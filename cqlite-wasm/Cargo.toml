@@ -1,0 +1,65 @@
+[package]
+name = "cqlite-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "WASM bindings for CQLite"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cqlite-core = { path = "../cqlite-core", features = ["wasm"] }
+
+# WASM dependencies
+wasm-bindgen = { workspace = true, features = ["serde-serialize"] }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = [
+  "console",
+  "Window",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "Storage",
+  "IdbFactory",
+  "IdbDatabase",
+  "IdbTransaction",
+  "IdbObjectStore",
+  "IdbRequest",
+  "IdbCursor",
+  "File",
+  "FileReader",
+  "Blob",
+  "Response",
+  "Request",
+] }
+
+# Async support for WASM
+wasm-bindgen-futures = "0.4"
+futures = "0.3"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde-wasm-bindgen = "0.6"
+
+# Utilities
+getrandom = { version = "0.2", features = ["js"] }
+
+[dependencies.wee_alloc]
+version = "0.4"
+optional = true
+
+[features]
+default = ["console_error_panic_hook"]
+console_error_panic_hook = ["wasm-bindgen/std"]
+wee_alloc = ["dep:wee_alloc"]

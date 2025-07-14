@@ -1,0 +1,56 @@
+# Rust
+target/
+Cargo.lock
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test data
+test-data/sstables/
+test-data/output/
+*.sstable
+*.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Docker
+.env
+docker-compose.override.yml
+
+# Generated files
+docs/generated/
+target-wasm/
+
+# Benchmarks
+benchmarks/results/
+perf.data*
+
+# Coverage
+coverage/
+*.profdata
+*.profraw
+
+# Local config
+local.toml
+.env.local

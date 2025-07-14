@@ -1,0 +1,39 @@
+[package]
+name = "cqlite-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "C FFI bindings for CQLite"
+
+[lib]
+name = "cqlite"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+cqlite-core = { path = "../cqlite-core" }
+
+# FFI dependencies
+libc = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization for complex types
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Memory management
+bytes = { workspace = true }
+
+[build-dependencies]
+cbindgen = "0.26"
+
+[features]
+default = []

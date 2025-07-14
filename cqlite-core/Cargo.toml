@@ -1,0 +1,62 @@
+[package]
+name = "cqlite-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Core database engine for CQLite"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Compression and checksums
+lz4_flex = { workspace = true }
+crc32fast = { workspace = true }
+
+# Concurrency and collections
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+# Memory management
+bytes = { workspace = true }
+memmap2 = { workspace = true }
+
+# Optional WASM support
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["console"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+tempfile = "3.8"
+
+[[bench]]
+name = "storage_bench"
+harness = false
+
+[[bench]]
+name = "query_bench"
+harness = false
+
+[features]
+default = ["compression", "metrics"]
+compression = []
+metrics = []
+wasm = ["wasm-bindgen", "js-sys", "web-sys"]

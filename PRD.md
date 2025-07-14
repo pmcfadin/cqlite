@@ -2,13 +2,13 @@
 
 ## Executive Summary
 
-CQLite is a high-performance Rust library that provides SQLite-like local access to Apache Cassandra SSTables. It enables developers to read and write Cassandra data files locally without networking or cluster dependencies, with bindings for Python, NodeJS, and WASM deployment.
+CQLite is an Apache-licensed, high-performance Rust library that provides SQLite-like local access to Apache Cassandra SSTables. Designed by Apache Cassandra PMC member Patrick McFadin, this community-driven project enables developers to read and write Cassandra 5+ data files locally without networking or cluster dependencies, with bindings for Python, NodeJS, and WASM deployment. The project embodies Apache Cassandra community values and will be donated to the Apache Cassandra project.
 
 ## 1. Product Vision
 
-**Mission**: Lower the friction to Cassandra data by providing a fast, safe, and lightweight library for local SSTable operations.
+**Mission**: Lower the friction to Cassandra data by providing a fast, safe, and lightweight library for local SSTable operations, built with Apache community principles and Patrick McFadin's 13 years of Cassandra expertise.
 
-**Vision**: Become the de facto standard for Cassandra SSTable manipulation outsidfe of the main Apache Cassandra project, enabling new workflows for data analytics, migration, testing, and edge computing.
+**Vision**: Become the community-standard library for Cassandra SSTable manipulation within the Apache ecosystem, enabling new workflows for data analytics, migration, testing, and edge computing while fostering open source collaboration.
 
 ## 2. Problem Statement
 
@@ -18,12 +18,14 @@ CQLite is a high-performance Rust library that provides SQLite-like local access
 - **Performance Issues**: Java-based tools are heavyweight and memory-intensive
 - **Platform Constraints**: No WASM-compatible SSTable readers exist
 - **Complex Migration**: Difficult to extract/analyze Cassandra data offline
+- **Community Need**: Apache Cassandra ecosystem lacks modern tooling for SSTable operations
 
-### Market Opportunity
-- Growing Cassandra adoption (Netflix, Apple, Instagram scale)
-- Need for data analytics and migration tools
+### Community Opportunity
+- Growing Apache Cassandra adoption across diverse industries
+- Strong community demand for data analytics and migration tools
 - Edge computing requirements for local data processing
 - Developer productivity tools for testing and debugging
+- Opportunity to strengthen Apache Cassandra ecosystem with modern tooling
 
 ## 3. Target Users
 
@@ -37,28 +39,33 @@ CQLite is a high-performance Rust library that provides SQLite-like local access
 2. **Application Developers**: Local development and testing
 3. **Research/Analytics**: Data science workflows
 
-## 4. Product Goals
+## 4. Project Goals
 
-### Business Goals
-- Fill the Cassandra 5 SSTable ecosystem gap
-- Establish Rust as the preferred language for database tooling
-- Enable new use cases for Cassandra data processing
+### Community Goals
+- Fill the Cassandra 5 SSTable ecosystem gap with Apache-licensed tooling
+- Establish community-driven standards for modern Cassandra tooling
+- Enable new use cases for Cassandra data processing across the ecosystem
+- Foster Apache Cassandra community growth and engagement
+- Create a pathway for donation to the Apache Cassandra project
 
 ### Technical Goals
 - **Performance**: 10x faster than existing Java tools
-- **Safety**: Memory-safe operations with comprehensive error handling
-- **Compatibility**: Full Cassandra 5 'oa' and BTI format support
+- **Safety**: Memory-safe operations with comprehensive error handling  
+- **Compatibility**: Full Cassandra 5+ format support (start with Cassandra 5 only)
 - **Portability**: Native + WASM deployment targets
+- **Apache Standards**: Code quality and practices aligned with Apache governance
 
-### User Experience Goals
+### Community Experience Goals
 - **Simple API**: Intuitive interface for common operations
 - **Rich Bindings**: First-class Python/NodeJS integration
-- **Documentation**: Comprehensive guides and examples
+- **Documentation**: Comprehensive guides and examples following Apache standards
+- **Contribution-Friendly**: Clear pathways for community contribution
+- **Open Governance**: Transparent development process
 
 ## 5. Core Features
 
 ### 5.1 SSTable Reading (Phase 1)
-- **Format Support**: Cassandra 3.11-5.0 (md, na, oa, BTI formats)
+- **Format Support**: Cassandra 5.0+ (oa, BTI formats) - Cassandra 5 ONLY initially
 - **Type System**: Full CQL type deserialization (primitives, collections, UDTs)
 - **Index Access**: Partition/row indexes, bloom filters, summaries
 - **Compression**: LZ4, Snappy, Deflate decompression
@@ -124,18 +131,22 @@ Memory Management
 ### Technical Metrics
 - **Performance**: 100K+ inserts/sec, <1ms query latency
 - **Memory**: <100MB for 1M rows
-- **Compatibility**: 100% test coverage for supported formats
+- **Compatibility**: 100% test coverage for Cassandra 5+ formats
 - **Bundle Size**: <2MB WASM compressed
+- **Code Quality**: Apache-standard code reviews and testing practices
 
-### Adoption Metrics
+### Community Metrics
+- **Contributors**: 50+ active community contributors within 12 months
+- **GitHub**: 1K+ stars with healthy issue/PR engagement
 - **Downloads**: 10K+ monthly PyPI/npm downloads within 6 months
-- **GitHub**: 1K+ stars, 50+ contributors
-- **Community**: Active Discord/forum with regular contributions
+- **Documentation**: Comprehensive Apache-standard documentation
+- **Feedback**: Active community feedback and contribution pipeline
 
-### Business Metrics
-- **Market Share**: 50% of new Cassandra tooling projects
-- **Ecosystem**: 5+ dependent projects/integrations
-- **Enterprise**: 10+ enterprise users/sponsors
+### Apache Ecosystem Metrics
+- **Integration**: Adoption by key Apache Cassandra ecosystem projects
+- **Community Growth**: New contributors to broader Cassandra community
+- **Standards**: Establishment as community standard for SSTable tooling
+- **Donation Readiness**: Project structure ready for Apache Cassandra donation
 
 ## 8. Competitive Analysis
 
@@ -145,31 +156,34 @@ Memory Management
 - **Cassandra Tools (Java)**: Official but heavyweight and complex
 
 ### Competitive Advantages
-- **Modern Format Support**: Only library supporting Cassandra 5
+- **Modern Format Support**: Only library supporting Cassandra 5+
 - **Performance**: Rust zero-copy advantages
 - **WASM Support**: Unique capability for web deployment
 - **Type Safety**: Compile-time guarantees vs runtime errors
-- **Ecosystem Integration**: Rich language bindings
+- **Apache Integration**: Built with Apache community values and governance
+- **PMC Leadership**: Designed by Apache Cassandra PMC member Patrick McFadin
 
-## 9. Go-to-Market Strategy
+## 9. Community Engagement Strategy
 
 ### Launch Strategy
-1. **Open Source Release**: GitHub with comprehensive documentation
-2. **Community Engagement**: Blog posts, conference talks, tutorials
-3. **Package Distribution**: Cargo, PyPI, npm registries
-4. **Documentation**: API docs, guides, examples
+1. **Apache-Licensed Release**: GitHub with comprehensive documentation following Apache standards
+2. **Community-First Engagement**: Blog posts, conference talks, tutorials
+3. **Package Distribution**: Cargo, PyPI, npm registries with Apache licensing
+4. **Documentation**: API docs, guides, examples following Apache documentation standards
+5. **Apache Contribution Pipeline**: Clear pathway for donation to Apache Cassandra
 
-### Marketing Channels
-- **Technical Blogs**: Rust, Cassandra, database communities
-- **Conferences**: RustConf, Cassandra Summit, DataCon
-- **Social Media**: Twitter, Reddit, HackerNews
-- **Partnerships**: DataStax, Scylla, cloud providers
+### Community Channels
+- **Apache Cassandra Community**: Mailing lists, JIRA, community calls
+- **Technical Communities**: Rust, database developer communities
+- **Conferences**: Apache events, Cassandra Summit, RustConf
+- **Documentation**: Apache-standard project documentation and contribution guides
+- **Open Source Forums**: Transparent discussion and decision-making
 
-### Success Timeline
-- **Month 1**: Core library MVP
-- **Month 3**: Python/NodeJS bindings
-- **Month 6**: WASM support and community growth
-- **Month 12**: Enterprise adoption and ecosystem integrations
+### Community Timeline
+- **Month 1**: Core library MVP with Apache licensing
+- **Month 3**: Python/NodeJS bindings and community contribution guidelines
+- **Month 6**: WASM support and established contributor community
+- **Month 12**: Apache donation preparation and ecosystem adoption
 
 ## 10. Risk Assessment
 
@@ -178,53 +192,74 @@ Memory Management
 - **Performance Goals**: Meeting 10x improvement targets
 - **WASM Constraints**: Memory limitations affecting functionality
 
-### Market Risks
+### Community Risks
 - **Adoption**: Slow uptake by conservative database community
-- **Competition**: Oracle/DataStax creating competing tools
-- **Cassandra Evolution**: Rapid format changes breaking compatibility
+- **Competition**: Commercial entities creating competing tools
+- **Apache Integration**: Challenges in Apache donation process
+- **Format Evolution**: Cassandra format changes affecting compatibility
 
 ### Mitigation Strategies
 - **Comprehensive Testing**: Extensive format compatibility testing
-- **Community Building**: Early adopter program and feedback loops
+- **Community Building**: Apache-aligned community engagement and feedback loops
 - **Modular Design**: Easy adaptation to format changes
 - **Performance Benchmarking**: Continuous optimization and measurement
+- **Apache Alignment**: Early engagement with Apache Cassandra PMC for donation pathway
+- **Patrick's Leadership**: Leveraging PMC member expertise and community connections
 
 ## 11. Success Criteria
 
 ### MVP Success (3 months)
-- ✅ Read Cassandra 5 SSTables with full type support
-- ✅ Python bindings with 10K+ PyPI downloads
-- ✅ 95% test coverage and comprehensive documentation
+- ✅ Read Cassandra 5+ SSTables with full type support
+- ✅ Python bindings with Apache-licensed distribution
+- ✅ 95% test coverage and comprehensive Apache-standard documentation
+- ✅ Community contribution guidelines established
 
-### Growth Success (6 months)
-- ✅ Write capability with format compatibility
+### Community Growth Success (6 months)
+- ✅ Write capability with Cassandra 5+ format compatibility
 - ✅ NodeJS bindings and WASM support
-- ✅ 5+ community contributors and 1K+ GitHub stars
+- ✅ 10+ active community contributors and healthy GitHub engagement
+- ✅ Integration with key Apache Cassandra ecosystem projects
 
-### Market Success (12 months)
+### Apache Ecosystem Success (12 months)
 - ✅ Query engine with basic SQL support
-- ✅ 10+ enterprise users and ecosystem integrations
-- ✅ Established as standard for Cassandra tooling
+- ✅ Adoption by multiple Apache Cassandra community projects
+- ✅ Established as community standard for Cassandra SSTable tooling
+- ✅ Apache donation process initiated or completed
 
-## 12. Resources Required
+## 12. Community Development Plan
 
-### Development Team
-- **Rust Engineer**: Core library development (1 FTE)
-- **Binding Engineer**: Python/NodeJS/WASM (0.5 FTE)
-- **DevOps Engineer**: CI/CD, packaging, releases (0.25 FTE)
+### Leadership Structure
+- **Technical Lead**: Patrick McFadin (Apache Cassandra PMC member, 13 years Cassandra experience)
+- **Community Contributors**: Open contribution model following Apache practices
+- **Apache Mentorship**: Leverage existing Apache Cassandra PMC guidance
 
-### Timeline
-- **Phase 1 (Months 1-3)**: Core reading capability
-- **Phase 2 (Months 4-6)**: Writing and language bindings
-- **Phase 3 (Months 7-9)**: Query engine and optimization
-- **Phase 4 (Months 10-12)**: WASM and enterprise features
+### Development Timeline
+- **Phase 1 (Months 1-3)**: Core Cassandra 5+ reading capability
+- **Phase 2 (Months 4-6)**: Writing capability and language bindings
+- **Phase 3 (Months 7-9)**: Query engine and performance optimization
+- **Phase 4 (Months 10-12)**: WASM support and Apache donation preparation
 
-### Budget Estimate
-- **Development**: $300K (engineering costs)
-- **Infrastructure**: $50K (CI/CD, hosting, tools)
-- **Marketing**: $25K (conferences, content creation)
-- **Total**: $375K for MVP + Growth phases
+### Community Investment
+- **Open Source Development**: Community-driven development with transparent processes
+- **Apache Infrastructure**: Leverage Apache foundation resources where possible
+- **Conference Participation**: Apache events and Cassandra community engagement
+- **Documentation**: Comprehensive Apache-standard documentation and contribution guides
+
+## 13. Apache Donation Pathway
+
+### Preparation Steps
+1. **Apache License**: Ensure all code is Apache 2.0 licensed
+2. **Contributor Agreements**: Implement Apache-standard contributor agreements
+3. **IP Clearance**: Complete intellectual property clearance process
+4. **Community Establishment**: Build active contributor community
+5. **PMC Engagement**: Work with Apache Cassandra PMC for donation process
+
+### Donation Benefits
+- **Long-term Sustainability**: Apache Foundation stewardship
+- **Community Growth**: Access to broader Apache developer community
+- **Standards Alignment**: Apache governance and development practices
+- **Ecosystem Integration**: Natural integration with Apache Cassandra project
 
 ---
 
-*This PRD represents the collective intelligence of our Hive Mind analysis, incorporating deep technical research, market analysis, and architectural design to create a comprehensive roadmap for CQLite development.*
+*This PRD reflects Patrick McFadin's vision for a community-driven, Apache-licensed project that embodies Apache Cassandra community values and technical excellence. The project is designed from inception for eventual donation to the Apache Cassandra ecosystem, leveraging Patrick's 13 years of Cassandra expertise and Apache PMC leadership.*
