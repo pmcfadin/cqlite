@@ -42,15 +42,56 @@ docker-compose.override.yml
 docs/generated/
 target-wasm/
 
+# FFI generated files
+cqlite-ffi/include/
+*.so
+*.dll
+*.dylib
+*.a
+
+# WASM generated files
+cqlite-wasm/pkg/
+*.wasm
+
 # Benchmarks
 benchmarks/results/
 perf.data*
+criterion/
+target/criterion/
 
 # Coverage
 coverage/
 *.profdata
 *.profraw
+cobertura.xml
+tarpaulin-report.html
+
+# Documentation
+/doc/
+
+# Node.js (for WASM testing)
+node_modules/
+package-lock.json
+
+# Python bindings
+*.pyc
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# Java bindings
+*.class
+*.jar
+
+# Examples and test data
+examples/*.db
+test_data/
 
 # Local config
 local.toml
 .env.local
+
+.swarm/*
+.hive-mind/*
+
