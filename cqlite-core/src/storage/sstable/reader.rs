@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::sync::Mutex;
 
 use crate::{
     parser::{
@@ -27,7 +28,7 @@ use crate::{
 
 use super::{
     bloom::BloomFilter,
-    compression::CompressionReader,
+    compression::{Compression, CompressionReader},
     index::SSTableIndex,
 };
 
@@ -119,7 +120,7 @@ pub struct SSTableReader {
     /// Path to the SSTable file
     file_path: PathBuf,
     /// File handle for reading
-    file: BufReader<File>,
+    file: Arc<Mutex<BufReader<File>>>,
     /// SSTable header information
     header: SSTableHeader,
     /// Parser for SSTable format
@@ -147,18 +148,23 @@ impl SSTableReader {
     pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
         let file = File::open(path).await?;
         let file_size = file.metadata().await?.len();
-        let mut file = BufReader::new(file);
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
 
         // Parse header
         let mut header_buffer = vec![0u8; 4096]; // Initial buffer for header
-        file.read_exact(&mut header_buffer).await?;
+        {
+            let mut file_guard = file.lock().await;
+            file_guard.read_exact(&mut header_buffer).await?;
+        }
 
         let parser = SSTableParser::new();
         let (header, header_size) = parser.parse_header(&header_buffer)?;
 
         // Seek to start of data section
-        file.seek(std::io::SeekFrom::Start(header_size as u64))
-            .await?;
+        {
+            let mut file_guard = file.lock().await;
+            file_guard.seek(std::io::SeekFrom::Start(header_size as u64)).await?;
+        }
 
         // Initialize compression reader if needed
         let compression_reader = if header.compression.algorithm != "NONE" {
@@ -207,7 +213,7 @@ impl SSTableReader {
     }
 
     /// Get a value by key from the SSTable
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    pub async fn get(&mut self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         // First check bloom filter if available
         if let Some(bloom_filter) = &self.bloom_filter {
             if !bloom_filter.might_contain(key.as_bytes()) {
@@ -242,8 +248,7 @@ impl SSTableReader {
         // Use index for efficient range scan if available
         if let Some(index) = &self.index {
             let entries = index
-                .scan_range(table_id, start_key, end_key, limit)
-                .await?;
+                .get_range(table_id, start_key, end_key)?;
 
             for entry in entries {
                 if let Some(limit) = limit {
@@ -268,17 +273,16 @@ impl SSTableReader {
     }
 
     /// Get all entries in the SSTable (for compaction)
-    pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
+    pub async fn get_all_entries(&mut self) -> Result<Vec<(TableId, RowKey, Value)>> {
         let mut results = Vec::new();
 
-        // Reset to beginning of data section
+        // Reset to beginning of data section  
         let header_size = self.calculate_header_size();
-        let mut file = self.file.clone();
-        file.seek(std::io::SeekFrom::Start(header_size as u64))
+        self.file.seek(std::io::SeekFrom::Start(header_size as u64))
             .await?;
 
         // Read all blocks sequentially
-        while let Some(block) = self.read_next_block(&mut file).await? {
+        while let Some(block) = self.read_next_block(&mut self.file).await? {
             let entries = self.parse_block_entries(&block)?;
             results.extend(entries);
         }
@@ -344,7 +348,7 @@ impl SSTableReader {
     }
 
     async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<Value>> {
-        let mut file = self.file.clone();
+        let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
 
         let mut buffer = vec![0u8; size as usize];
@@ -352,7 +356,8 @@ impl SSTableReader {
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {
-            compression_reader.decompress(&buffer)?
+            let compression = Compression::new(compression_reader.algorithm().clone())?;
+            compression.decompress(&buffer)?
         } else {
             buffer
         };
@@ -364,14 +369,13 @@ impl SSTableReader {
         Ok(Some(value))
     }
 
-    async fn scan_for_key(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
-        let mut file = self.file.clone();
+    async fn scan_for_key(&mut self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         let header_size = self.calculate_header_size();
-        file.seek(std::io::SeekFrom::Start(header_size as u64))
+        self.file.seek(std::io::SeekFrom::Start(header_size as u64))
             .await?;
 
         // Sequential scan through blocks
-        while let Some(block) = self.read_next_block(&mut file).await? {
+        while let Some(block) = self.read_next_block(&mut self.file).await? {
             let entries = self.parse_block_entries(&block)?;
 
             for (entry_table_id, entry_key, entry_value) in entries {
@@ -394,13 +398,12 @@ impl SSTableReader {
         let mut results = Vec::new();
         let mut count = 0;
 
-        let mut file = self.file.clone();
         let header_size = self.calculate_header_size();
-        file.seek(std::io::SeekFrom::Start(header_size as u64))
+        self.file.seek(std::io::SeekFrom::Start(header_size as u64))
             .await?;
 
         // Sequential scan through blocks
-        while let Some(block) = self.read_next_block(&mut file).await? {
+        while let Some(block) = self.read_next_block(&mut self.file).await? {
             let entries = self.parse_block_entries(&block)?;
 
             for (entry_table_id, entry_key, entry_value) in entries {
@@ -480,7 +483,8 @@ impl SSTableReader {
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {
-            compression_reader.decompress(block_data)?
+            let compression = Compression::new(compression_reader.algorithm().clone())?;
+            compression.decompress(block_data)?
         } else {
             block_data.to_vec()
         };

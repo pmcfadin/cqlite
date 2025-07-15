@@ -33,7 +33,7 @@ impl QueryParser {
         let first_word = sql
             .split_whitespace()
             .next()
-            .ok_or_else(|| Error::InvalidQuery("Empty query".to_string()))?
+            .ok_or_else(|| Error::query_execution("Empty query".to_string()))?
             .to_uppercase();
 
         match first_word.as_str() {
@@ -45,7 +45,7 @@ impl QueryParser {
             "DROP" => self.parse_drop(sql),
             "DESCRIBE" | "DESC" => self.parse_describe(sql),
             "USE" => self.parse_use(sql),
-            _ => Err(Error::InvalidQuery(format!(
+            _ => Err(Error::query_execution(format!(
                 "Unsupported query type: {}",
                 first_word
             ))),
@@ -81,7 +81,7 @@ impl QueryParser {
             let table_name = from_part
                 .split_whitespace()
                 .next()
-                .ok_or_else(|| Error::InvalidQuery("Missing table name after FROM".to_string()))?;
+                .ok_or_else(|| Error::query_execution("Missing table name after FROM".to_string()))?;
             table = Some(TableId::new(table_name));
         }
 
@@ -107,11 +107,11 @@ impl QueryParser {
                 .trim()
                 .split_whitespace()
                 .next()
-                .ok_or_else(|| Error::InvalidQuery("Missing limit value".to_string()))?;
+                .ok_or_else(|| Error::query_execution("Missing limit value".to_string()))?;
             limit = Some(
                 limit_str
                     .parse()
-                    .map_err(|_| Error::InvalidQuery("Invalid limit value".to_string()))?,
+                    .map_err(|_| Error::query_execution("Invalid limit value".to_string()))?,
             );
         }
 
@@ -251,7 +251,7 @@ impl QueryParser {
                 sql: sql.to_string(),
             })
         } else {
-            Err(Error::InvalidQuery(
+            Err(Error::query_execution(
                 "Unsupported CREATE statement".to_string(),
             ))
         }
@@ -273,7 +273,7 @@ impl QueryParser {
                 sql: sql.to_string(),
             })
         } else {
-            Err(Error::InvalidQuery(
+            Err(Error::query_execution(
                 "Unsupported DROP statement".to_string(),
             ))
         }
@@ -295,7 +295,7 @@ impl QueryParser {
                 sql: sql.to_string(),
             })
         } else {
-            Err(Error::InvalidQuery(
+            Err(Error::query_execution(
                 "Missing table name for DESCRIBE".to_string(),
             ))
         }
@@ -317,7 +317,7 @@ impl QueryParser {
                 sql: sql.to_string(),
             })
         } else {
-            Err(Error::InvalidQuery(
+            Err(Error::query_execution(
                 "Missing keyspace name for USE".to_string(),
             ))
         }
@@ -356,7 +356,7 @@ impl QueryParser {
             ">=" => Ok(ComparisonOperator::GreaterThanOrEqual),
             "IN" => Ok(ComparisonOperator::In),
             "LIKE" => Ok(ComparisonOperator::Like),
-            _ => Err(Error::InvalidQuery(format!("Unknown operator: {}", op))),
+            _ => Err(Error::query_execution(format!("Unknown operator: {}", op))),
         }
     }
 

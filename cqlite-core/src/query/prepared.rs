@@ -87,7 +87,7 @@ impl PreparedQuery {
     pub async fn execute(&self, params: &[Value]) -> Result<QueryResult> {
         // Validate parameter count
         if params.len() != self.parameters.len() {
-            return Err(Error::InvalidQuery(format!(
+            return Err(Error::query_execution(format!(
                 "Parameter count mismatch: expected {}, got {}",
                 self.parameters.len(),
                 params.len()
@@ -99,7 +99,7 @@ impl PreparedQuery {
             if let Some(metadata) = self.parameters.get(i) {
                 if let Some(expected_type) = &metadata.expected_type {
                     if !self.type_matches(param, expected_type) {
-                        return Err(Error::InvalidQuery(format!(
+                        return Err(Error::query_execution(format!(
                             "Parameter {} type mismatch: expected {:?}, got {:?}",
                             i, expected_type, param
                         )));
@@ -138,7 +138,7 @@ impl PreparedQuery {
                 if let Some(value) = params.get(name) {
                     positional_params.push(value.clone());
                 } else if !metadata.optional {
-                    return Err(Error::InvalidQuery(format!(
+                    return Err(Error::query_execution(format!(
                         "Missing required parameter: {}",
                         name
                     )));

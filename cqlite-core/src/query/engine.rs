@@ -124,7 +124,7 @@ impl QueryEngine {
         let plan = self.planner.plan(&parsed_query).await?;
 
         // Cache the plan if enabled
-        if self.config.query_cache_size.unwrap_or(0) > 0 {
+        if self.config.query.query_cache_size.unwrap_or(0) > 0 {
             self.cache_query_plan(sql, parsed_query, plan.clone());
         }
 
@@ -138,7 +138,7 @@ impl QueryEngine {
     }
 
     /// Execute a query with parameters
-    pub async fn execute_with_params(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
+    pub async fn execute_with_params(&self, sql: &str, _params: &[Value]) -> Result<QueryResult> {
         // In a real implementation, this would substitute parameters into the query
         // For now, we'll just execute the query as-is
         self.execute(sql).await
@@ -158,7 +158,7 @@ impl QueryEngine {
         let prepared = Arc::new(PreparedQuery::new(
             parsed_query,
             plan,
-            self.executor.clone(),
+            Arc::new(self.executor.clone()),
         ));
 
         // Cache the prepared statement
@@ -278,7 +278,7 @@ impl QueryEngine {
         let mut execution_times = Vec::new();
         let mut results = Vec::new();
 
-        for _ in 0..self.config.analyze_iterations.unwrap_or(5) {
+        for _ in 0..self.config.query.analyze_iterations.unwrap_or(5) {
             let iter_start = Instant::now();
             let result = self.execute(sql).await?;
             execution_times.push(iter_start.elapsed());
@@ -321,7 +321,7 @@ impl QueryEngine {
         parsed_query: super::ParsedQuery,
         plan: super::planner::QueryPlan,
     ) {
-        let cache_size = self.config.query_cache_size.unwrap_or(0);
+        let cache_size = self.config.query.query_cache_size.unwrap_or(0);
 
         if cache_size > 0 {
             // Check if we need to evict entries
@@ -462,7 +462,7 @@ mod tests {
     async fn test_query_caching() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = Config::default();
-        config.query_cache_size = Some(10);
+        config.query.query_cache_size = Some(10);
 
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
@@ -564,7 +564,7 @@ mod tests {
     async fn test_cache_eviction() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = Config::default();
-        config.query_cache_size = Some(2); // Very small cache
+        config.query.query_cache_size = Some(2); // Very small cache
 
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(

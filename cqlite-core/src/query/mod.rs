@@ -55,6 +55,7 @@ pub struct QueryStats {
 }
 
 /// Legacy query engine wrapper for backward compatibility
+#[derive(Debug)]
 pub struct QueryEngine {
     /// Advanced query engine
     advanced_engine: AdvancedQueryEngine,

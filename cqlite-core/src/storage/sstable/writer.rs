@@ -173,7 +173,7 @@ impl SSTableWriter {
 
         self.writer
             .write_all(&header)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += header.len() as u64;
         Ok(())
     }
@@ -301,13 +301,13 @@ impl SSTableWriter {
 
         self.writer
             .write_all(&header_bytes)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += header_bytes.len() as u64;
 
         // Write compressed block data
         self.writer
             .write_all(&compressed_data)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += compressed_data.len() as u64;
 
         // Store checksum for verification
@@ -431,7 +431,7 @@ impl SSTableWriter {
         self.write_footer().await?;
 
         // Flush all data to disk
-        self.writer.flush().map_err(|e| Error::io(e.to_string()))?;
+        self.writer.flush().map_err(|e| Error::from(e))?;
 
         self.finalized = true;
         Ok(())
@@ -454,13 +454,13 @@ impl SSTableWriter {
 
         self.writer
             .write_all(&header_bytes)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += header_bytes.len() as u64;
 
         // Write bloom filter data
         self.writer
             .write_all(&bloom_data)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += bloom_data.len() as u64;
 
         Ok(())
@@ -487,13 +487,13 @@ impl SSTableWriter {
 
         self.writer
             .write_all(&header_bytes)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += header_bytes.len() as u64;
 
         // Write stats data
         self.writer
             .write_all(&stats_data)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += stats_data.len() as u64;
 
         Ok(())
@@ -510,7 +510,7 @@ impl SSTableWriter {
         // Write index data
         self.writer
             .write_all(&index_data)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += index_data.len() as u64;
 
         // Write index metadata
@@ -525,7 +525,7 @@ impl SSTableWriter {
 
         self.writer
             .write_all(&metadata_bytes)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += metadata_bytes.len() as u64;
 
         Ok(())
@@ -564,13 +564,13 @@ impl SSTableWriter {
 
         self.writer
             .write_all(&footer_bytes)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += footer_bytes.len() as u64;
 
         // Write final magic bytes
         self.writer
             .write_all(&SSTABLE_MAGIC)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
         self.offset += SSTABLE_MAGIC.len() as u64;
 
         Ok(())

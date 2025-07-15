@@ -9,7 +9,7 @@
 //! - Execution plan representation
 
 use super::{ComparisonOperator, Condition, ParsedQuery, QueryType, WhereClause};
-use crate::{schema::SchemaManager, Config, Error, Result, TableId, Value};
+use crate::{schema::SchemaManager, Config, Error, Result, TableId};
 use std::sync::Arc;
 
 /// Query execution plan
@@ -202,7 +202,7 @@ impl QueryPlanner {
         let table = query
             .table
             .as_ref()
-            .ok_or_else(|| Error::InvalidQuery("Missing table in SELECT".to_string()))?;
+            .ok_or_else(|| Error::query_execution("Missing table in SELECT".to_string()))?;
 
         // Get table statistics
         let table_stats = self.get_table_statistics(table).await?;
@@ -238,7 +238,7 @@ impl QueryPlanner {
                 cost: table_stats.row_count as f64 * self.cost_model.row_scan_cost * 0.1,
                 parallelization: ParallelizationInfo {
                     can_parallelize: true,
-                    suggested_threads: self.config.query_parallelism.unwrap_or(4),
+                    suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
                     partition_key: None,
                 },
             });
@@ -253,7 +253,7 @@ impl QueryPlanner {
                 cost: table_stats.row_count as f64 * self.cost_model.sort_cost_per_row,
                 parallelization: ParallelizationInfo {
                     can_parallelize: true,
-                    suggested_threads: self.config.query_parallelism.unwrap_or(4),
+                    suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
                     partition_key: None,
                 },
             });
@@ -283,7 +283,7 @@ impl QueryPlanner {
                 cost: table_stats.row_count as f64 * 0.001, // Very cheap
                 parallelization: ParallelizationInfo {
                     can_parallelize: true,
-                    suggested_threads: self.config.query_parallelism.unwrap_or(4),
+                    suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
                     partition_key: None,
                 },
             });
@@ -308,7 +308,7 @@ impl QueryPlanner {
         let table = query
             .table
             .as_ref()
-            .ok_or_else(|| Error::InvalidQuery("Missing table in INSERT".to_string()))?;
+            .ok_or_else(|| Error::query_execution("Missing table in INSERT".to_string()))?;
 
         let table_stats = self.get_table_statistics(table).await?;
 
@@ -340,7 +340,7 @@ impl QueryPlanner {
         let table = query
             .table
             .as_ref()
-            .ok_or_else(|| Error::InvalidQuery("Missing table in UPDATE".to_string()))?;
+            .ok_or_else(|| Error::query_execution("Missing table in UPDATE".to_string()))?;
 
         let table_stats = self.get_table_statistics(table).await?;
         let index_selection = self.select_indexes(table, &query.where_clause).await?;
@@ -365,7 +365,7 @@ impl QueryPlanner {
             cost: table_stats.row_count as f64 * self.cost_model.row_scan_cost * 0.5,
             parallelization: ParallelizationInfo {
                 can_parallelize: true,
-                suggested_threads: self.config.query_parallelism.unwrap_or(4),
+                suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
                 partition_key: None,
             },
         });
@@ -389,7 +389,7 @@ impl QueryPlanner {
         let table = query
             .table
             .as_ref()
-            .ok_or_else(|| Error::InvalidQuery("Missing table in DELETE".to_string()))?;
+            .ok_or_else(|| Error::query_execution("Missing table in DELETE".to_string()))?;
 
         let table_stats = self.get_table_statistics(table).await?;
         let index_selection = self.select_indexes(table, &query.where_clause).await?;
@@ -628,7 +628,7 @@ impl QueryPlanner {
         let can_parallelize = table_stats.row_count > 10000;
 
         let suggested_threads = if can_parallelize {
-            self.config.query_parallelism.unwrap_or(4)
+            self.config.query.query_parallelism.unwrap_or(4)
         } else {
             1
         };

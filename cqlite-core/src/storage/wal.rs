@@ -62,9 +62,9 @@ impl WriteAheadLog {
             .append(true)
             .read(true)
             .open(&file_path)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
 
-        let file_size = file.metadata().map_err(|e| Error::io(e.to_string()))?.len();
+        let file_size = file.metadata().map_err(|e| Error::from(e))?.len();
 
         Ok(Self {
             file_path,
@@ -127,11 +127,11 @@ impl WriteAheadLog {
 
         // Write length prefix
         file.write_all(&length_bytes)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
 
         // Write entry data
         file.write_all(&serialized)
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
 
         // Update counters
         *file_size += (length_bytes.len() + serialized.len()) as u64;
@@ -139,7 +139,7 @@ impl WriteAheadLog {
 
         // Auto-sync if configured
         if self.config.storage.wal.sync_on_write {
-            file.sync_all().map_err(|e| Error::io(e.to_string()))?;
+            file.sync_all().map_err(|e| Error::from(e))?;
         }
 
         Ok(())
@@ -148,7 +148,7 @@ impl WriteAheadLog {
     /// Flush all pending writes to disk
     pub async fn flush(&self) -> Result<()> {
         let mut file = self.file.lock().await;
-        file.sync_all().map_err(|e| Error::io(e.to_string()))?;
+        file.sync_all().map_err(|e| Error::from(e))?;
         Ok(())
     }
 
@@ -159,7 +159,7 @@ impl WriteAheadLog {
 
         // Seek to beginning
         file.seek(SeekFrom::Start(0))
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
 
         // Read entries
         loop {
@@ -172,7 +172,7 @@ impl WriteAheadLog {
                     // Read entry data
                     let mut entry_data = vec![0u8; length];
                     file.read_exact(&mut entry_data)
-                        .map_err(|e| Error::io(e.to_string()))?;
+                        .map_err(|e| Error::from(e))?;
 
                     // Deserialize entry
                     let entry: WalEntry = bincode::deserialize(&entry_data)
@@ -185,7 +185,7 @@ impl WriteAheadLog {
                     break;
                 }
                 Err(e) => {
-                    return Err(Error::io(e.to_string()));
+                    return Err(Error::from(e));
                 }
             }
         }
@@ -199,9 +199,9 @@ impl WriteAheadLog {
         let mut file_size = self.file_size.lock().await;
         let mut entry_count = self.entry_count.lock().await;
 
-        file.set_len(0).map_err(|e| Error::io(e.to_string()))?;
+        file.set_len(0).map_err(|e| Error::from(e))?;
         file.seek(SeekFrom::Start(0))
-            .map_err(|e| Error::io(e.to_string()))?;
+            .map_err(|e| Error::from(e))?;
 
         *file_size = 0;
         *entry_count = 0;

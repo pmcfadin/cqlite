@@ -205,37 +205,13 @@ pub struct PreparedStatement {
 
 impl PreparedStatement {
     /// Execute the prepared statement with the given parameters
-    pub async fn execute(&self, params: &[Value]) -> Result<QueryResult> {
+    pub async fn execute(&self, params: &[Value]) -> Result<query::result::QueryResult> {
         self.statement.execute(params).await
     }
 }
 
-/// Result of a query execution
-#[derive(Debug, Clone)]
-pub struct QueryResult {
-    /// Column metadata
-    pub columns: Vec<ColumnMetadata>,
-    /// Result rows
-    pub rows: Vec<Row>,
-    /// Number of rows affected (for INSERT/UPDATE/DELETE)
-    pub rows_affected: u64,
-    /// Execution time in microseconds
-    pub execution_time_us: u64,
-}
-
-/// Column metadata information
-#[derive(Debug, Clone)]
-pub struct ColumnMetadata {
-    /// Column name
-    pub name: String,
-    /// Column data type
-    pub data_type: DataType,
-    /// Whether the column is nullable
-    pub nullable: bool,
-}
-
-/// A database row
-pub type Row = Vec<Value>;
+// Re-export query result types for convenience
+pub use query::result::{QueryResult, QueryRow};
 
 #[cfg(test)]
 mod tests {
