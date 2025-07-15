@@ -28,7 +28,7 @@ use crate::{
 
 use super::{
     bloom::BloomFilter,
-    compression::{Compression, CompressionReader},
+    compression::{Compression, CompressionAlgorithm, CompressionReader},
     index::SSTableIndex,
 };
 
@@ -168,11 +168,8 @@ impl SSTableReader {
 
         // Initialize compression reader if needed
         let compression_reader = if header.compression.algorithm != "NONE" {
-            Some(CompressionReader::new(
-                header.compression.algorithm.clone(),
-                header.compression.chunk_size,
-                header.compression.parameters.clone(),
-            )?)
+            let algorithm = CompressionAlgorithm::from(header.compression.algorithm.clone());
+            Some(CompressionReader::new(algorithm))
         } else {
             None
         };

@@ -91,6 +91,11 @@ impl Index {
         self.entries.get(table_id)?.get(key)
     }
 
+    /// Find an entry by table and key (alias for get)
+    pub async fn find_entry(&self, table_id: &TableId, key: &RowKey) -> Result<Option<&IndexEntry>> {
+        Ok(self.get(table_id, key))
+    }
+
     /// Get entries for a key range
     pub fn get_range(
         &self,
@@ -186,6 +191,13 @@ impl Index {
     /// Get total number of entries
     pub fn len(&self) -> usize {
         self.total_entries
+    }
+
+    /// Load index from a file/reader
+    pub async fn load<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+        // For now, return an empty index as a placeholder
+        // In a real implementation, this would deserialize the index from the reader
+        Ok(Self::new())
     }
 }
 

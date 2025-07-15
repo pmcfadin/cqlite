@@ -21,6 +21,18 @@ impl Default for CompressionAlgorithm {
     }
 }
 
+impl From<String> for CompressionAlgorithm {
+    fn from(s: String) -> Self {
+        match s.to_uppercase().as_str() {
+            "NONE" => CompressionAlgorithm::None,
+            "LZ4" => CompressionAlgorithm::Lz4,
+            "SNAPPY" => CompressionAlgorithm::Snappy,
+            "DEFLATE" => CompressionAlgorithm::Deflate,
+            _ => CompressionAlgorithm::None, // Default to None for unknown algorithms
+        }
+    }
+}
+
 /// Compression handler
 pub struct Compression {
     algorithm: CompressionAlgorithm,

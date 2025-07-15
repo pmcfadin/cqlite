@@ -46,6 +46,26 @@ impl Default for CompactionStrategy {
     }
 }
 
+impl CompactionStrategy {
+    /// Convert from config::CompactionStrategy to storage::CompactionStrategy
+    fn convert_config_strategy(config_strategy: &crate::config::CompactionStrategy) -> Self {
+        match config_strategy {
+            crate::config::CompactionStrategy::Size => CompactionStrategy::SizeTiered {
+                max_sstables_per_level: 4,
+                size_ratio_threshold: 1.2,
+            },
+            crate::config::CompactionStrategy::Leveled => CompactionStrategy::Leveled {
+                max_level_size: 10 * 1024 * 1024, // 10MB
+                level_size_multiplier: 10,
+            },
+            crate::config::CompactionStrategy::Universal => CompactionStrategy::TimeWindow {
+                max_windows: 24,
+                window_size_hours: 1,
+            },
+        }
+    }
+}
+
 /// Compaction manager
 #[derive(Debug)]
 pub struct CompactionManager {
@@ -78,7 +98,7 @@ impl CompactionManager {
         manifest: Arc<Manifest>,
         config: &Config,
     ) -> Result<Self> {
-        let strategy = config.storage.compaction.strategy.clone();
+        let strategy = CompactionStrategy::convert_config_strategy(&config.storage.compaction.strategy);
 
         let manager = Self {
             sstables,
@@ -109,7 +129,7 @@ impl CompactionManager {
 
         let handle = tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(
-                config.storage.compaction.check_interval_seconds,
+                config.storage.compaction.background_interval,
             ));
 
             loop {

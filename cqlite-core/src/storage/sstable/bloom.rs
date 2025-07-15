@@ -96,6 +96,11 @@ impl BloomFilter {
         true
     }
 
+    /// Alias for contains method (Cassandra-style naming)
+    pub fn might_contain(&self, key: &[u8]) -> bool {
+        self.contains(key)
+    }
+
     /// Calculate two independent hash values for double hashing
     fn calculate_hashes(&self, key: &[u8]) -> (u64, u64) {
         let mut hasher1 = DefaultHasher::new();
@@ -181,6 +186,13 @@ impl BloomFilter {
             bits_set,
             fill_ratio,
         }
+    }
+
+    /// Load bloom filter from a file/reader
+    pub async fn load<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+        // For now, return a default bloom filter as a placeholder
+        // In a real implementation, this would deserialize the bloom filter from the reader
+        Self::new(1000, 0.01) // Default parameters
     }
 }
 
