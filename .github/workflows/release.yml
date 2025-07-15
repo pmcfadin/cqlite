@@ -1,0 +1,214 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+
+  build-cli:
+    name: Build CLI
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            exe_suffix: ""
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            exe_suffix: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe_suffix: ".exe"
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            exe_suffix: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            exe_suffix: ""
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        target: ${{ matrix.target }}
+
+    - name: Install cross (Linux ARM64)
+      if: matrix.target == 'aarch64-unknown-linux-gnu'
+      run: cargo install cross
+
+    - name: Build CLI
+      run: |
+        if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+          cross build --package cqlite-cli --release --target ${{ matrix.target }}
+        else
+          cargo build --package cqlite-cli --release --target ${{ matrix.target }}
+        fi
+
+    - name: Create archive
+      shell: bash
+      run: |
+        cd target/${{ matrix.target }}/release
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          7z a ../../../cqlite-${{ matrix.target }}.zip cqlite${{ matrix.exe_suffix }}
+        else
+          tar czf ../../../cqlite-${{ matrix.target }}.tar.gz cqlite${{ matrix.exe_suffix }}
+        fi
+
+    - name: Upload CLI artifact
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./cqlite-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
+        asset_name: cqlite-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
+        asset_content_type: application/octet-stream
+
+  build-ffi:
+    name: Build FFI Libraries
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            lib_name: libcqlite.so
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            lib_name: cqlite.dll
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            lib_name: libcqlite.dylib
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        target: ${{ matrix.target }}
+
+    - name: Build FFI library
+      run: cargo build --package cqlite-ffi --release --target ${{ matrix.target }}
+
+    - name: Generate C headers
+      run: cargo run --package cqlite-ffi --bin cbindgen_gen
+
+    - name: Create FFI package
+      shell: bash
+      run: |
+        mkdir -p ffi-package/lib ffi-package/include
+        cp target/${{ matrix.target }}/release/${{ matrix.lib_name }} ffi-package/lib/
+        cp cqlite-ffi/include/*.h ffi-package/include/
+        cp cqlite-ffi/README.md ffi-package/
+        
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          7z a cqlite-ffi-${{ matrix.target }}.zip ffi-package/*
+        else
+          tar czf cqlite-ffi-${{ matrix.target }}.tar.gz ffi-package
+        fi
+
+    - name: Upload FFI artifact
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./cqlite-ffi-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
+        asset_name: cqlite-ffi-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
+        asset_content_type: application/octet-stream
+
+  build-wasm:
+    name: Build WASM Package
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        target: wasm32-unknown-unknown
+
+    - name: Install wasm-pack
+      run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+    - name: Build WASM package
+      run: wasm-pack build cqlite-wasm --target web --out-dir pkg
+
+    - name: Create WASM archive
+      run: |
+        cd cqlite-wasm/pkg
+        tar czf ../../cqlite-wasm.tar.gz .
+
+    - name: Upload WASM artifact
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./cqlite-wasm.tar.gz
+        asset_name: cqlite-wasm.tar.gz
+        asset_content_type: application/octet-stream
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: [build-cli, build-ffi, build-wasm]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Publish cqlite-core
+      run: cargo publish --package cqlite-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    - name: Wait for cqlite-core to be available
+      run: sleep 30
+
+    - name: Publish cqlite-ffi
+      run: cargo publish --package cqlite-ffi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    - name: Publish cqlite-wasm
+      run: cargo publish --package cqlite-wasm --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    - name: Publish cqlite-cli
+      run: cargo publish --package cqlite-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

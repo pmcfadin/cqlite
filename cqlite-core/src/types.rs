@@ -245,8 +245,8 @@ impl RowKey {
 
     /// Create a row key from a value
     pub fn from_value(value: &Value) -> crate::Result<Self> {
-        let bytes = bincode::serialize(value)
-            .map_err(|e| crate::Error::Serialization(e.to_string()))?;
+        let bytes =
+            bincode::serialize(value).map_err(|e| crate::Error::Serialization(e.to_string()))?;
         Ok(Self(bytes))
     }
 

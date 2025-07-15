@@ -1,0 +1,66 @@
+[package]
+name = "cqlite-integration-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Comprehensive test suite for CQLite Cassandra 5+ compatibility"
+
+[lib]
+name = "integration_tests"
+path = "src/lib.rs"
+
+[dependencies]
+cqlite-core = { path = "../cqlite-core" }
+cqlite-cli = { path = "../cqlite-cli" }
+
+# Test dependencies
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util"] }
+tempfile = { workspace = true }
+assert_cmd = "2.0"
+predicates = "3.0"
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+# Async testing
+tokio-test = "0.4"
+
+# Serialization for test data
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging for tests
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Additional dependencies for Phase 2 testing
+rand = "0.8"
+num_cpus = "1.0"
+
+# Command line interface for test runner
+clap = { version = "4.0", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[[bench]]
+name = "end_to_end_bench"
+harness = false
+path = "benchmarks/end_to_end_bench.rs"
+
+[[bench]]
+name = "performance_suite"
+harness = false
+path = "benchmarks/performance_suite.rs"
+
+[[bench]]
+name = "load_testing"
+harness = false
+path = "benchmarks/load_testing.rs"
+
+[[bench]]
+name = "compatibility_testing"
+harness = false
+path = "benchmarks/compatibility_testing.rs"
+
+# Test runner executables
+[[bin]]
+name = "compatibility_test_runner"
+path = "src/bin/compatibility_test_runner.rs"

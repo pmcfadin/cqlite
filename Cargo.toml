@@ -4,8 +4,7 @@ members = [
     "cqlite-ffi", 
     "cqlite-wasm",
     "cqlite-cli",
-    "bindings/python",
-    "bindings/nodejs",
+    "tests",
 ]
 resolver = "2"
 
@@ -27,6 +26,18 @@ serde_json = "1.0"
 bincode = "1.3"
 thiserror = "1.0"
 anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI dependencies
+clap = { version = "4.4", features = ["derive", "env"] }
+colored = "2.0"
+indicatif = "0.17"
+console = "0.15"
+ratatui = "0.24"
+crossterm = "0.27"
 
 # Storage and compression
 lz4_flex = "0.11"
@@ -41,17 +52,34 @@ dashmap = "5.5"
 bytes = "1.4"
 memmap2 = "0.9"
 
-# Testing
+# Development and testing
 criterion = "0.5"
 proptest = "1.0"
+tempfile = "3.8"
+once_cell = "1.19"
+assert_cmd = "2.0"
+predicates = "3.0"
+tokio-test = "0.4"
+
+# Configuration parsing
+toml = "0.8"
+serde_yaml = "0.9"
+dirs = "5.0"
 
 # FFI
 libc = "0.2"
+cbindgen = "0.26"
 
 # WASM
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+futures = "0.3"
+serde-wasm-bindgen = "0.6"
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
+wee_alloc = "0.4"
 
 [profile.release]
 codegen-units = 1
@@ -61,3 +89,27 @@ strip = true
 
 [profile.bench]
 debug = true
+
+[profile.dev]
+# Faster builds for development
+opt-level = 0
+debug = true
+rpath = false
+lto = false
+debug-assertions = true
+codegen-units = 256
+panic = "unwind"
+incremental = true
+overflow-checks = true
+
+[profile.test]
+# Optimized test builds
+opt-level = 1
+debug = true
+rpath = false
+lto = false
+debug-assertions = true
+codegen-units = 256
+panic = "unwind"
+incremental = true
+overflow-checks = true

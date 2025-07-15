@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  cassandra5-single:
+    image: cassandra:5.0
+    container_name: cqlite-cassandra5-test
+    environment:
+      - CASSANDRA_CLUSTER_NAME=CQLite-Test
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_NUM_TOKENS=256
+      - MAX_HEAP_SIZE=512m
+      - HEAP_NEWSIZE=100m
+    ports:
+      - "9042:9042"   # CQL port
+      - "7000:7000"   # Inter-node communication
+      - "7199:7199"   # JMX
+    volumes:
+      - ./cassandra-data:/var/lib/cassandra
+      - ./test-data:/opt/test-data
+      - ./scripts:/opt/scripts
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    networks:
+      - cqlite-test
+
+  data-generator:
+    image: cassandra:5.0
+    container_name: cqlite-data-generator
+    depends_on:
+      cassandra5-single:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/opt/scripts
+      - ./test-data:/opt/test-data
+    command: /opt/scripts/generate-test-data.sh
+    networks:
+      - cqlite-test
+
+networks:
+  cqlite-test:
+    driver: bridge
+
+volumes:
+  cassandra-data:

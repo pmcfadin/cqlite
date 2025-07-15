@@ -1,5 +1,5 @@
 //! CQLite Core Database Engine
-//! 
+//!
 //! A high-performance, embeddable database engine with SSTable-based storage,
 //! supporting both native and WASM deployments.
 
@@ -9,13 +9,14 @@
 
 pub mod config;
 pub mod error;
+pub mod parser;
 pub mod types;
 
-pub mod storage;
-pub mod schema;
-pub mod query;
 pub mod memory;
 pub mod platform;
+pub mod query;
+pub mod schema;
+pub mod storage;
 
 // Re-export main types for convenience
 pub use crate::{
@@ -28,15 +29,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
+    memory::MemoryManager, platform::Platform, query::QueryEngine, schema::SchemaManager,
     storage::StorageEngine,
-    schema::SchemaManager,
-    query::QueryEngine,
-    memory::MemoryManager,
-    platform::Platform,
 };
 
 /// Main database handle
-/// 
+///
 /// This is the primary interface for interacting with a CQLite database.
 /// It coordinates between the storage engine, schema manager, and query engine.
 #[derive(Debug)]
@@ -51,25 +49,25 @@ pub struct Database {
 
 impl Database {
     /// Open a database at the given path with the specified configuration
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `path` - The directory path where the database files will be stored
     /// * `config` - Database configuration options
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - The path cannot be created or accessed
     /// - Database files are corrupted
     /// - Configuration is invalid
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```rust,no_run
     /// use cqlite_core::{Database, Config};
     /// use std::path::Path;
-    /// 
+    ///
     /// # tokio_test::block_on(async {
     /// let config = Config::default();
     /// let db = Database::open(Path::new("./data"), config).await?;
@@ -79,16 +77,16 @@ impl Database {
     pub async fn open(path: &Path, config: Config) -> Result<Self> {
         // Initialize platform abstraction layer
         let platform = Arc::new(Platform::new(&config).await?);
-        
+
         // Initialize memory manager
         let memory = Arc::new(MemoryManager::new(&config)?);
-        
+
         // Initialize storage engine
         let storage = Arc::new(StorageEngine::open(path, &config, platform.clone()).await?);
-        
+
         // Initialize schema manager
         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await?);
-        
+
         // Initialize query engine
         let query = Arc::new(QueryEngine::new(
             storage.clone(),
@@ -96,7 +94,7 @@ impl Database {
             memory.clone(),
             &config,
         )?);
-        
+
         Ok(Self {
             storage,
             schema,
@@ -108,20 +106,20 @@ impl Database {
     }
 
     /// Execute a SQL query and return the result
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `sql` - The SQL query string to execute
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - SQL syntax is invalid
     /// - Referenced tables/columns don't exist
     /// - Query execution fails
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```rust,no_run
     /// # use cqlite_core::{Database, Config};
     /// # use std::path::Path;
@@ -137,13 +135,13 @@ impl Database {
     }
 
     /// Prepare a SQL statement for repeated execution
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `sql` - The SQL statement to prepare
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if SQL syntax is invalid or references non-existent objects
     pub async fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
         self.query.prepare(sql).await
@@ -169,16 +167,16 @@ impl Database {
     }
 
     /// Close the database and release all resources
-    /// 
+    ///
     /// This method ensures all pending operations are completed and
     /// all resources are properly cleaned up.
     pub async fn close(self) -> Result<()> {
         // Stop background tasks
         self.storage.shutdown().await?;
-        
+
         // Flush any remaining data
         self.storage.flush().await?;
-        
+
         Ok(())
     }
 
@@ -248,7 +246,7 @@ mod tests {
     async fn test_database_open_close() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
-        
+
         let db = Database::open(temp_dir.path(), config).await.unwrap();
         db.close().await.unwrap();
     }
@@ -257,21 +255,30 @@ mod tests {
     async fn test_database_basic_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
-        
+
         let db = Database::open(temp_dir.path(), config).await.unwrap();
-        
+
         // Create table
-        let result = db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)").await.unwrap();
+        let result = db
+            .execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .unwrap();
         assert_eq!(result.rows_affected, 0);
-        
+
         // Insert data
-        let result = db.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')").await.unwrap();
+        let result = db
+            .execute("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            .await
+            .unwrap();
         assert_eq!(result.rows_affected, 1);
-        
+
         // Query data
-        let result = db.execute("SELECT * FROM users WHERE id = 1").await.unwrap();
+        let result = db
+            .execute("SELECT * FROM users WHERE id = 1")
+            .await
+            .unwrap();
         assert_eq!(result.rows.len(), 1);
-        
+
         db.close().await.unwrap();
     }
 }

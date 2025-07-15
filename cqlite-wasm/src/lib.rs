@@ -1,15 +1,15 @@
 //! WASM bindings for CQLite
-//! 
+//!
 //! This module provides JavaScript-compatible bindings for the CQLite database engine,
 //! enabling use in web browsers and Node.js environments.
 
 #![deny(missing_docs)]
 
-mod utils;
 mod database;
 mod query;
-mod types;
 mod storage;
+mod types;
+mod utils;
 
 use wasm_bindgen::prelude::*;
 
@@ -31,7 +31,7 @@ macro_rules! console_log {
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 /// Initialize the CQLite WASM module
-/// 
+///
 /// This function should be called once when the module is loaded.
 /// It sets up panic handling and other global state.
 #[wasm_bindgen(start)]
@@ -39,7 +39,7 @@ pub fn init() {
     // Set up better panic messages in debug builds
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
-    
+
     console_log!("CQLite WASM module initialized");
 }
 
@@ -130,16 +130,15 @@ impl WasmConfig {
     /// Convert to JSON string
     #[wasm_bindgen]
     pub fn to_json(&self) -> Result<String, JsValue> {
-        serde_json::to_string_pretty(&self.config)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        serde_json::to_string_pretty(&self.config).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Create from JSON string
     #[wasm_bindgen]
     pub fn from_json(json: &str) -> Result<WasmConfig, JsValue> {
-        let config: cqlite_core::Config = serde_json::from_str(json)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
+        let config: cqlite_core::Config =
+            serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
         Ok(Self { config })
     }
 }
@@ -159,82 +158,91 @@ pub struct CQLiteDB {
 #[wasm_bindgen]
 impl CQLiteDB {
     /// Create a new database instance
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `name` - Database name (used for storage identification)
     /// * `config` - Optional configuration (uses default if not provided)
     #[wasm_bindgen(constructor)]
     pub fn new(name: String, config: Option<WasmConfig>) -> CQLiteDB {
         let config = config.unwrap_or_default();
         let database = database::WasmDatabase::new(name, config.config);
-        
+
         Self { database }
     }
 
     /// Open the database
-    /// 
+    ///
     /// This is an async operation that initializes the database storage.
     #[wasm_bindgen]
     pub async fn open(&mut self) -> Result<(), JsValue> {
-        self.database.open().await
+        self.database
+            .open()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Execute a SQL statement
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `sql` - SQL statement to execute
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A Promise that resolves to the query result
     #[wasm_bindgen]
     pub async fn execute(&self, sql: String) -> Result<JsValue, JsValue> {
-        let result = self.database.execute(&sql).await
+        let result = self
+            .database
+            .execute(&sql)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&result)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Prepare a SQL statement
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `sql` - SQL statement to prepare
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A prepared statement handle
     #[wasm_bindgen]
     pub async fn prepare(&self, sql: String) -> Result<PreparedStatement, JsValue> {
-        let stmt = self.database.prepare(&sql).await
+        let stmt = self
+            .database
+            .prepare(&sql)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
+
         Ok(PreparedStatement { statement: stmt })
     }
 
     /// Insert data into a table
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `table` - Table name
     /// * `data` - Data object to insert
     #[wasm_bindgen]
     pub async fn insert(&self, table: String, data: JsValue) -> Result<JsValue, JsValue> {
-        let result = self.database.insert(&table, data).await
+        let result = self
+            .database
+            .insert(&table, data)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&result)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Select data from a table
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `table` - Table name
     /// * `conditions` - Optional conditions object
     /// * `limit` - Optional result limit
@@ -245,17 +253,19 @@ impl CQLiteDB {
         conditions: Option<JsValue>,
         limit: Option<u32>,
     ) -> Result<JsValue, JsValue> {
-        let result = self.database.select(&table, conditions, limit).await
+        let result = self
+            .database
+            .select(&table, conditions, limit)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&result)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Update data in a table
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `table` - Table name
     /// * `data` - Data to update
     /// * `conditions` - Conditions for which rows to update
@@ -266,112 +276,137 @@ impl CQLiteDB {
         data: JsValue,
         conditions: JsValue,
     ) -> Result<JsValue, JsValue> {
-        let result = self.database.update(&table, data, conditions).await
+        let result = self
+            .database
+            .update(&table, data, conditions)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&result)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Delete data from a table
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `table` - Table name
     /// * `conditions` - Conditions for which rows to delete
     #[wasm_bindgen]
     pub async fn delete(&self, table: String, conditions: JsValue) -> Result<JsValue, JsValue> {
-        let result = self.database.delete(&table, conditions).await
+        let result = self
+            .database
+            .delete(&table, conditions)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&result)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Create a table
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `name` - Table name
     /// * `schema` - Table schema definition
     #[wasm_bindgen]
     pub async fn create_table(&self, name: String, schema: JsValue) -> Result<(), JsValue> {
-        self.database.create_table(&name, schema).await
+        self.database
+            .create_table(&name, schema)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Drop a table
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `name` - Table name
     #[wasm_bindgen]
     pub async fn drop_table(&self, name: String) -> Result<(), JsValue> {
-        self.database.drop_table(&name).await
+        self.database
+            .drop_table(&name)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// List all tables
     #[wasm_bindgen]
     pub async fn list_tables(&self) -> Result<JsValue, JsValue> {
-        let tables = self.database.list_tables().await
+        let tables = self
+            .database
+            .list_tables()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&tables)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&tables).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Get database statistics
     #[wasm_bindgen]
     pub async fn stats(&self) -> Result<JsValue, JsValue> {
-        let stats = self.database.stats().await
+        let stats = self
+            .database
+            .stats()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&stats)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&stats).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Flush all pending writes
     #[wasm_bindgen]
     pub async fn flush(&self) -> Result<(), JsValue> {
-        self.database.flush().await
+        self.database
+            .flush()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Perform manual compaction
     #[wasm_bindgen]
     pub async fn compact(&self) -> Result<(), JsValue> {
-        self.database.compact().await
+        self.database
+            .compact()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Close the database
     #[wasm_bindgen]
     pub async fn close(&mut self) -> Result<(), JsValue> {
-        self.database.close().await
+        self.database
+            .close()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Export database to JSON
     #[wasm_bindgen]
     pub async fn export_json(&self) -> Result<String, JsValue> {
-        self.database.export_json().await
+        self.database
+            .export_json()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Import database from JSON
     #[wasm_bindgen]
     pub async fn import_json(&self, json: String) -> Result<(), JsValue> {
-        self.database.import_json(&json).await
+        self.database
+            .import_json(&json)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Create a transaction
     #[wasm_bindgen]
     pub async fn begin_transaction(&self) -> Result<Transaction, JsValue> {
-        let tx = self.database.begin_transaction().await
+        let tx = self
+            .database
+            .begin_transaction()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
+
         Ok(Transaction { transaction: tx })
     }
 }
@@ -385,18 +420,20 @@ pub struct PreparedStatement {
 #[wasm_bindgen]
 impl PreparedStatement {
     /// Execute the prepared statement with parameters
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `params` - Array of parameter values
     #[wasm_bindgen]
     pub async fn execute(&self, params: Option<JsValue>) -> Result<JsValue, JsValue> {
         let params = params.unwrap_or(JsValue::NULL);
-        let result = self.statement.execute(params).await
+        let result = self
+            .statement
+            .execute(params)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&result)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 
@@ -411,24 +448,30 @@ impl Transaction {
     /// Execute a statement within the transaction
     #[wasm_bindgen]
     pub async fn execute(&self, sql: String) -> Result<JsValue, JsValue> {
-        let result = self.transaction.execute(&sql).await
+        let result = self
+            .transaction
+            .execute(&sql)
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&result)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Commit the transaction
     #[wasm_bindgen]
     pub async fn commit(&self) -> Result<(), JsValue> {
-        self.transaction.commit().await
+        self.transaction
+            .commit()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Rollback the transaction
     #[wasm_bindgen]
     pub async fn rollback(&self) -> Result<(), JsValue> {
-        self.transaction.rollback().await
+        self.transaction
+            .rollback()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
@@ -444,28 +487,32 @@ impl Iterator {
     /// Move to the next item
     #[wasm_bindgen]
     pub async fn next(&mut self) -> Result<bool, JsValue> {
-        self.iterator.next().await
+        self.iterator
+            .next()
+            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Get the current key
     #[wasm_bindgen]
     pub fn key(&self) -> Result<JsValue, JsValue> {
-        let key = self.iterator.key()
+        let key = self
+            .iterator
+            .key()
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&key)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&key).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Get the current value
     #[wasm_bindgen]
     pub fn value(&self) -> Result<JsValue, JsValue> {
-        let value = self.iterator.value()
+        let value = self
+            .iterator
+            .value()
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        serde_wasm_bindgen::to_value(&value)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+
+        serde_wasm_bindgen::to_value(&value).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 
@@ -519,5 +566,5 @@ impl Utils {
 }
 
 // Re-export types for easier access
-pub use types::*;
 pub use storage::*;
+pub use types::*;

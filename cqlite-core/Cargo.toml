@@ -25,6 +25,8 @@ anyhow = { workspace = true }
 
 # Compression and checksums
 lz4_flex = { workspace = true }
+snap = { version = "1.1", optional = true }
+flate2 = { version = "1.0", optional = true }
 crc32fast = { workspace = true }
 
 # Concurrency and collections
@@ -36,27 +38,33 @@ dashmap = { workspace = true }
 bytes = { workspace = true }
 memmap2 = { workspace = true }
 
+# Parsing
+nom = "7.1"
+hex = "0.4"
+bit-vec = "0.8"
+num_cpus = "1.0"
+base64 = "0.21"
+
+# Additional dependencies
+uuid = { version = "1.10", features = ["v4"] }
+regex = "1.10"
+
 # Optional WASM support
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = { workspace = true }
-js-sys = { workspace = true }
-web-sys = { workspace = true, features = ["console"] }
+wasm-bindgen = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, features = ["console"], optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3.8"
 
-[[bench]]
-name = "storage_bench"
-harness = false
-
-[[bench]]
-name = "query_bench"
-harness = false
-
 [features]
 default = ["compression", "metrics"]
 compression = []
+lz4 = []
+snappy = ["snap"]
+deflate = ["flate2"]
 metrics = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]

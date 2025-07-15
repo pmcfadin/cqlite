@@ -1,0 +1,60 @@
+[package]
+name = "cqlite-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Command-line interface for CQLite database"
+
+[[bin]]
+name = "cqlite"
+path = "src/main.rs"
+
+[dependencies]
+cqlite-core = { path = "../cqlite-core" }
+
+# CLI framework
+clap = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "signal"] }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging and tracing
+log = { workspace = true }
+env_logger = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Terminal UI
+colored = { workspace = true }
+indicatif = { workspace = true }
+console = { workspace = true }
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Configuration parsing
+toml = { workspace = true }
+serde_yaml = { workspace = true }
+dirs = { workspace = true }
+
+# Development dependencies
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+
+[features]
+default = ["interactive", "tui"]
+interactive = []
+tui = ["ratatui", "crossterm"]

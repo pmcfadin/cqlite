@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  cassandra-node1:
+    image: cassandra:5.0
+    container_name: cassandra-node1
+    hostname: cassandra-node1
+    environment:
+      - CASSANDRA_CLUSTER_NAME=test-cluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_SEEDS=cassandra-node1
+      - CASSANDRA_BROADCAST_ADDRESS=cassandra-node1
+      - CASSANDRA_LISTEN_ADDRESS=cassandra-node1
+      - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      - CASSANDRA_START_RPC=true
+      - CASSANDRA_AUTHENTICATOR=AllowAllAuthenticator
+      - CASSANDRA_AUTHORIZER=AllowAllAuthorizer
+      - CASSANDRA_AUTO_BOOTSTRAP=false
+      - JAVA_OPTS=-Xms512m -Xmx2g
+    ports:
+      - "9042:9042"
+      - "7100:7000"
+      - "7101:7001"
+      - "7199:7199"
+    volumes:
+      - cassandra-node1-data:/var/lib/cassandra
+      - ./scripts:/scripts
+      - ./samples:/samples
+    networks:
+      - cassandra-network
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+
+volumes:
+  cassandra-node1-data:
+
+networks:
+  cassandra-network:
+    driver: bridge

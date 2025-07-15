@@ -195,13 +195,13 @@ impl Error {
             Error::Io(_) => true,
             Error::Concurrency(_) => true,
             Error::Memory(_) => true,
-            
+
             // These errors are typically not recoverable
             Error::Corruption(_) => false,
             Error::Schema(_) => false,
             Error::SqlParse(_) => false,
             Error::Configuration(_) => false,
-            
+
             // Context-dependent errors
             Error::Storage(_) => true,
             Error::QueryExecution(_) => false,
@@ -213,10 +213,10 @@ impl Error {
             Error::Transaction(_) => true,
             Error::Index(_) => true,
             Error::Compaction(_) => true,
-            
+
             #[cfg(target_arch = "wasm32")]
             Error::Wasm(_) => false,
-            
+
             Error::Serialization(_) => false,
             Error::Internal(_) => false,
         }
@@ -243,10 +243,10 @@ impl Error {
             Error::Transaction(_) => ErrorCategory::Transaction,
             Error::Index(_) => ErrorCategory::Storage,
             Error::Compaction(_) => ErrorCategory::Storage,
-            
+
             #[cfg(target_arch = "wasm32")]
             Error::Wasm(_) => ErrorCategory::Platform,
-            
+
             Error::Internal(_) => ErrorCategory::Internal,
         }
     }
