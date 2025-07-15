@@ -178,10 +178,10 @@ impl SSTableReader {
         };
 
         // Load index if available
-        let index = Self::load_index(&mut file, &header, &platform).await?;
+        let index = Self::load_index(&file, &header, &platform).await?;
 
         // Load bloom filter if available
-        let bloom_filter = Self::load_bloom_filter(&mut file, &header, &platform).await?;
+        let bloom_filter = Self::load_bloom_filter(&file, &header, &platform).await?;
 
         let reader_config = SSTableReaderConfig::default();
 
@@ -213,7 +213,7 @@ impl SSTableReader {
     }
 
     /// Get a value by key from the SSTable
-    pub async fn get(&mut self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         // First check bloom filter if available
         if let Some(bloom_filter) = &self.bloom_filter {
             if !bloom_filter.might_contain(key.as_bytes()) {
@@ -273,16 +273,18 @@ impl SSTableReader {
     }
 
     /// Get all entries in the SSTable (for compaction)
-    pub async fn get_all_entries(&mut self) -> Result<Vec<(TableId, RowKey, Value)>> {
+    pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
         let mut results = Vec::new();
 
         // Reset to beginning of data section  
         let header_size = self.calculate_header_size();
-        self.file.seek(std::io::SeekFrom::Start(header_size as u64))
-            .await?;
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(std::io::SeekFrom::Start(header_size as u64)).await?;
+        }
 
         // Read all blocks sequentially
-        while let Some(block) = self.read_next_block(&mut self.file).await? {
+        while let Some(block) = self.read_next_block().await? {
             let entries = self.parse_block_entries(&block)?;
             results.extend(entries);
         }
@@ -308,7 +310,7 @@ impl SSTableReader {
     // Private helper methods
 
     async fn load_index(
-        file: &mut BufReader<File>,
+        file: &Arc<Mutex<BufReader<File>>>,
         header: &SSTableHeader,
         platform: &Platform,
     ) -> Result<Option<SSTableIndex>> {
@@ -319,16 +321,19 @@ impl SSTableReader {
                 .map_err(|_| Error::corruption("Invalid index offset in header"))?;
 
             // Load index from file
-            file.seek(std::io::SeekFrom::Start(offset)).await?;
-            let index = SSTableIndex::load(file).await?;
-            return Ok(Some(index));
+            {
+                let mut file_guard = file.lock().await;
+                file_guard.seek(std::io::SeekFrom::Start(offset)).await?;
+                let index = SSTableIndex::load(&mut *file_guard).await?;
+                return Ok(Some(index));
+            }
         }
 
         Ok(None)
     }
 
     async fn load_bloom_filter(
-        file: &mut BufReader<File>,
+        file: &Arc<Mutex<BufReader<File>>>,
         header: &SSTableHeader,
         platform: &Platform,
     ) -> Result<Option<BloomFilter>> {
@@ -339,9 +344,12 @@ impl SSTableReader {
                 .map_err(|_| Error::corruption("Invalid bloom filter offset in header"))?;
 
             // Load bloom filter from file
-            file.seek(std::io::SeekFrom::Start(offset)).await?;
-            let bloom_filter = BloomFilter::load(file).await?;
-            return Ok(Some(bloom_filter));
+            {
+                let mut file_guard = file.lock().await;
+                file_guard.seek(std::io::SeekFrom::Start(offset)).await?;
+                let bloom_filter = BloomFilter::load(&mut *file_guard).await?;
+                return Ok(Some(bloom_filter));
+            }
         }
 
         Ok(None)
@@ -369,13 +377,15 @@ impl SSTableReader {
         Ok(Some(value))
     }
 
-    async fn scan_for_key(&mut self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    async fn scan_for_key(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         let header_size = self.calculate_header_size();
-        self.file.seek(std::io::SeekFrom::Start(header_size as u64))
-            .await?;
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(std::io::SeekFrom::Start(header_size as u64)).await?;
+        }
 
         // Sequential scan through blocks
-        while let Some(block) = self.read_next_block(&mut self.file).await? {
+        while let Some(block) = self.read_next_block().await? {
             let entries = self.parse_block_entries(&block)?;
 
             for (entry_table_id, entry_key, entry_value) in entries {
@@ -399,11 +409,13 @@ impl SSTableReader {
         let mut count = 0;
 
         let header_size = self.calculate_header_size();
-        self.file.seek(std::io::SeekFrom::Start(header_size as u64))
-            .await?;
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(std::io::SeekFrom::Start(header_size as u64)).await?;
+        }
 
         // Sequential scan through blocks
-        while let Some(block) = self.read_next_block(&mut self.file).await? {
+        while let Some(block) = self.read_next_block().await? {
             let entries = self.parse_block_entries(&block)?;
 
             for (entry_table_id, entry_key, entry_value) in entries {
@@ -438,15 +450,18 @@ impl SSTableReader {
         Ok(results)
     }
 
-    async fn read_next_block(&self, file: &mut BufReader<File>) -> Result<Option<Vec<u8>>> {
+    async fn read_next_block(&self) -> Result<Option<Vec<u8>>> {
         // Read block header (offset, size, checksum)
         let mut header_buffer = [0u8; 16]; // 8 bytes offset + 4 bytes size + 4 bytes checksum
-        match file.read_exact(&mut header_buffer).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(None); // End of file
+        {
+            let mut file_guard = self.file.lock().await;
+            match file_guard.read_exact(&mut header_buffer).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(None); // End of file
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
         }
 
         let compressed_size = u32::from_be_bytes([
@@ -464,7 +479,10 @@ impl SSTableReader {
 
         // Read block data
         let mut block_data = vec![0u8; compressed_size as usize];
-        file.read_exact(&mut block_data).await?;
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.read_exact(&mut block_data).await?;
+        }
 
         // Validate checksum if enabled
         if self.config.validate_checksums {

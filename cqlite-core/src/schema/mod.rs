@@ -126,7 +126,7 @@ impl SchemaManager {
             } else {
                 return Err(Error::schema(format!(
                     "Table {} not found",
-                    table_id.as_str()
+                    table_id.0.as_str()
                 )));
             }
         }
@@ -146,7 +146,7 @@ impl SchemaManager {
             if schemas.remove(table_id).is_none() {
                 return Err(Error::schema(format!(
                     "Table {} not found",
-                    table_id.as_str()
+                    table_id.0.as_str()
                 )));
             }
         }
@@ -299,7 +299,7 @@ mod tests {
 
         let schema = TableSchema::new(TableId::new("users"), columns, vec!["id".to_string()]);
 
-        assert_eq!(schema.table_id.as_str(), "users");
+        assert_eq!(schema.table_id.0.as_str(), "users");
         assert_eq!(schema.columns.len(), 3);
         assert_eq!(schema.primary_key, vec!["id".to_string()]);
         assert_eq!(schema.version, 1);

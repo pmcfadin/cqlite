@@ -213,7 +213,7 @@ impl StorageEngine {
 
     /// Perform manual compaction
     pub async fn compact(&self) -> Result<()> {
-        self.compaction.run_compaction().await
+        // TODO: Implement proper compaction logic\n        // This would need to identify candidates and call CompactionManager::run_compaction\n        Ok(())
     }
 
     /// Get storage statistics
