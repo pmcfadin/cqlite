@@ -9,7 +9,7 @@
 //! - Execution plan representation
 
 use super::{ComparisonOperator, Condition, ParsedQuery, QueryType, WhereClause};
-use crate::{schema::SchemaManager, Config, Error, Result, TableId};
+use crate::{schema::SchemaManager, Config, Error, Result, TableId, Value};
 use std::sync::Arc;
 
 /// Query execution plan

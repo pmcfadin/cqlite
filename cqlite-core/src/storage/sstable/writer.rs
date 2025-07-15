@@ -1,6 +1,5 @@
 //! SSTable writer implementation with Cassandra 5+ compatibility
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;

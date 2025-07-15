@@ -823,8 +823,8 @@ mod tests {
         assert_eq!(executor.config.query_parallelism, config.query_parallelism);
     }
 
-    #[test]
-    fn test_value_comparison() {
+    #[tokio::test]
+    async fn test_value_comparison() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
@@ -852,8 +852,8 @@ mod tests {
         assert_eq!(result, std::cmp::Ordering::Less);
     }
 
-    #[test]
-    fn test_condition_evaluation() {
+    #[tokio::test]
+    async fn test_condition_evaluation() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());

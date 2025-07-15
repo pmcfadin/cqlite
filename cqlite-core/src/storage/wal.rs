@@ -30,6 +30,7 @@ pub enum WalEntry {
 }
 
 /// Write-Ahead Log for durability
+#[derive(Debug)]
 pub struct WriteAheadLog {
     /// Path to the WAL file
     file_path: PathBuf,

@@ -291,7 +291,7 @@ impl From<&str> for RowKey {
 }
 
 /// Table identifier
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TableId(pub String);
 
 impl TableId {

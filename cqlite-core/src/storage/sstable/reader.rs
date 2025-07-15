@@ -16,9 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 
 use crate::{
     parser::{
-        header::parse_sstable_header,
         types::{parse_cql_value, CqlTypeId},
-        vint::{parse_vint, parse_vint_length},
+        vint::parse_vint_length,
         SSTableHeader, SSTableParser,
     },
     platform::Platform,
@@ -29,7 +28,7 @@ use crate::{
 use super::{
     bloom::BloomFilter,
     compression::CompressionReader,
-    index::{IndexEntry, SSTableIndex},
+    index::SSTableIndex,
 };
 
 /// SSTable reader statistics
@@ -565,8 +564,6 @@ pub async fn open_sstable_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Value;
-    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_reader_stats() {

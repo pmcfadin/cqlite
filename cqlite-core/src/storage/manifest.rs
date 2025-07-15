@@ -75,6 +75,7 @@ pub struct SSTableMetadata {
 }
 
 /// Manifest manager
+#[derive(Debug)]
 pub struct Manifest {
     /// Path to manifest file
     manifest_path: PathBuf,

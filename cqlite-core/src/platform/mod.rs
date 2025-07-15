@@ -57,6 +57,7 @@ impl Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::TempDir;
 
     #[tokio::test]

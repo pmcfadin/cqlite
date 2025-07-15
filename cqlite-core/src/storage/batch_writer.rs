@@ -9,6 +9,7 @@ use crate::storage::wal::WriteAheadLog;
 use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// Batch writer for efficient write operations
+#[derive(Debug)]
 pub struct BatchWriter {
     /// Configuration
     config: Config,

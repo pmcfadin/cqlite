@@ -31,6 +31,7 @@ pub struct QueryCacheEntry {
 }
 
 /// Query engine with caching and statistics
+#[derive(Debug)]
 pub struct QueryEngine {
     /// Storage engine reference
     storage: Arc<StorageEngine>,

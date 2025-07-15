@@ -130,7 +130,7 @@ impl Database {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # });
     /// ```
-    pub async fn execute(&self, sql: &str) -> Result<QueryResult> {
+    pub async fn execute(&self, sql: &str) -> Result<query::result::QueryResult> {
         self.query.execute(sql).await
     }
 
@@ -143,7 +143,7 @@ impl Database {
     /// # Errors
     ///
     /// Returns an error if SQL syntax is invalid or references non-existent objects
-    pub async fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
+    pub async fn prepare(&self, sql: &str) -> Result<std::sync::Arc<query::PreparedQuery>> {
         self.query.prepare(sql).await
     }
 
@@ -152,7 +152,7 @@ impl Database {
         Ok(DatabaseStats {
             storage_stats: self.storage.stats().await?,
             memory_stats: self.memory.stats()?,
-            query_stats: self.query.stats()?,
+            query_stats: self.query.stats(),
         })
     }
 

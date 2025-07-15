@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::platform::Platform;
-use crate::storage::batch_writer::{BatchEntry, BatchWriter, BatchWriterBuilder, EntryType};
+use crate::storage::batch_writer::{BatchWriter, BatchWriterBuilder};
 use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// Main storage engine that coordinates all storage components

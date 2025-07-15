@@ -47,6 +47,7 @@ impl Default for CompactionStrategy {
 }
 
 /// Compaction manager
+#[derive(Debug)]
 pub struct CompactionManager {
     /// SSTable manager
     sstables: Arc<SSTableManager>,

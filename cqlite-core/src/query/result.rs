@@ -659,7 +659,11 @@ impl ToJson for Value {
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             Value::Text(s) => serde_json::Value::String(s.clone()),
-            Value::Bytes(b) => serde_json::Value::String(base64::encode(b)),
+            Value::Blob(b) => {
+                use base64::Engine;
+                let engine = base64::engine::general_purpose::STANDARD;
+                serde_json::Value::String(engine.encode(b))
+            },
             Value::List(list) => {
                 let json_list: Vec<serde_json::Value> = list.iter().map(|v| v.to_json()).collect();
                 serde_json::Value::Array(json_list)
