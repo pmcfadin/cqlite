@@ -673,6 +673,14 @@ impl ToJson for Value {
                     map.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
                 serde_json::Value::Object(json_map)
             }
+            Value::BigInt(i) => serde_json::Value::Number((*i).into()),
+            Value::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
+            Value::Uuid(uuid) => {
+                use base64::Engine;
+                let engine = base64::engine::general_purpose::STANDARD;
+                serde_json::Value::String(engine.encode(uuid))
+            }
+            Value::Json(json) => json.clone(),
         }
     }
 }

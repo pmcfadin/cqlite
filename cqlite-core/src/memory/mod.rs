@@ -137,16 +137,20 @@ impl MemoryManager {
         };
 
         let mut cache = self.block_cache.write();
-        if let Some(block) = cache.blocks.get(&key) {
-            // Update LRU order
+        
+        // Check if block exists and clone it before any mutations
+        let block_option = cache.blocks.get(&key).map(|block| Arc::clone(block));
+        
+        if let Some(block) = block_option {
+            // Update LRU order (now safe since we don't hold immutable borrow)
             if let Some(pos) = cache.lru_order.iter().position(|k| k == &key) {
                 cache.lru_order.remove(pos);
             }
             cache.lru_order.push(key);
 
             // Update access time
-            let mut block = Arc::clone(block);
-            if let Some(block_mut) = Arc::get_mut(&mut block) {
+            let mut block_clone = block.clone();
+            if let Some(block_mut) = Arc::get_mut(&mut block_clone) {
                 block_mut.last_access = std::time::Instant::now();
             }
 
@@ -209,8 +213,12 @@ impl MemoryManager {
         };
 
         let mut cache = self.row_cache.write();
-        if let Some(row) = cache.rows.get(&key) {
-            // Update LRU order
+        
+        // Check if row exists and clone it before any mutations
+        let row_option = cache.rows.get(&key).map(|row| Arc::clone(row));
+        
+        if let Some(row) = row_option {
+            // Update LRU order (now safe since we don't hold immutable borrow)
             if let Some(pos) = cache.lru_order.iter().position(|k| k == &key) {
                 cache.lru_order.remove(pos);
             }
@@ -222,7 +230,7 @@ impl MemoryManager {
                 stats.row_cache_hits += 1;
             }
 
-            Some(Arc::clone(row))
+            Some(row)
         } else {
             // Update stats
             {

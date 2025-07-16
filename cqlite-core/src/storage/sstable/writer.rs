@@ -82,9 +82,15 @@ impl SSTableWriter {
     pub async fn create(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
         let writer = platform.fs().create_file(path).await?;
         let compression = if config.storage.compression.enabled {
-            Some(Compression::new(
-                config.storage.compression.algorithm.clone(),
-            )?)
+            let algorithm = match config.storage.compression.algorithm {
+                crate::config::CompressionAlgorithm::None => crate::storage::sstable::compression::CompressionAlgorithm::None,
+                crate::config::CompressionAlgorithm::Lz4 => crate::storage::sstable::compression::CompressionAlgorithm::Lz4,
+                crate::config::CompressionAlgorithm::Snappy => crate::storage::sstable::compression::CompressionAlgorithm::Snappy,
+                crate::config::CompressionAlgorithm::Deflate => crate::storage::sstable::compression::CompressionAlgorithm::Deflate,
+                // Map Zstd to Deflate as a fallback since we don't have Zstd support yet
+                crate::config::CompressionAlgorithm::Zstd => crate::storage::sstable::compression::CompressionAlgorithm::Deflate,
+            };
+            Some(Compression::new(algorithm)?)
         } else {
             None
         };
@@ -147,7 +153,7 @@ impl SSTableWriter {
                 crate::storage::sstable::compression::CompressionAlgorithm::Lz4 => 1u8,
                 crate::storage::sstable::compression::CompressionAlgorithm::Snappy => 2u8,
                 crate::storage::sstable::compression::CompressionAlgorithm::Deflate => 3u8,
-                _ => 0u8,
+                crate::storage::sstable::compression::CompressionAlgorithm::None => 0u8,
             }
         } else {
             0u8
@@ -417,8 +423,9 @@ impl SSTableWriter {
         }
 
         // Write bloom filter if enabled
-        if let Some(ref bloom_filter) = self.bloom_filter {
-            self.write_bloom_filter(bloom_filter).await?;
+        if let Some(bloom_filter) = self.bloom_filter.take() {
+            self.write_bloom_filter(&bloom_filter).await?;
+            self.bloom_filter = Some(bloom_filter); // Put it back
         }
 
         // Write index

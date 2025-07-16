@@ -170,7 +170,7 @@ impl Compression {
 }
 
 /// Compression statistics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompressionStats {
     /// Original size in bytes
     pub original_size: u64,

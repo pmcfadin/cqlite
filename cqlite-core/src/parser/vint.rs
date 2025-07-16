@@ -56,7 +56,7 @@ pub fn parse_vint(input: &[u8]) -> IResult<&[u8], i64> {
 
     let (input, bytes) = take(length)(input)?;
 
-    let value: i64;
+    let mut value: i64;
 
     if length == 1 {
         // Single byte case - value is in lower 7 bits

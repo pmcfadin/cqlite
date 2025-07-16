@@ -15,7 +15,7 @@ use crate::platform::Platform;
 use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// SSTable file identifier
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SSTableId(pub String);
 
 impl SSTableId {

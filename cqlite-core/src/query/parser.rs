@@ -439,14 +439,14 @@ impl QueryParser {
     }
 
     /// Helper: Extract text between two patterns
-    fn extract_between(&self, text: &str, start: &str, end: &str) -> Option<&str> {
+    fn extract_between<'a>(&self, text: &'a str, start: &str, end: &str) -> Option<&'a str> {
         let start_pos = text.to_uppercase().find(&start.to_uppercase())? + start.len();
         let end_pos = text.to_uppercase()[start_pos..].find(&end.to_uppercase())?;
         Some(&text[start_pos..start_pos + end_pos])
     }
 
     /// Helper: Extract text after a pattern
-    fn extract_after(&self, text: &str, pattern: &str) -> Option<&str> {
+    fn extract_after<'a>(&self, text: &'a str, pattern: &str) -> Option<&'a str> {
         let start_pos = text.to_uppercase().find(&pattern.to_uppercase())? + pattern.len();
         Some(&text[start_pos..])
     }

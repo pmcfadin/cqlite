@@ -1,9 +1,9 @@
 //! Write-Ahead Log (WAL) implementation for durability
 
-use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Mutex;
 
 use crate::error::Error;
@@ -36,7 +36,7 @@ pub struct WriteAheadLog {
     file_path: PathBuf,
 
     /// File handle for writing
-    file: Arc<Mutex<std::fs::File>>,
+    file: Arc<Mutex<tokio::fs::File>>,
 
     /// Platform abstraction
     platform: Arc<Platform>,
@@ -127,10 +127,12 @@ impl WriteAheadLog {
 
         // Write length prefix
         file.write_all(&length_bytes)
+            .await
             .map_err(|e| Error::from(e))?;
 
         // Write entry data
         file.write_all(&serialized)
+            .await
             .map_err(|e| Error::from(e))?;
 
         // Update counters
@@ -139,7 +141,7 @@ impl WriteAheadLog {
 
         // Auto-sync if configured
         if self.config.storage.wal.sync_on_write {
-            file.sync_all().map_err(|e| Error::from(e))?;
+            file.sync_all().await.map_err(|e| Error::from(e))?;
         }
 
         Ok(())
@@ -148,7 +150,7 @@ impl WriteAheadLog {
     /// Flush all pending writes to disk
     pub async fn flush(&self) -> Result<()> {
         let mut file = self.file.lock().await;
-        file.sync_all().map_err(|e| Error::from(e))?;
+        file.sync_all().await.map_err(|e| Error::from(e))?;
         Ok(())
     }
 
@@ -159,19 +161,21 @@ impl WriteAheadLog {
 
         // Seek to beginning
         file.seek(SeekFrom::Start(0))
+            .await
             .map_err(|e| Error::from(e))?;
 
         // Read entries
         loop {
             // Read length prefix
             let mut length_bytes = [0u8; 4];
-            match file.read_exact(&mut length_bytes) {
+            match file.read_exact(&mut length_bytes).await {
                 Ok(()) => {
                     let length = u32::from_le_bytes(length_bytes) as usize;
 
                     // Read entry data
                     let mut entry_data = vec![0u8; length];
                     file.read_exact(&mut entry_data)
+                        .await
                         .map_err(|e| Error::from(e))?;
 
                     // Deserialize entry
@@ -199,8 +203,9 @@ impl WriteAheadLog {
         let mut file_size = self.file_size.lock().await;
         let mut entry_count = self.entry_count.lock().await;
 
-        file.set_len(0).map_err(|e| Error::from(e))?;
+        file.set_len(0).await.map_err(|e| Error::from(e))?;
         file.seek(SeekFrom::Start(0))
+            .await
             .map_err(|e| Error::from(e))?;
 
         *file_size = 0;

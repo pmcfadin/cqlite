@@ -166,14 +166,14 @@ impl MemTable {
             }
 
             // Check range bounds
-            if let Some(ref start) = start_bound {
-                if (tid, key) < start {
+            if let Some((start_tid, start_key)) = start_bound {
+                if (&tid, &key) < (&start_tid, &start_key) {
                     continue;
                 }
             }
 
-            if let Some(ref end) = end_bound {
-                if (tid, key) >= end {
+            if let Some((end_tid, end_key)) = end_bound {
+                if (&tid, &key) >= (&end_tid, &end_key) {
                     break;
                 }
             }

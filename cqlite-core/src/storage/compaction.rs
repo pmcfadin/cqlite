@@ -56,11 +56,11 @@ impl CompactionStrategy {
             },
             crate::config::CompactionStrategy::Leveled => CompactionStrategy::Leveled {
                 max_level_size: 10 * 1024 * 1024, // 10MB
-                level_size_multiplier: 10,
+                level_multiplier: 10,
             },
             crate::config::CompactionStrategy::Universal => CompactionStrategy::TimeWindow {
-                max_windows: 24,
                 window_size_hours: 1,
+                max_windows: 24,
             },
         }
     }
@@ -129,7 +129,7 @@ impl CompactionManager {
 
         let handle = tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(
-                config.storage.compaction.background_interval,
+                config.storage.compaction.background_interval.as_secs(),
             ));
 
             loop {
