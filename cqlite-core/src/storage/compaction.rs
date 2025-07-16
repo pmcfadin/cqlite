@@ -287,7 +287,7 @@ impl CompactionManager {
     }
 
     /// Run manual compaction
-    pub async fn run_compaction(&self) -> Result<()> {
+    pub async fn run_manual_compaction(&self) -> Result<()> {
         let sstable_ids = self.sstables.list_sstables().await;
 
         if sstable_ids.len() < 2 {

@@ -62,9 +62,10 @@ impl WriteAheadLog {
             .append(true)
             .read(true)
             .open(&file_path)
+            .await
             .map_err(|e| Error::from(e))?;
 
-        let file_size = file.metadata().map_err(|e| Error::from(e))?.len();
+        let file_size = file.metadata().await.map_err(|e| Error::from(e))?.len();
 
         Ok(Self {
             file_path,
@@ -140,7 +141,7 @@ impl WriteAheadLog {
         *entry_count += 1;
 
         // Auto-sync if configured
-        if self.config.storage.wal.sync_on_write {
+        if self.config.storage.wal.sync_writes {
             file.sync_all().await.map_err(|e| Error::from(e))?;
         }
 
@@ -260,32 +261,6 @@ pub struct WalStats {
     pub file_path: PathBuf,
 }
 
-/// WAL configuration
-#[derive(Debug, Clone)]
-pub struct WalConfig {
-    /// Whether WAL is enabled
-    pub enabled: bool,
-
-    /// Whether to sync on every write
-    pub sync_on_write: bool,
-
-    /// Maximum WAL file size before rotation
-    pub max_file_size: u64,
-
-    /// Whether to compress WAL entries
-    pub compression: bool,
-}
-
-impl Default for WalConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            sync_on_write: false,
-            max_file_size: 64 * 1024 * 1024, // 64MB
-            compression: false,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

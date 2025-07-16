@@ -116,9 +116,9 @@ struct CachedRow {
 impl MemoryManager {
     /// Create a new memory manager
     pub fn new(config: &Config) -> Result<Self> {
-        let block_cache = Arc::new(RwLock::new(BlockCache::new(config.memory.block_cache_size)));
-        let row_cache = Arc::new(RwLock::new(RowCache::new(config.memory.row_cache_size)));
-        let buffer_pool = Arc::new(RwLock::new(BufferPool::new(config.memory.buffer_pool_size)));
+        let block_cache = Arc::new(RwLock::new(BlockCache::new(config.memory.block_cache.max_size as usize)));
+        let row_cache = Arc::new(RwLock::new(RowCache::new(config.memory.row_cache.max_size as usize)));
+        let buffer_pool = Arc::new(RwLock::new(BufferPool::new(config.memory.max_memory as usize)));
 
         Ok(Self {
             block_cache,
