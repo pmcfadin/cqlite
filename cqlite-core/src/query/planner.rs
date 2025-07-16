@@ -135,6 +135,7 @@ pub struct QueryHints {
 }
 
 /// Query planner
+#[derive(Debug)]
 pub struct QueryPlanner {
     /// Schema manager reference
     schema: Arc<SchemaManager>,

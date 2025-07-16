@@ -12,6 +12,7 @@ use crate::{Config, Error, Result, TableId, Value};
 use std::collections::HashMap;
 
 /// CQL query parser
+#[derive(Debug)]
 pub struct QueryParser {
     /// Configuration
     config: Config,

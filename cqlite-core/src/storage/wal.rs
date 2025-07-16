@@ -170,7 +170,7 @@ impl WriteAheadLog {
             // Read length prefix
             let mut length_bytes = [0u8; 4];
             match file.read_exact(&mut length_bytes).await {
-                Ok(()) => {
+                Ok(_) => {
                     let length = u32::from_le_bytes(length_bytes) as usize;
 
                     // Read entry data

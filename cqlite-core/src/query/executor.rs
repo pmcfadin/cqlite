@@ -25,7 +25,7 @@ pub use super::result::{QueryResult, QueryRow};
 
 
 /// Query executor
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct QueryExecutor {
     /// Storage engine reference
     storage: Arc<StorageEngine>,
@@ -700,11 +700,11 @@ impl QueryExecutor {
     /// Convert Value to RowKey
     fn value_to_row_key(&self, value: &Value) -> Result<RowKey> {
         match value {
-            Value::Integer(i) => Ok(RowKey::from_bytes(i.to_be_bytes().to_vec())),
-            Value::Text(s) => Ok(RowKey::from_bytes(s.as_bytes().to_vec())),
-            Value::Float(f) => Ok(RowKey::from_bytes(f.to_be_bytes().to_vec())),
-            Value::Boolean(b) => Ok(RowKey::from_bytes(vec![if *b { 1 } else { 0 }])),
-            Value::Null => Ok(RowKey::from_bytes(vec![0])),
+            Value::Integer(i) => Ok(RowKey::new(i.to_be_bytes().to_vec())),
+            Value::Text(s) => Ok(RowKey::new(s.as_bytes().to_vec())),
+            Value::Float(f) => Ok(RowKey::new(f.to_be_bytes().to_vec())),
+            Value::Boolean(b) => Ok(RowKey::new(vec![if *b { 1 } else { 0 }])),
+            Value::Null => Ok(RowKey::new(vec![0])),
             _ => Err(Error::query_execution(
                 "Cannot convert value to row key".to_string(),
             )),
@@ -801,7 +801,7 @@ mod tests {
         row_values.insert("id".to_string(), Value::Integer(1));
         row_values.insert("name".to_string(), Value::Text("test".to_string()));
 
-        let row = QueryRow::with_values(RowKey::from_bytes(vec![1]), row_values);
+        let row = QueryRow::with_values(RowKey::new(vec![1]), row_values);
 
         let condition = Condition {
             column: "id".to_string(),

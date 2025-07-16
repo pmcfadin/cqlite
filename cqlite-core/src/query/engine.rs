@@ -217,12 +217,8 @@ impl QueryEngine {
         CacheStats {
             prepared_cache_size: self.prepared_cache.len(),
             plan_cache_size: self.plan_cache.len(),
-            prepared_cache_hits: self
-                .prepared_cache
-                .iter()
-                .map(|entry| entry.hit_count)
-                .sum(),
-            plan_cache_hits: self.plan_cache.iter().map(|entry| entry.hit_count).sum(),
+            prepared_cache_hits: self.prepared_cache.len() as u64,
+            plan_cache_hits: self.plan_cache.len() as u64,
         }
     }
 

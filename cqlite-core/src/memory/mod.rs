@@ -340,26 +340,19 @@ impl MemoryManager {
         match value {
             Value::Null => 1,
             Value::Boolean(_) => 1,
-            Value::Integer(_) => 8,
+            Value::Integer(_) => 4,
             Value::BigInt(_) => 8,
             Value::Float(_) => 8,
-            Value::Double(_) => 8,
             Value::Text(s) => s.len(),
             Value::Blob(b) => b.len(),
             Value::Timestamp(_) => 8,
-            Value::Date(_) => 4,
-            Value::Time(_) => 8,
             Value::Uuid(_) => 16,
+            Value::Json(json) => json.to_string().len(),
             Value::List(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
             Value::Map(map) => map
                 .iter()
                 .map(|(k, v)| k.len() + self.estimate_value_size(v))
                 .sum(),
-            Value::Set(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
-            Value::VarInt(_) => 16,
-            Value::Decimal(_) => 16,
-            Value::Duration(_) => 8,
-            Value::Inet(_) => 16,
         }
     }
 }
