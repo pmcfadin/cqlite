@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  # Cassandra 4.0
+  cassandra-4-0:
+    image: cassandra:4.0
+    container_name: cassandra-4-0
+    ports:
+      - "9042:9042"
+    environment:
+      - CASSANDRA_START_RPC=true
+      - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      - CASSANDRA_LISTEN_ADDRESS=auto
+      - CASSANDRA_BROADCAST_ADDRESS=127.0.0.1
+      - CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1
+      - CASSANDRA_CLUSTER_NAME=compat-test-4-0
+    volumes:
+      - cassandra-4-0-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES;'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks:
+      - cassandra-compat
+
+  # Cassandra 4.1
+  cassandra-4-1:
+    image: cassandra:4.1
+    container_name: cassandra-4-1
+    ports:
+      - "9043:9042"
+    environment:
+      - CASSANDRA_START_RPC=true
+      - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      - CASSANDRA_LISTEN_ADDRESS=auto
+      - CASSANDRA_BROADCAST_ADDRESS=127.0.0.1
+      - CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1
+      - CASSANDRA_CLUSTER_NAME=compat-test-4-1
+    volumes:
+      - cassandra-4-1-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES;'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks:
+      - cassandra-compat
+
+  # Cassandra 5.0
+  cassandra-5-0:
+    image: cassandra:5.0
+    container_name: cassandra-5-0
+    ports:
+      - "9044:9042"
+    environment:
+      - CASSANDRA_START_RPC=true
+      - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      - CASSANDRA_LISTEN_ADDRESS=auto
+      - CASSANDRA_BROADCAST_ADDRESS=127.0.0.1
+      - CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1
+      - CASSANDRA_CLUSTER_NAME=compat-test-5-0
+    volumes:
+      - cassandra-5-0-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES;'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks:
+      - cassandra-compat
+
+  # Cassandra 5.1
+  cassandra-5-1:
+    image: cassandra:5.1
+    container_name: cassandra-5-1
+    ports:
+      - "9045:9042"
+    environment:
+      - CASSANDRA_START_RPC=true
+      - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      - CASSANDRA_LISTEN_ADDRESS=auto
+      - CASSANDRA_BROADCAST_ADDRESS=127.0.0.1
+      - CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1
+      - CASSANDRA_CLUSTER_NAME=compat-test-5-1
+    volumes:
+      - cassandra-5-1-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES;'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks:
+      - cassandra-compat
+
+  # Cassandra 6.0 (future version)
+  cassandra-6-0:
+    image: cassandra:6.0
+    container_name: cassandra-6-0
+    ports:
+      - "9046:9042"
+    environment:
+      - CASSANDRA_START_RPC=true
+      - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      - CASSANDRA_LISTEN_ADDRESS=auto
+      - CASSANDRA_BROADCAST_ADDRESS=127.0.0.1
+      - CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1
+      - CASSANDRA_CLUSTER_NAME=compat-test-6-0
+    volumes:
+      - cassandra-6-0-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES;'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks:
+      - cassandra-compat
+    profiles:
+      - future  # Only start this with --profile future
+
+volumes:
+  cassandra-4-0-data:
+  cassandra-4-1-data:
+  cassandra-5-0-data:
+  cassandra-5-1-data:
+  cassandra-6-0-data:
+
+networks:
+  cassandra-compat:
+    driver: bridge

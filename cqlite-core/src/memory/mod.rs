@@ -116,9 +116,15 @@ struct CachedRow {
 impl MemoryManager {
     /// Create a new memory manager
     pub fn new(config: &Config) -> Result<Self> {
-        let block_cache = Arc::new(RwLock::new(BlockCache::new(config.memory.block_cache.max_size as usize)));
-        let row_cache = Arc::new(RwLock::new(RowCache::new(config.memory.row_cache.max_size as usize)));
-        let buffer_pool = Arc::new(RwLock::new(BufferPool::new(config.memory.max_memory as usize)));
+        let block_cache = Arc::new(RwLock::new(BlockCache::new(
+            config.memory.block_cache.max_size as usize,
+        )));
+        let row_cache = Arc::new(RwLock::new(RowCache::new(
+            config.memory.row_cache.max_size as usize,
+        )));
+        let buffer_pool = Arc::new(RwLock::new(BufferPool::new(
+            config.memory.max_memory as usize,
+        )));
 
         Ok(Self {
             block_cache,
@@ -137,10 +143,10 @@ impl MemoryManager {
         };
 
         let mut cache = self.block_cache.write();
-        
+
         // Check if block exists and clone it before any mutations
         let block_option = cache.blocks.get(&key).map(|block| Arc::clone(block));
-        
+
         if let Some(block) = block_option {
             // Update LRU order (now safe since we don't hold immutable borrow)
             if let Some(pos) = cache.lru_order.iter().position(|k| k == &key) {
@@ -213,10 +219,10 @@ impl MemoryManager {
         };
 
         let mut cache = self.row_cache.write();
-        
+
         // Check if row exists and clone it before any mutations
         let row_option = cache.rows.get(&key).map(|row| Arc::clone(row));
-        
+
         if let Some(row) = row_option {
             // Update LRU order (now safe since we don't hold immutable borrow)
             if let Some(pos) = cache.lru_order.iter().position(|k| k == &key) {

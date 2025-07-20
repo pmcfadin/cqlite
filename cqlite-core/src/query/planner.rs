@@ -763,7 +763,7 @@ mod tests {
             conditions: vec![Condition {
                 column: "id".to_string(),
                 operator: ComparisonOperator::Equal,
-                value: Value::Integer(1),
+                value: crate::Value::Integer(1),
             }],
         });
 
@@ -771,34 +771,28 @@ mod tests {
         assert_eq!(plan_type, PlanType::PointLookup);
     }
 
-    #[test]
-    fn test_selectivity_estimation() {
+    #[tokio::test]
+    async fn test_selectivity_estimation() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
-        let planner = QueryPlanner::new(
-            Arc::new(
-                crate::schema::SchemaManager::new(
-                    Arc::new(
-                        crate::storage::StorageEngine::open(
-                            temp_dir.path(),
-                            &config,
-                            Arc::new(crate::platform::Platform::new(&config).await.unwrap()),
-                        )
-                        .await
-                        .unwrap(),
-                    ),
-                    &config,
-                )
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
                 .await
                 .unwrap(),
-            ),
-            &config,
         );
+        let schema_manager = Arc::new(
+            crate::schema::SchemaManager::new(storage, &config)
+                .await
+                .unwrap(),
+        );
+
+        let planner = QueryPlanner::new(schema_manager, &config);
 
         let condition = Condition {
             column: "name".to_string(),
             operator: ComparisonOperator::Equal,
-            value: Value::Text("test".to_string()),
+            value: crate::Value::Text("test".to_string()),
         };
 
         let selectivity = planner.estimate_selectivity(&condition);

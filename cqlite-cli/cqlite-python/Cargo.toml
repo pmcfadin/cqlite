@@ -1,0 +1,33 @@
+[package]
+name = "cqlite-python"
+version = "0.1.0"
+edition = "2021"
+description = "Python bindings for CQLite - Direct SSTable querying"
+license = "Apache-2.0"
+authors = ["CQLite Team <support@cqlite.dev>"]
+
+[lib]
+name = "cqlite_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"] }
+cqlite-core = { path = "../cqlite-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
+anyhow = "1.0"
+thiserror = "1.0"
+bytes = "1.0"
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["serde"] }
+
+[dependencies.pyo3-polars]
+version = "0.9"
+optional = true
+
+[features]
+default = []
+polars = ["pyo3-polars"]

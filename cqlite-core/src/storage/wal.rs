@@ -261,7 +261,6 @@ pub struct WalStats {
     pub file_path: PathBuf,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

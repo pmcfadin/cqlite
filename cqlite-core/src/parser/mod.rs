@@ -8,12 +8,16 @@
 //! - CQL type system parsing and serialization
 //! - Error handling for parser operations
 
+pub mod benchmarks;
 pub mod header;
 pub mod types;
+pub mod validation;
 pub mod vint;
 
+pub use benchmarks::*;
 pub use header::*;
 pub use types::*;
+pub use validation::*;
 pub use vint::*;
 
 use crate::error::{Error, Result};

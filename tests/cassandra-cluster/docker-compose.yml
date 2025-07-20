@@ -1,0 +1,183 @@
+version: '3.8'
+
+services:
+  # Cassandra 5.x cluster for comprehensive E2E testing
+  cassandra5-seed:
+    image: cassandra:5.0
+    container_name: cqlite-cassandra5-seed
+    environment:
+      - CASSANDRA_CLUSTER_NAME=CQLite-E2E-Cluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_NUM_TOKENS=256
+      - CASSANDRA_SEEDS=cassandra5-seed
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=200m
+      - CASSANDRA_START_RPC=true
+    ports:
+      - "9042:9042"   # CQL port
+      - "7000:7000"   # Inter-node communication
+      - "7199:7199"   # JMX
+    volumes:
+      - cassandra5-seed-data:/var/lib/cassandra
+      - ./test-data:/opt/test-data
+      - ./scripts:/opt/scripts
+      - ./real-world-data:/opt/real-world-data
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 8
+      start_period: 180s
+    networks:
+      - cqlite-cluster
+
+  cassandra5-node2:
+    image: cassandra:5.0
+    container_name: cqlite-cassandra5-node2
+    environment:
+      - CASSANDRA_CLUSTER_NAME=CQLite-E2E-Cluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_NUM_TOKENS=256
+      - CASSANDRA_SEEDS=cassandra5-seed
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=200m
+      - CASSANDRA_START_RPC=true
+    depends_on:
+      cassandra5-seed:
+        condition: service_healthy
+    ports:
+      - "9043:9042"   # CQL port (different host port)
+      - "7001:7000"   # Inter-node communication
+      - "7200:7199"   # JMX
+    volumes:
+      - cassandra5-node2-data:/var/lib/cassandra
+      - ./test-data:/opt/test-data
+      - ./scripts:/opt/scripts
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 8
+      start_period: 240s
+    networks:
+      - cqlite-cluster
+
+  cassandra5-node3:
+    image: cassandra:5.0
+    container_name: cqlite-cassandra5-node3
+    environment:
+      - CASSANDRA_CLUSTER_NAME=CQLite-E2E-Cluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack2
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_NUM_TOKENS=256
+      - CASSANDRA_SEEDS=cassandra5-seed
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=200m
+      - CASSANDRA_START_RPC=true
+    depends_on:
+      cassandra5-seed:
+        condition: service_healthy
+    ports:
+      - "9044:9042"   # CQL port (different host port)
+      - "7002:7000"   # Inter-node communication
+      - "7201:7199"   # JMX
+    volumes:
+      - cassandra5-node3-data:/var/lib/cassandra
+      - ./test-data:/opt/test-data
+      - ./scripts:/opt/scripts
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 8
+      start_period: 300s
+    networks:
+      - cqlite-cluster
+
+  # Data generator with enhanced capabilities
+  e2e-data-generator:
+    image: cassandra:5.0
+    container_name: cqlite-e2e-data-generator
+    depends_on:
+      cassandra5-seed:
+        condition: service_healthy
+      cassandra5-node2:
+        condition: service_healthy
+      cassandra5-node3:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/opt/scripts
+      - ./test-data:/opt/test-data
+      - ./real-world-data:/opt/real-world-data
+    command: /opt/scripts/generate-comprehensive-test-data.sh
+    environment:
+      - CASSANDRA_SEEDS=cassandra5-seed
+      - TEST_SCALE=COMPREHENSIVE
+      - GENERATE_LARGE_DATASETS=true
+    networks:
+      - cqlite-cluster
+
+  # CQLite test runner for round-trip validation
+  cqlite-e2e-validator:
+    build:
+      context: ../../
+      dockerfile: tests/cassandra-cluster/Dockerfile.cqlite-tester
+    container_name: cqlite-e2e-validator
+    depends_on:
+      e2e-data-generator:
+        condition: service_completed_successfully
+    volumes:
+      - ./test-data:/opt/test-data
+      - ./scripts:/opt/scripts
+      - ../../target:/opt/cqlite/target
+      - ../../:/opt/cqlite/source
+    environment:
+      - CASSANDRA_CONTACT_POINTS=cassandra5-seed,cassandra5-node2,cassandra5-node3
+      - CASSANDRA_PORT=9042
+      - TEST_MODE=ROUND_TRIP_VALIDATION
+      - RUST_LOG=debug
+    working_dir: /opt/cqlite/source
+    command: /opt/scripts/run-e2e-validation.sh
+    networks:
+      - cqlite-cluster
+
+  # Performance benchmarking service
+  cqlite-performance-tester:
+    build:
+      context: ../../
+      dockerfile: tests/cassandra-cluster/Dockerfile.cqlite-tester
+    container_name: cqlite-performance-tester
+    depends_on:
+      e2e-data-generator:
+        condition: service_completed_successfully
+    volumes:
+      - ./test-data:/opt/test-data
+      - ./scripts:/opt/scripts
+      - ../../target:/opt/cqlite/target
+      - ../../:/opt/cqlite/source
+    environment:
+      - CASSANDRA_CONTACT_POINTS=cassandra5-seed,cassandra5-node2,cassandra5-node3
+      - CASSANDRA_PORT=9042
+      - TEST_MODE=PERFORMANCE_BENCHMARK
+      - RUST_LOG=info
+    working_dir: /opt/cqlite/source
+    command: /opt/scripts/run-performance-benchmarks.sh
+    networks:
+      - cqlite-cluster
+
+networks:
+  cqlite-cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  cassandra5-seed-data:
+  cassandra5-node2-data:
+  cassandra5-node3-data:

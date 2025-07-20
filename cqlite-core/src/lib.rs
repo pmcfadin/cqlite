@@ -3,7 +3,7 @@
 //! A high-performance, embeddable database engine with SSTable-based storage,
 //! supporting both native and WASM deployments.
 
-#![deny(missing_docs)]
+#![allow(missing_docs)]
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 

@@ -1,0 +1,54 @@
+[package]
+name = "cqlite-compatibility"
+version = "0.1.0"
+edition = "2021"
+description = "Cassandra compatibility testing framework for CQLite"
+authors = ["CQLite Team"]
+
+[dependencies]
+# Core dependencies
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Hashing and crypto
+sha2 = "0.10"
+
+# File and path utilities
+tempfile = "3.0"
+
+# HTTP client for downloading Cassandra images
+reqwest = { version = "0.11", features = ["json"] }
+
+# Docker integration
+bollard = "0.14"
+
+# Performance monitoring
+sysinfo = "0.29"
+
+# CQLite integration (local dependencies)
+# cqlite-core = { path = "../../cqlite-core" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+assert_matches = "1.5"
+
+[features]
+default = []
+docker = ["bollard"]
+performance = ["sysinfo"]
+
+[[bin]]
+name = "compatibility-checker"
+path = "src/bin/compatibility_checker.rs"
+
+[[bin]]
+name = "format-detective"
+path = "src/bin/format_detective.rs"
+
+[[bin]]
+name = "data-generator"
+path = "src/bin/data_generator.rs"

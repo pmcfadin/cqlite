@@ -150,8 +150,28 @@ impl BloomFilter {
         (1.0 - prob_bit_zero).powf(self.hash_count as f64)
     }
 
-    /// Serialize the bloom filter to bytes
+    /// Serialize the bloom filter to Cassandra-compatible format
     pub fn serialize(&self) -> Result<Vec<u8>> {
+        let mut output = Vec::new();
+
+        // Cassandra bloom filter format:
+        // [Hash Count: 4 bytes, big-endian]
+        // [Bit Count: 8 bytes, big-endian]
+        // [Bit Array: variable length, big-endian u64 words]
+
+        output.extend_from_slice(&self.hash_count.to_be_bytes());
+        output.extend_from_slice(&self.bit_count.to_be_bytes());
+
+        // Write bit array in big-endian format
+        for word in &self.bits {
+            output.extend_from_slice(&word.to_be_bytes());
+        }
+
+        Ok(output)
+    }
+
+    /// Legacy serialization using bincode (kept for backward compatibility)
+    pub fn serialize_legacy(&self) -> Result<Vec<u8>> {
         bincode::serialize(self).map_err(|e| Error::serialization(e.to_string()))
     }
 

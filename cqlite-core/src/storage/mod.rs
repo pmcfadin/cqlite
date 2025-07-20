@@ -317,7 +317,7 @@ impl StorageEngine {
     pub async fn shutdown(&self) -> Result<()> {
         // Note: batch_writer flush would require mutable access
         // In practice, shutdown should be called when no more writes are expected
-        
+
         // Stop compaction first
         self.compaction.shutdown().await?;
 

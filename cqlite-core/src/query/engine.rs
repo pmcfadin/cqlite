@@ -8,6 +8,10 @@ use super::{
     parser::QueryParser,
     planner::QueryPlanner,
     prepared::PreparedQuery,
+    select_executor::SelectExecutor,
+    select_optimizer::SelectOptimizer,
+    // Advanced SELECT components
+    select_parser,
     QueryStats,
 };
 use crate::{
@@ -45,6 +49,10 @@ pub struct QueryEngine {
     planner: QueryPlanner,
     /// Query executor
     executor: QueryExecutor,
+    /// Advanced SELECT optimizer
+    select_optimizer: SelectOptimizer,
+    /// Advanced SELECT executor
+    select_executor: SelectExecutor,
     /// Prepared statement cache
     prepared_cache: DashMap<String, Arc<PreparedQuery>>,
     /// Query plan cache
@@ -67,6 +75,10 @@ impl QueryEngine {
         let planner = QueryPlanner::new(schema.clone(), config);
         let executor = QueryExecutor::new(storage.clone(), schema.clone(), config);
 
+        // Initialize advanced SELECT components
+        let select_optimizer = SelectOptimizer::new(schema.clone(), storage.clone());
+        let select_executor = SelectExecutor::new(schema.clone(), storage.clone());
+
         Ok(Self {
             storage,
             schema,
@@ -74,6 +86,8 @@ impl QueryEngine {
             parser,
             planner,
             executor,
+            select_optimizer,
+            select_executor,
             prepared_cache: DashMap::new(),
             plan_cache: DashMap::new(),
             stats: Arc::new(parking_lot::RwLock::new(QueryStats::default())),
@@ -91,7 +105,13 @@ impl QueryEngine {
             stats.total_queries += 1;
         }
 
-        // Check plan cache first
+        // Check if this is a SELECT statement - use advanced parser
+        let trimmed_sql = sql.trim().to_uppercase();
+        if trimmed_sql.starts_with("SELECT") {
+            return self.execute_select_query(sql, start_time).await;
+        }
+
+        // Check plan cache first for non-SELECT queries
         if let Some(cached_entry) = self.plan_cache.get(sql) {
             // Update cache hit statistics
             {
@@ -112,7 +132,7 @@ impl QueryEngine {
             return Ok(result);
         }
 
-        // Parse the query
+        // Parse the query (non-SELECT)
         let parsed_query = self.parser.parse(sql).map_err(|e| {
             // Update error statistics
             let mut stats = self.stats.write();
@@ -130,6 +150,28 @@ impl QueryEngine {
 
         // Execute the query
         let mut result = self.executor.execute(&plan).await?;
+
+        // Update statistics
+        self.update_execution_stats(&mut result, start_time);
+
+        Ok(result)
+    }
+
+    /// Execute a SELECT query using the advanced parser and optimizer
+    async fn execute_select_query(&self, sql: &str, start_time: Instant) -> Result<QueryResult> {
+        // Parse SELECT statement using advanced parser
+        let select_statement = select_parser::parse_select(sql).map_err(|e| {
+            // Update error statistics
+            let mut stats = self.stats.write();
+            stats.error_queries += 1;
+            e
+        })?;
+
+        // Optimize the query plan
+        let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
+
+        // Execute the optimized plan
+        let mut result = self.select_executor.execute(optimized_plan).await?;
 
         // Update statistics
         self.update_execution_stats(&mut result, start_time);

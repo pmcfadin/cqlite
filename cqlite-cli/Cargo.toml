@@ -44,6 +44,15 @@ crossterm = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Table formatting
+prettytable-rs = "0.10"
+
+# CSV handling
+csv = "1.3"
+
+# Hex encoding for blob display
+hex = "0.4"
+
 # Configuration parsing
 toml = { workspace = true }
 serde_yaml = { workspace = true }

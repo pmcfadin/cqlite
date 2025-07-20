@@ -663,7 +663,7 @@ impl ToJson for Value {
                 use base64::Engine;
                 let engine = base64::engine::general_purpose::STANDARD;
                 serde_json::Value::String(engine.encode(b))
-            },
+            }
             Value::List(list) => {
                 let json_list: Vec<serde_json::Value> = list.iter().map(|v| v.to_json()).collect();
                 serde_json::Value::Array(json_list)
@@ -700,11 +700,11 @@ mod tests {
 
     #[test]
     fn test_query_result_with_rows() {
-        let mut row1 = QueryRow::new(RowKey::from_bytes(vec![1]));
+        let mut row1 = QueryRow::new(RowKey::new(vec![1]));
         row1.set("id".to_string(), Value::Integer(1));
         row1.set("name".to_string(), Value::Text("Alice".to_string()));
 
-        let mut row2 = QueryRow::new(RowKey::from_bytes(vec![2]));
+        let mut row2 = QueryRow::new(RowKey::new(vec![2]));
         row2.set("id".to_string(), Value::Integer(2));
         row2.set("name".to_string(), Value::Text("Bob".to_string()));
 
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_query_row_operations() {
-        let mut row = QueryRow::new(RowKey::from_bytes(vec![1]));
+        let mut row = QueryRow::new(RowKey::new(vec![1]));
         row.set("id".to_string(), Value::Integer(42));
         row.set("active".to_string(), Value::Boolean(true));
 
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_json_serialization() {
-        let mut row = QueryRow::new(RowKey::from_bytes(vec![1]));
+        let mut row = QueryRow::new(RowKey::new(vec![1]));
         row.set("id".to_string(), Value::Integer(1));
         row.set("name".to_string(), Value::Text("test".to_string()));
 
@@ -795,8 +795,8 @@ mod tests {
 
     #[test]
     fn test_result_iteration() {
-        let row1 = QueryRow::new(RowKey::from_bytes(vec![1]));
-        let row2 = QueryRow::new(RowKey::from_bytes(vec![2]));
+        let row1 = QueryRow::new(RowKey::new(vec![1]));
+        let row2 = QueryRow::new(RowKey::new(vec![2]));
         let result = QueryResult::with_rows(vec![row1, row2]);
 
         let mut count = 0;

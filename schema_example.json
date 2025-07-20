@@ -1,0 +1,57 @@
+{
+  "keyspace": "test_keyspace",
+  "table": "users",
+  "partition_keys": [
+    {
+      "name": "id",
+      "type": "bigint",
+      "position": 0
+    }
+  ],
+  "clustering_keys": [
+    {
+      "name": "created_at", 
+      "type": "timestamp",
+      "position": 0,
+      "order": "DESC"
+    }
+  ],
+  "columns": [
+    {
+      "name": "id",
+      "type": "bigint",
+      "nullable": false
+    },
+    {
+      "name": "name",
+      "type": "text",
+      "nullable": true
+    },
+    {
+      "name": "email",
+      "type": "text", 
+      "nullable": true
+    },
+    {
+      "name": "age",
+      "type": "int",
+      "nullable": true
+    },
+    {
+      "name": "created_at",
+      "type": "timestamp",
+      "nullable": false
+    },
+    {
+      "name": "active",
+      "type": "boolean",
+      "nullable": true,
+      "default": true
+    }
+  ],
+  "comments": {
+    "table": "User profiles and basic information",
+    "version": "1.0",
+    "cassandra_version": "5.0"
+  }
+}

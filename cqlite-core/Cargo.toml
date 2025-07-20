@@ -48,6 +48,7 @@ base64 = "0.21"
 # Additional dependencies
 uuid = { version = "1.10", features = ["v4"] }
 regex = "1.10"
+futures = "0.3"
 
 # Optional WASM support
 [target.'cfg(target_arch = "wasm32")'.dependencies]

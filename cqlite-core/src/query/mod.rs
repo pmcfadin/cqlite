@@ -4,10 +4,11 @@
 //! CQL parsing and the storage engine. It includes:
 //!
 //! - CQL query parsing and validation
-//! - Query planning and optimization
+//! - Query planning and optimization  
 //! - Query execution with storage integration
 //! - Prepared statement support
 //! - Result set management
+//! - REVOLUTIONARY SELECT parser for direct SSTable access
 
 pub mod engine;
 pub mod executor;
@@ -15,6 +16,14 @@ pub mod parser;
 pub mod planner;
 pub mod prepared;
 pub mod result;
+
+// Advanced SELECT query components
+pub mod select_ast;
+pub mod select_demo;
+pub mod select_executor;
+pub mod select_integration_tests;
+pub mod select_optimizer;
+pub mod select_parser;
 
 pub use engine::{
     AnalyzeResult, CacheStats, ExplainResult, QueryCacheEntry, QueryEngine as AdvancedQueryEngine,
@@ -30,6 +39,12 @@ pub use prepared::{
 pub use result::{
     ColumnInfo, PerformanceMetrics, QueryMetadata, QueryResult, QueryRow, RowMetadata,
 };
+
+// Re-export advanced SELECT components
+pub use select_ast::*;
+pub use select_executor::SelectExecutor;
+pub use select_optimizer::{OptimizedQueryPlan, SelectOptimizer};
+pub use select_parser::{parse_select, SelectParser};
 
 use std::collections::HashMap;
 use std::sync::Arc;

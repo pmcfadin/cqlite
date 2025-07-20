@@ -92,7 +92,11 @@ impl Index {
     }
 
     /// Find an entry by table and key (alias for get)
-    pub async fn find_entry(&self, table_id: &TableId, key: &RowKey) -> Result<Option<&IndexEntry>> {
+    pub async fn find_entry(
+        &self,
+        table_id: &TableId,
+        key: &RowKey,
+    ) -> Result<Option<&IndexEntry>> {
         Ok(self.get(table_id, key))
     }
 

@@ -27,10 +27,24 @@ pub enum Value {
     Uuid([u8; 16]),
     /// JSON value
     Json(serde_json::Value),
+    /// 8-bit signed integer (for exact Cassandra compatibility)
+    TinyInt(i8),
+    /// 16-bit signed integer (for exact Cassandra compatibility)
+    SmallInt(i16),
+    /// 32-bit floating point (for exact Cassandra compatibility)
+    Float32(f32),
     /// List of values
     List(Vec<Value>),
-    /// Map of string keys to values
-    Map(HashMap<String, Value>),
+    /// Set of values (implemented as Vec for ordering preservation)
+    Set(Vec<Value>),
+    /// Map of key-value pairs (Vec of tuples for exact Cassandra format)
+    Map(Vec<(Value, Value)>),
+    /// Tuple with fixed-size heterogeneous types
+    Tuple(Vec<Value>),
+    /// User defined type with type name and fields
+    Udt(String, HashMap<String, Value>),
+    /// Frozen wrapper for collections (immutable)
+    Frozen(Box<Value>),
 }
 
 impl Value {
@@ -47,8 +61,15 @@ impl Value {
             Value::Timestamp(_) => DataType::Timestamp,
             Value::Uuid(_) => DataType::Uuid,
             Value::Json(_) => DataType::Json,
+            Value::TinyInt(_) => DataType::TinyInt,
+            Value::SmallInt(_) => DataType::SmallInt,
+            Value::Float32(_) => DataType::Float32,
             Value::List(_) => DataType::List,
+            Value::Set(_) => DataType::Set,
             Value::Map(_) => DataType::Map,
+            Value::Tuple(_) => DataType::Tuple,
+            Value::Udt(_, _) => DataType::Udt,
+            Value::Frozen(_) => DataType::Frozen,
         }
     }
 
@@ -69,6 +90,8 @@ impl Value {
     pub fn as_i32(&self) -> Option<i32> {
         match self {
             Value::Integer(i) => Some(*i),
+            Value::TinyInt(i) => Some(*i as i32),
+            Value::SmallInt(i) => Some(*i as i32),
             _ => None,
         }
     }
@@ -78,6 +101,8 @@ impl Value {
         match self {
             Value::BigInt(i) => Some(*i),
             Value::Integer(i) => Some(*i as i64),
+            Value::TinyInt(i) => Some(*i as i64),
+            Value::SmallInt(i) => Some(*i as i64),
             _ => None,
         }
     }
@@ -86,8 +111,11 @@ impl Value {
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Float(f) => Some(*f),
+            Value::Float32(f) => Some(*f as f64),
             Value::Integer(i) => Some(*i as f64),
             Value::BigInt(i) => Some(*i as f64),
+            Value::TinyInt(i) => Some(*i as f64),
+            Value::SmallInt(i) => Some(*i as f64),
             _ => None,
         }
     }
@@ -125,6 +153,19 @@ impl fmt::Display for Value {
                 write!(f, "UUID({})", hex::encode(uuid))
             }
             Value::Json(json) => write!(f, "JSON({})", json),
+            Value::TinyInt(i) => write!(f, "{}", i),
+            Value::SmallInt(i) => write!(f, "{}", i),
+            Value::Float32(fl) => write!(f, "{}", fl),
+            Value::Set(set) => {
+                write!(f, "{{")?;
+                for (i, item) in set.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "}}")
+            }
             Value::List(list) => {
                 write!(f, "[")?;
                 for (i, item) in list.iter().enumerate() {
@@ -145,6 +186,29 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
+            Value::Tuple(tuple) => {
+                write!(f, "(")?;
+                for (i, item) in tuple.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, ")")
+            }
+            Value::Udt(type_name, fields) => {
+                write!(f, "{}{{", type_name)?;
+                for (i, (field_name, field_value)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", field_name, field_value)?;
+                }
+                write!(f, "}}")
+            }
+            Value::Frozen(inner) => {
+                write!(f, "FROZEN({})", inner)
+            }
         }
     }
 }
@@ -156,10 +220,16 @@ pub enum DataType {
     Null,
     /// Boolean type
     Boolean,
+    /// 8-bit signed integer
+    TinyInt,
+    /// 16-bit signed integer
+    SmallInt,
     /// 32-bit signed integer
     Integer,
     /// 64-bit signed integer
     BigInt,
+    /// 32-bit floating point
+    Float32,
     /// 64-bit floating point
     Float,
     /// Variable-length text
@@ -174,14 +244,30 @@ pub enum DataType {
     Json,
     /// List of values
     List,
-    /// Map of string keys to values
+    /// Set of values
+    Set,
+    /// Map of key-value pairs
     Map,
+    /// Tuple type with heterogeneous fields
+    Tuple,
+    /// User defined type
+    Udt,
+    /// Frozen type wrapper
+    Frozen,
 }
 
 impl DataType {
     /// Check if this type is numeric
     pub fn is_numeric(&self) -> bool {
-        matches!(self, DataType::Integer | DataType::BigInt | DataType::Float)
+        matches!(
+            self,
+            DataType::TinyInt
+                | DataType::SmallInt
+                | DataType::Integer
+                | DataType::BigInt
+                | DataType::Float32
+                | DataType::Float
+        )
     }
 
     /// Check if this type is textual
@@ -199,8 +285,11 @@ impl DataType {
         match self {
             DataType::Null => Value::Null,
             DataType::Boolean => Value::Boolean(false),
+            DataType::TinyInt => Value::TinyInt(0),
+            DataType::SmallInt => Value::SmallInt(0),
             DataType::Integer => Value::Integer(0),
             DataType::BigInt => Value::BigInt(0),
+            DataType::Float32 => Value::Float32(0.0),
             DataType::Float => Value::Float(0.0),
             DataType::Text => Value::Text(String::new()),
             DataType::Blob => Value::Blob(Vec::new()),
@@ -208,7 +297,11 @@ impl DataType {
             DataType::Uuid => Value::Uuid([0; 16]),
             DataType::Json => Value::Json(serde_json::Value::Null),
             DataType::List => Value::List(Vec::new()),
-            DataType::Map => Value::Map(HashMap::new()),
+            DataType::Set => Value::Set(Vec::new()),
+            DataType::Map => Value::Map(Vec::new()),
+            DataType::Tuple => Value::Tuple(Vec::new()),
+            DataType::Udt => Value::Udt(String::new(), HashMap::new()),
+            DataType::Frozen => Value::Frozen(Box::new(Value::Null)),
         }
     }
 }
@@ -218,8 +311,11 @@ impl fmt::Display for DataType {
         let name = match self {
             DataType::Null => "NULL",
             DataType::Boolean => "BOOLEAN",
+            DataType::TinyInt => "TINYINT",
+            DataType::SmallInt => "SMALLINT",
             DataType::Integer => "INTEGER",
             DataType::BigInt => "BIGINT",
+            DataType::Float32 => "FLOAT32",
             DataType::Float => "FLOAT",
             DataType::Text => "TEXT",
             DataType::Blob => "BLOB",
@@ -227,7 +323,11 @@ impl fmt::Display for DataType {
             DataType::Uuid => "UUID",
             DataType::Json => "JSON",
             DataType::List => "LIST",
+            DataType::Set => "SET",
             DataType::Map => "MAP",
+            DataType::Tuple => "TUPLE",
+            DataType::Udt => "UDT",
+            DataType::Frozen => "FROZEN",
         };
         write!(f, "{}", name)
     }
@@ -390,5 +490,52 @@ mod tests {
         assert_eq!(Value::Null.to_string(), "NULL");
         assert_eq!(Value::Integer(42).to_string(), "42");
         assert_eq!(Value::Text("hello".to_string()).to_string(), "'hello'");
+    }
+
+    #[test]
+    fn test_new_value_types() {
+        // Test Tuple
+        let tuple = Value::Tuple(vec![
+            Value::Integer(42),
+            Value::Text("hello".to_string()),
+            Value::Boolean(true),
+        ]);
+        assert_eq!(tuple.data_type(), DataType::Tuple);
+        assert_eq!(tuple.to_string(), "(42, 'hello', true)");
+
+        // Test UDT
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), Value::Text("John".to_string()));
+        fields.insert("age".to_string(), Value::Integer(30));
+        let udt = Value::Udt("Person".to_string(), fields);
+        assert_eq!(udt.data_type(), DataType::Udt);
+        assert!(udt.to_string().contains("Person{"));
+
+        // Test Frozen
+        let frozen_list = Value::Frozen(Box::new(Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ])));
+        assert_eq!(frozen_list.data_type(), DataType::Frozen);
+        assert_eq!(frozen_list.to_string(), "FROZEN([1, 2, 3])");
+    }
+
+    #[test]
+    fn test_new_data_types() {
+        assert_eq!(DataType::Tuple.to_string(), "TUPLE");
+        assert_eq!(DataType::Udt.to_string(), "UDT");
+        assert_eq!(DataType::Frozen.to_string(), "FROZEN");
+
+        // Test default values
+        assert_eq!(DataType::Tuple.default_value(), Value::Tuple(Vec::new()));
+        assert_eq!(
+            DataType::Udt.default_value(),
+            Value::Udt(String::new(), HashMap::new())
+        );
+        assert_eq!(
+            DataType::Frozen.default_value(),
+            Value::Frozen(Box::new(Value::Null))
+        );
     }
 }

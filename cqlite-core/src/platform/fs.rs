@@ -22,30 +22,22 @@ impl FileSystem {
 
     /// Create directory
     pub async fn create_dir_all(&self, path: &Path) -> Result<()> {
-        fs::create_dir_all(path)
-            .await
-            .map_err(Error::from)
+        fs::create_dir_all(path).await.map_err(Error::from)
     }
 
     /// Read directory
     pub async fn read_dir(&self, path: &Path) -> Result<fs::ReadDir> {
-        fs::read_dir(path)
-            .await
-            .map_err(Error::from)
+        fs::read_dir(path).await.map_err(Error::from)
     }
 
     /// Remove file
     pub async fn remove_file(&self, path: &Path) -> Result<()> {
-        fs::remove_file(path)
-            .await
-            .map_err(Error::from)
+        fs::remove_file(path).await.map_err(Error::from)
     }
 
     /// Copy file
     pub async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        fs::copy(from, to)
-            .await
-            .map_err(Error::from)?;
+        fs::copy(from, to).await.map_err(Error::from)?;
         Ok(())
     }
 
@@ -67,23 +59,17 @@ impl FileSystem {
 
     /// Write file contents
     pub async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        fs::write(path, contents)
-            .await
-            .map_err(Error::from)
+        fs::write(path, contents).await.map_err(Error::from)
     }
 
     /// Get file size
     pub async fn file_size(&self, path: &Path) -> Result<u64> {
-        let metadata = fs::metadata(path)
-            .await
-            .map_err(Error::from)?;
+        let metadata = fs::metadata(path).await.map_err(Error::from)?;
         Ok(metadata.len())
     }
 
     /// Get file metadata
     pub async fn metadata(&self, path: &Path) -> Result<std::fs::Metadata> {
-        fs::metadata(path)
-            .await
-            .map_err(Error::from)
+        fs::metadata(path).await.map_err(Error::from)
     }
 }

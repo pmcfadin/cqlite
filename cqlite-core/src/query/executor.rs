@@ -23,7 +23,6 @@ use std::time::Instant;
 // Use QueryResult and QueryRow from result module
 pub use super::result::{QueryResult, QueryRow};
 
-
 /// Query executor
 #[derive(Debug, Clone)]
 pub struct QueryExecutor {
@@ -72,11 +71,20 @@ impl QueryExecutor {
                     estimated_cost: plan.estimated_cost,
                     actual_cost: execution_time.as_millis() as f64,
                     indexes_used: Vec::new(), // TODO: populate with actual indexes used
-                    steps: plan.steps.iter().map(|s| format!("{:?}", s.step_type)).collect(),
-                    parallelization: if plan.steps.iter().any(|s| s.parallelization.can_parallelize) {
+                    steps: plan
+                        .steps
+                        .iter()
+                        .map(|s| format!("{:?}", s.step_type))
+                        .collect(),
+                    parallelization: if plan.steps.iter().any(|s| s.parallelization.can_parallelize)
+                    {
                         Some(super::result::ParallelizationInfo {
-                            threads_used: plan.steps.iter().find(|s| s.parallelization.can_parallelize)
-                                .map(|s| s.parallelization.suggested_threads).unwrap_or(1),
+                            threads_used: plan
+                                .steps
+                                .iter()
+                                .find(|s| s.parallelization.can_parallelize)
+                                .map(|s| s.parallelization.suggested_threads)
+                                .unwrap_or(1),
                             effective: true,
                             partitions: Vec::new(),
                         })
@@ -267,7 +275,7 @@ impl QueryExecutor {
         // Simplified secondary index scan using basic scan
         let scan_results = self.storage.scan(table, None, None, None).await?;
 
-        // Process results and filter by condition  
+        // Process results and filter by condition
         for (row_key, row_data) in scan_results {
             // TODO: Implement proper secondary index lookup
             let query_row = self.storage_data_to_query_row(row_data, &row_key)?;
@@ -327,7 +335,9 @@ impl QueryExecutor {
                     .iter()
                     .find(|c| c.column == index_selection.columns[0])
             })
-            .ok_or_else(|| Error::query_execution("No condition found for primary key".to_string()))?;
+            .ok_or_else(|| {
+                Error::query_execution("No condition found for primary key".to_string())
+            })?;
 
         // Direct primary key lookup
         let row_key = self.value_to_row_key(&condition.value)?;
@@ -747,7 +757,10 @@ mod tests {
         );
 
         let executor = QueryExecutor::new(storage, schema, &config);
-        assert_eq!(executor.config.query.query_parallelism, config.query.query_parallelism);
+        assert_eq!(
+            executor.config.query.query_parallelism,
+            config.query.query_parallelism
+        );
     }
 
     #[tokio::test]

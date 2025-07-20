@@ -1,0 +1,57 @@
+{
+  "name": "cqlite",
+  "version": "0.1.0",
+  "description": "Direct SSTable querying for Cassandra - First Ever!",
+  "main": "lib/index.js",
+  "types": "index.d.ts",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "napi": {
+    "name": "cqlite",
+    "triples": {
+      "defaults": true,
+      "additional": ["aarch64-apple-darwin"]
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "jest",
+    "prepublishOnly": "npm run build",
+    "dev": "napi build --platform",
+    "start": "node examples/basic-usage.js"
+  },
+  "keywords": [
+    "cassandra",
+    "sstable",
+    "cql",
+    "database",
+    "query",
+    "native",
+    "rust",
+    "performance"
+  ],
+  "author": "CQLite Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cqlite/cqlite-nodejs.git"
+  },
+  "dependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0",
+    "jest": "^29.7.0",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0",
+    "@types/jest": "^29.5.0",
+    "ts-jest": "^29.1.0"
+  },
+  "files": [
+    "lib",
+    "index.d.ts",
+    "*.node"
+  ]
+}

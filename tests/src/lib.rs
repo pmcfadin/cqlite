@@ -9,10 +9,18 @@ pub mod performance_benchmarks;
 pub mod sstable_format_tests;
 pub mod type_system_tests;
 
+// Advanced Performance Testing Modules
+pub mod performance_benchmark_runner;
+pub mod performance_regression_framework;
+pub mod performance_validation_suite;
+
 // Existing modules
 pub mod integration {
     pub mod cli_tests;
 }
+
+// End-to-end integration tests
+pub mod integration_e2e;
 
 pub mod benchmarks {
     // Benchmark modules are defined as separate files with [[bench]] sections
@@ -46,9 +54,56 @@ pub use performance_benchmarks::{BenchmarkConfig, BenchmarkResult, PerformanceBe
 pub use sstable_format_tests::SSTableFormatTests;
 pub use type_system_tests::TypeSystemTests;
 
+// Re-export advanced performance testing components
+pub use performance_benchmark_runner::{
+    BenchmarkRunnerConfig, PerformanceBenchmarkRunner, PerformanceResults,
+};
+pub use performance_regression_framework::{
+    PerformanceRegressionFramework, RegressionTestConfig, RegressionTestResult,
+};
+pub use performance_validation_suite::{
+    PerformanceValidationConfig, PerformanceValidationResults, PerformanceValidationSuite,
+};
+
 // Re-export commonly used test utilities
 pub use fixtures::{helpers, test_data};
 pub use performance_monitor::*;
+
+// Edge case testing modules for comprehensive compatibility validation
+pub mod edge_case_data_types;
+pub mod edge_case_runner;
+pub mod edge_case_sstable_corruption;
+pub mod edge_case_stress_testing;
+
+// Real SSTable compatibility testing against actual Cassandra 5 files
+pub mod real_sstable_compatibility_test;
+
+// Re-export edge case testing components
+pub use edge_case_runner::{
+    run_comprehensive_edge_case_tests, run_edge_case_tests_with_config, EdgeCaseConfig,
+    EdgeCaseResults, EdgeCaseRunner,
+};
+
+// Comprehensive integration testing modules
+pub mod cli_integration_tests;
+pub mod comprehensive_integration_tests;
+pub mod real_sstable_test_fixtures;
+pub mod validation_test_runner;
+
+// Re-export comprehensive integration testing components
+pub use cli_integration_tests::{CLIIntegrationTestSuite, CLITestConfig, CLITestResult};
+pub use comprehensive_integration_tests::{
+    ComprehensiveIntegrationTestSuite, IntegrationTestConfig, IntegrationTestResults,
+    PerformanceMetrics, TestReport, TestStatus,
+};
+pub use real_sstable_test_fixtures::{
+    SSTableTestFixture, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
+    SSTableTestFixtureValidator, ValidationResult,
+};
+pub use validation_test_runner::{
+    CLIValidationResult, FixtureValidationResult, PerformanceValidationResult, ReportFormat,
+    ValidationTestConfig, ValidationTestResults, ValidationTestRunner,
+};
 
 #[cfg(test)]
 mod tests {

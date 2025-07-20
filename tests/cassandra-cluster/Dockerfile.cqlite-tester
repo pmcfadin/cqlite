@@ -1,0 +1,43 @@
+# Dockerfile for CQLite E2E Testing Container
+FROM rust:1.70-slim-bullseye
+
+# Install required system dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    curl \
+    wget \
+    git \
+    build-essential \
+    python3 \
+    python3-pip \
+    openjdk-11-jdk-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Cassandra Python driver for validation scripts
+RUN pip3 install cassandra-driver
+
+# Install cqlsh for direct Cassandra interaction
+RUN pip3 install cqlsh
+
+# Create working directories
+RUN mkdir -p /opt/cqlite/source /opt/test-data /opt/scripts /opt/real-world-data
+
+# Set working directory
+WORKDIR /opt/cqlite/source
+
+# Copy Rust source (this will be overridden by volume mount)
+COPY . .
+
+# Pre-build dependencies for faster testing (cache Docker layer)
+RUN cargo fetch
+
+# Install testing tools
+RUN cargo install --force cargo-nextest
+
+# Set environment variables
+ENV RUST_BACKTRACE=1
+ENV RUST_LOG=debug
+
+# Default command
+CMD ["/bin/bash"]

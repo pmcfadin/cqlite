@@ -98,7 +98,8 @@ impl CompactionManager {
         manifest: Arc<Manifest>,
         config: &Config,
     ) -> Result<Self> {
-        let strategy = CompactionStrategy::convert_config_strategy(&config.storage.compaction.strategy);
+        let strategy =
+            CompactionStrategy::convert_config_strategy(&config.storage.compaction.strategy);
 
         let manager = Self {
             sstables,

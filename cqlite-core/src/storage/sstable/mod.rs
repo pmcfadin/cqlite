@@ -4,6 +4,7 @@ pub mod bloom;
 pub mod compression;
 pub mod index;
 pub mod reader;
+pub mod validation;
 pub mod writer;
 
 use std::collections::HashMap;

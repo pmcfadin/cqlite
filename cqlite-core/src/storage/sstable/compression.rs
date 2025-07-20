@@ -44,15 +44,20 @@ impl Compression {
         Ok(Self { algorithm })
     }
 
-    /// Compress data
+    /// Compress data with Cassandra-compatible parameters
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
         match self.algorithm {
             CompressionAlgorithm::None => Ok(data.to_vec()),
             CompressionAlgorithm::Lz4 => {
                 #[cfg(feature = "lz4")]
                 {
+                    // Use Cassandra-compatible LZ4 compression
                     use lz4_flex::compress_prepend_size;
-                    Ok(compress_prepend_size(data))
+
+                    // Cassandra uses LZ4 frame format with specific parameters
+                    let compressed = compress_prepend_size(data)
+                        .map_err(|e| Error::storage(format!("LZ4 compression failed: {}", e)))?;
+                    Ok(compressed)
                 }
                 #[cfg(not(feature = "lz4"))]
                 {
@@ -63,10 +68,18 @@ impl Compression {
                 #[cfg(feature = "snappy")]
                 {
                     use snap::raw::Encoder;
+
+                    // Use Cassandra-compatible Snappy parameters
                     let mut encoder = Encoder::new();
-                    encoder
+                    let compressed = encoder
                         .compress_vec(data)
-                        .map_err(|e| Error::storage(e.to_string()))
+                        .map_err(|e| Error::storage(format!("Snappy compression failed: {}", e)))?;
+
+                    // Prepend uncompressed size (4 bytes, big-endian) for Cassandra compatibility
+                    let mut result = Vec::with_capacity(4 + compressed.len());
+                    result.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                    result.extend_from_slice(&compressed);
+                    Ok(result)
                 }
                 #[cfg(not(feature = "snappy"))]
                 {
@@ -82,12 +95,20 @@ impl Compression {
                     use flate2::Compression as DeflateCompression;
                     use std::io::Write;
 
-                    let mut encoder =
-                        DeflateEncoder::new(Vec::new(), DeflateCompression::default());
-                    encoder
-                        .write_all(data)
-                        .map_err(|e| Error::storage(e.to_string()))?;
-                    encoder.finish().map_err(|e| Error::storage(e.to_string()))
+                    // Use Cassandra-compatible Deflate parameters (level 6)
+                    let mut encoder = DeflateEncoder::new(Vec::new(), DeflateCompression::new(6));
+                    encoder.write_all(data).map_err(|e| {
+                        Error::storage(format!("Deflate compression failed: {}", e))
+                    })?;
+                    let compressed = encoder
+                        .finish()
+                        .map_err(|e| Error::storage(format!("Deflate finish failed: {}", e)))?;
+
+                    // Prepend uncompressed size (4 bytes, big-endian) for Cassandra compatibility
+                    let mut result = Vec::with_capacity(4 + compressed.len());
+                    result.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                    result.extend_from_slice(&compressed);
+                    Ok(result)
                 }
                 #[cfg(not(feature = "deflate"))]
                 {

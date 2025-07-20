@@ -1,0 +1,411 @@
+name: 🐘 Cassandra Compatibility Testing
+
+on:
+  # Run on pushes to main branch
+  push:
+    branches: [ main ]
+  
+  # Run on pull requests
+  pull_request:
+    branches: [ main ]
+    
+  # Run daily to catch new Cassandra releases
+  schedule:
+    - cron: '0 6 * * *'  # 6 AM UTC daily
+    
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      cassandra_versions:
+        description: 'Cassandra versions to test (comma-separated)'
+        required: false
+        default: '4.0,4.1,5.0,5.1,6.0'
+      test_suite:
+        description: 'Test suite level'
+        required: false
+        default: 'comprehensive'
+        type: choice
+        options:
+          - basic
+          - comprehensive
+          - full
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  detect-versions:
+    name: 🔍 Detect Available Cassandra Versions
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.detect.outputs.versions }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - name: Detect Available Versions
+        id: detect
+        run: |
+          # Get available Cassandra Docker images
+          VERSIONS=$(curl -s "https://hub.docker.com/v2/repositories/cassandra/tags/?page_size=100" \
+            | jq -r '.results[] | select(.name | test("^[0-9]+\\.[0-9]+$")) | .name' \
+            | sort -V \
+            | tail -10 \
+            | tr '\n' ',' | sed 's/,$//')
+          
+          # Use input versions if provided, otherwise use detected versions
+          if [ "${{ github.event.inputs.cassandra_versions }}" != "" ]; then
+            VERSIONS="${{ github.event.inputs.cassandra_versions }}"
+          fi
+          
+          echo "versions=$VERSIONS" >> $GITHUB_OUTPUT
+          
+          # Create matrix for parallel testing
+          MATRIX=$(echo "$VERSIONS" | jq -R 'split(",") | map({version: .})')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          
+          echo "🐘 Will test Cassandra versions: $VERSIONS"
+
+  compatibility-matrix:
+    name: 🧪 Test Cassandra ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    needs: detect-versions
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-versions.outputs.matrix) }}
+    
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: 🦀 Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          
+      - name: 📦 Cache Cargo Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          
+      - name: 🐳 Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: 🐘 Start Cassandra ${{ matrix.version }}
+        run: |
+          echo "🚀 Starting Cassandra ${{ matrix.version }}"
+          
+          # Calculate unique port for this version
+          VERSION_HASH=$(echo "${{ matrix.version }}" | sha256sum | cut -c1-4)
+          PORT=$((9042 + 0x$VERSION_HASH % 100))
+          
+          docker run -d \
+            --name cassandra-${{ matrix.version }} \
+            -p $PORT:9042 \
+            -e CASSANDRA_START_RPC=true \
+            -e CASSANDRA_RPC_ADDRESS=0.0.0.0 \
+            -e CASSANDRA_LISTEN_ADDRESS=auto \
+            -e CASSANDRA_BROADCAST_ADDRESS=127.0.0.1 \
+            -e CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1 \
+            cassandra:${{ matrix.version }}
+          
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          
+          # Wait for Cassandra to be ready
+          echo "⏳ Waiting for Cassandra to be ready..."
+          for i in {1..30}; do
+            if docker exec cassandra-${{ matrix.version }} cqlsh -e "DESCRIBE KEYSPACES;" > /dev/null 2>&1; then
+              echo "✅ Cassandra ${{ matrix.version }} is ready!"
+              break
+            fi
+            echo "⏳ Attempt $i/30..."
+            sleep 10
+          done
+          
+      - name: 🏗️ Build Compatibility Test Suite
+        run: |
+          cd tests/compatibility
+          cargo build --release --bin compatibility-checker
+          
+      - name: 📊 Generate Test Data
+        run: |
+          cd tests/compatibility
+          ./target/release/compatibility-checker generate \
+            --version ${{ matrix.version }} \
+            --rows 10000 \
+            --complex \
+            --output ./test-data
+            
+      - name: 🧪 Run Compatibility Tests
+        run: |
+          cd tests/compatibility
+          ./target/release/compatibility-checker test \
+            --version ${{ matrix.version }} \
+            --suite ${{ github.event.inputs.test_suite || 'comprehensive' }} \
+            --detailed \
+            --output ./results
+            
+      - name: 📈 Analyze Performance
+        run: |
+          cd tests/compatibility
+          echo "📊 Performance Analysis for Cassandra ${{ matrix.version }}"
+          
+          # Run performance benchmarks
+          cargo run --bin compatibility-checker -- test \
+            --version ${{ matrix.version }} \
+            --suite performance \
+            --output ./performance-results
+            
+      - name: 🔍 Detect Format Changes
+        if: matrix.version != '4.0'  # Skip baseline version
+        run: |
+          cd tests/compatibility
+          ./target/release/compatibility-checker detect \
+            --sstable-dir ./test-data/cassandra-${{ matrix.version }} \
+            --baseline 4.0
+            
+      - name: 📄 Upload Test Results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: compatibility-results-${{ matrix.version }}
+          path: |
+            tests/compatibility/results/
+            tests/compatibility/performance-results/
+          retention-days: 30
+          
+      - name: 📊 Generate Version Report
+        run: |
+          cd tests/compatibility/results
+          
+          # Create summary for this version
+          echo "# Cassandra ${{ matrix.version }} Compatibility Report" > version-summary.md
+          echo "" >> version-summary.md
+          echo "**Test Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> version-summary.md
+          echo "**Version:** ${{ matrix.version }}" >> version-summary.md
+          echo "" >> version-summary.md
+          
+          if [ -f "compatibility-${{ matrix.version }}.json" ]; then
+            SCORE=$(jq -r '.compatibility_score' compatibility-${{ matrix.version }}.json)
+            ISSUES=$(jq -r '.issues | length' compatibility-${{ matrix.version }}.json)
+            
+            echo "**Compatibility Score:** ${SCORE}%" >> version-summary.md
+            echo "**Issues Found:** $ISSUES" >> version-summary.md
+            
+            if (( $(echo "$SCORE >= 95" | bc -l) )); then
+              echo "**Status:** ✅ Fully Compatible" >> version-summary.md
+            elif (( $(echo "$SCORE >= 80" | bc -l) )); then
+              echo "**Status:** 🟡 Mostly Compatible" >> version-summary.md
+            else
+              echo "**Status:** ❌ Compatibility Issues" >> version-summary.md
+            fi
+          fi
+          
+      - name: 🐳 Cleanup Docker Container
+        if: always()
+        run: |
+          docker stop cassandra-${{ matrix.version }} || true
+          docker rm cassandra-${{ matrix.version }} || true
+
+  compatibility-report:
+    name: 📊 Generate Compatibility Report
+    runs-on: ubuntu-latest
+    needs: [detect-versions, compatibility-matrix]
+    if: always()
+    
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: 📄 Download All Test Results
+        uses: actions/download-artifact@v3
+        with:
+          path: ./all-results
+          
+      - name: 🦀 Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          
+      - name: 📊 Generate Matrix Report
+        run: |
+          cd tests/compatibility
+          cargo build --release --bin compatibility-checker
+          
+          # Combine all results into matrix report
+          ./target/release/compatibility-checker matrix \
+            --format markdown \
+            --output ./final-report
+            
+      - name: 📈 Create Dashboard
+        run: |
+          cat > compatibility-dashboard.md << 'EOF'
+          # 🐘 CQLite Cassandra Compatibility Dashboard
+          
+          **Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          **Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          
+          ## 📊 Compatibility Matrix
+          
+          | Version | Status | Score | Issues | Performance |
+          |---------|--------|-------|--------|-------------|
+          EOF
+          
+          # Process each version result
+          for artifact_dir in ./all-results/compatibility-results-*; do
+            if [ -d "$artifact_dir" ]; then
+              VERSION=$(basename "$artifact_dir" | sed 's/compatibility-results-//')
+              
+              if [ -f "$artifact_dir/compatibility-$VERSION.json" ]; then
+                SCORE=$(jq -r '.compatibility_score' "$artifact_dir/compatibility-$VERSION.json")
+                ISSUES=$(jq -r '.issues | length' "$artifact_dir/compatibility-$VERSION.json")
+                
+                if (( $(echo "$SCORE >= 95" | bc -l) )); then
+                  STATUS="✅ Compatible"
+                elif (( $(echo "$SCORE >= 80" | bc -l) )); then
+                  STATUS="🟡 Minor Issues"
+                else
+                  STATUS="❌ Issues Found"
+                fi
+                
+                echo "| $VERSION | $STATUS | ${SCORE}% | $ISSUES | TBD |" >> compatibility-dashboard.md
+              else
+                echo "| $VERSION | ❌ Test Failed | - | - | - |" >> compatibility-dashboard.md
+              fi
+            fi
+          done
+          
+          echo "" >> compatibility-dashboard.md
+          echo "## 🔗 Detailed Reports" >> compatibility-dashboard.md
+          echo "" >> compatibility-dashboard.md
+          echo "- [Full Compatibility Matrix](./tests/compatibility/final-report/compatibility-matrix.md)" >> compatibility-dashboard.md
+          echo "- [Performance Analysis](./tests/compatibility/final-report/performance-analysis.md)" >> compatibility-dashboard.md
+          echo "- [Format Evolution](./tests/compatibility/final-report/format-evolution.md)" >> compatibility-dashboard.md
+          
+      - name: 📄 Upload Final Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: compatibility-dashboard
+          path: |
+            compatibility-dashboard.md
+            tests/compatibility/final-report/
+          retention-days: 90
+          
+      - name: 💬 Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // Read the dashboard summary
+            let dashboard = '';
+            try {
+              dashboard = fs.readFileSync('compatibility-dashboard.md', 'utf8');
+            } catch (error) {
+              dashboard = '❌ Failed to generate compatibility dashboard';
+            }
+            
+            const comment = `## 🐘 Cassandra Compatibility Test Results
+            
+            ${dashboard}
+            
+            <details>
+            <summary>📊 Click to view detailed compatibility matrix</summary>
+            
+            \`\`\`
+            Test completed for Cassandra versions: ${{ needs.detect-versions.outputs.versions }}
+            Workflow: ${{ github.workflow }}
+            Run: #${{ github.run_number }}
+            \`\`\`
+            
+            </details>`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+            
+      - name: 🚨 Notify on Compatibility Issues
+        if: failure()
+        run: |
+          echo "🚨 Compatibility issues detected!"
+          echo "This workflow will help identify what needs to be fixed in CQLite."
+          
+          # Create GitHub issue if critical compatibility problems found
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Creating GitHub issue for compatibility problems..."
+            # TODO: Create issue using GitHub API
+          fi
+
+  update-docs:
+    name: 📚 Update Compatibility Documentation
+    runs-on: ubuntu-latest
+    needs: [compatibility-report]
+    if: github.ref == 'refs/heads/main' && success()
+    
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: 📄 Download Dashboard
+        uses: actions/download-artifact@v3
+        with:
+          name: compatibility-dashboard
+          path: ./dashboard
+          
+      - name: 📚 Update Documentation
+        run: |
+          # Update compatibility status in docs
+          mkdir -p docs/compatibility
+          
+          if [ -f "./dashboard/compatibility-dashboard.md" ]; then
+            cp ./dashboard/compatibility-dashboard.md docs/compatibility/README.md
+            
+            # Update main README with compatibility badge
+            OVERALL_SCORE=$(grep "Overall Compatibility" docs/compatibility/README.md | grep -o '[0-9.]*%' | head -1 | sed 's/%//')
+            
+            if (( $(echo "$OVERALL_SCORE >= 95" | bc -l) )); then
+              BADGE_COLOR="brightgreen"
+              BADGE_TEXT="$OVERALL_SCORE%25compatible"
+            elif (( $(echo "$OVERALL_SCORE >= 80" | bc -l) )); then
+              BADGE_COLOR="yellow"
+              BADGE_TEXT="$OVERALL_SCORE%25compatible"
+            else
+              BADGE_COLOR="red"
+              BADGE_TEXT="$OVERALL_SCORE%25compatible"
+            fi
+            
+            # Update README.md with latest compatibility badge
+            sed -i "s|!\[Cassandra Compatibility\].*|![Cassandra Compatibility](https://img.shields.io/badge/Cassandra-$BADGE_TEXT-$BADGE_COLOR)|" README.md
+          fi
+          
+      - name: 📤 Commit Documentation Updates
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          git add docs/compatibility/README.md README.md
+          
+          if ! git diff --staged --quiet; then
+            git commit -m "📚 Update Cassandra compatibility documentation
+            
+            - Updated compatibility matrix
+            - Updated compatibility score badge
+            - Generated from workflow run #${{ github.run_number }}"
+            
+            git push
+          else
+            echo "No documentation changes to commit"
+          fi

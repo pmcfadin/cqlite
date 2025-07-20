@@ -79,10 +79,9 @@ impl QueryParser {
 
         // Extract table name
         if let Some(from_part) = self.extract_after(sql, "FROM") {
-            let table_name = from_part
-                .split_whitespace()
-                .next()
-                .ok_or_else(|| Error::query_execution("Missing table name after FROM".to_string()))?;
+            let table_name = from_part.split_whitespace().next().ok_or_else(|| {
+                Error::query_execution("Missing table name after FROM".to_string())
+            })?;
             table = Some(TableId::new(table_name));
         }
 

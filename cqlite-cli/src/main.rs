@@ -81,6 +81,12 @@ enum Commands {
         /// Output format
         #[arg(long, value_enum)]
         format: ExportFormat,
+        /// SSTable file path (for SSTable export)
+        #[arg(long)]
+        sstable: Option<PathBuf>,
+        /// Schema JSON file path (required for SSTable export)
+        #[arg(long)]
+        schema: Option<PathBuf>,
     },
     /// Database administration
     Admin {
@@ -96,6 +102,25 @@ enum Commands {
     Bench {
         #[command(subcommand)]
         command: BenchCommands,
+    },
+    /// Read SSTable file with schema
+    Read {
+        /// SSTable file path
+        sstable: PathBuf,
+        /// Schema JSON file path
+        #[arg(long)]
+        schema: PathBuf,
+        /// Limit number of rows to display
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Skip number of rows
+        #[arg(long)]
+        skip: Option<usize>,
+    },
+    /// Show SSTable information
+    Info {
+        /// SSTable file path
+        sstable: PathBuf,
     },
 }
 
@@ -163,6 +188,11 @@ enum SchemaCommands {
         /// Force drop without confirmation
         #[arg(long)]
         force: bool,
+    },
+    /// Validate schema JSON file
+    Validate {
+        /// Schema JSON file path
+        json: PathBuf,
     },
 }
 
@@ -247,7 +277,15 @@ async fn main() -> Result<()> {
             source,
             file,
             format,
-        }) => commands::export_data(&db_path, &source, &file, format).await,
+            sstable,
+            schema,
+        }) => {
+            if let (Some(sstable), Some(schema)) = (sstable, schema) {
+                commands::export_sstable(&sstable, &schema, &file, format).await
+            } else {
+                commands::export_data(&db_path, &source, &file, format).await
+            }
+        }
         Some(Commands::Admin { command }) => {
             commands::admin::handle_admin_command(&db_path, command).await
         }
@@ -257,6 +295,13 @@ async fn main() -> Result<()> {
         Some(Commands::Bench { command }) => {
             commands::bench::handle_bench_command(&db_path, command).await
         }
+        Some(Commands::Read {
+            sstable,
+            schema,
+            limit,
+            skip,
+        }) => commands::read_sstable(&sstable, &schema, limit, skip, cli.format).await,
+        Some(Commands::Info { sstable }) => commands::sstable_info(&sstable).await,
         None => {
             // Default to interactive REPL mode
             interactive::start_repl_mode(&db_path, &config).await

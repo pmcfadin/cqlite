@@ -1,287 +1,431 @@
-//! Schema management for CQLite
+//! Schema definition and parsing for CQLite
+//!
+//! This module handles JSON-based schema definitions that describe
+//! the structure of Cassandra tables for schema-aware SSTable reading.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
-use crate::error::Error;
+use crate::error::{Error, Result};
 use crate::storage::StorageEngine;
-use crate::{types::TableId, Config, DataType, Result, Value};
+use crate::Config;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
 
-/// Schema manager for database metadata
-#[derive(Debug)]
-pub struct SchemaManager {
-    /// Storage engine reference
-    storage: Arc<StorageEngine>,
-
-    /// Schema cache
-    schemas: Arc<RwLock<HashMap<TableId, TableSchema>>>,
-
-    /// Configuration
-    config: Config,
-}
-
-/// Table schema definition
-#[derive(Debug, Clone)]
+/// Table schema definition loaded from JSON
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
-    /// Table identifier
-    pub table_id: TableId,
+    /// Keyspace name
+    pub keyspace: String,
 
-    /// Column definitions
-    pub columns: Vec<ColumnSchema>,
+    /// Table name
+    pub table: String,
 
-    /// Primary key columns
-    pub primary_key: Vec<String>,
+    /// Partition key columns (ordered)
+    pub partition_keys: Vec<KeyColumn>,
 
-    /// Schema version
-    pub version: u32,
+    /// Clustering key columns (ordered)  
+    pub clustering_keys: Vec<ClusteringColumn>,
 
-    /// Creation timestamp
-    pub created_at: u64,
+    /// All columns in the table
+    pub columns: Vec<Column>,
 
-    /// Last modified timestamp
-    pub modified_at: u64,
+    /// Optional metadata
+    #[serde(default)]
+    pub comments: HashMap<String, String>,
 }
 
-/// Column schema definition
-#[derive(Debug, Clone)]
-pub struct ColumnSchema {
+/// Partition key column definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyColumn {
     /// Column name
     pub name: String,
 
-    /// Data type
-    pub data_type: DataType,
+    /// CQL data type
+    #[serde(rename = "type")]
+    pub data_type: String,
 
-    /// Whether column allows NULL values
+    /// Position in composite key (0-based)
+    pub position: usize,
+}
+
+/// Clustering key column with ordering
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusteringColumn {
+    /// Column name
+    pub name: String,
+
+    /// CQL data type
+    #[serde(rename = "type")]
+    pub data_type: String,
+
+    /// Position in clustering key (0-based)
+    pub position: usize,
+
+    /// Sort order (ASC or DESC)
+    #[serde(default = "default_order")]
+    pub order: String,
+}
+
+/// Regular column definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Column {
+    /// Column name
+    pub name: String,
+
+    /// CQL data type (e.g., "text", "bigint", "list<int>")
+    #[serde(rename = "type")]
+    pub data_type: String,
+
+    /// Whether column can be null
+    #[serde(default)]
     pub nullable: bool,
 
-    /// Default value
-    pub default_value: Option<Value>,
+    /// Default value (if any)
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+}
 
-    /// Whether column is part of primary key
-    pub is_primary_key: bool,
+/// Parsed CQL data type
+#[derive(Debug, Clone, PartialEq)]
+pub enum CqlType {
+    // Primitive types
+    Boolean,
+    TinyInt,
+    SmallInt,
+    Int,
+    BigInt,
+    Float,
+    Double,
+    Decimal,
+    Text,
+    Ascii,
+    Varchar,
+    Blob,
+    Timestamp,
+    Date,
+    Time,
+    Uuid,
+    TimeUuid,
+    Inet,
+    Duration,
 
-    /// Column position in table
-    pub position: u32,
+    // Collection types (implemented as tuples)
+    List(Box<CqlType>),
+    Set(Box<CqlType>),
+    Map(Box<CqlType>, Box<CqlType>),
+
+    // Complex types
+    Tuple(Vec<CqlType>),
+    Udt(String, Vec<(String, CqlType)>), // name, fields
+    Frozen(Box<CqlType>),
+
+    // Custom/Unknown
+    Custom(String),
+}
+
+impl TableSchema {
+    /// Load schema from JSON file
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| Error::schema(format!("Failed to read schema file: {}", e)))?;
+
+        Self::from_json(&content)
+    }
+
+    /// Parse schema from JSON string
+    pub fn from_json(json: &str) -> Result<Self> {
+        let schema: TableSchema = serde_json::from_str(json)
+            .map_err(|e| Error::schema(format!("Invalid JSON schema: {}", e)))?;
+
+        schema.validate()?;
+        Ok(schema)
+    }
+
+    /// Save schema to JSON file
+    pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| Error::serialization(format!("Failed to serialize schema: {}", e)))?;
+
+        fs::write(path, json)
+            .map_err(|e| Error::schema(format!("Failed to write schema file: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Validate schema consistency
+    pub fn validate(&self) -> Result<()> {
+        // Validate keyspace and table names
+        if self.keyspace.is_empty() {
+            return Err(Error::schema("Keyspace name cannot be empty".to_string()));
+        }
+
+        if self.table.is_empty() {
+            return Err(Error::schema("Table name cannot be empty".to_string()));
+        }
+
+        // Must have at least one partition key
+        if self.partition_keys.is_empty() {
+            return Err(Error::schema(
+                "Table must have at least one partition key".to_string(),
+            ));
+        }
+
+        // Validate partition key positions are contiguous
+        let mut positions: Vec<_> = self.partition_keys.iter().map(|k| k.position).collect();
+        positions.sort();
+        for (i, &pos) in positions.iter().enumerate() {
+            if pos != i {
+                return Err(Error::schema(format!(
+                    "Partition key positions must be contiguous starting from 0, found gap at position {}", 
+                    i
+                )));
+            }
+        }
+
+        // Validate clustering key positions (if any)
+        if !self.clustering_keys.is_empty() {
+            let mut positions: Vec<_> = self.clustering_keys.iter().map(|k| k.position).collect();
+            positions.sort();
+            for (i, &pos) in positions.iter().enumerate() {
+                if pos != i {
+                    return Err(Error::schema(format!(
+                        "Clustering key positions must be contiguous starting from 0, found gap at position {}", 
+                        i
+                    )));
+                }
+            }
+        }
+
+        // Validate data types
+        for column in &self.columns {
+            CqlType::parse(&column.data_type).map_err(|e| {
+                Error::schema(format!(
+                    "Invalid data type '{}' for column '{}': {}",
+                    column.data_type, column.name, e
+                ))
+            })?;
+        }
+
+        // Validate all key columns exist in columns list
+        for key in &self.partition_keys {
+            if !self.columns.iter().any(|c| c.name == key.name) {
+                return Err(Error::schema(format!(
+                    "Partition key '{}' not found in columns list",
+                    key.name
+                )));
+            }
+        }
+
+        for key in &self.clustering_keys {
+            if !self.columns.iter().any(|c| c.name == key.name) {
+                return Err(Error::schema(format!(
+                    "Clustering key '{}' not found in columns list",
+                    key.name
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get column by name
+    pub fn get_column(&self, name: &str) -> Option<&Column> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// Check if column is a partition key
+    pub fn is_partition_key(&self, name: &str) -> bool {
+        self.partition_keys.iter().any(|k| k.name == name)
+    }
+
+    /// Check if column is a clustering key
+    pub fn is_clustering_key(&self, name: &str) -> bool {
+        self.clustering_keys.iter().any(|k| k.name == name)
+    }
+
+    /// Get partition key columns in order
+    pub fn ordered_partition_keys(&self) -> Vec<&KeyColumn> {
+        let mut keys = self.partition_keys.iter().collect::<Vec<_>>();
+        keys.sort_by_key(|k| k.position);
+        keys
+    }
+
+    /// Get clustering key columns in order
+    pub fn ordered_clustering_keys(&self) -> Vec<&ClusteringColumn> {
+        let mut keys = self.clustering_keys.iter().collect::<Vec<_>>();
+        keys.sort_by_key(|k| k.position);
+        keys
+    }
+}
+
+impl CqlType {
+    /// Parse CQL type string into structured type
+    pub fn parse(type_str: &str) -> Result<Self> {
+        let type_str = type_str.trim();
+
+        // Handle frozen types
+        if let Some(inner) = type_str.strip_prefix("frozen<") {
+            if let Some(inner) = inner.strip_suffix('>') {
+                return Ok(CqlType::Frozen(Box::new(Self::parse(inner)?)));
+            }
+        }
+
+        // Handle collection types
+        if let Some(inner) = type_str.strip_prefix("list<") {
+            if let Some(inner) = inner.strip_suffix('>') {
+                return Ok(CqlType::List(Box::new(Self::parse(inner)?)));
+            }
+        }
+
+        if let Some(inner) = type_str.strip_prefix("set<") {
+            if let Some(inner) = inner.strip_suffix('>') {
+                return Ok(CqlType::Set(Box::new(Self::parse(inner)?)));
+            }
+        }
+
+        if let Some(inner) = type_str.strip_prefix("map<") {
+            if let Some(inner) = inner.strip_suffix('>') {
+                let parts: Vec<&str> = inner.splitn(2, ',').collect();
+                if parts.len() != 2 {
+                    return Err(Error::schema(format!("Invalid map type: {}", type_str)));
+                }
+                return Ok(CqlType::Map(
+                    Box::new(Self::parse(parts[0].trim())?),
+                    Box::new(Self::parse(parts[1].trim())?),
+                ));
+            }
+        }
+
+        // Handle tuple types
+        if let Some(inner) = type_str.strip_prefix("tuple<") {
+            if let Some(inner) = inner.strip_suffix('>') {
+                let parts: Vec<&str> = inner.split(',').collect();
+                let mut types = Vec::new();
+                for part in parts {
+                    types.push(Self::parse(part.trim())?);
+                }
+                return Ok(CqlType::Tuple(types));
+            }
+        }
+
+        // Primitive types
+        match type_str.to_lowercase().as_str() {
+            "boolean" | "bool" => Ok(CqlType::Boolean),
+            "tinyint" => Ok(CqlType::TinyInt),
+            "smallint" => Ok(CqlType::SmallInt),
+            "int" | "integer" => Ok(CqlType::Int),
+            "bigint" | "long" => Ok(CqlType::BigInt),
+            "float" => Ok(CqlType::Float),
+            "double" => Ok(CqlType::Double),
+            "decimal" => Ok(CqlType::Decimal),
+            "text" | "varchar" => Ok(CqlType::Text),
+            "ascii" => Ok(CqlType::Ascii),
+            "blob" => Ok(CqlType::Blob),
+            "timestamp" => Ok(CqlType::Timestamp),
+            "date" => Ok(CqlType::Date),
+            "time" => Ok(CqlType::Time),
+            "uuid" => Ok(CqlType::Uuid),
+            "timeuuid" => Ok(CqlType::TimeUuid),
+            "inet" => Ok(CqlType::Inet),
+            "duration" => Ok(CqlType::Duration),
+            _ => Ok(CqlType::Custom(type_str.to_string())),
+        }
+    }
+
+    /// Get the expected byte size for fixed-size types
+    pub fn fixed_size(&self) -> Option<usize> {
+        match self {
+            CqlType::Boolean => Some(1),
+            CqlType::TinyInt => Some(1),
+            CqlType::SmallInt => Some(2),
+            CqlType::Int => Some(4),
+            CqlType::BigInt => Some(8),
+            CqlType::Float => Some(4),
+            CqlType::Double => Some(8),
+            CqlType::Timestamp => Some(8),
+            CqlType::Date => Some(4),
+            CqlType::Time => Some(8),
+            CqlType::Uuid | CqlType::TimeUuid => Some(16),
+            CqlType::Inet => Some(16), // IPv6, IPv4 is variable
+            // Variable size types
+            CqlType::Text
+            | CqlType::Ascii
+            | CqlType::Varchar
+            | CqlType::Blob
+            | CqlType::Decimal
+            | CqlType::Duration => None,
+            // Collections and complex types are variable
+            CqlType::List(_)
+            | CqlType::Set(_)
+            | CqlType::Map(_, _)
+            | CqlType::Tuple(_)
+            | CqlType::Udt(_, _) => None,
+            CqlType::Frozen(inner) => inner.fixed_size(),
+            CqlType::Custom(_) => None,
+        }
+    }
+
+    /// Check if this type is a collection
+    pub fn is_collection(&self) -> bool {
+        matches!(
+            self,
+            CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _)
+        )
+    }
+}
+
+// Default functions for serde
+fn default_order() -> String {
+    "ASC".to_string()
+}
+
+/// Schema management service for handling table schemas
+#[derive(Debug)]
+pub struct SchemaManager {
+    storage: Arc<StorageEngine>,
+    schemas: HashMap<String, TableSchema>,
 }
 
 impl SchemaManager {
     /// Create a new schema manager
-    pub async fn new(storage: Arc<StorageEngine>, config: &Config) -> Result<Self> {
-        let schemas = Arc::new(RwLock::new(HashMap::new()));
-
-        let manager = Self {
+    pub async fn new(storage: Arc<StorageEngine>, _config: &Config) -> Result<Self> {
+        Ok(Self {
             storage,
-            schemas,
-            config: config.clone(),
-        };
-
-        // Load existing schemas
-        manager.load_schemas().await?;
-
-        Ok(manager)
+            schemas: HashMap::new(),
+        })
     }
 
-    /// Load schemas from storage
-    async fn load_schemas(&self) -> Result<()> {
-        // TODO: Load schemas from storage
-        Ok(())
-    }
-
-    /// Create a new table schema
-    pub async fn create_table(&self, schema: TableSchema) -> Result<()> {
-        // Validate schema
-        self.validate_schema(&schema)?;
-
-        // Store schema
-        {
-            let mut schemas = self.schemas.write().await;
-            schemas.insert(schema.table_id.clone(), schema.clone());
+    /// Load schema for a table
+    pub async fn load_schema(&mut self, table_name: &str) -> Result<&TableSchema> {
+        if !self.schemas.contains_key(table_name) {
+            // Try to load from storage or default
+            let schema = self.create_default_schema(table_name);
+            self.schemas.insert(table_name.to_string(), schema);
         }
 
-        // Persist to storage
-        self.persist_schema(&schema).await?;
-
-        Ok(())
+        Ok(self.schemas.get(table_name).unwrap())
     }
 
-    /// Get table schema
-    pub async fn get_table_schema(&self, table_id: &TableId) -> Result<Option<TableSchema>> {
-        let schemas = self.schemas.read().await;
-        Ok(schemas.get(table_id).cloned())
-    }
-
-    /// Update table schema
-    pub async fn update_table(&self, table_id: &TableId, new_schema: TableSchema) -> Result<()> {
-        // Validate schema
-        self.validate_schema(&new_schema)?;
-
-        // Update schema
-        {
-            let mut schemas = self.schemas.write().await;
-            if let Some(existing) = schemas.get_mut(table_id) {
-                existing.columns = new_schema.columns;
-                existing.version += 1;
-                existing.modified_at = self.current_timestamp();
-            } else {
-                return Err(Error::schema(format!(
-                    "Table {} not found",
-                    table_id.0.as_str()
-                )));
-            }
+    /// Create a default schema for unknown tables
+    fn create_default_schema(&self, table_name: &str) -> TableSchema {
+        TableSchema {
+            keyspace: "default".to_string(),
+            table: table_name.to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                nullable: false,
+                default: None,
+            }],
+            comments: HashMap::new(),
         }
-
-        // Persist changes
-        let updated_schema = self.get_table_schema(table_id).await?.unwrap();
-        self.persist_schema(&updated_schema).await?;
-
-        Ok(())
-    }
-
-    /// Drop table schema
-    pub async fn drop_table(&self, table_id: &TableId) -> Result<()> {
-        // Remove from cache
-        {
-            let mut schemas = self.schemas.write().await;
-            if schemas.remove(table_id).is_none() {
-                return Err(Error::schema(format!(
-                    "Table {} not found",
-                    table_id.0.as_str()
-                )));
-            }
-        }
-
-        // Remove from storage
-        self.remove_schema(table_id).await?;
-
-        Ok(())
-    }
-
-    /// List all tables
-    pub async fn list_tables(&self) -> Vec<TableId> {
-        let schemas = self.schemas.read().await;
-        schemas.keys().cloned().collect()
-    }
-
-    /// Validate schema
-    fn validate_schema(&self, schema: &TableSchema) -> Result<()> {
-        if schema.columns.is_empty() {
-            return Err(Error::schema(
-                "Table must have at least one column".to_string(),
-            ));
-        }
-
-        if schema.primary_key.is_empty() {
-            return Err(Error::schema("Table must have a primary key".to_string()));
-        }
-
-        // Check primary key columns exist
-        for pk_col in &schema.primary_key {
-            if !schema.columns.iter().any(|c| &c.name == pk_col) {
-                return Err(Error::schema(format!(
-                    "Primary key column '{}' not found",
-                    pk_col
-                )));
-            }
-        }
-
-        // Check for duplicate column names
-        let mut column_names = std::collections::HashSet::new();
-        for column in &schema.columns {
-            if !column_names.insert(&column.name) {
-                return Err(Error::schema(format!(
-                    "Duplicate column name: {}",
-                    column.name
-                )));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Persist schema to storage
-    async fn persist_schema(&self, schema: &TableSchema) -> Result<()> {
-        // TODO: Implement schema persistence
-        Ok(())
-    }
-
-    /// Remove schema from storage
-    async fn remove_schema(&self, table_id: &TableId) -> Result<()> {
-        // TODO: Implement schema removal
-        Ok(())
-    }
-
-    /// Get current timestamp
-    fn current_timestamp(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64
-    }
-}
-
-impl TableSchema {
-    /// Create a new table schema
-    pub fn new(table_id: TableId, columns: Vec<ColumnSchema>, primary_key: Vec<String>) -> Self {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
-
-        Self {
-            table_id,
-            columns,
-            primary_key,
-            version: 1,
-            created_at: timestamp,
-            modified_at: timestamp,
-        }
-    }
-
-    /// Get column by name
-    pub fn get_column(&self, name: &str) -> Option<&ColumnSchema> {
-        self.columns.iter().find(|c| c.name == name)
-    }
-
-    /// Get primary key columns
-    pub fn get_primary_key_columns(&self) -> Vec<&ColumnSchema> {
-        self.columns
-            .iter()
-            .filter(|c| self.primary_key.contains(&c.name))
-            .collect()
-    }
-}
-
-impl ColumnSchema {
-    /// Create a new column schema
-    pub fn new(name: String, data_type: DataType, nullable: bool) -> Self {
-        Self {
-            name,
-            data_type,
-            nullable,
-            default_value: None,
-            is_primary_key: false,
-            position: 0,
-        }
-    }
-
-    /// Set as primary key
-    pub fn primary_key(mut self) -> Self {
-        self.is_primary_key = true;
-        self.nullable = false; // Primary key cannot be null
-        self
-    }
-
-    /// Set default value
-    pub fn default_value(mut self, value: Value) -> Self {
-        self.default_value = Some(value);
-        self
-    }
-
-    /// Set position
-    pub fn position(mut self, position: u32) -> Self {
-        self.position = position;
-        self
     }
 }
 
@@ -290,48 +434,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_table_schema_creation() {
-        let columns = vec![
-            ColumnSchema::new("id".to_string(), DataType::Integer, false).primary_key(),
-            ColumnSchema::new("name".to_string(), DataType::Text, false),
-            ColumnSchema::new("email".to_string(), DataType::Text, true),
-        ];
+    fn test_schema_validation() {
+        let schema_json = r#"
+        {
+            "keyspace": "test",
+            "table": "users",
+            "partition_keys": [
+                {"name": "id", "type": "bigint", "position": 0}
+            ],
+            "clustering_keys": [],
+            "columns": [
+                {"name": "id", "type": "bigint", "nullable": false},
+                {"name": "name", "type": "text", "nullable": true}
+            ]
+        }
+        "#;
 
-        let schema = TableSchema::new(TableId::new("users"), columns, vec!["id".to_string()]);
-
-        assert_eq!(schema.table_id.0.as_str(), "users");
-        assert_eq!(schema.columns.len(), 3);
-        assert_eq!(schema.primary_key, vec!["id".to_string()]);
-        assert_eq!(schema.version, 1);
+        let schema = TableSchema::from_json(schema_json).unwrap();
+        assert_eq!(schema.keyspace, "test");
+        assert_eq!(schema.table, "users");
+        assert_eq!(schema.partition_keys.len(), 1);
+        assert_eq!(schema.columns.len(), 2);
     }
 
     #[test]
-    fn test_column_schema_builder() {
-        let column = ColumnSchema::new("id".to_string(), DataType::Integer, false)
-            .primary_key()
-            .position(0);
+    fn test_cql_type_parsing() {
+        assert_eq!(CqlType::parse("text").unwrap(), CqlType::Text);
+        assert_eq!(CqlType::parse("bigint").unwrap(), CqlType::BigInt);
 
-        assert_eq!(column.name, "id");
-        assert_eq!(column.data_type, DataType::Integer);
-        assert!(!column.nullable);
-        assert!(column.is_primary_key);
-        assert_eq!(column.position, 0);
+        match CqlType::parse("list<int>").unwrap() {
+            CqlType::List(inner) => assert_eq!(*inner, CqlType::Int),
+            _ => panic!("Expected List type"),
+        }
+
+        match CqlType::parse("map<text, bigint>").unwrap() {
+            CqlType::Map(key, value) => {
+                assert_eq!(*key, CqlType::Text);
+                assert_eq!(*value, CqlType::BigInt);
+            }
+            _ => panic!("Expected Map type"),
+        }
     }
 
     #[test]
-    fn test_table_schema_get_column() {
-        let columns = vec![
-            ColumnSchema::new("id".to_string(), DataType::Integer, false),
-            ColumnSchema::new("name".to_string(), DataType::Text, false),
-        ];
+    fn test_schema_validation_failures() {
+        // Missing partition key
+        let invalid_schema = r#"
+        {
+            "keyspace": "test",
+            "table": "users", 
+            "partition_keys": [],
+            "clustering_keys": [],
+            "columns": []
+        }
+        "#;
 
-        let schema = TableSchema::new(TableId::new("users"), columns, vec!["id".to_string()]);
+        assert!(TableSchema::from_json(invalid_schema).is_err());
 
-        let id_column = schema.get_column("id");
-        assert!(id_column.is_some());
-        assert_eq!(id_column.unwrap().name, "id");
+        // Invalid type
+        let invalid_type = r#"
+        {
+            "keyspace": "test",
+            "table": "users",
+            "partition_keys": [
+                {"name": "id", "type": "invalid_type", "position": 0}
+            ],
+            "clustering_keys": [],
+            "columns": [
+                {"name": "id", "type": "invalid_type", "nullable": false}
+            ]
+        }
+        "#;
 
-        let missing_column = schema.get_column("missing");
-        assert!(missing_column.is_none());
+        // This should succeed as we allow custom types
+        assert!(TableSchema::from_json(invalid_type).is_ok());
     }
 }

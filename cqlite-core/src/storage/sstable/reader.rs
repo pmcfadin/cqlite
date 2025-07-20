@@ -163,7 +163,9 @@ impl SSTableReader {
         // Seek to start of data section
         {
             let mut file_guard = file.lock().await;
-            file_guard.seek(std::io::SeekFrom::Start(header_size as u64)).await?;
+            file_guard
+                .seek(std::io::SeekFrom::Start(header_size as u64))
+                .await?;
         }
 
         // Initialize compression reader if needed
@@ -244,8 +246,7 @@ impl SSTableReader {
 
         // Use index for efficient range scan if available
         if let Some(index) = &self.index {
-            let entries = index
-                .get_range(table_id, start_key, end_key)?;
+            let entries = index.get_range(table_id, start_key, end_key)?;
 
             for entry in entries {
                 if let Some(limit) = limit {
@@ -273,11 +274,13 @@ impl SSTableReader {
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
         let mut results = Vec::new();
 
-        // Reset to beginning of data section  
+        // Reset to beginning of data section
         let header_size = self.calculate_header_size();
         {
             let mut file_guard = self.file.lock().await;
-            file_guard.seek(std::io::SeekFrom::Start(header_size as u64)).await?;
+            file_guard
+                .seek(std::io::SeekFrom::Start(header_size as u64))
+                .await?;
         }
 
         // Read all blocks sequentially
@@ -378,7 +381,9 @@ impl SSTableReader {
         let header_size = self.calculate_header_size();
         {
             let mut file_guard = self.file.lock().await;
-            file_guard.seek(std::io::SeekFrom::Start(header_size as u64)).await?;
+            file_guard
+                .seek(std::io::SeekFrom::Start(header_size as u64))
+                .await?;
         }
 
         // Sequential scan through blocks
@@ -408,7 +413,9 @@ impl SSTableReader {
         let header_size = self.calculate_header_size();
         {
             let mut file_guard = self.file.lock().await;
-            file_guard.seek(std::io::SeekFrom::Start(header_size as u64)).await?;
+            file_guard
+                .seek(std::io::SeekFrom::Start(header_size as u64))
+                .await?;
         }
 
         // Sequential scan through blocks
