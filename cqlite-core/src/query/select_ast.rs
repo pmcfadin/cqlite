@@ -14,7 +14,6 @@
 
 use crate::{TableId, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Complete SELECT statement AST
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

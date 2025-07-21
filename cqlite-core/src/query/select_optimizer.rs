@@ -9,7 +9,7 @@
 
 use super::select_ast::*;
 use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Query optimizer for SELECT statements
@@ -374,11 +374,12 @@ impl SelectOptimizer {
                         .filter_map(|expr| self.extract_literal_value(expr))
                         .collect();
                     if !values.is_empty() {
+                        let selectivity = (values.len() as f64 * 0.01).min(1.0);
                         return Some(SSTablePredicate {
                             column,
                             operation: SSTableFilterOp::In,
                             values,
-                            selectivity: (values.len() as f64 * 0.01).min(1.0),
+                            selectivity,
                         });
                     }
                 }
@@ -638,15 +639,31 @@ impl ExecutionStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+    use crate::{Config, platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
-    #[test]
-    fn test_predicate_extraction() {
+    async fn create_test_optimizer() -> SelectOptimizer {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await.unwrap());
+        let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+        
+        SelectOptimizer {
+            schema,
+            storage,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_predicate_extraction() {
+        let _optimizer = create_test_optimizer().await;
         // This would test the predicate extraction logic
         // Implementation depends on having mock schema/storage
     }
 
-    #[test]
-    fn test_cost_estimation() {
+    #[tokio::test]
+    async fn test_cost_estimation() {
         let stats = TableStatistics {
             row_count: 1_000_000,
             size_bytes: 100_000_000,
@@ -654,10 +671,7 @@ mod tests {
             column_statistics: HashMap::new(),
         };
 
-        let optimizer = SelectOptimizer {
-            schema: Arc::new(unsafe { std::mem::zeroed() }), // Mock for test
-            storage: Arc::new(unsafe { std::mem::zeroed() }), // Mock for test
-        };
+        let optimizer = create_test_optimizer().await;
 
         let cost = optimizer.estimate_scan_cost(&stats, &[]);
         assert!(cost > 0.0);

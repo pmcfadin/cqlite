@@ -142,29 +142,24 @@ impl QueryExecutor {
             .ok_or_else(|| Error::query_execution("No index selected".to_string()))?;
 
         // Execute based on index type
-        let mut rows = Vec::new();
-        match index_selection.index_type {
+        let mut rows = match index_selection.index_type {
             super::planner::IndexType::Secondary => {
-                rows = self
-                    .execute_secondary_index_scan(table, index_selection, &plan.steps)
-                    .await?;
+                self.execute_secondary_index_scan(table, index_selection, &plan.steps)
+                    .await?
             }
             super::planner::IndexType::BloomFilter => {
-                rows = self
-                    .execute_bloom_filter_scan(table, index_selection, &plan.steps)
-                    .await?;
+                self.execute_bloom_filter_scan(table, index_selection, &plan.steps)
+                    .await?
             }
             super::planner::IndexType::Primary => {
-                rows = self
-                    .execute_primary_index_scan(table, index_selection, &plan.steps)
-                    .await?;
+                self.execute_primary_index_scan(table, index_selection, &plan.steps)
+                    .await?
             }
             super::planner::IndexType::Composite => {
-                rows = self
-                    .execute_composite_index_scan(table, index_selection, &plan.steps)
-                    .await?;
+                self.execute_composite_index_scan(table, index_selection, &plan.steps)
+                    .await?
             }
-        }
+        };
 
         // Apply additional processing steps
         rows = self.apply_execution_steps(rows, &plan.steps).await?;
@@ -557,7 +552,7 @@ impl QueryExecutor {
     /// Apply limit step
     async fn apply_limit_step(
         &self,
-        mut rows: Vec<QueryRow>,
+        rows: Vec<QueryRow>,
         _step: &ExecutionStep,
     ) -> Result<Vec<QueryRow>> {
         // Limit is typically handled at the query level

@@ -311,7 +311,7 @@ impl QueryPlanner {
             .as_ref()
             .ok_or_else(|| Error::query_execution("Missing table in INSERT".to_string()))?;
 
-        let table_stats = self.get_table_statistics(table).await?;
+        let _table_stats = self.get_table_statistics(table).await?;
 
         let steps = vec![ExecutionStep {
             step_type: StepType::Scan, // Insert operation
@@ -497,7 +497,7 @@ impl QueryPlanner {
     /// Select optimal indexes for the query
     async fn select_indexes(
         &self,
-        table: &TableId,
+        _table: &TableId,
         where_clause: &Option<WhereClause>,
     ) -> Result<Vec<IndexSelection>> {
         let mut selections = Vec::new();
@@ -682,7 +682,7 @@ impl QueryPlanner {
     }
 
     /// Get table statistics
-    async fn get_table_statistics(&self, table: &TableId) -> Result<TableStatistics> {
+    async fn get_table_statistics(&self, _table: &TableId) -> Result<TableStatistics> {
         // In a real implementation, this would query actual table statistics
         Ok(TableStatistics {
             row_count: 100_000, // Simulated

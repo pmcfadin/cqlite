@@ -16,7 +16,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// Test helper to create a test database
-    async fn create_test_database() -> (Database, TempDir) {
+    pub async fn create_test_database() -> (Database, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let db = Database::open(temp_dir.path(), config).await.unwrap();
@@ -514,8 +514,10 @@ mod tests {
 /// Performance benchmarks (for manual testing)
 #[cfg(test)]
 mod benchmarks {
-    use super::*;
+    use super::tests::create_test_database;
+    use crate::{Config, Database};
     use std::time::Instant;
+    use tempfile::TempDir;
 
     #[tokio::test]
     #[ignore] // Run manually with: cargo test benchmarks -- --ignored
@@ -536,7 +538,7 @@ mod benchmarks {
             let query = format!(
                 "INSERT INTO benchmark_data VALUES ({}, {}, {})",
                 i,
-                rand::random::<i32>(),
+                (i * 1337) % 1000000, // Deterministic pseudo-random value
                 i % 100
             );
             db.execute(&query).await.unwrap();

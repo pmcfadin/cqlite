@@ -10,7 +10,6 @@
 
 use super::select_ast::*;
 use crate::{Error, Result, TableId, Value};
-use std::collections::HashMap;
 
 /// Advanced CQL SELECT parser
 #[derive(Debug)]
@@ -229,7 +228,6 @@ impl Tokenizer {
                 None => return Ok(Token::Eof),
                 Some(ch) if ch.is_whitespace() => {
                     self.skip_whitespace();
-                    continue;
                 }
                 Some('(') => {
                     self.advance();
@@ -635,7 +633,9 @@ impl SelectParser {
                             self.advance()?;
                             Ok(SelectExpression::Column(ColumnRef::qualified(name, column)))
                         } else {
-                            Err(Error::sql_parse("Expected column name after table qualifier"))
+                            Err(Error::sql_parse(
+                                "Expected column name after table qualifier",
+                            ))
                         }
                     } else {
                         Ok(SelectExpression::Column(ColumnRef::new(name)))
@@ -736,7 +736,7 @@ impl SelectParser {
 
     /// Parse OR expression
     fn parse_or_expression(&mut self) -> Result<WhereExpression> {
-        let mut expr = self.parse_and_expression()?;
+        let expr = self.parse_and_expression()?;
 
         let mut or_exprs = vec![expr];
         while self.current_token == Some(Token::Or) {
@@ -753,7 +753,7 @@ impl SelectParser {
 
     /// Parse AND expression
     fn parse_and_expression(&mut self) -> Result<WhereExpression> {
-        let mut expr = self.parse_not_expression()?;
+        let expr = self.parse_not_expression()?;
 
         let mut and_exprs = vec![expr];
         while self.current_token == Some(Token::And) {

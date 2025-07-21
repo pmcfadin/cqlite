@@ -533,7 +533,7 @@ impl fmt::Display for QueryResult {
 
         // Calculate column widths
         let mut col_widths = Vec::new();
-        for (i, col_name) in column_names.iter().enumerate() {
+        for col_name in column_names.iter() {
             let mut max_width = col_name.len();
             for row in &self.rows {
                 if let Some(value) = row.values.get(col_name) {
@@ -670,7 +670,7 @@ impl ToJson for Value {
             }
             Value::Map(map) => {
                 let json_map: serde_json::Map<String, serde_json::Value> =
-                    map.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
+                    map.iter().map(|(k, v)| (format!("{}", k), v.to_json())).collect();
                 serde_json::Value::Object(json_map)
             }
             Value::BigInt(i) => serde_json::Value::Number((*i).into()),
@@ -681,6 +681,32 @@ impl ToJson for Value {
                 serde_json::Value::String(engine.encode(uuid))
             }
             Value::Json(json) => json.clone(),
+            Value::TinyInt(i) => serde_json::Value::Number((*i as i64).into()),
+            Value::SmallInt(i) => serde_json::Value::Number((*i as i64).into()),
+            Value::Float32(f) => serde_json::Number::from_f64(*f as f64)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Value::Set(set) => {
+                let json_list: Vec<serde_json::Value> = set.iter().map(|v| v.to_json()).collect();
+                serde_json::Value::Array(json_list)
+            }
+            Value::Tuple(tuple) => {
+                let json_list: Vec<serde_json::Value> = tuple.iter().map(|v| v.to_json()).collect();
+                serde_json::Value::Array(json_list)
+            }
+            Value::Udt(udt) => {
+                let mut json_obj = serde_json::Map::new();
+                json_obj.insert("_type".to_string(), serde_json::Value::String(udt.type_name.clone()));
+                for field in &udt.fields {
+                    let field_json = match &field.value {
+                        Some(value) => value.to_json(),
+                        None => serde_json::Value::Null,
+                    };
+                    json_obj.insert(field.name.clone(), field_json);
+                }
+                serde_json::Value::Object(json_obj)
+            }
+            Value::Frozen(boxed_value) => boxed_value.to_json(),
         }
     }
 }

@@ -4,7 +4,7 @@
 //! SSTable files directly without Cassandra. This is a groundbreaking
 //! achievement in database technology!
 
-use crate::query::{parse_select, SelectExecutor, SelectOptimizer};
+use crate::query::parse_select;
 
 /// Demonstrate the revolutionary CQL SELECT capabilities
 pub fn demonstrate_select_parser() {
