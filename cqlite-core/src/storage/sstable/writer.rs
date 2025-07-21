@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::Error;
+use crate::schema::CqlType;
 use crate::storage::sstable::bloom::BloomFilter;
 use crate::storage::sstable::compression::{Compression, CompressionStats};
 use crate::storage::sstable::index::IndexEntry;
@@ -357,8 +358,25 @@ impl SSTableWriter {
         self.write_cassandra_vint(&mut data, key_bytes.len() as u64)?;
         data.extend_from_slice(key_bytes);
 
-        // Value type (1 byte)
-        data.push(value.data_type() as u8);
+        // Value type (1 byte) - use conversion trait
+        let data_type_id: u8 = match value.data_type() {
+            CqlType::Text => DataType::TEXT,
+            CqlType::Int => DataType::INTEGER,
+            CqlType::BigInt => DataType::BIGINT,
+            CqlType::Double => DataType::FLOAT,
+            CqlType::Boolean => DataType::BOOLEAN,
+            CqlType::Blob => DataType::BLOB,
+            CqlType::Timestamp => DataType::TIMESTAMP,
+            CqlType::Uuid => DataType::UUID,
+            CqlType::List(_) => DataType::LIST,
+            CqlType::Set(_) => DataType::LIST, // Map to closest existing
+            CqlType::Map(_, _) => DataType::MAP,
+            CqlType::Tuple(_) => DataType::LIST, // Map to closest existing
+            CqlType::Udt(_, _) => DataType::JSON, // Map to closest existing
+            CqlType::Frozen(_) => DataType::BLOB, // Map to closest existing
+            _ => DataType::TEXT, // Default fallback
+        };
+        data.push(data_type_id);
 
         // Value data with Cassandra VInt length encoding
         let value_bytes = self.serialize_value_cassandra_compatible(value)?;

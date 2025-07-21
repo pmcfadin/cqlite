@@ -276,8 +276,27 @@ impl MemTable {
                 .sum(),
             Some(Value::Map(m)) => m
                 .iter()
-                .map(|(k, v)| k.len() + self.estimate_value_size(&Some(v.clone())))
+                .map(|(k, v)| {
+                    self.estimate_value_size(&Some(k.clone()))
+                        + self.estimate_value_size(&Some(v.clone()))
+                })
                 .sum(),
+            Some(Value::TinyInt(_)) => 1,
+            Some(Value::SmallInt(_)) => 2,
+            Some(Value::Float32(_)) => 4,
+            Some(Value::Set(s)) => s
+                .iter()
+                .map(|v| self.estimate_value_size(&Some(v.clone())))
+                .sum(),
+            Some(Value::Tuple(t)) => t
+                .iter()
+                .map(|v| self.estimate_value_size(&Some(v.clone())))
+                .sum(),
+            Some(Value::Udt(udt)) => udt.fields
+                .iter()
+                .map(|f| self.estimate_value_size(&f.value))
+                .sum(),
+            Some(Value::Frozen(boxed_val)) => self.estimate_value_size(&Some((**boxed_val).clone())),
         }
     }
 }

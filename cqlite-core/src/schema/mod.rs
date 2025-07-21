@@ -87,7 +87,7 @@ pub struct Column {
 }
 
 /// Parsed CQL data type
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CqlType {
     // Primitive types
     Boolean,
