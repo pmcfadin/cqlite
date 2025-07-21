@@ -9,6 +9,12 @@ pub mod performance_benchmarks;
 pub mod sstable_format_tests;
 pub mod type_system_tests;
 
+// SSTable validation and testing modules
+pub mod sstable_validator;
+pub mod format_verifier;
+pub mod sstable_benchmark;
+pub mod complex_data_test;
+
 // Advanced Performance Testing Modules
 pub mod performance_benchmark_runner;
 pub mod performance_regression_framework;
@@ -86,12 +92,17 @@ pub use edge_case_runner::{
 
 // Comprehensive integration testing modules
 pub mod cli_integration_tests;
+pub mod collection_compatibility_tests;
 pub mod comprehensive_integration_tests;
 pub mod real_sstable_test_fixtures;
 pub mod validation_test_runner;
 
 // Re-export comprehensive integration testing components
 pub use cli_integration_tests::{CLIIntegrationTestSuite, CLITestConfig, CLITestResult};
+pub use collection_compatibility_tests::{
+    CollectionCompatibilityTester, TestResult as CollectionTestResult, 
+    PerformanceMetrics as CollectionPerformanceMetrics,
+};
 pub use comprehensive_integration_tests::{
     ComprehensiveIntegrationTestSuite, IntegrationTestConfig, IntegrationTestResults,
     PerformanceMetrics, TestReport, TestStatus,
@@ -104,6 +115,28 @@ pub use validation_test_runner::{
     CLIValidationResult, FixtureValidationResult, PerformanceValidationResult, ReportFormat,
     ValidationTestConfig, ValidationTestResults, ValidationTestRunner,
 };
+
+// Complex Type Validation Modules - M3 Validation Engineer
+pub mod complex_type_validation_suite;
+pub mod real_cassandra_data_validator;
+pub mod performance_complex_types_benchmark;
+
+// Re-export complex type validation components
+pub use complex_type_validation_suite::{
+    ComplexTypeValidationConfig, ComplexTypeValidationResults, ComplexTypeValidationSuite,
+};
+pub use real_cassandra_data_validator::{
+    RealCassandraDataValidator, RealDataValidationConfig, RealDataValidationResults,
+};
+pub use performance_complex_types_benchmark::{
+    ComplexTypePerformanceBenchmark, ComplexTypeBenchmarkConfig, ComplexTypeBenchmarkResults,
+};
+
+// Re-export SSTable validation components
+pub use sstable_validator::{run_validation, SSTableValidator};
+pub use format_verifier::{verify_sstable_format, SSTableFormatVerifier, FormatVerificationResult};
+pub use sstable_benchmark::{run_comprehensive_benchmark, BenchmarkConfig, BenchmarkResults, SSTableBenchmark};
+pub use complex_data_test::{run_complex_data_tests, ComplexDataTestSuite, ComplexDataTestResults};
 
 #[cfg(test)]
 mod tests {

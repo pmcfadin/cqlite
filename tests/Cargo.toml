@@ -64,3 +64,11 @@ path = "benchmarks/compatibility_testing.rs"
 [[bin]]
 name = "compatibility_test_runner"
 path = "src/bin/compatibility_test_runner.rs"
+
+[[bin]]
+name = "complex_type_validation_runner"
+path = "src/bin/complex_type_validation_runner.rs"
+
+[[bin]]
+name = "sstable_test_runner"
+path = "src/bin/sstable_test_runner.rs"
