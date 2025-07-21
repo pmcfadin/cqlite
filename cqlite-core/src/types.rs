@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use crate::schema::CqlType;
 
 /// Database value type that can hold any supported data type
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,35 +42,261 @@ pub enum Value {
     Map(Vec<(Value, Value)>),
     /// Tuple with fixed-size heterogeneous types
     Tuple(Vec<Value>),
-    /// User defined type with type name and fields
-    Udt(String, HashMap<String, Value>),
+    /// User defined type with structured fields
+    Udt(UdtValue),
     /// Frozen wrapper for collections (immutable)
     Frozen(Box<Value>),
 }
 
+/// User Defined Type value with structured field access
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UdtValue {
+    /// UDT type name
+    pub type_name: String,
+    /// Keyspace where the UDT is defined
+    pub keyspace: String,
+    /// Ordered list of fields (matches schema definition order)
+    pub fields: Vec<UdtField>,
+}
+
+/// UDT field with name and optional value
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UdtField {
+    /// Field name
+    pub name: String,
+    /// Field value (None represents null)
+    pub value: Option<Value>,
+}
+
+/// UDT type definition for schema management
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UdtTypeDef {
+    /// Keyspace name
+    pub keyspace: String,
+    /// UDT type name
+    pub name: String,
+    /// Field definitions in schema order
+    pub fields: Vec<UdtFieldDef>,
+}
+
+/// UDT field definition in schema
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UdtFieldDef {
+    /// Field name
+    pub name: String,
+    /// Field data type
+    pub field_type: CqlType,
+    /// Whether the field can be null (default: true)
+    #[serde(default = "default_nullable")]
+    pub nullable: bool,
+}
+
+/// Tuple value with positional fields
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TupleValue {
+    /// Positional fields (None represents null)
+    pub fields: Vec<Option<Value>>,
+}
+
+fn default_nullable() -> bool {
+    true
+}
+
+impl UdtValue {
+    /// Create a new UDT value
+    pub fn new(type_name: String, keyspace: String) -> Self {
+        Self {
+            type_name,
+            keyspace,
+            fields: Vec::new(),
+        }
+    }
+
+    /// Add a field to the UDT
+    pub fn with_field(mut self, name: String, value: Option<Value>) -> Self {
+        self.fields.push(UdtField { name, value });
+        self
+    }
+
+    /// Get a field value by name
+    pub fn get_field(&self, name: &str) -> Option<&Value> {
+        self.fields.iter()
+            .find(|f| f.name == name)
+            .and_then(|f| f.value.as_ref())
+    }
+
+    /// Set a field value
+    pub fn set_field(&mut self, name: String, value: Option<Value>) {
+        if let Some(field) = self.fields.iter_mut().find(|f| f.name == name) {
+            field.value = value;
+        } else {
+            self.fields.push(UdtField { name, value });
+        }
+    }
+
+    /// Get all field names
+    pub fn field_names(&self) -> Vec<&str> {
+        self.fields.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    /// Get number of fields
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+}
+
+impl UdtTypeDef {
+    /// Create a new UDT type definition
+    pub fn new(keyspace: String, name: String) -> Self {
+        Self {
+            keyspace,
+            name,
+            fields: Vec::new(),
+        }
+    }
+
+    /// Add a field definition
+    pub fn with_field(mut self, name: String, field_type: CqlType, nullable: bool) -> Self {
+        self.fields.push(UdtFieldDef {
+            name,
+            field_type,
+            nullable,
+        });
+        self
+    }
+
+    /// Get field definition by name
+    pub fn get_field(&self, name: &str) -> Option<&UdtFieldDef> {
+        self.fields.iter().find(|f| f.name == name)
+    }
+
+    /// Validate UDT value against this type definition
+    pub fn validate_value(&self, value: &UdtValue) -> crate::Result<()> {
+        // Check that type names match
+        if value.type_name != self.name {
+            return Err(crate::Error::schema(format!(
+                "UDT type name mismatch: expected '{}', found '{}'",
+                self.name, value.type_name
+            )));
+        }
+
+        // Check that keyspace matches
+        if value.keyspace != self.keyspace {
+            return Err(crate::Error::schema(format!(
+                "UDT keyspace mismatch: expected '{}', found '{}'",
+                self.keyspace, value.keyspace
+            )));
+        }
+
+        // Validate each field
+        for field_def in &self.fields {
+            if let Some(field_value) = value.get_field(&field_def.name) {
+                // Field is present, check type compatibility
+                if field_value.data_type() != field_def.field_type {
+                    return Err(crate::Error::schema(format!(
+                        "Field '{}' type mismatch: expected {:?}, found {:?}",
+                        field_def.name, field_def.field_type, field_value.data_type()
+                    )));
+                }
+            } else if !field_def.nullable {
+                // Field is missing but not nullable
+                return Err(crate::Error::schema(format!(
+                    "Non-nullable field '{}' is missing",
+                    field_def.name
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_compatible_type(value_type: &DataType, expected_type: &DataType) -> bool {
+        // For now, require exact match - could be extended for type coercion
+        value_type == expected_type
+    }
+}
+
+impl TupleValue {
+    /// Create a new tuple value
+    pub fn new(fields: Vec<Option<Value>>) -> Self {
+        Self { fields }
+    }
+
+    /// Get field by position
+    pub fn get_field(&self, index: usize) -> Option<&Value> {
+        self.fields.get(index).and_then(|f| f.as_ref())
+    }
+
+    /// Set field by position
+    pub fn set_field(&mut self, index: usize, value: Option<Value>) {
+        if index < self.fields.len() {
+            self.fields[index] = value;
+        }
+    }
+
+    /// Get field count
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+}
+
 impl Value {
     /// Get the data type of this value
-    pub fn data_type(&self) -> DataType {
+    pub fn data_type(&self) -> CqlType {
         match self {
-            Value::Null => DataType::Null,
-            Value::Boolean(_) => DataType::Boolean,
-            Value::Integer(_) => DataType::Integer,
-            Value::BigInt(_) => DataType::BigInt,
-            Value::Float(_) => DataType::Float,
-            Value::Text(_) => DataType::Text,
-            Value::Blob(_) => DataType::Blob,
-            Value::Timestamp(_) => DataType::Timestamp,
-            Value::Uuid(_) => DataType::Uuid,
-            Value::Json(_) => DataType::Json,
-            Value::TinyInt(_) => DataType::TinyInt,
-            Value::SmallInt(_) => DataType::SmallInt,
-            Value::Float32(_) => DataType::Float32,
-            Value::List(_) => DataType::List,
-            Value::Set(_) => DataType::Set,
-            Value::Map(_) => DataType::Map,
-            Value::Tuple(_) => DataType::Tuple,
-            Value::Udt(_, _) => DataType::Udt,
-            Value::Frozen(_) => DataType::Frozen,
+            Value::Null => CqlType::Text, // Default type for null
+            Value::Boolean(_) => CqlType::Boolean,
+            Value::Integer(_) => CqlType::Int,
+            Value::BigInt(_) => CqlType::BigInt,
+            Value::Float(_) => CqlType::Double,
+            Value::Text(_) => CqlType::Text,
+            Value::Blob(_) => CqlType::Blob,
+            Value::Timestamp(_) => CqlType::Timestamp,
+            Value::Uuid(_) => CqlType::Uuid,
+            Value::Json(_) => CqlType::Text, // JSON stored as text
+            Value::TinyInt(_) => CqlType::TinyInt,
+            Value::SmallInt(_) => CqlType::SmallInt,
+            Value::Float32(_) => CqlType::Float,
+            Value::List(elements) => {
+                let element_type = if elements.is_empty() {
+                    CqlType::Text
+                } else {
+                    elements[0].data_type()
+                };
+                CqlType::List(Box::new(element_type))
+            },
+            Value::Set(elements) => {
+                let element_type = if elements.is_empty() {
+                    CqlType::Text
+                } else {
+                    elements[0].data_type()
+                };
+                CqlType::Set(Box::new(element_type))
+            },
+            Value::Map(pairs) => {
+                let (key_type, value_type) = if pairs.is_empty() {
+                    (CqlType::Text, CqlType::Text)
+                } else {
+                    (pairs[0].0.data_type(), pairs[0].1.data_type())
+                };
+                CqlType::Map(Box::new(key_type), Box::new(value_type))
+            },
+            Value::Tuple(fields) => {
+                let field_types = fields.iter().map(|f| f.data_type()).collect();
+                CqlType::Tuple(field_types)
+            },
+            Value::Udt(udt) => {
+                let fields = udt.fields.iter().map(|f| {
+                    let field_type = if let Some(ref value) = f.value {
+                        value.data_type()
+                    } else {
+                        CqlType::Text // Default for null fields
+                    };
+                    (f.name.clone(), field_type)
+                }).collect();
+                CqlType::Udt(udt.type_name.clone(), fields)
+            },
+            Value::Frozen(inner) => CqlType::Frozen(Box::new(inner.data_type())),
         }
     }
 
@@ -136,6 +363,177 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Get the size in bytes for this value when serialized
+    pub fn size_estimate(&self) -> usize {
+        match self {
+            Value::Null => 1,
+            Value::Boolean(_) => 1,
+            Value::TinyInt(_) => 1,
+            Value::SmallInt(_) => 2,
+            Value::Integer(_) => 4,
+            Value::BigInt(_) => 8,
+            Value::Float32(_) => 4,
+            Value::Float(_) => 8,
+            Value::Text(s) => 4 + s.len(), // VInt length + content
+            Value::Blob(b) => 4 + b.len(), // VInt length + content
+            Value::Timestamp(_) => 8,
+            Value::Uuid(_) => 16,
+            Value::Json(j) => {
+                let json_str = j.to_string();
+                4 + json_str.len()
+            },
+            Value::List(list) => {
+                let mut size = 4 + 1; // count + element type
+                for item in list {
+                    size += item.size_estimate();
+                }
+                size
+            },
+            Value::Set(set) => {
+                let mut size = 4 + 1; // count + element type
+                for item in set {
+                    size += item.size_estimate();
+                }
+                size
+            },
+            Value::Map(map) => {
+                let mut size = 4 + 2; // count + key_type + value_type
+                for (key, value) in map {
+                    size += key.size_estimate() + value.size_estimate();
+                }
+                size
+            },
+            Value::Tuple(tuple) => {
+                let mut size = 4; // count
+                for item in tuple {
+                    size += 1 + item.size_estimate(); // type + value
+                }
+                size
+            },
+            Value::Udt(udt_value) => {
+                let mut size = 4 + udt_value.type_name.len() + 4 + udt_value.keyspace.len() + 4; // type name + keyspace + field count
+                for field in &udt_value.fields {
+                    size += 4 + field.name.len(); // field name length + field name
+                    if let Some(ref field_value) = field.value {
+                        size += 1 + field_value.size_estimate(); // type + value
+                    } else {
+                        size += 1; // null marker
+                    }
+                }
+                size
+            },
+            Value::Frozen(inner) => inner.size_estimate(),
+        }
+    }
+
+    /// Check if this value represents an empty collection
+    pub fn is_empty_collection(&self) -> bool {
+        match self {
+            Value::List(list) => list.is_empty(),
+            Value::Set(set) => set.is_empty(),
+            Value::Map(map) => map.is_empty(),
+            Value::Tuple(tuple) => tuple.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Get the element count for collections
+    pub fn collection_len(&self) -> Option<usize> {
+        match self {
+            Value::List(list) => Some(list.len()),
+            Value::Set(set) => Some(set.len()),
+            Value::Map(map) => Some(map.len()),
+            Value::Tuple(tuple) => Some(tuple.len()),
+            _ => None,
+        }
+    }
+
+    /// Check if this value can be used as a collection element
+    pub fn is_valid_collection_element(&self) -> bool {
+        match self {
+            Value::Null => false, // Null elements typically not allowed in collections
+            _ => true,
+        }
+    }
+
+    /// Validate collection type consistency
+    pub fn validate_collection_types(&self) -> crate::Result<()> {
+        match self {
+            Value::List(list) => {
+                if list.is_empty() {
+                    return Ok(());
+                }
+                let first_type = list[0].data_type();
+                for item in list.iter().skip(1) {
+                    if item.data_type() != first_type {
+                        return Err(crate::Error::schema(
+                            format!("List contains mixed types: {:?} and {:?}", first_type, item.data_type())
+                        ));
+                    }
+                }
+                Ok(())
+            },
+            Value::Set(set) => {
+                if set.is_empty() {
+                    return Ok(());
+                }
+                let first_type = set[0].data_type();
+                for item in set.iter().skip(1) {
+                    if item.data_type() != first_type {
+                        return Err(crate::Error::schema(
+                            format!("Set contains mixed types: {:?} and {:?}", first_type, item.data_type())
+                        ));
+                    }
+                }
+                // Check for duplicates in set
+                let mut seen = std::collections::HashSet::new();
+                for item in set {
+                    let item_str = format!("{}", item);
+                    if !seen.insert(item_str.clone()) {
+                        return Err(crate::Error::schema(
+                            format!("Set contains duplicate value: {}", item_str)
+                        ));
+                    }
+                }
+                Ok(())
+            },
+            Value::Map(map) => {
+                if map.is_empty() {
+                    return Ok(());
+                }
+                let (first_key, first_value) = &map[0];
+                let key_type = first_key.data_type();
+                let value_type = first_value.data_type();
+                
+                for (key, value) in map.iter().skip(1) {
+                    if key.data_type() != key_type {
+                        return Err(crate::Error::schema(
+                            format!("Map contains mixed key types: {:?} and {:?}", key_type, key.data_type())
+                        ));
+                    }
+                    if value.data_type() != value_type {
+                        return Err(crate::Error::schema(
+                            format!("Map contains mixed value types: {:?} and {:?}", value_type, value.data_type())
+                        ));
+                    }
+                }
+                
+                // Check for duplicate keys
+                let mut seen_keys = std::collections::HashSet::new();
+                for (key, _) in map {
+                    let key_str = format!("{}", key);
+                    if !seen_keys.insert(key_str.clone()) {
+                        return Err(crate::Error::schema(
+                            format!("Map contains duplicate key: {}", key_str)
+                        ));
+                    }
+                }
+                Ok(())
+            },
+            _ => Ok(()), // Non-collections are always valid
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -196,13 +594,16 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
-            Value::Udt(type_name, fields) => {
-                write!(f, "{}{{", type_name)?;
-                for (i, (field_name, field_value)) in fields.iter().enumerate() {
+            Value::Udt(udt) => {
+                write!(f, "{}{{", udt.type_name)?;
+                for (i, field) in udt.fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}: {}", field_name, field_value)?;
+                    match &field.value {
+                        Some(value) => write!(f, "{}: {}", field.name, value)?,
+                        None => write!(f, "{}: NULL", field.name)?,
+                    }
                 }
                 write!(f, "}}")
             }
@@ -300,7 +701,11 @@ impl DataType {
             DataType::Set => Value::Set(Vec::new()),
             DataType::Map => Value::Map(Vec::new()),
             DataType::Tuple => Value::Tuple(Vec::new()),
-            DataType::Udt => Value::Udt(String::new(), HashMap::new()),
+            DataType::Udt => Value::Udt(UdtValue {
+                type_name: String::new(),
+                keyspace: String::new(),
+                fields: Vec::new(),
+            }),
             DataType::Frozen => Value::Frozen(Box::new(Value::Null)),
         }
     }
@@ -464,9 +869,9 @@ mod tests {
 
     #[test]
     fn test_value_types() {
-        assert_eq!(Value::Integer(42).data_type(), DataType::Integer);
-        assert_eq!(Value::Text("hello".to_string()).data_type(), DataType::Text);
-        assert_eq!(Value::Boolean(true).data_type(), DataType::Boolean);
+        assert_eq!(Value::Integer(42).data_type(), CqlType::Int);
+        assert_eq!(Value::Text("hello".to_string()).data_type(), CqlType::Text);
+        assert_eq!(Value::Boolean(true).data_type(), CqlType::Boolean);
     }
 
     #[test]
@@ -500,15 +905,19 @@ mod tests {
             Value::Text("hello".to_string()),
             Value::Boolean(true),
         ]);
-        assert_eq!(tuple.data_type(), DataType::Tuple);
+        assert_eq!(tuple.data_type(), CqlType::Tuple(vec![]));
         assert_eq!(tuple.to_string(), "(42, 'hello', true)");
 
         // Test UDT
-        let mut fields = HashMap::new();
-        fields.insert("name".to_string(), Value::Text("John".to_string()));
-        fields.insert("age".to_string(), Value::Integer(30));
-        let udt = Value::Udt("Person".to_string(), fields);
-        assert_eq!(udt.data_type(), DataType::Udt);
+        let udt = Value::Udt(UdtValue {
+            type_name: "Person".to_string(),
+            keyspace: "test".to_string(),
+            fields: vec![
+                UdtField { name: "name".to_string(), value: Some(Value::Text("John".to_string())) },
+                UdtField { name: "age".to_string(), value: Some(Value::Integer(30)) },
+            ],
+        });
+        assert!(matches!(udt.data_type(), CqlType::Udt { .. }));
         assert!(udt.to_string().contains("Person{"));
 
         // Test Frozen
@@ -517,7 +926,7 @@ mod tests {
             Value::Integer(2),
             Value::Integer(3),
         ])));
-        assert_eq!(frozen_list.data_type(), DataType::Frozen);
+        assert!(matches!(frozen_list.data_type(), CqlType::Frozen(..)));
         assert_eq!(frozen_list.to_string(), "FROZEN([1, 2, 3])");
     }
 
@@ -531,7 +940,7 @@ mod tests {
         assert_eq!(DataType::Tuple.default_value(), Value::Tuple(Vec::new()));
         assert_eq!(
             DataType::Udt.default_value(),
-            Value::Udt(String::new(), HashMap::new())
+            Value::Udt(UdtValue::new(String::new(), String::new()))
         );
         assert_eq!(
             DataType::Frozen.default_value(),

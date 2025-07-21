@@ -9,16 +9,31 @@
 //! - Error handling for parser operations
 
 pub mod benchmarks;
+pub mod collection_benchmarks;
+#[cfg(test)]
+pub mod collection_tests;
+pub mod complex_types;
 pub mod header;
 pub mod types;
 pub mod validation;
 pub mod vint;
 
+// M3 Performance Optimization Modules
+pub mod optimized_complex_types;
+pub mod m3_performance_benchmarks;
+pub mod performance_regression_framework;
+
 pub use benchmarks::*;
+pub use complex_types::*;
 pub use header::*;
 pub use types::*;
 pub use validation::*;
 pub use vint::*;
+
+// Re-export M3 performance modules
+pub use optimized_complex_types::OptimizedComplexTypeParser;
+pub use m3_performance_benchmarks::{M3PerformanceBenchmarks, PerformanceTargets};
+pub use performance_regression_framework::{PerformanceRegressionFramework, RegressionThresholds};
 
 use crate::error::{Error, Result};
 use nom::{error::ParseError, IResult};

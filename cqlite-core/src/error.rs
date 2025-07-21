@@ -188,6 +188,11 @@ impl Error {
         Self::Internal(msg.into())
     }
 
+    /// Create a validation error
+    pub fn validation(msg: impl Into<String>) -> Self {
+        Self::InvalidOperation(msg.into())
+    }
+
     /// Check if this error is recoverable
     pub fn is_recoverable(&self) -> bool {
         match self {
@@ -320,6 +325,33 @@ impl From<serde_json::Error> for Error {
         Error::Serialization(err.to_string())
     }
 }
+
+/// Convert from nom errors
+impl<I> From<nom::Err<nom::error::Error<I>>> for Error 
+where 
+    I: std::fmt::Debug 
+{
+    fn from(err: nom::Err<nom::error::Error<I>>) -> Self {
+        Error::SqlParse(format!("Parse error: {:?}", err))
+    }
+}
+
+// Helper function to create custom parse error type
+pub type ParseResult<I, O> = nom::IResult<I, O, Error>;
+
+/// Custom error type for parsing operations
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    pub message: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ParseError {}
 
 #[cfg(test)]
 mod tests {

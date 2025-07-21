@@ -7,7 +7,7 @@
 use super::vint::{encode_vint, parse_vint, parse_vint_length};
 use crate::{
     error::{Error, Result},
-    types::Value,
+    types::{Value, UdtValue, UdtField},
 };
 use nom::{
     bytes::complete::take,
@@ -15,7 +15,6 @@ use nom::{
     number::complete::{be_f32, be_f64, be_i32, be_i64, be_u16, be_u32, be_u8},
     IResult,
 };
-use std::collections::HashMap;
 
 /// CQL type identifiers as they appear in the binary format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,8 +115,10 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
         CqlTypeId::List => parse_list(input),
         CqlTypeId::Set => parse_set(input),
         CqlTypeId::Map => parse_map(input),
-        CqlTypeId::Custom | CqlTypeId::Udt | CqlTypeId::Tuple => {
-            // These types require additional metadata, return as blob for now
+        CqlTypeId::Udt => parse_udt(input),
+        CqlTypeId::Tuple => parse_tuple(input),
+        CqlTypeId::Custom => {
+            // Custom types require additional metadata, return as blob for now
             parse_blob(input)
         }
     }
@@ -272,24 +273,142 @@ pub fn parse_map(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, key_type) = parse_cql_type_id(input)?;
     let (input, value_type) = parse_cql_type_id(input)?;
 
-    let mut map = HashMap::new();
+    let mut map = Vec::new();
     let mut remaining = input;
 
     for _ in 0..count {
         let (new_remaining, key) = parse_cql_value(remaining, key_type)?;
         let (new_remaining, value) = parse_cql_value(new_remaining, value_type)?;
 
-        // Convert key to string for HashMap
-        let key_str = match key {
-            Value::Text(s) => s,
-            other => format!("{}", other),
-        };
-
-        map.insert(key_str, value);
+        map.push((key, value));
         remaining = new_remaining;
     }
 
     Ok((remaining, Value::Map(map)))
+}
+
+/// Parse UDT value according to Cassandra format specification
+pub fn parse_udt(input: &[u8]) -> IResult<&[u8], Value> {
+    // Parse UDT type name length and name
+    let (input, type_name_length) = parse_vint_length(input)?;
+    let (input, type_name_bytes) = take(type_name_length)(input)?;
+    let type_name = String::from_utf8(type_name_bytes.to_vec()).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
+
+    // Parse field count
+    let (input, field_count) = parse_vint_length(input)?;
+
+    // Parse field definitions (schema metadata)
+    let mut field_defs = Vec::with_capacity(field_count);
+    let mut remaining = input;
+
+    for _ in 0..field_count {
+        // Parse field name
+        let (new_remaining, field_name_length) = parse_vint_length(remaining)?;
+        let (new_remaining, field_name_bytes) = take(field_name_length)(new_remaining)?;
+        let field_name = String::from_utf8(field_name_bytes.to_vec()).map_err(|_| {
+            nom::Err::Error(nom::error::Error::new(new_remaining, nom::error::ErrorKind::Verify))
+        })?;
+
+        // Parse field type ID
+        let (new_remaining, field_type_id) = parse_cql_type_id(new_remaining)?;
+
+        field_defs.push((field_name, field_type_id));
+        remaining = new_remaining;
+    }
+
+    // Parse field values
+    let mut fields = Vec::with_capacity(field_count);
+    for (field_name, field_type_id) in field_defs {
+        // Parse field length
+        let (new_remaining, length) = be_i32(remaining)?;
+        remaining = new_remaining;
+
+        let field_value = if length == -1 {
+            // Null field
+            None
+        } else if length == 0 {
+            // Empty field
+            Some(create_empty_value(field_type_id).map_err(|e| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?)
+        } else {
+            // Field with data
+            let (new_remaining, field_data) = take(length as usize)(remaining)?;
+            remaining = new_remaining;
+            Some(parse_cql_value(field_data, field_type_id)?.1)
+        };
+
+        fields.push(UdtField {
+            name: field_name,
+            value: field_value,
+        });
+    }
+
+    let udt = UdtValue {
+        type_name,
+        keyspace: "unknown".to_string(), // Will be resolved from schema context
+        fields,
+    };
+
+    Ok((remaining, Value::Udt(udt)))
+}
+
+/// Parse tuple value according to Cassandra format specification
+pub fn parse_tuple(input: &[u8]) -> IResult<&[u8], Value> {
+    // Parse field count
+    let (input, field_count) = parse_vint_length(input)?;
+
+    // Parse field type definitions
+    let mut field_types = Vec::with_capacity(field_count);
+    let mut remaining = input;
+
+    for _ in 0..field_count {
+        let (new_remaining, field_type_id) = parse_cql_type_id(remaining)?;
+        field_types.push(field_type_id);
+        remaining = new_remaining;
+    }
+
+    // Parse field values (tuples must have exact field count, no sparse representation)
+    let mut fields = Vec::with_capacity(field_count);
+    for field_type_id in field_types {
+        // Parse field length
+        let (new_remaining, length) = be_i32(remaining)?;
+        remaining = new_remaining;
+
+        let field_value = if length == -1 {
+            Value::Null // Null field
+        } else {
+            let (new_remaining, field_data) = take(length as usize)(remaining)?;
+            remaining = new_remaining;
+            parse_cql_value(field_data, field_type_id)?.1
+        };
+
+        fields.push(field_value);
+    }
+
+    Ok((remaining, Value::Tuple(fields)))
+}
+
+/// Create an empty value for a given type ID
+fn create_empty_value(type_id: CqlTypeId) -> Result<Value> {
+    match type_id {
+        CqlTypeId::Boolean => Ok(Value::Boolean(false)),
+        CqlTypeId::Tinyint => Ok(Value::TinyInt(0)),
+        CqlTypeId::Smallint => Ok(Value::SmallInt(0)),
+        CqlTypeId::Int => Ok(Value::Integer(0)),
+        CqlTypeId::BigInt | CqlTypeId::Counter => Ok(Value::BigInt(0)),
+        CqlTypeId::Float => Ok(Value::Float32(0.0)),
+        CqlTypeId::Double => Ok(Value::Float(0.0)),
+        CqlTypeId::Ascii | CqlTypeId::Varchar => Ok(Value::Text(String::new())),
+        CqlTypeId::Blob => Ok(Value::Blob(Vec::new())),
+        CqlTypeId::Uuid | CqlTypeId::Timeuuid => Ok(Value::Uuid([0; 16])),
+        CqlTypeId::Timestamp => Ok(Value::Timestamp(0)),
+        CqlTypeId::List => Ok(Value::List(Vec::new())),
+        CqlTypeId::Set => Ok(Value::Set(Vec::new())),
+        CqlTypeId::Map => Ok(Value::Map(Vec::new())),
+        CqlTypeId::Tuple => Ok(Value::Tuple(Vec::new())),
+        _ => Ok(Value::Null),
+    }
 }
 
 /// Serialize a CQL value to bytes
@@ -362,20 +481,108 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
             result.push(CqlTypeId::Map as u8);
             result.extend_from_slice(&encode_vint(map.len() as i64));
 
-            // Assume string keys and mixed values
-            result.push(CqlTypeId::Varchar as u8); // Key type
-            result.push(CqlTypeId::Varchar as u8); // Value type (simplified)
+            // For simplicity, assume all keys and values are the same type
+            if let Some((first_key, first_value)) = map.first() {
+                let key_type = map_value_to_cql_type(first_key);
+                let value_type = map_value_to_cql_type(first_value);
+                result.push(key_type as u8);
+                result.push(value_type as u8);
 
-            for (key, value) in map {
-                // Serialize key
-                result.extend_from_slice(&encode_vint(key.len() as i64));
-                result.extend_from_slice(key.as_bytes());
-
-                // Serialize value as string
-                let value_str = format!("{}", value);
-                result.extend_from_slice(&encode_vint(value_str.len() as i64));
-                result.extend_from_slice(value_str.as_bytes());
+                for (key, value) in map {
+                    let key_bytes = serialize_cql_value(key)?;
+                    let value_bytes = serialize_cql_value(value)?;
+                    
+                    result.extend_from_slice(&key_bytes[1..]); // Skip type byte
+                    result.extend_from_slice(&value_bytes[1..]); // Skip type byte
+                }
             }
+        }
+        Value::TinyInt(i) => {
+            result.push(CqlTypeId::Tinyint as u8);
+            result.push(*i as u8);
+        }
+        Value::SmallInt(i) => {
+            result.push(CqlTypeId::Smallint as u8);
+            result.extend_from_slice(&i.to_be_bytes());
+        }
+        Value::Float32(f) => {
+            result.push(CqlTypeId::Float as u8);
+            result.extend_from_slice(&f.to_be_bytes());
+        }
+        Value::Set(set) => {
+            result.push(CqlTypeId::Set as u8);
+            result.extend_from_slice(&encode_vint(set.len() as i64));
+            
+            if let Some(first) = set.first() {
+                let element_type = map_value_to_cql_type(first);
+                result.push(element_type as u8);
+                
+                for element in set {
+                    let element_bytes = serialize_cql_value(element)?;
+                    result.extend_from_slice(&element_bytes[1..]); // Skip type byte
+                }
+            }
+        }
+        Value::Tuple(tuple) => {
+            result.push(CqlTypeId::Tuple as u8);
+            result.extend_from_slice(&encode_vint(tuple.len() as i64));
+            
+            // Serialize type information for each field
+            for element in tuple {
+                let element_type = map_value_to_cql_type(element);
+                result.push(element_type as u8);
+            }
+            
+            // Serialize field values
+            for element in tuple {
+                let element_bytes = serialize_cql_value(element)?;
+                result.extend_from_slice(&element_bytes[1..]); // Skip type byte
+            }
+        }
+        Value::Udt(udt) => {
+            result.push(CqlTypeId::Udt as u8);
+            
+            // Serialize type name
+            result.extend_from_slice(&encode_vint(udt.type_name.len() as i64));
+            result.extend_from_slice(udt.type_name.as_bytes());
+            
+            // Serialize field count
+            result.extend_from_slice(&encode_vint(udt.fields.len() as i64));
+            
+            // Serialize field definitions
+            for field in &udt.fields {
+                result.extend_from_slice(&encode_vint(field.name.len() as i64));
+                result.extend_from_slice(field.name.as_bytes());
+                
+                // Serialize field type (inferred from value or use blob as fallback)
+                let field_type = match &field.value {
+                    Some(value) => map_value_to_cql_type(value),
+                    None => CqlTypeId::Blob, // Null field, use generic type
+                };
+                result.push(field_type as u8);
+            }
+            
+            // Serialize field values
+            for field in &udt.fields {
+                match &field.value {
+                    None => {
+                        // Null field: length = -1
+                        result.extend_from_slice(&(-1i32).to_be_bytes());
+                    }
+                    Some(value) => {
+                        let field_bytes = serialize_cql_value(value)?;
+                        // Remove the type ID byte since it's already in the schema
+                        let field_data = &field_bytes[1..];
+                        result.extend_from_slice(&(field_data.len() as i32).to_be_bytes());
+                        result.extend_from_slice(field_data);
+                    }
+                }
+            }
+        }
+        Value::Frozen(boxed_value) => {
+            // For frozen values, just serialize the inner value
+            let inner_bytes = serialize_cql_value(boxed_value)?;
+            result.extend_from_slice(&inner_bytes);
         }
     }
 
@@ -394,8 +601,15 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
         Value::Timestamp(_) => CqlTypeId::Timestamp,
         Value::Uuid(_) => CqlTypeId::Uuid,
         Value::Json(_) => CqlTypeId::Varchar,
+        Value::TinyInt(_) => CqlTypeId::Tinyint,
+        Value::SmallInt(_) => CqlTypeId::Smallint,
+        Value::Float32(_) => CqlTypeId::Float,
         Value::List(_) => CqlTypeId::List,
+        Value::Set(_) => CqlTypeId::Set,
         Value::Map(_) => CqlTypeId::Map,
+        Value::Tuple(_) => CqlTypeId::Tuple,
+        Value::Udt(_) => CqlTypeId::Udt,
+        Value::Frozen(_) => CqlTypeId::Blob, // Frozen is a wrapper, use blob as fallback
     }
 }
 
@@ -465,5 +679,41 @@ mod tests {
             // which depends on the type context that's not always preserved
             assert!(!serialized.is_empty());
         }
+    }
+
+    #[test]
+    fn test_udt_serialization() {
+        // Test UDT serialization
+        let udt = UdtValue {
+            type_name: "Person".to_string(),
+            keyspace: "test".to_string(),
+            fields: vec![
+                UdtField { name: "name".to_string(), value: Some(Value::Text("John".to_string())) },
+                UdtField { name: "age".to_string(), value: Some(Value::Integer(30)) },
+                UdtField { name: "email".to_string(), value: None }, // Null field
+            ],
+        };
+
+        let serialized = serialize_cql_value(&Value::Udt(udt)).unwrap();
+        assert!(!serialized.is_empty());
+        
+        // Should start with UDT type ID
+        assert_eq!(serialized[0], CqlTypeId::Udt as u8);
+    }
+
+    #[test]
+    fn test_tuple_serialization() {
+        // Test tuple serialization
+        let tuple = vec![
+            Value::Text("hello".to_string()),
+            Value::Integer(42),
+            Value::Boolean(true),
+        ];
+
+        let serialized = serialize_cql_value(&Value::Tuple(tuple)).unwrap();
+        assert!(!serialized.is_empty());
+        
+        // Should start with Tuple type ID
+        assert_eq!(serialized[0], CqlTypeId::Tuple as u8);
     }
 }
