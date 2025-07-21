@@ -5,6 +5,7 @@ members = [
     "cqlite-wasm",
     "cqlite-cli",
     "tests",
+    "proof-of-concept",
 ]
 resolver = "2"
 

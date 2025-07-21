@@ -23,6 +23,9 @@ bincode = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
 # Compression and checksums
 lz4_flex = { workspace = true }
 snap = { version = "1.1", optional = true }
@@ -49,6 +52,7 @@ base64 = "0.21"
 uuid = { version = "1.10", features = ["v4"] }
 regex = "1.10"
 futures = "0.3"
+clap = { version = "4.4", features = ["derive"] }
 
 # Optional WASM support
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -60,6 +64,10 @@ web-sys = { workspace = true, features = ["console"], optional = true }
 criterion = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3.8"
+
+[[bin]]
+name = "memory_safety_validator"
+path = "src/bin/memory_safety_validator.rs"
 
 [features]
 default = ["compression", "metrics"]

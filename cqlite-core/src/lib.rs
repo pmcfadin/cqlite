@@ -18,6 +18,10 @@ pub mod query;
 pub mod schema;
 pub mod storage;
 
+// Memory safety testing modules
+pub mod memory_safety_tests;
+pub mod memory_safety_runner;
+
 // Re-export main types for convenience
 pub use crate::{
     config::Config,

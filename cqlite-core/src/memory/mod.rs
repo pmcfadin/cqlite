@@ -357,8 +357,15 @@ impl MemoryManager {
             Value::List(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
             Value::Map(map) => map
                 .iter()
-                .map(|(k, v)| k.len() + self.estimate_value_size(v))
+                .map(|(k, v)| self.estimate_value_size(k) + self.estimate_value_size(v))
                 .sum(),
+            Value::TinyInt(_) => 1,
+            Value::SmallInt(_) => 2,
+            Value::Float32(_) => 4,
+            Value::Set(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
+            Value::Tuple(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
+            Value::Udt(udt) => udt.fields.iter().map(|f| f.value.as_ref().map_or(0, |v| self.estimate_value_size(v))).sum(),
+            Value::Frozen(boxed_value) => self.estimate_value_size(boxed_value),
         }
     }
 }
