@@ -1,0 +1,30 @@
+[package]
+name = "cqlite-proof-of-concept"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "simple_demo"
+path = "src/bin/simple_demo.rs"
+
+[[bin]]
+name = "vint_demo"
+path = "src/bin/vint_demo.rs"
+
+[dependencies]
+cqlite-core = { path = "../cqlite-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Additional dependencies for demos
+criterion = { workspace = true }
+once_cell = { workspace = true }
