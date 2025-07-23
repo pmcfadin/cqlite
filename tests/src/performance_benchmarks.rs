@@ -636,7 +636,7 @@ impl PerformanceBenchmarks {
     /// Print comprehensive benchmark report
     fn print_benchmark_report(&self) {
         println!("\n🎯 PERFORMANCE BENCHMARK REPORT");
-        println!("=".repeat(60));
+        println!("{}", "=".repeat(60));
 
         println!("🔧 Configuration:");
         println!("  • Small dataset: {}", self.config.small_dataset_size);

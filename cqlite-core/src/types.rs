@@ -46,6 +46,8 @@ pub enum Value {
     Udt(UdtValue),
     /// Frozen wrapper for collections (immutable)
     Frozen(Box<Value>),
+    /// Tombstone marker indicating deleted data
+    Tombstone(TombstoneInfo),
 }
 
 /// User Defined Type value with structured field access
@@ -100,6 +102,34 @@ pub struct TupleValue {
 
 fn default_nullable() -> bool {
     true
+}
+
+/// Tombstone information for tracking deletions
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TombstoneInfo {
+    /// Deletion timestamp in microseconds since Unix epoch
+    pub deletion_time: i64,
+    /// Type of tombstone
+    pub tombstone_type: TombstoneType,
+    /// TTL if applicable (for TTL-based expiration)
+    pub ttl: Option<i64>,
+    /// Range start key for range tombstones
+    pub range_start: Option<RowKey>,
+    /// Range end key for range tombstones  
+    pub range_end: Option<RowKey>,
+}
+
+/// Types of tombstones in Cassandra
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TombstoneType {
+    /// Row-level deletion (entire row is deleted)
+    RowTombstone,
+    /// Cell-level deletion (specific column is deleted)
+    CellTombstone,
+    /// Range tombstone (a range of columns/rows is deleted)
+    RangeTombstone,
+    /// TTL expiration (data expired due to TTL)
+    TtlExpiration,
 }
 
 impl UdtValue {
@@ -192,7 +222,7 @@ impl UdtTypeDef {
         for field_def in &self.fields {
             if let Some(field_value) = value.get_field(&field_def.name) {
                 // Field is present, check type compatibility
-                if field_value.data_type() != field_def.field_type {
+                if !Self::is_compatible_type(&field_value.data_type(), &field_def.field_type) {
                     return Err(crate::Error::schema(format!(
                         "Field '{}' type mismatch: expected {:?}, found {:?}",
                         field_def.name, field_def.field_type, field_value.data_type()
@@ -210,7 +240,7 @@ impl UdtTypeDef {
         Ok(())
     }
 
-    fn is_compatible_type(value_type: &DataType, expected_type: &DataType) -> bool {
+    fn is_compatible_type(value_type: &CqlType, expected_type: &CqlType) -> bool {
         // For now, require exact match - could be extended for type coercion
         value_type == expected_type
     }
@@ -297,12 +327,151 @@ impl Value {
                 CqlType::Udt(udt.type_name.clone(), fields)
             },
             Value::Frozen(inner) => CqlType::Frozen(Box::new(inner.data_type())),
+            Value::Tombstone(_) => CqlType::Text, // Tombstones don't have a specific type
         }
     }
 
     /// Check if this value is null
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    /// Check if this value is a tombstone (deleted)
+    pub fn is_tombstone(&self) -> bool {
+        matches!(self, Value::Tombstone(_))
+    }
+
+    /// Check if this value is deleted (null or tombstone)
+    pub fn is_deleted(&self) -> bool {
+        self.is_null() || self.is_tombstone()
+    }
+
+    /// Check if this value has expired based on TTL
+    pub fn is_expired(&self, current_time: i64) -> bool {
+        match self {
+            Value::Tombstone(info) => {
+                // Check if TTL has expired
+                if let Some(ttl) = info.ttl {
+                    current_time > info.deletion_time + ttl
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
+
+    /// Get the deletion timestamp if this is a tombstone
+    pub fn deletion_time(&self) -> Option<i64> {
+        match self {
+            Value::Tombstone(info) => Some(info.deletion_time),
+            _ => None,
+        }
+    }
+
+    /// Create a row tombstone with the given timestamp
+    pub fn row_tombstone(deletion_time: i64) -> Self {
+        Value::Tombstone(TombstoneInfo {
+            deletion_time,
+            tombstone_type: TombstoneType::RowTombstone,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        })
+    }
+
+    /// Create a cell tombstone with the given timestamp
+    pub fn cell_tombstone(deletion_time: i64) -> Self {
+        Value::Tombstone(TombstoneInfo {
+            deletion_time,
+            tombstone_type: TombstoneType::CellTombstone,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        })
+    }
+
+    /// Create a TTL expiration tombstone
+    pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+        Value::Tombstone(TombstoneInfo {
+            deletion_time,
+            tombstone_type: TombstoneType::TtlExpiration,
+            ttl: Some(ttl),
+            range_start: None,
+            range_end: None,
+        })
+    }
+    
+    /// Create a range tombstone for clustering key ranges
+    pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+        Value::Tombstone(TombstoneInfo {
+            deletion_time,
+            tombstone_type: TombstoneType::RangeTombstone,
+            ttl: None,
+            range_start: Some(start_key),
+            range_end: Some(end_key),
+        })
+    }
+    
+    /// Create a range tombstone with TTL for clustering key ranges
+    pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+        Value::Tombstone(TombstoneInfo {
+            deletion_time,
+            tombstone_type: TombstoneType::RangeTombstone,
+            ttl: Some(ttl),
+            range_start: Some(start_key),
+            range_end: Some(end_key),
+        })
+    }
+    
+    /// Get the tombstone type if this is a tombstone
+    pub fn tombstone_type(&self) -> Option<TombstoneType> {
+        match self {
+            Value::Tombstone(info) => Some(info.tombstone_type),
+            _ => None,
+        }
+    }
+    
+    /// Check if this tombstone covers a specific key (for range tombstones)
+    pub fn tombstone_covers_key(&self, key: &RowKey) -> bool {
+        match self {
+            Value::Tombstone(info) if info.tombstone_type == TombstoneType::RangeTombstone => {
+                match (&info.range_start, &info.range_end) {
+                    (Some(start), Some(end)) => key >= start && key <= end,
+                    (Some(start), None) => key >= start,
+                    (None, Some(end)) => key <= end,
+                    (None, None) => false,
+                }
+            },
+            Value::Tombstone(_) => true, // Row and cell tombstones cover their specific key
+            _ => false,
+        }
+    }
+    
+    /// Get TTL information from tombstone
+    pub fn tombstone_ttl(&self) -> Option<i64> {
+        match self {
+            Value::Tombstone(info) => info.ttl,
+            _ => None,
+        }
+    }
+    
+    /// Check if this is a specific type of tombstone
+    pub fn is_tombstone_type(&self, tombstone_type: TombstoneType) -> bool {
+        match self {
+            Value::Tombstone(info) => info.tombstone_type == tombstone_type,
+            _ => false,
+        }
+    }
+    
+    /// Get range information for range tombstones
+    pub fn tombstone_range(&self) -> Option<(Option<&RowKey>, Option<&RowKey>)> {
+        match self {
+            Value::Tombstone(info) if info.tombstone_type == TombstoneType::RangeTombstone => {
+                Some((info.range_start.as_ref(), info.range_end.as_ref()))
+            },
+            _ => None,
+        }
     }
 
     /// Try to convert this value to a boolean
@@ -424,6 +593,7 @@ impl Value {
                 size
             },
             Value::Frozen(inner) => inner.size_estimate(),
+            Value::Tombstone(_) => 16, // timestamp + type + optional TTL
         }
     }
 
@@ -610,6 +780,20 @@ impl fmt::Display for Value {
             Value::Frozen(inner) => {
                 write!(f, "FROZEN({})", inner)
             }
+            Value::Tombstone(info) => {
+                match info.tombstone_type {
+                    TombstoneType::RowTombstone => write!(f, "TOMBSTONE(ROW@{})", info.deletion_time),
+                    TombstoneType::CellTombstone => write!(f, "TOMBSTONE(CELL@{})", info.deletion_time),
+                    TombstoneType::RangeTombstone => write!(f, "TOMBSTONE(RANGE@{})", info.deletion_time),
+                    TombstoneType::TtlExpiration => {
+                        if let Some(ttl) = info.ttl {
+                            write!(f, "TOMBSTONE(TTL@{}+{})", info.deletion_time, ttl)
+                        } else {
+                            write!(f, "TOMBSTONE(TTL@{})", info.deletion_time)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -655,6 +839,8 @@ pub enum DataType {
     Udt,
     /// Frozen type wrapper
     Frozen,
+    /// Tombstone marker
+    Tombstone,
 }
 
 impl DataType {
@@ -707,6 +893,13 @@ impl DataType {
                 fields: Vec::new(),
             }),
             DataType::Frozen => Value::Frozen(Box::new(Value::Null)),
+            DataType::Tombstone => Value::Tombstone(TombstoneInfo {
+                deletion_time: 0,
+                tombstone_type: TombstoneType::RowTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            }),
         }
     }
 }
@@ -733,6 +926,7 @@ impl fmt::Display for DataType {
             DataType::Tuple => "TUPLE",
             DataType::Udt => "UDT",
             DataType::Frozen => "FROZEN",
+            DataType::Tombstone => "TOMBSTONE",
         };
         write!(f, "{}", name)
     }
@@ -905,7 +1099,7 @@ mod tests {
             Value::Text("hello".to_string()),
             Value::Boolean(true),
         ]);
-        assert_eq!(tuple.data_type(), CqlType::Tuple(vec![]));
+        assert!(matches!(tuple.data_type(), CqlType::Tuple(_)));
         assert_eq!(tuple.to_string(), "(42, 'hello', true)");
 
         // Test UDT
@@ -917,7 +1111,7 @@ mod tests {
                 UdtField { name: "age".to_string(), value: Some(Value::Integer(30)) },
             ],
         });
-        assert!(matches!(udt.data_type(), CqlType::Udt { .. }));
+        assert!(matches!(udt.data_type(), CqlType::Udt(_, _)));
         assert!(udt.to_string().contains("Person{"));
 
         // Test Frozen
@@ -935,6 +1129,7 @@ mod tests {
         assert_eq!(DataType::Tuple.to_string(), "TUPLE");
         assert_eq!(DataType::Udt.to_string(), "UDT");
         assert_eq!(DataType::Frozen.to_string(), "FROZEN");
+        assert_eq!(DataType::Tombstone.to_string(), "TOMBSTONE");
 
         // Test default values
         assert_eq!(DataType::Tuple.default_value(), Value::Tuple(Vec::new()));
@@ -946,5 +1141,56 @@ mod tests {
             DataType::Frozen.default_value(),
             Value::Frozen(Box::new(Value::Null))
         );
+        assert!(matches!(
+            DataType::Tombstone.default_value(),
+            Value::Tombstone(_)
+        ));
+    }
+
+    #[test]
+    fn test_tombstone_functionality() {
+        // Test row tombstone creation
+        let row_tombstone = Value::row_tombstone(1000);
+        assert!(row_tombstone.is_tombstone());
+        assert!(row_tombstone.is_deleted());
+        assert_eq!(row_tombstone.deletion_time(), Some(1000));
+        assert!(!row_tombstone.is_expired(500)); // before deletion
+        assert!(!row_tombstone.is_expired(1500)); // TTL tombstones only expire
+
+        // Test cell tombstone creation
+        let cell_tombstone = Value::cell_tombstone(2000);
+        assert!(cell_tombstone.is_tombstone());
+        assert_eq!(cell_tombstone.deletion_time(), Some(2000));
+
+        // Test TTL tombstone creation
+        let ttl_tombstone = Value::ttl_tombstone(3000, 1000);
+        assert!(ttl_tombstone.is_tombstone());
+        assert_eq!(ttl_tombstone.deletion_time(), Some(3000));
+        assert!(!ttl_tombstone.is_expired(3500)); // within TTL
+        assert!(ttl_tombstone.is_expired(5000)); // past TTL
+
+        // Test regular values
+        let regular_value = Value::Integer(42);
+        assert!(!regular_value.is_tombstone());
+        assert!(!regular_value.is_deleted());
+        assert_eq!(regular_value.deletion_time(), None);
+        assert!(!regular_value.is_expired(1000));
+
+        // Test null values
+        let null_value = Value::Null;
+        assert!(!null_value.is_tombstone());
+        assert!(null_value.is_deleted()); // null is considered deleted
+    }
+
+    #[test]
+    fn test_tombstone_display() {
+        let row_tombstone = Value::row_tombstone(1000);
+        assert_eq!(row_tombstone.to_string(), "TOMBSTONE(ROW@1000)");
+
+        let cell_tombstone = Value::cell_tombstone(2000);
+        assert_eq!(cell_tombstone.to_string(), "TOMBSTONE(CELL@2000)");
+
+        let ttl_tombstone = Value::ttl_tombstone(3000, 1000);
+        assert_eq!(ttl_tombstone.to_string(), "TOMBSTONE(TTL@3000+1000)");
     }
 }

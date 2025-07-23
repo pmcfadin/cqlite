@@ -7,22 +7,19 @@ use super::vint::{encode_vint, parse_vint, parse_vint_length};
 use crate::{
     error::{Error, Result},
     types::{Value, UdtValue, UdtField, UdtTypeDef},
-    schema::CqlType,
+    schema::{CqlType, UdtRegistry},
 };
 use nom::{
-    bytes::complete::take,
-    combinator::{map, map_res},
     multi::count,
-    number::complete::{be_u16, be_u32, be_u8},
+    number::complete::be_u8,
     IResult,
 };
-use std::collections::HashMap;
 
 /// Complex type parser with Cassandra 5+ format support
 #[derive(Debug)]
 pub struct ComplexTypeParser {
     /// UDT type registry for schema lookups
-    pub udt_registry: HashMap<String, UdtTypeDef>,
+    pub udt_registry: UdtRegistry,
     /// Enable strict Cassandra 5+ format validation
     pub strict_format: bool,
     /// Maximum allowed nesting depth
@@ -32,7 +29,7 @@ pub struct ComplexTypeParser {
 impl Default for ComplexTypeParser {
     fn default() -> Self {
         Self {
-            udt_registry: HashMap::new(),
+            udt_registry: UdtRegistry::new(),
             strict_format: true,
             max_nesting_depth: 10,
         }
@@ -47,8 +44,16 @@ impl ComplexTypeParser {
 
     /// Register a UDT type definition for parsing
     pub fn register_udt(&mut self, udt_def: UdtTypeDef) {
-        let key = format!("{}.{}", udt_def.keyspace, udt_def.name);
-        self.udt_registry.insert(key, udt_def);
+        self.udt_registry.register_udt(udt_def);
+    }
+
+    /// Create parser with test UDTs for compatibility testing
+    pub fn with_test_udts() -> Self {
+        Self {
+            udt_registry: UdtRegistry::new(),
+            strict_format: true,
+            max_nesting_depth: 10,
+        }
     }
 
     /// Parse a collection (List, Set, Map) with Cassandra 5+ tuple format
@@ -156,9 +161,8 @@ impl ComplexTypeParser {
 
     /// Parse User Defined Type (UDT) with schema validation
     pub fn parse_udt<'a>(&'a self, input: &'a [u8], type_name: &str, keyspace: &str) -> IResult<&'a [u8], Value> {
-        // Look up UDT definition
-        let registry_key = format!("{}.{}", keyspace, type_name);
-        let udt_def = self.udt_registry.get(&registry_key)
+        // Look up UDT definition from registry
+        let udt_def = self.udt_registry.get_udt(keyspace, type_name)
             .ok_or_else(|| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
 
         // Cassandra format: [field_count:vint][field_values...]
@@ -202,11 +206,35 @@ impl ComplexTypeParser {
         Ok((remaining, Value::Udt(udt_value)))
     }
 
-    /// Parse Frozen type wrapper
+    /// Parse Frozen type wrapper with enhanced collection support
     pub fn parse_frozen<'a>(&'a self, input: &'a [u8], inner_type: &CqlType) -> IResult<&'a [u8], Value> {
-        // Frozen types are serialized the same as their inner type
+        // Frozen types are serialized the same as their inner type but immutable
         let (remaining, inner_value) = self.parse_typed_value(input, inner_type)?;
         Ok((remaining, Value::Frozen(Box::new(inner_value))))
+    }
+
+    /// Parse FROZEN<LIST<T>> with Cassandra 5+ format
+    pub fn parse_frozen_list<'a>(&'a self, input: &'a [u8]) -> IResult<&'a [u8], Value> {
+        let (remaining, list_value) = self.parse_list_v5(input)?;
+        Ok((remaining, Value::Frozen(Box::new(list_value))))
+    }
+
+    /// Parse FROZEN<SET<T>> with Cassandra 5+ format
+    pub fn parse_frozen_set<'a>(&'a self, input: &'a [u8]) -> IResult<&'a [u8], Value> {
+        let (remaining, set_value) = self.parse_set_v5(input)?;
+        Ok((remaining, Value::Frozen(Box::new(set_value))))
+    }
+
+    /// Parse FROZEN<MAP<K,V>> with Cassandra 5+ format
+    pub fn parse_frozen_map<'a>(&'a self, input: &'a [u8]) -> IResult<&'a [u8], Value> {
+        let (remaining, map_value) = self.parse_map_v5(input)?;
+        Ok((remaining, Value::Frozen(Box::new(map_value))))
+    }
+
+    /// Parse FROZEN<UDT> with enhanced validation
+    pub fn parse_frozen_udt<'a>(&'a self, input: &'a [u8], type_name: &str, keyspace: &str) -> IResult<&'a [u8], Value> {
+        let (remaining, udt_value) = self.parse_udt(input, type_name, keyspace)?;
+        Ok((remaining, Value::Frozen(Box::new(udt_value))))
     }
 
     /// Parse a value based on its CQL type specification

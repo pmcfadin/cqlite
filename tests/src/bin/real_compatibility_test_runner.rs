@@ -65,7 +65,7 @@ fn main() {
     }
 
     println!("🚀 CQLite Real SSTable Compatibility Test Runner");
-    println!("=".repeat(55));
+    println!("{}", "=".repeat(55));
 
     // Build configuration from command line arguments
     let test_path = PathBuf::from(matches.get_one::<String>("test-path").unwrap());

@@ -193,7 +193,7 @@ impl PerformanceRegressionFramework {
     /// Run comprehensive regression tests
     pub async fn run_regression_tests(&mut self) -> Result<Vec<RegressionTestResult>> {
         println!("🔄 Running Performance Regression Tests");
-        println!("=".repeat(60));
+        println!("{}", "=".repeat(60));
 
         let mut results = Vec::new();
 
@@ -746,7 +746,7 @@ impl PerformanceRegressionFramework {
     /// Print regression test results
     pub fn print_regression_report(&self, results: &[RegressionTestResult]) {
         println!("\n🎯 PERFORMANCE REGRESSION TEST REPORT");
-        println!("=".repeat(80));
+        println!("{}", "=".repeat(80));
 
         let regression_count = results.iter().filter(|r| r.is_regression).count();
 

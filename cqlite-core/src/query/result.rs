@@ -707,6 +707,16 @@ impl ToJson for Value {
                 serde_json::Value::Object(json_obj)
             }
             Value::Frozen(boxed_value) => boxed_value.to_json(),
+            Value::Tombstone(info) => {
+                let mut json_obj = serde_json::Map::new();
+                json_obj.insert("type".to_string(), serde_json::Value::String("tombstone".to_string()));
+                json_obj.insert("deletion_time".to_string(), serde_json::Value::Number(info.deletion_time.into()));
+                json_obj.insert("tombstone_type".to_string(), serde_json::Value::String(format!("{:?}", info.tombstone_type)));
+                if let Some(ttl) = info.ttl {
+                    json_obj.insert("ttl".to_string(), serde_json::Value::Number(ttl.into()));
+                }
+                serde_json::Value::Object(json_obj)
+            }
         }
     }
 }

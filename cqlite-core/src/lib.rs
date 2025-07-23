@@ -19,7 +19,9 @@ pub mod schema;
 pub mod storage;
 
 // Memory safety testing modules
+#[cfg(test)]
 pub mod memory_safety_tests;
+#[cfg(test)]
 pub mod memory_safety_runner;
 
 // Re-export main types for convenience

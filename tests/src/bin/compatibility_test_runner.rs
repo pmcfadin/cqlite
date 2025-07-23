@@ -70,7 +70,7 @@ async fn main() {
         .get_matches();
 
     println!("🚀 CQLite Cassandra 5+ Compatibility Test Runner");
-    println!("=".repeat(60));
+    println!("{}", "=".repeat(60));
 
     let mode = matches.get_one::<String>("mode").unwrap();
     let stress_enabled = matches.get_flag("stress");

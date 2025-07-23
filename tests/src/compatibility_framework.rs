@@ -531,7 +531,7 @@ impl CompatibilityTestFramework {
     /// Generate comprehensive compatibility report
     fn generate_compatibility_report(&self) {
         println!("\n📊 CASSANDRA 5+ COMPATIBILITY TEST REPORT");
-        println!("=".repeat(60));
+        println!("{}", "=".repeat(60));
 
         let total_tests = self.results.len();
         let passed_tests = self.results.iter().filter(|r| r.passed).count();

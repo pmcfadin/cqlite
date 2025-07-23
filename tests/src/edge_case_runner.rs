@@ -528,7 +528,7 @@ impl EdgeCaseRunner {
 
     fn print_detailed_report(&self) {
         println!("\n📊 Comprehensive Edge Case Test Report");
-        println!("=" * 60);
+        println!("{}", "=".repeat(60));
 
         // Overall summary
         println!("\n🎯 Overall Summary:");
@@ -639,7 +639,7 @@ impl EdgeCaseRunner {
 
     fn generate_performance_report(&self) {
         println!("\n📈 Performance Analysis Report");
-        println!("=" * 60);
+        println!("{}", "=".repeat(60));
 
         // Performance trends
         println!("\n⏱️  Performance Metrics by Category:");

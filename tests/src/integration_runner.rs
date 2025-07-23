@@ -301,7 +301,7 @@ impl IntegrationTestRunner {
     /// Print comprehensive final report
     fn print_final_report(&self, results: &IntegrationTestResults) {
         println!("📊 FINAL COMPATIBILITY REPORT");
-        println!("=".repeat(50));
+        println!("{}", "=".repeat(50));
 
         // Executive summary
         println!("🎯 Executive Summary:");

@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let verbose = matches.get_flag("verbose");
 
     println!("🚀 CQLite Integration Test Runner");
-    println!("=".repeat(60));
+    println!("{}", "=".repeat(60));
     println!("Test Type: {}", test_type);
     println!("Timeout: {}s", timeout);
     println!("Output Directory: {}", output_dir);

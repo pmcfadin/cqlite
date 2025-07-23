@@ -6,6 +6,7 @@ members = [
     "cqlite-cli",
     "tests",
     "proof-of-concept",
+    "test-env/cassandra5/validation",
 ]
 resolver = "2"
 

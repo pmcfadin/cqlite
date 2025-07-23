@@ -1,9 +1,16 @@
 //! SSTable (Sorted String Table) implementation
 
 pub mod bloom;
+pub mod bti;
 pub mod compression;
+pub mod directory;
+pub mod directory_integration_tests;
 pub mod index;
+pub mod performance_benchmarks;
 pub mod reader;
+pub mod statistics_reader;
+pub mod streaming_reader;
+pub mod tombstone_merger;
 pub mod validation;
 pub mod writer;
 
@@ -14,6 +21,7 @@ use tokio::sync::RwLock;
 
 use crate::platform::Platform;
 use crate::{types::TableId, Config, Result, RowKey, Value};
+use self::tombstone_merger::{TombstoneMerger, EntryMetadata, GenerationValue};
 
 /// SSTable file identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -137,27 +145,35 @@ impl SSTableManager {
         Ok(sstable_id)
     }
 
-    /// Get a value by key from all SSTables
+    /// Get a value by key from all SSTables with proper tombstone merging
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         let readers = self.readers.read().await;
-
-        // Search through SSTables in reverse chronological order
-        // (newer SSTables have precedence)
-        let mut sstable_ids: Vec<_> = readers.keys().collect();
-        sstable_ids.sort_by(|a, b| b.0.cmp(&a.0)); // Reverse sort by filename/timestamp
-
-        for sstable_id in sstable_ids {
-            if let Some(reader) = readers.get(sstable_id) {
-                if let Some(value) = reader.get(table_id, key).await? {
-                    return Ok(Some(value));
-                }
+        let mut all_values = Vec::new();
+        
+        // Collect values from all SSTables
+        for (sstable_id, reader) in readers.iter() {
+            if let Some(value) = reader.get(table_id, key).await? {
+                let generation = reader.generation;
+                let write_time = reader.extract_write_time_from_entry(key, &value);
+                
+                let gen_value = GenerationValue {
+                    value,
+                    metadata: EntryMetadata {
+                        write_time,
+                        generation,
+                        ttl: None, // Would be extracted from SSTable metadata
+                    },
+                };
+                all_values.push(gen_value);
             }
         }
-
-        Ok(None)
+        
+        // Use tombstone merger to resolve conflicts across generations
+        let merger = TombstoneMerger::new();
+        merger.merge_generations(all_values)
     }
 
-    /// Scan a range of keys from all SSTables
+    /// Scan a range of keys from all SSTables with proper tombstone merging
     pub async fn scan(
         &self,
         table_id: &TableId,
@@ -166,24 +182,48 @@ impl SSTableManager {
         limit: Option<usize>,
     ) -> Result<Vec<(RowKey, Value)>> {
         let readers = self.readers.read().await;
-        let mut all_results = Vec::new();
+        let mut key_values = std::collections::HashMap::new();
 
-        // Collect results from all SSTables
+        // Collect results from all SSTables, grouping by key
         for reader in readers.values() {
-            let results = reader.scan(table_id, start_key, end_key, limit).await?;
-            all_results.extend(results);
+            let results = reader.scan(table_id, start_key, end_key, None).await?;
+            
+            for (row_key, value) in results {
+                let generation = reader.generation;
+                let write_time = reader.extract_write_time_from_entry(&row_key, &value);
+                
+                let gen_value = GenerationValue {
+                    value,
+                    metadata: EntryMetadata {
+                        write_time,
+                        generation,
+                        ttl: None,
+                    },
+                };
+                
+                key_values.entry(row_key).or_insert_with(Vec::new).push(gen_value);
+            }
         }
 
-        // Sort and deduplicate results
-        all_results.sort_by(|a, b| a.0.cmp(&b.0));
-        all_results.dedup_by(|a, b| a.0 == b.0);
+        // Merge values for each key using tombstone merger
+        let merger = TombstoneMerger::new();
+        let mut final_results = Vec::new();
+        
+        for (row_key, values) in key_values {
+            if let Some(merged_value) = merger.merge_generations(values)? {
+                final_results.push((row_key, merged_value));
+            }
+        }
+
+        // Sort results by key
+        final_results.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Apply limit
         if let Some(limit) = limit {
-            all_results.truncate(limit);
+            final_results.truncate(limit);
         }
 
-        Ok(all_results)
+        Ok(final_results)
     }
 
     /// Get list of all SSTable IDs

@@ -1,0 +1,64 @@
+{
+  "keyspace": "test_keyspace",
+  "table": "all_types",
+  "partition_keys": [
+    {
+      "name": "id",
+      "type": "uuid",
+      "position": 0
+    }
+  ],
+  "clustering_keys": [],
+  "columns": [
+    {
+      "name": "id", 
+      "type": "uuid",
+      "nullable": false
+    },
+    {
+      "name": "text_col",
+      "type": "text",
+      "nullable": true
+    },
+    {
+      "name": "int_col",
+      "type": "int",
+      "nullable": true
+    },
+    {
+      "name": "bigint_col",
+      "type": "bigint", 
+      "nullable": true
+    },
+    {
+      "name": "float_col",
+      "type": "float",
+      "nullable": true
+    },
+    {
+      "name": "double_col",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "boolean_col",
+      "type": "boolean",
+      "nullable": true
+    },
+    {
+      "name": "timestamp_col",
+      "type": "timestamp",
+      "nullable": true
+    },
+    {
+      "name": "uuid_col",
+      "type": "uuid",
+      "nullable": true
+    },
+    {
+      "name": "blob_col",
+      "type": "blob",
+      "nullable": true
+    }
+  ]
+}

@@ -874,6 +874,7 @@ impl From<crate::types::DataType> for u8 {
             crate::types::DataType::Tuple => DataType::LIST, // Map to closest existing
             crate::types::DataType::Udt => DataType::JSON,   // Map to closest existing
             crate::types::DataType::Frozen => DataType::BLOB, // Map to closest existing
+            crate::types::DataType::Tombstone => DataType::BLOB, // Map to closest existing
         }
     }
 }

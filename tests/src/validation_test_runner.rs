@@ -112,7 +112,7 @@ impl ValidationTestRunner {
         &mut self,
     ) -> Result<ValidationTestResults, Box<dyn std::error::Error>> {
         println!("🔍 Starting CQLite Validation Tests");
-        println!("=".repeat(50));
+        println!("{}", "=".repeat(50));
 
         let overall_start = Instant::now();
         let mut results = ValidationTestResults {
@@ -643,7 +643,7 @@ impl ValidationTestRunner {
     fn print_validation_summary(&self, results: &ValidationTestResults) {
         println!();
         println!("📊 Validation Summary");
-        println!("=".repeat(40));
+        println!("{}", "=".repeat(40));
         println!("  Total Validations:   {}", results.total_validations);
         println!("  Successful:          {}", results.successful_validations);
         println!("  Failed:              {}", results.failed_validations);

@@ -1,0 +1,23 @@
+CREATE TABLE all_types (
+  id UUID PRIMARY KEY,
+  text_col TEXT,
+  ascii_col ASCII,
+  varchar_col VARCHAR,
+  bigint_col BIGINT,
+  blob_col BLOB,
+  boolean_col BOOLEAN,
+  counter_col COUNTER,
+  date_col DATE,
+  decimal_col DECIMAL,
+  double_col DOUBLE,
+  duration_col DURATION,
+  float_col FLOAT,
+  inet_col INET,
+  int_col INT,
+  smallint_col SMALLINT,
+  time_col TIME,
+  timestamp_col TIMESTAMP,
+  timeuuid_col TIMEUUID,
+  tinyint_col TINYINT,
+  varint_col VARINT
+) WITH compression = {'class': 'LZ4Compressor'};

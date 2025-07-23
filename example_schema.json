@@ -1,0 +1,17 @@
+{
+  "keyspace": "example",
+  "table": "users",
+  "partition_keys": [
+    {"name": "user_id", "type": "uuid", "position": 0}
+  ],
+  "clustering_keys": [
+    {"name": "created_at", "type": "timestamp", "position": 0, "order": "DESC"}
+  ],
+  "columns": [
+    {"name": "user_id", "type": "uuid", "nullable": false},
+    {"name": "created_at", "type": "timestamp", "nullable": false},
+    {"name": "username", "type": "text", "nullable": false},
+    {"name": "email", "type": "text", "nullable": true},
+    {"name": "profile_data", "type": "map<text, text>", "nullable": true}
+  ]
+}

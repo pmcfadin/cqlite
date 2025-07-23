@@ -12,9 +12,21 @@ pub mod benchmarks;
 pub mod collection_benchmarks;
 #[cfg(test)]
 pub mod collection_tests;
+#[cfg(test)]
+pub mod collection_validation_tests;
+#[cfg(test)]
+pub mod collection_udt_tests;
 pub mod complex_types;
 pub mod header;
+pub mod statistics;
+pub mod enhanced_statistics_parser;
+#[cfg(test)]
+pub mod statistics_test;
+#[cfg(test)]
+pub mod enhanced_statistics_test;
 pub mod types;
+#[cfg(test)]
+pub mod udt_tests;
 pub mod validation;
 pub mod vint;
 
@@ -26,6 +38,8 @@ pub mod performance_regression_framework;
 pub use benchmarks::*;
 pub use complex_types::*;
 pub use header::*;
+pub use statistics::*;
+pub use enhanced_statistics_parser::*;
 pub use types::*;
 pub use validation::*;
 pub use vint::*;

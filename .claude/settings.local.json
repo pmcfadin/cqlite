@@ -2,7 +2,25 @@
   "permissions": {
     "allow": [
       "mcp__ruv-swarm",
-      "mcp__claude-flow"
+      "mcp__claude-flow",
+      "Bash(npx claude-flow:*)",
+      "Bash(npx claude-flow@alpha hooks pre-task:*)",
+      "Bash(npx:*)",
+      "Bash(npx claude-flow:*)",
+      "Bash(npx:*)",
+      "Bash(npx claude-flow:*)",
+      "Bash(find:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(find:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(cargo run:*)",
+      "Bash(./target/release/validate_all_types)",
+      "Bash(RUST_BACKTRACE=1 cargo check --bin cassandra_sstable_validator)",
+      "Bash(/Users/patrick/local_projects/cqlite/target/release/validate_all_types)",
+      "Bash(./target/release/real_cqlite_parser_test)",
+      "Bash(./target/release/cassandra_sstable_validator:*)"
     ],
     "deny": []
   }

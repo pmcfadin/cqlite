@@ -31,6 +31,7 @@ use super::{
     compression::{Compression, CompressionAlgorithm, CompressionReader},
     index::SSTableIndex,
     reader::{SSTableReaderStats, BlockMeta, CachedBlock},
+    streaming_reader::{BufferPool, StreamingReaderConfig},
 };
 
 /// Optimized SSTable reader configuration
@@ -218,7 +219,7 @@ impl PrefetchBuffer {
     }
 }
 
-/// Optimized SSTable reader with high-performance features
+/// Optimized SSTable reader with high-performance features and streaming integration
 pub struct OptimizedSSTableReader {
     /// Path to the SSTable file
     file_path: PathBuf,
@@ -240,6 +241,10 @@ pub struct OptimizedSSTableReader {
     block_cache: Arc<OptimizedBlockCache>,
     /// Prefetch buffer for sequential reads
     prefetch_buffer: Arc<PrefetchBuffer>,
+    /// Buffer pool for memory management
+    buffer_pool: Arc<BufferPool>,
+    /// Streaming configuration
+    streaming_config: StreamingReaderConfig,
     /// Reader configuration
     config: OptimizedReaderConfig,
     /// Platform abstraction
@@ -305,6 +310,11 @@ impl OptimizedSSTableReader {
 
         let block_cache = Arc::new(OptimizedBlockCache::new(opt_config.block_cache_size));
         let prefetch_buffer = Arc::new(PrefetchBuffer::new(opt_config.prefetch_buffer_size));
+        
+        // Initialize streaming components
+        let streaming_config = StreamingReaderConfig::default();
+        let max_buffers = streaming_config.buffer_pool_size_mb * 1024 * 1024 / streaming_config.buffer_size_bytes;
+        let buffer_pool = Arc::new(BufferPool::new(streaming_config.buffer_size_bytes, max_buffers));
 
         let stats = Arc::new(Mutex::new(SSTableReaderStats {
             file_size,
@@ -328,6 +338,8 @@ impl OptimizedSSTableReader {
             compression_reader,
             block_cache,
             prefetch_buffer,
+            buffer_pool,
+            streaming_config,
             config: opt_config,
             platform,
             stats,
@@ -612,11 +624,12 @@ impl OptimizedSSTableReader {
                 break;
             }
 
-            // Optimized value parsing
-            let value = if self.config.enable_zero_copy {
-                self.parse_value_zero_copy(&data[offset..offset + value_len])?
+            // Enhanced optimized value parsing with Cassandra 5.0 support
+            let value_data = &data[offset..offset + value_len];
+            let value = if self.config.enable_zero_copy && self.can_use_zero_copy(value_data) {
+                self.parse_value_zero_copy_enhanced(value_data, &table_id, &key)?
             } else {
-                self.parse_value_standard(&data[offset..offset + value_len])?
+                self.parse_value_standard_enhanced(value_data, &table_id, &key)?
             };
             
             offset += value_len;
@@ -626,24 +639,138 @@ impl OptimizedSSTableReader {
         Ok(entries)
     }
 
-    fn parse_value_zero_copy(&self, data: &[u8]) -> Result<Value> {
-        // Zero-copy parsing for simple types
+    fn parse_value_zero_copy_enhanced(&self, data: &[u8], table_id: &TableId, key: &RowKey) -> Result<Value> {
+        // Enhanced zero-copy parsing with Cassandra 5.0 format awareness
         if data.is_empty() {
             return Ok(Value::Null);
         }
 
-        // Simple zero-copy parsing for strings (UTF-8 validation still needed)
-        match std::str::from_utf8(data) {
-            Ok(s) => Ok(Value::Text(s.to_string())), // Still needs allocation for ownership
-            Err(_) => Ok(Value::Blob(data.to_vec())), // Fallback to blob
+        // Skip cell metadata for zero-copy parsing (Cassandra 5.0 format)
+        let mut offset = 0;
+        if data.len() > 1 && (data[0] & 0x80) != 0 {
+            offset += 1; // Skip flags
+            if offset + 8 <= data.len() {
+                offset += 8; // Skip timestamp
+            }
+            if offset < data.len() && (data[0] & 0x40) != 0 && offset + 4 <= data.len() {
+                offset += 4; // Skip TTL
+            }
+        }
+
+        let actual_data = &data[offset..];
+        if actual_data.is_empty() {
+            return Ok(Value::Null);
+        }
+
+        // Zero-copy parsing with type detection for common patterns
+        match actual_data.len() {
+            16 => {
+                // UUID - can be parsed zero-copy
+                let mut uuid_bytes = [0u8; 16];
+                uuid_bytes.copy_from_slice(actual_data);
+                Ok(Value::Uuid(uuid_bytes))
+            }
+            4 => {
+                // Integer types - zero-copy parsing
+                let int_val = i32::from_be_bytes([
+                    actual_data[0], actual_data[1], actual_data[2], actual_data[3]
+                ]);
+                Ok(Value::Integer(int_val))
+            }
+            8 => {
+                // BigInt/Timestamp - zero-copy parsing
+                let long_val = i64::from_be_bytes([
+                    actual_data[0], actual_data[1], actual_data[2], actual_data[3],
+                    actual_data[4], actual_data[5], actual_data[6], actual_data[7]
+                ]);
+                if long_val > 1_000_000_000_000 && long_val < 10_000_000_000_000 {
+                    Ok(Value::Timestamp(long_val))
+                } else {
+                    Ok(Value::BigInt(long_val))
+                }
+            }
+            _ => {
+                // Text or blob - minimal allocation
+                match std::str::from_utf8(actual_data) {
+                    Ok(s) => Ok(Value::Text(s.to_string())),
+                    Err(_) => Ok(Value::Blob(actual_data.to_vec())),
+                }
+            }
         }
     }
 
-    fn parse_value_standard(&self, data: &[u8]) -> Result<Value> {
-        // Standard parsing with proper type detection
-        let (_, value) = parse_cql_value(data, CqlTypeId::Varchar)
-            .map_err(|e| Error::corruption(format!("Failed to parse value: {:?}", e)))?;
-        Ok(value)
+    fn parse_value_standard_enhanced(&self, data: &[u8], table_id: &TableId, key: &RowKey) -> Result<Value> {
+        // Enhanced standard parsing with Cassandra 5.0 type detection
+        if data.is_empty() {
+            return Ok(Value::Null);
+        }
+
+        // Parse cell metadata (Cassandra 5.0 format)
+        let mut offset = 0;
+        if data.len() > 1 && (data[0] & 0x80) != 0 {
+            offset += 1; // Skip cell flags
+            
+            // Skip timestamp if present
+            if offset + 8 <= data.len() {
+                offset += 8;
+            }
+            
+            // Skip TTL if present
+            if offset < data.len() && (data[0] & 0x40) != 0 && offset + 4 <= data.len() {
+                offset += 4;
+            }
+        }
+
+        let actual_data = &data[offset..];
+        if actual_data.is_empty() {
+            return Ok(Value::Null);
+        }
+
+        // Enhanced type detection and parsing
+        let detected_type = self.detect_value_type_optimized(actual_data);
+        match detected_type {
+            Some(type_id) => {
+                let (_, value) = parse_cql_value(actual_data, type_id)
+                    .map_err(|e| Error::corruption(format!("Failed to parse detected type {:?}: {:?}", type_id, e)))?;
+                Ok(value)
+            }
+            None => {
+                // Fallback with better heuristics
+                if actual_data.len() == 1 && actual_data[0] <= 1 {
+                    Ok(Value::Boolean(actual_data[0] != 0))
+                } else if let Ok(s) = std::str::from_utf8(actual_data) {
+                    Ok(Value::Text(s.to_string()))
+                } else {
+                    Ok(Value::Blob(actual_data.to_vec()))
+                }
+            }
+        }
+    }
+
+    fn detect_value_type_optimized(&self, data: &[u8]) -> Option<CqlTypeId> {
+        // Optimized type detection for better performance
+        if data.is_empty() {
+            return None;
+        }
+
+        // Fast path for common sizes
+        match data.len() {
+            1 => Some(if data[0] <= 1 { CqlTypeId::Boolean } else { CqlTypeId::Tinyint }),
+            2 => Some(CqlTypeId::Smallint),
+            4 => Some(CqlTypeId::Int),
+            8 => Some(CqlTypeId::BigInt),
+            16 => Some(CqlTypeId::Uuid),
+            _ => {
+                // For variable-length data, check UTF-8 validity efficiently
+                if data.len() < 1024 && data.is_ascii() {
+                    Some(CqlTypeId::Varchar)
+                } else if std::str::from_utf8(data).is_ok() {
+                    Some(CqlTypeId::Varchar)
+                } else {
+                    Some(CqlTypeId::Blob)
+                }
+            }
+        }
     }
 
     fn can_use_zero_copy(&self, data: &[u8]) -> bool {

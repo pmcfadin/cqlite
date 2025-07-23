@@ -1,0 +1,54 @@
+{
+  "keyspace": "test_keyspace",
+  "table": "collections_table",
+  "partition_keys": [
+    {
+      "name": "id",
+      "type": "uuid",
+      "position": 0
+    }
+  ],
+  "clustering_keys": [],
+  "columns": [
+    {
+      "name": "id",
+      "type": "uuid",
+      "nullable": false
+    },
+    {
+      "name": "list_col",
+      "type": "list<text>",
+      "nullable": true
+    },
+    {
+      "name": "set_col",
+      "type": "set<int>",
+      "nullable": true
+    },
+    {
+      "name": "map_col",
+      "type": "map<text, int>",
+      "nullable": true
+    },
+    {
+      "name": "frozen_list",
+      "type": "frozen<list<text>>",
+      "nullable": true
+    },
+    {
+      "name": "frozen_set",
+      "type": "frozen<set<int>>",
+      "nullable": true
+    },
+    {
+      "name": "frozen_map",
+      "type": "frozen<map<text, int>>",
+      "nullable": true
+    }
+  ],
+  "comments": {
+    "table": "Table with various collection types",
+    "version": "1.0",
+    "cassandra_version": "5.0"
+  }
+}

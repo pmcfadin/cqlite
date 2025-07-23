@@ -212,7 +212,7 @@ impl PerformanceValidationSuite {
     /// Run complete performance validation suite
     pub async fn run_validation(&mut self) -> Result<PerformanceValidationResults> {
         println!("🚀 Running CQLite Performance Validation Suite");
-        println!("=".repeat(60));
+        println!("{}", "=".repeat(60));
 
         // Run parsing performance validation
         let parsing_performance = self.validate_parsing_performance().await?;
@@ -711,7 +711,7 @@ impl PerformanceValidationSuite {
     fn print_validation_report(&self, results: &PerformanceValidationResults) {
         println!("\n".repeat(2));
         println!("🎯 PERFORMANCE VALIDATION REPORT");
-        println!("=".repeat(80));
+        println!("{}", "=".repeat(80));
 
         // Overall status
         if results.validation_passed {

@@ -30,6 +30,7 @@ chrono = { version = "0.4", features = ["serde"] }
 lz4_flex = { workspace = true }
 snap = { version = "1.1", optional = true }
 flate2 = { version = "1.0", optional = true }
+zstd = { version = "0.13", optional = true }
 crc32fast = { workspace = true }
 
 # Concurrency and collections
@@ -53,6 +54,7 @@ uuid = { version = "1.10", features = ["v4"] }
 regex = "1.10"
 futures = "0.3"
 clap = { version = "4.4", features = ["derive"] }
+env_logger = { workspace = true }
 
 # Optional WASM support
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -69,11 +71,20 @@ tempfile = "3.8"
 name = "memory_safety_validator"
 path = "src/bin/memory_safety_validator.rs"
 
+[[bin]]
+name = "benchmark_streaming"
+path = "src/bin/benchmark_streaming.rs"
+
+[[bin]]
+name = "test_streaming_performance"
+path = "src/bin/test_streaming_performance.rs"
+
 [features]
-default = ["compression", "metrics"]
+default = ["compression", "lz4", "metrics"]
 compression = []
 lz4 = []
 snappy = ["snap"]
 deflate = ["flate2"]
+zstd = ["dep:zstd"]
 metrics = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]

@@ -289,7 +289,7 @@ impl PerformanceBenchmarkRunner {
     pub async fn run_all_tests(&self) -> Result<PerformanceResults> {
         println!("🚀 Starting Comprehensive Performance Testing");
         println!("Version: {}", self.config.version);
-        println!("=".repeat(80));
+        println!("{}", "=".repeat(80));
 
         let start_time = Instant::now();
 
@@ -329,21 +329,21 @@ impl PerformanceBenchmarkRunner {
         // Run validation tests
         if self.config.enable_validation {
             println!("\n📊 Running Performance Validation Suite");
-            println!("-".repeat(50));
+            println!("{}", "-".repeat(50));
             results.validation_results = Some(self.run_validation_tests().await?);
         }
 
         // Run comprehensive benchmarks
         if self.config.enable_benchmarking {
             println!("\n⚡ Running Performance Benchmarks");
-            println!("-".repeat(50));
+            println!("{}", "-".repeat(50));
             results.benchmark_results = Some(self.run_benchmark_tests().await?);
         }
 
         // Run regression tests
         if self.config.enable_regression_testing {
             println!("\n🔄 Running Regression Tests");
-            println!("-".repeat(50));
+            println!("{}", "-".repeat(50));
             results.regression_results = Some(self.run_regression_tests().await?);
         }
 
@@ -823,9 +823,9 @@ impl PerformanceBenchmarkRunner {
 
     /// Print final summary
     fn print_final_summary(&self, results: &PerformanceResults) {
-        println!("\n".repeat(2));
+        println!("{}", "\n".repeat(2));
         println!("🎯 FINAL PERFORMANCE SUMMARY");
-        println!("=".repeat(80));
+        println!("{}", "=".repeat(80));
 
         println!("📊 Overall Grade: {}", results.summary.overall_grade);
         println!(

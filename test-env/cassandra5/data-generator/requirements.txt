@@ -1,0 +1,6 @@
+# Cassandra driver for connecting to the database
+# Pinning to a specific modern version to ensure API consistency.
+cassandra-driver==3.28.0
+
+# Faker for generating realistic-looking test data
+Faker 

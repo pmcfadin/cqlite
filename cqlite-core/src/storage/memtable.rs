@@ -297,6 +297,7 @@ impl MemTable {
                 .map(|f| self.estimate_value_size(&f.value))
                 .sum(),
             Some(Value::Frozen(boxed_val)) => self.estimate_value_size(&Some((**boxed_val).clone())),
+            Some(Value::Tombstone(_)) => 16, // timestamp + type + optional TTL
         }
     }
 }

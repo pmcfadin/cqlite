@@ -1,16 +1,13 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use colored::*;
 use std::path::PathBuf;
-use tracing::{error, info, warn};
+use tracing::info;
 
 mod cli;
 mod commands;
 mod config;
 mod interactive;
 mod tui;
-
-use cli::*;
 
 #[derive(Parser)]
 #[command(name = "cqlite")]
@@ -36,14 +33,22 @@ struct Cli {
 
     /// Output format
     #[arg(long, value_enum, default_value = "table")]
-    format: OutputFormat,
+    format: cli::OutputFormat,
+
+    /// Auto-detect SSTable format version
+    #[arg(long)]
+    auto_detect: bool,
+
+    /// Override Cassandra version for compatibility (e.g., 3.11, 4.0, 5.0)
+    #[arg(long, value_name = "VERSION")]
+    cassandra_version: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
-enum Commands {
+pub enum Commands {
     /// Start interactive REPL mode
     Repl {
         /// Enable TUI mode
@@ -67,7 +72,7 @@ enum Commands {
         file: PathBuf,
         /// File format (csv, json, parquet)
         #[arg(long, value_enum)]
-        format: ImportFormat,
+        format: cli::ImportFormat,
         /// Target table name
         #[arg(long)]
         table: Option<String>,
@@ -80,11 +85,11 @@ enum Commands {
         file: PathBuf,
         /// Output format
         #[arg(long, value_enum)]
-        format: ExportFormat,
+        format: cli::ExportFormat,
         /// SSTable file path (for SSTable export)
         #[arg(long)]
         sstable: Option<PathBuf>,
-        /// Schema JSON file path (required for SSTable export)
+        /// Schema file path (JSON or CQL format - auto-detected by extension)
         #[arg(long)]
         schema: Option<PathBuf>,
     },
@@ -103,11 +108,11 @@ enum Commands {
         #[command(subcommand)]
         command: BenchCommands,
     },
-    /// Read SSTable file with schema
+    /// Read SSTable directory or file with schema
     Read {
-        /// SSTable file path
-        sstable: PathBuf,
-        /// Schema JSON file path
+        /// SSTable directory path (e.g., users-46436710673711f0b2cf19d64e7cbecb) or legacy file path
+        sstable_path: PathBuf,
+        /// Schema file path (JSON or CQL format - auto-detected by extension)
         #[arg(long)]
         schema: PathBuf,
         /// Limit number of rows to display
@@ -116,39 +121,23 @@ enum Commands {
         /// Skip number of rows
         #[arg(long)]
         skip: Option<usize>,
+        /// Generation number to read (if not specified, reads latest)
+        #[arg(long)]
+        generation: Option<u32>,
     },
-    /// Show SSTable information
+    /// Show SSTable directory or file information
     Info {
-        /// SSTable file path
-        sstable: PathBuf,
+        /// SSTable directory path (e.g., users-46436710673711f0b2cf19d64e7cbecb) or legacy file path
+        sstable_path: PathBuf,
+        /// Show component details
+        #[arg(long)]
+        detailed: bool,
     },
 }
 
-#[derive(clap::ValueEnum, Clone)]
-enum OutputFormat {
-    Table,
-    Json,
-    Csv,
-    Yaml,
-}
-
-#[derive(clap::ValueEnum, Clone)]
-enum ImportFormat {
-    Csv,
-    Json,
-    Parquet,
-}
-
-#[derive(clap::ValueEnum, Clone)]
-enum ExportFormat {
-    Csv,
-    Json,
-    Parquet,
-    Sql,
-}
 
 #[derive(Subcommand)]
-enum AdminCommands {
+pub enum AdminCommands {
     /// Display database information
     Info,
     /// Compact database files
@@ -168,7 +157,7 @@ enum AdminCommands {
 }
 
 #[derive(Subcommand)]
-enum SchemaCommands {
+pub enum SchemaCommands {
     /// List all tables
     List,
     /// Describe table structure
@@ -176,9 +165,9 @@ enum SchemaCommands {
         /// Table name
         table: String,
     },
-    /// Create table from DDL file
+    /// Create table from schema file (CQL DDL or JSON)
     Create {
-        /// DDL file path
+        /// Schema file path (.cql for DDL or .json for schema) - format auto-detected
         file: PathBuf,
     },
     /// Drop table
@@ -189,15 +178,15 @@ enum SchemaCommands {
         #[arg(long)]
         force: bool,
     },
-    /// Validate schema JSON file
+    /// Validate schema file (JSON or CQL format)
     Validate {
-        /// Schema JSON file path
-        json: PathBuf,
+        /// Schema file path (.json or .cql) - format auto-detected by extension
+        file: PathBuf,
     },
 }
 
 #[derive(Subcommand)]
-enum BenchCommands {
+pub enum BenchCommands {
     /// Run read performance benchmark
     Read {
         /// Number of operations
@@ -296,12 +285,13 @@ async fn main() -> Result<()> {
             commands::bench::handle_bench_command(&db_path, command).await
         }
         Some(Commands::Read {
-            sstable,
+            sstable_path,
             schema,
             limit,
             skip,
-        }) => commands::read_sstable(&sstable, &schema, limit, skip, cli.format).await,
-        Some(Commands::Info { sstable }) => commands::sstable_info(&sstable).await,
+            generation,
+        }) => commands::read_sstable(&sstable_path, &schema, limit, skip, generation, cli.format, cli.auto_detect, cli.cassandra_version).await,
+        Some(Commands::Info { sstable_path, detailed }) => commands::sstable_info(&sstable_path, detailed, cli.auto_detect, cli.cassandra_version).await,
         None => {
             // Default to interactive REPL mode
             interactive::start_repl_mode(&db_path, &config).await

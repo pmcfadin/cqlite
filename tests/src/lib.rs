@@ -132,11 +132,48 @@ pub use performance_complex_types_benchmark::{
     ComplexTypePerformanceBenchmark, ComplexTypeBenchmarkConfig, ComplexTypeBenchmarkResults,
 };
 
+// New comprehensive integration test suite
+pub mod comprehensive_integration_test_suite;
+pub mod integration_test_harness;
+
+// Re-export new comprehensive testing components
+pub use comprehensive_integration_test_suite::{
+    run_comprehensive_integration_tests, run_quick_integration_tests,
+    print_integration_test_results, IntegrationTestConfig as ComprehensiveTestConfig,
+    ComprehensiveIntegrationTestSuite, IntegrationTestSuiteResults,
+};
+pub use integration_test_harness::{
+    TestDataValidator, TestEnvironmentStatus, TableInfo, TestTimer, MemoryMonitor,
+    SSTableFileFinder, TestResultAggregator, TestOutcome, TestSummary,
+    PerformanceMeasurer, PerformanceMeasurement, TestCaseBuilder, TestCase,
+};
+
 // Re-export SSTable validation components
 pub use sstable_validator::{run_validation, SSTableValidator};
 pub use format_verifier::{verify_sstable_format, SSTableFormatVerifier, FormatVerificationResult};
 pub use sstable_benchmark::{run_comprehensive_benchmark, BenchmarkConfig, BenchmarkResults, SSTableBenchmark};
 pub use complex_data_test::{run_complex_data_tests, ComplexDataTestSuite, ComplexDataTestResults};
+
+// CQL Schema Validation Modules
+pub mod cql_parser_validation_suite;
+pub mod cql_integration_tests;
+pub mod cql_performance_benchmarks;
+pub mod cql_test_data_fixtures;
+
+// Re-export CQL validation components
+pub use cql_parser_validation_suite::{
+    CqlParserValidationSuite, ValidationReport, ValidationResult, PerformanceMetric,
+};
+pub use cql_integration_tests::{
+    CqlIntegrationTestSuite, IntegrationTestReport, IntegrationTestResult,
+};
+pub use cql_performance_benchmarks::{
+    CqlPerformanceBenchmarkSuite, BenchmarkReport, BenchmarkResult, PerformanceTargets,
+};
+pub use cql_test_data_fixtures::{
+    PerformanceTestData, JsonSchemaFixtures, CompatibilityTestFixtures,
+    CqlTestCase, TypeTestCase, ErrorTestCase,
+};
 
 #[cfg(test)]
 mod tests {

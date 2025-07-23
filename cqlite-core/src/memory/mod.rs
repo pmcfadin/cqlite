@@ -366,6 +366,7 @@ impl MemoryManager {
             Value::Tuple(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
             Value::Udt(udt) => udt.fields.iter().map(|f| f.value.as_ref().map_or(0, |v| self.estimate_value_size(v))).sum(),
             Value::Frozen(boxed_value) => self.estimate_value_size(boxed_value),
+            Value::Tombstone(_) => 16, // timestamp + type + optional TTL
         }
     }
 }
