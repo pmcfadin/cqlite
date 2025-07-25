@@ -1,64 +1,93 @@
 use crate::SchemaCommands;
 use anyhow::{Context, Result};
-use cqlite_core::schema::{TableSchema, Column, KeyColumn, ClusteringColumn, parse_cql_schema};
+use cqlite_core::{Database, schema::{TableSchema, Column, KeyColumn, ClusteringColumn, parse_cql_schema}};
 use serde_json;
 use std::path::Path;
 use std::collections::HashMap;
 
-pub async fn handle_schema_command(db_path: &Path, command: SchemaCommands) -> Result<()> {
+pub async fn handle_schema_command(database: &Database, command: SchemaCommands) -> Result<()> {
     match command {
-        SchemaCommands::List => list_tables(db_path).await,
-        SchemaCommands::Describe { table } => describe_table(db_path, &table).await,
-        SchemaCommands::Create { file } => create_table_from_file(db_path, &file).await,
-        SchemaCommands::Drop { table, force } => drop_table(db_path, &table, force).await,
+        SchemaCommands::List => list_tables(database).await,
+        SchemaCommands::Describe { table } => describe_table(database, &table).await,
+        SchemaCommands::Create { file } => create_table_from_file(database, &file).await,
+        SchemaCommands::Drop { table, force } => drop_table(database, &table, force).await,
         SchemaCommands::Validate { file } => validate_schema(&file).await,
     }
 }
 
-async fn list_tables(db_path: &Path) -> Result<()> {
-    // TODO: Implement table listing
-    println!("Tables in database: {}", db_path.display());
+async fn list_tables(database: &Database) -> Result<()> {
+    // TODO: Implement actual table listing from database
+    println!("Tables in database:");
     println!("- users");
-    println!("- orders");
+    println!("- orders"); 
     println!("- products");
+    println!("\nNote: Table listing not yet implemented");
 
     Ok(())
 }
 
-async fn describe_table(db_path: &Path, table: &str) -> Result<()> {
-    // TODO: Implement table description
-    println!(
-        "Describing table '{}' in database: {}",
-        table,
-        db_path.display()
-    );
+async fn describe_table(database: &Database, table: &str) -> Result<()> {
+    // TODO: Implement actual table description from database schema
+    println!("Describing table '{}'", table);
     println!("Columns:");
     println!("- id: UUID (primary key)");
     println!("- name: TEXT");
     println!("- created_at: TIMESTAMP");
+    println!("\nNote: Table description not yet implemented");
 
     Ok(())
 }
 
-async fn create_table_from_file(db_path: &Path, file: &Path) -> Result<()> {
-    // TODO: Implement table creation from DDL file
+async fn create_table_from_file(database: &Database, file: &Path) -> Result<()> {
     println!("Creating table from DDL file: {}", file.display());
-    println!("Target database: {}", db_path.display());
+    
+    // Read the DDL file
+    let ddl_content = std::fs::read_to_string(file)
+        .with_context(|| format!("Failed to read DDL file: {}", file.display()))?;
+    
+    // Execute the CREATE TABLE statement
+    match database.execute(&ddl_content).await {
+        Ok(result) => {
+            println!("Table created successfully");
+            if result.rows_affected > 0 {
+                println!("Rows affected: {}", result.rows_affected);
+            }
+        }
+        Err(e) => {
+            println!("Failed to create table: {}", e);
+            return Err(anyhow::anyhow!("Table creation failed: {}", e));
+        }
+    }
 
     Ok(())
 }
 
-async fn drop_table(db_path: &Path, table: &str, force: bool) -> Result<()> {
-    // TODO: Implement table dropping
-    if force {
-        println!(
-            "Force dropping table '{}' from database: {}",
-            table,
-            db_path.display()
-        );
+async fn drop_table(database: &Database, table: &str, force: bool) -> Result<()> {
+    if !force {
+        // Ask for confirmation
+        println!("Are you sure you want to drop table '{}'? [y/N]", table);
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().to_lowercase().starts_with('y') {
+            println!("Table drop cancelled");
+            return Ok(());
+        }
     } else {
-        println!("Are you sure you want to drop table '{}'? (y/N)", table);
-        // TODO: Add confirmation logic
+        println!("Force dropping table '{}'", table);
+    }
+    
+    let drop_sql = format!("DROP TABLE {}", table);
+    match database.execute(&drop_sql).await {
+        Ok(result) => {
+            println!("Table '{}' dropped successfully", table);
+            if result.rows_affected > 0 {
+                println!("Rows affected: {}", result.rows_affected);
+            }
+        }
+        Err(e) => {
+            println!("Failed to drop table: {}", e);
+            return Err(anyhow::anyhow!("Table drop failed: {}", e));
+        }
     }
 
     Ok(())

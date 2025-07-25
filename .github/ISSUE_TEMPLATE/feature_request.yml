@@ -1,0 +1,108 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+title: "[FEATURE] "
+labels: ["enhancement", "needs-triage"]
+projects: ["cqlite-development"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature! Please provide detailed information about your request.
+
+  - type: dropdown
+    id: feature-type
+    attributes:
+      label: Feature Type
+      description: What type of feature is this?
+      options:
+        - New CQL Feature Support
+        - Performance Enhancement
+        - CLI Improvement
+        - API Enhancement
+        - Documentation
+        - Developer Experience
+        - FFI/Language Binding
+        - WASM Feature
+        - Tooling/Testing
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component would this feature affect?
+      options:
+        - cqlite-core
+        - cqlite-cli
+        - cqlite-ffi
+        - cqlite-wasm
+        - SSTable Reader
+        - CQL Parser
+        - Schema Management
+        - Documentation
+        - Build System
+        - Multiple Components
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem-summary
+    attributes:
+      label: Problem Summary
+      description: What problem does this feature solve? What use case does it address?
+      placeholder: Describe the problem or use case this feature would address...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: Describe your proposed solution in detail
+      placeholder: How would you like this feature to work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative Solutions
+      description: Describe any alternative solutions or features you've considered
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How important is this feature to you?
+      options:
+        - Low - Nice to have
+        - Medium - Would improve workflow
+        - High - Blocking current work
+        - Critical - Project depends on this
+    validations:
+      required: true
+
+  - type: textarea
+    id: cassandra-compatibility
+    attributes:
+      label: Cassandra Compatibility
+      description: If applicable, describe how this relates to Apache Cassandra compatibility
+      placeholder: Does this feature exist in Cassandra? Which versions support it?
+
+  - type: textarea
+    id: implementation-ideas
+    attributes:
+      label: Implementation Ideas
+      description: If you have ideas about how this could be implemented, share them here
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any other context, screenshots, examples, or links about the feature request

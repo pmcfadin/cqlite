@@ -941,7 +941,8 @@ pub fn parse_list_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
             
             if element_length > 0 {
                 let (new_remaining, element_data) = take(element_length)(new_remaining)?;
-                let element_value = parse_cql_value_with_cell_metadata(element_data, element_type_id)?;
+                let element_value = parse_cql_value_with_cell_metadata(element_data, element_type_id)
+                    .map_err(|e| nom::Err::Error(nom::error::Error::new(element_data, nom::error::ErrorKind::Verify)))?;
                 elements.push(element_value);
                 remaining = new_remaining;
             } else {
@@ -960,7 +961,8 @@ pub fn parse_list_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
             
             if element_length > 0 {
                 let (new_remaining, element_data) = take(element_length)(new_remaining)?;
-                let element_value = parse_cql_value_with_cell_metadata(element_data, element_type_id)?;
+                let element_value = parse_cql_value_with_cell_metadata(element_data, element_type_id)
+                    .map_err(|e| nom::Err::Error(nom::error::Error::new(element_data, nom::error::ErrorKind::Verify)))?;
                 elements.push(element_value);
                 remaining = new_remaining;
             } else {
@@ -975,7 +977,7 @@ pub fn parse_list_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
 }
 
 /// Parse CQL value with Cassandra 5.0 cell metadata handling
-fn parse_cql_value_with_cell_metadata(input: &[u8], type_id: CqlTypeId) -> Result<Value, nom::Err<nom::error::Error<&[u8]>>> {
+fn parse_cql_value_with_cell_metadata(input: &[u8], type_id: CqlTypeId) -> Result<Value> {
     if input.is_empty() {
         return Ok(Value::Null);
     }

@@ -5,12 +5,12 @@
 
 use cqlite_core::{
     parser::{
-        parse_cql_value, serialize_cql_value, CqlTypeId,
-        parse_list_with_type, parse_set_with_type, parse_map_with_types,
-        parse_tuple, parse_udt, vint::encode_vint
+        // parse_cql_value, serialize_cql_value, CqlTypeId,
+        // parse_list_with_type, parse_set_with_type, parse_map_with_types,
+        // parse_tuple, parse_udt, vint::encode_vint
     },
-    types::Value,
-    Result,
+    // types::Value,
+    // Result,
 };
 use std::collections::HashMap;
 

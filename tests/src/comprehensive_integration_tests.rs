@@ -5,17 +5,10 @@
 
 use cqlite_core::{
     error::Result,
-    parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats},
     parser::types::{parse_cql_value, serialize_cql_value},
     parser::{CqlTypeId, SSTableParser},
-    platform::Platform,
-    query::executor::QueryExecutor,
-    query::parser::parse_select_query,
-    query::planner::{PlanType, QueryPlanner},
-    schema::{ColumnSchema, SchemaManager, TableSchema},
-    storage::StorageEngine,
-    types::{DataType, TableId},
-    Config, RowKey, Value,
+    schema::TableSchema,
+    Config,
 };
 
 use assert_cmd::prelude::*;

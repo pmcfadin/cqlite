@@ -559,7 +559,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: "DEEP_NESTING_100".to_string(),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.as_ref().err().cloned(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: result.unwrap_or(0),
             edge_case_type: EdgeCaseType::LargeData,
@@ -589,7 +589,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: "LARGE_BLOB_10MB".to_string(),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.as_ref().err().cloned(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: result.unwrap_or(0),
             edge_case_type: EdgeCaseType::LargeData,
@@ -632,7 +632,7 @@ impl EdgeCaseDataTypeTests {
             let test_result = EdgeCaseTestResult {
                 test_name: format!("EXTREME_STRING_LENGTH_{}", length),
                 passed: result.is_ok(),
-                error_message: result.err(),
+                error_message: result.as_ref().err().cloned(),
                 processing_time_nanos: elapsed.as_nanos() as u64,
                 data_size: result.unwrap_or(0),
                 edge_case_type: EdgeCaseType::LargeData,
@@ -678,7 +678,8 @@ impl EdgeCaseDataTypeTests {
         for i in 0..10 {
             let mut corrupted_data = base_data.to_vec();
             if !corrupted_data.is_empty() {
-                corrupted_data[i % corrupted_data.len()] = 0xFF;
+                let len = corrupted_data.len();
+                corrupted_data[i % len] = 0xFF;
             }
             self.test_corrupted_data(&corrupted_data, &format!("RANDOM_BYTE_{}", i))?;
         }
@@ -821,7 +822,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: "STRESS_MILLION_ELEMENTS".to_string(),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.as_ref().err().cloned(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: result.unwrap_or(0),
             edge_case_type: EdgeCaseType::ConcurrencyStress,
@@ -876,7 +877,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: "STRESS_DEEP_NESTING_1000".to_string(),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.as_ref().err().cloned(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: result.unwrap_or(0),
             edge_case_type: EdgeCaseType::ConcurrencyStress,

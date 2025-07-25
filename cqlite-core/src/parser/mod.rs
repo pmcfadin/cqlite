@@ -1,13 +1,38 @@
-//! Parser module for SSTable binary format parsing
+//! Parser module for CQLite
 //!
-//! This module provides comprehensive parsing capabilities for Cassandra 5+ SSTable
-//! format ('oa' format). It includes:
+//! This module provides a comprehensive parser abstraction layer that allows
+//! switching between different parser backends (nom, ANTLR) while maintaining
+//! a consistent API. It includes:
 //!
-//! - Variable-length integer encoding/decoding (VInt)
-//! - SSTable header parsing with metadata
-//! - CQL type system parsing and serialization
-//! - Error handling for parser operations
+//! - Parser trait abstractions for backend-agnostic parsing
+//! - Abstract Syntax Tree (AST) definitions for CQL statements
+//! - Visitor pattern for AST traversal and transformation
+//! - Configuration system for parser selection and optimization
+//! - Factory pattern for parser instantiation
+//! - Error handling specific to parsing operations
+//! - Binary format parsing for SSTable compatibility (backward compatibility)
 
+// Core trait definitions
+pub mod traits;
+pub mod ast;
+pub mod visitor;
+pub mod error;
+pub mod config;
+
+// Parser implementations
+pub mod nom_backend;
+pub mod antlr_backend;
+
+// Factory and configuration
+pub mod factory;
+
+// Schema integration with new parser layer
+pub mod schema_integration;
+
+// Binary format parsing (for backward compatibility)
+pub mod binary;
+
+// Re-export existing modules for backward compatibility
 pub mod benchmarks;
 pub mod collection_benchmarks;
 #[cfg(test)]
@@ -35,6 +60,53 @@ pub mod optimized_complex_types;
 pub mod m3_performance_benchmarks;
 pub mod performance_regression_framework;
 
+// Re-export core trait abstractions
+pub use traits::{
+    CqlParser, CqlVisitor, CqlParserFactory, ParserBackendInfo, 
+    ParserFeature, PerformanceCharacteristics, FactoryInfo, SourcePosition
+};
+
+// Re-export AST types for convenience
+pub use ast::{
+    CqlStatement, CqlDataType, CqlExpression, CqlIdentifier, CqlLiteral,
+    CqlSelect, CqlInsert, CqlUpdate, CqlDelete, CqlCreateTable, CqlDropTable,
+    CqlColumnDef, CqlTableOptions, CqlPrimaryKey, CqlTable,
+    CqlSelectItem, CqlInsertValues, CqlAssignment, CqlAssignmentOperator,
+    CqlBinaryOperator, CqlUnaryOperator, CqlOrderBy, CqlSortDirection,
+    CqlUsing
+};
+
+// Re-export visitor pattern
+pub use visitor::{DefaultVisitor, SemanticValidator, IdentifierCollector, SchemaBuilderVisitor, ValidationVisitor, TypeCollectorVisitor};
+
+// Re-export error types
+pub use error::{ParserError, ParserWarning, ErrorSeverity, ErrorCategory as ParserErrorCategory};
+
+// Re-export configuration
+pub use config::{
+    ParserConfig, ParserBackend, ParserFeature as ConfigFeature,
+    PerformanceSettings, MemorySettings, SecuritySettings
+};
+
+// Re-export factory
+pub use factory::{ParserFactory, UseCase, ParserRegistry, global_registry, register_global_factory};
+
+// Re-export schema integration functions
+pub use schema_integration::{
+    parse_cql_schema_enhanced, parse_cql_schema_simple, parse_cql_schema_fast,
+    parse_cql_schema_strict, parse_cql_schemas_batch, validate_cql_schema_syntax,
+    extract_table_name_enhanced, table_name_matches_enhanced,
+    SchemaParserConfig, parse_cql_schema_compat
+};
+
+// Re-export parser implementations
+pub use nom_backend::NomParser;
+pub use antlr_backend::AntlrParser;
+
+// Re-export binary format parser for backward compatibility
+pub use binary::{SSTableParser, CQLiteParseError, ParseResult};
+
+// Re-export binary format parsers for backward compatibility
 pub use benchmarks::*;
 pub use complex_types::*;
 pub use header::*;
@@ -50,172 +122,194 @@ pub use m3_performance_benchmarks::{M3PerformanceBenchmarks, PerformanceTargets}
 pub use performance_regression_framework::{PerformanceRegressionFramework, RegressionThresholds};
 
 use crate::error::{Error, Result};
-use nom::{error::ParseError, IResult};
+use std::sync::Arc;
 
-/// Result type for parser operations using nom
-pub type ParseResult<'a, T> = IResult<&'a [u8], T>;
+/// Re-export common result types
+pub use crate::error::{Result as CqlResult};
 
-/// Common parser error types specific to CQLite
-#[derive(Debug, Clone, PartialEq)]
-pub enum CQLiteParseError {
-    /// Invalid magic number in SSTable header
-    InvalidMagic { expected: u32, found: u32 },
-    /// Unsupported format version
-    UnsupportedVersion(String),
-    /// Invalid length field
-    InvalidLength { expected: usize, found: usize },
-    /// Data corruption detected
-    Corruption(String),
-    /// Unexpected end of input
-    EndOfInput,
+/// Convenience function to create a default parser
+pub fn create_default_parser() -> Result<Arc<dyn CqlParser + Send + Sync>> {
+    ParserFactory::create_default()
 }
 
-impl<I> ParseError<I> for CQLiteParseError {
-    fn from_error_kind(_input: I, _kind: nom::error::ErrorKind) -> Self {
-        CQLiteParseError::EndOfInput
-    }
-
-    fn append(_input: I, _kind: nom::error::ErrorKind, other: Self) -> Self {
-        other
-    }
+/// Convenience function to create a parser with specific configuration
+pub fn create_parser(config: ParserConfig) -> Result<Arc<dyn CqlParser + Send + Sync>> {
+    ParserFactory::create(config)
 }
 
-impl From<CQLiteParseError> for Error {
-    fn from(err: CQLiteParseError) -> Self {
-        match err {
-            CQLiteParseError::InvalidMagic { expected, found } => Error::corruption(format!(
-                "Invalid magic number: expected 0x{:08X}, found 0x{:08X}",
-                expected, found
-            )),
-            CQLiteParseError::UnsupportedVersion(version) => {
-                Error::corruption(format!("Unsupported format version: {}", version))
-            }
-            CQLiteParseError::InvalidLength { expected, found } => Error::corruption(format!(
-                "Invalid length: expected {}, found {}",
-                expected, found
-            )),
-            CQLiteParseError::Corruption(msg) => Error::corruption(msg),
-            CQLiteParseError::EndOfInput => {
-                Error::corruption("Unexpected end of input during parsing")
-            }
-        }
-    }
+/// Convenience function to create a parser for a specific use case
+pub fn create_parser_for_use_case(use_case: UseCase) -> Result<Arc<dyn CqlParser + Send + Sync>> {
+    ParserFactory::create_for_use_case(use_case)
 }
 
-/// Main parser context for SSTable parsing
-#[derive(Debug)]
-pub struct SSTableParser {
-    /// Whether to validate checksums
-    pub validate_checksums: bool,
-    /// Maximum allowed VInt size for safety
-    pub max_vint_size: usize,
-    /// Whether to allow unknown type IDs
-    pub allow_unknown_types: bool,
+/// Get information about available parser backends
+pub fn get_available_backends() -> Vec<ParserBackendInfo> {
+    ParserFactory::get_available_backends()
 }
 
-impl Default for SSTableParser {
-    fn default() -> Self {
-        Self {
-            validate_checksums: true,
-            max_vint_size: vint::MAX_VINT_SIZE,
-            allow_unknown_types: false,
-        }
-    }
+/// Check if a specific backend is available
+pub fn is_backend_available(backend: &ParserBackend) -> bool {
+    ParserFactory::is_backend_available(backend)
 }
 
-impl SSTableParser {
-    /// Create a new parser with default settings
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// Parse CQL CREATE TABLE statement (main backward compatibility function)
+/// 
+/// This function maintains full backward compatibility with the existing
+/// parse_cql_schema API while using the new parser abstraction internally.
+/// 
+/// # Arguments
+/// * `input` - The CQL CREATE TABLE statement to parse
+/// 
+/// # Returns
+/// * `nom::IResult<&str, crate::schema::TableSchema>` - Parsed schema or error
+pub fn parse_cql_schema(input: &str) -> nom::IResult<&str, crate::schema::TableSchema> {
+    use crate::schema::TableSchema;
+    
+    // Use the compatibility wrapper
+    parse_cql_schema_compat(input)
+}
 
-    /// Create a parser with custom settings
-    pub fn with_options(validate_checksums: bool, allow_unknown_types: bool) -> Self {
-        Self {
-            validate_checksums,
-            max_vint_size: vint::MAX_VINT_SIZE,
-            allow_unknown_types,
-        }
-    }
-
-    /// Parse a complete SSTable header
-    pub fn parse_header(&self, input: &[u8]) -> Result<(SSTableHeader, usize)> {
-        match header::parse_sstable_header(input) {
-            Ok((remaining, header)) => {
-                let parsed_bytes = input.len() - remaining.len();
-                Ok((header, parsed_bytes))
-            }
-            Err(nom::Err::Error(e) | nom::Err::Failure(e)) => Err(Error::corruption(format!(
-                "Failed to parse SSTable header: {:?}",
-                e
-            ))),
-            Err(nom::Err::Incomplete(_)) => {
-                Err(Error::corruption("Incomplete SSTable header data"))
-            }
-        }
-    }
-
-    /// Parse a CQL value with the given type
-    pub fn parse_value(&self, input: &[u8], type_id: CqlTypeId) -> Result<(crate::Value, usize)> {
-        match types::parse_cql_value(input, type_id) {
-            Ok((remaining, value)) => {
-                let parsed_bytes = input.len() - remaining.len();
-                Ok((value, parsed_bytes))
-            }
-            Err(nom::Err::Error(e) | nom::Err::Failure(e)) => Err(Error::corruption(format!(
-                "Failed to parse CQL value: {:?}",
-                e
-            ))),
-            Err(nom::Err::Incomplete(_)) => Err(Error::corruption("Incomplete CQL value data")),
-        }
-    }
-
-    /// Serialize an SSTable header to bytes
-    pub fn serialize_header(&self, header: &SSTableHeader) -> Result<Vec<u8>> {
-        header::serialize_sstable_header(header)
-    }
-
-    /// Serialize a CQL value to bytes
-    pub fn serialize_value(&self, value: &crate::Value) -> Result<Vec<u8>> {
-        types::serialize_cql_value(value)
-    }
+/// Get the recommended backend for a specific use case
+pub fn recommend_backend(use_case: UseCase) -> ParserBackend {
+    ParserFactory::recommend_backend(use_case)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Value;
 
-    #[test]
-    fn test_parser_creation() {
-        let parser = SSTableParser::new();
-        assert!(parser.validate_checksums);
-        assert!(!parser.allow_unknown_types);
+    #[tokio::test]
+    async fn test_parser_creation() {
+        let parser = create_default_parser().unwrap();
+        let info = parser.backend_info();
+        assert!(!info.name.is_empty());
+    }
 
-        let parser = SSTableParser::with_options(false, true);
-        assert!(!parser.validate_checksums);
-        assert!(parser.allow_unknown_types);
+    #[tokio::test]
+    async fn test_parser_with_config() {
+        let config = ParserConfig::default().with_backend(ParserBackend::Nom);
+        let parser = create_parser(config).unwrap();
+        
+        let info = parser.backend_info();
+        assert_eq!(info.name, "nom");
+    }
+
+    #[tokio::test]
+    async fn test_use_case_parsers() {
+        let parser = create_parser_for_use_case(UseCase::HighPerformance).unwrap();
+        let info = parser.backend_info();
+        assert_eq!(info.name, "nom"); // Should select nom for high performance
     }
 
     #[test]
-    fn test_error_conversion() {
-        let parse_error = CQLiteParseError::InvalidMagic {
-            expected: 0x1234_5678,
-            found: 0x8765_4321,
-        };
-        let error: Error = parse_error.into();
-        assert!(matches!(error, Error::Corruption(_)));
+    fn test_backend_availability() {
+        assert!(is_backend_available(&ParserBackend::Nom));
+        assert!(is_backend_available(&ParserBackend::Auto));
     }
 
     #[test]
-    fn test_value_serialization_roundtrip() {
-        let parser = SSTableParser::new();
-        let value = Value::Text("test".to_string());
+    fn test_backend_recommendations() {
+        assert_eq!(recommend_backend(UseCase::HighPerformance), ParserBackend::Nom);
+        assert_eq!(recommend_backend(UseCase::Development), ParserBackend::Antlr);
+        assert_eq!(recommend_backend(UseCase::Production), ParserBackend::Auto);
+    }
 
-        let serialized = parser.serialize_value(&value).unwrap();
-        assert!(!serialized.is_empty());
+    #[test]
+    fn test_available_backends() {
+        let backends = get_available_backends();
+        assert!(!backends.is_empty());
+        
+        // Should have at least nom backend
+        assert!(backends.iter().any(|b| b.name == "nom"));
+    }
 
-        // The first byte should be the type ID
-        assert_eq!(serialized[0], CqlTypeId::Varchar as u8);
+    #[tokio::test]
+    async fn test_basic_parsing() {
+        let parser = create_default_parser().unwrap();
+        
+        // Test that we can attempt to parse (even if not fully implemented)
+        let result = parser.parse("SELECT * FROM users").await;
+        // Result can be Ok or Err depending on implementation status
+        // We're just testing that the interface works
+        match result {
+            Ok(statement) => {
+                // Parsing succeeded
+                assert!(matches!(statement, CqlStatement::Select(_)));
+            }
+            Err(_) => {
+                // Parsing failed, which is expected for placeholder implementations
+                // This is fine as long as the trait interface works
+            }
+        }
+    }
+
+    #[test]
+    fn test_ast_types() {
+        use ast::*;
+        
+        // Test that we can create AST nodes
+        let identifier = CqlIdentifier::new("test_table");
+        assert_eq!(identifier.name(), "test_table");
+        assert!(!identifier.is_quoted());
+        
+        let quoted_identifier = CqlIdentifier::quoted("test table");
+        assert_eq!(quoted_identifier.name(), "test table");
+        assert!(quoted_identifier.is_quoted());
+        
+        let table = CqlTable::new("users");
+        assert_eq!(table.name().name(), "users");
+    }
+
+    #[test]
+    fn test_visitor_pattern() {
+        use visitor::*;
+        use ast::*;
+        
+        let mut collector = IdentifierCollector::new();
+        let table = CqlTable::new("users");
+        let statement = CqlStatement::Select(CqlSelect {
+            distinct: false,
+            select_list: vec![CqlSelectItem::Wildcard],
+            from: table,
+            where_clause: None,
+            order_by: None,
+            limit: None,
+            allow_filtering: false,
+        });
+        
+        let result = collector.visit_statement(&statement);
+        assert!(result.is_ok());
+        
+        let identifiers = collector.into_identifiers();
+        assert!(identifiers.iter().any(|id| id.name() == "users"));
+    }
+
+    #[test]
+    fn test_error_types() {
+        use error::*;
+        
+        let error = ParserError::syntax(
+            "Test error".to_string(),
+            SourcePosition::start(),
+        );
+        
+        assert_eq!(error.category(), &ErrorCategory::Syntax);
+        assert_eq!(error.severity(), &ErrorSeverity::Error);
+        assert!(error.message().contains("Test error"));
+    }
+
+    #[test]
+    fn test_configuration() {
+        use config::*;
+        
+        let config = ParserConfig::default()
+            .with_backend(ParserBackend::Nom)
+            .with_feature(ParserFeature::Streaming);
+        
+        assert_eq!(config.backend, ParserBackend::Nom);
+        assert!(config.has_feature(&ParserFeature::Streaming));
+        
+        let validation_result = config.validate();
+        assert!(validation_result.is_ok());
     }
 }

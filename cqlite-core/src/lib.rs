@@ -18,6 +18,10 @@ pub mod query;
 pub mod schema;
 pub mod storage;
 
+// Docker integration for testing
+pub mod docker;
+pub mod testing;
+
 // Memory safety testing modules
 #[cfg(test)]
 pub mod memory_safety_tests;
@@ -151,6 +155,19 @@ impl Database {
     /// Returns an error if SQL syntax is invalid or references non-existent objects
     pub async fn prepare(&self, sql: &str) -> Result<std::sync::Arc<query::PreparedQuery>> {
         self.query.prepare(sql).await
+    }
+
+    /// Explain a SQL query without executing it
+    ///
+    /// # Arguments
+    ///
+    /// * `sql` - The SQL query to explain
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQL syntax is invalid
+    pub async fn explain(&self, sql: &str) -> Result<query::ExplainResult> {
+        self.query.explain(sql).await
     }
 
     /// Get database statistics

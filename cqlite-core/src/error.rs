@@ -29,6 +29,22 @@ pub enum Error {
     #[error("SQL parse error: {0}")]
     SqlParse(String),
 
+    /// Invalid format error (for SSTable parsing)
+    #[error("Invalid format: {0}")]
+    InvalidFormat(String),
+
+    /// Unsupported format error
+    #[error("Unsupported format: {0}")]
+    UnsupportedFormat(String),
+
+    /// Invalid path error
+    #[error("Invalid path: {0}")]
+    InvalidPath(String),
+
+    /// Invalid state error
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+
     /// Query execution errors
     #[error("Query execution error: {0}")]
     QueryExecution(String),
@@ -89,6 +105,14 @@ pub enum Error {
     /// Generic internal error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// Parse error
+    #[error("Parse error: {0}")]
+    ParseError(String),
+
+    /// Invalid input error
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl Error {
@@ -110,6 +134,26 @@ impl Error {
     /// Create a SQL parse error
     pub fn sql_parse(msg: impl Into<String>) -> Self {
         Self::SqlParse(msg.into())
+    }
+
+    /// Create an invalid format error
+    pub fn invalid_format(msg: impl Into<String>) -> Self {
+        Self::InvalidFormat(msg.into())
+    }
+
+    /// Create an unsupported format error
+    pub fn unsupported_format(msg: impl Into<String>) -> Self {
+        Self::UnsupportedFormat(msg.into())
+    }
+
+    /// Create an invalid path error
+    pub fn invalid_path(msg: impl Into<String>) -> Self {
+        Self::InvalidPath(msg.into())
+    }
+
+    /// Create an invalid state error
+    pub fn invalid_state(msg: impl Into<String>) -> Self {
+        Self::InvalidState(msg.into())
     }
 
     /// Create a query execution error
@@ -193,6 +237,11 @@ impl Error {
         Self::InvalidOperation(msg.into())
     }
 
+    /// Create an invalid input error
+    pub fn invalid_input(msg: impl Into<String>) -> Self {
+        Self::InvalidInput(msg.into())
+    }
+
     /// Check if this error is recoverable
     pub fn is_recoverable(&self) -> bool {
         match self {
@@ -224,6 +273,12 @@ impl Error {
 
             Error::Serialization(_) => false,
             Error::Internal(_) => false,
+            Error::ParseError(_) => false,
+            Error::InvalidInput(_) => false,
+            Error::InvalidFormat(_) => false,
+            Error::UnsupportedFormat(_) => false,
+            Error::InvalidPath(_) => false,
+            Error::InvalidState(_) => false,
         }
     }
 
@@ -253,6 +308,12 @@ impl Error {
             Error::Wasm(_) => ErrorCategory::Platform,
 
             Error::Internal(_) => ErrorCategory::Internal,
+            Error::ParseError(_) => ErrorCategory::Data,
+            Error::InvalidInput(_) => ErrorCategory::Data,
+            Error::InvalidFormat(_) => ErrorCategory::Data,
+            Error::UnsupportedFormat(_) => ErrorCategory::Data,
+            Error::InvalidPath(_) => ErrorCategory::System,
+            Error::InvalidState(_) => ErrorCategory::Logic,
         }
     }
 }

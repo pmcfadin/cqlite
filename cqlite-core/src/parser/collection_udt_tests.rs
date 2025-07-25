@@ -4,7 +4,7 @@
 //! against the actual test schema defined in test-env/cassandra5/scripts/create-keyspaces.cql
 
 use super::complex_types::ComplexTypeParser;
-use super::types::{parse_cql_value, serialize_cql_value, CqlTypeId};
+use super::types::CqlTypeId;
 use super::vint::encode_vint;
 use crate::schema::{CqlType, UdtRegistry};
 use crate::types::{Value, UdtValue, UdtField, UdtTypeDef};

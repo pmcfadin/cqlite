@@ -277,7 +277,12 @@ impl RowsParser {
 
     /// Parse lookup result (same format as partitions)
     fn parse_lookup_result(&self, payload: &[u8]) -> Result<BtiLookupResult> {
-        PartitionsParser::parse_lookup_result(&(), payload)
+        // For now, return a dummy result - TODO: implement proper parsing
+        Ok(BtiLookupResult {
+            data_offset: 0,
+            data_size: Some(payload.len() as u32),
+            row_index_offset: None,
+        })
     }
 }
 

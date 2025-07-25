@@ -7,6 +7,7 @@ members = [
     "tests",
     "proof-of-concept",
     "test-env/cassandra5/validation",
+    "testing-framework",
 ]
 resolver = "2"
 
@@ -67,6 +68,9 @@ tokio-test = "0.4"
 toml = "0.8"
 serde_yaml = "0.9"
 dirs = "5.0"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
 
 # FFI
 libc = "0.2"
