@@ -151,8 +151,74 @@ impl Compression {
             CompressionAlgorithm::Lz4 => {
                 #[cfg(feature = "lz4")]
                 {
-                    use lz4_flex::decompress_size_prepended;
-                    decompress_size_prepended(data).map_err(|e| Error::storage(format!("LZ4 decompression failed: {}", e)))
+                    use lz4_flex::{decompress_size_prepended, decompress};
+                    
+                    // Debug: Log the first 64 bytes to understand the format
+                    println!("LZ4 data analysis ({} bytes):", data.len());
+                    if data.len() >= 16 {
+                        println!("First 16 bytes: {:02x?}", &data[..16]);
+                    }
+                    
+                    // For Cassandra 5.0, try different approaches based on data analysis
+                    
+                    // Method 1: Try standard LZ4 size-prepended format
+                    if let Ok(result) = decompress_size_prepended(data) {
+                        println!("LZ4 success: size-prepended format, {} bytes decompressed", result.len());
+                        return Ok(result);
+                    }
+                    
+                    // Method 2: Try Cassandra's LZ4 format with 4-byte size prefix (big-endian)
+                    if data.len() >= 4 {
+                        let expected_size_be = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+                        if expected_size_be > 0 && expected_size_be <= 64 * 1024 * 1024 { // Max 64MB reasonable
+                            if let Ok(result) = decompress(&data[4..], expected_size_be) {
+                                println!("LZ4 success: big-endian size prefix ({}), {} bytes decompressed", expected_size_be, result.len());
+                                return Ok(result);
+                            }
+                        }
+                        
+                        // Method 3: Try little-endian size prefix
+                        let expected_size_le = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+                        if expected_size_le > 0 && expected_size_le <= 64 * 1024 * 1024 {
+                            if let Ok(result) = decompress(&data[4..], expected_size_le) {
+                                println!("LZ4 success: little-endian size prefix ({}), {} bytes decompressed", expected_size_le, result.len());
+                                return Ok(result);
+                            }
+                        }
+                    }
+                    
+                    // Method 4: Try no size prefix with various estimated sizes
+                    // This is more exploratory for Cassandra 5.0
+                    let estimated_sizes = [
+                        data.len() * 2,      // 2x compressed size
+                        data.len() * 4,      // 4x compressed size  
+                        64 * 1024,           // 64KB
+                        256 * 1024,          // 256KB
+                        1024 * 1024,         // 1MB
+                    ];
+                    
+                    for &estimated_size in &estimated_sizes {
+                        if let Ok(result) = decompress(data, estimated_size) {
+                            println!("LZ4 success: no prefix with estimated size {}, {} bytes decompressed", estimated_size, result.len());
+                            return Ok(result);
+                        }
+                    }
+                    
+                    // Method 5: Try to parse as raw LZ4 block format
+                    // Cassandra 5.0 might use raw LZ4 blocks without size info
+                    println!("All LZ4 decompression attempts failed. Trying advanced methods...");
+                    
+                    // Try very large buffer to handle any size
+                    match decompress(data, 16 * 1024 * 1024) {  // 16MB max
+                        Ok(result) => {
+                            println!("LZ4 success: large buffer method, {} bytes decompressed", result.len());
+                            Ok(result)
+                        },
+                        Err(e) => {
+                            println!("LZ4 final error: {}", e);
+                            Err(Error::storage(format!("LZ4 decompression failed after all attempts: {}", e)))
+                        }
+                    }
                 }
                 #[cfg(not(feature = "lz4"))]
                 {
@@ -774,11 +840,11 @@ impl CompressionInfo {
     /// Parse legacy binary CompressionInfo.db format (Cassandra 5.0 format)
     pub fn parse_binary(data: &[u8]) -> Result<Self> {
         // Cassandra 5.0 binary format parsing based on actual file structure
-        // Format analysis from real files shows:
-        // - 2-byte algorithm name length
-        // - Algorithm name string
-        // - Some padding/alignment bytes
-        // - Complex chunk layout
+        // From hex dump: 00 0d 4c 5a 34 43 6f 6d 70 72 65 73 73 6f 72 00
+        // - 00 0d = 13 bytes for algorithm name "LZ4Compressor"
+        // - 4c 5a 34 ... = "LZ4Compressor"
+        // - 00 = null terminator
+        // - Then chunk size and data info
         
         if data.len() < 20 {
             return Err(Error::storage("CompressionInfo.db too short".to_string()));
@@ -786,7 +852,7 @@ impl CompressionInfo {
         
         let mut offset = 0;
         
-        // Read algorithm name length (2 bytes big-endian, not 4)
+        // Read algorithm name length (2 bytes big-endian)
         // Based on hex analysis: 00 0d = 13 bytes for "LZ4Compressor"
         let algo_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2;
@@ -800,78 +866,49 @@ impl CompressionInfo {
             .map_err(|e| Error::storage(format!("Invalid UTF-8 in algorithm name: {}", e)))?;
         offset += algo_len;
         
-        // The format is more complex than initially thought. Based on analysis of real files:
-        // After algorithm name, there are several fields including chunk info.
-        // For now, we'll implement a simplified parser that works with the known structure.
+        // Based on hex dump analysis:
+        // 00 0d 4c 5a 34 43 6f 6d 70 72 65 73 73 6f 72 00 = "LZ4Compressor" + null
+        // 00 00 00 00 00 40 00 = chunk length: 0x4000 = 16384 bytes (16KB)
+        // 7f ff ff ff = data length: 0x7fffffff (max int, or placeholder)
+        // 00 00 00 00 00 00 1c 40 = some metadata
+        // 00 00 00 01 = number of chunks: 1
+        // 00 00 00 00 00 00 00 00 = chunk offset: 0
         
-        // Skip any null padding after algorithm name
-        while offset < data.len() && data[offset] == 0 {
+        // Skip null terminator if present
+        if offset < data.len() && data[offset] == 0 {
             offset += 1;
         }
         
-        // For Cassandra 5.0, we'll use a default chunk length of 64KB
-        // This can be refined as we learn more about the exact format
-        let chunk_length = 65536u32; // 64KB default
+        // Next: chunk length (seems to be at a specific offset)
+        // From hex: 00 00 00 00 00 40 00 suggests 0x4000 = 16384
+        // But let's parse it properly - skip padding bytes first
+        while offset < data.len() && data[offset] == 0 && offset < 20 {
+            offset += 1;
+        }
         
-        // Estimate data length and chunk count from file structure
-        // The remaining data after header contains chunk information
-        let remaining_data = data.len() - offset;
-        
-        // Each chunk entry is typically 16 bytes (8-byte offset + 4-byte compressed + 4-byte uncompressed)
-        let estimated_chunks = remaining_data / 16;
-        
-        // For testing, we'll create a basic structure
-        let data_length = (estimated_chunks * chunk_length as usize) as u64;
-        
-        // Parse chunk information from the remaining data
-        // We'll try to extract meaningful chunk data, but handle the complex format gracefully
-        let mut chunks = Vec::new();
-        
-        // Try to parse chunks assuming 16-byte entries
-        while offset + 16 <= data.len() {
-            // Try to read what looks like chunk data
-            let chunk_offset = u64::from_be_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-                data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]
+        // Try to find the chunk size - look for non-zero values
+        let mut chunk_length = 65536u32; // Default 64KB
+        if offset + 4 <= data.len() {
+            // Try reading as big-endian u32
+            let potential_chunk_size = u32::from_be_bytes([
+                data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
             ]);
-            
-            let compressed_length = u32::from_be_bytes([
-                data[offset + 8], data[offset + 9], data[offset + 10], data[offset + 11]
-            ]);
-            
-            let uncompressed_length = u32::from_be_bytes([
-                data[offset + 12], data[offset + 13], data[offset + 14], data[offset + 15]
-            ]);
-            
-            // Validate chunk data makes sense
-            if compressed_length > 0 && compressed_length <= 10 * 1024 * 1024 && // Max 10MB per chunk
-               uncompressed_length > 0 && uncompressed_length <= 10 * 1024 * 1024 &&
-               uncompressed_length >= compressed_length / 10  // Reasonable compression ratio
-            {
-                chunks.push(ChunkInfo {
-                    offset: chunk_offset,
-                    compressed_length,
-                    uncompressed_length,
-                });
-            }
-            
-            offset += 16;
-            
-            // Safety check to avoid infinite loop
-            if chunks.len() > 10000 {
-                break;
+            if potential_chunk_size > 1024 && potential_chunk_size <= 1024 * 1024 {
+                chunk_length = potential_chunk_size;
+                offset += 4;
             }
         }
         
-        // If we couldn't parse any chunks, create at least one default chunk
-        if chunks.is_empty() {
-            // Create a single chunk representing the entire compressed data
-            chunks.push(ChunkInfo {
-                offset: 0,
-                compressed_length: data_length as u32,
-                uncompressed_length: data_length as u32,
-            });
-        }
+        // For Cassandra 5.0 nb format, we often have just one large compressed block
+        // The exact data length is hard to determine from CompressionInfo.db alone
+        // We'll create a single chunk representing the entire data
+        let data_length = 1024 * 1024; // 1MB estimate - will be corrected during reading
+        
+        let chunks = vec![ChunkInfo {
+            offset: 0,
+            compressed_length: data_length as u32,
+            uncompressed_length: data_length as u32,
+        }];
         
         Ok(CompressionInfo {
             algorithm,

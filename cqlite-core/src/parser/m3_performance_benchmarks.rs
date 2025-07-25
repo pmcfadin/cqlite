@@ -8,7 +8,7 @@
 
 use super::benchmarks::ParserBenchmarks;
 use super::optimized_complex_types::OptimizedComplexTypeParser;
-use super::types::{CqlTypeId, parse_cql_value, serialize_cql_value};
+use super::types::{CqlTypeId, parse_cql_value};
 use super::vint::encode_vint;
 use crate::error::Result;
 use crate::types::Value;

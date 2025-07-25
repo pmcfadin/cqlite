@@ -3,6 +3,10 @@
 pub mod bloom;
 pub mod bti;
 pub mod compression;
+pub mod compression_info;
+pub mod chunk_decompressor;
+pub mod format_detector;
+pub mod bulletproof_reader;
 pub mod directory;
 pub mod directory_integration_tests;
 pub mod index;

@@ -50,18 +50,17 @@ impl ByteComparableEncoder {
     fn encode_value_to_buffer(&mut self, value: &Value) -> Result<()> {
         match value {
             Value::Text(s) => self.encode_text(s),
-            Value::Int(i) => self.encode_int(*i),
+            Value::Integer(i) => self.encode_int(*i),
             Value::BigInt(i) => self.encode_bigint(*i),
-            Value::Uuid(uuid) => self.encode_uuid(uuid),
-            Value::TimeUuid(uuid) => self.encode_timeuuid(uuid),
+            Value::Uuid(uuid) => self.encode_uuid_bytes(uuid),
             Value::Timestamp(ts) => self.encode_timestamp(*ts),
             Value::Boolean(b) => self.encode_boolean(*b),
-            Value::Float(f) => self.encode_float(*f),
-            Value::Double(d) => self.encode_double(*d),
+            Value::Float(f) => self.encode_float(*f as f32),
+            Value::Float32(f) => self.encode_float(*f),
             Value::Blob(bytes) => self.encode_blob(bytes),
             Value::List(items) => self.encode_list(items),
             Value::Set(items) => self.encode_set(items),
-            Value::Map(map) => self.encode_map(map),
+            Value::Map(map) => self.encode_map_vec(map),
             Value::Frozen(inner) => self.encode_value_to_buffer(inner),
             _ => {
                 return Err(BtiError::InvalidByteComparableKey(
@@ -114,6 +113,13 @@ impl ByteComparableEncoder {
     fn encode_uuid(&mut self, uuid: &Uuid) -> Result<()> {
         // UUID bytes are naturally comparable
         self.buffer.extend_from_slice(uuid.as_bytes());
+        Ok(())
+    }
+
+    /// Encode UUID bytes with proper byte ordering
+    fn encode_uuid_bytes(&mut self, uuid: &[u8; 16]) -> Result<()> {
+        // UUID bytes are naturally comparable
+        self.buffer.extend_from_slice(uuid);
         Ok(())
     }
 
@@ -224,6 +230,37 @@ impl ByteComparableEncoder {
 
     /// Encode map with sorted key-value pairs
     fn encode_map(&mut self, map: &HashMap<Value, Value>) -> Result<()> {
+        // Encode key-value pairs and sort by encoded keys
+        let mut encoded_pairs = Vec::new();
+        
+        for (key, value) in map {
+            let mut key_encoder = ByteComparableEncoder::new();
+            let encoded_key = key_encoder.encode_value(key)?;
+            
+            let mut value_encoder = ByteComparableEncoder::new();
+            let encoded_value = value_encoder.encode_value(value)?;
+            
+            encoded_pairs.push((encoded_key, encoded_value));
+        }
+        
+        // Sort by encoded keys
+        encoded_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        
+        // Length prefix
+        self.buffer.extend_from_slice(&(encoded_pairs.len() as u32).to_be_bytes());
+        
+        // Add sorted pairs
+        for (encoded_key, encoded_value) in encoded_pairs {
+            self.buffer.extend_from_slice(&(encoded_key.len() as u32).to_be_bytes());
+            self.buffer.extend_from_slice(&encoded_key);
+            self.buffer.extend_from_slice(&(encoded_value.len() as u32).to_be_bytes());
+            self.buffer.extend_from_slice(&encoded_value);
+        }
+        Ok(())
+    }
+
+    /// Encode map from Vec of tuples with sorted key-value pairs
+    fn encode_map_vec(&mut self, map: &Vec<(Value, Value)>) -> Result<()> {
         // Encode key-value pairs and sort by encoded keys
         let mut encoded_pairs = Vec::new();
         

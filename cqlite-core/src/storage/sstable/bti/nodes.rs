@@ -209,7 +209,7 @@ impl NodeParser {
     }
 
     /// Parse a BTI trie node from bytes
-    pub fn parse_node(&mut self, input: &[u8], position: u64) -> IResult<&[u8], TrieNode> {
+    pub fn parse_node<'a>(&mut self, input: &'a [u8], position: u64) -> IResult<&'a [u8], TrieNode> {
         self.position = position;
         
         let (input, header) = be_u8(input)?;
@@ -226,7 +226,7 @@ impl NodeParser {
     }
 
     /// Parse PAYLOAD_ONLY node
-    fn parse_payload_only_node(&self, input: &[u8], flags: u8) -> IResult<&[u8], TrieNode> {
+    fn parse_payload_only_node<'a>(&self, input: &'a [u8], flags: u8) -> IResult<&'a [u8], TrieNode> {
         let has_payload = (flags & 0x01) != 0;
         
         if has_payload {
@@ -243,7 +243,7 @@ impl NodeParser {
     }
 
     /// Parse SINGLE node
-    fn parse_single_node(&self, input: &[u8], flags: u8) -> IResult<&[u8], TrieNode> {
+    fn parse_single_node<'a>(&self, input: &'a [u8], flags: u8) -> IResult<&'a [u8], TrieNode> {
         let has_payload = (flags & 0x01) != 0;
         
         let (input, character) = be_u8(input)?;
@@ -266,7 +266,7 @@ impl NodeParser {
     }
 
     /// Parse SPARSE node
-    fn parse_sparse_node(&self, input: &[u8], flags: u8) -> IResult<&[u8], TrieNode> {
+    fn parse_sparse_node<'a>(&self, input: &'a [u8], flags: u8) -> IResult<&'a [u8], TrieNode> {
         let has_payload = (flags & 0x01) != 0;
         
         let (input, transition_count) = be_u8(input)?;
@@ -304,7 +304,7 @@ impl NodeParser {
     }
 
     /// Parse DENSE node
-    fn parse_dense_node(&self, input: &[u8], flags: u8) -> IResult<&[u8], TrieNode> {
+    fn parse_dense_node<'a>(&self, input: &'a [u8], flags: u8) -> IResult<&'a [u8], TrieNode> {
         let has_payload = (flags & 0x01) != 0;
         
         let (input, first_char) = be_u8(input)?;
@@ -347,7 +347,7 @@ impl NodeParser {
     }
 
     /// Parse compressed pointer (variable-size based on distance)
-    fn parse_compressed_pointer(&self, input: &[u8]) -> IResult<&[u8], i64> {
+    fn parse_compressed_pointer<'a>(&self, input: &'a [u8]) -> IResult<&'a [u8], i64> {
         // For now, use fixed 64-bit pointers - can be optimized later
         let (input, offset) = be_u64(input)?;
         Ok((input, offset as i64))

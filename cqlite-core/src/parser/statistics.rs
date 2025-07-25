@@ -218,7 +218,7 @@ pub fn parse_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> 
     let (input, header) = parse_statistics_header(input)?;
     let (input, row_stats) = parse_row_statistics(input)?;
     let (input, timestamp_stats) = parse_timestamp_statistics(input)?;
-    let (input, column_stats) = parse_column_statistics(input, header.section_count)?;
+    let (input, column_stats) = parse_column_statistics(input, header.data_length)?;
     let (input, table_stats) = parse_table_statistics(input)?;
     let (input, partition_stats) = parse_partition_statistics(input)?;
     let (input, compression_stats) = parse_compression_statistics(input)?;

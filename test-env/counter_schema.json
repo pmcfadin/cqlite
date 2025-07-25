@@ -1,0 +1,14 @@
+{
+  "keyspace": "test_keyspace",
+  "table": "counters",
+  "columns": {
+    "id": {
+      "type": "uuid",
+      "kind": "PartitionKey"
+    },
+    "counter_value": {
+      "type": "counter",
+      "kind": "Regular"
+    }
+  }
+}

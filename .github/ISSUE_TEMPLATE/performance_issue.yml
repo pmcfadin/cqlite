@@ -1,0 +1,123 @@
+name: Performance Issue
+description: Report performance problems or regressions
+title: "[PERFORMANCE] "
+labels: ["performance", "needs-triage"]
+projects: ["cqlite-development"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a performance issue! Please provide detailed information to help us investigate.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component has the performance issue?
+      options:
+        - SSTable Reading
+        - CQL Parsing
+        - Query Execution
+        - CLI Operations
+        - WASM Performance
+        - FFI Performance
+        - Memory Usage
+        - Build Times
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue Type
+      description: What type of performance issue is this?
+      options:
+        - Slow execution/processing
+        - High memory usage
+        - CPU usage too high
+        - Performance regression
+        - Scalability issue
+        - Build/compile time issue
+    validations:
+      required: true
+
+  - type: textarea
+    id: performance-description
+    attributes:
+      label: Performance Issue Description
+      description: Describe the performance problem you're experiencing
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-performance
+    attributes:
+      label: Current Performance
+      description: What performance are you currently seeing?
+      placeholder: |
+        - Time taken: X seconds
+        - Memory usage: X MB/GB
+        - CPU usage: X%
+        - File size processed: X MB/GB
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-performance
+    attributes:
+      label: Expected Performance
+      description: What performance would you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: benchmark-data
+    attributes:
+      label: Benchmark Data
+      description: If you have specific benchmark results, please share them
+      render: shell
+
+  - type: textarea
+    id: data-characteristics
+    attributes:
+      label: Data Characteristics
+      description: Describe the data you're working with
+      placeholder: |
+        - SSTable file size: X MB/GB
+        - Number of partitions: X
+        - Row count: X
+        - Column count: X
+        - Data types used: text, int, uuid, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Your environment details
+      placeholder: |
+        - OS: [e.g., Ubuntu 22.04, macOS 14.0, Windows 11]
+        - CPU: [e.g., Intel i7-12700K, Apple M2, AMD Ryzen 7]
+        - RAM: [e.g., 16GB DDR4, 32GB]
+        - Storage: [e.g., NVMe SSD, HDD]
+        - Rust version: [e.g., 1.75.0]
+    validations:
+      required: true
+
+  - type: textarea
+    id: profiling-data
+    attributes:
+      label: Profiling Data
+      description: If you have profiling data (flamegraphs, etc.), please share
+      render: shell
+
+  - type: textarea
+    id: comparison
+    attributes:
+      label: Comparison with Other Tools
+      description: How does this performance compare to other tools (if applicable)?
+      placeholder: e.g., "cqlsh takes 2 seconds for the same operation"

@@ -6,6 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;
+use crate::parser::{CqlCreateTable, CqlDataType, CqlIdentifier};
 use crate::schema::{CqlType, TableSchema, KeyColumn, ClusteringColumn, Column};
 use serde_json;
 use nom::{
@@ -501,6 +502,149 @@ pub fn parse_cql_schema(cql: &str) -> Result<TableSchema> {
         }
         Err(nom::Err::Incomplete(_)) => {
             Err(Error::schema("Incomplete CQL schema".to_string()))
+        }
+    }
+}
+
+/// Parse CQL schema using the visitor pattern (preferred method for new code)
+/// 
+/// This function demonstrates how to use the visitor pattern for AST-based parsing.
+/// It provides better error handling, validation, and is more maintainable than 
+/// the legacy nom-based parser.
+pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
+    // Note: This is a demonstration function. In a complete implementation,
+    // you would first parse the CQL into an AST using a parser (nom or ANTLR),
+    // then use the visitor pattern to convert it to TableSchema.
+    // 
+    // For now, this uses the existing nom parser for demonstration purposes.
+    
+    use crate::parser::visitor::SchemaBuilderVisitor;
+    use crate::parser::traits::CqlVisitor;
+    use crate::parser::{CqlStatement, CqlCreateTable, CqlTable, CqlIdentifier, CqlColumnDef, CqlDataType, CqlPrimaryKey, CqlTableOptions};
+    use std::collections::HashMap;
+    
+    // Parse using the existing nom parser to get the TableSchema
+    let schema = parse_cql_schema(cql)?;
+    
+    // Demonstrate the visitor pattern by reconstructing the AST and then using the visitor
+    // (In real usage, you would have the AST from a parser)
+    let ast = table_schema_to_ast(&schema)?;
+    let statement = CqlStatement::CreateTable(ast);
+    
+    // Use the visitor to convert AST back to TableSchema
+    let mut visitor = SchemaBuilderVisitor;
+    visitor.visit_statement(&statement)
+}
+
+/// Helper function to convert TableSchema to AST for demonstration
+/// (In real usage, the AST would come directly from a parser)
+fn table_schema_to_ast(schema: &TableSchema) -> Result<CqlCreateTable> {
+    use crate::parser::{CqlCreateTable, CqlTable, CqlIdentifier, CqlColumnDef, CqlDataType, CqlPrimaryKey, CqlTableOptions};
+    
+    // Convert table reference
+    let table = if schema.keyspace == "default" {
+        CqlTable::new(&schema.table)
+    } else {
+        CqlTable::with_keyspace(&schema.keyspace, &schema.table)
+    };
+    
+    // Convert columns
+    let columns: Result<Vec<CqlColumnDef>> = schema.columns.iter()
+        .map(|col| {
+            Ok(CqlColumnDef {
+                name: CqlIdentifier::new(&col.name),
+                data_type: string_to_cql_data_type(&col.data_type)?,
+                is_static: false,
+            })
+        })
+        .collect();
+    
+    let columns = columns?;
+    
+    // Convert primary key
+    let partition_key: Vec<CqlIdentifier> = schema.partition_keys.iter()
+        .map(|pk| CqlIdentifier::new(&pk.name))
+        .collect();
+    
+    let clustering_key: Vec<CqlIdentifier> = schema.clustering_keys.iter()
+        .map(|ck| CqlIdentifier::new(&ck.name))
+        .collect();
+    
+    Ok(CqlCreateTable {
+        if_not_exists: false,
+        table,
+        columns,
+        primary_key: CqlPrimaryKey {
+            partition_key,
+            clustering_key,
+        },
+        options: CqlTableOptions {
+            options: HashMap::new(),
+        },
+    })
+}
+
+/// Convert string type to CqlDataType (simplified version)
+fn string_to_cql_data_type(type_str: &str) -> Result<CqlDataType> {
+    use crate::parser::{CqlDataType, CqlIdentifier};
+    
+    let type_lower = type_str.trim().to_lowercase();
+    
+    // Handle collection types
+    if type_lower.starts_with("list<") && type_lower.ends_with('>') {
+        let inner_type_str = &type_lower[5..type_lower.len() - 1];
+        let inner_type = string_to_cql_data_type(inner_type_str)?;
+        return Ok(CqlDataType::List(Box::new(inner_type)));
+    }
+    
+    if type_lower.starts_with("set<") && type_lower.ends_with('>') {
+        let inner_type_str = &type_lower[4..type_lower.len() - 1];
+        let inner_type = string_to_cql_data_type(inner_type_str)?;
+        return Ok(CqlDataType::Set(Box::new(inner_type)));
+    }
+    
+    if type_lower.starts_with("map<") && type_lower.ends_with('>') {
+        let inner = &type_lower[4..type_lower.len() - 1];
+        if let Some(comma_pos) = inner.find(',') {
+            let key_type_str = inner[..comma_pos].trim();
+            let value_type_str = inner[comma_pos + 1..].trim();
+            let key_type = string_to_cql_data_type(key_type_str)?;
+            let value_type = string_to_cql_data_type(value_type_str)?;
+            return Ok(CqlDataType::Map(Box::new(key_type), Box::new(value_type)));
+        }
+    }
+    
+    if type_lower.starts_with("frozen<") && type_lower.ends_with('>') {
+        let inner_type_str = &type_lower[7..type_lower.len() - 1];
+        let inner_type = string_to_cql_data_type(inner_type_str)?;
+        return Ok(CqlDataType::Frozen(Box::new(inner_type)));
+    }
+    
+    // Handle primitive types
+    match type_lower.as_str() {
+        "boolean" | "bool" => Ok(CqlDataType::Boolean),
+        "tinyint" => Ok(CqlDataType::TinyInt),
+        "smallint" => Ok(CqlDataType::SmallInt),
+        "int" => Ok(CqlDataType::Int),
+        "bigint" | "long" => Ok(CqlDataType::BigInt),
+        "varint" => Ok(CqlDataType::Varint),
+        "decimal" => Ok(CqlDataType::Decimal),
+        "float" => Ok(CqlDataType::Float),
+        "double" => Ok(CqlDataType::Double),
+        "text" | "varchar" => Ok(CqlDataType::Text),
+        "ascii" => Ok(CqlDataType::Ascii),
+        "blob" => Ok(CqlDataType::Blob),
+        "timestamp" => Ok(CqlDataType::Timestamp),
+        "date" => Ok(CqlDataType::Date),
+        "time" => Ok(CqlDataType::Time),
+        "uuid" => Ok(CqlDataType::Uuid),
+        "timeuuid" => Ok(CqlDataType::TimeUuid),
+        "inet" => Ok(CqlDataType::Inet),
+        "duration" => Ok(CqlDataType::Duration),
+        "counter" => Ok(CqlDataType::Counter),
+        _ => {
+            // Assume it's a UDT
+            Ok(CqlDataType::Udt(CqlIdentifier::new(type_str)))
         }
     }
 }

@@ -603,7 +603,8 @@ impl SSTableCorruptionTests {
             }
             2 => {
                 if corrupted.len() > 1 {
-                    corrupted[corrupted.len() - 1] = 0x00;
+                    let len = corrupted.len();
+                    corrupted[len - 1] = 0x00;
                 }
             }
             3 => {
@@ -656,7 +657,8 @@ impl SSTableCorruptionTests {
             }
             14 => {
                 if !corrupted.is_empty() {
-                    corrupted.swap(0, corrupted.len() - 1);
+                    let len = corrupted.len();
+                    corrupted.swap(0, len - 1);
                 }
             }
             15 => {

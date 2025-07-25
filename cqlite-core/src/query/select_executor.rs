@@ -276,10 +276,11 @@ impl SelectExecutor {
         data_type: &crate::types::DataType,
     ) -> Result<(Value, usize)> {
         // Use the existing parser from the parser module
-        let parser = crate::parser::SSTableParser::new();
+        let config = crate::parser::config::ParserConfig::default();
+        let parser = crate::parser::SSTableParser::new(config)?;
         let type_id = self.datatype_to_cql_type_id(data_type);
-        let (value, bytes_consumed) = parser.parse_value(data, type_id)?;
-        Ok((value, bytes_consumed))
+        // TODO: Implement parse_value method for SSTableParser
+        return Err(Error::invalid_operation("SSTableParser parse_value not yet implemented".to_string()));
     }
 
     /// Convert DataType to CQL type ID

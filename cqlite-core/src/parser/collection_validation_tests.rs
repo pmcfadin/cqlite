@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::types::Value;
-use super::types::{CqlTypeId, parse_list, parse_set, parse_map, parse_cql_value};
+use super::types::{CqlTypeId, parse_list, parse_set, parse_map};
 use super::vint::encode_vint;
 use crate::schema::{TableSchema, CqlType};
 
@@ -224,7 +224,7 @@ mod cassandra_format_tests {
         
         // Check that the data type is correctly identified
         if let CqlType::List(element_type) = int_list.data_type() {
-            assert_eq!(*element_type, Box::new(CqlType::Int));
+            assert_eq!(**element_type, CqlType::Int);
         } else {
             panic!("Expected List type");
         }
@@ -255,7 +255,7 @@ mod cassandra_format_tests {
         
         // Parse as if reading from SSTable
         let (remaining, collection_length) = super::vint::parse_vint_length(&sstable_data).unwrap();
-        let (remaining, collection_data) = nom::bytes::complete::take(collection_length)(remaining).unwrap();
+        let (remaining, collection_data) = nom::bytes::complete::take::<_, _, nom::error::Error<_>>(collection_length)(remaining).unwrap();
         
         // Now parse the collection itself
         let (_, value) = parse_list(collection_data).unwrap();

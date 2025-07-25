@@ -15,7 +15,7 @@ use crate::performance_benchmarks::{BenchmarkConfig, PerformanceBenchmarks};
 use crate::real_sstable_compatibility_test::{RealSSTableCompatibilityTester, RealCompatibilityConfig};
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::header::{CassandraVersion, parse_magic_and_version};
-use cqlite_core::parser::complex_types::{parse_collection_value, parse_udt_value, CollectionType};
+// use cqlite_core::parser::complex_types::{parse_collection_value, parse_udt_value, CollectionType};
 use cqlite_core::parser::SSTableParser;
 use cqlite_core::storage::sstable::directory::SSTableDirectory;
 use cqlite_core::types::Value;

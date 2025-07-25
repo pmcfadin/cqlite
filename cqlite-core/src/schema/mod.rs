@@ -8,7 +8,7 @@ pub mod cql_parser;
 
 // Re-export CQL parsing functions
 pub use cql_parser::{
-    parse_cql_schema, extract_table_name, table_name_matches, 
+    parse_cql_schema, parse_cql_schema_with_visitor, extract_table_name, table_name_matches, 
     cql_type_to_type_id, parse_create_table
 };
 

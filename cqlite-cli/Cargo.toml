@@ -58,10 +58,18 @@ toml = { workspace = true }
 serde_yaml = { workspace = true }
 dirs = { workspace = true }
 
+# Date/time handling
+chrono = { workspace = true }
+
 # Development dependencies
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+
+# Additional testing dependencies
+assert_cmd = "2.0"
+predicates = "3.0"
+serial_test = "3.0"
 
 [features]
 default = ["interactive", "tui"]
