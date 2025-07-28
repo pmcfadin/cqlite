@@ -104,12 +104,13 @@ pub use collection_compatibility_tests::{
     PerformanceMetrics as CollectionPerformanceMetrics,
 };
 pub use comprehensive_integration_tests::{
-    ComprehensiveIntegrationTestSuite, IntegrationTestConfig, IntegrationTestResults,
+    ComprehensiveIntegrationTestSuite, IntegrationTestConfig as CITIntegrationTestConfig, 
+    IntegrationTestResults as CITIntegrationTestResults,
     PerformanceMetrics, TestReport, TestStatus,
 };
 pub use real_sstable_test_fixtures::{
     SSTableTestFixture, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
-    SSTableTestFixtureValidator, ValidationResult,
+    SSTableTestFixtureValidator, ValidationResult as SSTableValidationResult,
 };
 pub use validation_test_runner::{
     CLIValidationResult, FixtureValidationResult, PerformanceValidationResult, ReportFormat,
@@ -140,7 +141,7 @@ pub mod integration_test_harness;
 pub use comprehensive_integration_test_suite::{
     run_comprehensive_integration_tests, run_quick_integration_tests,
     print_integration_test_results, IntegrationTestConfig as ComprehensiveTestConfig,
-    ComprehensiveIntegrationTestSuite, IntegrationTestSuiteResults,
+    ComprehensiveIntegrationTestSuite as CITSuite, IntegrationTestSuiteResults,
 };
 pub use integration_test_harness::{
     TestDataValidator, TestEnvironmentStatus, TableInfo, TestTimer, MemoryMonitor,
@@ -151,8 +152,11 @@ pub use integration_test_harness::{
 // Re-export SSTable validation components
 pub use sstable_validator::{run_validation, SSTableValidator};
 pub use format_verifier::{verify_sstable_format, SSTableFormatVerifier, FormatVerificationResult};
-pub use sstable_benchmark::{run_comprehensive_benchmark, BenchmarkConfig, BenchmarkResults, SSTableBenchmark};
+pub use sstable_benchmark::{run_comprehensive_benchmark, BenchmarkConfig as SSTableBenchmarkConfig, BenchmarkResults, SSTableBenchmark};
 pub use complex_data_test::{run_complex_data_tests, ComplexDataTestSuite, ComplexDataTestResults};
+
+// Minimal smoke tests for baseline
+pub mod minimal_smoke_tests;
 
 // CQL Schema Validation Modules
 pub mod cql_parser_validation_suite;
@@ -162,7 +166,7 @@ pub mod cql_test_data_fixtures;
 
 // Re-export CQL validation components
 pub use cql_parser_validation_suite::{
-    CqlParserValidationSuite, ValidationReport, ValidationResult, PerformanceMetric,
+    CqlParserValidationSuite, ValidationReport, ValidationResult as CqlValidationResult, PerformanceMetric,
 };
 pub use cql_integration_tests::{
     CqlIntegrationTestSuite, IntegrationTestReport, IntegrationTestResult,

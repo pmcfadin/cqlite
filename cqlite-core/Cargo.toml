@@ -67,6 +67,8 @@ web-sys = { workspace = true, features = ["console"], optional = true }
 criterion = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3.8"
+rand = "0.8"
+tokio-test = "0.4"
 
 [[bin]]
 name = "memory_safety_validator"
@@ -79,6 +81,10 @@ path = "src/bin/benchmark_streaming.rs"
 [[bin]]
 name = "test_streaming_performance"
 path = "src/bin/test_streaming_performance.rs"
+
+[[bin]]
+name = "performance_baseline_runner"
+path = "src/bin/performance_baseline_runner.rs"
 
 [features]
 default = ["compression", "lz4", "metrics"]

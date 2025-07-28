@@ -5,7 +5,7 @@
 
 use cqlite_core::{
     error::Result,
-    parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats},
+    parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats, parse_sstable_header, serialize_sstable_header, CassandraVersion},
     parser::types::{parse_cql_value, serialize_cql_value},
     parser::{CqlTypeId, SSTableParser},
     types::DataType,
@@ -199,6 +199,7 @@ impl SSTableTestFixtureGenerator {
 
         // Create SSTable header
         let header = SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0_Release,
             version: 1,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -317,6 +318,7 @@ impl SSTableTestFixtureGenerator {
 
         // Create SSTable header
         let header = SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0_Release,
             version: 1,
             table_id: [2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -425,6 +427,7 @@ impl SSTableTestFixtureGenerator {
 
         // Create SSTable header
         let header = SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0_Release,
             version: 1,
             table_id: [3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -773,7 +776,7 @@ impl SSTableTestFixtureGenerator {
         let mut file_content = Vec::new();
 
         // Serialize header
-        let header_bytes = self.parser.serialize_header(header)?;
+        let header_bytes = serialize_sstable_header(header)?;
         file_content.extend(&(header_bytes.len() as u32).to_be_bytes());
         file_content.extend(header_bytes);
 
@@ -860,7 +863,7 @@ impl SSTableTestFixtureValidator {
         }
 
         // Parse header
-        match self.parser.parse_header(&file_content[4..4 + header_len]) {
+        match parse_sstable_header(&file_content[4..4 + header_len]) {
             Ok((header, _)) => {
                 // Validate schema
                 if header.columns.len() != fixture.expected_schema.len() {

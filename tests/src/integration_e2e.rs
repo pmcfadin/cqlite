@@ -12,7 +12,7 @@
 
 use cqlite_core::{
     error::Result,
-    parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats},
+    parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats, parse_sstable_header, serialize_sstable_header},
     parser::types::{parse_cql_value, serialize_cql_value},
     parser::{CqlTypeId, SSTableParser},
     platform::Platform,
@@ -354,8 +354,9 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
 
     // Test 1: Parse mock Cassandra 5+ SSTable header
     let mock_header = create_mock_cassandra5_header();
-    let serialized_header = parser.serialize_header(&mock_header)?;
-    let (parsed_header, _) = parser.parse_header(&serialized_header)?;
+    let serialized_header = serialize_sstable_header(&mock_header)?;
+    let (remaining, parsed_header) = parse_sstable_header(&serialized_header)
+        .map_err(|e| cqlite_core::error::Error::parser(format!("Failed to parse header: {:?}", e)))?;
 
     // Validate round-trip consistency
     assert_eq!(mock_header.version, parsed_header.version);

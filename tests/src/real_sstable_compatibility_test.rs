@@ -81,13 +81,13 @@ pub struct RealSSTableCompatibilityTester {
 
 impl RealSSTableCompatibilityTester {
     /// Create new tester instance
-    pub fn new(config: RealCompatibilityConfig) -> Self {
-        let parser = SSTableParser::new();
-        Self {
+    pub fn new(config: RealCompatibilityConfig) -> Result<Self> {
+        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+        Ok(Self {
             config,
             parser,
             results: Vec::new(),
-        }
+        })
     }
 
     /// Run comprehensive compatibility tests against real SSTable files

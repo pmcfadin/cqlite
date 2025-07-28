@@ -416,14 +416,14 @@ mod tests {
 
     #[test]
     fn test_docker_manager_creation() {
-        let config = CqlshConfig::default();
+        let config = DockerConfig::default();
         let manager = DockerManager::new(config);
         assert_eq!(manager.config.container_name, "cassandra-node1");
     }
 
     #[test]
     fn test_cqlsh_output_parsing() {
-        let docker_manager = DockerManager::new(CqlshConfig::default());
+        let docker_manager = DockerManager::new(DockerConfig::default());
         let sample_output = r#"
  id                                   | data
 --------------------------------------+--------

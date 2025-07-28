@@ -1,0 +1,590 @@
+name: Progress Monitoring
+
+on:
+  schedule:
+    - cron: '0 9 * * 1-5'  # Daily at 9 AM, weekdays only
+    - cron: '0 17 * * 5'   # Weekly summary on Friday at 5 PM
+  workflow_dispatch:
+    inputs:
+      report_type:
+        description: 'Type of report to generate'
+        required: true
+        type: choice
+        options:
+          - daily
+          - weekly
+          - milestone
+          - custom
+        default: daily
+      check_blockers:
+        description: 'Check for blockers'
+        required: false
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths: ['**/*.rs', 'Cargo.toml', 'Cargo.lock']
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
+  checks: read
+
+jobs:
+  daily-status-check:
+    name: Daily Status Check
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 9 * * 1-5' || inputs.report_type == 'daily'
+    
+    outputs:
+      critical_issues: ${{ steps.analyze.outputs.critical_issues }}
+      blockers_found: ${{ steps.analyze.outputs.blockers_found }}
+      milestone_progress: ${{ steps.analyze.outputs.milestone_progress }}
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Analyze Current Status
+      id: analyze
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { owner, repo } = context.repo;
+          
+          // Get open issues
+          const issues = await github.rest.issues.listForRepo({
+            owner,
+            repo,
+            state: 'open',
+            per_page: 100
+          });
+          
+          // Get open PRs
+          const prs = await github.rest.pulls.list({
+            owner,
+            repo,
+            state: 'open'
+          });
+          
+          // Get recent workflow runs
+          const workflows = await github.rest.actions.listWorkflowRunsForRepo({
+            owner,
+            repo,
+            per_page: 50,
+            created: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+          });
+          
+          // Analyze issues
+          const criticalIssues = issues.data.filter(issue => 
+            issue.labels.some(label => ['critical', 'P0', 'blocker'].includes(label.name))
+          );
+          
+          const blockers = issues.data.filter(issue =>
+            issue.labels.some(label => ['blocker', 'blocked'].includes(label.name))
+          );
+          
+          // Get milestone progress
+          const milestones = await github.rest.issues.listMilestones({
+            owner,
+            repo,
+            state: 'open'
+          });
+          
+          let milestoneProgress = {};
+          for (const milestone of milestones.data) {
+            const milestoneIssues = issues.data.filter(issue => 
+              issue.milestone && issue.milestone.id === milestone.id
+            );
+            const closedIssues = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              milestone: milestone.number,
+              state: 'closed'
+            });
+            
+            const total = milestoneIssues.length + closedIssues.data.length;
+            const completed = closedIssues.data.length;
+            const progress = total > 0 ? (completed / total * 100).toFixed(1) : 0;
+            
+            milestoneProgress[milestone.title] = {
+              progress: progress,
+              total: total,
+              completed: completed,
+              due_date: milestone.due_on
+            };
+          }
+          
+          // Check CI/CD health
+          const failedRuns = workflows.data.workflow_runs.filter(run => 
+            run.conclusion === 'failure'
+          );
+          
+          core.setOutput('critical_issues', criticalIssues.length);
+          core.setOutput('blockers_found', blockers.length);
+          core.setOutput('milestone_progress', JSON.stringify(milestoneProgress));
+          
+          return {
+            critical: criticalIssues.length,
+            blockers: blockers.length,
+            openIssues: issues.data.length,
+            openPRs: prs.data.length,
+            failedRuns: failedRuns.length,
+            milestoneProgress
+          };
+
+    - name: Generate Daily Report
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const data = ${{ steps.analyze.outputs.result }};
+          
+          const report = `# 📊 Daily Progress Report - ${new Date().toDateString()}
+          
+          ## 🎯 Overview
+          - **Open Issues:** ${data.openIssues}
+          - **Open PRs:** ${data.openPRs}
+          - **Critical Issues:** ${data.critical}
+          - **Blockers:** ${data.blockers}
+          - **Failed CI Runs (24h):** ${data.failedRuns}
+          
+          ## 📈 Milestone Progress
+          ${Object.entries(data.milestoneProgress).map(([name, info]) => 
+            `- **${name}:** ${info.progress}% (${info.completed}/${info.total}) ${info.due_date ? `- Due: ${new Date(info.due_date).toDateString()}` : ''}`
+          ).join('\n') || 'No active milestones'}
+          
+          ## 🚨 Attention Required
+          ${data.critical > 0 ? `- ⚠️ ${data.critical} critical issues need immediate attention` : '- ✅ No critical issues'}
+          ${data.blockers > 0 ? `- 🚫 ${data.blockers} blockers preventing progress` : '- ✅ No blockers detected'}
+          ${data.failedRuns > 0 ? `- 🔴 ${data.failedRuns} CI failures in last 24h` : '- ✅ CI is healthy'}
+          
+          ## 📋 Action Items
+          - Review critical issues and blockers
+          - Address CI failures
+          - Update milestone progress
+          - Check PR review status
+          `;
+          
+          // Create issue for daily report
+          await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `Daily Progress Report - ${new Date().toDateString()}`,
+            body: report,
+            labels: ['report', 'daily', 'automated']
+          });
+
+  blocker-detection:
+    name: Blocker Detection
+    runs-on: ubuntu-latest
+    needs: daily-status-check
+    if: needs.daily-status-check.outputs.blockers_found > 0 || inputs.check_blockers == true
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Analyze Blockers
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { owner, repo } = context.repo;
+          
+          // Get all blocked issues
+          const blockedIssues = await github.rest.issues.listForRepo({
+            owner,
+            repo,
+            state: 'open',
+            labels: 'blocker,blocked'
+          });
+          
+          // Analyze each blocker
+          const blockerAnalysis = [];
+          for (const issue of blockedIssues.data) {
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: issue.number
+            });
+            
+            const lastUpdate = new Date(Math.max(
+              new Date(issue.updated_at),
+              ...comments.data.map(c => new Date(c.updated_at))
+            ));
+            
+            const daysSinceUpdate = Math.floor((Date.now() - lastUpdate) / (1000 * 60 * 60 * 24));
+            
+            blockerAnalysis.push({
+              number: issue.number,
+              title: issue.title,
+              assignee: issue.assignee?.login || 'unassigned',
+              daysSinceUpdate: daysSinceUpdate,
+              priority: issue.labels.find(l => l.name.match(/^P[0-2]$/))?.name || 'unspecified',
+              blocker_type: issue.labels.find(l => ['blocker', 'blocked'].includes(l.name))?.name
+            });
+          }
+          
+          // Sort by priority and staleness
+          blockerAnalysis.sort((a, b) => {
+            if (a.priority !== b.priority) {
+              return a.priority.localeCompare(b.priority);
+            }
+            return b.daysSinceUpdate - a.daysSinceUpdate;
+          });
+          
+          // Generate blocker report
+          const report = `# 🚫 Blocker Analysis Report
+          
+          **Total Blockers:** ${blockerAnalysis.length}
+          
+          ## 🔴 Critical Blockers (Immediate Action Required)
+          ${blockerAnalysis.filter(b => b.daysSinceUpdate > 3).map(b => 
+            `- #${b.number}: ${b.title} (${b.priority}, ${b.daysSinceUpdate} days stale, assigned to: ${b.assignee})`
+          ).join('\n') || 'None'}
+          
+          ## 🟡 Active Blockers
+          ${blockerAnalysis.filter(b => b.daysSinceUpdate <= 3).map(b =>
+            `- #${b.number}: ${b.title} (${b.priority}, last update: ${b.daysSinceUpdate} days ago, assigned to: ${b.assignee})`
+          ).join('\n') || 'None'}
+          
+          ## 📋 Recommended Actions
+          ${blockerAnalysis.length > 0 ? 
+            blockerAnalysis.map(b => 
+              `- **#${b.number}**: ${b.daysSinceUpdate > 7 ? 'URGENT - ' : ''}${b.daysSinceUpdate > 3 ? 'Escalate to team lead' : 'Check with assignee for update'}`
+            ).join('\n') : 
+            '- ✅ No blockers detected'
+          }
+          `;
+          
+          // Create or update blocker tracking issue
+          const existingIssues = await github.rest.issues.listForRepo({
+            owner,
+            repo,
+            labels: 'blocker-tracking',
+            state: 'open'
+          });
+          
+          if (existingIssues.data.length > 0) {
+            // Update existing tracking issue
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: existingIssues.data[0].number,
+              body: report
+            });
+          } else {
+            // Create new tracking issue
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: '🚫 Active Blockers Tracking',
+              body: report,
+              labels: ['blocker-tracking', 'automated']
+            });
+          }
+
+  metric-collection:
+    name: Collect Progress Metrics
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install Dependencies
+      run: |
+        pip install requests pandas matplotlib seaborn
+
+    - name: Collect GitHub Metrics
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        python - << 'EOF'
+        import requests
+        import json
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from datetime import datetime, timedelta
+        import os
+        
+        token = os.environ['GITHUB_TOKEN']
+        headers = {'Authorization': f'token {token}'}
+        owner = '${{ github.repository_owner }}'
+        repo = '${{ github.event.repository.name }}'
+        
+        # Collect various metrics
+        metrics = {
+            'timestamp': datetime.now().isoformat(),
+            'issues': {},
+            'prs': {},
+            'commits': {},
+            'workflows': {}
+        }
+        
+        # Issue metrics
+        issues_url = f'https://api.github.com/repos/{owner}/{repo}/issues'
+        issues_response = requests.get(issues_url, headers=headers, params={'state': 'all', 'per_page': 100})
+        issues_data = issues_response.json()
+        
+        metrics['issues']['total'] = len(issues_data)
+        metrics['issues']['open'] = len([i for i in issues_data if i['state'] == 'open'])
+        metrics['issues']['closed'] = len([i for i in issues_data if i['state'] == 'closed'])
+        
+        # PR metrics
+        prs_url = f'https://api.github.com/repos/{owner}/{repo}/pulls'
+        prs_response = requests.get(prs_url, headers=headers, params={'state': 'all', 'per_page': 100})
+        prs_data = prs_response.json()
+        
+        metrics['prs']['total'] = len(prs_data)
+        metrics['prs']['open'] = len([p for p in prs_data if p['state'] == 'open'])
+        metrics['prs']['merged'] = len([p for p in prs_data if p['merged_at']])
+        
+        # Commit activity (last 30 days)
+        since_date = (datetime.now() - timedelta(days=30)).isoformat()
+        commits_url = f'https://api.github.com/repos/{owner}/{repo}/commits'
+        commits_response = requests.get(commits_url, headers=headers, params={'since': since_date})
+        commits_data = commits_response.json()
+        
+        metrics['commits']['last_30_days'] = len(commits_data)
+        
+        # Workflow runs (last 7 days)
+        workflows_url = f'https://api.github.com/repos/{owner}/{repo}/actions/runs'
+        workflows_response = requests.get(workflows_url, headers=headers)
+        workflows_data = workflows_response.json()
+        
+        recent_runs = [w for w in workflows_data['workflow_runs'] 
+                      if datetime.fromisoformat(w['created_at'].replace('Z', '+00:00')) > datetime.now() - timedelta(days=7)]
+        
+        metrics['workflows']['total_runs_7d'] = len(recent_runs)
+        metrics['workflows']['successful_runs'] = len([r for r in recent_runs if r['conclusion'] == 'success'])
+        metrics['workflows']['failed_runs'] = len([r for r in recent_runs if r['conclusion'] == 'failure'])
+        
+        # Save metrics
+        with open('metrics.json', 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        print("Metrics collected successfully")
+        EOF
+
+    - name: Generate Metrics Visualization
+      run: |
+        python - << 'EOF'
+        import json
+        import matplotlib.pyplot as plt
+        import pandas as pd
+        from datetime import datetime
+        
+        with open('metrics.json', 'r') as f:
+            metrics = json.load(f)
+        
+        # Create visualizations
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # Issues pie chart
+        issues_data = [metrics['issues']['open'], metrics['issues']['closed']]
+        ax1.pie(issues_data, labels=['Open', 'Closed'], autopct='%1.1f%%')
+        ax1.set_title('Issues Status')
+        
+        # PRs pie chart
+        prs_data = [metrics['prs']['open'], metrics['prs']['merged']]
+        ax2.pie(prs_data, labels=['Open', 'Merged'], autopct='%1.1f%%')
+        ax2.set_title('Pull Requests Status')
+        
+        # Workflow success rate
+        total_workflows = metrics['workflows']['total_runs_7d']
+        success_rate = (metrics['workflows']['successful_runs'] / total_workflows * 100) if total_workflows > 0 else 0
+        failure_rate = 100 - success_rate
+        
+        ax3.bar(['Success', 'Failure'], [success_rate, failure_rate], color=['green', 'red'])
+        ax3.set_title('CI/CD Success Rate (7 days)')
+        ax3.set_ylabel('Percentage')
+        
+        # Commit activity
+        commits = metrics['commits']['last_30_days']
+        ax4.bar(['Last 30 Days'], [commits], color='blue')
+        ax4.set_title('Commit Activity')
+        ax4.set_ylabel('Number of Commits')
+        
+        plt.tight_layout()
+        plt.savefig('metrics-dashboard.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print("Visualization generated")
+        EOF
+
+    - name: Upload Metrics
+      uses: actions/upload-artifact@v4
+      with:
+        name: progress-metrics
+        path: |
+          metrics.json
+          metrics-dashboard.png
+
+  alert-notifications:
+    name: Alert Notifications
+    runs-on: ubuntu-latest
+    needs: [daily-status-check, blocker-detection, metric-collection]
+    if: |
+      needs.daily-status-check.outputs.critical_issues > 0 ||
+      needs.daily-status-check.outputs.blockers_found > 0 ||
+      always()
+    
+    steps:
+    - name: Send Slack Notification
+      if: env.SLACK_WEBHOOK_URL != ''
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+          --data '{
+            "text": "🚨 CQLite Progress Alert",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "🚨 CQLite Progress Alert"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Critical Issues:* ${{ needs.daily-status-check.outputs.critical_issues || 0 }}"
+                  },
+                  {
+                    "type": "mrkdwn", 
+                    "text": "*Blockers:* ${{ needs.daily-status-check.outputs.blockers_found || 0 }}"
+                  }
+                ]
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "View Issues"
+                    },
+                    "url": "https://github.com/${{ github.repository }}/issues"
+                  }
+                ]
+              }
+            ]
+          }' \
+          "$SLACK_WEBHOOK_URL"
+
+    - name: Create GitHub Notification
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const critical = ${{ needs.daily-status-check.outputs.critical_issues || 0 }};
+          const blockers = ${{ needs.daily-status-check.outputs.blockers_found || 0 }};
+          
+          if (critical > 0 || blockers > 0) {
+            const message = `## 🚨 Progress Alert
+            
+            **Critical Issues:** ${critical}
+            **Blockers:** ${blockers}
+            
+            Immediate attention required for project health.
+            
+            📊 [View Full Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            🔍 [Open Issues](https://github.com/${{ github.repository }}/issues?q=is%3Aopen+is%3Aissue)
+            🚫 [Blockers](https://github.com/${{ github.repository }}/issues?q=is%3Aopen+is%3Aissue+label%3Ablocker)
+            `;
+            
+            // Create urgent notification issue
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 URGENT: ${critical} Critical Issues, ${blockers} Blockers Detected`,
+              body: message,
+              labels: ['alert', 'urgent', 'automated'],
+              assignees: ['${{ github.repository_owner }}']
+            });
+          }
+
+  weekly-summary:
+    name: Weekly Summary Report
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 17 * * 5' || inputs.report_type == 'weekly'
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Generate Weekly Summary
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { owner, repo } = context.repo;
+          const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          
+          // Get activity from the last week
+          const [issues, prs, commits] = await Promise.all([
+            github.rest.issues.listForRepo({
+              owner, repo,
+              since: weekAgo.toISOString(),
+              state: 'all'
+            }),
+            github.rest.pulls.list({
+              owner, repo,
+              state: 'all'
+            }),
+            github.rest.repos.listCommits({
+              owner, repo,
+              since: weekAgo.toISOString()
+            })
+          ]);
+          
+          const newIssues = issues.data.filter(i => new Date(i.created_at) > weekAgo);
+          const closedIssues = issues.data.filter(i => i.state === 'closed' && new Date(i.closed_at) > weekAgo);
+          const newPRs = prs.data.filter(p => new Date(p.created_at) > weekAgo);
+          const mergedPRs = prs.data.filter(p => p.merged_at && new Date(p.merged_at) > weekAgo);
+          
+          const summary = `# 📈 Weekly Progress Summary - Week of ${new Date(weekAgo).toDateString()}
+          
+          ## 📊 Activity Overview
+          - **New Issues:** ${newIssues.length}
+          - **Closed Issues:** ${closedIssues.length}
+          - **New PRs:** ${newPRs.length}
+          - **Merged PRs:** ${mergedPRs.length}
+          - **Commits:** ${commits.data.length}
+          
+          ## 🎯 Achievements
+          ${mergedPRs.length > 0 ? 
+            mergedPRs.map(pr => `- ✅ Merged: #${pr.number} ${pr.title}`).join('\n') :
+            '- No PRs merged this week'
+          }
+          
+          ## 🏆 Top Contributors
+          ${commits.data.reduce((acc, commit) => {
+            const author = commit.commit.author.name;
+            acc[author] = (acc[author] || 0) + 1;
+            return acc;
+          }, {})}
+          
+          ## 📋 Next Week Focus
+          - Review open PRs
+          - Address critical issues
+          - Continue milestone progress
+          - Maintain CI health
+          
+          ---
+          *Generated automatically by Progress Monitoring workflow*
+          `;
+          
+          // Create weekly summary issue
+          await github.rest.issues.create({
+            owner,
+            repo,
+            title: `📈 Weekly Summary - ${new Date().toDateString()}`,
+            body: summary,
+            labels: ['report', 'weekly', 'automated']
+          });

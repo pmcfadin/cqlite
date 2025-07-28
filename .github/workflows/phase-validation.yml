@@ -1,0 +1,450 @@
+name: Phase Validation and Quality Gates
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      validation_type:
+        description: 'Type of validation to run'
+        required: true
+        type: choice
+        options:
+          - 'phase1-completion'
+          - 'phase2-readiness'
+          - 'comprehensive'
+        default: 'comprehensive'
+      strict_mode:
+        description: 'Enable strict validation mode'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTFLAGS: '-D warnings'
+
+jobs:
+  phase1-validation:
+    name: Phase 1 Completion Validation
+    runs-on: ${{ matrix.os }}
+    if: |
+      github.event.inputs.validation_type == 'phase1-completion' || 
+      github.event.inputs.validation_type == 'comprehensive' ||
+      github.event.inputs.validation_type == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache Dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: phase1-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install Coverage Tools
+      run: |
+        cargo install cargo-tarpaulin --locked
+
+    - name: Create Scripts Directory
+      run: mkdir -p scripts/validation
+
+    - name: Make Validation Scripts Executable
+      run: |
+        chmod +x scripts/validation/validate-phase1-complete.sh || true
+        chmod +x scripts/validation/assess-phase2-readiness.sh || true
+
+    - name: Run Phase 1 Validation
+      id: phase1_validation
+      run: |
+        echo "::group::Phase 1 Completion Validation"
+        
+        # Run the validation script and capture output
+        if bash scripts/validation/validate-phase1-complete.sh > phase1-validation-report.txt 2>&1; then
+          echo "PHASE1_STATUS=PASSED" >> $GITHUB_ENV
+          echo "PHASE1_RESULT=success" >> $GITHUB_ENV
+        else
+          echo "PHASE1_STATUS=FAILED" >> $GITHUB_ENV
+          echo "PHASE1_RESULT=failure" >> $GITHUB_ENV
+        fi
+        
+        echo "::endgroup::"
+        
+        # Display results
+        echo ""
+        echo "📋 Phase 1 Validation Results:"
+        cat phase1-validation-report.txt
+
+    - name: Upload Phase 1 Validation Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: phase1-validation-report-${{ matrix.os }}
+        path: phase1-validation-report.txt
+
+    - name: Phase 1 Validation Summary
+      if: always()
+      run: |
+        echo "## 📋 Phase 1 Validation Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Platform:** ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Status:** ${{ env.PHASE1_STATUS }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ env.PHASE1_RESULT }}" = "success" ]; then
+          echo "✅ **Phase 1 validation PASSED**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All Phase 1 requirements have been met:" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Build compilation successful" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Test execution reliable" >> $GITHUB_STEP_SUMMARY  
+          echo "- ✅ Core functionality validated" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Performance baseline established" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Phase 2 development can proceed.**" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Phase 1 validation FAILED**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Critical Phase 1 requirements not met." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Phase 2 development is BLOCKED until issues are resolved.**" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Fail Job if Phase 1 Not Complete
+      if: env.PHASE1_RESULT == 'failure'
+      run: |
+        echo "❌ Phase 1 validation failed - blocking pipeline"
+        exit 1
+
+  phase2-readiness:
+    name: Phase 2 Readiness Assessment
+    runs-on: ubuntu-latest
+    needs: phase1-validation
+    if: |
+      always() && 
+      (github.event.inputs.validation_type == 'phase2-readiness' || 
+       github.event.inputs.validation_type == 'comprehensive' ||
+       github.event.inputs.validation_type == '') &&
+      needs.phase1-validation.result == 'success'
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache Dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: phase2-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install Additional Tools
+      run: |
+        cargo install cargo-tarpaulin --locked
+        cargo install cargo-geiger --locked
+        cargo install cargo-audit --locked
+
+    - name: Make Validation Scripts Executable
+      run: |
+        chmod +x scripts/validation/validate-phase1-complete.sh
+        chmod +x scripts/validation/assess-phase2-readiness.sh
+
+    - name: Run Phase 2 Readiness Assessment
+      id: phase2_assessment
+      run: |
+        echo "::group::Phase 2 Readiness Assessment"
+        
+        # Run the readiness assessment and capture output
+        if bash scripts/validation/assess-phase2-readiness.sh > phase2-readiness-report.txt 2>&1; then
+          echo "PHASE2_STATUS=APPROVED" >> $GITHUB_ENV
+          echo "PHASE2_RESULT=success" >> $GITHUB_ENV
+        else
+          # Check if it's conditional or blocked
+          if grep -q "CONDITIONAL" phase2-readiness-report.txt; then
+            echo "PHASE2_STATUS=CONDITIONAL" >> $GITHUB_ENV
+            echo "PHASE2_RESULT=warning" >> $GITHUB_ENV
+          else
+            echo "PHASE2_STATUS=BLOCKED" >> $GITHUB_ENV
+            echo "PHASE2_RESULT=failure" >> $GITHUB_ENV
+          fi
+        fi
+        
+        echo "::endgroup::"
+        
+        # Display results
+        echo ""
+        echo "🎯 Phase 2 Readiness Assessment Results:"
+        cat phase2-readiness-report.txt
+
+    - name: Upload Phase 2 Readiness Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: phase2-readiness-report
+        path: phase2-readiness-report.txt
+
+    - name: Extract Readiness Score
+      id: extract_score
+      run: |
+        # Extract the readiness score from the report
+        SCORE=$(grep -o "Overall Readiness Score: [0-9]*" phase2-readiness-report.txt | grep -o "[0-9]*" || echo "0")
+        echo "READINESS_SCORE=$SCORE" >> $GITHUB_ENV
+        echo "Readiness Score: $SCORE/100"
+
+    - name: Phase 2 Readiness Summary
+      if: always()
+      run: |
+        echo "## 🎯 Phase 2 Readiness Assessment" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Readiness Score:** ${{ env.READINESS_SCORE }}/100" >> $GITHUB_STEP_SUMMARY
+        echo "**Status:** ${{ env.PHASE2_STATUS }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ env.PHASE2_RESULT }}" = "success" ]; then
+          echo "✅ **Phase 2 readiness APPROVED**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All readiness criteria have been met." >> $GITHUB_STEP_SUMMARY
+          echo "**Phase 2 development is authorized to begin.**" >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ env.PHASE2_RESULT }}" = "warning" ]; then
+          echo "⚠️ **Phase 2 readiness CONDITIONAL**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Most criteria met with minor issues." >> $GITHUB_STEP_SUMMARY
+          echo "**Address minor issues before proceeding to Phase 2.**" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Phase 2 readiness BLOCKED**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Critical readiness criteria not met." >> $GITHUB_STEP_SUMMARY
+          echo "**Phase 2 development is BLOCKED until issues are resolved.**" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Comment on PR with Readiness Results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('phase2-readiness-report.txt', 'utf8');
+          
+          const score = '${{ env.READINESS_SCORE }}';
+          const status = '${{ env.PHASE2_STATUS }}';
+          
+          let emoji = '❌';
+          let color = '#d73a49';
+          
+          if (status === 'APPROVED') {
+            emoji = '✅';
+            color = '#28a745';
+          } else if (status === 'CONDITIONAL') {
+            emoji = '⚠️';
+            color = '#ffc107';
+          }
+          
+          const comment = `## ${emoji} Phase 2 Readiness Assessment
+          
+          **Score:** ${score}/100  
+          **Status:** ${status}
+          
+          <details>
+          <summary>📋 Detailed Assessment Report</summary>
+          
+          \`\`\`
+          ${report}
+          \`\`\`
+          
+          </details>
+          
+          **Next Steps:**
+          ${status === 'APPROVED' ? 
+            '- ✅ Phase 2 development is authorized to proceed\n- 📊 Continue monitoring quality metrics' :
+            status === 'CONDITIONAL' ?
+            '- ⚠️ Address minor issues identified in the report\n- 🔄 Re-run assessment after fixes' :
+            '- ❌ Resolve critical issues before Phase 2\n- 🔄 Run Phase 1 validation if needed'
+          }
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+    - name: Conditional Approval Warning
+      if: env.PHASE2_RESULT == 'warning'
+      run: |
+        echo "⚠️ Phase 2 readiness is conditional - address minor issues"
+        exit 0
+
+    - name: Block Phase 2 if Not Ready
+      if: env.PHASE2_RESULT == 'failure'
+      run: |
+        echo "❌ Phase 2 readiness blocked - critical issues must be resolved"
+        exit 1
+
+  quality-enforcement:
+    name: Quality Gate Enforcement
+    runs-on: ubuntu-latest
+    needs: [phase1-validation, phase2-readiness]
+    if: always()
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Download All Reports
+      uses: actions/download-artifact@v4
+      with:
+        path: validation-reports/
+
+    - name: Generate Quality Gates Summary
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // Collect results from all jobs
+          const results = {
+            phase1: '${{ needs.phase1-validation.result }}',
+            phase2: '${{ needs.phase2-readiness.result }}',
+            phase1_status: process.env.PHASE1_STATUS || 'UNKNOWN',
+            phase2_status: process.env.PHASE2_STATUS || 'UNKNOWN',
+            readiness_score: process.env.READINESS_SCORE || '0'
+          };
+          
+          const allPassed = results.phase1 === 'success' && 
+                          (results.phase2 === 'success' || results.phase2 === 'skipped');
+          
+          const summary = `# 🛡️ Quality Gates Enforcement Summary
+          
+          ## Phase Validation Results
+          
+          | Phase | Validation | Status | Result |
+          |-------|------------|--------|---------|
+          | Phase 1 | Completion Check | ${results.phase1_status} | ${results.phase1 === 'success' ? '✅' : '❌'} |
+          | Phase 2 | Readiness Assessment | ${results.phase2_status} | ${results.phase2 === 'success' ? '✅' : results.phase2 === 'failure' ? '❌' : '⚠️'} |
+          
+          ## Overall Assessment
+          
+          **Readiness Score:** ${results.readiness_score}/100
+          
+          ${allPassed ? 
+            '### ✅ Quality Gates: PASSED\n\nAll validation criteria met. Development can proceed.' :
+            '### ❌ Quality Gates: FAILED\n\nCritical validation criteria not met. Development is blocked.'
+          }
+          
+          ## Enforcement Actions
+          
+          ${allPassed ?
+            '- ✅ All quality gates passed\n- 🚀 Phase progression authorized\n- 📊 Continue quality monitoring' :
+            '- ❌ Quality gates failed\n- 🚫 Phase progression blocked\n- 🔧 Critical issues must be resolved'
+          }
+          `;
+          
+          // Create check run
+          await github.rest.checks.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            name: 'Phase Validation Quality Gates',
+            head_sha: context.sha,
+            status: 'completed',
+            conclusion: allPassed ? 'success' : 'failure',
+            output: {
+              title: 'Phase Validation Results',
+              summary: summary
+            }
+          });
+          
+          console.log(summary);
+
+    - name: Update Phase Status File
+      run: |
+        # Create or update phase status tracking
+        mkdir -p .github/phase-status/
+        
+        cat > .github/phase-status/current-status.json << EOF
+        {
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "phase1_status": "${{ needs.phase1-validation.result }}",
+          "phase2_status": "${{ needs.phase2-readiness.result }}",
+          "readiness_score": "${{ env.READINESS_SCORE }}",
+          "overall_status": "${{ (needs.phase1-validation.result == 'success' && (needs.phase2-readiness.result == 'success' || needs.phase2-readiness.result == 'skipped')) && 'APPROVED' || 'BLOCKED' }}",
+          "last_validation": "${{ github.sha }}",
+          "workflow_run": "${{ github.run_id }}"
+        }
+        EOF
+
+    - name: Commit Phase Status Update
+      if: github.ref == 'refs/heads/main'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        git add .github/phase-status/current-status.json
+        
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "docs: Update phase validation status [skip ci]"
+          git push
+        fi
+
+    - name: Fail Pipeline if Quality Gates Not Met
+      if: |
+        needs.phase1-validation.result == 'failure' ||
+        (needs.phase2-readiness.result == 'failure' && 
+         github.event.inputs.validation_type != 'phase1-completion')
+      run: |
+        echo "❌ Quality gates enforcement: FAILED"
+        echo "Phase validation requirements not met"
+        exit 1
+
+  notification:
+    name: Send Validation Notifications
+    runs-on: ubuntu-latest
+    needs: [phase1-validation, phase2-readiness, quality-enforcement]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Send Success Notification
+      if: |
+        needs.phase1-validation.result == 'success' &&
+        (needs.phase2-readiness.result == 'success' || needs.phase2-readiness.result == 'skipped') &&
+        needs.quality-enforcement.result == 'success'
+      run: |
+        echo "🎉 Phase validation successful!"
+        echo "All quality gates passed - development can proceed"
+
+    - name: Send Failure Notification
+      if: |
+        needs.phase1-validation.result == 'failure' ||
+        needs.phase2-readiness.result == 'failure' ||
+        needs.quality-enforcement.result == 'failure'
+      run: |
+        echo "💥 Phase validation failed!"
+        echo "Critical issues detected - development blocked"
+        
+        # In a real implementation, this could send notifications to:
+        # - Slack channels
+        # - Email lists  
+        # - GitHub issues
+        # - Project management tools

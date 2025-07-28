@@ -4,7 +4,7 @@
 //! Cassandra-scale workloads with acceptable performance characteristics.
 
 use cqlite_core::error::Result;
-use cqlite_core::parser::header::SSTableHeader;
+use cqlite_core::parser::header::{SSTableHeader, parse_sstable_header, serialize_sstable_header, CassandraVersion};
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
 use cqlite_core::platform::Platform;
@@ -106,8 +106,8 @@ impl PerformanceBenchmarks {
         let mut successful_parses = 0;
 
         for _ in 0..iterations {
-            let parser = SSTableParser::new();
-            match parser.parse_header(&serialized) {
+            let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+            match parse_sstable_header(&serialized) {
                 Ok(_) => successful_parses += 1,
                 Err(_) => {}
             }
@@ -752,6 +752,7 @@ impl PerformanceBenchmarks {
             .collect();
 
         SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0_Release,
             version: 1,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "benchmark_keyspace".to_string(),

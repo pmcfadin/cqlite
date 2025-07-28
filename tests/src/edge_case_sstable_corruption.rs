@@ -983,7 +983,7 @@ impl SSTableCorruptionTests {
             test_name: test_name.to_string(),
             corruption_type,
             passed: result.is_ok() && !crash_detected,
-            error_message: result.err(),
+            error_message: result.clone().err(),
             data_size: corrupted_data.len(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             crash_detected,

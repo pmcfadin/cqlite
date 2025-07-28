@@ -94,7 +94,7 @@ impl BtiValidationSuite {
         let test_data_path = current_dir.join("test-env/cassandra5");
 
         Self {
-            parser: SSTableParser::new(),
+            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default()).unwrap(),
             test_data_path,
         }
     }

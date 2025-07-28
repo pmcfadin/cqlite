@@ -115,14 +115,14 @@ pub struct ComprehensiveIntegrationTestSuite {
 
 impl ComprehensiveIntegrationTestSuite {
     /// Create new test suite instance
-    pub fn new(config: IntegrationTestConfig) -> Self {
-        let parser = SSTableParser::new();
-        Self {
+    pub fn new(config: IntegrationTestConfig) -> Result<Self> {
+        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+        Ok(Self {
             config,
             parser,
             results: Vec::new(),
             start_time: Instant::now(),
-        }
+        })
     }
 
     /// Run all comprehensive integration tests

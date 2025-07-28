@@ -6,7 +6,7 @@
 
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::header::{
-    parse_magic_and_version, parse_magic_and_version_legacy, serialize_sstable_header,
+    parse_magic_and_version, parse_magic_and_version_legacy, serialize_sstable_header, parse_sstable_header,
     CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
     SUPPORTED_MAGIC_NUMBERS, SUPPORTED_VERSION,
 };
@@ -45,7 +45,7 @@ impl ParserIntegrationTestSuite {
         let temp_dir = TempDir::new()
             .map_err(|e| Error::io_error(format!("Failed to create temp directory: {}", e)))?;
 
-        let parser = SSTableParser::new();
+        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
 
         Ok(Self {
             parser,
@@ -270,8 +270,9 @@ impl ParserIntegrationTestSuite {
                     total_bytes += serialized.len();
                     
                     // Parse the header back
-                    match self.parser.parse_header(&serialized) {
-                        Ok((parsed_header, bytes_read)) => {
+                    match parse_sstable_header(&serialized) {
+                        Ok((remaining, parsed_header)) => {
+                            let bytes_read = serialized.len() - remaining.len();
                             // Validate all header fields
                             let validation_passed = self.validate_header_completeness(
                                 &original_header, &parsed_header
@@ -358,8 +359,8 @@ impl ParserIntegrationTestSuite {
             Ok(serialized) => {
                 total_bytes += serialized.len();
                 
-                match self.parser.parse_header(&serialized) {
-                    Ok((parsed, _)) => {
+                match parse_sstable_header(&serialized) {
+                    Ok((_, parsed)) => {
                         if parsed.cassandra_version == CassandraVersion::Legacy {
                             passed_tests += 1;
                             println!("  ✅ Legacy format with new parser: PASS");

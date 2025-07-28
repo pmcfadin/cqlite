@@ -13,6 +13,7 @@ pub mod parser;
 pub mod types;
 
 pub mod memory;
+pub mod performance_monitor;
 pub mod platform;
 pub mod query;
 pub mod schema;

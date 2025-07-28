@@ -4,7 +4,7 @@
 //! compatibility with Cassandra 5+ SSTable format and data structures.
 
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats};
+use cqlite_core::parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats, parse_sstable_header, serialize_sstable_header, CassandraVersion};
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
@@ -118,10 +118,12 @@ impl CompatibilityTestFramework {
         let header = self.create_mock_sstable_header();
 
         // Test serialization
-        let serialized = self.parser.serialize_header(&header)?;
+        let serialized = serialize_sstable_header(&header)?;
 
         // Test deserialization
-        let (parsed_header, bytes_read) = self.parser.parse_header(&serialized)?;
+        let (remaining, parsed_header) = parse_sstable_header(&serialized)
+            .map_err(|e| Error::parser(format!("Failed to parse header: {:?}", e)))?;
+        let bytes_read = serialized.len() - remaining.len();
 
         // Validate round-trip consistency
         let passed = self.validate_header_roundtrip(&header, &parsed_header);
@@ -620,6 +622,7 @@ impl CompatibilityTestFramework {
         };
 
         SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0_Release,
             version: 1,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "test_keyspace".to_string(),

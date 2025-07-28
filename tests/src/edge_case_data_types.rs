@@ -327,7 +327,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: format!("VINT_BOUNDARY_{}", name),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.clone().err(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: result.unwrap_or(0),
             edge_case_type: EdgeCaseType::BoundaryValue,
@@ -376,7 +376,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: format!("FLOAT_BOUNDARY_{}", name),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.clone().err(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: result.unwrap_or(0),
             edge_case_type: EdgeCaseType::BoundaryValue,
@@ -414,7 +414,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: format!("MALFORMED_VINT_{}", name),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.clone().err(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: data.len(),
             edge_case_type: EdgeCaseType::MalformedData,
@@ -464,7 +464,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: format!("UNICODE_{}", name),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.clone().err(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: text.len(),
             edge_case_type: EdgeCaseType::UnicodeEdgeCase,
@@ -494,7 +494,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: "LARGE_LIST_100K".to_string(),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.clone().err(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: result.unwrap_or(0),
             edge_case_type: EdgeCaseType::LargeData,
@@ -527,7 +527,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: "LARGE_MAP_10K".to_string(),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.clone().err(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: result.unwrap_or(0),
             edge_case_type: EdgeCaseType::LargeData,
@@ -729,7 +729,7 @@ impl EdgeCaseDataTypeTests {
         let test_result = EdgeCaseTestResult {
             test_name: format!("CORRUPTION_{}", name),
             passed: result.is_ok(),
-            error_message: result.err(),
+            error_message: result.clone().err(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             data_size: data.len(),
             edge_case_type: EdgeCaseType::CorruptedInput,
@@ -788,7 +788,7 @@ impl EdgeCaseDataTypeTests {
             let test_result = EdgeCaseTestResult {
                 test_name: format!("CONCURRENT_PARSE_{}", iteration),
                 passed: result.is_ok(),
-                error_message: result.err(),
+                error_message: result.clone().err(),
                 processing_time_nanos: elapsed.as_nanos() as u64,
                 data_size: data.len(),
                 edge_case_type: EdgeCaseType::ConcurrencyStress,
