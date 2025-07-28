@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! SSTable Format Compatibility Tests
 //!
 //! Comprehensive tests for Cassandra 5+ SSTable format compatibility,

@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Edge Case Test Runner
 //!
 //! This module provides a unified interface to run all edge case tests

@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! CQL Schema Integration Tests
 //!
 //! Integration tests that work with real CQL files and test the complete

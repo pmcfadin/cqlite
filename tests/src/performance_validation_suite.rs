@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Advanced Performance Validation Suite for CQLite
 //!
 //! This module provides comprehensive performance validation to ensure CQLite meets

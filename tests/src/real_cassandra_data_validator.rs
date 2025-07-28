@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Real Cassandra Data Validator
 //!
 //! This module provides validation against actual Cassandra 5+ SSTable files

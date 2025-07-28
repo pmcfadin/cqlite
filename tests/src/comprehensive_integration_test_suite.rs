@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Integration Test Suite for CQLite
 //!
 //! This module provides a complete integration test harness that validates:
@@ -18,7 +19,7 @@ use cqlite_core::parser::header::{CassandraVersion, parse_magic_and_version};
 // use cqlite_core::parser::complex_types::{parse_collection_value, parse_udt_value, CollectionType};
 use cqlite_core::parser::SSTableParser;
 use cqlite_core::storage::sstable::directory::SSTableDirectory;
-use cqlite_core::types::Value;
+use cqlite_core::{Value, types::*};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

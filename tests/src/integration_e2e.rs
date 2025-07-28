@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Enhanced End-to-end integration tests for CQLite with Cassandra 5+ validation
 //!
 //! This module tests the complete workflow from schema creation to query execution,

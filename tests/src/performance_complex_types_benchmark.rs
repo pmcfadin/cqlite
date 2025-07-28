@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Performance Benchmarks for Complex Types
 //!
 //! This module provides comprehensive performance benchmarking for complex type

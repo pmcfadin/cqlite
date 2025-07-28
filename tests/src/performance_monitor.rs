@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Performance Monitoring Utilities for CQLite Testing
 //!
 //! Provides real-time performance monitoring and analysis tools

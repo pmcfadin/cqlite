@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Stress Testing and Performance Edge Cases
 //!
 //! Comprehensive stress tests for large data volumes, memory constraints,

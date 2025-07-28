@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Integration Tests for CQLite
 //!
 //! This module provides complete integration testing infrastructure for CQLite,
@@ -98,12 +99,12 @@ pub struct ComprehensiveIntegrationTestSuite {
 impl ComprehensiveIntegrationTestSuite {
     pub fn new(config: IntegrationTestConfig) -> Result<Self> {
         let temp_dir = TempDir::new().map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to create temp dir: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create temp dir: {}", e)))
         })?;
 
         let test_data_path = temp_dir.path().join("test_data");
         fs::create_dir_all(&test_data_path).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to create test data dir: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create test data dir: {}", e)))
         })?;
 
         Ok(Self {
@@ -610,7 +611,7 @@ impl ComprehensiveIntegrationTestSuite {
         cmd.arg("--help");
 
         let output = cmd.output().map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to execute CLI: {}", e))
+            cqlite_core::error::Error::Io(format!("Failed to execute CLI: {}", e))
         })?;
 
         if !output.status.success() {
@@ -653,7 +654,7 @@ impl ComprehensiveIntegrationTestSuite {
         cmd.arg("--version");
 
         let output = cmd.output().map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to execute CLI: {}", e))
+            cqlite_core::error::Error::Io(format!("Failed to execute CLI: {}", e))
         })?;
 
         if !output.status.success() {
@@ -966,11 +967,11 @@ impl ComprehensiveIntegrationTestSuite {
     async fn generate_test_reports(&self, results: &IntegrationTestResults) -> Result<()> {
         let report_path = self.test_data_path.join("integration_test_report.json");
         let report_json = serde_json::to_string_pretty(results).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to serialize report: {}", e))
+            cqlite_core::error::Error::Io(format!("Failed to serialize report: {}", e))
         })?;
 
         fs::write(&report_path, report_json).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to write report: {}", e))
+            cqlite_core::error::Error::Io(format!("Failed to write report: {}", e))
         })?;
 
         println!("📄 Test report written to: {}", report_path.display());

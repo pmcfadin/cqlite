@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Real Cassandra 5 SSTable Compatibility Test
 //!
 //! This module tests CQLite parser against actual Cassandra 5 SSTable files
@@ -7,7 +8,7 @@ use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::header::{parse_sstable_header, SSTABLE_MAGIC};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::types::Value;
+use cqlite_core::{Value, types::*};
 use std::fs;
 use std::path::{Path, PathBuf};
 

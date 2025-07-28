@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Performance Benchmarks for Cassandra 5+ Compatibility
 //!
 //! This module provides performance benchmarks to ensure CQLite can handle

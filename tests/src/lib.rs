@@ -27,6 +27,7 @@ pub mod integration {
 
 // End-to-end integration tests
 pub mod integration_e2e;
+pub mod smoke_test_baseline;
 
 pub mod benchmarks {
     // Benchmark modules are defined as separate files with [[bench]] sections

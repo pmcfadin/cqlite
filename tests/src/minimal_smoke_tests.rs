@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Minimal smoke tests to establish baseline execution
 //!
 //! These tests verify basic functionality without complex integration
@@ -6,7 +7,7 @@
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::config::ParserConfig;
 use cqlite_core::parser::SSTableParser;
-use cqlite_core::types::Value;
+use cqlite_core::{Value, types::*};
 
 /// Basic smoke test to verify the test framework loads
 #[test]

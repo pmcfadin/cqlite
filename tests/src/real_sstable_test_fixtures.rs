@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Real SSTable Test Fixtures
 //!
 //! This module creates and manages real Cassandra 5+ SSTable files for testing
@@ -73,7 +74,7 @@ impl SSTableTestFixtureGenerator {
         println!("🏗️  Generating SSTable test fixtures...");
 
         fs::create_dir_all(&self.output_dir).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to create output dir: {}", e))
+            cqlite_core::error::Error::Io(format!("Failed to create output dir: {}", e))
         })?;
 
         let mut fixtures = Vec::new();
@@ -510,7 +511,7 @@ impl SSTableTestFixtureGenerator {
 
         // Create empty file as placeholder
         fs::write(&file_path, b"").map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to write UDT fixture: {}", e))
+            cqlite_core::error::Error::Io(format!("Failed to write UDT fixture: {}", e))
         })?;
 
         Ok(SSTableTestFixture {
@@ -786,7 +787,7 @@ impl SSTableTestFixtureGenerator {
 
         // Write to file
         fs::write(file_path, file_content).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to write SSTable file: {}", e))
+            cqlite_core::error::Error::Io(format!("Failed to write SSTable file: {}", e))
         })?;
 
         println!(
@@ -835,7 +836,7 @@ impl SSTableTestFixtureValidator {
 
         // Read and parse header
         let file_content = fs::read(&fixture.file_path).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to read SSTable file: {}", e))
+            cqlite_core::error::Error::Io(format!("Failed to read SSTable file: {}", e))
         })?;
 
         if file_content.len() < 8 {

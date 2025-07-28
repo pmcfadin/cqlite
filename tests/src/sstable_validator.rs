@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive SSTable validator for testing reader/writer functionality
 //! and Cassandra 5+ 'oa' format specification compliance
 

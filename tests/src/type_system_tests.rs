@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! CQL Type System Compatibility Tests
 //!
 //! Comprehensive tests for all CQL data types and their serialization/parsing

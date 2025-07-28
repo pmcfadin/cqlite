@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Complex data type testing for SSTable operations
 //! Tests serialization and deserialization of various Cassandra data types
 

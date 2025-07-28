@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! SSTable Corruption and Edge Case Testing
 //!
 //! Comprehensive tests for SSTable format robustness, corruption handling,

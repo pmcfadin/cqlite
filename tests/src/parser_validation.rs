@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Parser Validation Tests
 //!
 //! This module validates the CQLite parser implementation against real Cassandra 5+ SSTable files.

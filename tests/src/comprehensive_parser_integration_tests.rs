@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Parser Integration Tests for CQLite
 //!
 //! This module provides comprehensive integration tests for the updated CQLite parser,
@@ -13,7 +14,7 @@ use cqlite_core::parser::header::{
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value, CqlTypeId};
 use cqlite_core::parser::vint::{encode_vint, parse_vint, parse_vint_length};
 use cqlite_core::parser::SSTableParser;
-use cqlite_core::types::Value;
+use cqlite_core::{Value, types::*};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;

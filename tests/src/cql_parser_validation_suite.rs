@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive CQL Parser Validation Suite
 //!
 //! This module provides extensive validation testing for the CQL schema parser
@@ -8,7 +9,7 @@ use crate::fixtures::test_data::*;
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::{SSTableParser, CqlTypeId};
 use cqlite_core::schema::{TableSchema, CqlType, UdtRegistry};
-use cqlite_core::types::Value;
+use cqlite_core::{Value, types::*};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;

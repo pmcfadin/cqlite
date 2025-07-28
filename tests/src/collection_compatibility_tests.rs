@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Collection compatibility tests with real Cassandra data formats
 //!
 //! This module tests collection parsing against real Cassandra SSTable data

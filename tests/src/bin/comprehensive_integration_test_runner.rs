@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Integration Test Runner
 //!
 //! Standalone executable for running the complete CQLite integration test suite.

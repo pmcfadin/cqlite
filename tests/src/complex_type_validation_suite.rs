@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Complex Type Validation Suite for M3 Cassandra 5+ Compatibility
 //!
 //! This module provides comprehensive validation for complex CQL types including:

@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Edge Case Testing for CQL Data Types
 //!
 //! This module tests extreme boundary conditions, malformed data handling,

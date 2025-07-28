@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Performance Regression Testing Framework
 //!
 //! This module provides comprehensive performance regression detection and tracking

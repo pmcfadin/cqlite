@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Compatibility Test Framework for Cassandra 5+ Validation
 //!
 //! This module provides a complete testing framework for validating CQLite's
