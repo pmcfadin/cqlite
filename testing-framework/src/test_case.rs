@@ -46,6 +46,9 @@ pub struct TestCase {
     
     /// Tags for grouping and filtering
     pub tags: Vec<String>,
+    
+    /// Optional keyspace to use for this test
+    pub keyspace: Option<String>,
 }
 
 /// Expected result types for test cases
@@ -71,6 +74,7 @@ pub enum ExpectedResult {
 
 /// Test case categories
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(clap::ValueEnum)]
 pub enum TestCategory {
     /// Basic DDL operations (CREATE, ALTER, DROP)
     DDL,
@@ -101,11 +105,13 @@ pub enum TestCategory {
     /// Edge cases and error conditions
     EdgeCases,
     /// Custom category
+    #[clap(skip)]
     Custom(String),
 }
 
 /// Test priority levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(clap::ValueEnum)]
 pub enum TestPriority {
     /// Low priority - nice to have
     Low,
@@ -139,6 +145,7 @@ impl TestCase {
             should_fail: false,
             timeout_seconds: None,
             tags: Vec::new(),
+            keyspace: None,
         }
     }
 

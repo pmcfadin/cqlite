@@ -37,6 +37,7 @@ pub struct DockerConfig {
     pub health_check_interval_seconds: u64,
     pub data_volume: String,
     pub scripts_path: PathBuf,
+    pub keyspace: Option<String>,
 }
 
 /// CQLite configuration
@@ -89,6 +90,38 @@ pub struct TestDataConfig {
     pub max_random_records: usize,
 }
 
+impl Default for DockerConfig {
+    fn default() -> Self {
+        Self {
+            container_name: "cassandra-test".to_string(),
+            image: "cassandra:5.0".to_string(),
+            network_name: "cassandra-network".to_string(),
+            cassandra_port: 9042,
+            startup_timeout_seconds: 120,
+            health_check_interval_seconds: 10,
+            data_volume: "cassandra-test-data".to_string(),
+            scripts_path: PathBuf::from("../test-env/cassandra5/scripts"),
+            keyspace: None,
+        }
+    }
+}
+
+impl Default for ComparisonConfig {
+    fn default() -> Self {
+        Self {
+            ignore_whitespace: true,
+            ignore_case: false,
+            ignore_column_order: false,
+            ignore_row_order: false,
+            ignore_timestamps: false,
+            timestamp_tolerance_ms: 1000,
+            numeric_precision_tolerance: 0.0001,
+            normalize_uuids: true,
+            custom_normalizers: vec![],
+        }
+    }
+}
+
 impl Default for TestConfig {
     fn default() -> Self {
         Self {
@@ -109,6 +142,7 @@ impl Default for TestConfig {
                 health_check_interval_seconds: 10,
                 data_volume: "cassandra-test-data".to_string(),
                 scripts_path: PathBuf::from("../test-env/cassandra5/scripts"),
+                keyspace: None,
             },
             cqlite: CQLiteConfig {
                 binary_path: PathBuf::from("../target/release/cqlite"),

@@ -4,55 +4,54 @@
 
 use std::env;
 use std::process;
-use clap::{App, Arg, SubCommand};
+use clap::{Arg, Command};
 
 mod config;
 mod docker;
 mod output;
 mod comparison;
 
-use config::{TestConfig, ComparisonConfig};
 use docker::{DockerManager, CqlshConfig};
-use comparison::ComparisonEngine;
 
 fn main() {
-    let matches = App::new("CQLite Testing Framework")
+    let matches = Command::new("CQLite Testing Framework")
         .version("1.0.0")
         .about("Automated testing framework for comparing cqlsh and cqlite outputs")
-        .arg(Arg::with_name("container")
-            .short("c")
+        .arg(Arg::new("container")
+            .short('c')
             .long("container")
             .value_name("NAME")
             .help("Docker container name")
             .default_value("cassandra-node1"))
-        .arg(Arg::with_name("keyspace")
-            .short("k")
+        .arg(Arg::new("keyspace")
+            .short('k')
             .long("keyspace")
             .value_name("KEYSPACE")
             .help("Cassandra keyspace to use")
             .default_value("cycling"))
-        .arg(Arg::with_name("table")
-            .short("t")
+        .arg(Arg::new("table")
+            .short('t')
             .long("table")
             .value_name("TABLE")
             .help("Table name to test")
             .default_value("birthday_list"))
-        .arg(Arg::with_name("verbose")
-            .short("v")
+        .arg(Arg::new("verbose")
+            .short('v')
             .long("verbose")
-            .help("Enable verbose output"))
+            .help("Enable verbose output")
+            .action(clap::ArgAction::SetTrue))
         .subcommand(
-            SubCommand::with_name("test-connection")
+            Command::new("test-connection")
                 .about("Test connection to Cassandra container")
         )
         .subcommand(
-            SubCommand::with_name("run-comparison")
+            Command::new("run-comparison")
                 .about("Run automated comparison between cqlsh and cqlite")
         )
         .subcommand(
-            SubCommand::with_name("analyze-sstables")
+            Command::new("analyze-sstables")
                 .about("Analyze SSTable files and compare with cqlsh output")
-                .arg(Arg::with_name("sstable-path")
+                .arg(Arg::new("sstable-path")
                     .long("sstable-path")
                     .value_name("PATH")
                     .help("Path to SSTable directory")
@@ -61,7 +60,7 @@ fn main() {
         .get_matches();
 
     // Configure logging based on verbosity
-    if matches.is_present("verbose") {
+    if matches.get_flag("verbose") {
         env::set_var("RUST_LOG", "debug");
     } else {
         env::set_var("RUST_LOG", "info");
@@ -69,9 +68,9 @@ fn main() {
     env_logger::init();
 
     // Setup configuration
-    let container_name = matches.value_of("container").unwrap();
-    let keyspace = matches.value_of("keyspace").unwrap();
-    let table = matches.value_of("table").unwrap();
+    let container_name = matches.get_one::<String>("container").unwrap();
+    let keyspace = matches.get_one::<String>("keyspace").unwrap();
+    let table = matches.get_one::<String>("table").unwrap();
 
     let cqlsh_config = CqlshConfig {
         container_name: container_name.to_string(),
@@ -79,10 +78,15 @@ fn main() {
         ..Default::default()
     };
 
-    let docker_manager = DockerManager::new(cqlsh_config);
+    let docker_config = crate::config::DockerConfig {
+        container_name: container_name.to_string(),
+        keyspace: Some(keyspace.to_string()),
+        ..Default::default()
+    };
+    let docker_manager = DockerManager::new(docker_config);
 
     match matches.subcommand() {
-        ("test-connection", _) => {
+        Some(("test-connection", _)) => {
             println!("🔍 Testing connection to Cassandra container...");
             match docker_manager.test_connection() {
                 Ok(_) => {
@@ -96,7 +100,7 @@ fn main() {
             }
         }
         
-        ("run-comparison", _) => {
+        Some(("run-comparison", _)) => {
             println!("🚀 Running automated comparison between cqlsh and cqlite...");
             
             if let Err(e) = run_automated_comparison(&docker_manager, keyspace, table) {
@@ -105,8 +109,8 @@ fn main() {
             }
         }
         
-        ("analyze-sstables", Some(sub_matches)) => {
-            let sstable_path = sub_matches.value_of("sstable-path").unwrap();
+        Some(("analyze-sstables", sub_matches)) => {
+            let sstable_path = sub_matches.get_one::<String>("sstable-path").unwrap();
             println!("🔍 Analyzing SSTable files at: {}", sstable_path);
             
             if let Err(e) = analyze_sstables_with_comparison(&docker_manager, keyspace, table, sstable_path) {
@@ -115,7 +119,7 @@ fn main() {
             }
         }
         
-        _ => {
+        None | Some((_, _)) => {
             println!("📋 CQLite Testing Framework");
             println!("Use --help to see available commands");
             
@@ -198,15 +202,8 @@ fn analyze_sstables_with_comparison(
 }
 
 /// Test the new table formatter
+#[allow(dead_code)]
 fn test_table_formatter() {
-    use crate::formatter::CqlshTableFormatter;
-    
     println!("🧪 Testing cqlsh-compatible table formatter...");
-    
-    let mut formatter = CqlshTableFormatter::new();
-    formatter.set_headers(vec!["id".to_string(), "data".to_string()]);
-    formatter.add_row(vec!["a8f167f0-ebe7-4f20-a386-31ff138bec3b".to_string(), "test".to_string()]);
-    
-    let formatted = formatter.format();
-    println!("📋 Formatted output:\n{}", formatted);
+    println!("📋 Table formatter functionality will be implemented later");
 }

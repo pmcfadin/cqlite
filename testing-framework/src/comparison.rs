@@ -3,7 +3,7 @@
 //! This module provides comprehensive comparison functionality to validate
 //! that cqlite produces output identical to cqlsh for the same queries.
 
-use std::collections::HashMap;
+// use std::collections::HashMap; // Currently unused
 use std::fmt;
 use serde::{Deserialize, Serialize};
 use crate::output::QueryOutput;
@@ -252,7 +252,8 @@ impl ComparisonEngine {
 
     /// Compare formatting aspects
     fn compare_formatting(&self, cqlsh: &QueryOutput, cqlite: &QueryOutput, differences: &mut Vec<Difference>) {
-        if !self.config.ignore_formatting {
+        // Note: ignore_formatting field doesn't exist in ComparisonConfig, using format comparison anyway
+        if true {
             // Compare raw output format
             let cqlsh_format = self.extract_format_structure(&cqlsh.raw_output);
             let cqlite_format = self.extract_format_structure(&cqlite.raw_output);
@@ -277,9 +278,10 @@ impl ComparisonEngine {
     /// Compare metadata
     fn compare_metadata(&self, cqlsh: &QueryOutput, cqlite: &QueryOutput, differences: &mut Vec<Difference>) {
         // Compare execution times (if not ignoring timing)
-        if !self.config.ignore_timing {
+        // Note: ignore_timing field doesn't exist in ComparisonConfig, using timestamp tolerance check
+        if true {
             let time_diff = (cqlsh.execution_time_ms as i64 - cqlite.execution_time_ms as i64).abs() as u64;
-            if time_diff > self.config.timing_tolerance_ms {
+            if time_diff > self.config.timestamp_tolerance_ms {
                 differences.push(Difference {
                     category: DifferenceCategory::Timing,
                     severity: DifferenceSeverity::Negligible,
@@ -383,7 +385,7 @@ impl ComparisonEngine {
             penalty += weight;
         }
         
-        (1.0 - penalty).max(0.0)
+        (1.0_f64 - penalty).max(0.0_f64)
     }
 
     /// Determine comparison status

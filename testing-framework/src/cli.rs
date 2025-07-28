@@ -80,7 +80,7 @@ pub enum Commands {
         
         /// Generate detailed report
         #[arg(long)]
-        detailed_report: bool,
+        _detailed_report: bool,
     },
     
     /// List available test cases
@@ -175,7 +175,7 @@ pub enum Commands {
         
         /// Include random data generation
         #[arg(long)]
-        random_data: bool,
+        _random_data: bool,
     },
     
     /// Analyze test results
@@ -234,7 +234,7 @@ impl CliHandler {
                 parallel,
                 workers,
                 fail_fast,
-                detailed_report,
+                _detailed_report,
             } => {
                 self.handle_run_command(
                     paths,
@@ -246,7 +246,7 @@ impl CliHandler {
                     parallel,
                     workers,
                     fail_fast,
-                    detailed_report,
+                    _detailed_report,
                 ).await
             }
             Commands::List {
@@ -288,9 +288,9 @@ impl CliHandler {
                 output,
                 template,
                 count,
-                random_data,
+                _random_data,
             } => {
-                self.handle_generate_command(output, template, count, random_data).await
+                self.handle_generate_command(output, template, count, _random_data).await
             }
             Commands::Analyze {
                 path,
@@ -314,7 +314,7 @@ impl CliHandler {
         parallel: bool,
         workers: usize,
         fail_fast: bool,
-        detailed_report: bool,
+        _detailed_report: bool,
     ) -> Result<()> {
         self.log_info("Starting test execution");
         
@@ -436,13 +436,13 @@ impl CliHandler {
             let mut docker_config = self.config.docker.clone();
             docker_config.image = format!("cassandra:{}", cassandra_version);
             
-            let docker_manager = crate::docker::DockerManager::new(&docker_config).await?;
+            let docker_manager = crate::docker::DockerManager::new(docker_config);
             
             if force {
-                docker_manager.cleanup().await?;
+                docker_manager.cleanup().await.map_err(anyhow::Error::msg)?;
             }
             
-            docker_manager.ensure_cassandra_ready().await?;
+            docker_manager.ensure_cassandra_ready().await.map_err(anyhow::Error::msg)?;
             self.log_info("Cassandra setup completed");
         }
         
@@ -460,8 +460,8 @@ impl CliHandler {
         self.log_info("Cleaning up test environment");
         
         if all || containers {
-            let docker_manager = crate::docker::DockerManager::new(&self.config.docker).await?;
-            docker_manager.cleanup().await?;
+            let docker_manager = crate::docker::DockerManager::new(self.config.docker.clone());
+            docker_manager.cleanup().await.map_err(anyhow::Error::msg)?;
             self.log_info("Docker containers cleaned up");
         }
         
@@ -488,7 +488,7 @@ impl CliHandler {
         output: PathBuf,
         template: String,
         count: usize,
-        random_data: bool,
+        _random_data: bool,
     ) -> Result<()> {
         self.log_info(&format!("Generating {} test cases", count));
         

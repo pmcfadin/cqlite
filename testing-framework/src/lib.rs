@@ -10,6 +10,7 @@ pub mod output;
 pub mod reporter;
 pub mod test_case;
 pub mod comparator;
+pub mod comparison;
 pub mod cli;
 pub mod utils;
 pub mod error;

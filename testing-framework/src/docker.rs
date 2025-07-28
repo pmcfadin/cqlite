@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use crate::output::QueryOutput;
-use crate::config::{TestConfig, DockerConfig};
+use crate::config::DockerConfig;
 
 /// Docker container information for Cassandra
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,7 +212,7 @@ impl DockerManager {
         let mut parsing_data = false;
         let mut header_found = false;
         
-        for (i, line) in lines.iter().enumerate() {
+        for (_i, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             
             // Skip empty lines

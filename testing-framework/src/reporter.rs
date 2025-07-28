@@ -163,7 +163,7 @@ impl TestReporter {
     /// Generate diff content for a failed test
     fn generate_diff_content(&self, test_result: &TestResult) -> String {
         format!(
-Test: {}
+            "Test: {}
 Status: {}
 Execution Time: {} ms
 Error: {}
