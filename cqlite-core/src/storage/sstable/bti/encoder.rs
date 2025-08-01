@@ -5,10 +5,7 @@
 
 use crate::error::Result;
 use crate::types::Value;
-use crate::parser::CqlTypeId;
 use super::BtiError;
-use uuid::Uuid;
-use std::collections::HashMap;
 
 /// Byte-comparable key encoder
 pub struct ByteComparableEncoder {
@@ -109,12 +106,6 @@ impl ByteComparableEncoder {
         Ok(())
     }
 
-    /// Encode UUID with proper byte ordering
-    fn encode_uuid(&mut self, uuid: &Uuid) -> Result<()> {
-        // UUID bytes are naturally comparable
-        self.buffer.extend_from_slice(uuid.as_bytes());
-        Ok(())
-    }
 
     /// Encode UUID bytes with proper byte ordering
     fn encode_uuid_bytes(&mut self, uuid: &[u8; 16]) -> Result<()> {
@@ -123,19 +114,6 @@ impl ByteComparableEncoder {
         Ok(())
     }
 
-    /// Encode TimeUUID with timestamp-first ordering
-    fn encode_timeuuid(&mut self, uuid: &Uuid) -> Result<()> {
-        let bytes = uuid.as_bytes();
-        
-        // TimeUUID has timestamp in specific byte positions
-        // Rearrange for time-based comparison
-        // Time-high: bytes 6-7, time-mid: bytes 4-5, time-low: bytes 0-3
-        self.buffer.extend_from_slice(&bytes[6..8]); // time-high
-        self.buffer.extend_from_slice(&bytes[4..6]); // time-mid  
-        self.buffer.extend_from_slice(&bytes[0..4]); // time-low
-        self.buffer.extend_from_slice(&bytes[8..]);  // rest
-        Ok(())
-    }
 
     /// Encode timestamp (microseconds since epoch)
     fn encode_timestamp(&mut self, timestamp: i64) -> Result<()> {
@@ -166,22 +144,6 @@ impl ByteComparableEncoder {
         Ok(())
     }
 
-    /// Encode double with IEEE 754 ordering adjustment
-    fn encode_double(&mut self, value: f64) -> Result<()> {
-        let bits = value.to_bits();
-        
-        // Adjust for proper ordering of IEEE 754 doubles
-        let adjusted = if (bits & 0x8000000000000000) == 0 {
-            // Positive: flip sign bit
-            bits ^ 0x8000000000000000
-        } else {
-            // Negative: flip all bits
-            !bits
-        };
-        
-        self.buffer.extend_from_slice(&adjusted.to_be_bytes());
-        Ok(())
-    }
 
     /// Encode blob (binary data)
     fn encode_blob(&mut self, bytes: &[u8]) -> Result<()> {
@@ -228,36 +190,6 @@ impl ByteComparableEncoder {
         Ok(())
     }
 
-    /// Encode map with sorted key-value pairs
-    fn encode_map(&mut self, map: &HashMap<Value, Value>) -> Result<()> {
-        // Encode key-value pairs and sort by encoded keys
-        let mut encoded_pairs = Vec::new();
-        
-        for (key, value) in map {
-            let mut key_encoder = ByteComparableEncoder::new();
-            let encoded_key = key_encoder.encode_value(key)?;
-            
-            let mut value_encoder = ByteComparableEncoder::new();
-            let encoded_value = value_encoder.encode_value(value)?;
-            
-            encoded_pairs.push((encoded_key, encoded_value));
-        }
-        
-        // Sort by encoded keys
-        encoded_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        
-        // Length prefix
-        self.buffer.extend_from_slice(&(encoded_pairs.len() as u32).to_be_bytes());
-        
-        // Add sorted pairs
-        for (encoded_key, encoded_value) in encoded_pairs {
-            self.buffer.extend_from_slice(&(encoded_key.len() as u32).to_be_bytes());
-            self.buffer.extend_from_slice(&encoded_key);
-            self.buffer.extend_from_slice(&(encoded_value.len() as u32).to_be_bytes());
-            self.buffer.extend_from_slice(&encoded_value);
-        }
-        Ok(())
-    }
 
     /// Encode map from Vec of tuples with sorted key-value pairs
     fn encode_map_vec(&mut self, map: &Vec<(Value, Value)>) -> Result<()> {

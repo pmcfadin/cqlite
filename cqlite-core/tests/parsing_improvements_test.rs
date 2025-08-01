@@ -127,7 +127,7 @@ mod parsing_improvements_tests {
     #[test]
     fn test_null_and_empty_value_handling() {
         // Test case 1: Empty data should be null
-        let empty_data = &[];
+        let empty_data: &[u8] = &[];
         // Should handle empty data gracefully
 
         // Test case 2: Zero-length string

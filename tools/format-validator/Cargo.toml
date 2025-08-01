@@ -33,7 +33,7 @@ byteorder = "1.5"
 memmap2 = "0.9"
 colored = "2.0"
 indicatif = "0.17"
-pretty_hex = "0.4"
+pretty-hex = "0.4"
 
 [dependencies.cqlite-core]
 path = "../../cqlite-core"

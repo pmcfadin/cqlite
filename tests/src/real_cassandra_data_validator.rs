@@ -1,8 +1,9 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Real Cassandra Data Validator
 //!
 //! This module provides validation against actual Cassandra 5+ SSTable files
 //! to ensure 100% format compatibility for complex types.
+
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 
 use cqlite_core::parser::header::SSTableHeader;
 use cqlite_core::parser::types::*;
@@ -229,13 +230,14 @@ impl RealCassandraDataValidator {
     /// Discover SSTable files in the configured directory
     fn discover_sstable_files(&mut self) -> Result<()> {
         if !self.config.sstable_dir.exists() {
-            return Err(Error::io(format!(
+            return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!(
                 "SSTable directory does not exist: {}",
                 self.config.sstable_dir.display()
-            )));
+            ))));
         }
 
-        self.find_sstable_files_recursive(&self.config.sstable_dir)?;
+        let sstable_dir = self.config.sstable_dir.clone();
+        self.find_sstable_files_recursive(&sstable_dir)?;
         
         // Filter by target tables if specified
         if !self.config.target_tables.is_empty() {
@@ -390,7 +392,7 @@ impl RealCassandraDataValidator {
         match self.validate_sstable_format(&sstable_data, &mut file_result).await {
             Ok(_) => {
                 // Validate complex types in data
-                self.validate_complex_types_in_data(&sstable_data, table_schema.as_ref(), &mut file_result).await?;
+                self.validate_complex_types_in_data(&sstable_data, table_schema.as_deref(), &mut file_result).await?;
                 
                 file_result.validation_success = file_result.validation_errors.is_empty();
             }
@@ -558,7 +560,7 @@ impl RealCassandraDataValidator {
             .map_err(|e| Error::serialization(format!("Failed to serialize report: {}", e)))?;
         
         fs::write(output_path, report_json)
-            .map_err(|e| Error::io(format!("Failed to write report: {}", e)))?;
+            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to write report: {}", e))))?;
         
         println!("📄 Validation report written to: {}", output_path.display());
         Ok(())

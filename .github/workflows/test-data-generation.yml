@@ -1,0 +1,450 @@
+# CQLite Test Data Generation CI/CD Workflow
+# Automatically generates test data for multiple Cassandra versions
+# Issue #18: Docker-based test data generation
+
+name: Test Data Generation
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'test-data/**'
+      - '.github/workflows/test-data-generation.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'test-data/**'
+  schedule:
+    # Run weekly to refresh test data
+    - cron: '0 2 * * 0'  # Sunday at 2 AM UTC
+  workflow_dispatch:
+    inputs:
+      cassandra_versions:
+        description: 'Cassandra versions to generate (comma-separated: 3.7,3.11,4.0,4.1)'
+        required: false
+        default: '3.7,3.11,4.0,4.1'
+      data_scale:
+        description: 'Test data scale'
+        required: false
+        default: 'COMPREHENSIVE'
+        type: choice
+        options:
+          - 'SMALL'
+          - 'MEDIUM' 
+          - 'COMPREHENSIVE'
+          - 'LARGE'
+
+env:
+  TEST_DATA_SCALE: ${{ github.event.inputs.data_scale || 'COMPREHENSIVE' }}
+  CASSANDRA_VERSIONS: ${{ github.event.inputs.cassandra_versions || '3.7,3.11,4.0,4.1' }}
+
+jobs:
+  # Job 1: Generate test data
+  generate-test-data:
+    name: Generate Test Data
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    
+    strategy:
+      matrix:
+        # Generate data for each version in parallel
+        cassandra_version: ['3.7', '3.11', '4.0', '4.1']
+      fail-fast: false  # Continue with other versions if one fails
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Install Docker Compose
+        run: |
+          sudo curl -L "https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          docker-compose --version
+      
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h
+      
+      - name: Create test data directories
+        run: |
+          mkdir -p test-data/generated/{v3.7,v3.11,v4.0,v4.1}
+          mkdir -p test-data/logs
+          
+      - name: Generate test data for Cassandra ${{ matrix.cassandra_version }}
+        working-directory: test-data/docker
+        env:
+          CASSANDRA_VERSION: ${{ matrix.cassandra_version }}
+        run: |
+          echo "Starting test data generation for Cassandra ${{ matrix.cassandra_version }}"
+          
+          # Create version-specific docker-compose file
+          cp docker-compose.yml docker-compose-${{ matrix.cassandra_version }}.yml
+          
+          # Modify compose file to run only the specific version
+          python3 << 'EOF'
+          import yaml
+          import sys
+          
+          version = "${{ matrix.cassandra_version }}"
+          compose_file = f"docker-compose-{version}.yml"
+          
+          with open(compose_file, 'r') as f:
+              compose = yaml.safe_load(f)
+          
+          # Keep only services for this version
+          services_to_keep = [
+              f"cassandra-{version.replace('.', '-')}",
+              "test-data-generator", 
+              "sstable-exporter"
+          ]
+          
+          # Filter services
+          filtered_services = {}
+          for service_name, service_config in compose['services'].items():
+              if any(keep in service_name for keep in services_to_keep):
+                  # Update dependencies to only reference this version
+                  if 'depends_on' in service_config:
+                      updated_deps = {}
+                      for dep_name, dep_config in service_config['depends_on'].items():
+                          if version.replace('.', '-') in dep_name:
+                              updated_deps[dep_name] = dep_config
+                      service_config['depends_on'] = updated_deps
+                  filtered_services[service_name] = service_config
+          
+          compose['services'] = filtered_services
+          
+          with open(compose_file, 'w') as f:
+              yaml.dump(compose, f, default_flow_style=False)
+          
+          print(f"Created version-specific compose file for {version}")
+          EOF
+          
+          # Pull images first
+          docker-compose -f docker-compose-${{ matrix.cassandra_version }}.yml pull
+          
+          # Start generation with timeout and logging
+          timeout 3600 docker-compose -f docker-compose-${{ matrix.cassandra_version }}.yml up --abort-on-container-exit --exit-code-from test-data-generator 2>&1 | tee ../logs/generation-${{ matrix.cassandra_version }}.log
+          
+          # Check if generation succeeded
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "✅ Test data generation completed successfully for Cassandra ${{ matrix.cassandra_version }}"
+          else
+            echo "❌ Test data generation failed for Cassandra ${{ matrix.cassandra_version }}"
+            exit 1
+          fi
+          
+      - name: Export SSTables for Cassandra ${{ matrix.cassandra_version }}
+        working-directory: test-data/docker
+        run: |
+          echo "Exporting SSTables for Cassandra ${{ matrix.cassandra_version }}"
+          
+          # Run SSTable export
+          docker-compose -f docker-compose-${{ matrix.cassandra_version }}.yml up sstable-exporter --exit-code-from sstable-exporter 2>&1 | tee ../logs/export-${{ matrix.cassandra_version }}.log
+          
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "✅ SSTable export completed successfully for Cassandra ${{ matrix.cassandra_version }}"
+          else
+            echo "❌ SSTable export failed for Cassandra ${{ matrix.cassandra_version }}"
+            exit 1
+          fi
+          
+      - name: Validate generated data
+        run: |
+          echo "Validating generated test data for Cassandra ${{ matrix.cassandra_version }}"
+          
+          # Run validation script
+          if test-data/scripts/validate-data.sh; then
+            echo "✅ Data validation passed for Cassandra ${{ matrix.cassandra_version }}"
+          else
+            echo "❌ Data validation failed for Cassandra ${{ matrix.cassandra_version }}"
+            exit 1
+          fi
+          
+      - name: Collect generation metrics
+        run: |
+          echo "Collecting metrics for Cassandra ${{ matrix.cassandra_version }}"
+          
+          VERSION_DIR="test-data/generated/v${{ matrix.cassandra_version }}"
+          if [ -d "$VERSION_DIR" ]; then
+            TOTAL_SIZE=$(du -sh "$VERSION_DIR" | cut -f1)
+            FILE_COUNT=$(find "$VERSION_DIR" -type f | wc -l)
+            SSTABLE_COUNT=$(find "$VERSION_DIR" -name "*.db" | wc -l)
+            
+            echo "📊 Generation Metrics for Cassandra ${{ matrix.cassandra_version }}:"
+            echo "  Total Size: $TOTAL_SIZE"
+            echo "  Total Files: $FILE_COUNT"
+            echo "  SSTable Files: $SSTABLE_COUNT"
+            
+            # Create metrics file
+            cat > test-data/generated/metrics-${{ matrix.cassandra_version }}.json << EOF
+          {
+            "cassandra_version": "${{ matrix.cassandra_version }}",
+            "generation_date": "$(date -Iseconds)",
+            "total_size": "$TOTAL_SIZE",
+            "file_count": $FILE_COUNT,
+            "sstable_count": $SSTABLE_COUNT,
+            "data_scale": "$TEST_DATA_SCALE",
+            "workflow_run_id": "${{ github.run_id }}",
+            "commit_sha": "${{ github.sha }}"
+          }
+          EOF
+          else
+            echo "❌ Generated data directory not found for Cassandra ${{ matrix.cassandra_version }}"
+            exit 1
+          fi
+          
+      - name: Cleanup Docker resources
+        if: always()
+        working-directory: test-data/docker
+        run: |
+          echo "Cleaning up Docker resources for Cassandra ${{ matrix.cassandra_version }}"
+          docker-compose -f docker-compose-${{ matrix.cassandra_version }}.yml down -v --remove-orphans || true
+          docker system prune -f --volumes || true
+          
+      - name: Archive test data
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-data-cassandra-${{ matrix.cassandra_version }}
+          path: |
+            test-data/generated/v${{ matrix.cassandra_version }}/
+            test-data/generated/metrics-${{ matrix.cassandra_version }}.json
+            test-data/logs/generation-${{ matrix.cassandra_version }}.log
+            test-data/logs/export-${{ matrix.cassandra_version }}.log
+          retention-days: 30
+          compression-level: 6
+          
+      - name: Archive validation reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-reports-cassandra-${{ matrix.cassandra_version }}
+          path: test-data/generated/validation-reports/
+          retention-days: 7
+
+  # Job 2: Consolidate and validate all test data
+  consolidate-validation:
+    name: Consolidate & Final Validation
+    runs-on: ubuntu-latest
+    needs: generate-test-data
+    if: always()
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Download all test data artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts/
+          
+      - name: Consolidate test data
+        run: |
+          echo "Consolidating test data from all Cassandra versions"
+          
+          mkdir -p test-data/generated
+          
+          # Move artifacts to proper locations
+          for version in 3.7 3.11 4.0 4.1; do
+            ARTIFACT_DIR="downloaded-artifacts/test-data-cassandra-$version"
+            if [ -d "$ARTIFACT_DIR" ]; then
+              echo "Processing Cassandra $version artifacts..."
+              
+              # Copy generated data
+              if [ -d "$ARTIFACT_DIR/v$version" ]; then
+                cp -r "$ARTIFACT_DIR/v$version" test-data/generated/
+                echo "  ✅ Data copied for version $version"
+              else
+                echo "  ❌ No data found for version $version"
+              fi
+              
+              # Copy metrics
+              if [ -f "$ARTIFACT_DIR/metrics-$version.json" ]; then
+                cp "$ARTIFACT_DIR/metrics-$version.json" test-data/generated/
+                echo "  ✅ Metrics copied for version $version"
+              fi
+            else
+              echo "❌ No artifacts found for Cassandra $version"
+            fi
+          done
+          
+      - name: Generate consolidation report
+        run: |
+          echo "Generating consolidation report"
+          
+          REPORT_FILE="test-data/generated/consolidation-report.md"
+          
+          cat > "$REPORT_FILE" << 'EOF'
+          # CQLite Test Data Consolidation Report
+          
+          **Generated:** $(date)
+          **Workflow:** ${{ github.workflow }} #${{ github.run_number }}
+          **Commit:** ${{ github.sha }}
+          **Data Scale:** ${{ env.TEST_DATA_SCALE }}
+          
+          ## Summary
+          
+          EOF
+          
+          TOTAL_SIZE=0
+          TOTAL_FILES=0
+          SUCCESSFUL_VERSIONS=0
+          
+          for version in 3.7 3.11 4.0 4.1; do
+            VERSION_DIR="test-data/generated/v$version"
+            METRICS_FILE="test-data/generated/metrics-$version.json"
+            
+            echo "### Cassandra $version" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+            
+            if [ -d "$VERSION_DIR" ]; then
+              SIZE=$(du -sh "$VERSION_DIR" | cut -f1)
+              FILES=$(find "$VERSION_DIR" -type f | wc -l)
+              SSTABLES=$(find "$VERSION_DIR" -name "*.db" | wc -l)
+              
+              echo "- **Status:** ✅ Success" >> "$REPORT_FILE"
+              echo "- **Size:** $SIZE" >> "$REPORT_FILE"
+              echo "- **Files:** $FILES" >> "$REPORT_FILE"
+              echo "- **SSTables:** $SSTABLES" >> "$REPORT_FILE"
+              
+              SUCCESSFUL_VERSIONS=$((SUCCESSFUL_VERSIONS + 1))
+              TOTAL_FILES=$((TOTAL_FILES + FILES))
+            else
+              echo "- **Status:** ❌ Failed" >> "$REPORT_FILE"
+            fi
+            echo "" >> "$REPORT_FILE"
+          done
+          
+          # Add summary to top of file
+          sed -i "/## Summary/a\\
+          \\
+          - **Successful Versions:** $SUCCESSFUL_VERSIONS/4\\
+          - **Total Files Generated:** $TOTAL_FILES\\
+          - **Workflow Status:** $([ $SUCCESSFUL_VERSIONS -eq 4 ] && echo "✅ All Successful" || echo "⚠️ Some Failures")\\
+          " "$REPORT_FILE"
+          
+          echo "📋 Consolidation report generated: $REPORT_FILE"
+          cat "$REPORT_FILE"
+          
+      - name: Run final validation
+        run: |
+          echo "Running final comprehensive validation"
+          
+          if [ -x "test-data/scripts/validate-data.sh" ]; then
+            if test-data/scripts/validate-data.sh; then
+              echo "✅ Final validation passed"
+              echo "VALIDATION_STATUS=success" >> $GITHUB_ENV
+            else
+              echo "❌ Final validation failed"
+              echo "VALIDATION_STATUS=failed" >> $GITHUB_ENV
+            fi
+          else
+            echo "⚠️ Validation script not found or not executable"
+            echo "VALIDATION_STATUS=skipped" >> $GITHUB_ENV
+          fi
+          
+      - name: Create release archive
+        if: github.ref == 'refs/heads/main' && env.VALIDATION_STATUS == 'success'
+        run: |
+          echo "Creating release archive for main branch"
+          
+          cd test-data
+          tar -czf "../cqlite-test-data-$(date +%Y%m%d).tar.gz" \
+            generated/ \
+            schemas/ \
+            scripts/ \
+            --exclude='generated/validation-reports'
+          
+          cd ..
+          ls -lh cqlite-test-data-*.tar.gz
+          
+      - name: Archive consolidated test data
+        uses: actions/upload-artifact@v4
+        with:
+          name: cqlite-test-data-consolidated
+          path: |
+            test-data/generated/
+            test-data/schemas/
+            test-data/scripts/
+            cqlite-test-data-*.tar.gz
+          retention-days: 90
+          
+      - name: Update status badge
+        if: always()
+        run: |
+          echo "Test data generation workflow completed"
+          echo "Status: ${{ env.VALIDATION_STATUS }}"
+          
+          # This could be extended to update a status badge
+          # or send notifications based on the results
+
+  # Job 3: Integration test with CQLite (if validation passes)
+  integration-test:
+    name: Integration Test with CQLite
+    runs-on: ubuntu-latest
+    needs: consolidate-validation
+    if: needs.consolidate-validation.result == 'success'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          
+      - name: Download consolidated test data
+        uses: actions/download-artifact@v4
+        with:
+          name: cqlite-test-data-consolidated
+          path: test-data/
+          
+      - name: Build CQLite
+        run: |
+          echo "Building CQLite for integration testing"
+          cargo build --release
+          
+      - name: Test CQLite with generated data
+        run: |
+          echo "Testing CQLite with generated SSTable files"
+          
+          EXIT_CODE=0
+          
+          # Test with a few sample files from each version
+          for version in 3.7 3.11 4.0 4.1; do
+            VERSION_DIR="test-data/generated/v$version"
+            if [ -d "$VERSION_DIR" ]; then
+              echo "Testing Cassandra $version SSTables..."
+              
+              # Find a sample SSTable file
+              SAMPLE_FILE=$(find "$VERSION_DIR" -name "*-Data.db" | head -1)
+              if [ -n "$SAMPLE_FILE" ] && [ -f "$SAMPLE_FILE" ]; then
+                echo "  Testing file: $SAMPLE_FILE"
+                
+                # Run CQLite info command
+                if timeout 60 ./target/release/cqlite info "$SAMPLE_FILE"; then
+                  echo "  ✅ CQLite successfully read Cassandra $version SSTable"
+                else
+                  echo "  ❌ CQLite failed to read Cassandra $version SSTable"
+                  EXIT_CODE=1
+                fi
+              else
+                echo "  ⚠️ No sample SSTable found for Cassandra $version"
+              fi
+            fi
+          done
+          
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "🎉 All integration tests passed!"
+          else
+            echo "💥 Some integration tests failed"
+            exit $EXIT_CODE
+          fi

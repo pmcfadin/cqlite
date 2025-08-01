@@ -7,7 +7,7 @@
 use super::vint::{parse_vint, parse_vint_length};
 use crate::error::{Error, Result};
 use nom::{
-    bytes::complete::{take, take_until},
+    bytes::complete::take,
     multi::count,
     number::complete::{be_f64, be_i64, be_u32, be_u64, be_u8},
     IResult,
@@ -661,7 +661,7 @@ pub struct StatisticsSummary {
 }
 
 /// Serialize Statistics structure to bytes (for testing and validation)
-pub fn serialize_statistics(stats: &SSTableStatistics) -> Result<Vec<u8>> {
+pub fn serialize_statistics(_stats: &SSTableStatistics) -> Result<Vec<u8>> {
     // This would implement the reverse of parsing for complete round-trip testing
     // For now, return an error indicating this is not implemented
     Err(Error::corruption("Statistics serialization not yet implemented"))

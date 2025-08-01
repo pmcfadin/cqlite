@@ -155,7 +155,7 @@ impl SSTableManager {
         let mut all_values = Vec::new();
         
         // Collect values from all SSTables
-        for (sstable_id, reader) in readers.iter() {
+        for (_sstable_id, reader) in readers.iter() {
             if let Some(value) = reader.get(table_id, key).await? {
                 let generation = reader.generation;
                 let write_time = reader.extract_write_time_from_entry(key, &value);

@@ -5,21 +5,31 @@ members = [
     "cqlite-wasm",
     "cqlite-cli",
     "tests",
-    "proof-of-concept",
-    "test-env/cassandra5/validation",
-    "testing-framework",
+    "examples",
+    "tools/*",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["CQLite Team"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cqlite/cqlite"
 keywords = ["database", "embedded", "sstable", "wasm"]
 categories = ["database-implementations", "embedded", "wasm"]
-rust-version = "1.70"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unused_imports = "deny"
+unused_variables = "deny"
+dead_code = "warn"  # Allow dead code during development
+unused_mut = "deny"
+unused_assignments = "deny"
+unreachable_code = "deny"
+unused_must_use = "deny"
+warnings = "warn"  # Allow warnings during Rust 2024 migration
+private_interfaces = "allow"  # Allow private interfaces during development
 
 [workspace.dependencies]
 # Core dependencies
@@ -117,6 +127,20 @@ rpath = false
 lto = false
 debug-assertions = true
 codegen-units = 256
-panic = "unwind"
 incremental = true
 overflow-checks = true
+
+# Clippy configuration for strict code quality
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+cargo = "warn"
+missing_docs_in_private_items = "warn"
+unused_imports = "deny"
+unused_variables = "deny"
+dead_code = "deny"
+unused_mut = "deny"
+unused_assignments = "deny"
+unreachable_code = "deny"
+unused_must_use = "deny"

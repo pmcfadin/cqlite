@@ -493,7 +493,10 @@ impl OptimizedSSTableReader {
             if start < mmap.len() && end <= mmap.len() {
                 Ok(mmap[start..end].to_vec())
             } else {
-                Err(Error::io_error("Read beyond file bounds".to_string()))
+                Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Read beyond file bounds"
+                )))
             }
         } else {
             // File-based access with async I/O
@@ -505,7 +508,10 @@ impl OptimizedSSTableReader {
                 // This is simplified for demonstration
                 Ok(buffer)
             } else {
-                Err(Error::io_error("No file handle available".to_string()))
+                Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No file handle available"
+                )))
             }
         }
     }

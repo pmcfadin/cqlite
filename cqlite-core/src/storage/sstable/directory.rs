@@ -398,16 +398,16 @@ impl SSTableDirectory {
     pub fn all_data_files(&self) -> Vec<&PathBuf> {
         self.generations
             .iter()
-            .filter_map(|gen| gen.components.get(&SSTableComponent::Data))
+            .filter_map(|generation| generation.components.get(&SSTableComponent::Data))
             .collect()
     }
     
     /// Check if directory contains valid SSTable data
     pub fn is_valid(&self) -> bool {
         !self.generations.is_empty() && 
-        self.generations.iter().any(|gen| {
-            gen.components.contains_key(&SSTableComponent::Data) &&
-            gen.components.contains_key(&SSTableComponent::Statistics)
+        self.generations.iter().any(|generation| {
+            generation.components.contains_key(&SSTableComponent::Data) &&
+            generation.components.contains_key(&SSTableComponent::Statistics)
         })
     }
     
@@ -532,18 +532,18 @@ impl SSTableDirectory {
         summary.push_str(&format!("Secondary Indexes: {}\n", self.secondary_indexes.len()));
         summary.push_str(&format!("Valid: {}\n\n", self.is_valid()));
         
-        for (i, gen) in self.generations.iter().enumerate() {
+        for (i, generation) in self.generations.iter().enumerate() {
             summary.push_str(&format!("Generation {} ({}): {} components\n", 
-                                    gen.generation, gen.format, gen.components.len()));
+                                    generation.generation, generation.format, generation.components.len()));
             
             // Check for required components
-            let has_data = gen.components.contains_key(&SSTableComponent::Data);
-            let has_stats = gen.components.contains_key(&SSTableComponent::Statistics);
+            let has_data = generation.components.contains_key(&SSTableComponent::Data);
+            let has_stats = generation.components.contains_key(&SSTableComponent::Statistics);
             summary.push_str(&format!("  Required components: Data={}, Statistics={}\n", 
                                     has_data, has_stats));
             
             // List all components
-            for (component, path) in &gen.components {
+            for (component, path) in &generation.components {
                 let file_exists = path.exists();
                 let file_size = if file_exists {
                     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
@@ -610,7 +610,7 @@ fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SSTableGenera
                 valid_sstable_files += 1;
                 let key = (generation, format.clone());
                 
-                let gen = generations_map.entry(key.clone()).or_insert_with(|| {
+                let generation_obj = generations_map.entry(key.clone()).or_insert_with(|| {
                     SSTableGeneration {
                         generation,
                         format,
@@ -620,7 +620,7 @@ fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SSTableGenera
                     }
                 });
                 
-                gen.components.insert(component, file_path);
+                generation_obj.components.insert(component, file_path);
             }
         }
     }
@@ -994,7 +994,7 @@ fn validate_file_integrity(path: &Path) -> Result<bool> {
         return Ok(false);
     }
     
-    let metadata = fs::metadata(path)
+    let _metadata = fs::metadata(path)
         .with_context(|| format!("Cannot read metadata for {:?}", path))?;
     
     // Check if file is readable
@@ -1063,13 +1063,13 @@ mod tests {
     
     #[test]
     fn test_parse_sstable_filename() {
-        let (gen, fmt, comp) = parse_sstable_filename("nb-1-big-Data.db").unwrap().unwrap();
-        assert_eq!(gen, 1);
+        let (generation, fmt, comp) = parse_sstable_filename("nb-1-big-Data.db").unwrap().unwrap();
+        assert_eq!(generation, 1);
         assert_eq!(fmt, "big");
         assert_eq!(comp, SSTableComponent::Data);
         
-        let (gen, fmt, comp) = parse_sstable_filename("nb-2-da-Partitions.db").unwrap().unwrap();
-        assert_eq!(gen, 2);
+        let (generation, fmt, comp) = parse_sstable_filename("nb-2-da-Partitions.db").unwrap().unwrap();
+        assert_eq!(generation, 2);
         assert_eq!(fmt, "da");
         assert_eq!(comp, SSTableComponent::Partitions);
         

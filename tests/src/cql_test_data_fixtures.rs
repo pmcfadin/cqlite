@@ -510,7 +510,7 @@ impl PerformanceTestData {
                     created_at TIMESTAMP,
                     updated_at TIMESTAMP,
                     PRIMARY KEY ((customer_id, order_date), order_timestamp, order_id)
-                ) WITH CLUSTERING ORDER BY (order_timestamp DESC, order_id ASC);"#,
+                ) WITH CLUSTERING ORDER BY (order_timestamp DESC, order_id ASC);"#.to_string(),
             ),
             (
                 "user_profiles".to_string(),
@@ -534,7 +534,7 @@ impl PerformanceTestData {
                     verification_status TEXT,
                     privacy_settings FROZEN<MAP<TEXT, BOOLEAN>>,
                     PRIMARY KEY (user_id, profile_type)
-                ) WITH CLUSTERING ORDER BY (profile_type ASC);"#,
+                ) WITH CLUSTERING ORDER BY (profile_type ASC);"#.to_string(),
             ),
             (
                 "iot_sensor_data".to_string(),
@@ -558,7 +558,7 @@ impl PerformanceTestData {
                     battery_level FLOAT,
                     signal_strength INT,
                     PRIMARY KEY ((sensor_id, location, year), month, day, hour, timestamp)
-                ) WITH CLUSTERING ORDER BY (month ASC, day ASC, hour ASC, timestamp DESC);"#,
+                ) WITH CLUSTERING ORDER BY (month ASC, day ASC, hour ASC, timestamp DESC);"#.to_string(),
             ),
             (
                 "social_media_posts".to_string(),
@@ -583,7 +583,7 @@ impl PerformanceTestData {
                     language TEXT,
                     content_warning SET<TEXT>,
                     PRIMARY KEY ((user_id, post_type), created_at, post_id)
-                ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);"#,
+                ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);"#.to_string(),
             ),
             (
                 "financial_transactions".to_string(),
@@ -615,7 +615,7 @@ impl PerformanceTestData {
                     created_at TIMESTAMP,
                     updated_at TIMESTAMP,
                     PRIMARY KEY ((account_id, transaction_date), timestamp, transaction_id)
-                ) WITH CLUSTERING ORDER BY (timestamp DESC, transaction_id DESC);"#,
+                ) WITH CLUSTERING ORDER BY (timestamp DESC, transaction_id DESC);"#.to_string(),
             ),
         ]
     }

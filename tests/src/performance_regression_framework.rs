@@ -1,12 +1,11 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Performance Regression Testing Framework
 //!
 //! This module provides comprehensive performance regression detection and tracking
 //! to ensure CQLite maintains its performance targets over time and across releases.
 
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+
 use cqlite_core::error::Result;
-use cqlite_core::platform::Platform;
-use cqlite_core::storage::StorageEngine;
 use cqlite_core::{types::TableId, Config, RowKey, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -171,7 +170,10 @@ impl PerformanceRegressionFramework {
     /// Create a new regression testing framework
     pub async fn new(config: RegressionTestConfig) -> Result<Self> {
         let temp_dir = TempDir::new().map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("Failed to create temp dir: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create temp dir: {}", e)
+            ))
         })?;
 
         let cqlite_config = Config::performance_optimized();
@@ -539,9 +541,10 @@ impl PerformanceRegressionFramework {
         iterations: usize,
     ) -> Result<OperationMetrics> {
         if latencies.is_empty() {
-            return Err(cqlite_core::error::Error::io_error(
+            return Err(cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
                 "No latency measurements available".to_string(),
-            ));
+            )));
         }
 
         latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -687,24 +690,36 @@ impl PerformanceRegressionFramework {
     /// Load baseline from file
     async fn load_baseline(path: &Path) -> Result<PerformanceBaseline> {
         let content = fs::read_to_string(path).await.map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("Failed to read baseline: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to read baseline: {}", e)
+            ))
         })?;
 
         serde_json::from_str(&content).map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("Failed to parse baseline: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to parse baseline: {}", e)
+            ))
         })
     }
 
     /// Save baseline to file
     async fn save_baseline(&self, baseline: &PerformanceBaseline) -> Result<()> {
         let content = serde_json::to_string_pretty(baseline).map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("Failed to serialize baseline: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to serialize baseline: {}", e)
+            ))
         })?;
 
         fs::write(&self.config.baseline_path, content)
             .await
             .map_err(|e| {
-                cqlite_core::error::Error::io_error(format!("Failed to write baseline: {}", e))
+                cqlite_core::error::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to write baseline: {}", e)
+                ))
             })
     }
 

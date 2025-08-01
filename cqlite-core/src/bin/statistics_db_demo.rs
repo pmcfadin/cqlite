@@ -6,11 +6,11 @@
 use cqlite_core::{
     parser::enhanced_statistics_parser::parse_enhanced_statistics_file,
     parser::statistics::StatisticsAnalyzer,
-    Config, Platform,
+    // Config,
 };
 use std::env;
 use std::path::Path;
-use std::sync::Arc;
+// use std::sync::Arc;
 use tokio::fs;
 
 #[tokio::main]

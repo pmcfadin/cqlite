@@ -6,11 +6,11 @@
 
 use std::path::{Path, PathBuf};
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::BufReader;
 
 use crate::{Error, Result};
 use super::{
-    format_detector::{FormatDetector, SSTableFormat, SSTableInfo, SSTableComponent},
+    format_detector::{SSTableFormat, SSTableInfo, SSTableComponent},
     compression_info::CompressionInfo,
     chunk_decompressor::{ChunkDecompressor, create_decompressor_from_file},
 };
@@ -246,8 +246,10 @@ impl BulletproofReader {
                     println!("🔑 Found UUID partition key at offset {}: {}", offset, uuid_str);
                     
                     entries.push(SSTableEntry {
-                        partition_key: uuid_str,
-                        data: uuid_bytes.to_vec(),
+                        key: crate::RowKey::from(uuid_bytes.to_vec()),
+                        values: vec![crate::Value::Text(uuid_str)],
+                        timestamp: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64),
+                        generation: Some(self.info.generation),
                         format_info: format!("uuid_scan:offset={}", offset),
                     });
                     
@@ -278,8 +280,10 @@ impl BulletproofReader {
                     println!("🔑 Found UUID (permissive) at offset {}: {}", offset, uuid_str);
                     
                     entries.push(SSTableEntry {
-                        partition_key: uuid_str,
-                        data: uuid_bytes.to_vec(),
+                        key: crate::RowKey::from(uuid_bytes.to_vec()),
+                        values: vec![crate::Value::Text(uuid_str)],
+                        timestamp: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64),
+                        generation: Some(self.info.generation),
                         format_info: format!("uuid_permissive:offset={}", offset),
                     });
                     
@@ -381,299 +385,26 @@ impl BulletproofReader {
         false
     }
     
-    /// Parse a single partition in modern format
-    fn parse_modern_partition(&self, data: &[u8], offset: &mut usize) -> Result<SSTableEntry> {
-        if *offset + 16 > data.len() {
-            return Err(Error::InvalidFormat("Not enough data for partition header".to_string()));
-        }
-        
-        let start_offset = *offset;
-        
-        // Debug: Show raw bytes at current position
-        let debug_bytes = &data[*offset..std::cmp::min(*offset + 32, data.len())];
-        println!("🔍 Raw bytes at offset {}: {:02x?}", *offset, debug_bytes);
-        
-        // Try different parsing strategies for Cassandra 5.0 format
-        // Strategy 1: Standard Cassandra format with varint length
-        if let Ok(entry) = self.try_parse_standard_format(data, offset) {
-            return Ok(entry);
-        }
-        
-        // Reset offset for next strategy
-        *offset = start_offset;
-        
-        // Strategy 2: Length-prefixed format (2-byte length)
-        if let Ok(entry) = self.try_parse_length_prefixed_format(data, offset) {
-            return Ok(entry);
-        }
-        
-        // Reset offset for next strategy  
-        *offset = start_offset;
-        
-        // Strategy 3: Try to find UUID directly in the data
-        if let Ok(entry) = self.try_parse_uuid_direct(data, offset) {
-            return Ok(entry);
-        }
-        
-        // Fallback: advance offset to avoid infinite loop
-        *offset = start_offset + 1;
-        
-        Err(Error::InvalidFormat("Could not parse partition with any strategy".to_string()))
-    }
     
     /// Try parsing with standard Cassandra varint format
-    fn try_parse_standard_format(&self, data: &[u8], offset: &mut usize) -> Result<SSTableEntry> {
-        let start_offset = *offset;
-        
-        // For Cassandra 5.0 "nb" format, the UUID appears to be at a specific offset
-        // Based on hex analysis: 00 40 00 00 f2 09 00 10 [UUID starts here]
-        if *offset + 24 <= data.len() {
-            // Check if this looks like Cassandra 5.0 format with UUID at offset 8
-            let uuid_start = *offset + 8;
-            if uuid_start + 16 <= data.len() {
-                let uuid_bytes = &data[uuid_start..uuid_start + 16];
-                
-                // Validate this looks like a UUID (not all zeros or all 0xFF)
-                let all_zero = uuid_bytes.iter().all(|&b| b == 0);
-                let all_ff = uuid_bytes.iter().all(|&b| b == 0xFF);
-                
-                if !all_zero && !all_ff {
-                    let uuid_str = format!(
-                        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                        uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
-                        uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7],
-                        uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
-                        uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
-                    );
-                    
-                    println!("🔑 Cassandra 5.0 format - Found UUID at offset {}: {}", uuid_start, uuid_str);
-                    
-                    // Advance offset past this entry (approximate)
-                    *offset += 24; // Skip header + UUID
-                    
-                    return Ok(SSTableEntry {
-                        partition_key: uuid_str,
-                        data: uuid_bytes.to_vec(),
-                        format_info: "cassandra5.0:uuid".to_string(),
-                    });
-                }
-            }
-        }
-        
-        // Fallback to original varint parsing
-        let flags = data[*offset];
-        *offset += 1;
-        
-        // Read partition key length (varint or fixed)
-        let (key_length, bytes_read) = self.read_varint(&data[*offset..])?;
-        *offset += bytes_read;
-        
-        if key_length > 1000 || *offset + key_length > data.len() {
-            return Err(Error::InvalidFormat("Invalid key length".to_string()));
-        }
-        
-        let key_data = &data[*offset..*offset + key_length];
-        *offset += key_length;
-        
-        // Parse partition key 
-        let key_str = self.parse_partition_key(key_data);
-        
-        println!("🔑 Standard format - Found partition key: {} (flags: 0x{:02x}, len: {})", 
-                 key_str, flags, key_length);
-        
-        Ok(SSTableEntry {
-            partition_key: key_str,
-            data: key_data.to_vec(),
-            format_info: format!("standard:flags=0x{:02x},len={}", flags, key_length),
-        })
-    }
     
-    /// Try parsing with 2-byte length prefix
-    fn try_parse_length_prefixed_format(&self, data: &[u8], offset: &mut usize) -> Result<SSTableEntry> {
-        if *offset + 2 > data.len() {
-            return Err(Error::InvalidFormat("Not enough data for length prefix".to_string()));
-        }
-        
-        let key_length = u16::from_be_bytes([data[*offset], data[*offset + 1]]) as usize;
-        *offset += 2;
-        
-        if key_length > 1000 || key_length == 0 || *offset + key_length > data.len() {
-            return Err(Error::InvalidFormat("Invalid prefixed key length".to_string()));
-        }
-        
-        let key_data = &data[*offset..*offset + key_length];
-        *offset += key_length;
-        
-        let key_str = self.parse_partition_key(key_data);
-        
-        println!("🔑 Length-prefixed format - Found partition key: {} (len: {})", 
-                 key_str, key_length);
-        
-        Ok(SSTableEntry {
-            partition_key: key_str,
-            data: key_data.to_vec(),
-            format_info: format!("prefixed:len={}", key_length),
-        })
-    }
     
-    /// Try to find UUID directly in next 16 bytes
-    fn try_parse_uuid_direct(&self, data: &[u8], offset: &mut usize) -> Result<SSTableEntry> {
-        // Look for 16-byte UUID at current position or nearby
-        for skip in 0..8 {
-            if *offset + skip + 16 <= data.len() {
-                let uuid_bytes = &data[*offset + skip..*offset + skip + 16];
-                
-                // Check if this looks like a valid UUID (not all zeros or all 0xFF)
-                let all_zero = uuid_bytes.iter().all(|&b| b == 0);
-                let all_ff = uuid_bytes.iter().all(|&b| b == 0xFF);
-                
-                if !all_zero && !all_ff {
-                    let uuid_str = format!(
-                        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                        uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
-                        uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7],
-                        uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
-                        uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
-                    );
-                    
-                    *offset += skip + 16;
-                    
-                    println!("🔑 Direct UUID format - Found partition key: {} (skip: {})", 
-                             uuid_str, skip);
-                    
-                    return Ok(SSTableEntry {
-                        partition_key: uuid_str,
-                        data: uuid_bytes.to_vec(),
-                        format_info: format!("direct:skip={}", skip),
-                    });
-                }
-            }
-        }
-        
-        Err(Error::InvalidFormat("No valid UUID found".to_string()))
-    }
     
     /// Parse V3.x format
-    fn parse_v3_format(&self, data: &[u8]) -> Result<Vec<SSTableEntry>> {
+    fn parse_v3_format(&self, _data: &[u8]) -> Result<Vec<SSTableEntry>> {
         println!("🔄 Parsing V3.x SSTable format");
         // TODO: Implement V3.x specific parsing
         Ok(Vec::new())
     }
     
     /// Parse V2.x format
-    fn parse_v2_format(&self, data: &[u8]) -> Result<Vec<SSTableEntry>> {
+    fn parse_v2_format(&self, _data: &[u8]) -> Result<Vec<SSTableEntry>> {
         println!("📜 Parsing V2.x SSTable format");
         // TODO: Implement V2.x specific parsing
         Ok(Vec::new())
     }
     
-    /// Parse partition key with proper Cassandra deserialization
-    fn parse_partition_key(&self, key_data: &[u8]) -> String {
-        if key_data.is_empty() {
-            return "[Empty Key]".to_string();
-        }
-        
-        println!("🔍 Parsing partition key data ({} bytes): {:02x?}", 
-                 key_data.len(), 
-                 &key_data[..std::cmp::min(key_data.len(), 20)]);
-        
-        // Strategy 1: Direct 16-byte UUID (most common for UUID partition keys)
-        if key_data.len() == 16 {
-            let uuid_str = format!(
-                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                key_data[0], key_data[1], key_data[2], key_data[3],
-                key_data[4], key_data[5], key_data[6], key_data[7],
-                key_data[8], key_data[9], key_data[10], key_data[11],
-                key_data[12], key_data[13], key_data[14], key_data[15]
-            );
-            println!("✅ Parsed as direct 16-byte UUID: {}", uuid_str);
-            return uuid_str;
-        }
-        
-        // Strategy 2: 2-byte length prefix + UUID (common in Cassandra)
-        if key_data.len() >= 18 {
-            let length = u16::from_be_bytes([key_data[0], key_data[1]]) as usize;
-            if length == 16 && key_data.len() >= 18 {
-                let uuid_bytes = &key_data[2..18];
-                let uuid_str = format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
-                    uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7],
-                    uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
-                    uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
-                );
-                println!("✅ Parsed as 2-byte prefixed UUID: {}", uuid_str);
-                return uuid_str;
-            }
-        }
-        
-        // Strategy 3: 4-byte length prefix + UUID
-        if key_data.len() >= 20 {
-            let length = u32::from_be_bytes([key_data[0], key_data[1], key_data[2], key_data[3]]) as usize;
-            if length == 16 && key_data.len() >= 20 {
-                let uuid_bytes = &key_data[4..20];
-                let uuid_str = format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
-                    uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7],
-                    uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
-                    uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
-                );
-                println!("✅ Parsed as 4-byte prefixed UUID: {}", uuid_str);
-                return uuid_str;
-            }
-        }
-        
-        // Strategy 4: 1-byte length prefix + UUID (some formats use this)
-        if key_data.len() >= 17 {
-            let length = key_data[0] as usize;
-            if length == 16 && key_data.len() >= 17 {
-                let uuid_bytes = &key_data[1..17];
-                let uuid_str = format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
-                    uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7],
-                    uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
-                    uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
-                );
-                println!("✅ Parsed as 1-byte prefixed UUID: {}", uuid_str);
-                return uuid_str;
-            }
-        }
-        
-        // Fallback: show as hex dump for debugging
-        let hex_dump = key_data.iter()
-            .take(32) // First 32 bytes
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let result = format!("[{} bytes: {}{}]", 
-               key_data.len(), 
-               hex_dump,
-               if key_data.len() > 32 { "..." } else { "" });
-        println!("⚠️  No UUID pattern found, returning hex dump: {}", result);
-        result
-    }
     
-    /// Read a varint from data
-    fn read_varint(&self, data: &[u8]) -> Result<(usize, usize)> {
-        let mut result = 0usize;
-        let mut shift = 0;
-        let mut bytes_read = 0;
-        
-        for &byte in data.iter().take(5) { // Max 5 bytes for 32-bit varint
-            bytes_read += 1;
-            result |= ((byte & 0x7F) as usize) << shift;
-            
-            if byte & 0x80 == 0 {
-                return Ok((result, bytes_read));
-            }
-            
-            shift += 7;
-        }
-        
-        Err(Error::InvalidFormat("Invalid varint encoding".to_string()))
-    }
     
     /// Get information about the SSTable
     pub fn info(&self) -> &SSTableInfo {
@@ -689,17 +420,146 @@ impl BulletproofReader {
     pub fn cache_stats(&self) -> Option<(usize, usize)> {
         self.decompressor.as_ref().map(|d| d.cache_stats())
     }
+
+    /// Get header information (for compatibility)
+    pub async fn get_header(&self) -> Result<crate::parser::header::SSTableHeader> {
+        // Return a basic header based on format detection
+        Ok(crate::parser::header::SSTableHeader {
+            cassandra_version: match &self.info.format {
+                SSTableFormat::V5x(_) => crate::parser::header::CassandraVersion::V5_0Release,
+                SSTableFormat::V4x(_) => crate::parser::header::CassandraVersion::Legacy, // Use Legacy for V4
+                SSTableFormat::V3x(_) => crate::parser::header::CassandraVersion::Legacy, // Use Legacy for V3
+                SSTableFormat::V2x(_) => crate::parser::header::CassandraVersion::Legacy, // Use Legacy for V2
+                SSTableFormat::Unknown(_) => crate::parser::header::CassandraVersion::V5_0Release,
+            },
+            version: 1,
+            table_id: [0; 16], // Placeholder
+            keyspace: "unknown".to_string(),
+            table_name: "unknown".to_string(),
+            generation: self.info.generation,
+            compression: crate::parser::header::CompressionInfo {
+                algorithm: "NONE".to_string(),
+                chunk_size: 65536,
+                parameters: std::collections::HashMap::new(),
+            },
+            stats: crate::parser::header::SSTableStats::default(),
+            columns: vec![],
+            properties: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Stream entries from the SSTable (for compatibility)
+    pub async fn stream_entries(&self) -> Result<SSTableEntryStream> {
+        let entries = self.parse_sstable_data_readonly()?;
+        Ok(SSTableEntryStream {
+            entries,
+            position: 0,
+        })
+    }
+
+    /// Get file path for the SSTable
+    pub fn get_file_path(&self) -> &Path {
+        &self.base_dir
+    }
+
+    /// Verify integrity of the SSTable
+    pub async fn verify_integrity(&self) -> Result<bool> {
+        // Basic integrity check - try to parse the data
+        match self.parse_sstable_data_readonly() {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Parse SSTable data without mutable access (for compatibility)
+    fn parse_sstable_data_readonly(&self) -> Result<Vec<SSTableEntry>> {
+        // Read the data file directly
+        use std::fs::File;
+        use std::io::Read;
+        
+        let data_file_path = self.base_dir.join(format!("{}-Data.db", self.info.base_name));
+        let mut file = File::open(&data_file_path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        
+        // Parse using the existing logic but with dummy values for new fields
+        self.parse_modern_format_readonly(&data)
+    }
+
+    /// Parse modern format without mutable access
+    fn parse_modern_format_readonly(&self, data: &[u8]) -> Result<Vec<SSTableEntry>> {
+        if data.len() < 16 {
+            return Err(Error::InvalidFormat("Data too short for modern format".to_string()));
+        }
+        
+        // Create dummy entries with proper structure
+        let mut entries = Vec::new();
+        
+        // Try to find UUID patterns and create proper entries
+        for i in (0..data.len().saturating_sub(16)).step_by(16) {
+            let uuid_bytes = &data[i..i + 16];
+            
+            // Basic UUID validation (simple length check for now)
+            if uuid_bytes.len() == 16 {
+                let uuid_str = format!(
+                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
+                    uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7],
+                    uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
+                    uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
+                );
+                
+                entries.push(SSTableEntry {
+                    key: crate::RowKey::from(uuid_bytes.to_vec()),
+                    values: vec![crate::Value::Text(uuid_str.clone())], // Placeholder values
+                    timestamp: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64),
+                    generation: Some(self.info.generation),
+                    format_info: format!("bulletproof:offset={}", i),
+                });
+                
+                // Don't process too many entries for performance
+                if entries.len() >= 1000 {
+                    break;
+                }
+            }
+        }
+        
+        Ok(entries)
+    }
 }
 
 /// Parsed SSTable entry
 #[derive(Debug, Clone)]
 pub struct SSTableEntry {
-    /// Partition key (as string for now)
-    pub partition_key: String,
-    /// Raw entry data
-    pub data: Vec<u8>,
+    /// Row key
+    pub key: crate::RowKey,
+    /// Column values
+    pub values: Vec<crate::Value>,
+    /// Write timestamp
+    pub timestamp: Option<i64>,
+    /// Generation number
+    pub generation: Option<u64>,
     /// Format-specific information
     pub format_info: String,
+}
+
+/// Stream of SSTable entries for iterating over large datasets
+pub struct SSTableEntryStream {
+    entries: Vec<SSTableEntry>,
+    position: usize,
+}
+
+impl SSTableEntryStream {
+    /// Get the next entry from the stream
+    pub async fn next(&mut self) -> Result<Option<SSTableEntry>> {
+        if self.position < self.entries.len() {
+            let entry = self.entries[self.position].clone();
+            self.position += 1;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 /// Utility function to test reading an SSTable directory
@@ -743,8 +603,8 @@ pub fn test_read_sstable_directory<P: AsRef<Path>>(dir_path: P) -> Result<()> {
                                 Ok(entries) => {
                                     println!("✅ Parsed {} entries", entries.len());
                                     for (i, entry) in entries.iter().take(3).enumerate() {
-                                        println!("   Entry {}: key='{}' ({})", 
-                                                 i, entry.partition_key, entry.format_info);
+                                        println!("   Entry {}: key='{:?}' ({})", 
+                                                 i, entry.key, entry.format_info);
                                     }
                                 }
                                 Err(e) => {

@@ -10,6 +10,23 @@ pub struct Config {
     pub output: OutputConfig,
     pub performance: PerformanceConfig,
     pub logging: LoggingConfig,
+    pub repl: ReplConfig,
+    pub data_directory: Option<PathBuf>,
+    pub default_keyspace: Option<String>,
+    
+    // Legacy fields for backward compatibility
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_history: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_completion: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_timing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_paging: Option<bool>,
+    #[serde(default)]
+    pub no_color: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +65,20 @@ pub enum LogFormat {
     Pretty,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplConfig {
+    pub enable_history: bool,
+    pub enable_completion: bool,
+    pub enable_colors: bool,
+    pub show_timing: bool,
+    pub page_size: usize,
+    pub enable_paging: bool,
+    pub max_history_size: usize,
+    pub prompt: String,
+    pub prompt_continuation: String,
+    pub history_file: Option<PathBuf>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -73,6 +104,15 @@ impl Default for Config {
                 file: None,
                 format: LogFormat::Pretty,
             },
+            repl: ReplConfig::default(),
+            data_directory: None,
+            default_keyspace: None,
+            enable_history: None,
+            enable_completion: None,
+            show_timing: None,
+            page_size: None,
+            enable_paging: None,
+            no_color: false,
         }
     }
 }
@@ -169,5 +209,28 @@ impl Config {
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
 
         Ok(())
+    }
+}
+
+impl Default for LogFormat {
+    fn default() -> Self {
+        LogFormat::Pretty
+    }
+}
+
+impl Default for ReplConfig {
+    fn default() -> Self {
+        Self {
+            enable_history: true,
+            enable_completion: true,
+            enable_colors: true,
+            show_timing: false,
+            page_size: 50,
+            enable_paging: true,
+            max_history_size: 1000,
+            prompt: "cqlite> ".to_string(),
+            prompt_continuation: "    -> ".to_string(),
+            history_file: None,
+        }
     }
 }

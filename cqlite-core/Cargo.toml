@@ -57,6 +57,11 @@ clap = { version = "4.4", features = ["derive"] }
 env_logger = { workspace = true }
 async-trait = "0.1.88"
 
+# Terminal output and logging
+colored = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Optional WASM support
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true, optional = true }
@@ -94,4 +99,8 @@ snappy = ["snap"]
 deflate = ["flate2"]
 zstd = ["dep:zstd"]
 metrics = []
+pest = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]
+
+[lints]
+workspace = true

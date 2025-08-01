@@ -6,12 +6,10 @@ use cqlite_core::{
     parser::{
         benchmarks::ParserBenchmarks,
         m3_performance_benchmarks::M3PerformanceBenchmarks,
-        performance_regression_framework::PerformanceRegressionFramework,
         vint::{encode_vint, parse_vint}
-    },
-    Config, RowKey, Value
+    }, RowKey, Value
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::collections::HashMap;
 
 /// Performance benchmark runner
@@ -98,12 +96,11 @@ impl PerformanceBenchmarkRunner {
             
             // Decoding benchmark
             let start = Instant::now();
-            let mut decoded_count = 0;
             
             for _ in 0..iterations {
                 for encoded in &encoded_values {
                     if let Ok((_, _value)) = parse_vint(encoded) {
-                        decoded_count += 1;
+                        // Just benchmark the parsing, don't track count
                     }
                 }
             }

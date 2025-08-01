@@ -419,7 +419,7 @@ pub fn parse_udt(input: &[u8]) -> IResult<&[u8], Value> {
             None
         } else if length == 0 {
             // Empty field
-            Some(create_empty_value(field_type_id).map_err(|e| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?)
+            Some(create_empty_value(field_type_id).map_err(|_e| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?)
         } else {
             // Field with data
             let (new_remaining, field_data) = take(length as usize)(remaining)?;
@@ -942,7 +942,7 @@ pub fn parse_list_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
             if element_length > 0 {
                 let (new_remaining, element_data) = take(element_length)(new_remaining)?;
                 let element_value = parse_cql_value_with_cell_metadata(element_data, element_type_id)
-                    .map_err(|e| nom::Err::Error(nom::error::Error::new(element_data, nom::error::ErrorKind::Verify)))?;
+                    .map_err(|_e| nom::Err::Error(nom::error::Error::new(element_data, nom::error::ErrorKind::Verify)))?;
                 elements.push(element_value);
                 remaining = new_remaining;
             } else {
@@ -962,7 +962,7 @@ pub fn parse_list_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
             if element_length > 0 {
                 let (new_remaining, element_data) = take(element_length)(new_remaining)?;
                 let element_value = parse_cql_value_with_cell_metadata(element_data, element_type_id)
-                    .map_err(|e| nom::Err::Error(nom::error::Error::new(element_data, nom::error::ErrorKind::Verify)))?;
+                    .map_err(|_e| nom::Err::Error(nom::error::Error::new(element_data, nom::error::ErrorKind::Verify)))?;
                 elements.push(element_value);
                 remaining = new_remaining;
             } else {

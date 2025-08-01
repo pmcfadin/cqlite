@@ -17,7 +17,7 @@ use crate::{
 use super::{
     reader::SSTableReader,
     // optimized_reader::OptimizedSSTableReader, // TODO: Re-enable when optimized_reader module is available
-    streaming_reader::{StreamingSSTableReader, StreamingStats},
+    streaming_reader::StreamingSSTableReader,
 };
 
 /// Performance benchmark results
@@ -207,7 +207,7 @@ impl PerformanceBenchmarks {
         
         let mut ops_count = 0;
         let mut error_count = 0;
-        let memory_start = get_memory_usage();
+        let _memory_start = get_memory_usage();
         
         // Test streaming scan
         match reader.scan_streaming(&table_id, None, None, Some(100)).await {
@@ -230,7 +230,7 @@ impl PerformanceBenchmarks {
             }
         }
         
-        let memory_end = get_memory_usage();
+        let _memory_end = get_memory_usage();
         let total_duration = start_time.elapsed();
         let file_size = fs::metadata(file_path).await?.len();
         

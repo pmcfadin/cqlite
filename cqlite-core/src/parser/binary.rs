@@ -12,13 +12,12 @@ use async_trait::async_trait;
 /// Binary format parser for SSTable compatibility
 #[derive(Debug)]
 pub struct SSTableParser {
-    config: super::config::ParserConfig,
 }
 
 impl SSTableParser {
     /// Create a new binary parser
-    pub fn new(config: super::config::ParserConfig) -> Result<Self> {
-        Ok(Self { config })
+    pub fn new(_config: super::config::ParserConfig) -> Result<Self> {
+        Ok(Self {})
     }
     
     /// Get backend information

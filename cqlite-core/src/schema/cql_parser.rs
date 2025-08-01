@@ -6,16 +6,16 @@
 
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;
-use crate::parser::{CqlCreateTable, CqlDataType, CqlIdentifier};
-use crate::schema::{CqlType, TableSchema, KeyColumn, ClusteringColumn, Column};
+use crate::parser::{CqlCreateTable, CqlDataType};
+use crate::schema::{TableSchema, KeyColumn, ClusteringColumn, Column};
 use serde_json;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while, take_while1},
-    character::complete::{char, multispace0, multispace1},
-    combinator::{map, opt, recognize},
-    multi::{many0, separated_list0, separated_list1},
-    sequence::{delimited, preceded, separated_pair, terminated, tuple},
+    bytes::complete::{tag_no_case, take_while, take_while1},
+    character::complete::char,
+    combinator::{map, opt},
+    multi::{separated_list0, separated_list1},
+    sequence::{delimited, preceded, separated_pair, tuple},
     IResult,
 };
 use std::collections::HashMap;
@@ -520,8 +520,8 @@ pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
     
     use crate::parser::visitor::SchemaBuilderVisitor;
     use crate::parser::traits::CqlVisitor;
-    use crate::parser::{CqlStatement, CqlCreateTable, CqlTable, CqlIdentifier, CqlColumnDef, CqlDataType, CqlPrimaryKey, CqlTableOptions};
-    use std::collections::HashMap;
+    use crate::parser::CqlStatement;
+    
     
     // Parse using the existing nom parser to get the TableSchema
     let schema = parse_cql_schema(cql)?;
@@ -539,7 +539,7 @@ pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
 /// Helper function to convert TableSchema to AST for demonstration
 /// (In real usage, the AST would come directly from a parser)
 fn table_schema_to_ast(schema: &TableSchema) -> Result<CqlCreateTable> {
-    use crate::parser::{CqlCreateTable, CqlTable, CqlIdentifier, CqlColumnDef, CqlDataType, CqlPrimaryKey, CqlTableOptions};
+    use crate::parser::{CqlCreateTable, CqlTable, CqlIdentifier, CqlColumnDef, CqlPrimaryKey, CqlTableOptions};
     
     // Convert table reference
     let table = if schema.keyspace == "default" {

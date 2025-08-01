@@ -16,7 +16,7 @@ use cqlite_core::{
         performance_benchmarks::PerformanceBenchmarks,
     },
     types::TableId,
-    Config, RowKey,
+    Config,
 };
 
 #[tokio::main]

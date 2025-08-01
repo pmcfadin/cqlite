@@ -4,7 +4,7 @@
 //! allowing easy traversal and transformation of CQL AST nodes.
 
 use crate::error::Result;
-use crate::schema::{TableSchema, KeyColumn, ClusteringColumn, Column, CqlType};
+use crate::schema::{TableSchema, KeyColumn, ClusteringColumn, Column};
 use super::ast::*;
 use super::traits::{CqlVisitor, ValidationContext};
 use std::collections::HashMap;
@@ -41,11 +41,11 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
         for item in &select.select_list {
             match item {
                 CqlSelectItem::Expression { expression, .. } => {
-                    self.visit_expression(expression)?;
+                    let _: T = self.visit_expression(expression)?;
                 }
                 CqlSelectItem::Function { args, .. } => {
                     for arg in args {
-                        self.visit_expression(arg)?;
+                        let _: T = self.visit_expression(arg)?;
                     }
                 }
                 CqlSelectItem::Wildcard => {}
@@ -54,7 +54,7 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
         
         // Visit WHERE clause
         if let Some(where_clause) = &select.where_clause {
-            self.visit_expression(where_clause)?;
+            let _: T = self.visit_expression(where_clause)?;
         }
         
         Ok(T::default())
@@ -63,14 +63,14 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     fn visit_insert(&mut self, insert: &CqlInsert) -> Result<T> {
         // Visit column names
         for column in &insert.columns {
-            self.visit_identifier(column)?;
+            let _: T = self.visit_identifier(column)?;
         }
         
         // Visit values
         match &insert.values {
             CqlInsertValues::Values(expressions) => {
                 for expr in expressions {
-                    self.visit_expression(expr)?;
+                    let _: T = self.visit_expression(expr)?;
                 }
             }
             CqlInsertValues::Json(_) => {
@@ -81,10 +81,10 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
         // Visit USING clause
         if let Some(using) = &insert.using {
             if let Some(ttl) = &using.ttl {
-                self.visit_expression(ttl)?;
+                let _: T = self.visit_expression(ttl)?;
             }
             if let Some(timestamp) = &using.timestamp {
-                self.visit_expression(timestamp)?;
+                let _: T = self.visit_expression(timestamp)?;
             }
         }
         
@@ -94,30 +94,30 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     fn visit_update(&mut self, update: &CqlUpdate) -> Result<T> {
         // Visit assignments
         for assignment in &update.assignments {
-            self.visit_identifier(&assignment.column)?;
-            self.visit_expression(&assignment.value)?;
+            let _: T = self.visit_identifier(&assignment.column)?;
+            let _: T = self.visit_expression(&assignment.value)?;
             
             // Visit map update key if present
             if let CqlAssignmentOperator::MapUpdate(key_expr) = &assignment.operator {
-                self.visit_expression(key_expr)?;
+                let _: T = self.visit_expression(key_expr)?;
             }
         }
         
         // Visit WHERE clause
-        self.visit_expression(&update.where_clause)?;
+        let _: T = self.visit_expression(&update.where_clause)?;
         
         // Visit IF condition
         if let Some(if_condition) = &update.if_condition {
-            self.visit_expression(if_condition)?;
+            let _: T = self.visit_expression(if_condition)?;
         }
         
         // Visit USING clause
         if let Some(using) = &update.using {
             if let Some(ttl) = &using.ttl {
-                self.visit_expression(ttl)?;
+                let _: T = self.visit_expression(ttl)?;
             }
             if let Some(timestamp) = &using.timestamp {
-                self.visit_expression(timestamp)?;
+                let _: T = self.visit_expression(timestamp)?;
             }
         }
         
@@ -127,21 +127,21 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     fn visit_delete(&mut self, delete: &CqlDelete) -> Result<T> {
         // Visit column names
         for column in &delete.columns {
-            self.visit_identifier(column)?;
+            let _: T = self.visit_identifier(column)?;
         }
         
         // Visit WHERE clause
-        self.visit_expression(&delete.where_clause)?;
+        let _: T = self.visit_expression(&delete.where_clause)?;
         
         // Visit IF condition
         if let Some(if_condition) = &delete.if_condition {
-            self.visit_expression(if_condition)?;
+            let _: T = self.visit_expression(if_condition)?;
         }
         
         // Visit USING clause
         if let Some(using) = &delete.using {
             if let Some(timestamp) = &using.timestamp {
-                self.visit_expression(timestamp)?;
+                let _: T = self.visit_expression(timestamp)?;
             }
         }
         
@@ -150,23 +150,23 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     
     fn visit_create_table(&mut self, create: &CqlCreateTable) -> Result<T> {
         // Visit table name
-        self.visit_identifier(&create.table.name)?;
+        let _: T = self.visit_identifier(&create.table.name)?;
         if let Some(keyspace) = &create.table.keyspace {
-            self.visit_identifier(keyspace)?;
+            let _: T = self.visit_identifier(keyspace)?;
         }
         
         // Visit column definitions
         for column in &create.columns {
-            self.visit_identifier(&column.name)?;
-            self.visit_data_type(&column.data_type)?;
+            let _: T = self.visit_identifier(&column.name)?;
+            let _: T = self.visit_data_type(&column.data_type)?;
         }
         
         // Visit primary key
         for pk_column in &create.primary_key.partition_key {
-            self.visit_identifier(pk_column)?;
+            let _: T = self.visit_identifier(pk_column)?;
         }
         for ck_column in &create.primary_key.clustering_key {
-            self.visit_identifier(ck_column)?;
+            let _: T = self.visit_identifier(ck_column)?;
         }
         
         Ok(T::default())
@@ -174,9 +174,9 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     
     fn visit_drop_table(&mut self, drop: &CqlDropTable) -> Result<T> {
         // Visit table name
-        self.visit_identifier(&drop.table.name)?;
+        let _: T = self.visit_identifier(&drop.table.name)?;
         if let Some(keyspace) = &drop.table.keyspace {
-            self.visit_identifier(keyspace)?;
+            let _: T = self.visit_identifier(keyspace)?;
         }
         
         Ok(T::default())
@@ -185,23 +185,23 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     fn visit_create_index(&mut self, create: &CqlCreateIndex) -> Result<T> {
         // Visit index name
         if let Some(name) = &create.name {
-            self.visit_identifier(name)?;
+            let _: T = self.visit_identifier(name)?;
         }
         
         // Visit table name
-        self.visit_identifier(&create.table.name)?;
+        let _: T = self.visit_identifier(&create.table.name)?;
         if let Some(keyspace) = &create.table.keyspace {
-            self.visit_identifier(keyspace)?;
+            let _: T = self.visit_identifier(keyspace)?;
         }
         
         // Visit indexed columns
         for column in &create.columns {
             match column {
-                CqlIndexColumn::Column(id) => self.visit_identifier(id)?,
-                CqlIndexColumn::Keys(id) => self.visit_identifier(id)?,
-                CqlIndexColumn::Values(id) => self.visit_identifier(id)?,
-                CqlIndexColumn::Entries(id) => self.visit_identifier(id)?,
-                CqlIndexColumn::Full(id) => self.visit_identifier(id)?,
+                CqlIndexColumn::Column(id) => { let _: T = self.visit_identifier(id)?; }
+                CqlIndexColumn::Keys(id) => { let _: T = self.visit_identifier(id)?; }
+                CqlIndexColumn::Values(id) => { let _: T = self.visit_identifier(id)?; }
+                CqlIndexColumn::Entries(id) => { let _: T = self.visit_identifier(id)?; }
+                CqlIndexColumn::Full(id) => { let _: T = self.visit_identifier(id)?; }
             }
         }
         
@@ -210,27 +210,27 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     
     fn visit_alter_table(&mut self, alter: &CqlAlterTable) -> Result<T> {
         // Visit table name
-        self.visit_identifier(&alter.table.name)?;
+        let _: T = self.visit_identifier(&alter.table.name)?;
         if let Some(keyspace) = &alter.table.keyspace {
-            self.visit_identifier(keyspace)?;
+            let _: T = self.visit_identifier(keyspace)?;
         }
         
         // Visit operation
         match &alter.operation {
             CqlAlterTableOp::AddColumn(column_def) => {
-                self.visit_identifier(&column_def.name)?;
-                self.visit_data_type(&column_def.data_type)?;
+                let _: T = self.visit_identifier(&column_def.name)?;
+                let _: T = self.visit_data_type(&column_def.data_type)?;
             }
             CqlAlterTableOp::DropColumn(column) => {
-                self.visit_identifier(column)?;
+                let _: T = self.visit_identifier(column)?;
             }
             CqlAlterTableOp::AlterColumn { column, new_type } => {
-                self.visit_identifier(column)?;
-                self.visit_data_type(new_type)?;
+                let _: T = self.visit_identifier(column)?;
+                let _: T = self.visit_data_type(new_type)?;
             }
             CqlAlterTableOp::RenameColumn { old_name, new_name } => {
-                self.visit_identifier(old_name)?;
-                self.visit_identifier(new_name)?;
+                let _: T = self.visit_identifier(old_name)?;
+                let _: T = self.visit_identifier(new_name)?;
             }
             CqlAlterTableOp::WithOptions(_) => {
                 // Table options are literals, no sub-expressions to visit
@@ -245,19 +245,19 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
             CqlDataType::List(inner) |
             CqlDataType::Set(inner) |
             CqlDataType::Frozen(inner) => {
-                self.visit_data_type(inner)?;
+                let _: T = self.visit_data_type(inner)?;
             }
             CqlDataType::Map(key_type, value_type) => {
-                self.visit_data_type(key_type)?;
-                self.visit_data_type(value_type)?;
+                let _: T = self.visit_data_type(key_type)?;
+                let _: T = self.visit_data_type(value_type)?;
             }
             CqlDataType::Tuple(types) => {
                 for typ in types {
-                    self.visit_data_type(typ)?;
+                    let _: T = self.visit_data_type(typ)?;
                 }
             }
             CqlDataType::Udt(name) => {
-                self.visit_identifier(name)?;
+                let _: T = self.visit_identifier(name)?;
             }
             _ => {
                 // Primitive types have no sub-components to visit
@@ -273,61 +273,61 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
             CqlExpression::Column(column) => self.visit_identifier(column),
             CqlExpression::Parameter(_) | CqlExpression::NamedParameter(_) => Ok(T::default()),
             CqlExpression::Binary { left, right, .. } => {
-                self.visit_expression(left)?;
-                self.visit_expression(right)?;
+                let _: T = self.visit_expression(left)?;
+                let _: T = self.visit_expression(right)?;
                 Ok(T::default())
             }
             CqlExpression::Unary { operand, .. } => {
-                self.visit_expression(operand)?;
+                let _: T = self.visit_expression(operand)?;
                 Ok(T::default())
             }
             CqlExpression::Function { name, args } => {
-                self.visit_identifier(name)?;
+                let _: T = self.visit_identifier(name)?;
                 for arg in args {
-                    self.visit_expression(arg)?;
+                    let _: T = self.visit_expression(arg)?;
                 }
                 Ok(T::default())
             }
             CqlExpression::In { expression, values } => {
-                self.visit_expression(expression)?;
+                let _: T = self.visit_expression(expression)?;
                 for value in values {
-                    self.visit_expression(value)?;
+                    let _: T = self.visit_expression(value)?;
                 }
                 Ok(T::default())
             }
             CqlExpression::Contains { column, value } => {
-                self.visit_identifier(column)?;
-                self.visit_expression(value)?;
+                let _: T = self.visit_identifier(column)?;
+                let _: T = self.visit_expression(value)?;
                 Ok(T::default())
             }
             CqlExpression::ContainsKey { column, key } => {
-                self.visit_identifier(column)?;
-                self.visit_expression(key)?;
+                let _: T = self.visit_identifier(column)?;
+                let _: T = self.visit_expression(key)?;
                 Ok(T::default())
             }
             CqlExpression::CollectionAccess { collection, index } => {
-                self.visit_expression(collection)?;
-                self.visit_expression(index)?;
+                let _: T = self.visit_expression(collection)?;
+                let _: T = self.visit_expression(index)?;
                 Ok(T::default())
             }
             CqlExpression::FieldAccess { object, field } => {
-                self.visit_expression(object)?;
-                self.visit_identifier(field)?;
+                let _: T = self.visit_expression(object)?;
+                let _: T = self.visit_identifier(field)?;
                 Ok(T::default())
             }
             CqlExpression::Case { when_clauses, else_clause } => {
                 for when_clause in when_clauses {
-                    self.visit_expression(&when_clause.condition)?;
-                    self.visit_expression(&when_clause.result)?;
+                    let _: T = self.visit_expression(&when_clause.condition)?;
+                    let _: T = self.visit_expression(&when_clause.result)?;
                 }
                 if let Some(else_expr) = else_clause {
-                    self.visit_expression(else_expr)?;
+                    let _: T = self.visit_expression(else_expr)?;
                 }
                 Ok(T::default())
             }
             CqlExpression::Cast { expression, target_type } => {
-                self.visit_expression(expression)?;
-                self.visit_data_type(target_type)?;
+                let _: T = self.visit_expression(expression)?;
+                let _: T = self.visit_data_type(target_type)?;
                 Ok(T::default())
             }
         }
@@ -379,6 +379,14 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
 #[derive(Debug, Default)]
 pub struct IdentifierCollector {
     pub identifiers: Vec<CqlIdentifier>,
+}
+
+impl IdentifierCollector {
+    pub fn new() -> Self {
+        Self {
+            identifiers: Vec::new(),
+        }
+    }
 }
 
 impl CqlVisitor<()> for IdentifierCollector {

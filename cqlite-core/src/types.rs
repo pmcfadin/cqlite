@@ -1,7 +1,6 @@
 //! Core data types for CQLite
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use crate::schema::CqlType;
 
@@ -702,6 +701,32 @@ impl Value {
                 Ok(())
             },
             _ => Ok(()), // Non-collections are always valid
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (Value::Null, Value::Null) => Some(Ordering::Equal),
+            (Value::Null, _) => Some(Ordering::Less),
+            (_, Value::Null) => Some(Ordering::Greater),
+            
+            (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
+            (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
+            (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
+            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+            (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
+            (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
+            (Value::Uuid(a), Value::Uuid(b)) => a.partial_cmp(b),
+            (Value::TinyInt(a), Value::TinyInt(b)) => a.partial_cmp(b),
+            (Value::SmallInt(a), Value::SmallInt(b)) => a.partial_cmp(b),
+            (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b),
+            
+            // For complex types, compare by string representation
+            (a, b) => a.to_string().partial_cmp(&b.to_string()),
         }
     }
 }

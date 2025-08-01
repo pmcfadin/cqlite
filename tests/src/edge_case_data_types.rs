@@ -1,10 +1,11 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Edge Case Testing for CQL Data Types
 //!
 //! This module tests extreme boundary conditions, malformed data handling,
 //! and edge cases that could break Cassandra compatibility.
 
-use cqlite_core::parser::types::*;
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+
+use cqlite_core::parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::{error::Result, Value};
 use std::collections::HashMap;
@@ -172,6 +173,10 @@ impl EdgeCaseDataTypeTests {
     fn test_unicode_edge_cases(&mut self) -> Result<()> {
         println!("  Testing Unicode edge cases...");
 
+        // Create longer-lived bindings for temporary values to avoid E0716
+        let long_ascii = "A".repeat(1000);
+        let long_emoji = "🚀".repeat(1000);
+
         let unicode_edge_cases = vec![
             // Empty string
             ("", "EMPTY_STRING"),
@@ -199,9 +204,9 @@ impl EdgeCaseDataTypeTests {
             // Surrogate pairs and invalid UTF-8 sequences
             // Note: Rust strings are always valid UTF-8, so these are conceptual
             ("Valid UTF-8 \u{10000}", "SURROGATE_PAIR_EQUIVALENT"),
-            // Very long strings
-            (&"A".repeat(1000), "LONG_ASCII_1K"),
-            (&"🚀".repeat(1000), "LONG_EMOJI_1K"),
+            // Very long strings (using pre-created bindings)
+            (&long_ascii, "LONG_ASCII_1K"),
+            (&long_emoji, "LONG_EMOJI_1K"),
             // Mixed scripts
             ("Αα Ββ 中文 العربية हिन्दी ελληνικά русский", "MIXED_SCRIPTS"),
             // Private Use Area
@@ -513,7 +518,11 @@ impl EdgeCaseDataTypeTests {
         for i in 0..10_000 {
             large_map.insert(format!("key_{:06}", i), Value::Integer(i));
         }
-        let map_value = Value::Map(large_map);
+        // Convert HashMap to Vec<(Value, Value)>
+        let map_vec: Vec<(Value, Value)> = large_map.into_iter()
+            .map(|(k, v)| (Value::Text(k), v))
+            .collect();
+        let map_value = Value::Map(map_vec);
 
         let result = match std::panic::catch_unwind(|| match serialize_cql_value(&map_value) {
             Ok(serialized) => Ok(serialized.len()),
@@ -837,7 +846,7 @@ impl EdgeCaseDataTypeTests {
         // We'll simulate this without actually allocating 1GB
         let start_time = std::time::Instant::now();
 
-        let result = Ok(0); // Skip actual GB allocation for practical reasons
+        let result: Result<i32> = Ok(0); // Skip actual GB allocation for practical reasons
 
         let elapsed = start_time.elapsed();
 

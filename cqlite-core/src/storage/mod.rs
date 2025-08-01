@@ -7,6 +7,11 @@ pub mod memtable;
 pub mod sstable;
 pub mod wal;
 
+// REPL data access components
+pub mod sstable_data_manager;
+pub mod repl_data_api;
+pub mod schema_discovery;
+
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;

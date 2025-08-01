@@ -1,18 +1,36 @@
-//! Comprehensive SSTable Validation Framework
+//! Comprehensive SSTable Validation Framework - Issue #17
 //!
 //! This module provides comprehensive validation for SSTable reading operations
 //! with a focus on accuracy, cqlsh compatibility, and performance metrics.
+//! Enhanced for Issue #17 with robust error handling and Cassandra 5+ support.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
+// Legacy validation modules
 pub mod accuracy;
 pub mod compatibility;
 pub mod performance;
 pub mod regression;
 pub mod report;
+
+// Issue #17 comprehensive validation framework
+pub mod core;
+pub mod data_integrity;
+pub mod error_handling;
+pub mod format_compatibility;
+pub mod real_time;
+pub mod reports;
+
+// Re-export Issue #17 framework components
+pub use self::core::*;
+pub use self::data_integrity::*;
+pub use self::error_handling::*;
+pub use self::format_compatibility::*;
+pub use self::real_time::*;
+pub use self::reports::*;
 
 /// Validation result for a single test case
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,11 +418,136 @@ pub struct EdgeCaseTestCase {
     pub test_type: EdgeCaseType,
 }
 
-// Re-export types from submodules
+// Re-export types from legacy submodules
 pub use accuracy::{AccuracyTestCase, AccuracyMetrics};
 pub use compatibility::{CompatibilityTestCase, CompatibilityCheck};
 pub use performance::{PerformanceTestCase, PerformanceMetrics};
 pub use regression::{RegressionTestCase, RegressionBaseline};
+
+/// Issue #17 Comprehensive Validation Framework Entry Point
+/// 
+/// This provides the main interface for the comprehensive validation framework
+/// that integrates all validation components for robust error handling and
+/// data integrity validation with Cassandra 5+ support.
+pub struct Issue17ValidationFramework {
+    /// Core validation framework
+    core_framework: std::sync::Arc<core::ValidationFramework>,
+    /// Data integrity validator
+    data_integrity: data_integrity::DataIntegrityValidator,
+    /// Error handling validator
+    error_handler: error_handling::ErrorHandler,
+    /// Format compatibility validator
+    format_compatibility: format_compatibility::FormatCompatibilityValidator,
+    /// Real-time monitoring
+    realtime_validator: real_time::RealtimeValidator,
+    /// Report generator
+    report_generator: reports::ReportGenerator,
+}
+
+impl Issue17ValidationFramework {
+    /// Create a new Issue #17 validation framework
+    pub fn new() -> crate::error::Result<Self> {
+        let core_framework = std::sync::Arc::new(core::ValidationFramework::new(core::ValidationConfig::default())?);
+        
+        Ok(Self {
+            core_framework: core_framework.clone(),
+            data_integrity: data_integrity::DataIntegrityValidator::new(data_integrity::IntegrityConfig::default())?,
+            error_handler: error_handling::ErrorHandler::new(error_handling::ErrorHandlingConfig::default())?,
+            format_compatibility: format_compatibility::FormatCompatibilityValidator::new(format_compatibility::CompatibilityConfig::default())?,
+            realtime_validator: real_time::RealtimeValidator::new(real_time::MonitoringConfig::default())?,
+            report_generator: reports::ReportGenerator::new(reports::ReportFormat::Comprehensive)?,
+        })
+    }
+    
+    /// Run comprehensive validation with all Issue #17 components
+    pub async fn run_comprehensive_validation(&mut self) -> crate::error::Result<reports::ValidationReport> {
+        let mut main_report = reports::ValidationReport::new("Issue #17 Comprehensive Validation");
+        
+        // 1. Data Integrity Validation
+        let integrity_result = self.data_integrity.validate_data_integrity().await?;
+        main_report.add_section("data_integrity", reports::ValidationSection {
+            name: "Data Integrity Validation".to_string(),
+            status: if integrity_result.overall_integrity_score > 0.95 {
+                reports::ValidationSectionStatus::Passed
+            } else {
+                reports::ValidationSectionStatus::Failed
+            },
+            details: format!("Integrity Score: {:.2}%", integrity_result.overall_integrity_score * 100.0),
+            metrics: {
+                let mut metrics = HashMap::new();
+                metrics.insert("integrity_score".to_string(), integrity_result.overall_integrity_score);
+                metrics.insert("tests_run".to_string(), integrity_result.integrity_checks.len() as f64);
+                metrics
+            },
+            recommendations: if integrity_result.overall_integrity_score < 0.95 {
+                vec!["Review data integrity failures and implement corrections".to_string()]
+            } else {
+                vec!["Data integrity validation passed successfully".to_string()]
+            },
+            timestamp: chrono::Utc::now(),
+        });
+        
+        // 2. Error Handling Validation
+        let error_result = self.error_handler.validate_error_handling().await?;
+        main_report.add_section("error_handling", reports::ValidationSection {
+            name: "Error Handling Validation".to_string(),
+            status: if error_result.success_rate > 0.90 {
+                reports::ValidationSectionStatus::Passed
+            } else {
+                reports::ValidationSectionStatus::Failed
+            },
+            details: format!("Success Rate: {:.2}%", error_result.success_rate * 100.0),
+            metrics: {
+                let mut metrics = HashMap::new();
+                metrics.insert("success_rate".to_string(), error_result.success_rate);
+                metrics.insert("scenarios_tested".to_string(), error_result.scenarios_tested as f64);
+                metrics
+            },
+            recommendations: if error_result.success_rate < 0.90 {
+                vec!["Improve error handling robustness for edge cases".to_string()]
+            } else {
+                vec!["Error handling validation passed successfully".to_string()]
+            },
+            timestamp: chrono::Utc::now(),
+        });
+        
+        // 3. Format Compatibility Validation
+        let format_result = self.format_compatibility.validate_format_compatibility().await?;
+        main_report.add_section("format_compatibility", reports::ValidationSection {
+            name: "Format Compatibility Validation".to_string(),
+            status: if format_result.compatibility_score > 0.95 {
+                reports::ValidationSectionStatus::Passed
+            } else {
+                reports::ValidationSectionStatus::Failed
+            },
+            details: format!("Compatibility Score: {:.2}% (Cassandra 5+ Focus)", format_result.compatibility_score * 100.0),
+            metrics: {
+                let mut metrics = HashMap::new();
+                metrics.insert("compatibility_score".to_string(), format_result.compatibility_score);
+                metrics.insert("versions_tested".to_string(), format_result.version_results.len() as f64);
+                metrics
+            },
+            recommendations: if format_result.compatibility_score < 0.95 {
+                vec!["Address Cassandra 5+ format compatibility issues".to_string()]
+            } else {
+                vec!["Format compatibility validation passed for Cassandra 5+".to_string()]
+            },
+            timestamp: chrono::Utc::now(),
+        });
+        
+        Ok(main_report)
+    }
+    
+    /// Get real-time validation status
+    pub fn get_realtime_status(&self) -> crate::error::Result<real_time::ValidationEvent> {
+        self.realtime_validator.get_current_status()
+    }
+    
+    /// Generate comprehensive report
+    pub async fn generate_report(&self, report: reports::ValidationReport) -> crate::error::Result<reports::ValidationReport> {
+        self.report_generator.generate_report(report).await
+    }
+}
 
 #[cfg(test)]
 mod tests {

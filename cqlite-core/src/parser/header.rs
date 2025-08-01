@@ -20,15 +20,15 @@ pub enum CassandraVersion {
     /// Legacy 'oa' format (backward compatibility)
     Legacy,
     /// Cassandra 5.0 Alpha
-    V5_0_Alpha,
+    V5_0Alpha,
     /// Cassandra 5.0 Beta
-    V5_0_Beta,
+    V5_0Beta,
     /// Cassandra 5.0 Release
-    V5_0_Release,
+    V5_0Release,
     /// Cassandra 5.0 'nb' (new big) format
-    V5_0_NewBig,
+    V5_0NewBig,
     /// Cassandra 5.0 BTI (Big Trie-Indexed) format
-    V5_0_Bti,
+    V5_0Bti,
 }
 
 impl CassandraVersion {
@@ -36,11 +36,11 @@ impl CassandraVersion {
     pub fn magic_number(&self) -> u32 {
         match self {
             CassandraVersion::Legacy => 0x6F61_0000,      // 'oa' format
-            CassandraVersion::V5_0_Alpha => 0xAD01_0000,   // Cassandra 5.0 Alpha
-            CassandraVersion::V5_0_Beta => 0xA007_0000,    // Cassandra 5.0 Beta
-            CassandraVersion::V5_0_Release => 0x4316_0000, // Cassandra 5.0 Release
-            CassandraVersion::V5_0_NewBig => 0x0040_0000,  // Cassandra 5.0 'nb' (new big) format
-            CassandraVersion::V5_0_Bti => 0x6461_0000,     // Cassandra 5.0 BTI (Big Trie-Indexed) format
+            CassandraVersion::V5_0Alpha => 0xAD01_0000,   // Cassandra 5.0 Alpha
+            CassandraVersion::V5_0Beta => 0xA007_0000,    // Cassandra 5.0 Beta
+            CassandraVersion::V5_0Release => 0x4316_0000, // Cassandra 5.0 Release
+            CassandraVersion::V5_0NewBig => 0x0040_0000,  // Cassandra 5.0 'nb' (new big) format
+            CassandraVersion::V5_0Bti => 0x6461_0000,     // Cassandra 5.0 BTI (Big Trie-Indexed) format
         }
     }
     
@@ -48,11 +48,11 @@ impl CassandraVersion {
     pub fn from_magic_number(magic: u32) -> Option<CassandraVersion> {
         match magic {
             0x6F61_0000 => Some(CassandraVersion::Legacy),
-            0xAD01_0000 => Some(CassandraVersion::V5_0_Alpha),
-            0xA007_0000 => Some(CassandraVersion::V5_0_Beta),
-            0x4316_0000 => Some(CassandraVersion::V5_0_Release),
-            0x0040_0000 => Some(CassandraVersion::V5_0_NewBig),
-            0x6461_0000 => Some(CassandraVersion::V5_0_Bti),
+            0xAD01_0000 => Some(CassandraVersion::V5_0Alpha),
+            0xA007_0000 => Some(CassandraVersion::V5_0Beta),
+            0x4316_0000 => Some(CassandraVersion::V5_0Release),
+            0x0040_0000 => Some(CassandraVersion::V5_0NewBig),
+            0x6461_0000 => Some(CassandraVersion::V5_0Bti),
             _ => None,
         }
     }
@@ -61,11 +61,11 @@ impl CassandraVersion {
     pub fn version_string(&self) -> &'static str {
         match self {
             CassandraVersion::Legacy => "Legacy 'oa' format",
-            CassandraVersion::V5_0_Alpha => "Cassandra 5.0 Alpha",
-            CassandraVersion::V5_0_Beta => "Cassandra 5.0 Beta",
-            CassandraVersion::V5_0_Release => "Cassandra 5.0 Release",
-            CassandraVersion::V5_0_NewBig => "Cassandra 5.0 'nb' (new big) format",
-            CassandraVersion::V5_0_Bti => "Cassandra 5.0 BTI (Big Trie-Indexed) format",
+            CassandraVersion::V5_0Alpha => "Cassandra 5.0 Alpha",
+            CassandraVersion::V5_0Beta => "Cassandra 5.0 Beta",
+            CassandraVersion::V5_0Release => "Cassandra 5.0 Release",
+            CassandraVersion::V5_0NewBig => "Cassandra 5.0 'nb' (new big) format",
+            CassandraVersion::V5_0Bti => "Cassandra 5.0 BTI (Big Trie-Indexed) format",
         }
     }
 }
@@ -123,7 +123,7 @@ pub struct CompressionInfo {
 }
 
 /// Statistics about the SSTable content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SSTableStats {
     /// Total number of rows
     pub row_count: u64,
@@ -171,7 +171,7 @@ pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion
 
     // Handle different format versions - 'nb' format has different header structure
     let (input, version) = match cassandra_version {
-        CassandraVersion::V5_0_NewBig => {
+        CassandraVersion::V5_0NewBig => {
             // For 'nb' format, skip the next bytes and look for version later
             // Based on analysis of real data, version appears at offset 29 (25 bytes after magic number)
             let (input, _skip_bytes) = take(25usize)(input)?; // Skip 25 bytes after magic number
@@ -465,44 +465,44 @@ mod tests {
     #[test]
     fn test_magic_and_version_cassandra_5_alpha() {
         let mut data = Vec::new();
-        data.extend_from_slice(&CassandraVersion::V5_0_Alpha.magic_number().to_be_bytes());
+        data.extend_from_slice(&CassandraVersion::V5_0Alpha.magic_number().to_be_bytes());
         data.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
 
         let (_, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
-        assert_eq!(cassandra_version, CassandraVersion::V5_0_Alpha);
+        assert_eq!(cassandra_version, CassandraVersion::V5_0Alpha);
         assert_eq!(version, SUPPORTED_VERSION);
     }
 
     #[test]
     fn test_magic_and_version_cassandra_5_beta() {
         let mut data = Vec::new();
-        data.extend_from_slice(&CassandraVersion::V5_0_Beta.magic_number().to_be_bytes());
+        data.extend_from_slice(&CassandraVersion::V5_0Beta.magic_number().to_be_bytes());
         data.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
 
         let (_, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
-        assert_eq!(cassandra_version, CassandraVersion::V5_0_Beta);
+        assert_eq!(cassandra_version, CassandraVersion::V5_0Beta);
         assert_eq!(version, SUPPORTED_VERSION);
     }
 
     #[test]
     fn test_magic_and_version_cassandra_5_release() {
         let mut data = Vec::new();
-        data.extend_from_slice(&CassandraVersion::V5_0_Release.magic_number().to_be_bytes());
+        data.extend_from_slice(&CassandraVersion::V5_0Release.magic_number().to_be_bytes());
         data.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
 
         let (_, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
-        assert_eq!(cassandra_version, CassandraVersion::V5_0_Release);
+        assert_eq!(cassandra_version, CassandraVersion::V5_0Release);
         assert_eq!(version, SUPPORTED_VERSION);
     }
 
     #[test]
     fn test_magic_and_version_cassandra_5_newbig() {
         let mut data = Vec::new();
-        data.extend_from_slice(&CassandraVersion::V5_0_NewBig.magic_number().to_be_bytes());
+        data.extend_from_slice(&CassandraVersion::V5_0NewBig.magic_number().to_be_bytes());
         data.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
 
         let (_, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
-        assert_eq!(cassandra_version, CassandraVersion::V5_0_NewBig);
+        assert_eq!(cassandra_version, CassandraVersion::V5_0NewBig);
         assert_eq!(version, SUPPORTED_VERSION);
     }
 
@@ -519,20 +519,20 @@ mod tests {
     #[test]
     fn test_cassandra_version_from_magic() {
         assert_eq!(CassandraVersion::from_magic_number(0x6F61_0000), Some(CassandraVersion::Legacy));
-        assert_eq!(CassandraVersion::from_magic_number(0xAD01_0000), Some(CassandraVersion::V5_0_Alpha));
-        assert_eq!(CassandraVersion::from_magic_number(0xA007_0000), Some(CassandraVersion::V5_0_Beta));
-        assert_eq!(CassandraVersion::from_magic_number(0x4316_0000), Some(CassandraVersion::V5_0_Release));
-        assert_eq!(CassandraVersion::from_magic_number(0x0040_0000), Some(CassandraVersion::V5_0_NewBig));
+        assert_eq!(CassandraVersion::from_magic_number(0xAD01_0000), Some(CassandraVersion::V5_0Alpha));
+        assert_eq!(CassandraVersion::from_magic_number(0xA007_0000), Some(CassandraVersion::V5_0Beta));
+        assert_eq!(CassandraVersion::from_magic_number(0x4316_0000), Some(CassandraVersion::V5_0Release));
+        assert_eq!(CassandraVersion::from_magic_number(0x0040_0000), Some(CassandraVersion::V5_0NewBig));
         assert_eq!(CassandraVersion::from_magic_number(0xDEADBEEF), None);
     }
 
     #[test]
     fn test_cassandra_version_strings() {
         assert_eq!(CassandraVersion::Legacy.version_string(), "Legacy 'oa' format");
-        assert_eq!(CassandraVersion::V5_0_Alpha.version_string(), "Cassandra 5.0 Alpha");
-        assert_eq!(CassandraVersion::V5_0_Beta.version_string(), "Cassandra 5.0 Beta");
-        assert_eq!(CassandraVersion::V5_0_Release.version_string(), "Cassandra 5.0 Release");
-        assert_eq!(CassandraVersion::V5_0_NewBig.version_string(), "Cassandra 5.0 'nb' (new big) format");
+        assert_eq!(CassandraVersion::V5_0Alpha.version_string(), "Cassandra 5.0 Alpha");
+        assert_eq!(CassandraVersion::V5_0Beta.version_string(), "Cassandra 5.0 Beta");
+        assert_eq!(CassandraVersion::V5_0Release.version_string(), "Cassandra 5.0 Release");
+        assert_eq!(CassandraVersion::V5_0NewBig.version_string(), "Cassandra 5.0 'nb' (new big) format");
     }
 
     #[test]
@@ -600,7 +600,7 @@ mod tests {
         compression_params.insert("level".to_string(), "6".to_string());
         
         let header = SSTableHeader {
-            cassandra_version: CassandraVersion::V5_0_NewBig,
+            cassandra_version: CassandraVersion::V5_0NewBig,
             version: SUPPORTED_VERSION,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "test_keyspace".to_string(),

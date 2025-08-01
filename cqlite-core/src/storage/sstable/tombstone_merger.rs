@@ -5,8 +5,7 @@
 
 use std::collections::HashMap;
 use crate::{
-    types::{Value, TombstoneInfo, TombstoneType, RowKey, TableId},
-    Error, Result,
+    types::{Value, TombstoneInfo, TombstoneType, RowKey, TableId}, Result,
 };
 
 /// Entry metadata for tombstone processing
@@ -70,7 +69,7 @@ impl TombstoneMerger {
         
         // Track the most recent tombstone timestamp for proper deletion semantics
         let mut latest_tombstone_time: Option<i64> = None;
-        let mut latest_tombstone_type: Option<TombstoneType> = None;
+        let mut _latest_tombstone_type: Option<TombstoneType> = None;
         
         // First pass: find the most recent active tombstone
         for gen_value in &sorted_values {
@@ -79,7 +78,7 @@ impl TombstoneMerger {
                     // Update latest tombstone if this one is newer
                     if latest_tombstone_time.map_or(true, |t| tombstone_info.deletion_time > t) {
                         latest_tombstone_time = Some(tombstone_info.deletion_time);
-                        latest_tombstone_type = Some(tombstone_info.tombstone_type);
+                        _latest_tombstone_type = Some(tombstone_info.tombstone_type);
                     }
                 }
             }
@@ -131,8 +130,8 @@ impl TombstoneMerger {
     /// Merge entries for a specific row across generations
     pub fn merge_row_entries(
         &self,
-        table_id: &TableId,
-        row_key: &RowKey,
+        _table_id: &TableId,
+        _row_key: &RowKey,
         entries: Vec<GenerationValue>,
     ) -> Result<Option<Value>> {
         // Check for row-level tombstones first
@@ -447,7 +446,7 @@ impl TombstoneMerger {
     
     /// Performance optimized tombstone check for hot paths
     /// Uses fast path checks to minimize expensive operations
-    pub fn fast_tombstone_check(&self, value: &Value, write_time: i64) -> bool {
+    pub fn fast_tombstone_check(&self, value: &Value, _write_time: i64) -> bool {
         match value {
             Value::Tombstone(info) => {
                 // Fast path: check common case of non-TTL tombstones first

@@ -25,6 +25,13 @@ pub enum ExportFormat {
     Sql,
 }
 
+#[derive(ValueEnum, Clone, Debug)]
+pub enum InfoOutputFormat {
+    Text,
+    Json,
+    Csv,
+}
+
 impl std::fmt::Display for OutputFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -53,6 +60,16 @@ impl std::fmt::Display for ExportFormat {
             ExportFormat::Json => write!(f, "json"),
             ExportFormat::Parquet => write!(f, "parquet"),
             ExportFormat::Sql => write!(f, "sql"),
+        }
+    }
+}
+
+impl std::fmt::Display for InfoOutputFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InfoOutputFormat::Text => write!(f, "text"),
+            InfoOutputFormat::Json => write!(f, "json"),
+            InfoOutputFormat::Csv => write!(f, "csv"),
         }
     }
 }

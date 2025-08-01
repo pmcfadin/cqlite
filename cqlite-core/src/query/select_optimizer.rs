@@ -299,7 +299,7 @@ impl SelectOptimizer {
     }
 
     /// Get table statistics for cost estimation
-    async fn get_table_statistics(&self, table_id: &TableId) -> Result<TableStatistics> {
+    async fn get_table_statistics(&self, _table_id: &TableId) -> Result<TableStatistics> {
         // TODO: Implement real statistics gathering from storage engine
         Ok(TableStatistics {
             row_count: 1_000_000, // Default estimate
@@ -592,7 +592,7 @@ impl SelectOptimizer {
         let rows_per_partition = stats.row_count / num_partitions as u64;
 
         let mut partitions = Vec::new();
-        for i in 0..num_partitions {
+        for _i in 0..num_partitions {
             partitions.push(PartitionBounds {
                 start_key: None, // TODO: Implement real key ranges
                 end_key: None,

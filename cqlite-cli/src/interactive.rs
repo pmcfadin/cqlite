@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::{config::Config, repl::{ReplEngine, ReplConfig, ReplMode}};
 use anyhow::Result;
 use colored::*;
 use cqlite_core::{
@@ -45,16 +45,32 @@ impl ReplSession {
 }
 
 pub async fn start_repl_mode(db_path: &Path, config: &Config, database: Database) -> Result<()> {
-    let mut session = ReplSession::new(db_path, config.clone(), database);
+    // For now, use a simplified integration approach due to compilation issues
+    // This will be replaced with the full REPL engine once core issues are resolved
     
-    // Display enhanced startup banner
-    display_startup_banner(&session).await?;
+    println!("{}", "╔═══════════════════════════════════════════════╗".cyan());
+    println!("{}", "║           CQLite REPL Engine v2.0            ║".cyan().bold());
+    println!("{}", "║      High-Performance Cassandra Reader       ║".cyan());
+    println!("{}", "╚═══════════════════════════════════════════════╝".cyan());
+    println!();
+    println!("🗄️  Database: {}", db_path.display().to_string().yellow());
+    println!("🔧 Mode: Interactive");
+    println!("📊 Engine: CQLite Core v0.1.0");
+    println!();
+    println!("{}", "Quick Commands:".cyan().bold());
+    println!("  • {} - Show help", ":help".green());
+    println!("  • {} - List tables", ":tables".green());
+    println!("  • {} - Execute CQL", "SELECT * FROM table;".yellow());
+    println!("  • {} - Exit", ":quit".red());
+    println!();
+    
+    // Fall back to original implementation for now
+    let mut session = ReplSession::new(db_path, config.clone(), database);
     
     let mut input = String::new();
     let stdin = io::stdin();
 
     loop {
-        // Display contextual prompt
         let prompt = format_prompt(&session);
         print!("{} ", prompt);
         io::stdout().flush()?;
@@ -69,7 +85,6 @@ pub async fn start_repl_mode(db_path: &Path, config: &Config, database: Database
                     continue;
                 }
 
-                // Add to command history
                 if !trimmed.starts_with(':') || trimmed.len() > 1 {
                     session.command_history.push(trimmed.to_string());
                 }

@@ -198,7 +198,7 @@ impl Index {
     }
 
     /// Load index from a file/reader
-    pub async fn load<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+    pub async fn load<R: tokio::io::AsyncRead + Unpin>(_reader: &mut R) -> Result<Self> {
         // For now, return an empty index as a placeholder
         // In a real implementation, this would deserialize the index from the reader
         Ok(Self::new())

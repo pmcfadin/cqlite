@@ -1,8 +1,9 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Minimal smoke tests to establish baseline execution
 //!
 //! These tests verify basic functionality without complex integration
 //! to establish that the test infrastructure is working.
+
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::config::ParserConfig;

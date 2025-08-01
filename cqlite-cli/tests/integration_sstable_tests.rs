@@ -13,7 +13,7 @@ use tempfile::{TempDir, NamedTempFile};
 use serde_json::{json, Value};
 
 /// Test configuration for SSTable integration tests
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SSTableTestConfig {
     pub test_data_dir: PathBuf,
     pub temp_dir: TempDir,
@@ -157,7 +157,8 @@ fn test_sstable_info_command() -> Result<(), Box<dyn std::error::Error>> {
         let mut cmd = get_cli_command();
         cmd.arg("info")
            .arg(&sstable_dir)
-           .timeout(config.timeout);
+           .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
            
         let output = cmd.output()?;
         
@@ -179,7 +180,8 @@ fn test_sstable_info_command() -> Result<(), Box<dyn std::error::Error>> {
         cmd.arg("info")
            .arg(&sstable_dir)
            .arg("--detailed")
-           .timeout(config.timeout);
+           .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
            
         let detailed_output = cmd.output()?;
         
@@ -242,7 +244,8 @@ fn test_sstable_read_command() -> Result<(), Box<dyn std::error::Error>> {
                .arg(schema_path)
                .arg("--limit")
                .arg("5")
-               .timeout(config.timeout);
+               .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
                
             let output = cmd.output()?;
             
@@ -272,7 +275,8 @@ fn test_sstable_read_command() -> Result<(), Box<dyn std::error::Error>> {
                    .arg(format)
                    .arg("--limit")
                    .arg("3")
-                   .timeout(config.timeout);
+                   .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
                    
                 let format_output = cmd.output()?;
                 
@@ -340,7 +344,8 @@ fn test_sstable_select_command() -> Result<(), Box<dyn std::error::Error>> {
                    .arg("--schema")
                    .arg(schema_path)
                    .arg(query)
-                   .timeout(config.timeout);
+                   .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
                    
                 let output = cmd.output()?;
                 
@@ -370,7 +375,8 @@ fn test_sstable_select_command() -> Result<(), Box<dyn std::error::Error>> {
                .arg("SELECT * FROM users LIMIT 2")
                .arg("--format")
                .arg("json")
-               .timeout(config.timeout);
+               .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
                
             let json_output = cmd.output()?;
             
@@ -413,7 +419,8 @@ fn test_version_detection() -> Result<(), Box<dyn std::error::Error>> {
         cmd.arg("info")
            .arg(&sstable_dir)
            .arg("--auto-detect")
-           .timeout(config.timeout);
+           .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
            
         let output = cmd.output()?;
         
@@ -434,7 +441,8 @@ fn test_version_detection() -> Result<(), Box<dyn std::error::Error>> {
                .arg(&sstable_dir)
                .arg("--cassandra-version")
                .arg(version)
-               .timeout(config.timeout);
+               .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
                
             let version_output = cmd.output()?;
             
@@ -535,7 +543,8 @@ fn test_schema_format_detection() -> Result<(), Box<dyn std::error::Error>> {
                .arg(json_schema_path)
                .arg("--limit")
                .arg("1")
-               .timeout(config.timeout);
+               .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
                
             let output = cmd.output()?;
             
@@ -554,7 +563,8 @@ fn test_schema_format_detection() -> Result<(), Box<dyn std::error::Error>> {
                .arg(cql_schema_path)
                .arg("--limit")
                .arg("1")
-               .timeout(config.timeout);
+               .arg("--timeout")
+           .arg(config.timeout.as_secs().to_string());
                
             let output = cmd.output()?;
             

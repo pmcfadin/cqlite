@@ -14,19 +14,19 @@ use tempfile::TempDir;
 /// - Data corruption scenarios
 /// - Security and permission issues
 
+const CLI_BINARY: &str = "cqlite";
+
+fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
+    Command::new("cargo")
+        .args(&["run", "--bin", CLI_BINARY, "--"])
+        .args(args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run CLI command: {}", e))
+}
+
 #[cfg(test)]
 mod error_handling_tests {
     use super::*;
-
-    const CLI_BINARY: &str = "cqlite";
-
-    fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
-        Command::new("cargo")
-            .args(&["run", "--bin", CLI_BINARY, "--"])
-            .args(args)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run CLI command: {}", e))
-    }
 
     #[test]
     fn test_invalid_command_line_arguments() -> Result<()> {

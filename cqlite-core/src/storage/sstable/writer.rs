@@ -18,8 +18,6 @@ const CASSANDRA_FORMAT_VERSION: &[u8] = b"oa";
 /// Magic bytes for Cassandra SSTable file identification  
 const CASSANDRA_MAGIC: [u8; 4] = [0x5A, 0x5A, 0x5A, 0x5A];
 
-/// Default block size for data compression
-const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
 
 /// CRC32 polynomial for checksumming
 const CRC32_POLYNOMIAL: u32 = 0xEDB88320;
@@ -429,22 +427,6 @@ impl SSTableWriter {
         }
     }
 
-    /// Legacy value serialization (kept for backward compatibility)
-    fn serialize_value_optimized(&self, value: &Value) -> Result<Vec<u8>> {
-        match value {
-            Value::Null => Ok(vec![]),
-            Value::Boolean(b) => Ok(vec![if *b { 1 } else { 0 }]),
-            Value::Integer(i) => Ok(i.to_le_bytes().to_vec()),
-            Value::BigInt(i) => Ok(i.to_le_bytes().to_vec()),
-            Value::Float(f) => Ok(f.to_le_bytes().to_vec()),
-            Value::Text(s) => Ok(s.as_bytes().to_vec()),
-            Value::Blob(b) => Ok(b.clone()),
-            Value::Timestamp(ts) => Ok(ts.to_le_bytes().to_vec()),
-            Value::Uuid(uuid) => Ok(uuid.to_vec()),
-            // For complex types, fall back to bincode
-            _ => bincode::serialize(value).map_err(|e| Error::serialization(e.to_string())),
-        }
-    }
 
     /// Write Cassandra-compatible variable-length integer (VInt)
     fn write_cassandra_vint(&self, data: &mut Vec<u8>, value: u64) -> Result<()> {

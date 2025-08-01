@@ -7,7 +7,7 @@ pub mod nodes;
 pub mod encoder;
 pub mod parser;
 
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;
 

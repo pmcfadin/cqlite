@@ -89,7 +89,7 @@ pub use config::{
 };
 
 // Re-export factory
-pub use factory::{ParserFactory, UseCase, ParserRegistry, global_registry, register_global_factory};
+pub use factory::{ParserFactory, UseCase, ParserRegistry, register_global_factory};
 
 // Re-export schema integration functions
 pub use schema_integration::{
@@ -121,7 +121,7 @@ pub use optimized_complex_types::OptimizedComplexTypeParser;
 pub use m3_performance_benchmarks::{M3PerformanceBenchmarks, PerformanceTargets};
 pub use performance_regression_framework::{PerformanceRegressionFramework, RegressionThresholds};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use std::sync::Arc;
 
 /// Re-export common result types
@@ -163,7 +163,6 @@ pub fn is_backend_available(backend: &ParserBackend) -> bool {
 /// # Returns
 /// * `nom::IResult<&str, crate::schema::TableSchema>` - Parsed schema or error
 pub fn parse_cql_schema(input: &str) -> nom::IResult<&str, crate::schema::TableSchema> {
-    use crate::schema::TableSchema;
     
     // Use the compatibility wrapper
     parse_cql_schema_compat(input)

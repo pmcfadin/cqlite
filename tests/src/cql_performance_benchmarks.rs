@@ -24,7 +24,7 @@ pub struct CqlPerformanceBenchmarkSuite {
 }
 
 /// Result of a performance benchmark
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BenchmarkResult {
     pub benchmark_name: String,
     pub iterations: usize,
@@ -41,7 +41,7 @@ pub struct BenchmarkResult {
 }
 
 /// Memory usage tracker
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryTracker {
     initial_memory_kb: usize,
     peak_memory_kb: usize,
@@ -275,7 +275,7 @@ impl CqlPerformanceBenchmarkSuite {
         
         // Check for memory leaks (simplified check)
         let memory_growth_rate = memory_measurements.iter()
-            .map(|(size, initial, final)| (*final as f64 - *initial as f64) / **size as f64)
+            .map(|(size, initial, final_val)| (*final_val as f64 - *initial as f64) / **size as f64)
             .max_by(|a, b| a.partial_cmp(b).unwrap())
             .unwrap_or(0.0);
         
@@ -843,7 +843,7 @@ impl MemoryTracker {
 }
 
 /// Complete benchmark report
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BenchmarkReport {
     pub total_benchmarks: usize,
     pub passed_benchmarks: usize,
@@ -859,7 +859,7 @@ impl BenchmarkReport {
     /// Print formatted benchmark report
     pub fn print_report(&self) {
         println!("\n⚡ CQL Parser Performance Benchmark Report");
-        println!("=" .repeat(60));
+        println!("{}", "=".repeat(60));
         
         println!("📊 Summary:");
         println!("  Total Benchmarks: {}", self.total_benchmarks);
@@ -894,7 +894,7 @@ impl BenchmarkReport {
             println!();
         }
         
-        println!("=" .repeat(60));
+        println!("{}", "=".repeat(60));
         
         if self.failed_benchmarks == 0 {
             println!("🎉 All performance benchmarks passed!");

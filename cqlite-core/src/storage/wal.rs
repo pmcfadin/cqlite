@@ -150,7 +150,7 @@ impl WriteAheadLog {
 
     /// Flush all pending writes to disk
     pub async fn flush(&self) -> Result<()> {
-        let mut file = self.file.lock().await;
+        let file = self.file.lock().await;
         file.sync_all().await.map_err(|e| Error::from(e))?;
         Ok(())
     }

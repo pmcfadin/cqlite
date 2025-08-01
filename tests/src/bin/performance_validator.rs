@@ -6,7 +6,7 @@
 use clap::{Arg, Command};
 use std::path::PathBuf;
 use std::process;
-use tests::{
+use cqlite_integration_tests::{
     BenchmarkRunnerConfig, PerformanceBenchmarkRunner, PerformanceTargets, TestConfiguration,
 };
 use tokio;

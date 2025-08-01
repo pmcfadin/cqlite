@@ -1,14 +1,14 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! CQL Schema Integration Tests
 //!
 //! Integration tests that work with real CQL files and test the complete
 //! schema parsing pipeline from CQL input to validated schema output.
 
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+
 use crate::fixtures::test_data::*;
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::SSTableParser;
-use cqlite_core::schema::{TableSchema, SchemaManager, UdtRegistry, CqlType};
-use cqlite_core::storage::StorageEngine;
+use cqlite_core::schema::{TableSchema, UdtRegistry, CqlType};
 use cqlite_core::Config;
 use std::collections::HashMap;
 use std::fs;
@@ -53,9 +53,10 @@ impl CqlIntegrationTestSuite {
     /// Initialize schema manager for testing
     pub async fn initialize_schema_manager(&mut self) -> Result<()> {
         let config = Config::default();
-        let storage = Arc::new(StorageEngine::new(&config).await?);
+        let platform = Arc::new(Platform::new(&config).await?);
+        let storage = Arc::new(StorageEngine::open(std::path::Path::new("./test_data"), &config, platform).await?);
         
-        self.schema_manager = Some(SchemaManager::new(storage, &config).await?);
+        self.schema_manager = Some(SchemaManager::new_with_storage(storage, &config).await?);
         Ok(())
     }
 
@@ -1038,7 +1039,7 @@ impl CqlIntegrationTestSuite {
                     metadata MAP<TEXT, TEXT>,
                     tags SET<TEXT>,
                     PRIMARY KEY ((customer_id, order_date), order_timestamp, order_id)
-                ) WITH CLUSTERING ORDER BY (order_timestamp DESC, order_id ASC);"#,
+                ) WITH CLUSTERING ORDER BY (order_timestamp DESC, order_id ASC);"#.to_string(),
             ),
             (
                 "iot_sensor_data".to_string(),
@@ -1055,7 +1056,7 @@ impl CqlIntegrationTestSuite {
                     raw_data BLOB,
                     metadata TUPLE<UUID, TIMESTAMP, TEXT, MAP<TEXT, TEXT>>,
                     PRIMARY KEY ((sensor_id, location, year), month, day, hour, timestamp)
-                ) WITH CLUSTERING ORDER BY (month ASC, day ASC, hour ASC, timestamp DESC);"#,
+                ) WITH CLUSTERING ORDER BY (month ASC, day ASC, hour ASC, timestamp DESC);"#.to_string(),
             ),
             (
                 "social_media_posts".to_string(),
@@ -1073,7 +1074,7 @@ impl CqlIntegrationTestSuite {
                     visibility_settings FROZEN<MAP<TEXT, BOOLEAN>>,
                     attachment_metadata LIST<FROZEN<MAP<TEXT, TEXT>>>,
                     PRIMARY KEY ((user_id, post_type), created_at, post_id)
-                ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);"#,
+                ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);"#.to_string(),
             ),
         ]
     }
@@ -1149,7 +1150,7 @@ impl IntegrationTestReport {
     /// Print formatted report
     pub fn print_report(&self) {
         println!("\n🔗 CQL Integration Test Report");
-        println!("=" .repeat(50));
+        println!("{}", "=".repeat(50));
         
         println!("📊 Summary:");
         println!("  Total Tests: {}", self.total_tests);
@@ -1178,7 +1179,7 @@ impl IntegrationTestReport {
             }
         }
         
-        println!("\n" + "=".repeat(50));
+        println!("\n{}", "=".repeat(50));
         
         if self.failed_tests == 0 {
             println!("🎉 All integration tests passed!");

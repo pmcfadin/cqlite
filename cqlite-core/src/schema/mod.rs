@@ -5,6 +5,9 @@
 //! JSON-based schema definitions and CQL CREATE TABLE statement parsing.
 
 pub mod cql_parser;
+pub mod discovery;
+pub mod registry;
+pub mod json_exporter;
 
 // Re-export CQL parsing functions
 pub use cql_parser::{
@@ -12,11 +15,30 @@ pub use cql_parser::{
     cql_type_to_type_id, parse_create_table
 };
 
+// Re-export discovery and registry components
+pub use discovery::{
+    SchemaDiscoveryEngine, SchemaDiscoveryConfig, SchemaInfo, ColumnDefinition, TypeInfo,
+    UDTDefinition, IndexDefinition, TableOptions, SchemaMetadata, ValidationResults,
+    DiscoveryMethod, ValidationStatus, ValidationError, ValidationWarning,
+};
+
+pub use registry::{
+    SchemaRegistry, SchemaRegistryConfig, SchemaSource, SchemaValidationStatus,
+    SchemaVersion, SchemaChange, SchemaChangeType, ValidationReport, SchemaQuery,
+    RegistryStatistics, SchemaValidator,
+};
+
+pub use json_exporter::{
+    JsonExporter, JsonExportConfig, JsonFormat, JsonSchema, JsonTable, JsonColumn,
+    JsonPrimaryKey, JsonClusteringKey, JsonUDT, JsonIndex, JsonTableOptions,
+    JsonMetadata, JsonValidationResults, JsonPerformanceMetrics,
+};
+
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;
 use crate::storage::StorageEngine;
 use crate::Config;
-use crate::types::{UdtTypeDef, UdtFieldDef};
+use crate::types::UdtTypeDef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -693,8 +715,22 @@ pub struct SchemaManager {
 }
 
 impl SchemaManager {
-    /// Create a new schema manager
-    pub async fn new(storage: Arc<StorageEngine>, _config: &Config) -> Result<Self> {
+    /// Create a new schema manager from a path
+    pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        // Create temporary storage engine (not actually used in this context)
+        let config = Config::default();
+        let platform = Arc::new(crate::platform::Platform::new(&config).await?);
+        let storage = Arc::new(StorageEngine::open(path.as_ref(), &config, platform).await?);
+        
+        Ok(Self {
+            storage,
+            schemas: HashMap::new(),
+            udt_registry: UdtRegistry::new(),
+        })
+    }
+
+    /// Create a new schema manager with storage
+    pub async fn new_with_storage(storage: Arc<StorageEngine>, _config: &Config) -> Result<Self> {
         let mut manager = Self {
             storage,
             schemas: HashMap::new(),
@@ -837,6 +873,16 @@ impl SchemaManager {
     /// Convert CQL type string to internal type ID
     pub fn cql_type_to_internal(&self, cql_type: &str) -> Result<CqlTypeId> {
         cql_parser::cql_type_to_type_id(cql_type)
+    }
+
+    /// Get table schema by name (async for compatibility)
+    pub async fn get_table_schema(&self, table_name: &str) -> Result<TableSchema> {
+        // Try to find schema by table name
+        if let Some(schema) = self.find_schema_by_table(&None, table_name) {
+            Ok(schema.clone())
+        } else {
+            Err(Error::Schema(format!("Table schema not found: {}", table_name)))
+        }
     }
 }
 

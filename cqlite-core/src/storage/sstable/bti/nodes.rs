@@ -3,10 +3,10 @@
 //! Implements the four BTI trie node types: PAYLOAD_ONLY, SINGLE, SPARSE, and DENSE
 
 use crate::error::Result;
-use super::{BtiError, MAX_TRIE_DEPTH, BTI_PAGE_SIZE};
+use super::BtiError;
 use nom::{
     bytes::complete::take,
-    number::complete::{be_u8, be_u16, be_u32, be_u64},
+    number::complete::{be_u8, be_u16, be_u64},
     IResult,
 };
 use std::collections::HashMap;
@@ -160,7 +160,7 @@ impl TrieNode {
                 vec![(*character, *target)]
             }
             TrieNode::Sparse { transitions, .. } => transitions.clone(),
-            TrieNode::Dense { first_char, last_char, targets, .. } => {
+            TrieNode::Dense { first_char,  targets, .. } => {
                 let mut result = Vec::new();
                 for (i, target) in targets.iter().enumerate() {
                     if let Some(target_ref) = target {
@@ -183,7 +183,7 @@ impl TrieNode {
             TrieNode::Sparse { transitions, payload } => {
                 1 + 2 + transitions.len() * (1 + 8) + payload.as_ref().map_or(0, |p| p.len())
             }
-            TrieNode::Dense { first_char, last_char, targets, payload } => {
+            TrieNode::Dense { first_char, last_char, targets: _, payload } => {
                 let range_size = (*last_char - *first_char + 1) as usize;
                 1 + 2 + range_size * 8 + payload.as_ref().map_or(0, |p| p.len())
             }

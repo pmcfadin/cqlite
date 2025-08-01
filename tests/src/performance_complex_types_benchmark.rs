@@ -1,12 +1,13 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Performance Benchmarks for Complex Types
 //!
 //! This module provides comprehensive performance benchmarking for complex type
 //! operations to ensure M3 meets or exceeds Cassandra 5+ performance expectations.
 
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+
 use cqlite_core::parser::types::*;
 use cqlite_core::schema::{CqlType, TableSchema};
-use cqlite_core::types::{DataType, Value};
+use cqlite_core::types::{DataType, Value, UdtValue};
 use cqlite_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -240,7 +241,8 @@ impl ComplexTypePerformanceBenchmark {
     async fn benchmark_collection_operations(&mut self) -> Result<()> {
         println!("📋 Benchmarking Collection Operations");
 
-        for &size_factor in &self.config.data_size_factors {
+        let data_size_factors = self.config.data_size_factors.clone();
+        for &size_factor in &data_size_factors {
             // Benchmark List operations
             self.benchmark_list_operations(size_factor).await?;
             
@@ -607,11 +609,11 @@ impl ComplexTypePerformanceBenchmark {
     fn generate_udt_test_data(&self, size_factor: usize) -> Vec<Value> {
         (0..size_factor)
             .map(|i| {
-                let mut fields = HashMap::new();
-                fields.insert("id".to_string(), Value::Integer(i as i32));
-                fields.insert("name".to_string(), Value::Text(format!("user_{}", i)));
-                fields.insert("active".to_string(), Value::Boolean(true));
-                Value::Udt("User".to_string(), fields)
+                let udt_value = UdtValue::new("User".to_string(), "test".to_string())
+                    .with_field("id".to_string(), Some(Value::Integer(i as i32)))
+                    .with_field("name".to_string(), Some(Value::Text(format!("user_{}", i))))
+                    .with_field("active".to_string(), Some(Value::Boolean(true)));
+                Value::Udt(udt_value)
             })
             .collect()
     }

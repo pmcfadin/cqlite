@@ -19,6 +19,7 @@ assert_cmd = "2.0"
 predicates = "3.0"
 criterion = { workspace = true }
 proptest = { workspace = true }
+anyhow = "1.0"
 
 # Async testing
 tokio-test = "0.4"
@@ -76,3 +77,11 @@ path = "src/bin/complex_type_validation_runner.rs"
 [[bin]]
 name = "sstable_test_runner"
 path = "src/bin/sstable_test_runner.rs"
+
+[[bin]]
+name = "property_based_test_runner"
+path = "src/bin/property_based_test_runner.rs"
+
+[[bin]]
+name = "performance_regression_test_runner"
+path = "src/bin/performance_regression_test_runner.rs"

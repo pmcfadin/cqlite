@@ -5,12 +5,9 @@
 //! Based on analysis of real test data files.
 
 use super::statistics::*;
-use super::vint::{parse_vint, parse_vint_length};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use nom::{
-    bytes::complete::{take, take_while},
-    multi::count,
-    number::complete::{be_f64, be_i64, be_u32, be_u64, be_u8, le_u32, le_u64},
+    number::complete::be_u32,
     IResult,
 };
 use std::collections::HashMap;
@@ -22,7 +19,7 @@ use std::collections::HashMap;
 pub fn parse_nb_format_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> {
     let (input, version_type) = be_u32(input)?; // 0x00000004
     let (input, statistics_kind) = be_u32(input)?; // 0x26291b05
-    let (input, reserved1) = be_u32(input)?; // 0x00000000
+    let (input, _reserved1) = be_u32(input)?; // 0x00000000
     let (input, data_length) = be_u32(input)?; // 0x0000002c (44 bytes)
     let (input, metadata1) = be_u32(input)?; // 0x00000001
     let (input, metadata2) = be_u32(input)?; // 0x00000065 (101)
@@ -56,7 +53,7 @@ pub fn parse_nb_format_statistics_data(
     // - Compressed/encoded metadata
 
     // Initialize with reasonable defaults and try to extract what we can
-    let mut parser_input = input;
+    let parser_input = input;
     
     // Try to find and parse specific statistics markers
     let (row_stats, remaining) = extract_row_statistics(parser_input, header)?;
@@ -87,7 +84,7 @@ fn extract_row_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> Res
 }
 
 /// Extract timestamp statistics from binary data
-fn extract_timestamp_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> Result<(TimestampStatistics, &'a [u8])> {
+fn extract_timestamp_statistics<'a>(input: &'a [u8], _header: &StatisticsHeader) -> Result<(TimestampStatistics, &'a [u8])> {
     // Look for timestamp patterns in the data
     // For now, create reasonable defaults based on current time
     let current_time_micros = std::time::SystemTime::now()

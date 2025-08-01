@@ -27,10 +27,12 @@ impl TestDataValidator {
 
         // Check if base path exists
         if !self.test_data_path.exists() {
-            return Err(Error::io_error(format!(
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
                 "Test data path does not exist: {}. Run 'cd test-env/cassandra5 && ./manage.sh all' to generate test data.",
                 self.test_data_path.display()
-            )));
+            ))));
         }
 
         // Scan for table directories

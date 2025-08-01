@@ -18,9 +18,6 @@ pub struct MemoryManager {
     /// Buffer pool for memory allocation
     buffer_pool: Arc<RwLock<BufferPool>>,
 
-    /// Configuration
-    config: Config,
-
     /// Memory statistics
     stats: Arc<RwLock<MemoryStats>>,
 }
@@ -68,9 +65,6 @@ struct BufferPool {
 
     /// Total memory used
     total_memory: usize,
-
-    /// Maximum memory limit
-    max_memory: usize,
 }
 
 /// Block key for cache lookup
@@ -90,9 +84,6 @@ struct RowKey {
 /// Cached block
 #[derive(Debug)]
 struct Block {
-    /// Block data
-    data: Vec<u8>,
-
     /// Block size
     size: usize,
 
@@ -108,9 +99,6 @@ struct CachedRow {
 
     /// Row size estimate
     size: usize,
-
-    /// Last access time
-    last_access: std::time::Instant,
 }
 
 impl MemoryManager {
@@ -130,7 +118,6 @@ impl MemoryManager {
             block_cache,
             row_cache,
             buffer_pool,
-            config: config.clone(),
             stats: Arc::new(RwLock::new(MemoryStats::default())),
         })
     }
@@ -187,7 +174,6 @@ impl MemoryManager {
 
         let block = Arc::new(Block {
             size: data.len(),
-            data,
             last_access: std::time::Instant::now(),
         });
 
@@ -259,7 +245,6 @@ impl MemoryManager {
         let row = Arc::new(CachedRow {
             data,
             size,
-            last_access: std::time::Instant::now(),
         });
 
         let mut cache = self.row_cache.write();
@@ -394,12 +379,11 @@ impl RowCache {
 }
 
 impl BufferPool {
-    fn new(max_memory: usize) -> Self {
+    fn new(_max_memory: usize) -> Self {
         Self {
             free_buffers: HashMap::new(),
             allocated_count: 0,
             total_memory: 0,
-            max_memory,
         }
     }
 }
@@ -485,7 +469,7 @@ mod tests {
         // Cache hit
         let result = manager.get_block(&table_id, block_id);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().data, data);
+        assert_eq!(result.unwrap().size, data.len());
     }
 
     #[test]

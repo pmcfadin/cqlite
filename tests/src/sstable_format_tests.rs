@@ -1,12 +1,13 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! SSTable Format Compatibility Tests
 //!
 //! Comprehensive tests for Cassandra 5+ SSTable format compatibility,
 //! including header parsing, data blocks, and metadata validation.
 
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+
 use cqlite_core::parser::header::{
     parse_sstable_header, serialize_sstable_header, ColumnInfo, CompressionInfo, SSTableHeader,
-    SSTableStats, SSTABLE_MAGIC, SUPPORTED_VERSION,
+    SSTableStats, SSTABLE_MAGIC, SUPPORTED_VERSION, CassandraVersion,
 };
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
@@ -145,6 +146,7 @@ impl SSTableFormatTests {
 
             // Test that compression info can be included in header
             let header = SSTableHeader {
+                cassandra_version: cqlite_core::parser::header::CassandraVersion::V5_0Release,
                 version: SUPPORTED_VERSION,
                 table_id: [0u8; 16],
                 keyspace: "test".to_string(),
@@ -191,6 +193,7 @@ impl SSTableFormatTests {
         };
 
         let header = SSTableHeader {
+            cassandra_version: cqlite_core::parser::header::CassandraVersion::V5_0Release,
             version: SUPPORTED_VERSION,
             table_id: [0u8; 16],
             keyspace: "test".to_string(),
@@ -260,6 +263,7 @@ impl SSTableFormatTests {
         ];
 
         let header = SSTableHeader {
+            cassandra_version: cqlite_core::parser::header::CassandraVersion::V5_0Release,
             version: SUPPORTED_VERSION,
             table_id: [0u8; 16],
             keyspace: "test".to_string(),
@@ -328,6 +332,7 @@ impl SSTableFormatTests {
         properties.insert("compression".to_string(), "LZ4Compressor".to_string());
 
         let header = SSTableHeader {
+            cassandra_version: cqlite_core::parser::header::CassandraVersion::V5_0Release,
             version: SUPPORTED_VERSION,
             table_id: [0u8; 16],
             keyspace: "test".to_string(),
@@ -440,6 +445,7 @@ impl SSTableFormatTests {
         }
 
         let large_header = SSTableHeader {
+            cassandra_version: cqlite_core::parser::header::CassandraVersion::V5_0Release,
             version: SUPPORTED_VERSION,
             table_id: [0u8; 16],
             keyspace: "test_large".to_string(),
@@ -482,6 +488,7 @@ impl SSTableFormatTests {
         properties.insert("test_property".to_string(), "test_value".to_string());
 
         SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0Release,
             version: SUPPORTED_VERSION,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "test_keyspace".to_string(),

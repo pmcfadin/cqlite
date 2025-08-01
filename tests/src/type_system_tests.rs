@@ -1,8 +1,9 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! CQL Type System Compatibility Tests
 //!
 //! Comprehensive tests for all CQL data types and their serialization/parsing
 //! compatibility with Cassandra 5+ format specifications.
+
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 
 use cqlite_core::parser::types::*;
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
@@ -228,14 +229,18 @@ impl TypeSystemTests {
         self.test_type_roundtrip("SET_STRINGS", CqlTypeId::Set, string_set)?;
 
         // MAP tests
-        let empty_map = Value::Map(HashMap::new());
+        let empty_map = Value::Map(vec![]);
         self.test_type_roundtrip("MAP_EMPTY", CqlTypeId::Map, empty_map)?;
 
         let mut test_map = HashMap::new();
         test_map.insert("key1".to_string(), Value::Text("value1".to_string()));
         test_map.insert("key2".to_string(), Value::Integer(42));
         test_map.insert("key3".to_string(), Value::Boolean(true));
-        let map_value = Value::Map(test_map);
+        // Convert HashMap to Vec<(Value, Value)>
+        let map_vec: Vec<(Value, Value)> = test_map.into_iter()
+            .map(|(k, v)| (Value::Text(k), v))
+            .collect();
+        let map_value = Value::Map(map_vec);
         self.test_type_roundtrip("MAP_MIXED", CqlTypeId::Map, map_value)?;
 
         Ok(())
@@ -300,7 +305,11 @@ impl TypeSystemTests {
         for i in 0..1000 {
             large_map.insert(format!("key_{:04}", i), Value::Integer(i));
         }
-        self.test_type_roundtrip("LARGE_MAP", CqlTypeId::Map, Value::Map(large_map))?;
+        // Convert HashMap to Vec<(Value, Value)>
+        let large_map_vec: Vec<(Value, Value)> = large_map.into_iter()
+            .map(|(k, v)| (Value::Text(k), v))
+            .collect();
+        self.test_type_roundtrip("LARGE_MAP", CqlTypeId::Map, Value::Map(large_map_vec))?;
 
         Ok(())
     }

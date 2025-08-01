@@ -18,17 +18,8 @@ use crate::schema::TableSchema;
 /// Nom-based parser implementation
 #[derive(Debug)]
 pub struct NomParser {
-    config: ParserConfig,
-    stats: ParserStats,
 }
 
-/// Parser statistics
-#[derive(Debug, Default)]
-struct ParserStats {
-    parse_count: u64,
-    total_parse_time: std::time::Duration,
-    error_count: u64,
-}
 
 impl NomParser {
     /// Create a new nom parser with the given configuration
@@ -36,10 +27,7 @@ impl NomParser {
         // Validate nom-specific configuration
         Self::validate_config(&config)?;
         
-        Ok(Self {
-            config,
-            stats: ParserStats::default(),
-        })
+        Ok(Self {})
     }
     
     /// Validate configuration for nom backend
@@ -88,14 +76,6 @@ impl NomParser {
         }
     }
     
-    /// Update parser statistics
-    fn update_stats(&mut self, duration: std::time::Duration, success: bool) {
-        self.stats.parse_count += 1;
-        self.stats.total_parse_time += duration;
-        if !success {
-            self.stats.error_count += 1;
-        }
-    }
 }
 
 #[async_trait]

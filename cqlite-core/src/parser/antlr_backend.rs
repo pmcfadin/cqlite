@@ -16,7 +16,6 @@ use super::{
 /// ANTLR-based parser implementation
 #[derive(Debug)]
 pub struct AntlrParser {
-    config: ParserConfig,
 }
 
 impl AntlrParser {
@@ -25,7 +24,7 @@ impl AntlrParser {
         // Validate ANTLR-specific configuration
         Self::validate_config(&config)?;
         
-        Ok(Self { config })
+        Ok(Self {})
     }
     
     /// Validate configuration for ANTLR backend
@@ -63,7 +62,7 @@ impl AntlrParser {
 
 #[async_trait]
 impl CqlParser for AntlrParser {
-    async fn parse(&self, input: &str) -> Result<CqlStatement> {
+    async fn parse(&self, _input: &str) -> Result<CqlStatement> {
         // For now, return an error indicating this is not yet implemented
         // In a real implementation, this would use ANTLR-generated parsers
         Err(ParserError::backend(

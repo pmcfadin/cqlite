@@ -1,6 +1,7 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Complex data type testing for SSTable operations
 //! Tests serialization and deserialization of various Cassandra data types
+
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,7 +9,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
-    platform::Platform,
     storage::sstable::{
         reader::SSTableReader,
         writer::SSTableWriter,
@@ -162,9 +162,9 @@ impl ComplexDataTestSuite {
             ("blob_simple", Value::Blob(vec![1, 2, 3, 4, 5])),
             ("blob_empty", Value::Blob(vec![])),
             ("timestamp", Value::Timestamp(
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64
             )),
-            ("uuid", Value::Uuid(vec![
+            ("uuid", Value::Uuid([
                 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
                 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0
             ])),
@@ -437,7 +437,7 @@ impl ComplexDataTestSuite {
         let table_id = TableId::new("timestamp_test");
 
         // Test various timestamp values
-        let base_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
+        let base_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64;
         
         let timestamp_tests = vec![
             ("current_time", base_time),
@@ -449,7 +449,7 @@ impl ComplexDataTestSuite {
         ];
 
         for (key, timestamp) in &timestamp_tests {
-            let value = Value::Timestamp(*timestamp);
+            let value = Value::Timestamp(*timestamp as i64);
             writer.add_entry(&table_id, RowKey::from(*key), value).await?;
         }
 
@@ -461,7 +461,7 @@ impl ComplexDataTestSuite {
         for (key, expected_timestamp) in &timestamp_tests {
             match reader.get(&table_id, &RowKey::from(*key)).await? {
                 Some(Value::Timestamp(actual_timestamp)) => {
-                    if actual_timestamp != *expected_timestamp {
+                    if actual_timestamp != (*expected_timestamp as i64) {
                         return Err(cqlite_core::error::Error::storage(format!(
                             "Timestamp precision test failed for key '{}': expected {}, got {}",
                             key, expected_timestamp, actual_timestamp

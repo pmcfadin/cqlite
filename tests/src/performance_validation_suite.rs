@@ -1,4 +1,3 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Advanced Performance Validation Suite for CQLite
 //!
 //! This module provides comprehensive performance validation to ensure CQLite meets
@@ -10,13 +9,13 @@ use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platf
 //! - Sub-millisecond partition key lookups
 //! - Query latency competitive with Cassandra performance
 
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+
 use cqlite_core::error::Result;
 use cqlite_core::memory::MemoryManager;
 use cqlite_core::parser::header::SSTableHeader;
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::storage::StorageEngine;
 use cqlite_core::{types::TableId, Config, RowKey, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -187,7 +186,10 @@ impl PerformanceValidationSuite {
     /// Create a new performance validation suite
     pub async fn new(config: PerformanceValidationConfig) -> Result<Self> {
         let temp_dir = TempDir::new().map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("Failed to create temp dir: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create temp dir: {}", e)
+            ))
         })?;
 
         let cqlite_config = if config.enable_memory_pressure {
@@ -506,7 +508,10 @@ impl PerformanceValidationSuite {
 
         for handle in handles {
             handle.await.map_err(|e| {
-                cqlite_core::error::Error::io_error(format!("Thread join error: {}", e))
+                cqlite_core::error::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Thread join error: {}", e)
+                ))
             })?;
         }
 
@@ -710,7 +715,7 @@ impl PerformanceValidationSuite {
     }
 
     fn print_validation_report(&self, results: &PerformanceValidationResults) {
-        println!("\n".repeat(2));
+        println!("{}", "\n".repeat(2));
         println!("🎯 PERFORMANCE VALIDATION REPORT");
         println!("{}", "=".repeat(80));
 

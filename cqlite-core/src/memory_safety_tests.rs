@@ -195,7 +195,7 @@ impl MemorySafetyTests {
 
         // Test VInt with too many leading 1s (should reject > 8 extra bytes = 9 total)
         let malformed_vint = vec![0xFF; 15]; // 15 bytes with all 1s should be rejected
-        let result = parse_vint(&malformed_vint);
+        let _result = parse_vint(&malformed_vint);
         // Parser should handle this gracefully (currently accepts up to 9 bytes)
 
         // Test incomplete VInt data

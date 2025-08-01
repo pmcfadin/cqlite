@@ -37,12 +37,6 @@ pub struct QueryCacheEntry {
 /// Query engine with caching and statistics
 #[derive(Debug)]
 pub struct QueryEngine {
-    /// Storage engine reference
-    storage: Arc<StorageEngine>,
-    /// Schema manager reference
-    schema: Arc<SchemaManager>,
-    /// Memory manager reference
-    memory: Arc<MemoryManager>,
     /// Query parser
     parser: QueryParser,
     /// Query planner
@@ -68,7 +62,7 @@ impl QueryEngine {
     pub fn new(
         storage: Arc<StorageEngine>,
         schema: Arc<SchemaManager>,
-        memory: Arc<MemoryManager>,
+        _memory: Arc<MemoryManager>,
         config: &Config,
     ) -> Result<Self> {
         let parser = QueryParser::new(config);
@@ -80,9 +74,6 @@ impl QueryEngine {
         let select_executor = SelectExecutor::new(schema.clone(), storage.clone());
 
         Ok(Self {
-            storage,
-            schema,
-            memory,
             parser,
             planner,
             executor,

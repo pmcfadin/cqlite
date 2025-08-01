@@ -81,12 +81,7 @@ impl PerformanceBaselineRunner {
         // Decoding performance
         let encoded_values: Vec<_> = test_values.iter().map(|&v| encode_vint(v)).collect();
         let start = Instant::now();
-        let mut decoded_count = 0;
-        for encoded in &encoded_values {
-            if parse_vint(encoded).is_ok() {
-                decoded_count += 1;
-            }
-        }
+        let _decoded_count = encoded_values.iter().filter(|encoded| parse_vint(encoded).is_ok()).count();
         let decoding_time = start.elapsed();
         let decoding_mb_per_sec = (total_bytes as f64) / (decoding_time.as_secs_f64() * 1024.0 * 1024.0);
 

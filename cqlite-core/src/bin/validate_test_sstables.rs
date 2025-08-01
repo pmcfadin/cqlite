@@ -1,5 +1,5 @@
 use std::path::Path;
-use cqlite_core::storage::sstable::directory::{test_all_directories, test_directory_validation};
+use cqlite_core::storage::sstable::directory::test_all_directories;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 SSTable Directory Validation Test");
@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Print detailed reports for invalid directories
             println!("\n📋 Detailed Reports for Invalid Directories");
             println!("==========================================");
-            for (dir_name, report) in &results {
+            for (_dir_name, report) in &results {
                 if !report.is_valid() {
                     println!("\n{}", report.detailed_report());
                 }
@@ -92,10 +92,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Component analysis summary
             println!("\n🔍 Component Analysis Summary");
             println!("============================");
-            for (dir_name, report) in &results {
+            for (_dir_name, report) in &results {
                 for analysis in &report.component_analysis {
                     println!("\n📁 {}/Generation {} ({} format):", 
-                             dir_name, analysis.generation, analysis.format);
+                             _dir_name, analysis.generation, analysis.format);
                     println!("   Required present: {} components", analysis.required_components_present.len());
                     println!("   Required missing: {} components", analysis.required_components_missing.len());
                     println!("   Optional present: {} components", analysis.optional_components_present.len());

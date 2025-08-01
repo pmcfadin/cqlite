@@ -3,10 +3,9 @@
 //! This module defines error types that are specific to the parser subsystem,
 //! providing detailed information about parsing failures with context.
 
-use crate::error::{Error, Result};
+use crate::error::Error;
 use super::traits::SourcePosition;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use thiserror::Error;
 
 /// Parser-specific error type
@@ -518,7 +517,7 @@ pub mod utils {
     /// Convert nom parsing errors to ParserError
     pub fn from_nom_error<I>(
         error: nom::Err<nom::error::Error<I>>,
-        input: &str,
+        _input: &str,
     ) -> ParserError
     where
         I: std::fmt::Debug,

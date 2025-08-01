@@ -5,12 +5,11 @@
 //! between backends transparently.
 
 use crate::error::Result;
-use crate::schema::CqlType;
 use std::fmt::{Debug, Display, Formatter};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{ast::*, visitor::*, error::ParserError};
+use super::ast::*;
 
 /// Main trait for CQL parsing operations
 /// 

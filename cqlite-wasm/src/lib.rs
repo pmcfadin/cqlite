@@ -69,7 +69,10 @@ impl WasmConfig {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmConfig {
         Self {
+            #[cfg(target_arch = "wasm32")]
             config: cqlite_core::Config::wasm_optimized(),
+            #[cfg(not(target_arch = "wasm32"))]
+            config: cqlite_core::Config::memory_optimized(),
         }
     }
 
@@ -165,8 +168,9 @@ impl CQLiteDB {
     /// * `config` - Optional configuration (uses default if not provided)
     #[wasm_bindgen(constructor)]
     pub fn new(name: String, config: Option<WasmConfig>) -> CQLiteDB {
-        let config = config.unwrap_or_default();
-        let database = database::WasmDatabase::new(name, config.config);
+        let _name = name; // Suppress unused warning
+        let _config = config.unwrap_or_default();
+        let database = database::WasmDatabase::new();
 
         Self { database }
     }
@@ -496,23 +500,15 @@ impl Iterator {
     /// Get the current key
     #[wasm_bindgen]
     pub fn key(&self) -> Result<JsValue, JsValue> {
-        let key = self
-            .iterator
-            .key()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        serde_wasm_bindgen::to_value(&key).map_err(|e| JsValue::from_str(&e.to_string()))
+        // The iterator.key() returns a JsValue, not something we need to serialize
+        self.iterator.key()
     }
 
     /// Get the current value
     #[wasm_bindgen]
     pub fn value(&self) -> Result<JsValue, JsValue> {
-        let value = self
-            .iterator
-            .value()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        serde_wasm_bindgen::to_value(&value).map_err(|e| JsValue::from_str(&e.to_string()))
+        // The iterator.value() returns a JsValue, not something we need to serialize
+        self.iterator.value()
     }
 }
 
@@ -555,7 +551,7 @@ impl Utils {
     /// Get available memory (estimate)
     #[wasm_bindgen]
     pub fn available_memory() -> u32 {
-        utils::estimate_available_memory()
+        utils::estimate_available_memory() as u32
     }
 
     /// Set log level for debugging

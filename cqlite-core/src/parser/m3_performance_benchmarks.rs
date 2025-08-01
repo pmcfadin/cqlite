@@ -6,19 +6,15 @@
 //! - Throughput: >100 MB/s for complex type SSTable parsing
 //! - Latency: <10ms additional latency for complex type queries
 
-use super::benchmarks::ParserBenchmarks;
 use super::optimized_complex_types::OptimizedComplexTypeParser;
 use super::types::{CqlTypeId, parse_cql_value};
 use super::vint::encode_vint;
 use crate::error::Result;
-use crate::types::Value;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// M3 performance benchmark suite
 pub struct M3PerformanceBenchmarks {
-    /// Baseline parser for comparison
-    baseline_parser: ParserBenchmarks,
     /// Optimized complex type parser
     optimized_parser: OptimizedComplexTypeParser,
     /// Performance targets
@@ -82,7 +78,6 @@ impl M3PerformanceBenchmarks {
     /// Create new M3 benchmark suite
     pub fn new() -> Self {
         Self {
-            baseline_parser: ParserBenchmarks::new(),
             optimized_parser: OptimizedComplexTypeParser::new(),
             targets: PerformanceTargets::default(),
             results: Vec::new(),
@@ -993,14 +988,6 @@ impl M3PerformanceBenchmarks {
         })
     }
 
-    fn benchmark_memory_usage(&self, _data: &[u8]) -> Result<BenchmarkPerformance> {
-        // Memory benchmarking would integrate with actual memory profiling
-        Ok(BenchmarkPerformance {
-            throughput_mbs: 0.0,
-            memory_usage: 1024 * 1024, // 1MB estimated
-            latency_microseconds: 0.0,
-        })
-    }
 
     fn benchmark_query_latency(&self, data: &[u8]) -> Result<BenchmarkPerformance> {
         let start = Instant::now();

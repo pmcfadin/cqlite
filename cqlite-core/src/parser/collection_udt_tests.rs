@@ -6,8 +6,8 @@
 use super::complex_types::ComplexTypeParser;
 use super::types::CqlTypeId;
 use super::vint::encode_vint;
-use crate::schema::{CqlType, UdtRegistry};
-use crate::types::{Value, UdtValue, UdtField, UdtTypeDef};
+use crate::schema::CqlType;
+use crate::types::Value;
 
 /// Test parsing of LIST<TEXT> from Cassandra 5 test schema
 #[test]
@@ -244,7 +244,8 @@ fn test_empty_collections() {
 /// Test collection serialization roundtrip
 #[test]
 fn test_collection_serialization_roundtrip() {
-    use super::complex_types::{serialize_list_v5, serialize_set_v5, serialize_map_v5};
+    // Note: These serialization functions need to be implemented in complex_types module
+    // use super::complex_types::{serialize_list_v5, serialize_set_v5, serialize_map_v5};
     
     let parser = ComplexTypeParser::new();
     

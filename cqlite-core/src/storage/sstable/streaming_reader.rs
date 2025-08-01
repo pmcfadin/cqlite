@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     bloom::BloomFilter,
-    compression::{Compression, CompressionAlgorithm, CompressionReader},
+    compression::{CompressionAlgorithm, CompressionReader},
     index::SSTableIndex,
     reader::{SSTableReaderStats, BlockMeta},
 };
@@ -231,7 +231,7 @@ pub struct StreamingSSTableReader {
 
 impl StreamingSSTableReader {
     /// Create a new streaming SSTable reader
-    pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+    pub async fn open(path: &Path, _config: &Config, platform: Arc<Platform>) -> Result<Self> {
         let file = File::open(path).await?;
         let file_size = file.metadata().await?.len();
         
@@ -249,7 +249,7 @@ impl StreamingSSTableReader {
         };
 
         // Parse header
-        let header_data = if let Some(ref mmap) = mmap {
+        let _header_data = if let Some(ref mmap) = mmap {
             // Read header from memory-mapped data
             let header_size = 4096.min(mmap.len());
             mmap[..header_size].to_vec()
@@ -267,7 +267,7 @@ impl StreamingSSTableReader {
         let parser = SSTableParser::new(config)?;
         // TODO: Implement parse_header method for SSTableParser - using placeholder header for now
         let header = crate::parser::header::SSTableHeader {
-            cassandra_version: crate::parser::header::CassandraVersion::V5_0_NewBig,
+            cassandra_version: crate::parser::header::CassandraVersion::V5_0NewBig,
             version: crate::parser::header::SUPPORTED_VERSION,
             table_id: [0; 16],
             keyspace: "placeholder".to_string(),
@@ -445,7 +445,7 @@ impl StreamingSSTableReader {
         let data = self.read_data_streaming(offset, size as usize).await?;
         
         // Streaming decompression if needed
-        let decompressed_data = if let Some(compression_reader) = &self.compression_reader {
+        let decompressed_data = if let Some(_compression_reader) = &self.compression_reader {
             self.decompress_streaming(&data).await?
         } else {
             data

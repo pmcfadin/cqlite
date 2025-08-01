@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
     sync::{Arc, Mutex},
 };
 use serde::{Serialize, Deserialize};

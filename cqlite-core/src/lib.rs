@@ -3,9 +3,7 @@
 //! A high-performance, embeddable database engine with SSTable-based storage,
 //! supporting both native and WASM deployments.
 
-#![allow(missing_docs)]
 #![warn(clippy::all, clippy::pedantic)]
-#![allow(clippy::module_name_repetitions)]
 
 pub mod config;
 pub mod error;
@@ -18,6 +16,7 @@ pub mod platform;
 pub mod query;
 pub mod schema;
 pub mod storage;
+pub mod benchmarks;
 
 // Docker integration for testing
 pub mod docker;
@@ -51,10 +50,8 @@ use crate::{
 #[derive(Debug)]
 pub struct Database {
     storage: Arc<StorageEngine>,
-    schema: Arc<SchemaManager>,
     query: Arc<QueryEngine>,
     memory: Arc<MemoryManager>,
-    platform: Arc<Platform>,
     config: Config,
 }
 
@@ -96,7 +93,7 @@ impl Database {
         let storage = Arc::new(StorageEngine::open(path, &config, platform.clone()).await?);
 
         // Initialize schema manager
-        let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await?);
+        let schema = Arc::new(SchemaManager::new_with_storage(storage.clone(), &config).await?);
 
         // Initialize query engine
         let query = Arc::new(QueryEngine::new(
@@ -108,10 +105,8 @@ impl Database {
 
         Ok(Self {
             storage,
-            schema,
             query,
             memory,
-            platform,
             config,
         })
     }

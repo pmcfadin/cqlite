@@ -895,7 +895,7 @@ impl CompressionInfo {
             ]);
             if potential_chunk_size > 1024 && potential_chunk_size <= 1024 * 1024 {
                 chunk_length = potential_chunk_size;
-                offset += 4;
+                let _ = offset + 4; // Updated offset not used in current implementation
             }
         }
         

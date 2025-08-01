@@ -7,7 +7,7 @@ use clap::{Arg, Command};
 use serde_json::json;
 use std::path::PathBuf;
 use std::process;
-use tests::real_sstable_compatibility_test::{
+use cqlite_integration_tests::real_sstable_compatibility_test::{
     RealCompatibilityConfig, RealSSTableCompatibilityTester,
 };
 

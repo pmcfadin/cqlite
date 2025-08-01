@@ -3,6 +3,10 @@
 //! This library provides a complete test suite for validating CQLite's
 //! compatibility with Cassandra 5+ SSTable format and functionality.
 
+// REPL Testing Modules
+pub mod repl_integration_tests;
+pub mod repl_quality_gates;
+
 pub mod compatibility_framework;
 pub mod integration_runner;
 pub mod performance_benchmarks;
@@ -57,13 +61,13 @@ pub use compatibility_framework::{
     CompatibilityTestConfig, CompatibilityTestFramework, CompatibilityTestResult,
 };
 
-pub use performance_benchmarks::{BenchmarkConfig, BenchmarkResult, PerformanceBenchmarks};
+pub use performance_benchmarks::{BenchmarkConfig, BenchmarkResult as PerfBenchmarkResult, PerformanceBenchmarks};
 pub use sstable_format_tests::SSTableFormatTests;
 pub use type_system_tests::TypeSystemTests;
 
 // Re-export advanced performance testing components
 pub use performance_benchmark_runner::{
-    BenchmarkRunnerConfig, PerformanceBenchmarkRunner, PerformanceResults,
+    BenchmarkRunnerConfig, PerformanceBenchmarkRunner, PerformanceResults, TestConfiguration,
 };
 pub use performance_regression_framework::{
     PerformanceRegressionFramework, RegressionTestConfig, RegressionTestResult,
@@ -84,6 +88,7 @@ pub mod edge_case_stress_testing;
 
 // Real SSTable compatibility testing against actual Cassandra 5 files
 pub mod real_sstable_compatibility_test;
+pub mod comprehensive_sstable_test_suite;
 
 // Re-export edge case testing components
 pub use edge_case_runner::{
@@ -173,7 +178,7 @@ pub use cql_integration_tests::{
     CqlIntegrationTestSuite, IntegrationTestReport, IntegrationTestResult,
 };
 pub use cql_performance_benchmarks::{
-    CqlPerformanceBenchmarkSuite, BenchmarkReport, BenchmarkResult, PerformanceTargets,
+    CqlPerformanceBenchmarkSuite, BenchmarkReport, BenchmarkResult as CqlBenchmarkResult, PerformanceTargets,
 };
 pub use cql_test_data_fixtures::{
     PerformanceTestData, JsonSchemaFixtures, CompatibilityTestFixtures,

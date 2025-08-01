@@ -8,15 +8,14 @@
 //! - Latency: <10ms additional latency for complex type queries
 
 use super::types::{CqlTypeId, parse_cql_value};
-use super::vint::{encode_vint, parse_vint, parse_vint_length};
+use super::vint::parse_vint_length;
 use crate::{
-    error::{Error, Result},
     types::Value,
 };
 use nom::{
     bytes::complete::take,
-    combinator::{map, map_res},
-    number::complete::{be_u8, be_u32},
+    combinator::map_res,
+    number::complete::be_u8,
     IResult,
 };
 use std::collections::HashMap;
@@ -31,18 +30,10 @@ pub struct OptimizedComplexTypeParser {
     pub enable_simd: bool,
     /// Batch size for vectorized operations
     pub batch_size: usize,
-    /// Pre-allocated buffers for parsing
-    buffer_pool: Arc<BufferPool>,
     /// Performance metrics
     metrics: Arc<PerformanceMetrics>,
 }
 
-/// Buffer pool for efficient memory management
-struct BufferPool {
-    small_buffers: std::sync::Mutex<Vec<Vec<u8>>>,
-    medium_buffers: std::sync::Mutex<Vec<Vec<u8>>>,
-    large_buffers: std::sync::Mutex<Vec<Vec<u8>>>,
-}
 
 /// Performance tracking metrics
 #[derive(Debug, Default)]
@@ -58,52 +49,6 @@ pub struct PerformanceMetrics {
     pub cache_misses: std::sync::atomic::AtomicU64,
 }
 
-impl BufferPool {
-    fn new() -> Self {
-        Self {
-            small_buffers: std::sync::Mutex::new(Vec::new()),
-            medium_buffers: std::sync::Mutex::new(Vec::new()),
-            large_buffers: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn get_buffer(&self, size: usize) -> Vec<u8> {
-        let mut buffer = if size <= 1024 {
-            self.small_buffers.lock().unwrap().pop()
-        } else if size <= 8192 {
-            self.medium_buffers.lock().unwrap().pop()
-        } else {
-            self.large_buffers.lock().unwrap().pop()
-        }.unwrap_or_else(|| Vec::with_capacity(size.max(1024)));
-
-        buffer.clear();
-        buffer.reserve(size);
-        buffer
-    }
-
-    fn return_buffer(&self, mut buffer: Vec<u8>) {
-        buffer.clear();
-        let capacity = buffer.capacity();
-        
-        if capacity <= 1024 {
-            if let Ok(mut pool) = self.small_buffers.lock() {
-                if pool.len() < 16 {
-                    pool.push(buffer);
-                }
-            }
-        } else if capacity <= 8192 {
-            if let Ok(mut pool) = self.medium_buffers.lock() {
-                if pool.len() < 8 {
-                    pool.push(buffer);
-                }
-            }
-        } else if let Ok(mut pool) = self.large_buffers.lock() {
-            if pool.len() < 4 {
-                pool.push(buffer);
-            }
-        }
-    }
-}
 
 impl OptimizedComplexTypeParser {
     /// Create a new optimized parser
@@ -111,7 +56,6 @@ impl OptimizedComplexTypeParser {
         Self {
             enable_simd: Self::detect_simd_support(),
             batch_size: 16, // Process 16 elements at a time
-            buffer_pool: Arc::new(BufferPool::new()),
             metrics: Arc::new(PerformanceMetrics::default()),
         }
     }

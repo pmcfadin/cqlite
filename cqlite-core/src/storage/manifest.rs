@@ -296,7 +296,7 @@ impl Manifest {
     /// Checkpoint the manifest
     pub async fn checkpoint(&self) -> Result<()> {
         let state = self.state.read().await;
-        let timestamp = self.current_timestamp();
+        let _timestamp = self.current_timestamp();
 
         // Create checkpoint file
         let checkpoint_path = self.manifest_path.with_extension("checkpoint");

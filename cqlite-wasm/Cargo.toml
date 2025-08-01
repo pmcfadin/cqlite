@@ -54,6 +54,7 @@ serde-wasm-bindgen = "0.6"
 
 # Utilities
 getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
 
 [dependencies.wee_alloc]
 version = "0.4"

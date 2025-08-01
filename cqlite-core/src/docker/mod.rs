@@ -1,5 +1,5 @@
 /// Docker integration module for running cqlsh commands in Cassandra containers
-use std::process::{Command, Output};
+use std::process::Command;
 use std::io::{self, Error, ErrorKind};
 use serde::{Deserialize, Serialize};
 

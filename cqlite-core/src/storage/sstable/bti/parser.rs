@@ -3,9 +3,9 @@
 //! Implements parsing of BTI trie-indexed files
 
 use crate::error::Result;
-use super::{BtiError, BtiLookupResult, BtiMetadata, MAX_TRIE_DEPTH};
-use super::nodes::{TrieNode, NodeParser, NodeRef};
-use super::encoder::{ByteComparableEncoder, ByteComparableDecoder};
+use super::{BtiError, BtiLookupResult, MAX_TRIE_DEPTH};
+use super::nodes::{TrieNode, NodeParser};
+use super::encoder::ByteComparableEncoder;
 use crate::types::Value;
 use std::collections::HashMap;
 use std::fs::File;

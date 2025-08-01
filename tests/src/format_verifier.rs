@@ -65,8 +65,8 @@ impl SSTableFormatVerifier {
 
         // Read and verify footer
         let footer_result = Self::verify_footer(&mut file, file_size)?;
-        issues.extend(footer_result.footer_issues);
-        warnings.extend(footer_result.footer_warnings);
+        issues.extend(footer_result.footer_issues.clone());
+        warnings.extend(footer_result.footer_warnings.clone());
 
         // Verify data section integrity
         let data_result = Self::verify_data_section(&mut file, &header_result.details, &footer_result)?;

@@ -1,6 +1,7 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! SSTable performance benchmark suite
 //! Tests write/read performance, compression efficiency, and scalability
+
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -9,7 +10,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
     config::CompressionAlgorithm,
-    platform::Platform,
     storage::sstable::{
         reader::SSTableReader,
         writer::SSTableWriter,
@@ -365,7 +365,7 @@ impl SSTableBenchmark {
             println!("Testing {} compression...", name);
             
             let config = BenchmarkConfig {
-                enable_compression: algorithm != CompressionAlgorithm::None,
+                enable_compression: !matches!(algorithm, CompressionAlgorithm::None),
                 compression_algorithm: algorithm,
                 ..Default::default()
             };

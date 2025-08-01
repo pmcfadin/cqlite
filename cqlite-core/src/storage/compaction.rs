@@ -229,7 +229,7 @@ impl CompactionManager {
 
     /// Calculate total size of SSTables
     async fn calculate_total_size(
-        sstable_ids: &[SSTableId],
+        _sstable_ids: &[SSTableId],
         sstables: &SSTableManager,
     ) -> Result<u64> {
         let stats = sstables.stats().await?;

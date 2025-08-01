@@ -1,9 +1,10 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Edge Case Test Runner
 //!
 //! This module provides a unified interface to run all edge case tests
 //! for CQLite's Cassandra compatibility, including data types, corruption,
 //! stress testing, and vulnerability detection.
+
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 
 use crate::edge_case_data_types::EdgeCaseDataTypeTests;
 use crate::edge_case_sstable_corruption::SSTableCorruptionTests;

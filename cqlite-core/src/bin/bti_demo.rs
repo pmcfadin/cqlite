@@ -5,14 +5,14 @@
 //! This binary demonstrates the BTI (Big Trie-Indexed) format support
 //! and tests the implementation against hypothetical BTI files.
 
-use cqlite_core::parser::header::CassandraVersion;
+// use cqlite_core::parser::header::CassandraVersion;
 use cqlite_core::storage::sstable::bti::{
-    detect_format, is_bti_format, BTI_MAGIC_NUMBER, FormatType
+    detect_format, is_bti_format, BTI_MAGIC_NUMBER
 };
 use cqlite_core::storage::sstable::bti::nodes::{NodeType, TrieNode, NodeRef, select_optimal_node_type};
 use cqlite_core::storage::sstable::bti::encoder::{ByteComparableEncoder, ByteComparableDecoder};
 use cqlite_core::types::Value;
-use std::collections::HashMap;
+// use std::collections::HashMap; // Removed - unused
 
 fn main() {
     println!("🎯 BTI Format Demonstration - CQLite");
@@ -129,7 +129,7 @@ fn demo_byte_comparable_encoding() {
     
     let mut encoded_ints = Vec::new();
     for &int_val in &int_values {
-        let value = Value::Int(int_val);
+        let value = Value::Integer(int_val);
         let encoded = encoder.encode_value(&value).unwrap();
         encoded_ints.push((int_val, encoded));
         
@@ -148,7 +148,7 @@ fn demo_byte_comparable_encoding() {
     println!("  Composite key encoding:");
     let composite_key = vec![
         Value::Text("partition1".to_string()),
-        Value::Int(42),
+        Value::Integer(42),
         Value::Text("clustering1".to_string()),
     ];
     let encoded_composite = encoder.encode_composite_key(&composite_key).unwrap();

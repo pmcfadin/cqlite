@@ -18,7 +18,7 @@ use cqlite_core::types::TableId;
 #[tokio::test]
 async fn test_basic_cassandra_compatibility() -> Result<()> {
     let temp_dir = TempDir::new().map_err(|e| {
-        cqlite_core::error::Error::io(format!("Failed to create temp dir: {}", e))
+        cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create temp dir: {}", e)))
     })?;
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
@@ -62,7 +62,7 @@ async fn test_basic_cassandra_compatibility() -> Result<()> {
 #[tokio::test]
 async fn test_cassandra_compression_compatibility() -> Result<()> {
     let temp_dir = TempDir::new().map_err(|e| {
-        cqlite_core::error::Error::io(format!("Failed to create temp dir: {}", e))
+        cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create temp dir: {}", e)))
     })?;
     
     let compressed_config = Config {
@@ -95,7 +95,7 @@ async fn test_cassandra_compression_compatibility() -> Result<()> {
     
     // Verify the compressed file is smaller than it would be uncompressed
     let metadata = std::fs::metadata(&compressed_path).map_err(|e| {
-        cqlite_core::error::Error::io(format!("Failed to get file metadata: {}", e))
+        cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to get file metadata: {}", e)))
     })?;
     
     // With 100 entries of ~120 chars each, uncompressed should be >12KB

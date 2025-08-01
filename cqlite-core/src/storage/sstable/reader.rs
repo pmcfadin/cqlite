@@ -31,7 +31,7 @@ use super::{
     bloom::BloomFilter,
     compression::{Compression, CompressionAlgorithm, CompressionReader, CompressionInfo},
     index::SSTableIndex,
-    tombstone_merger::{TombstoneMerger, EntryMetadata, GenerationValue},
+    tombstone_merger::{TombstoneMerger, GenerationValue},
 };
 
 /// SSTable reader health and performance metrics
@@ -214,7 +214,7 @@ pub struct SSTableReader {
 
 impl SSTableReader {
     /// Open an SSTable file for reading
-    pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+    pub async fn open(path: &Path, _config: &Config, platform: Arc<Platform>) -> Result<Self> {
         let file = File::open(path).await?;
         let file_size = file.metadata().await?.len();
         let file = Arc::new(Mutex::new(BufReader::new(file)));
@@ -278,36 +278,8 @@ impl SSTableReader {
                 .await?;
         }
 
-        // Initialize compression reader if needed
-        // For debugging Cassandra 5.0, temporarily disable compression
-        let compression_reader = if header.compression.algorithm != "NONE" {
-            let algorithm = CompressionAlgorithm::from(header.compression.algorithm.clone());
-            // Temporarily disable to debug data parsing
-            println!("Debug: Found compression {} but disabling for debugging", header.compression.algorithm);
-            None // Some(CompressionReader::new(algorithm))
-        } else {
-            // Check for CompressionInfo.db file in the same directory
-            let parent_dir = path.parent().unwrap_or(Path::new("."));
-            let compression_info_path = parent_dir.join("nb-1-big-CompressionInfo.db");
-            
-            if compression_info_path.exists() {
-                match Self::load_compression_info(&compression_info_path).await {
-                    Ok(compression_info) => {
-                        let algorithm = compression_info.get_algorithm();
-                        println!("Found CompressionInfo with algorithm: {:?}, chunks: {}", algorithm, compression_info.chunk_count());
-                        // Re-enable compression to test decompression
-                        Some(CompressionReader::new(algorithm))
-                    }
-                    Err(e) => {
-                        // Log warning but continue without compression
-                        eprintln!("Warning: Failed to load CompressionInfo.db: {}", e);
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        };
+        // ENHANCEMENT: Initialize compression reader with improved format detection
+        let compression_reader = Self::detect_and_initialize_compression(&header, path).await?;
 
         // Load index if available
         let index = Self::load_index(&file, &header, &platform).await?;
@@ -565,6 +537,121 @@ impl SSTableReader {
     }
 
     // Private helper methods
+    
+    /// Enhanced compression format detection and initialization
+    async fn detect_and_initialize_compression(
+        header: &SSTableHeader,
+        path: &Path,
+    ) -> Result<Option<CompressionReader>> {
+        // Strategy 1: Check header compression info
+        if header.compression.algorithm != "NONE" {
+            let algorithm = CompressionAlgorithm::from(header.compression.algorithm.clone());
+            println!("Header indicates compression: {:?}", algorithm);
+            
+            // Validate compression algorithm is supported
+            match algorithm {
+                CompressionAlgorithm::Lz4 | CompressionAlgorithm::Snappy | 
+                CompressionAlgorithm::Deflate | CompressionAlgorithm::Zstd => {
+                    return Ok(Some(CompressionReader::new(algorithm)));
+                }
+                CompressionAlgorithm::None => {
+                    // Continue to other detection methods
+                }
+            }
+        }
+        
+        // Strategy 2: Check for CompressionInfo.db file in the same directory
+        let parent_dir = path.parent().unwrap_or(Path::new("."));
+        
+        // Try multiple CompressionInfo file patterns
+        let compressed_filename = format!("{}-CompressionInfo.db", 
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+        );
+        let compression_info_patterns = [
+            "nb-1-big-CompressionInfo.db",
+            "CompressionInfo.db", 
+            compressed_filename.as_str(),
+        ];
+        
+        for pattern in &compression_info_patterns {
+            let compression_info_path = parent_dir.join(pattern);
+            
+            if compression_info_path.exists() {
+                match Self::load_compression_info(&compression_info_path).await {
+                    Ok(compression_info) => {
+                        let algorithm = compression_info.get_algorithm();
+                        println!("Found CompressionInfo at {:?} with algorithm: {:?}, chunks: {}", 
+                                 compression_info_path, algorithm, compression_info.chunk_count());
+                        
+                        if algorithm != CompressionAlgorithm::None {
+                            return Ok(Some(CompressionReader::new(algorithm)));
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load {}: {}", pattern, e);
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        // Strategy 3: Heuristic detection based on file format and data patterns
+        if let Some(algorithm) = Self::detect_compression_heuristic(header, path).await? {
+            println!("Heuristic detection found compression: {:?}", algorithm);
+            return Ok(Some(CompressionReader::new(algorithm)));
+        }
+        
+        // Strategy 4: Check filename patterns for compression hints
+        if let Some(algorithm) = Self::detect_compression_from_filename(path) {
+            println!("Filename pattern suggests compression: {:?}", algorithm);
+            return Ok(Some(CompressionReader::new(algorithm)));
+        }
+        
+        println!("No compression detected for {:?}", path);
+        Ok(None)
+    }
+    
+    /// Heuristic compression detection based on file format and data analysis
+    async fn detect_compression_heuristic(
+        header: &SSTableHeader,
+        _path: &Path,
+    ) -> Result<Option<CompressionAlgorithm>> {
+        // For Cassandra 5.0 'nb' format, LZ4 is commonly used
+        if header.cassandra_version == crate::parser::header::CassandraVersion::V5_0NewBig {
+            // Check if this looks like compressed data by analyzing entropy or patterns
+            // For now, assume LZ4 for nb format as it's the most common
+            return Ok(Some(CompressionAlgorithm::Lz4));
+        }
+        
+        // For BTI format, Snappy is often used
+        if header.cassandra_version == crate::parser::header::CassandraVersion::V5_0Bti {
+            return Ok(Some(CompressionAlgorithm::Snappy));
+        }
+        
+        Ok(None)
+    }
+    
+    /// Detect compression algorithm from filename patterns
+    fn detect_compression_from_filename(path: &Path) -> Option<CompressionAlgorithm> {
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+            
+        // Check for compression hints in filename
+        if filename.contains("lz4") || filename.contains("LZ4") {
+            Some(CompressionAlgorithm::Lz4)
+        } else if filename.contains("snappy") || filename.contains("SNAPPY") {
+            Some(CompressionAlgorithm::Snappy)
+        } else if filename.contains("deflate") || filename.contains("DEFLATE") {
+            Some(CompressionAlgorithm::Deflate)
+        } else if filename.contains("zstd") || filename.contains("ZSTD") {
+            Some(CompressionAlgorithm::Zstd)
+        } else {
+            None
+        }
+    }
 
     async fn load_compression_info(path: &Path) -> Result<CompressionInfo> {
         use tokio::fs::File;
@@ -580,7 +667,7 @@ impl SSTableReader {
     async fn load_index(
         file: &Arc<Mutex<BufReader<File>>>,
         header: &SSTableHeader,
-        platform: &Platform,
+        _platform: &Platform,
     ) -> Result<Option<SSTableIndex>> {
         // Check if index information is available in header
         if let Some(index_offset) = header.properties.get("index_offset") {
@@ -603,7 +690,7 @@ impl SSTableReader {
     async fn load_bloom_filter(
         file: &Arc<Mutex<BufReader<File>>>,
         header: &SSTableHeader,
-        platform: &Platform,
+        _platform: &Platform,
     ) -> Result<Option<BloomFilter>> {
         // Check if bloom filter information is available in header
         if let Some(bloom_offset) = header.properties.get("bloom_filter_offset") {
@@ -654,7 +741,7 @@ impl SSTableReader {
             .map_err(|e| Error::corruption(format!("Failed to parse value: {:?}", e)))?;
 
         // Extract write time from value (placeholder - would need to be parsed from SSTable)
-        let write_time = std::time::SystemTime::now()
+        let _write_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros() as i64;
@@ -695,7 +782,7 @@ impl SSTableReader {
     }
     
     /// Enhanced multi-generation tombstone filtering for compaction
-    /// Merges values from multiple SSTable generations correctly
+    /// Merges values from multiple SSTable generations correctly with comprehensive conflict resolution
     pub async fn filter_with_multi_generation_merge(
         &self,
         table_id: &TableId,
@@ -703,17 +790,67 @@ impl SSTableReader {
     ) -> Result<Vec<(RowKey, Value)>> {
         let mut results = Vec::new();
         
+        println!("Processing {} key groups for multi-generation merge", entries.len());
+        
         // Use batch processing for better performance
         const BATCH_SIZE: usize = 1000;
-        let merged_results = self.tombstone_merger.batch_merge_with_tombstones(entries, BATCH_SIZE)?;
         
-        for (key, merged_value) in merged_results {
-            if let Some(value) = merged_value {
-                results.push((key, value));
+        // ENHANCEMENT: Enhanced batch processing with comprehensive tombstone handling
+        let batches: Vec<_> = entries.chunks(BATCH_SIZE).collect();
+        
+        for (batch_idx, batch) in batches.iter().enumerate() {
+            println!("Processing batch {}/{} with {} entries", batch_idx + 1, batches.len(), batch.len());
+            
+            let batch_entries = batch.to_vec();
+            let merged_results = self.tombstone_merger.batch_merge_with_tombstones(batch_entries, BATCH_SIZE)?;
+            
+            for (key, merged_value) in merged_results {
+                if let Some(value) = merged_value {
+                    // ENHANCEMENT: Additional filtering for collection types and complex data
+                    if self.should_include_value_after_merge(&value, table_id, &key)? {
+                        results.push((key, value));
+                    }
+                } else {
+                    // Value was completely tombstoned
+                    println!("Value for key {:?} was completely tombstoned", key);
+                }
             }
         }
         
+        println!("Multi-generation merge completed: {} final results from {} input groups", 
+                 results.len(), entries.len());
+        
         Ok(results)
+    }
+    
+    /// Enhanced filtering logic for post-merge values including collection validation
+    fn should_include_value_after_merge(&self, value: &Value, _table_id: &TableId, _key: &RowKey) -> Result<bool> {
+        match value {
+            // Skip null values
+            Value::Null => Ok(false),
+            
+            // For collections, check if they have valid content
+            Value::List(list) => Ok(!list.is_empty()),
+            Value::Set(set) => Ok(!set.is_empty()),
+            Value::Map(map) => Ok(!map.is_empty()),
+            
+            // For UDTs, check if they have non-null fields
+            Value::Udt(udt) => {
+                let has_non_null_fields = udt.fields.iter().any(|field| field.value.is_some());
+                Ok(has_non_null_fields)
+            }
+            
+            // For frozen values, recursively check the inner value
+            Value::Frozen(boxed_value) => {
+                self.should_include_value_after_merge(boxed_value, _table_id, _key)
+            }
+            
+            // Tombstones should not be included in final results
+            Value::Tombstone(_) => Ok(false),
+            
+            // All other value types are included
+            _ => Ok(true),
+        }
     }
     
     /// Extract TTL from value metadata (placeholder implementation)
@@ -756,7 +893,7 @@ impl SSTableReader {
             for (entry_table_id, entry_key, entry_value) in entries {
                 if entry_table_id == *table_id && entry_key == *key {
                     // Extract write time from entry metadata (placeholder implementation)
-                    let write_time = self.extract_write_time_from_entry(&entry_key, &entry_value);
+                    let _write_time = self.extract_write_time_from_entry(&entry_key, &entry_value);
                     
                     // Filter out tombstones and expired data
                     if !self.filter_tombstone(&entry_value) {
@@ -812,7 +949,7 @@ impl SSTableReader {
                 }
 
                 // Extract write time from entry metadata
-                let write_time = self.extract_write_time_from_entry(&entry_key, &entry_value);
+                let _write_time = self.extract_write_time_from_entry(&entry_key, &entry_value);
                 
                 // Filter out tombstones and expired data
                 if !self.filter_tombstone(&entry_value) {
@@ -866,10 +1003,10 @@ impl SSTableReader {
     async fn read_next_block_impl(&self) -> Result<Option<Vec<u8>>> {
         // Read block header with format-specific handling
         let block_header = match self.header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0_NewBig => {
+            crate::parser::header::CassandraVersion::V5_0NewBig => {
                 self.read_nb_format_block_header().await?
             },
-            crate::parser::header::CassandraVersion::V5_0_Bti => {
+            crate::parser::header::CassandraVersion::V5_0Bti => {
                 self.read_bti_format_block_header().await?
             },
             _ => {
@@ -1155,14 +1292,14 @@ impl SSTableReader {
     /// Calculate header size based on format and actual header content
     fn calculate_header_size(&self) -> usize {
         match self.header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0_NewBig => {
+            crate::parser::header::CassandraVersion::V5_0NewBig => {
                 // For Cassandra 5.0 nb format, use a much simpler approach
                 // The actual data starts much later in the file
                 // Based on the hex dump analysis, try starting much further in
                 1024 // Start after 1KB - will scan for actual block start
                     .min(8192) // Maximum reasonable size
             },
-            crate::parser::header::CassandraVersion::V5_0_Bti => {
+            crate::parser::header::CassandraVersion::V5_0Bti => {
                 // BTI format varies more
                 1024
             },
@@ -1189,18 +1326,85 @@ impl SSTableReader {
         }
     }
     
-    /// Enhanced composite key parsing for Cassandra 5.0 multi-component keys
+    /// Enhanced composite key parsing for Cassandra 5.0 multi-component keys with improved format detection
     fn parse_composite_key(&self, key_data: &[u8]) -> Result<RowKey> {
         if key_data.is_empty() {
             return Ok(RowKey::new(Vec::new()));
         }
         
-        // For simple single-component keys, return as-is
-        if key_data.len() < 3 || key_data[0] != 0x00 {
-            return Ok(RowKey::new(key_data.to_vec()));
+        // ENHANCEMENT: Try multiple parsing strategies for different Cassandra formats
+        
+        // Strategy 1: Try Cassandra 5.0+ vint-based composite key format
+        if let Ok(parsed_key) = self.parse_composite_key_v5_format(key_data) {
+            return Ok(parsed_key);
         }
         
-        // Parse composite key format: [component_count:vint][component1_len:u16][component1_data][...]
+        // Strategy 2: Try legacy u16-length prefixed format
+        if let Ok(parsed_key) = self.parse_composite_key_legacy_format(key_data) {
+            return Ok(parsed_key);
+        }
+        
+        // Strategy 3: Try simple clustering key format
+        if let Ok(parsed_key) = self.parse_clustering_key_format(key_data) {
+            return Ok(parsed_key);
+        }
+        
+        // Strategy 4: For simple single-component keys or unknown formats, return as-is
+        println!("Using raw key data for key of length {}", key_data.len());
+        Ok(RowKey::new(key_data.to_vec()))
+    }
+    
+    /// Parse composite key using Cassandra 5.0+ vint-based format
+    fn parse_composite_key_v5_format(&self, key_data: &[u8]) -> Result<RowKey> {
+        if key_data.len() < 2 {
+            return Err(Error::corruption("Key too short for v5 format".to_string()));
+        }
+        
+        let mut components = Vec::new();
+        
+        // Parse component count (vint)
+        let (remaining, component_count) = parse_vint_length(key_data)
+            .map_err(|_| Error::corruption("Failed to parse component count".to_string()))?;
+        let mut offset = key_data.len() - remaining.len();
+        
+        if component_count == 0 || component_count > 256 {
+            return Err(Error::corruption(format!("Invalid component count: {}", component_count)));
+        }
+        
+        println!("Parsing v5 composite key with {} components", component_count);
+        
+        // Parse each component
+        for i in 0..component_count {
+            if offset >= key_data.len() {
+                break;
+            }
+            
+            // Parse component length (vint)
+            let (remaining, component_len) = parse_vint_length(&key_data[offset..])
+                .map_err(|_| Error::corruption(format!("Failed to parse component {} length", i)))?;
+            offset = key_data.len() - remaining.len();
+            
+            if component_len > 0 && offset + component_len <= key_data.len() {
+                components.extend_from_slice(&key_data[offset..offset + component_len]);
+                offset += component_len;
+                
+                // Add component separator (except for last component)
+                if i < component_count - 1 {
+                    components.push(0x00);
+                }
+            }
+        }
+        
+        println!("Parsed v5 composite key: {} total bytes", components.len());
+        Ok(RowKey::new(components))
+    }
+    
+    /// Parse composite key using legacy u16-length prefixed format
+    fn parse_composite_key_legacy_format(&self, key_data: &[u8]) -> Result<RowKey> {
+        if key_data.len() < 3 || key_data[0] != 0x00 {
+            return Err(Error::corruption("Not legacy composite key format".to_string()));
+        }
+        
         let mut offset = 0;
         let mut components = Vec::new();
         
@@ -1223,7 +1427,6 @@ impl SSTableReader {
             
             // Check for end-of-components marker
             if offset < key_data.len() && key_data[offset] == 0x00 {
-                offset += 1;
                 break;
             }
         }
@@ -1233,11 +1436,42 @@ impl SSTableReader {
             components.pop();
         }
         
+        println!("Parsed legacy composite key: {} total bytes", components.len());
         Ok(RowKey::new(components))
     }
     
-    /// Enhanced column value parsing with Cassandra 5.0 type detection
-    fn parse_column_value_enhanced(&self, value_data: &[u8], table_id: &TableId, key: &RowKey) -> Result<Value> {
+    /// Parse clustering key format (simpler format for clustering columns)
+    fn parse_clustering_key_format(&self, key_data: &[u8]) -> Result<RowKey> {
+        // Clustering keys in Cassandra 5.0 might use a different format
+        // Check for clustering key markers or patterns
+        
+        if key_data.len() < 4 {
+            return Err(Error::corruption("Too short for clustering key".to_string()));
+        }
+        
+        // Check if this looks like a clustering key by analyzing the structure
+        // Clustering keys often have type info followed by the actual key data
+        if key_data[0] <= 0x1F { // Potential type marker
+            let mut offset = 1;
+            
+            // Skip type information
+            while offset < key_data.len() && key_data[offset] <= 0x1F {
+                offset += 1;
+            }
+            
+            if offset < key_data.len() {
+                let clustering_data = &key_data[offset..];
+                println!("Parsed clustering key: {} bytes after {} byte type prefix", 
+                         clustering_data.len(), offset);
+                return Ok(RowKey::new(clustering_data.to_vec()));
+            }
+        }
+        
+        Err(Error::corruption("Not clustering key format".to_string()))
+    }
+    
+    /// Enhanced column value parsing with Cassandra 5.0 type detection and collection support
+    fn parse_column_value_enhanced(&self, value_data: &[u8], _table_id: &TableId, _key: &RowKey) -> Result<Value> {
         if value_data.is_empty() {
             return Ok(Value::Null);
         }
@@ -1268,6 +1502,11 @@ impl SSTableReader {
             return Ok(Value::Null);
         }
         
+        // ENHANCEMENT: First try to parse as collection types using enhanced parsers
+        if let Ok(collection_value) = self.try_parse_collection_enhanced(actual_value_data) {
+            return Ok(collection_value);
+        }
+        
         // Try different parsing strategies based on data patterns
         match self.detect_value_type(actual_value_data) {
             Some(type_id) => {
@@ -1282,6 +1521,55 @@ impl SSTableReader {
                 }
             }
         }
+    }
+    
+    /// Try parsing as collection types using enhanced Cassandra 5.0+ parsers
+    fn try_parse_collection_enhanced(&self, data: &[u8]) -> Result<Value> {
+        use crate::parser::types::{parse_list_enhanced, parse_set_enhanced, parse_map_enhanced, parse_udt_enhanced};
+        
+        if data.len() < 2 {
+            return Err(Error::corruption("Data too short for collection parsing".to_string()));
+        }
+        
+        // Check for collection type markers in Cassandra 5.0+ format
+        // Lists often start with element count (vint) followed by type info
+        if let Ok((_, list_value)) = parse_list_enhanced(data) {
+            if !matches!(list_value, Value::List(ref v) if v.is_empty()) {
+                println!("Successfully parsed as enhanced list with {} elements", 
+                    match &list_value { Value::List(v) => v.len(), _ => 0 });
+                return Ok(list_value);
+            }
+        }
+        
+        // Try parsing as set
+        if let Ok((_, set_value)) = parse_set_enhanced(data) {
+            if !matches!(set_value, Value::Set(ref v) if v.is_empty()) {
+                println!("Successfully parsed as enhanced set with {} elements", 
+                    match &set_value { Value::Set(v) => v.len(), _ => 0 });
+                return Ok(set_value);
+            }
+        }
+        
+        // Try parsing as map
+        if let Ok((_, map_value)) = parse_map_enhanced(data) {
+            if !matches!(map_value, Value::Map(ref v) if v.is_empty()) {
+                println!("Successfully parsed as enhanced map with {} pairs", 
+                    match &map_value { Value::Map(v) => v.len(), _ => 0 });
+                return Ok(map_value);
+            }
+        }
+        
+        // Try parsing as UDT
+        if let Ok((_, udt_value)) = parse_udt_enhanced(data) {
+            println!("Successfully parsed as enhanced UDT: {}", 
+                match &udt_value { 
+                    Value::Udt(udt) => format!("{}.{}", udt.keyspace, udt.type_name),
+                    _ => "unknown".to_string()
+                });
+            return Ok(udt_value);
+        }
+        
+        Err(Error::corruption("Could not parse as any collection type".to_string()))
     }
     
     /// Parse CQL value with fallback handling for robust parsing
@@ -1519,8 +1807,8 @@ impl SSTableReader {
                 if name.contains("-") {
                     let parts: Vec<&str> = name.split('-').collect();
                     if parts.len() >= 2 {
-                        if let Ok(gen) = parts[1].parse::<u64>() {
-                            return Some(gen);
+                        if let Ok(generation) = parts[1].parse::<u64>() {
+                            return Some(generation);
                         }
                     }
                 }
@@ -1529,8 +1817,8 @@ impl SSTableReader {
                 if name.starts_with("sstable_") {
                     let parts: Vec<&str> = name.split('_').collect();
                     if parts.len() >= 2 {
-                        if let Ok(gen) = parts[1].parse::<u64>() {
-                            return Some(gen);
+                        if let Ok(generation) = parts[1].parse::<u64>() {
+                            return Some(generation);
                         }
                     }
                 }
@@ -1554,7 +1842,7 @@ impl SSTableReader {
         header_buffer: &[u8],
         path: &Path,
     ) -> Result<crate::parser::header::SSTableHeader> {
-        use crate::parser::header::{parse_magic_and_version, parse_sstable_header, CassandraVersion};
+        use crate::parser::header::{parse_magic_and_version, parse_sstable_header};
         
         if header_buffer.len() < 6 {
             return Err(Error::corruption("Header buffer too small"));
@@ -1596,11 +1884,11 @@ impl SSTableReader {
             .unwrap_or("");
             
         let version = if filename.contains("-big-") {
-            CassandraVersion::V5_0_NewBig
+            CassandraVersion::V5_0NewBig
         } else if filename.contains("-da-") || filename.contains("Partitions") {
-            CassandraVersion::V5_0_Bti
+            CassandraVersion::V5_0Bti
         } else if filename.starts_with("nb-") {
-            CassandraVersion::V5_0_NewBig
+            CassandraVersion::V5_0NewBig
         } else {
             CassandraVersion::Legacy
         };
@@ -1704,15 +1992,15 @@ impl SSTableReader {
     /// Calculate actual header size from parsed header
     fn calculate_actual_header_size(
         header: &crate::parser::header::SSTableHeader,
-        header_buffer: &[u8],
+        _header_buffer: &[u8],
     ) -> Result<usize> {
         // For Cassandra 5.x formats, the header size varies by version
         match header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0_NewBig => {
+            crate::parser::header::CassandraVersion::V5_0NewBig => {
                 // 'nb' format has a fixed header structure
                 Ok(2048) // 2KB header for 'nb' format
             },
-            crate::parser::header::CassandraVersion::V5_0_Bti => {
+            crate::parser::header::CassandraVersion::V5_0Bti => {
                 // BTI format has variable header size
                 Ok(1024) // Default 1KB, could be calculated more precisely
             },

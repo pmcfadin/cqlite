@@ -8,7 +8,7 @@ use std::process;
 use cqlite_core::Result;
 
 // Import our test modules
-use integration_tests::{
+use cqlite_integration_tests::{
     format_verifier::{verify_sstable_format, SSTableFormatVerifier},
     sstable_benchmark::{run_comprehensive_benchmark, BenchmarkConfig, SSTableBenchmark},
     sstable_validator::{run_validation, SSTableValidator},

@@ -563,9 +563,9 @@ impl TestRunner {
     }
     
     fn print_final_results(&self) {
-        println!("\n" + "=".repeat(60).as_str());
+        println!("\n{}", "=".repeat(60));
         println!("🏁 CQLite CLI Test Suite Results");
-        println!("=".repeat(60));
+        println!("{}", "=".repeat(60));
         
         println!("\n📊 {}", self.results.summary());
         

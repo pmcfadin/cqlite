@@ -1,6 +1,7 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive SSTable validator for testing reader/writer functionality
 //! and Cassandra 5+ 'oa' format specification compliance
+
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 
 use std::collections::HashMap;
 use std::fs;
@@ -9,7 +10,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
-    platform::Platform,
     storage::sstable::{
         bloom::BloomFilter,
         reader::SSTableReader,
@@ -183,10 +183,10 @@ impl SSTableValidator {
             (TableId::new("test"), RowKey::from("null"), Value::Null),
             (TableId::new("test"), RowKey::from("blob"), Value::Blob(vec![0, 1, 2, 3, 255])),
             (TableId::new("test"), RowKey::from("timestamp"), Value::Timestamp(
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64
             )),
             (TableId::new("test"), RowKey::from("uuid"), Value::Uuid(
-                vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]
+                [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]
             )),
         ];
 

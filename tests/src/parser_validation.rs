@@ -1,4 +1,3 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Parser Validation Tests
 //!
 //! This module validates the CQLite parser implementation against real Cassandra 5+ SSTable files.
@@ -7,6 +6,8 @@ use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platf
 //! - VInt parsing with real variable-length integers
 //! - CQL data type parsing validation
 //! - BTI index parsing integration tests
+
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 
 use cqlite_core::{
     error::Error,
@@ -127,6 +128,7 @@ impl ParserValidationSuite {
         use std::collections::HashMap;
 
         let header = SSTableHeader {
+            cassandra_version: cqlite_core::parser::header::CassandraVersion::V5_0Release,
             version: SUPPORTED_VERSION,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -174,8 +176,7 @@ impl ParserValidationSuite {
             },
         };
 
-        self.parser
-        serialize_sstable_header(&header)
+        cqlite_core::parser::header::serialize_sstable_header(&header)
             .expect("Failed to serialize test header")
     }
 }
@@ -305,8 +306,7 @@ mod header_validation_tests {
 
         // Parse the header
         let (header, parsed_bytes) = suite
-            .parser
-        parse_sstable_header(&test_header_bytes)
+            .parser.parse_sstable_header(&test_header_bytes)
             .expect("Failed to parse test header");
 
         assert_eq!(
@@ -336,8 +336,8 @@ mod header_validation_tests {
 
         // Test serialization roundtrip
         let reserialized = suite
-            .parser
-        serialize_sstable_header(&header)
+            .parser;
+        cqlite_core::parser::header::serialize_sstable_header(&header)
             .expect("Failed to reserialize header");
         assert_eq!(
             reserialized, test_header_bytes,

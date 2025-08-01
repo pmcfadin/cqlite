@@ -3,7 +3,7 @@
 //! This framework provides automated performance regression testing to ensure
 //! M3 complex types maintain performance targets across code changes.
 
-use super::m3_performance_benchmarks::{M3PerformanceBenchmarks, M3BenchmarkResult, PerformanceTargets};
+use super::m3_performance_benchmarks::{M3PerformanceBenchmarks, M3BenchmarkResult};
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

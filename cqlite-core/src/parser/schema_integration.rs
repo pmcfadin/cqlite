@@ -4,7 +4,7 @@
 //! abstraction layer while maintaining full backward compatibility.
 
 use crate::error::{Error, Result};
-use crate::schema::{TableSchema, KeyColumn, ClusteringColumn, Column};
+use crate::schema::TableSchema;
 use super::{
     factory::ParserFactory,
     config::{ParserConfig, ParserBackend},
@@ -13,7 +13,6 @@ use super::{
     traits::CqlVisitor,
     ast::CqlStatement,
 };
-use std::sync::Arc;
 
 /// Configuration for schema parsing
 #[derive(Debug, Clone)]
@@ -260,7 +259,7 @@ pub async fn extract_table_name_enhanced(cql: &str) -> Result<String> {
 pub fn parse_cql_schema_compat(cql: &str) -> nom::IResult<&str, TableSchema> {
     // Use tokio runtime to run the async function
     let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| nom::Err::Error(nom::error::Error::new(cql, nom::error::ErrorKind::Fail)))?;
+        .map_err(|_e| nom::Err::Error(nom::error::Error::new(cql, nom::error::ErrorKind::Fail)))?;
     
     match rt.block_on(parse_cql_schema_simple(cql)) {
         Ok(schema) => Ok(("", schema)),

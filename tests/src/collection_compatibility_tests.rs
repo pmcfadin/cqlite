@@ -1,17 +1,18 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Collection compatibility tests with real Cassandra data formats
 //!
 //! This module tests collection parsing against real Cassandra SSTable data
 //! to ensure 100% compatibility with the 'oa' format specification.
 
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 use cqlite_core::{
     parser::{
-        // parse_cql_value, serialize_cql_value, CqlTypeId,
+        types::{parse_cql_value, serialize_cql_value, CqlTypeId},
+        vint::encode_vint,
         // parse_list_with_type, parse_set_with_type, parse_map_with_types,
-        // parse_tuple, parse_udt, vint::encode_vint
+        // parse_tuple, parse_udt
     },
-    // types::Value,
-    // Result,
+    types::{Value, DataType},
+    Result,
 };
 use std::collections::HashMap;
 

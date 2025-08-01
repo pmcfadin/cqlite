@@ -4,7 +4,7 @@
 //! with different backends and configurations.
 
 use crate::error::{Error, Result};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Mutex};
 
 use super::{
     config::{ParserConfig, ParserBackend},
@@ -298,17 +298,13 @@ impl ParserRegistry {
 }
 
 /// Global parser registry instance
-static mut GLOBAL_REGISTRY: Option<ParserRegistry> = None;
-static REGISTRY_INIT: std::sync::Once = std::sync::Once::new();
+static GLOBAL_REGISTRY: OnceLock<Mutex<ParserRegistry>> = OnceLock::new();
 
 /// Get the global parser registry
-pub fn global_registry() -> &'static mut ParserRegistry {
-    unsafe {
-        REGISTRY_INIT.call_once(|| {
-            GLOBAL_REGISTRY = Some(ParserRegistry::new());
-        });
-        GLOBAL_REGISTRY.as_mut().unwrap()
-    }
+fn with_global_registry<T>(f: impl FnOnce(&mut ParserRegistry) -> T) -> T {
+    let registry = GLOBAL_REGISTRY.get_or_init(|| Mutex::new(ParserRegistry::new()));
+    let mut guard = registry.lock().unwrap();
+    f(&mut *guard)
 }
 
 /// Register a global parser factory
@@ -316,7 +312,9 @@ pub fn register_global_factory(
     name: String,
     factory: Box<dyn CqlParserFactory + Send + Sync>,
 ) {
-    global_registry().register_factory(name, factory);
+    with_global_registry(|registry| {
+        registry.register_factory(name, factory);
+    });
 }
 
 /// Benchmark different parser backends
