@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::error::Error;
 use crate::storage::sstable::SSTableId;
-use crate::{types::TableId, Config, Result};
+use crate::{Config, Result, types::TableId};
 
 /// Manifest entry types
 #[derive(Debug, Clone, Serialize, Deserialize)]

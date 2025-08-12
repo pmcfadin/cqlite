@@ -1,14 +1,14 @@
 //! REPL Quality Gates Validation
-//! 
+//!
 //! This module implements specific quality gate validation for Issue #10 requirements.
 //! Each quality gate must pass for the REPL to be considered production-ready.
 
-use std::process::{Command, Stdio};
-use std::io::{Write, BufReader, Read};
-use std::time::{Duration, Instant};
-use std::path::PathBuf;
-use std::fs;
 use anyhow::{Result, anyhow};
+use std::fs;
+use std::io::{BufReader, Read, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Quality gate validation results
 #[derive(Debug)]
@@ -44,25 +44,25 @@ impl ReplQualityGatesValidator {
 
         // Quality Gate 1: REPL Launches Successfully
         self.validate_gate1_repl_launch()?;
-        
+
         // Quality Gate 2: All Required Commands Functional
         self.validate_gate2_commands_functional()?;
-        
+
         // Quality Gate 3: User Workflows Complete End-to-End
         self.validate_gate3_user_workflows()?;
-        
+
         // Quality Gate 4: Real Cassandra Data Compatibility
         self.validate_gate4_real_data_compatibility()?;
-        
+
         // Quality Gate 5: Error Handling and Recovery
         self.validate_gate5_error_handling()?;
-        
+
         // Quality Gate 6: Performance and Usability
         self.validate_gate6_performance_usability()?;
 
         let all_passed = self.results.iter().all(|r| r.passed);
         self.print_quality_gate_report();
-        
+
         Ok(all_passed)
     }
 
@@ -83,7 +83,7 @@ impl ReplQualityGatesValidator {
                     errors.push("❌ REPL banner not displayed correctly".to_string());
                     passed = false;
                 }
-                
+
                 if output.contains("cqlite>") {
                     details.push("✅ REPL prompt displays correctly".to_string());
                 } else {
@@ -210,8 +210,11 @@ impl ReplQualityGatesValidator {
             let cmd = format!("{}\n:config\n:quit", config_cmd);
             match self.run_repl_test(&cmd, Duration::from_secs(5)) {
                 Ok(output) => {
-                    if output.contains("Success") || output.contains("enabled") || 
-                       output.contains("disabled") || output.contains("25") {
+                    if output.contains("Success")
+                        || output.contains("enabled")
+                        || output.contains("disabled")
+                        || output.contains("25")
+                    {
                         details.push(format!("✅ Config command works: {}", config_cmd));
                     } else {
                         errors.push(format!("❌ Config command failed: {}", config_cmd));
@@ -258,12 +261,12 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 3;
             Ok(output) => {
                 let required_elements = vec![
                     "Available Keyspaces",
-                    "Available Tables", 
+                    "Available Tables",
                     "Timing is now enabled",
                     "Executing",
-                    "Command History"
+                    "Command History",
                 ];
-                
+
                 let mut workflow_passed = true;
                 for element in required_elements {
                     if output.contains(element) {
@@ -274,7 +277,7 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 3;
                         passed = false;
                     }
                 }
-                
+
                 if workflow_passed {
                     details.push("✅ Data exploration workflow complete".to_string());
                 }
@@ -297,9 +300,10 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 3;
 
         match self.run_repl_test(config_workflow, Duration::from_secs(8)) {
             Ok(output) => {
-                if output.contains("Current Configuration") && 
-                   output.contains("enabled") && 
-                   output.contains("20") {
+                if output.contains("Current Configuration")
+                    && output.contains("enabled")
+                    && output.contains("20")
+                {
                     details.push("✅ Configuration management workflow complete".to_string());
                 } else {
                     errors.push("❌ Configuration management workflow incomplete".to_string());
@@ -324,9 +328,10 @@ SELECT table_name FROM system.tables WHERE keyspace_name = 'system' LIMIT 2;
 
         match self.run_repl_test(query_workflow, Duration::from_secs(10)) {
             Ok(output) => {
-                if output.contains("Executing") && 
-                   output.contains("SELECT keyspace_name") &&
-                   output.contains("Command History") {
+                if output.contains("Executing")
+                    && output.contains("SELECT keyspace_name")
+                    && output.contains("Command History")
+                {
                     details.push("✅ Query development workflow complete".to_string());
                 } else {
                     errors.push("❌ Query development workflow incomplete".to_string());
@@ -350,10 +355,11 @@ SELECT table_name FROM system.tables WHERE keyspace_name = 'system' LIMIT 2;
 
         match self.run_repl_test(help_workflow, Duration::from_secs(8)) {
             Ok(output) => {
-                if output.contains("CQLite Interactive REPL") && 
-                   output.contains("Meta-Commands Reference") &&
-                   output.contains("Configuration System") &&
-                   output.contains("Common Usage Examples") {
+                if output.contains("CQLite Interactive REPL")
+                    && output.contains("Meta-Commands Reference")
+                    && output.contains("Configuration System")
+                    && output.contains("Common Usage Examples")
+                {
                     details.push("✅ Help and discovery workflow complete".to_string());
                 } else {
                     errors.push("❌ Help and discovery workflow incomplete".to_string());
@@ -386,7 +392,10 @@ SELECT table_name FROM system.tables WHERE keyspace_name = 'system' LIMIT 2;
         let mut passed = true;
 
         // Test data directory configuration
-        match self.run_repl_test(":config data-dir /nonexistent\n:quit", Duration::from_secs(5)) {
+        match self.run_repl_test(
+            ":config data-dir /nonexistent\n:quit",
+            Duration::from_secs(5),
+        ) {
             Ok(output) => {
                 if output.contains("Directory does not exist") {
                     details.push("✅ Data directory validation works".to_string());
@@ -434,11 +443,7 @@ SELECT table_name FROM system.tables WHERE keyspace_name = 'system' LIMIT 2;
         }
 
         // Test schema introspection commands
-        let schema_commands = vec![
-            ":schema",
-            ":describe system.keyspaces",
-            ":info system",
-        ];
+        let schema_commands = vec![":schema", ":describe system.keyspaces", ":info system"];
 
         for cmd in schema_commands {
             match self.run_repl_test(&format!("{}\n:quit", cmd), Duration::from_secs(5)) {
@@ -467,14 +472,36 @@ SELECT table_name FROM system.tables WHERE keyspace_name = 'system' LIMIT 2;
             match self.run_repl_test(&format!("{}\n:quit", query), Duration::from_secs(8)) {
                 Ok(output) => {
                     if output.contains("Executing") && !output.contains("failed") {
-                        details.push(format!("✅ System query works: {}", query.split_whitespace().take(4).collect::<Vec<_>>().join(" ")));
+                        details.push(format!(
+                            "✅ System query works: {}",
+                            query
+                                .split_whitespace()
+                                .take(4)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ));
                     } else {
-                        details.push(format!("⚠️ System query handled gracefully: {}", query.split_whitespace().take(4).collect::<Vec<_>>().join(" ")));
+                        details.push(format!(
+                            "⚠️ System query handled gracefully: {}",
+                            query
+                                .split_whitespace()
+                                .take(4)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ));
                         // Not failing the gate - system tables might not be populated in test environment
                     }
                 }
                 Err(e) => {
-                    errors.push(format!("❌ System query error: {}: {}", query.split_whitespace().take(4).collect::<Vec<_>>().join(" "), e));
+                    errors.push(format!(
+                        "❌ System query error: {}: {}",
+                        query
+                            .split_whitespace()
+                            .take(4)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        e
+                    ));
                     passed = false;
                 }
             }
@@ -511,13 +538,21 @@ SELECT table_name FROM system.tables WHERE keyspace_name = 'system' LIMIT 2;
         for invalid_query in invalid_queries {
             match self.run_repl_test(&format!("{}\n:quit", invalid_query), Duration::from_secs(5)) {
                 Ok(output) => {
-                    if output.contains("Error") && 
-                       !output.contains("panic") && 
-                       !output.contains("crashed") &&
-                       output.contains("Hint") {
+                    if output.contains("Error")
+                        && !output.contains("panic")
+                        && !output.contains("crashed")
+                        && output.contains("Hint")
+                    {
                         details.push(format!("✅ Graceful error handling for invalid query"));
                     } else {
-                        errors.push(format!("❌ Poor error handling for: {}", invalid_query.split_whitespace().take(3).collect::<Vec<_>>().join(" ")));
+                        errors.push(format!(
+                            "❌ Poor error handling for: {}",
+                            invalid_query
+                                .split_whitespace()
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ));
                         passed = false;
                     }
                 }
@@ -539,17 +574,27 @@ SELECT table_name FROM system.tables WHERE keyspace_name = 'system' LIMIT 2;
         for invalid_cmd in invalid_commands {
             match self.run_repl_test(&format!("{}\n:quit", invalid_cmd), Duration::from_secs(5)) {
                 Ok(output) => {
-                    if (output.contains("Error") || output.contains("Unknown")) && 
-                       !output.contains("panic") && 
-                       !output.contains("crashed") {
-                        details.push(format!("✅ Graceful handling of invalid command: {}", invalid_cmd));
+                    if (output.contains("Error") || output.contains("Unknown"))
+                        && !output.contains("panic")
+                        && !output.contains("crashed")
+                    {
+                        details.push(format!(
+                            "✅ Graceful handling of invalid command: {}",
+                            invalid_cmd
+                        ));
                     } else {
-                        errors.push(format!("❌ Poor handling of invalid command: {}", invalid_cmd));
+                        errors.push(format!(
+                            "❌ Poor handling of invalid command: {}",
+                            invalid_cmd
+                        ));
                         passed = false;
                     }
                 }
                 Err(e) => {
-                    errors.push(format!("❌ Invalid command test failed: {}: {}", invalid_cmd, e));
+                    errors.push(format!(
+                        "❌ Invalid command test failed: {}: {}",
+                        invalid_cmd, e
+                    ));
                     passed = false;
                 }
             }
@@ -566,9 +611,10 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
 
         match self.run_repl_test(recovery_test, Duration::from_secs(10)) {
             Ok(output) => {
-                if output.contains("Error") && 
-                   output.contains("CQLite Interactive REPL") &&
-                   output.contains("Current Configuration") {
+                if output.contains("Error")
+                    && output.contains("CQLite Interactive REPL")
+                    && output.contains("Current Configuration")
+                {
                     details.push("✅ REPL recovers properly after errors".to_string());
                 } else {
                     errors.push("❌ REPL doesn't recover properly after errors".to_string());
@@ -640,7 +686,10 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
         }
 
         // Test query timing functionality
-        match self.run_repl_test(":timing\nSELECT keyspace_name FROM system.keyspaces LIMIT 1;\n:quit", Duration::from_secs(8)) {
+        match self.run_repl_test(
+            ":timing\nSELECT keyspace_name FROM system.keyspaces LIMIT 1;\n:quit",
+            Duration::from_secs(8),
+        ) {
             Ok(output) => {
                 if output.contains("Execution time") || output.contains("Query completed") {
                     details.push("✅ Query timing functionality works".to_string());
@@ -656,11 +705,15 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
         }
 
         // Test help system usability
-        match self.run_repl_test(":help\n:help commands\n:help config\n:quit", Duration::from_secs(8)) {
+        match self.run_repl_test(
+            ":help\n:help commands\n:help config\n:quit",
+            Duration::from_secs(8),
+        ) {
             Ok(output) => {
-                if output.contains("CQLite Interactive REPL") && 
-                   output.contains("Meta-Commands Reference") &&
-                   output.contains("Configuration System") {
+                if output.contains("CQLite Interactive REPL")
+                    && output.contains("Meta-Commands Reference")
+                    && output.contains("Configuration System")
+                {
                     details.push("✅ Comprehensive help system available".to_string());
                 } else {
                     errors.push("❌ Help system incomplete".to_string());
@@ -684,9 +737,10 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
 
         match self.run_repl_test(usability_test, Duration::from_secs(8)) {
             Ok(output) => {
-                if output.contains("Command History") && 
-                   output.contains("Current Configuration") &&
-                   output.contains("Timing is now") {
+                if output.contains("Command History")
+                    && output.contains("Current Configuration")
+                    && output.contains("Timing is now")
+                {
                     details.push("✅ User-friendly features available".to_string());
                 } else {
                     errors.push("❌ Some user-friendly features missing".to_string());
@@ -734,14 +788,17 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
                     Some(status) => {
                         let stdout = cmd.stdout.take().unwrap();
                         let stderr = cmd.stderr.take().unwrap();
-                        
+
                         let mut stdout_data = String::new();
                         let mut stderr_data = String::new();
-                        
+
                         BufReader::new(stdout).read_to_string(&mut stdout_data)?;
                         BufReader::new(stderr).read_to_string(&mut stderr_data)?;
-                        
-                        break format!("Status: {}\nSTDOUT:\n{}\nSTDERR:\n{}", status, stdout_data, stderr_data);
+
+                        break format!(
+                            "Status: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                            status, stdout_data, stderr_data
+                        );
                     }
                     None => {
                         if start_time.elapsed() > timeout {
@@ -762,35 +819,45 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
     fn print_quality_gate_report(&self) {
         println!("\n📋 QUALITY GATE VALIDATION REPORT");
         println!("=================================");
-        
+
         let total_gates = self.results.len();
         let passed_gates = self.results.iter().filter(|r| r.passed).count();
         let failed_gates = total_gates - passed_gates;
-        
+
         println!("Total Quality Gates: {}", total_gates);
         println!("✅ Passed: {}", passed_gates);
         if failed_gates > 0 {
             println!("❌ Failed: {}", failed_gates);
         }
-        println!("Pass Rate: {:.1}%", (passed_gates as f64 / total_gates as f64) * 100.0);
-        
+        println!(
+            "Pass Rate: {:.1}%",
+            (passed_gates as f64 / total_gates as f64) * 100.0
+        );
+
         for result in &self.results {
-            let status = if result.passed { "✅ PASS" } else { "❌ FAIL" };
-            println!("\n{} {} (completed in {:?})", status, result.gate_name, result.duration);
-            
+            let status = if result.passed {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
+            println!(
+                "\n{} {} (completed in {:?})",
+                status, result.gate_name, result.duration
+            );
+
             for detail in &result.details {
                 println!("  {}", detail);
             }
-            
+
             for error in &result.errors {
                 println!("  {}", error);
             }
         }
-        
+
         // Final assessment
         println!("\n🎯 FINAL ASSESSMENT");
         println!("==================");
-        
+
         if passed_gates == total_gates {
             println!("🎉 ALL QUALITY GATES PASSED!");
             println!("✅ REPL is ready for production use");
@@ -800,28 +867,37 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
             println!("❌ REPL needs improvement before production");
             println!("❌ Issue #10 requirements not fully met");
         }
-        
+
         // Requirement checklist
         println!("\n📋 ISSUE #10 REQUIREMENT CHECKLIST");
         println!("==================================");
-        
+
         let requirements = vec![
             ("REPL launches successfully", self.gate_passed("Gate 1")),
-            ("All required commands functional", self.gate_passed("Gate 2")),
-            ("User workflows complete end-to-end", self.gate_passed("Gate 3")),
-            ("Real Cassandra data compatibility", self.gate_passed("Gate 4")),
+            (
+                "All required commands functional",
+                self.gate_passed("Gate 2"),
+            ),
+            (
+                "User workflows complete end-to-end",
+                self.gate_passed("Gate 3"),
+            ),
+            (
+                "Real Cassandra data compatibility",
+                self.gate_passed("Gate 4"),
+            ),
             ("Error handling and recovery", self.gate_passed("Gate 5")),
             ("Performance and usability", self.gate_passed("Gate 6")),
         ];
-        
+
         for (requirement, passed) in requirements {
             let status = if passed { "✅" } else { "❌" };
             println!("{} {}", status, requirement);
         }
-        
+
         println!("\n🚀 REPL FEATURES VALIDATED:");
         println!("• Interactive shell with enhanced prompt");
-        println!("• Comprehensive command structure"); 
+        println!("• Comprehensive command structure");
         println!("• Configuration management");
         println!("• Data exploration capabilities");
         println!("• CQL query execution with timing");
@@ -834,7 +910,8 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
 
     /// Check if a specific gate passed
     fn gate_passed(&self, gate_name: &str) -> bool {
-        self.results.iter()
+        self.results
+            .iter()
             .find(|r| r.gate_name.contains(gate_name))
             .map_or(false, |r| r.passed)
     }
@@ -855,13 +932,13 @@ mod tests {
         }
 
         let mut validator = ReplQualityGatesValidator::new(binary_path);
-        
+
         // Run just Gate 1 for basic testing
         validator.validate_gate1_repl_launch().unwrap();
-        
+
         // Should have at least one result
         assert!(!validator.results.is_empty());
-        
+
         // Print basic report
         validator.print_quality_gate_report();
     }

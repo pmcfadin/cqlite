@@ -4,10 +4,10 @@
 //! It tests robust error handling for corrupted/unsupported files and recovery strategies.
 
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 /// Error handling validator
@@ -154,7 +154,7 @@ impl ErrorHandler {
     /// Create a new error handler
     pub fn new(config: ErrorHandlingConfig) -> Result<Self> {
         let recovery_strategies = Self::create_default_recovery_strategies();
-        
+
         Ok(Self {
             config,
             scenarios: HashMap::new(),
@@ -166,7 +166,7 @@ impl ErrorHandler {
     pub async fn validate_error_handling(&self) -> Result<ErrorHandlingReport> {
         log::info!("Starting comprehensive error handling validation");
         let _start_time = Instant::now();
-        
+
         let mut all_scenarios = Vec::new();
 
         // Test corruption scenarios
@@ -215,13 +215,13 @@ impl ErrorHandler {
     /// Test error scenarios as requested by the validation framework
     pub async fn test_error_scenarios(&self) -> Result<super::ValidationReport> {
         log::info!("Testing error scenarios for Issue #17 validation");
-        
+
         let mut report = super::ValidationReport::new("Error Handling Scenarios");
-        
+
         // Run error handling validation
         let error_report = self.validate_error_handling().await?;
         report.add_section("Error Handling", error_report.into());
-        
+
         Ok(report)
     }
 
@@ -231,7 +231,10 @@ impl ErrorHandler {
         let mut scenarios = Vec::new();
 
         // Test 1: Completely corrupted file
-        scenarios.push(self.test_corrupted_file_scenario("completely_corrupted").await?);
+        scenarios.push(
+            self.test_corrupted_file_scenario("completely_corrupted")
+                .await?,
+        );
 
         // Test 2: Partially corrupted header
         scenarios.push(self.test_corrupted_header_scenario().await?);
@@ -318,16 +321,20 @@ impl ErrorHandler {
 
     // Individual scenario implementations
 
-    async fn test_corrupted_file_scenario(&self, scenario_name: &str) -> Result<ErrorScenarioResult> {
+    async fn test_corrupted_file_scenario(
+        &self,
+        scenario_name: &str,
+    ) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create corrupted test data
         let corrupted_data = vec![0xFF; 1000]; // Invalid data
         let test_file = self.create_temp_test_file(&corrupted_data).await?;
-        
+
         // Attempt to process the corrupted file
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -341,14 +348,17 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::CorruptedData, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::CorruptedData,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_corrupted_header_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create file with valid structure but corrupted header
         let mut data = self.create_valid_sstable_data();
         // Corrupt the header (first 32 bytes)
@@ -357,10 +367,11 @@ impl ErrorHandler {
                 data[i] = 0xFF;
             }
         }
-        
+
         let test_file = self.create_temp_test_file(&data).await?;
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -374,14 +385,17 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::CorruptedData, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::CorruptedData,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_corrupted_data_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create file with valid header but corrupted data section
         let mut data = self.create_valid_sstable_data();
         // Corrupt middle section (data area)
@@ -392,10 +406,11 @@ impl ErrorHandler {
                 data[i] = (i % 256) as u8; // Fill with pattern
             }
         }
-        
+
         let test_file = self.create_temp_test_file(&data).await?;
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -409,28 +424,32 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::CorruptedData, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::CorruptedData,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_invalid_checksum_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create file with invalid checksum
         let mut data = self.create_valid_sstable_data();
         // Corrupt checksum area (assume last 4 bytes)
         let len = data.len();
         if len >= 4 {
-            data[len-4] = 0xFF;
-            data[len-3] = 0xFF;
-            data[len-2] = 0xFF;
-            data[len-1] = 0xFF;
+            data[len - 4] = 0xFF;
+            data[len - 3] = 0xFF;
+            data[len - 2] = 0xFF;
+            data[len - 1] = 0xFF;
         }
-        
+
         let test_file = self.create_temp_test_file(&data).await?;
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -444,21 +463,25 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::CorruptedData, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::CorruptedData,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_truncated_file_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create truncated file (cut off halfway)
         let data = self.create_valid_sstable_data();
-        let truncated_data = &data[0..data.len()/2];
-        
+        let truncated_data = &data[0..data.len() / 2];
+
         let test_file = self.create_temp_test_file(truncated_data).await?;
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::CorruptedData)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -472,14 +495,17 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::CorruptedData, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::CorruptedData,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_unsupported_version_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create file with unsupported version
         let mut data = self.create_valid_sstable_data();
         // Change version bytes (assume bytes 4-6 are version)
@@ -487,10 +513,11 @@ impl ErrorHandler {
             data[4] = 0xFF; // Invalid version
             data[5] = 0xFF;
         }
-        
+
         let test_file = self.create_temp_test_file(&data).await?;
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::UnsupportedFormat).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::UnsupportedFormat)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -504,20 +531,24 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::UnsupportedFormat, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::UnsupportedFormat,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_wrong_file_type_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create a text file instead of SSTable
         let data = b"This is not an SSTable file, just plain text content for testing.";
-        
+
         let test_file = self.create_temp_test_file(data).await?;
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::UnsupportedFormat).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::UnsupportedFormat)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -531,14 +562,17 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::UnsupportedFormat, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::UnsupportedFormat,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_invalid_magic_bytes_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create file with invalid magic bytes
         let mut data = self.create_valid_sstable_data();
         // Corrupt magic bytes (first 4 bytes)
@@ -548,10 +582,11 @@ impl ErrorHandler {
             data[2] = 0xBE;
             data[3] = 0xEF;
         }
-        
+
         let test_file = self.create_temp_test_file(&data).await?;
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::UnsupportedFormat).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::UnsupportedFormat)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -565,14 +600,17 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::UnsupportedFormat, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::UnsupportedFormat,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_future_format_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create file with future format version
         let mut data = self.create_valid_sstable_data();
         // Set version to a future version
@@ -580,10 +618,11 @@ impl ErrorHandler {
             data[4] = 99; // Future version
             data[5] = 99;
         }
-        
+
         let test_file = self.create_temp_test_file(&data).await?;
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::UnsupportedFormat).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::UnsupportedFormat)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -597,18 +636,22 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::UnsupportedFormat, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::UnsupportedFormat,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_file_not_found_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Try to process non-existent file
         let non_existent_file = PathBuf::from("/tmp/non_existent_file.sst");
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&non_existent_file, ErrorScenarioType::IoError).await?;
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&non_existent_file, ErrorScenarioType::IoError)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -622,20 +665,23 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::IoError, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::IoError,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_permission_denied_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create file with restricted permissions (simulated)
         let data = self.create_valid_sstable_data();
         let test_file = self.create_temp_test_file(&data).await?;
-        
+
         // Simulate permission denied by trying to access as if permissions were restricted
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
+        let (status, actual_error, recovery_attempted, recovery_successful) =
             self.simulate_permission_denied(&test_file).await?;
 
         let duration = start_time.elapsed();
@@ -650,16 +696,19 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::IoError, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::IoError,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_disk_full_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Simulate disk full error
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
+        let (status, actual_error, recovery_attempted, recovery_successful) =
             self.simulate_disk_full_error().await?;
 
         let duration = start_time.elapsed();
@@ -674,16 +723,19 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::IoError, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::IoError,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_network_unavailable_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Simulate network unavailable error
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
+        let (status, actual_error, recovery_attempted, recovery_successful) =
             self.simulate_network_error().await?;
 
         let duration = start_time.elapsed();
@@ -698,20 +750,24 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::NetworkError, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::NetworkError,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_large_file_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Create very large file to test memory limits
         let large_data = vec![0u8; 10 * 1024 * 1024]; // 10MB
         let test_file = self.create_temp_test_file(&large_data).await?;
-        
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
-            self.attempt_file_processing(&test_file, ErrorScenarioType::MemoryLimit).await?;
+
+        let (status, actual_error, recovery_attempted, recovery_successful) = self
+            .attempt_file_processing(&test_file, ErrorScenarioType::MemoryLimit)
+            .await?;
 
         let duration = start_time.elapsed();
 
@@ -725,16 +781,19 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::MemoryLimit, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::MemoryLimit,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_memory_exhaustion_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Simulate memory exhaustion
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
+        let (status, actual_error, recovery_attempted, recovery_successful) =
             self.simulate_memory_exhaustion().await?;
 
         let duration = start_time.elapsed();
@@ -749,16 +808,19 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::MemoryLimit, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::MemoryLimit,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_operation_timeout_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Simulate operation timeout
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
+        let (status, actual_error, recovery_attempted, recovery_successful) =
             self.simulate_operation_timeout().await?;
 
         let duration = start_time.elapsed();
@@ -773,16 +835,19 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::Timeout, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::Timeout,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
 
     async fn test_network_timeout_scenario(&self) -> Result<ErrorScenarioResult> {
         let start_time = Instant::now();
-        
+
         // Simulate network timeout
-        let (status, actual_error, recovery_attempted, recovery_successful) = 
+        let (status, actual_error, recovery_attempted, recovery_successful) =
             self.simulate_network_timeout().await?;
 
         let duration = start_time.elapsed();
@@ -797,7 +862,10 @@ impl ErrorHandler {
             recovery_successful,
             duration_ms: duration.as_millis() as u64,
             error_message: None,
-            recommendations: self.generate_scenario_recommendations(ErrorScenarioType::Timeout, status == ErrorHandlingStatus::Passed),
+            recommendations: self.generate_scenario_recommendations(
+                ErrorScenarioType::Timeout,
+                status == ErrorHandlingStatus::Passed,
+            ),
             timestamp: chrono::Utc::now(),
         })
     }
@@ -806,9 +874,9 @@ impl ErrorHandler {
 
     /// Attempt to process a file and handle errors
     async fn attempt_file_processing(
-        &self, 
-        file_path: &Path, 
-        expected_error_type: ErrorScenarioType
+        &self,
+        file_path: &Path,
+        expected_error_type: ErrorScenarioType,
     ) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         // Simulate file processing
         match self.simulate_file_processing(file_path).await {
@@ -818,7 +886,7 @@ impl ErrorHandler {
             }
             Err(error) => {
                 let error_message = error.to_string();
-                
+
                 // Check if the error type matches expectations
                 let status = if self.is_expected_error(&error, &expected_error_type) {
                     ErrorHandlingStatus::Passed
@@ -827,10 +895,15 @@ impl ErrorHandler {
                 };
 
                 // Attempt recovery
-                let (recovery_attempted, recovery_successful) = 
+                let (recovery_attempted, recovery_successful) =
                     self.attempt_recovery(&error, &expected_error_type).await?;
 
-                Ok((status, Some(error_message), recovery_attempted, recovery_successful))
+                Ok((
+                    status,
+                    Some(error_message),
+                    recovery_attempted,
+                    recovery_successful,
+                ))
             }
         }
     }
@@ -838,7 +911,8 @@ impl ErrorHandler {
     /// Simulate file processing (would be real processing in actual implementation)
     async fn simulate_file_processing(&self, file_path: &Path) -> Result<()> {
         // Read the file
-        let data = fs::read(file_path).await
+        let data = fs::read(file_path)
+            .await
             .map_err(|e| Error::storage(format!("Failed to read file: {}", e)))?;
 
         // Basic validation
@@ -906,7 +980,9 @@ impl ErrorHandler {
         error_type: &ErrorScenarioType,
     ) -> Result<(bool, bool)> {
         // Find applicable recovery strategies
-        let applicable_strategies: Vec<_> = self.recovery_strategies.iter()
+        let applicable_strategies: Vec<_> = self
+            .recovery_strategies
+            .iter()
             .filter(|s| s.applicable_errors.contains(&error_type))
             .collect();
 
@@ -935,12 +1011,13 @@ impl ErrorHandler {
         // Simulate recovery steps
         for step in &strategy.steps {
             log::debug!("Executing recovery step: {}", step.step_name);
-            
+
             // Simulate step execution with timeout
             let step_result = tokio::time::timeout(
                 Duration::from_millis(step.timeout_ms),
                 self.execute_recovery_step(step),
-            ).await;
+            )
+            .await;
 
             match step_result {
                 Ok(Ok(())) => {
@@ -969,7 +1046,7 @@ impl ErrorHandler {
     async fn execute_recovery_step(&self, step: &RecoveryStep) -> Result<()> {
         // Simulate step execution
         tokio::time::sleep(Duration::from_millis(10)).await;
-        
+
         match step.step_name.as_str() {
             "validate_backup" => {
                 // Simulate backup validation
@@ -995,44 +1072,49 @@ impl ErrorHandler {
     async fn create_temp_test_file(&self, data: &[u8]) -> Result<PathBuf> {
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join(format!("test_error_{}.sst", uuid::Uuid::new_v4()));
-        
-        fs::write(&file_path, data).await
+
+        fs::write(&file_path, data)
+            .await
             .map_err(|e| Error::storage(format!("Failed to create test file: {}", e)))?;
-        
+
         Ok(file_path)
     }
 
     /// Create valid SSTable data for testing
     fn create_valid_sstable_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         // Magic bytes
         data.extend_from_slice(&[0x5A, 0x5A, 0x5A, 0x5A]);
-        
+
         // Version
         data.extend_from_slice(&[0x00, 0x10]); // Version 16
-        
+
         // Header size
         data.extend_from_slice(&32u32.to_be_bytes());
-        
+
         // Padding to make it look like a real SSTable
         data.resize(1024, 0);
-        
+
         // Add some realistic data patterns
         for i in 0..256 {
             data.push(i as u8);
         }
-        
+
         data
     }
 
     /// Simulate permission denied error
-    async fn simulate_permission_denied(&self, _file_path: &Path) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
+    async fn simulate_permission_denied(
+        &self,
+        _file_path: &Path,
+    ) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         // Simulate permission denied scenario
         let error = Error::storage("Permission denied");
-        let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, &ErrorScenarioType::IoError).await?;
-        
+        let (recovery_attempted, recovery_successful) = self
+            .attempt_recovery(&error, &ErrorScenarioType::IoError)
+            .await?;
+
         Ok((
             ErrorHandlingStatus::Passed,
             Some(error.to_string()),
@@ -1042,11 +1124,14 @@ impl ErrorHandler {
     }
 
     /// Simulate disk full error
-    async fn simulate_disk_full_error(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
+    async fn simulate_disk_full_error(
+        &self,
+    ) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::storage("No space left on device");
-        let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, &ErrorScenarioType::IoError).await?;
-        
+        let (recovery_attempted, recovery_successful) = self
+            .attempt_recovery(&error, &ErrorScenarioType::IoError)
+            .await?;
+
         Ok((
             ErrorHandlingStatus::Passed,
             Some(error.to_string()),
@@ -1056,11 +1141,14 @@ impl ErrorHandler {
     }
 
     /// Simulate network error
-    async fn simulate_network_error(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
+    async fn simulate_network_error(
+        &self,
+    ) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::storage("Network unreachable");
-        let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, &ErrorScenarioType::NetworkError).await?;
-        
+        let (recovery_attempted, recovery_successful) = self
+            .attempt_recovery(&error, &ErrorScenarioType::NetworkError)
+            .await?;
+
         Ok((
             ErrorHandlingStatus::Passed,
             Some(error.to_string()),
@@ -1070,11 +1158,14 @@ impl ErrorHandler {
     }
 
     /// Simulate memory exhaustion
-    async fn simulate_memory_exhaustion(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
+    async fn simulate_memory_exhaustion(
+        &self,
+    ) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::memory("Out of memory");
-        let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, &ErrorScenarioType::MemoryLimit).await?;
-        
+        let (recovery_attempted, recovery_successful) = self
+            .attempt_recovery(&error, &ErrorScenarioType::MemoryLimit)
+            .await?;
+
         Ok((
             ErrorHandlingStatus::Passed,
             Some(error.to_string()),
@@ -1084,11 +1175,14 @@ impl ErrorHandler {
     }
 
     /// Simulate operation timeout
-    async fn simulate_operation_timeout(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
+    async fn simulate_operation_timeout(
+        &self,
+    ) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::internal("Operation timed out");
-        let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, &ErrorScenarioType::Timeout).await?;
-        
+        let (recovery_attempted, recovery_successful) = self
+            .attempt_recovery(&error, &ErrorScenarioType::Timeout)
+            .await?;
+
         Ok((
             ErrorHandlingStatus::Passed,
             Some(error.to_string()),
@@ -1098,11 +1192,14 @@ impl ErrorHandler {
     }
 
     /// Simulate network timeout
-    async fn simulate_network_timeout(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
+    async fn simulate_network_timeout(
+        &self,
+    ) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::internal("Network timeout");
-        let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, &ErrorScenarioType::Timeout).await?;
-        
+        let (recovery_attempted, recovery_successful) = self
+            .attempt_recovery(&error, &ErrorScenarioType::Timeout)
+            .await?;
+
         Ok((
             ErrorHandlingStatus::Passed,
             Some(error.to_string()),
@@ -1112,18 +1209,22 @@ impl ErrorHandler {
     }
 
     /// Calculate recovery statistics
-    fn calculate_recovery_statistics(&self, scenarios: &[ErrorScenarioResult]) -> RecoveryStatistics {
+    fn calculate_recovery_statistics(
+        &self,
+        scenarios: &[ErrorScenarioResult],
+    ) -> RecoveryStatistics {
         let total_scenarios = scenarios.len();
         let recovery_attempted = scenarios.iter().filter(|s| s.recovery_attempted).count();
         let recovery_successful = scenarios.iter().filter(|s| s.recovery_successful).count();
-        
+
         let recovery_success_rate = if recovery_attempted > 0 {
             (recovery_successful as f64 / recovery_attempted as f64) * 100.0
         } else {
             0.0
         };
 
-        let total_recovery_time: u64 = scenarios.iter()
+        let total_recovery_time: u64 = scenarios
+            .iter()
             .filter(|s| s.recovery_attempted)
             .map(|s| s.duration_ms)
             .sum();
@@ -1145,11 +1246,20 @@ impl ErrorHandler {
 
     /// Determine overall status
     fn determine_overall_status(&self, scenarios: &[ErrorScenarioResult]) -> ErrorHandlingStatus {
-        if scenarios.iter().any(|s| s.status == ErrorHandlingStatus::Failed) {
+        if scenarios
+            .iter()
+            .any(|s| s.status == ErrorHandlingStatus::Failed)
+        {
             ErrorHandlingStatus::Failed
-        } else if scenarios.iter().any(|s| s.status == ErrorHandlingStatus::Warning) {
+        } else if scenarios
+            .iter()
+            .any(|s| s.status == ErrorHandlingStatus::Warning)
+        {
             ErrorHandlingStatus::Warning
-        } else if scenarios.iter().any(|s| s.status == ErrorHandlingStatus::Error) {
+        } else if scenarios
+            .iter()
+            .any(|s| s.status == ErrorHandlingStatus::Error)
+        {
             ErrorHandlingStatus::Error
         } else {
             ErrorHandlingStatus::Passed
@@ -1157,10 +1267,17 @@ impl ErrorHandler {
     }
 
     /// Generate summary
-    fn generate_summary(&self, scenarios: &[ErrorScenarioResult], stats: &RecoveryStatistics) -> String {
-        let passed = scenarios.iter().filter(|s| s.status == ErrorHandlingStatus::Passed).count();
+    fn generate_summary(
+        &self,
+        scenarios: &[ErrorScenarioResult],
+        stats: &RecoveryStatistics,
+    ) -> String {
+        let passed = scenarios
+            .iter()
+            .filter(|s| s.status == ErrorHandlingStatus::Passed)
+            .count();
         let total = scenarios.len();
-        
+
         format!(
             "Error handling validation completed: {}/{} scenarios passed ({:.1}% success rate). \
              Recovery attempted in {}/{} cases with {:.1}% success rate. \
@@ -1178,8 +1295,9 @@ impl ErrorHandler {
     /// Generate recommendations
     fn generate_recommendations(&self, scenarios: &[ErrorScenarioResult]) -> Vec<String> {
         let mut recommendations = Vec::new();
-        
-        let failed_scenarios: Vec<_> = scenarios.iter()
+
+        let failed_scenarios: Vec<_> = scenarios
+            .iter()
             .filter(|s| s.status == ErrorHandlingStatus::Failed)
             .collect();
 
@@ -1191,35 +1309,43 @@ impl ErrorHandler {
         }
 
         // Check for specific error type patterns
-        let corruption_failures = scenarios.iter()
-            .filter(|s| s.scenario_type == ErrorScenarioType::CorruptedData && s.status == ErrorHandlingStatus::Failed)
+        let corruption_failures = scenarios
+            .iter()
+            .filter(|s| {
+                s.scenario_type == ErrorScenarioType::CorruptedData
+                    && s.status == ErrorHandlingStatus::Failed
+            })
             .count();
 
         if corruption_failures > 0 {
-            recommendations.push(
-                "Improve corruption detection and recovery mechanisms".to_string()
-            );
+            recommendations
+                .push("Improve corruption detection and recovery mechanisms".to_string());
         }
 
-        let io_failures = scenarios.iter()
-            .filter(|s| s.scenario_type == ErrorScenarioType::IoError && s.status == ErrorHandlingStatus::Failed)
+        let io_failures = scenarios
+            .iter()
+            .filter(|s| {
+                s.scenario_type == ErrorScenarioType::IoError
+                    && s.status == ErrorHandlingStatus::Failed
+            })
             .count();
 
         if io_failures > 0 {
             recommendations.push(
-                "Enhance I/O error handling with better retry and fallback strategies".to_string()
+                "Enhance I/O error handling with better retry and fallback strategies".to_string(),
             );
         }
 
         // Check recovery success rate
         let recovery_attempted = scenarios.iter().filter(|s| s.recovery_attempted).count();
         let recovery_successful = scenarios.iter().filter(|s| s.recovery_successful).count();
-        
+
         if recovery_attempted > 0 {
             let success_rate = (recovery_successful as f64 / recovery_attempted as f64) * 100.0;
             if success_rate < 80.0 {
                 recommendations.push(
-                    "Improve recovery strategy effectiveness - current success rate is below 80%".to_string()
+                    "Improve recovery strategy effectiveness - current success rate is below 80%"
+                        .to_string(),
                 );
             }
         }
@@ -1232,44 +1358,60 @@ impl ErrorHandler {
     }
 
     /// Generate scenario-specific recommendations
-    fn generate_scenario_recommendations(&self, scenario_type: ErrorScenarioType, passed: bool) -> Vec<String> {
+    fn generate_scenario_recommendations(
+        &self,
+        scenario_type: ErrorScenarioType,
+        passed: bool,
+    ) -> Vec<String> {
         let mut recommendations = Vec::new();
-        
+
         if !passed {
             match scenario_type {
                 ErrorScenarioType::CorruptedData => {
-                    recommendations.push("Implement robust corruption detection using checksums".to_string());
+                    recommendations
+                        .push("Implement robust corruption detection using checksums".to_string());
                     recommendations.push("Add data validation at read time".to_string());
-                    recommendations.push("Consider implementing repair mechanisms for minor corruption".to_string());
+                    recommendations.push(
+                        "Consider implementing repair mechanisms for minor corruption".to_string(),
+                    );
                 }
                 ErrorScenarioType::UnsupportedFormat => {
                     recommendations.push("Implement clear format version checking".to_string());
-                    recommendations.push("Provide helpful error messages for unsupported formats".to_string());
+                    recommendations
+                        .push("Provide helpful error messages for unsupported formats".to_string());
                     recommendations.push("Consider backward compatibility support".to_string());
                 }
                 ErrorScenarioType::IoError => {
-                    recommendations.push("Implement retry mechanisms with exponential backoff".to_string());
+                    recommendations
+                        .push("Implement retry mechanisms with exponential backoff".to_string());
                     recommendations.push("Add fallback strategies for I/O failures".to_string());
                     recommendations.push("Improve error reporting for I/O issues".to_string());
                 }
                 ErrorScenarioType::MemoryLimit => {
-                    recommendations.push("Implement streaming processing for large files".to_string());
+                    recommendations
+                        .push("Implement streaming processing for large files".to_string());
                     recommendations.push("Add memory usage monitoring and limits".to_string());
-                    recommendations.push("Consider data compression to reduce memory usage".to_string());
+                    recommendations
+                        .push("Consider data compression to reduce memory usage".to_string());
                 }
                 ErrorScenarioType::Timeout => {
                     recommendations.push("Implement configurable timeout values".to_string());
                     recommendations.push("Add progress reporting for long operations".to_string());
-                    recommendations.push("Consider breaking large operations into smaller chunks".to_string());
+                    recommendations
+                        .push("Consider breaking large operations into smaller chunks".to_string());
                 }
                 _ => {
-                    recommendations.push("Review error handling implementation for this scenario".to_string());
+                    recommendations
+                        .push("Review error handling implementation for this scenario".to_string());
                 }
             }
         } else {
-            recommendations.push(format!("{:?} error handling working correctly", scenario_type));
+            recommendations.push(format!(
+                "{:?} error handling working correctly",
+                scenario_type
+            ));
         }
-        
+
         recommendations
     }
 
@@ -1300,7 +1442,10 @@ impl ErrorHandler {
             RecoveryStrategy {
                 name: "I/O Error Recovery".to_string(),
                 description: "Handle I/O related failures".to_string(),
-                applicable_errors: vec![ErrorScenarioType::IoError, ErrorScenarioType::NetworkError],
+                applicable_errors: vec![
+                    ErrorScenarioType::IoError,
+                    ErrorScenarioType::NetworkError,
+                ],
                 steps: vec![
                     RecoveryStep {
                         step_name: "retry_operation".to_string(),
@@ -1399,33 +1544,48 @@ mod tests {
     #[tokio::test]
     async fn test_corruption_detection() {
         let handler = ErrorHandler::new(ErrorHandlingConfig::default()).unwrap();
-        
+
         // Test corrupted file scenario
-        let result = handler.test_corrupted_file_scenario("test_corruption").await;
+        let result = handler
+            .test_corrupted_file_scenario("test_corruption")
+            .await;
         assert!(result.is_ok());
-        
+
         let scenario_result = result.unwrap();
-        assert_eq!(scenario_result.scenario_type, ErrorScenarioType::CorruptedData);
+        assert_eq!(
+            scenario_result.scenario_type,
+            ErrorScenarioType::CorruptedData
+        );
         assert!(scenario_result.duration_ms > 0);
     }
 
     #[tokio::test]
     async fn test_recovery_strategies() {
         let handler = ErrorHandler::new(ErrorHandlingConfig::default()).unwrap();
-        
+
         // Test that recovery strategies are properly initialized
         assert!(!handler.recovery_strategies.is_empty());
-        assert!(handler.recovery_strategies.iter().any(|s| s.name.contains("Corruption")));
-        assert!(handler.recovery_strategies.iter().any(|s| s.name.contains("I/O Error")));
+        assert!(
+            handler
+                .recovery_strategies
+                .iter()
+                .any(|s| s.name.contains("Corruption"))
+        );
+        assert!(
+            handler
+                .recovery_strategies
+                .iter()
+                .any(|s| s.name.contains("I/O Error"))
+        );
     }
 
     #[test]
     fn test_error_type_matching() {
         let handler = ErrorHandler::new(ErrorHandlingConfig::default()).unwrap();
-        
+
         let corruption_error = Error::corruption("Test corruption");
         assert!(handler.is_expected_error(&corruption_error, ErrorScenarioType::CorruptedData));
-        
+
         let io_error = Error::storage("I/O error");
         assert!(handler.is_expected_error(&io_error, ErrorScenarioType::IoError));
     }
@@ -1433,7 +1593,7 @@ mod tests {
     #[test]
     fn test_recovery_statistics() {
         let handler = ErrorHandler::new(ErrorHandlingConfig::default()).unwrap();
-        
+
         let scenarios = vec![
             ErrorScenarioResult {
                 scenario_name: "test1".to_string(),
@@ -1462,7 +1622,7 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             },
         ];
-        
+
         let stats = handler.calculate_recovery_statistics(&scenarios);
         assert_eq!(stats.total_scenarios, 2);
         assert_eq!(stats.recovery_attempted, 2);

@@ -4,11 +4,11 @@
 //! It validates format version compatibility and ensures proper handling across versions.
 
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 /// Format compatibility validator
@@ -74,11 +74,11 @@ impl Default for CompatibilityConfig {
         let mut version_test_data = HashMap::new();
         version_test_data.insert("5.0".to_string(), PathBuf::from("test-data/cassandra-5.0"));
         version_test_data.insert("5.1".to_string(), PathBuf::from("test-data/cassandra-5.1"));
-        
+
         Self {
             enable_version_testing: true,
             enable_backward_compatibility: false, // No backward compatibility needed - only Cassandra 5+
-            enable_forward_compatibility: true,   // Forward compatibility within Cassandra 5.x versions
+            enable_forward_compatibility: true, // Forward compatibility within Cassandra 5.x versions
             min_supported_version: "5.0".to_string(),
             max_supported_version: "5.1".to_string(),
             version_test_data,
@@ -230,9 +230,11 @@ impl FormatCompatibilityValidator {
             results: HashMap::new(),
         })
     }
-    
+
     /// Validate format compatibility
-    pub async fn validate_format_compatibility(&mut self) -> crate::error::Result<FormatCompatibilityResult> {
+    pub async fn validate_format_compatibility(
+        &mut self,
+    ) -> crate::error::Result<FormatCompatibilityResult> {
         let mut result = FormatCompatibilityResult {
             compatibility_score: 0.95, // Placeholder high score
             version_results: HashMap::new(),
@@ -240,28 +242,38 @@ impl FormatCompatibilityValidator {
             recommendations: Vec::new(),
             timestamp: chrono::Utc::now(),
         };
-        
+
         // Add Cassandra 5+ version results
-        result.version_results.insert("5.0".to_string(), VersionCompatibilityResult {
-            version: "5.0".to_string(),
-            compatible: true,
-            score: 0.98,
-            issues: Vec::new(),
-        });
-        
-        result.version_results.insert("5.1".to_string(), VersionCompatibilityResult {
-            version: "5.1".to_string(),
-            compatible: true,
-            score: 0.96,
-            issues: vec!["Minor format differences in collection serialization".to_string()],
-        });
-        
+        result.version_results.insert(
+            "5.0".to_string(),
+            VersionCompatibilityResult {
+                version: "5.0".to_string(),
+                compatible: true,
+                score: 0.98,
+                issues: Vec::new(),
+            },
+        );
+
+        result.version_results.insert(
+            "5.1".to_string(),
+            VersionCompatibilityResult {
+                version: "5.1".to_string(),
+                compatible: true,
+                score: 0.96,
+                issues: vec!["Minor format differences in collection serialization".to_string()],
+            },
+        );
+
         if result.compatibility_score < 0.95 {
-            result.recommendations.push("Address Cassandra 5+ format compatibility issues".to_string());
+            result
+                .recommendations
+                .push("Address Cassandra 5+ format compatibility issues".to_string());
         } else {
-            result.recommendations.push("Format compatibility validation passed for Cassandra 5+".to_string());
+            result
+                .recommendations
+                .push("Format compatibility validation passed for Cassandra 5+".to_string());
         }
-        
+
         Ok(result)
     }
 }
@@ -271,7 +283,7 @@ impl FormatValidator {
     pub fn new(_framework: Arc<super::core::ValidationFramework>) -> crate::error::Result<Self> {
         let config = CompatibilityConfig::default();
         let version_support = Self::create_version_support();
-        
+
         Ok(Self {
             config,
             version_support,
@@ -283,7 +295,7 @@ impl FormatValidator {
     pub async fn validate_compatibility(&self) -> Result<CompatibilityReport> {
         log::info!("Starting comprehensive format compatibility validation");
         let _start_time = Instant::now();
-        
+
         let mut all_checks = Vec::new();
 
         // Test backward compatibility
@@ -324,14 +336,14 @@ impl FormatValidator {
     /// Validate specific format versions
     pub async fn validate_versions(&self, versions: &[String]) -> Result<super::ValidationReport> {
         log::info!("Validating specific format versions: {:?}", versions);
-        
+
         let mut report = super::ValidationReport::new("Format Version Validation");
-        
+
         for version in versions {
             let version_result = self.validate_single_version(version).await?;
             report.add_section(&format!("Version: {}", version), version_result.into());
         }
-        
+
         Ok(report)
     }
 
@@ -346,7 +358,11 @@ impl FormatValidator {
                 let version_checks = self.validate_version_files(version, test_data_path).await?;
                 checks.extend(version_checks);
             } else {
-                log::warn!("Test data path for version {} does not exist: {}", version, test_data_path.display());
+                log::warn!(
+                    "Test data path for version {} does not exist: {}",
+                    version,
+                    test_data_path.display()
+                );
             }
         } else {
             log::warn!("No test data path configured for version {}", version);
@@ -362,7 +378,11 @@ impl FormatValidator {
 
         Ok(CompatibilityReport {
             overall_status,
-            summary: format!("Validated {} compatibility checks for version {}", checks.len(), version),
+            summary: format!(
+                "Validated {} compatibility checks for version {}",
+                checks.len(),
+                version
+            ),
             recommendations: self.generate_version_recommendations(version, &checks),
             migration_recommendations: Vec::new(),
             checks,
@@ -379,11 +399,13 @@ impl FormatValidator {
         // Test each older version
         for version in &self.version_support.supported_versions {
             if self.is_older_version(&version.version, &self.config.max_supported_version) {
-                let backward_check = self.test_version_compatibility(
-                    &version.version,
-                    &self.config.max_supported_version,
-                    CompatibilityType::BackwardCompatibility,
-                ).await?;
+                let backward_check = self
+                    .test_version_compatibility(
+                        &version.version,
+                        &self.config.max_supported_version,
+                        CompatibilityType::BackwardCompatibility,
+                    )
+                    .await?;
                 checks.push(backward_check);
             }
         }
@@ -399,11 +421,13 @@ impl FormatValidator {
         // Test each newer version
         for version in &self.version_support.supported_versions {
             if self.is_newer_version(&version.version, &self.config.min_supported_version) {
-                let forward_check = self.test_version_compatibility(
-                    &self.config.min_supported_version,
-                    &version.version,
-                    CompatibilityType::ForwardCompatibility,
-                ).await?;
+                let forward_check = self
+                    .test_version_compatibility(
+                        &self.config.min_supported_version,
+                        &version.version,
+                        CompatibilityType::ForwardCompatibility,
+                    )
+                    .await?;
                 checks.push(forward_check);
             }
         }
@@ -420,11 +444,13 @@ impl FormatValidator {
         for source_version in &self.version_support.supported_versions {
             for target_version in &self.version_support.supported_versions {
                 if source_version.version != target_version.version {
-                    let cross_check = self.test_version_compatibility(
-                        &source_version.version,
-                        &target_version.version,
-                        CompatibilityType::CrossVersion,
-                    ).await?;
+                    let cross_check = self
+                        .test_version_compatibility(
+                            &source_version.version,
+                            &target_version.version,
+                            CompatibilityType::CrossVersion,
+                        )
+                        .await?;
                     checks.push(cross_check);
                 }
             }
@@ -465,19 +491,23 @@ impl FormatValidator {
         compatibility_type: CompatibilityType,
     ) -> Result<CompatibilityCheck> {
         let start_time = Instant::now();
-        
-        log::debug!("Testing {} compatibility: {} -> {}", 
-                   match compatibility_type {
-                       CompatibilityType::BackwardCompatibility => "backward",
-                       CompatibilityType::ForwardCompatibility => "forward",
-                       CompatibilityType::CrossVersion => "cross-version",
-                       _ => "unknown",
-                   },
-                   source_version, target_version);
+
+        log::debug!(
+            "Testing {} compatibility: {} -> {}",
+            match compatibility_type {
+                CompatibilityType::BackwardCompatibility => "backward",
+                CompatibilityType::ForwardCompatibility => "forward",
+                CompatibilityType::CrossVersion => "cross-version",
+                _ => "unknown",
+            },
+            source_version,
+            target_version
+        );
 
         // Determine compatibility status based on version comparison
-        let (status, details, migration_required) = 
-            self.analyze_version_compatibility(source_version, target_version, &compatibility_type).await?;
+        let (status, details, migration_required) = self
+            .analyze_version_compatibility(source_version, target_version, &compatibility_type)
+            .await?;
 
         let migration_steps = if let Some(migration_type) = &migration_required {
             self.get_migration_steps(source_version, target_version, migration_type)
@@ -489,9 +519,12 @@ impl FormatValidator {
         let duration = start_time.elapsed();
 
         Ok(CompatibilityCheck {
-            check_name: format!("{}_{}_to_{}", 
-                              self.compatibility_type_name(&compatibility_type),
-                              source_version, target_version),
+            check_name: format!(
+                "{}_{}_to_{}",
+                self.compatibility_type_name(&compatibility_type),
+                source_version,
+                target_version
+            ),
             source_version: source_version.to_string(),
             target_version: target_version.to_string(),
             compatibility_type,
@@ -508,23 +541,39 @@ impl FormatValidator {
     /// Test feature compatibility across versions
     async fn test_feature_across_versions(&self, feature: &str) -> Result<CompatibilityCheck> {
         let start_time = Instant::now();
-        
+
         log::debug!("Testing feature '{}' across versions", feature);
 
         // Analyze which versions support this feature
         let supporting_versions = self.get_feature_supporting_versions(feature);
-        
-        let (status, details) = if supporting_versions.len() == self.version_support.supported_versions.len() {
-            (CompatibilityStatus::FullyCompatible, 
-             format!("Feature '{}' is supported across all versions", feature))
+
+        let (status, details) = if supporting_versions.len()
+            == self.version_support.supported_versions.len()
+        {
+            (
+                CompatibilityStatus::FullyCompatible,
+                format!("Feature '{}' is supported across all versions", feature),
+            )
         } else if supporting_versions.len() > self.version_support.supported_versions.len() / 2 {
-            (CompatibilityStatus::PartiallyCompatible,
-             format!("Feature '{}' is supported in {}/{} versions", 
-                    feature, supporting_versions.len(), self.version_support.supported_versions.len()))
+            (
+                CompatibilityStatus::PartiallyCompatible,
+                format!(
+                    "Feature '{}' is supported in {}/{} versions",
+                    feature,
+                    supporting_versions.len(),
+                    self.version_support.supported_versions.len()
+                ),
+            )
         } else {
-            (CompatibilityStatus::IncompatibleRecoverable,
-             format!("Feature '{}' has limited support ({}/{} versions)",
-                    feature, supporting_versions.len(), self.version_support.supported_versions.len()))
+            (
+                CompatibilityStatus::IncompatibleRecoverable,
+                format!(
+                    "Feature '{}' has limited support ({}/{} versions)",
+                    feature,
+                    supporting_versions.len(),
+                    self.version_support.supported_versions.len()
+                ),
+            )
         };
 
         let duration = start_time.elapsed();
@@ -545,16 +594,23 @@ impl FormatValidator {
     }
 
     /// Validate files for a specific version
-    async fn validate_version_files(&self, version: &str, test_data_path: &Path) -> Result<Vec<CompatibilityCheck>> {
+    async fn validate_version_files(
+        &self,
+        version: &str,
+        test_data_path: &Path,
+    ) -> Result<Vec<CompatibilityCheck>> {
         let mut checks = Vec::new();
-        
-        let mut entries = fs::read_dir(test_data_path).await
+
+        let mut entries = fs::read_dir(test_data_path)
+            .await
             .map_err(|e| Error::storage(format!("Failed to read test data directory: {}", e)))?;
 
         let mut file_count = 0;
-        while let Some(entry) = entries.next_entry().await
-            .map_err(|e| Error::storage(format!("Failed to read directory entry: {}", e)))? {
-            
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| Error::storage(format!("Failed to read directory entry: {}", e)))?
+        {
             let path = entry.path();
             if path.is_file() {
                 if let Some(ext) = path.extension() {
@@ -562,7 +618,7 @@ impl FormatValidator {
                         let file_check = self.validate_format_file(version, &path).await?;
                         checks.push(file_check);
                         file_count += 1;
-                        
+
                         // Limit number of files tested to avoid long test times
                         if file_count >= 10 {
                             break;
@@ -576,23 +632,34 @@ impl FormatValidator {
     }
 
     /// Validate a specific format file
-    async fn validate_format_file(&self, version: &str, file_path: &Path) -> Result<CompatibilityCheck> {
+    async fn validate_format_file(
+        &self,
+        version: &str,
+        file_path: &Path,
+    ) -> Result<CompatibilityCheck> {
         let start_time = Instant::now();
         let file_name = file_path.file_name().unwrap().to_string_lossy();
-        
+
         // Attempt to read and validate the file format
         let (status, details) = match self.read_and_validate_file(file_path).await {
-            Ok(validation_result) => {
-                (CompatibilityStatus::FullyCompatible, 
-                 format!("File '{}' validated successfully: {}", file_name, validation_result))
-            }
+            Ok(validation_result) => (
+                CompatibilityStatus::FullyCompatible,
+                format!(
+                    "File '{}' validated successfully: {}",
+                    file_name, validation_result
+                ),
+            ),
             Err(e) => {
                 if self.is_recoverable_format_error(&e) {
-                    (CompatibilityStatus::IncompatibleRecoverable,
-                     format!("File '{}' has recoverable format issues: {}", file_name, e))
+                    (
+                        CompatibilityStatus::IncompatibleRecoverable,
+                        format!("File '{}' has recoverable format issues: {}", file_name, e),
+                    )
                 } else {
-                    (CompatibilityStatus::Incompatible,
-                     format!("File '{}' has incompatible format: {}", file_name, e))
+                    (
+                        CompatibilityStatus::Incompatible,
+                        format!("File '{}' has incompatible format: {}", file_name, e),
+                    )
                 }
             }
         };
@@ -615,9 +682,12 @@ impl FormatValidator {
     }
 
     /// Create synthetic version checks when no test data is available
-    async fn create_synthetic_version_checks(&self, version: &str) -> Result<Vec<CompatibilityCheck>> {
+    async fn create_synthetic_version_checks(
+        &self,
+        version: &str,
+    ) -> Result<Vec<CompatibilityCheck>> {
         let mut checks = Vec::new();
-        
+
         // Create basic compatibility check
         checks.push(CompatibilityCheck {
             check_name: format!("synthetic_{}", version),
@@ -625,7 +695,10 @@ impl FormatValidator {
             target_version: "current".to_string(),
             compatibility_type: CompatibilityType::BackwardCompatibility,
             status: CompatibilityStatus::PartiallyCompatible,
-            details: format!("Synthetic compatibility check for version {} - no test data available", version),
+            details: format!(
+                "Synthetic compatibility check for version {} - no test data available",
+                version
+            ),
             migration_required: Some(MigrationType::Automatic),
             migration_steps: vec!["Version validation".to_string()],
             performance_impact: 1.1,
@@ -652,57 +725,94 @@ impl FormatValidator {
         match (source_info, target_info) {
             (Some(source), Some(target)) => {
                 let version_diff = self.calculate_version_difference(&source, &target);
-                
+
                 match compatibility_type {
                     CompatibilityType::BackwardCompatibility => {
                         if version_diff.major_diff <= 1 && !target.deprecated {
-                            Ok((CompatibilityStatus::FullyCompatible,
-                             format!("Backward compatible: {} -> {}", source_version, target_version),
-                             None))
+                            Ok((
+                                CompatibilityStatus::FullyCompatible,
+                                format!(
+                                    "Backward compatible: {} -> {}",
+                                    source_version, target_version
+                                ),
+                                None,
+                            ))
                         } else if version_diff.major_diff <= 2 {
-                            Ok((CompatibilityStatus::PartiallyCompatible,
-                             format!("Partially backward compatible with migration: {} -> {}", source_version, target_version),
-                             Some(MigrationType::Automatic)))
+                            Ok((
+                                CompatibilityStatus::PartiallyCompatible,
+                                format!(
+                                    "Partially backward compatible with migration: {} -> {}",
+                                    source_version, target_version
+                                ),
+                                Some(MigrationType::Automatic),
+                            ))
                         } else {
-                            Ok((CompatibilityStatus::IncompatibleRecoverable,
-                             format!("Significant version gap, manual migration required: {} -> {}", source_version, target_version),
-                             Some(MigrationType::Manual)))
+                            Ok((
+                                CompatibilityStatus::IncompatibleRecoverable,
+                                format!(
+                                    "Significant version gap, manual migration required: {} -> {}",
+                                    source_version, target_version
+                                ),
+                                Some(MigrationType::Manual),
+                            ))
                         }
                     }
                     CompatibilityType::ForwardCompatibility => {
                         if version_diff.major_diff == 0 {
-                            Ok((CompatibilityStatus::FullyCompatible,
-                             format!("Forward compatible: {} -> {}", source_version, target_version),
-                             None))
+                            Ok((
+                                CompatibilityStatus::FullyCompatible,
+                                format!(
+                                    "Forward compatible: {} -> {}",
+                                    source_version, target_version
+                                ),
+                                None,
+                            ))
                         } else if version_diff.major_diff == 1 {
-                            Ok((CompatibilityStatus::PartiallyCompatible,
-                             format!("Limited forward compatibility: {} -> {}", source_version, target_version),
-                             Some(MigrationType::Automatic)))
+                            Ok((
+                                CompatibilityStatus::PartiallyCompatible,
+                                format!(
+                                    "Limited forward compatibility: {} -> {}",
+                                    source_version, target_version
+                                ),
+                                Some(MigrationType::Automatic),
+                            ))
                         } else {
-                            Ok((CompatibilityStatus::Incompatible,
-                             format!("Forward incompatible: {} -> {}", source_version, target_version),
-                             Some(MigrationType::Impossible)))
+                            Ok((
+                                CompatibilityStatus::Incompatible,
+                                format!(
+                                    "Forward incompatible: {} -> {}",
+                                    source_version, target_version
+                                ),
+                                Some(MigrationType::Impossible),
+                            ))
                         }
                     }
-                    _ => {
-                        Ok((CompatibilityStatus::PartiallyCompatible,
-                         format!("Cross-version compatibility requires validation: {} -> {}", source_version, target_version),
-                         Some(MigrationType::Automatic)))
-                    }
+                    _ => Ok((
+                        CompatibilityStatus::PartiallyCompatible,
+                        format!(
+                            "Cross-version compatibility requires validation: {} -> {}",
+                            source_version, target_version
+                        ),
+                        Some(MigrationType::Automatic),
+                    )),
                 }
             }
-            _ => {
-                Ok((CompatibilityStatus::Unknown,
-                 format!("Unknown version compatibility: {} -> {}", source_version, target_version),
-                 None))
-            }
+            _ => Ok((
+                CompatibilityStatus::Unknown,
+                format!(
+                    "Unknown version compatibility: {} -> {}",
+                    source_version, target_version
+                ),
+                None,
+            )),
         }
     }
 
     /// Read and validate a format file
     async fn read_and_validate_file(&self, file_path: &Path) -> Result<String> {
         // Read file contents
-        let contents = fs::read(file_path).await
+        let contents = fs::read(file_path)
+            .await
             .map_err(|e| Error::storage(format!("Failed to read file: {}", e)))?;
 
         // Basic format validation
@@ -721,9 +831,11 @@ impl FormatValidator {
         // Check if it looks like a valid binary format
         let text_bytes = contents.iter().filter(|&&b| b >= 32 && b <= 126).count();
         let text_ratio = text_bytes as f64 / contents.len() as f64;
-        
+
         if text_ratio > 0.8 {
-            return Err(Error::invalid_format("File appears to be text, not binary SSTable format"));
+            return Err(Error::invalid_format(
+                "File appears to be text, not binary SSTable format",
+            ));
         }
 
         Ok(format!("Binary format detected, {} bytes", contents.len()))
@@ -743,12 +855,18 @@ impl FormatValidator {
 
     /// Get version information
     fn get_version_info(&self, version: &str) -> Option<&FormatVersion> {
-        self.version_support.supported_versions.iter()
+        self.version_support
+            .supported_versions
+            .iter()
             .find(|v| v.version == version)
     }
 
     /// Calculate version difference
-    fn calculate_version_difference(&self, source: &FormatVersion, target: &FormatVersion) -> VersionDifference {
+    fn calculate_version_difference(
+        &self,
+        source: &FormatVersion,
+        target: &FormatVersion,
+    ) -> VersionDifference {
         VersionDifference {
             major_diff: (target.major as i32 - source.major as i32).abs(),
             minor_diff: (target.minor as i32 - source.minor as i32).abs(),
@@ -758,9 +876,13 @@ impl FormatValidator {
 
     /// Check if version A is older than version B
     fn is_older_version(&self, version_a: &str, version_b: &str) -> bool {
-        if let (Some(a), Some(b)) = (self.get_version_info(version_a), self.get_version_info(version_b)) {
-            a.major < b.major || (a.major == b.major && a.minor < b.minor) || 
-            (a.major == b.major && a.minor == b.minor && a.patch < b.patch)
+        if let (Some(a), Some(b)) = (
+            self.get_version_info(version_a),
+            self.get_version_info(version_b),
+        ) {
+            a.major < b.major
+                || (a.major == b.major && a.minor < b.minor)
+                || (a.major == b.major && a.minor == b.minor && a.patch < b.patch)
         } else {
             false
         }
@@ -773,22 +895,36 @@ impl FormatValidator {
 
     /// Get versions that support a specific feature
     fn get_feature_supporting_versions(&self, feature: &str) -> Vec<String> {
-        self.version_support.supported_versions.iter()
+        self.version_support
+            .supported_versions
+            .iter()
             .filter(|v| v.features.contains(&feature.to_string()))
             .map(|v| v.version.clone())
             .collect()
     }
 
     /// Get migration steps for version transition
-    fn get_migration_steps(&self, source_version: &str, target_version: &str, migration_type: &MigrationType) -> Vec<String> {
+    fn get_migration_steps(
+        &self,
+        source_version: &str,
+        target_version: &str,
+        migration_type: &MigrationType,
+    ) -> Vec<String> {
         let migration_key = format!("{}_{}", source_version, target_version);
-        
-        if let Some(strategy) = self.version_support.migration_strategies.get(&migration_key) {
+
+        if let Some(strategy) = self
+            .version_support
+            .migration_strategies
+            .get(&migration_key)
+        {
             strategy.steps.iter().map(|s| s.step_name.clone()).collect()
         } else {
             match migration_type {
                 MigrationType::Automatic => vec!["Automatic format conversion".to_string()],
-                MigrationType::Manual => vec!["Manual format validation".to_string(), "Data migration".to_string()],
+                MigrationType::Manual => vec![
+                    "Manual format validation".to_string(),
+                    "Data migration".to_string(),
+                ],
                 MigrationType::Impossible => vec!["Migration not supported".to_string()],
                 MigrationType::None => vec![],
             }
@@ -802,11 +938,18 @@ impl FormatValidator {
         }
 
         let migration_key = format!("{}_{}", source_version, target_version);
-        if let Some(strategy) = self.version_support.migration_strategies.get(&migration_key) {
+        if let Some(strategy) = self
+            .version_support
+            .migration_strategies
+            .get(&migration_key)
+        {
             strategy.estimated_time_factor
         } else {
             // Estimate based on version difference
-            if let (Some(source), Some(target)) = (self.get_version_info(source_version), self.get_version_info(target_version)) {
+            if let (Some(source), Some(target)) = (
+                self.get_version_info(source_version),
+                self.get_version_info(target_version),
+            ) {
                 let major_diff = (target.major as i32 - source.major as i32).abs();
                 1.0 + (major_diff as f64 * 0.2) // 20% penalty per major version
             } else {
@@ -816,26 +959,46 @@ impl FormatValidator {
     }
 
     /// Build compatibility matrix
-    fn build_compatibility_matrix(&self, checks: &[CompatibilityCheck]) -> HashMap<String, HashMap<String, CompatibilityStatus>> {
+    fn build_compatibility_matrix(
+        &self,
+        checks: &[CompatibilityCheck],
+    ) -> HashMap<String, HashMap<String, CompatibilityStatus>> {
         let mut matrix = HashMap::new();
-        
+
         for check in checks {
-            let source_entry = matrix.entry(check.source_version.clone()).or_insert_with(HashMap::new);
+            let source_entry = matrix
+                .entry(check.source_version.clone())
+                .or_insert_with(HashMap::new);
             source_entry.insert(check.target_version.clone(), check.status.clone());
         }
-        
+
         matrix
     }
 
     /// Determine overall compatibility status
-    fn determine_overall_compatibility(&self, checks: &[CompatibilityCheck]) -> CompatibilityStatus {
-        if checks.iter().any(|c| c.status == CompatibilityStatus::Incompatible) {
+    fn determine_overall_compatibility(
+        &self,
+        checks: &[CompatibilityCheck],
+    ) -> CompatibilityStatus {
+        if checks
+            .iter()
+            .any(|c| c.status == CompatibilityStatus::Incompatible)
+        {
             CompatibilityStatus::Incompatible
-        } else if checks.iter().any(|c| c.status == CompatibilityStatus::IncompatibleRecoverable) {
+        } else if checks
+            .iter()
+            .any(|c| c.status == CompatibilityStatus::IncompatibleRecoverable)
+        {
             CompatibilityStatus::IncompatibleRecoverable
-        } else if checks.iter().any(|c| c.status == CompatibilityStatus::PartiallyCompatible) {
+        } else if checks
+            .iter()
+            .any(|c| c.status == CompatibilityStatus::PartiallyCompatible)
+        {
             CompatibilityStatus::PartiallyCompatible
-        } else if checks.iter().any(|c| c.status == CompatibilityStatus::Unknown) {
+        } else if checks
+            .iter()
+            .any(|c| c.status == CompatibilityStatus::Unknown)
+        {
             CompatibilityStatus::Unknown
         } else {
             CompatibilityStatus::FullyCompatible
@@ -845,9 +1008,18 @@ impl FormatValidator {
     /// Generate summary
     fn generate_summary(&self, checks: &[CompatibilityCheck]) -> String {
         let total = checks.len();
-        let fully_compatible = checks.iter().filter(|c| c.status == CompatibilityStatus::FullyCompatible).count();
-        let partially_compatible = checks.iter().filter(|c| c.status == CompatibilityStatus::PartiallyCompatible).count();
-        let incompatible = checks.iter().filter(|c| c.status == CompatibilityStatus::Incompatible).count();
+        let fully_compatible = checks
+            .iter()
+            .filter(|c| c.status == CompatibilityStatus::FullyCompatible)
+            .count();
+        let partially_compatible = checks
+            .iter()
+            .filter(|c| c.status == CompatibilityStatus::PartiallyCompatible)
+            .count();
+        let incompatible = checks
+            .iter()
+            .filter(|c| c.status == CompatibilityStatus::Incompatible)
+            .count();
 
         format!(
             "Format compatibility validation completed: {}/{} fully compatible ({:.1}% success rate). \
@@ -865,8 +1037,11 @@ impl FormatValidator {
     /// Generate recommendations
     fn generate_recommendations(&self, checks: &[CompatibilityCheck]) -> Vec<String> {
         let mut recommendations = Vec::new();
-        
-        let incompatible_count = checks.iter().filter(|c| c.status == CompatibilityStatus::Incompatible).count();
+
+        let incompatible_count = checks
+            .iter()
+            .filter(|c| c.status == CompatibilityStatus::Incompatible)
+            .count();
         if incompatible_count > 0 {
             recommendations.push(format!(
                 "Address {} incompatible format combinations to improve compatibility",
@@ -874,7 +1049,10 @@ impl FormatValidator {
             ));
         }
 
-        let recoverable_count = checks.iter().filter(|c| c.status == CompatibilityStatus::IncompatibleRecoverable).count();
+        let recoverable_count = checks
+            .iter()
+            .filter(|c| c.status == CompatibilityStatus::IncompatibleRecoverable)
+            .count();
         if recoverable_count > 0 {
             recommendations.push(format!(
                 "Implement migration strategies for {} recoverable incompatibilities",
@@ -883,25 +1061,31 @@ impl FormatValidator {
         }
 
         // Check for version-specific issues
-        let old_version_issues = checks.iter()
-            .filter(|c| c.compatibility_type == CompatibilityType::BackwardCompatibility && 
-                       c.status != CompatibilityStatus::FullyCompatible)
+        let old_version_issues = checks
+            .iter()
+            .filter(|c| {
+                c.compatibility_type == CompatibilityType::BackwardCompatibility
+                    && c.status != CompatibilityStatus::FullyCompatible
+            })
             .count();
 
         if old_version_issues > 0 {
             recommendations.push(
-                "Improve backward compatibility support for legacy format versions".to_string()
+                "Improve backward compatibility support for legacy format versions".to_string(),
             );
         }
 
-        let new_version_issues = checks.iter()
-            .filter(|c| c.compatibility_type == CompatibilityType::ForwardCompatibility && 
-                       c.status != CompatibilityStatus::FullyCompatible)
+        let new_version_issues = checks
+            .iter()
+            .filter(|c| {
+                c.compatibility_type == CompatibilityType::ForwardCompatibility
+                    && c.status != CompatibilityStatus::FullyCompatible
+            })
             .count();
 
         if new_version_issues > 0 {
             recommendations.push(
-                "Enhance forward compatibility handling for newer format versions".to_string()
+                "Enhance forward compatibility handling for newer format versions".to_string(),
             );
         }
 
@@ -913,12 +1097,19 @@ impl FormatValidator {
     }
 
     /// Generate version-specific recommendations
-    fn generate_version_recommendations(&self, version: &str, checks: &[CompatibilityCheck]) -> Vec<String> {
+    fn generate_version_recommendations(
+        &self,
+        version: &str,
+        checks: &[CompatibilityCheck],
+    ) -> Vec<String> {
         let mut recommendations = Vec::new();
-        
-        let failed_checks: Vec<_> = checks.iter()
-            .filter(|c| c.status == CompatibilityStatus::Incompatible || 
-                       c.status == CompatibilityStatus::IncompatibleRecoverable)
+
+        let failed_checks: Vec<_> = checks
+            .iter()
+            .filter(|c| {
+                c.status == CompatibilityStatus::Incompatible
+                    || c.status == CompatibilityStatus::IncompatibleRecoverable
+            })
             .collect();
 
         if !failed_checks.is_empty() {
@@ -947,16 +1138,22 @@ impl FormatValidator {
                 }
             }
         } else {
-            recommendations.push(format!("Version {} compatibility validation passed", version));
+            recommendations.push(format!(
+                "Version {} compatibility validation passed",
+                version
+            ));
         }
 
         recommendations
     }
 
     /// Generate migration recommendations
-    fn generate_migration_recommendations(&self, checks: &[CompatibilityCheck]) -> Vec<MigrationRecommendation> {
+    fn generate_migration_recommendations(
+        &self,
+        checks: &[CompatibilityCheck],
+    ) -> Vec<MigrationRecommendation> {
         let mut recommendations = Vec::new();
-        
+
         // Find version pairs that need migration
         for check in checks {
             if let Some(migration_type) = &check.migration_required {
@@ -1026,13 +1223,17 @@ impl FormatValidator {
                 major: 5,
                 minor: 0,
                 patch: 0,
-                release_date: Some(chrono::DateTime::parse_from_rfc3339("2023-03-30T00:00:00Z").unwrap().with_timezone(&chrono::Utc)),
+                release_date: Some(
+                    chrono::DateTime::parse_from_rfc3339("2023-03-30T00:00:00Z")
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                ),
                 deprecated: false,
                 end_of_life: None,
                 features: vec![
                     "all_cql_types".to_string(),
-                    "collections".to_string(), 
-                    "user_defined_types".to_string(), 
+                    "collections".to_string(),
+                    "user_defined_types".to_string(),
                     "tuples".to_string(),
                     "vectors".to_string(),
                     "lz4_compression".to_string(),
@@ -1041,20 +1242,27 @@ impl FormatValidator {
                     "enhanced_statistics".to_string(),
                     "zero_copy_deserialization".to_string(),
                 ],
-                breaking_changes: vec!["New SSTable format".to_string(), "Enhanced index format".to_string()],
+                breaking_changes: vec![
+                    "New SSTable format".to_string(),
+                    "Enhanced index format".to_string(),
+                ],
             },
             FormatVersion {
                 version: "5.1".to_string(),
                 major: 5,
                 minor: 1,
                 patch: 0,
-                release_date: Some(chrono::DateTime::parse_from_rfc3339("2024-01-15T00:00:00Z").unwrap().with_timezone(&chrono::Utc)),
+                release_date: Some(
+                    chrono::DateTime::parse_from_rfc3339("2024-01-15T00:00:00Z")
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                ),
                 deprecated: false,
                 end_of_life: None,
                 features: vec![
                     "all_cql_types".to_string(),
-                    "collections".to_string(), 
-                    "user_defined_types".to_string(), 
+                    "collections".to_string(),
+                    "user_defined_types".to_string(),
                     "tuples".to_string(),
                     "vectors".to_string(),
                     "vector_search".to_string(),
@@ -1070,31 +1278,40 @@ impl FormatValidator {
         ];
 
         let mut compatibility_matrix = HashMap::new();
-        compatibility_matrix.insert("5.0".to_string(), vec!["5.0".to_string(), "5.1".to_string()]);
-        compatibility_matrix.insert("5.1".to_string(), vec!["5.0".to_string(), "5.1".to_string()]);
+        compatibility_matrix.insert(
+            "5.0".to_string(),
+            vec!["5.0".to_string(), "5.1".to_string()],
+        );
+        compatibility_matrix.insert(
+            "5.1".to_string(),
+            vec!["5.0".to_string(), "5.1".to_string()],
+        );
 
         let mut migration_strategies = HashMap::new();
-        migration_strategies.insert("5.0_5.1".to_string(), MigrationStrategy {
-            from_version: "5.0".to_string(),
-            to_version: "5.1".to_string(),
-            migration_type: MigrationType::Automatic,
-            steps: vec![
-                MigrationStep {
-                    step_name: "vector_format_upgrade".to_string(),
-                    description: "Upgrade vector search format".to_string(),
-                    required: false,
-                    estimated_duration_ms: 1000,
-                },
-                MigrationStep {
-                    step_name: "bloom_filter_optimization".to_string(),
-                    description: "Optimize bloom filter format".to_string(),
-                    required: false,
-                    estimated_duration_ms: 500,
-                },
-            ],
-            rollback_possible: true,
-            estimated_time_factor: 1.05, // Minimal impact within Cassandra 5.x
-        });
+        migration_strategies.insert(
+            "5.0_5.1".to_string(),
+            MigrationStrategy {
+                from_version: "5.0".to_string(),
+                to_version: "5.1".to_string(),
+                migration_type: MigrationType::Automatic,
+                steps: vec![
+                    MigrationStep {
+                        step_name: "vector_format_upgrade".to_string(),
+                        description: "Upgrade vector search format".to_string(),
+                        required: false,
+                        estimated_duration_ms: 1000,
+                    },
+                    MigrationStep {
+                        step_name: "bloom_filter_optimization".to_string(),
+                        description: "Optimize bloom filter format".to_string(),
+                        required: false,
+                        estimated_duration_ms: 500,
+                    },
+                ],
+                rollback_possible: true,
+                estimated_time_factor: 1.05, // Minimal impact within Cassandra 5.x
+            },
+        );
 
         VersionSupport {
             supported_versions,
@@ -1118,10 +1335,18 @@ impl From<CompatibilityReport> for super::reports::ValidationSection {
         super::reports::ValidationSection {
             name: "Format Compatibility".to_string(),
             status: match report.overall_status {
-                CompatibilityStatus::FullyCompatible => super::reports::ValidationSectionStatus::Passed,
-                CompatibilityStatus::PartiallyCompatible => super::reports::ValidationSectionStatus::Warning,
-                CompatibilityStatus::IncompatibleRecoverable => super::reports::ValidationSectionStatus::Warning,
-                CompatibilityStatus::Incompatible => super::reports::ValidationSectionStatus::Failed,
+                CompatibilityStatus::FullyCompatible => {
+                    super::reports::ValidationSectionStatus::Passed
+                }
+                CompatibilityStatus::PartiallyCompatible => {
+                    super::reports::ValidationSectionStatus::Warning
+                }
+                CompatibilityStatus::IncompatibleRecoverable => {
+                    super::reports::ValidationSectionStatus::Warning
+                }
+                CompatibilityStatus::Incompatible => {
+                    super::reports::ValidationSectionStatus::Failed
+                }
                 CompatibilityStatus::Unknown => super::reports::ValidationSectionStatus::Error,
             },
             details: report.summary,
@@ -1138,7 +1363,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_format_validator_creation() {
-        use crate::validation::{ValidationFramework, ValidationConfig};
+        use crate::validation::{ValidationConfig, ValidationFramework};
         let framework = Arc::new(ValidationFramework::new(ValidationConfig::default()).unwrap());
         let validator = FormatValidator::new(framework);
         assert!(validator.is_ok());
@@ -1146,9 +1371,12 @@ mod tests {
 
     #[test]
     fn test_version_comparison() {
-        use crate::validation::{ValidationFramework, ValidationConfig};
-        let validator = FormatValidator::new(Arc::new(ValidationFramework::new(ValidationConfig::default()).unwrap())).unwrap();
-        
+        use crate::validation::{ValidationConfig, ValidationFramework};
+        let validator = FormatValidator::new(Arc::new(
+            ValidationFramework::new(ValidationConfig::default()).unwrap(),
+        ))
+        .unwrap();
+
         assert!(validator.is_older_version("5.0", "5.1"));
         assert!(validator.is_newer_version("5.1", "5.0"));
         assert!(!validator.is_older_version("5.0", "5.0"));
@@ -1157,43 +1385,55 @@ mod tests {
     #[test]
     fn test_version_support_creation() {
         let version_support = FormatValidator::create_version_support();
-        
+
         assert!(!version_support.supported_versions.is_empty());
         assert!(!version_support.migration_strategies.is_empty());
-        
+
         // Check that only Cassandra 5.x versions are supported
-        let v5_0 = version_support.supported_versions.iter().find(|v| v.version == "5.0");
+        let v5_0 = version_support
+            .supported_versions
+            .iter()
+            .find(|v| v.version == "5.0");
         assert!(v5_0.is_some());
         assert!(!v5_0.unwrap().deprecated);
-        
-        let v5_1 = version_support.supported_versions.iter().find(|v| v.version == "5.1");
+
+        let v5_1 = version_support
+            .supported_versions
+            .iter()
+            .find(|v| v.version == "5.1");
         assert!(v5_1.is_some());
         assert!(!v5_1.unwrap().deprecated);
-        
+
         // Ensure no legacy versions are supported
-        assert!(version_support.supported_versions.iter().all(|v| v.major >= 5));
+        assert!(
+            version_support
+                .supported_versions
+                .iter()
+                .all(|v| v.major >= 5)
+        );
     }
 
     #[test]
     fn test_compatibility_matrix() {
-        let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
-        
-        let checks = vec![
-            CompatibilityCheck {
-                check_name: "test".to_string(),
-                source_version: "5.0".to_string(),
-                target_version: "5.1".to_string(),
-                compatibility_type: CompatibilityType::ForwardCompatibility,
-                status: CompatibilityStatus::FullyCompatible,
-                details: "Test".to_string(),
-                migration_required: None,
-                migration_steps: Vec::new(),
-                performance_impact: 1.0,
-                duration_ms: 100,
-                timestamp: chrono::Utc::now(),
-            },
-        ];
-        
+        let validator = FormatValidator::new(Arc::new(
+            super::ValidationFramework::new(super::ValidationConfig::default()).unwrap(),
+        ))
+        .unwrap();
+
+        let checks = vec![CompatibilityCheck {
+            check_name: "test".to_string(),
+            source_version: "5.0".to_string(),
+            target_version: "5.1".to_string(),
+            compatibility_type: CompatibilityType::ForwardCompatibility,
+            status: CompatibilityStatus::FullyCompatible,
+            details: "Test".to_string(),
+            migration_required: None,
+            migration_steps: Vec::new(),
+            performance_impact: 1.0,
+            duration_ms: 100,
+            timestamp: chrono::Utc::now(),
+        }];
+
         let matrix = validator.build_compatibility_matrix(&checks);
         assert!(matrix.contains_key("5.0"));
         assert!(matrix["5.0"].contains_key("5.1"));
@@ -1201,24 +1441,25 @@ mod tests {
 
     #[test]
     fn test_migration_recommendations() {
-        let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
-        
-        let checks = vec![
-            CompatibilityCheck {
-                check_name: "test".to_string(),
-                source_version: "5.0".to_string(),
-                target_version: "5.1".to_string(),
-                compatibility_type: CompatibilityType::ForwardCompatibility,
-                status: CompatibilityStatus::PartiallyCompatible,
-                details: "Test".to_string(),
-                migration_required: Some(MigrationType::Automatic),
-                migration_steps: Vec::new(),
-                performance_impact: 1.0,
-                duration_ms: 100,
-                timestamp: chrono::Utc::now(),
-            },
-        ];
-        
+        let validator = FormatValidator::new(Arc::new(
+            super::ValidationFramework::new(super::ValidationConfig::default()).unwrap(),
+        ))
+        .unwrap();
+
+        let checks = vec![CompatibilityCheck {
+            check_name: "test".to_string(),
+            source_version: "5.0".to_string(),
+            target_version: "5.1".to_string(),
+            compatibility_type: CompatibilityType::ForwardCompatibility,
+            status: CompatibilityStatus::PartiallyCompatible,
+            details: "Test".to_string(),
+            migration_required: Some(MigrationType::Automatic),
+            migration_steps: Vec::new(),
+            performance_impact: 1.0,
+            duration_ms: 100,
+            timestamp: chrono::Utc::now(),
+        }];
+
         let recommendations = validator.generate_migration_recommendations(&checks);
         assert!(!recommendations.is_empty());
         assert_eq!(recommendations[0].urgency, RecommendationUrgency::Medium);

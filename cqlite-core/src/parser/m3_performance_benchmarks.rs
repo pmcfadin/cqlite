@@ -66,10 +66,10 @@ pub struct M3BenchmarkResult {
 impl Default for PerformanceTargets {
     fn default() -> Self {
         Self {
-            max_complex_slowdown_ratio: 2.0,     // <2x slower than primitives
-            max_memory_increase_ratio: 1.5,      // <1.5x memory usage
-            min_complex_throughput_mbs: 100.0,   // >100 MB/s throughput  
-            max_additional_latency_ms: 10.0,     // <10ms additional latency
+            max_complex_slowdown_ratio: 2.0,   // <2x slower than primitives
+            max_memory_increase_ratio: 1.5,    // <1.5x memory usage
+            min_complex_throughput_mbs: 100.0, // >100 MB/s throughput
+            max_additional_latency_ms: 10.0,   // <10ms additional latency
         }
     }
 }
@@ -94,10 +94,22 @@ impl M3PerformanceBenchmarks {
     pub fn run_m3_validation(&mut self) -> Result<()> {
         println!("🚀 Running M3 Complex Type Performance Validation...");
         println!("📊 Performance Targets:");
-        println!("   - Complex type slowdown: <{:.1}x", self.targets.max_complex_slowdown_ratio);
-        println!("   - Memory increase: <{:.1}x", self.targets.max_memory_increase_ratio);
-        println!("   - Throughput: >{:.1} MB/s", self.targets.min_complex_throughput_mbs);
-        println!("   - Additional latency: <{:.1} ms", self.targets.max_additional_latency_ms);
+        println!(
+            "   - Complex type slowdown: <{:.1}x",
+            self.targets.max_complex_slowdown_ratio
+        );
+        println!(
+            "   - Memory increase: <{:.1}x",
+            self.targets.max_memory_increase_ratio
+        );
+        println!(
+            "   - Throughput: >{:.1} MB/s",
+            self.targets.min_complex_throughput_mbs
+        );
+        println!(
+            "   - Additional latency: <{:.1} ms",
+            self.targets.max_additional_latency_ms
+        );
         println!();
 
         // Run all benchmark categories
@@ -141,10 +153,16 @@ impl M3PerformanceBenchmarks {
             additional_metrics: HashMap::new(),
         };
 
-        println!("   ✅ Primitive list: {:.2} MB/s", result.primitive_baseline_mbs);
-        println!("   🔄 Complex list: {:.2} MB/s ({:.2}x)", result.complex_performance_mbs, result.performance_ratio);
+        println!(
+            "   ✅ Primitive list: {:.2} MB/s",
+            result.primitive_baseline_mbs
+        );
+        println!(
+            "   🔄 Complex list: {:.2} MB/s ({:.2}x)",
+            result.complex_performance_mbs, result.performance_ratio
+        );
         println!("   📊 Memory ratio: {:.2}x", result.memory_ratio);
-        
+
         self.results.push(result);
         Ok(())
     }
@@ -175,8 +193,14 @@ impl M3PerformanceBenchmarks {
             additional_metrics: HashMap::new(),
         };
 
-        println!("   ✅ Primitive map: {:.2} MB/s", result.primitive_baseline_mbs);
-        println!("   🔄 Complex map: {:.2} MB/s ({:.2}x)", result.complex_performance_mbs, result.performance_ratio);
+        println!(
+            "   ✅ Primitive map: {:.2} MB/s",
+            result.primitive_baseline_mbs
+        );
+        println!(
+            "   🔄 Complex map: {:.2} MB/s ({:.2}x)",
+            result.complex_performance_mbs, result.performance_ratio
+        );
         println!("   📊 Memory ratio: {:.2}x", result.memory_ratio);
 
         self.results.push(result);
@@ -207,8 +231,14 @@ impl M3PerformanceBenchmarks {
             additional_metrics: HashMap::new(),
         };
 
-        println!("   ✅ Primitive set: {:.2} MB/s", result.primitive_baseline_mbs);
-        println!("   🔄 Complex set: {:.2} MB/s ({:.2}x)", result.complex_performance_mbs, result.performance_ratio);
+        println!(
+            "   ✅ Primitive set: {:.2} MB/s",
+            result.primitive_baseline_mbs
+        );
+        println!(
+            "   🔄 Complex set: {:.2} MB/s ({:.2}x)",
+            result.complex_performance_mbs, result.performance_ratio
+        );
 
         self.results.push(result);
         Ok(())
@@ -238,8 +268,14 @@ impl M3PerformanceBenchmarks {
             additional_metrics: HashMap::new(),
         };
 
-        println!("   ✅ Simple tuple: {:.2} MB/s", result.primitive_baseline_mbs);
-        println!("   🔄 Complex tuple: {:.2} MB/s ({:.2}x)", result.complex_performance_mbs, result.performance_ratio);
+        println!(
+            "   ✅ Simple tuple: {:.2} MB/s",
+            result.primitive_baseline_mbs
+        );
+        println!(
+            "   🔄 Complex tuple: {:.2} MB/s ({:.2}x)",
+            result.complex_performance_mbs, result.performance_ratio
+        );
 
         self.results.push(result);
         Ok(())
@@ -269,8 +305,14 @@ impl M3PerformanceBenchmarks {
             additional_metrics: HashMap::new(),
         };
 
-        println!("   ✅ Simple UDT: {:.2} MB/s", result.primitive_baseline_mbs);
-        println!("   🔄 Complex UDT: {:.2} MB/s ({:.2}x)", result.complex_performance_mbs, result.performance_ratio);
+        println!(
+            "   ✅ Simple UDT: {:.2} MB/s",
+            result.primitive_baseline_mbs
+        );
+        println!(
+            "   🔄 Complex UDT: {:.2} MB/s ({:.2}x)",
+            result.complex_performance_mbs, result.performance_ratio
+        );
 
         self.results.push(result);
         Ok(())
@@ -300,8 +342,14 @@ impl M3PerformanceBenchmarks {
             additional_metrics: HashMap::new(),
         };
 
-        println!("   ✅ Simple data: {:.2} MB/s", result.primitive_baseline_mbs);
-        println!("   🔄 Deeply nested: {:.2} MB/s ({:.2}x)", result.complex_performance_mbs, result.performance_ratio);
+        println!(
+            "   ✅ Simple data: {:.2} MB/s",
+            result.primitive_baseline_mbs
+        );
+        println!(
+            "   🔄 Deeply nested: {:.2} MB/s ({:.2}x)",
+            result.complex_performance_mbs, result.performance_ratio
+        );
 
         self.results.push(result);
         Ok(())
@@ -328,7 +376,10 @@ impl M3PerformanceBenchmarks {
         let latency_data = self.generate_latency_test_data();
         let latency_result = self.benchmark_query_latency(&latency_data)?;
 
-        println!("   ⚡ Average query latency: {:.2} ms", latency_result.latency_microseconds / 1000.0);
+        println!(
+            "   ⚡ Average query latency: {:.2} ms",
+            latency_result.latency_microseconds / 1000.0
+        );
 
         let result = M3BenchmarkResult {
             name: "latency_impact".to_string(),
@@ -340,7 +391,8 @@ impl M3PerformanceBenchmarks {
             memory_complex_bytes: 0,
             memory_ratio: 1.0,
             latency_microseconds: latency_result.latency_microseconds,
-            meets_targets: latency_result.latency_microseconds / 1000.0 <= self.targets.max_additional_latency_ms,
+            meets_targets: latency_result.latency_microseconds / 1000.0
+                <= self.targets.max_additional_latency_ms,
             additional_metrics: HashMap::new(),
         };
 
@@ -353,7 +405,7 @@ impl M3PerformanceBenchmarks {
         println!("⚡ Benchmarking SIMD Effectiveness...");
 
         let simd_data = self.generate_simd_test_data();
-        
+
         // Test with SIMD enabled
         let optimized_parser = OptimizedComplexTypeParser::new();
         let simd_perf = self.benchmark_simd_parsing(&simd_data, &optimized_parser)?;
@@ -366,8 +418,13 @@ impl M3PerformanceBenchmarks {
 
         let mut additional_metrics = HashMap::new();
         additional_metrics.insert("simd_speedup".to_string(), simd_speedup);
-        additional_metrics.insert("simd_operations".to_string(), 
-            optimized_parser.get_metrics().simd_operations.load(std::sync::atomic::Ordering::Relaxed) as f64);
+        additional_metrics.insert(
+            "simd_operations".to_string(),
+            optimized_parser
+                .get_metrics()
+                .simd_operations
+                .load(std::sync::atomic::Ordering::Relaxed) as f64,
+        );
 
         let result = M3BenchmarkResult {
             name: "simd_effectiveness".to_string(),
@@ -403,8 +460,14 @@ impl M3PerformanceBenchmarks {
         let social_data = self.generate_social_scenario_data();
         let social_perf = self.benchmark_scenario(&social_data, "social_media")?;
 
-        println!("   🛒 E-commerce: {:.2} MB/s", ecommerce_perf.throughput_mbs);
-        println!("   📈 Time series: {:.2} MB/s", timeseries_perf.throughput_mbs);
+        println!(
+            "   🛒 E-commerce: {:.2} MB/s",
+            ecommerce_perf.throughput_mbs
+        );
+        println!(
+            "   📈 Time series: {:.2} MB/s",
+            timeseries_perf.throughput_mbs
+        );
         println!("   📱 Social media: {:.2} MB/s", social_perf.throughput_mbs);
 
         Ok(())
@@ -422,46 +485,88 @@ impl M3PerformanceBenchmarks {
 
         report.push_str(&format!("## Executive Summary\n"));
         report.push_str(&format!("- **Total Tests**: {}\n", total_tests));
-        report.push_str(&format!("- **Passed**: {} ({:.1}%)\n", passed_tests, pass_rate));
+        report.push_str(&format!(
+            "- **Passed**: {} ({:.1}%)\n",
+            passed_tests, pass_rate
+        ));
         report.push_str(&format!("- **Failed**: {}\n", total_tests - passed_tests));
         report.push_str(&format!("\n### Performance Targets\n"));
-        report.push_str(&format!("- Complex type slowdown: <{:.1}x ✅\n", self.targets.max_complex_slowdown_ratio));
-        report.push_str(&format!("- Memory increase: <{:.1}x ✅\n", self.targets.max_memory_increase_ratio));
-        report.push_str(&format!("- Throughput: >{:.1} MB/s ✅\n", self.targets.min_complex_throughput_mbs));
-        report.push_str(&format!("- Additional latency: <{:.1} ms ✅\n\n", self.targets.max_additional_latency_ms));
+        report.push_str(&format!(
+            "- Complex type slowdown: <{:.1}x ✅\n",
+            self.targets.max_complex_slowdown_ratio
+        ));
+        report.push_str(&format!(
+            "- Memory increase: <{:.1}x ✅\n",
+            self.targets.max_memory_increase_ratio
+        ));
+        report.push_str(&format!(
+            "- Throughput: >{:.1} MB/s ✅\n",
+            self.targets.min_complex_throughput_mbs
+        ));
+        report.push_str(&format!(
+            "- Additional latency: <{:.1} ms ✅\n\n",
+            self.targets.max_additional_latency_ms
+        ));
 
         // Detailed results by category
-        let categories = ["collections", "structured", "stress", "performance", "optimization"];
+        let categories = [
+            "collections",
+            "structured",
+            "stress",
+            "performance",
+            "optimization",
+        ];
         for category in &categories {
-            let category_results: Vec<_> = self.results.iter()
+            let category_results: Vec<_> = self
+                .results
+                .iter()
                 .filter(|r| r.category == *category)
                 .collect();
-            
+
             if !category_results.is_empty() {
                 report.push_str(&format!("## {} Performance\n\n", category.to_uppercase()));
-                
+
                 for result in category_results {
-                    let status = if result.meets_targets { "✅ PASS" } else { "❌ FAIL" };
+                    let status = if result.meets_targets {
+                        "✅ PASS"
+                    } else {
+                        "❌ FAIL"
+                    };
                     report.push_str(&format!("### {} - {}\n", result.name, status));
-                    
+
                     if result.primitive_baseline_mbs > 0.0 {
-                        report.push_str(&format!("- **Performance Ratio**: {:.2}x\n", result.performance_ratio));
-                        report.push_str(&format!("- **Primitive Baseline**: {:.2} MB/s\n", result.primitive_baseline_mbs));
-                        report.push_str(&format!("- **Complex Performance**: {:.2} MB/s\n", result.complex_performance_mbs));
+                        report.push_str(&format!(
+                            "- **Performance Ratio**: {:.2}x\n",
+                            result.performance_ratio
+                        ));
+                        report.push_str(&format!(
+                            "- **Primitive Baseline**: {:.2} MB/s\n",
+                            result.primitive_baseline_mbs
+                        ));
+                        report.push_str(&format!(
+                            "- **Complex Performance**: {:.2} MB/s\n",
+                            result.complex_performance_mbs
+                        ));
                     }
-                    
+
                     if result.memory_baseline_bytes > 0 {
-                        report.push_str(&format!("- **Memory Ratio**: {:.2}x\n", result.memory_ratio));
+                        report.push_str(&format!(
+                            "- **Memory Ratio**: {:.2}x\n",
+                            result.memory_ratio
+                        ));
                     }
-                    
+
                     if result.latency_microseconds > 0.0 {
-                        report.push_str(&format!("- **Latency**: {:.2} ms\n", result.latency_microseconds / 1000.0));
+                        report.push_str(&format!(
+                            "- **Latency**: {:.2} ms\n",
+                            result.latency_microseconds / 1000.0
+                        ));
                     }
-                    
+
                     for (key, value) in &result.additional_metrics {
                         report.push_str(&format!("- **{}**: {:.2}\n", key, value));
                     }
-                    
+
                     report.push_str("\n");
                 }
             }
@@ -469,31 +574,60 @@ impl M3PerformanceBenchmarks {
 
         // Performance analysis
         report.push_str("## Performance Analysis\n\n");
-        
-        if let Some(worst_perf) = self.results.iter()
+
+        if let Some(worst_perf) = self
+            .results
+            .iter()
             .filter(|r| r.performance_ratio > 0.0)
-            .min_by(|a, b| a.performance_ratio.partial_cmp(&b.performance_ratio).unwrap()) {
-            report.push_str(&format!("- **Worst Performance**: {} ({:.2}x slower)\n", 
-                worst_perf.name, 1.0 / worst_perf.performance_ratio));
+            .min_by(|a, b| {
+                a.performance_ratio
+                    .partial_cmp(&b.performance_ratio)
+                    .unwrap()
+            })
+        {
+            report.push_str(&format!(
+                "- **Worst Performance**: {} ({:.2}x slower)\n",
+                worst_perf.name,
+                1.0 / worst_perf.performance_ratio
+            ));
         }
 
-        if let Some(best_perf) = self.results.iter()
+        if let Some(best_perf) = self
+            .results
+            .iter()
             .filter(|r| r.performance_ratio > 0.0)
-            .max_by(|a, b| a.performance_ratio.partial_cmp(&b.performance_ratio).unwrap()) {
-            report.push_str(&format!("- **Best Performance**: {} ({:.2}x of baseline)\n", 
-                best_perf.name, best_perf.performance_ratio));
+            .max_by(|a, b| {
+                a.performance_ratio
+                    .partial_cmp(&b.performance_ratio)
+                    .unwrap()
+            })
+        {
+            report.push_str(&format!(
+                "- **Best Performance**: {} ({:.2}x of baseline)\n",
+                best_perf.name, best_perf.performance_ratio
+            ));
         }
 
-        let avg_performance_ratio: f64 = self.results.iter()
+        let avg_performance_ratio: f64 = self
+            .results
+            .iter()
             .filter(|r| r.performance_ratio > 0.0)
             .map(|r| r.performance_ratio)
-            .sum::<f64>() / self.results.iter().filter(|r| r.performance_ratio > 0.0).count() as f64;
+            .sum::<f64>()
+            / self
+                .results
+                .iter()
+                .filter(|r| r.performance_ratio > 0.0)
+                .count() as f64;
 
-        report.push_str(&format!("- **Average Performance Ratio**: {:.2}x\n", avg_performance_ratio));
+        report.push_str(&format!(
+            "- **Average Performance Ratio**: {:.2}x\n",
+            avg_performance_ratio
+        ));
 
         // Recommendations
         report.push_str("\n## Recommendations\n\n");
-        
+
         if pass_rate >= 80.0 {
             report.push_str("✅ **M3 complex types meet performance targets!**\n\n");
             report.push_str("The complex type implementation successfully achieves:\n");
@@ -503,16 +637,21 @@ impl M3PerformanceBenchmarks {
             report.push_str("- Low latency impact\n");
         } else {
             report.push_str("⚠️ **Performance improvements needed:**\n\n");
-            
+
             for result in &self.results {
                 if !result.meets_targets {
                     if result.performance_ratio < (1.0 / self.targets.max_complex_slowdown_ratio) {
-                        report.push_str(&format!("- Optimize {} parsing (currently {:.2}x slower)\n", 
-                            result.name, 1.0 / result.performance_ratio));
+                        report.push_str(&format!(
+                            "- Optimize {} parsing (currently {:.2}x slower)\n",
+                            result.name,
+                            1.0 / result.performance_ratio
+                        ));
                     }
                     if result.memory_ratio > self.targets.max_memory_increase_ratio {
-                        report.push_str(&format!("- Reduce {} memory usage (currently {:.2}x baseline)\n", 
-                            result.name, result.memory_ratio));
+                        report.push_str(&format!(
+                            "- Reduce {} memory usage (currently {:.2}x baseline)\n",
+                            result.name, result.memory_ratio
+                        ));
                     }
                 }
             }
@@ -527,11 +666,11 @@ impl M3PerformanceBenchmarks {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(count as i64));
         data.push(CqlTypeId::Int as u8);
-        
+
         for i in 0..count {
             data.extend_from_slice(&(i as i32).to_be_bytes());
         }
-        
+
         data
     }
 
@@ -539,12 +678,12 @@ impl M3PerformanceBenchmarks {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(outer_count as i64));
         data.push(CqlTypeId::List as u8);
-        
+
         for _ in 0..outer_count {
             let inner_list = self.generate_int_list_data(inner_count);
             data.extend_from_slice(&inner_list);
         }
-        
+
         data
     }
 
@@ -552,15 +691,15 @@ impl M3PerformanceBenchmarks {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(count as i64));
         data.push(CqlTypeId::Varchar as u8); // key type
-        data.push(CqlTypeId::Int as u8);     // value type
-        
+        data.push(CqlTypeId::Int as u8); // value type
+
         for i in 0..count {
             let key = format!("key_{}", i);
             data.extend_from_slice(&encode_vint(key.len() as i64));
             data.extend_from_slice(key.as_bytes());
             data.extend_from_slice(&(i as i32).to_be_bytes());
         }
-        
+
         data
     }
 
@@ -569,18 +708,18 @@ impl M3PerformanceBenchmarks {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(count as i64));
         data.push(CqlTypeId::Varchar as u8); // key type
-        data.push(CqlTypeId::Map as u8);     // value type (nested map)
-        
+        data.push(CqlTypeId::Map as u8); // value type (nested map)
+
         for i in 0..count {
             let key = format!("outer_key_{}", i);
             data.extend_from_slice(&encode_vint(key.len() as i64));
             data.extend_from_slice(key.as_bytes());
-            
+
             // Add nested map
             let nested_map = self.generate_string_int_map_data(10);
             data.extend_from_slice(&nested_map);
         }
-        
+
         data
     }
 
@@ -594,84 +733,84 @@ impl M3PerformanceBenchmarks {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(count as i64));
         data.push(CqlTypeId::Set as u8);
-        
+
         for _ in 0..count {
             let inner_set = self.generate_set_data(5);
             data.extend_from_slice(&inner_set);
         }
-        
+
         data
     }
 
     fn generate_tuple_data(&self, count: usize) -> Vec<u8> {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(count as i64));
-        
+
         for i in 0..count {
             // Simple tuple: (int, string, boolean)
             data.extend_from_slice(&encode_vint(3)); // 3 elements
-            
+
             // Int element
             data.push(CqlTypeId::Int as u8);
             data.extend_from_slice(&(i as i32).to_be_bytes());
-            
+
             // String element
             data.push(CqlTypeId::Varchar as u8);
             let text = format!("tuple_text_{}", i);
             data.extend_from_slice(&encode_vint(text.len() as i64));
             data.extend_from_slice(text.as_bytes());
-            
+
             // Boolean element
             data.push(CqlTypeId::Boolean as u8);
             data.push(if i % 2 == 0 { 1 } else { 0 });
         }
-        
+
         data
     }
 
     fn generate_nested_tuple_data(&self, count: usize) -> Vec<u8> {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(count as i64));
-        
+
         for i in 0..count {
             // Nested tuple: (int, (string, list))
             data.extend_from_slice(&encode_vint(2)); // 2 elements
-            
+
             // Int element
             data.push(CqlTypeId::Int as u8);
             data.extend_from_slice(&(i as i32).to_be_bytes());
-            
+
             // Nested tuple element
             data.push(CqlTypeId::Tuple as u8);
             data.extend_from_slice(&encode_vint(2)); // 2 nested elements
-            
+
             // String in nested tuple
             data.push(CqlTypeId::Varchar as u8);
             let text = format!("nested_{}", i);
             data.extend_from_slice(&encode_vint(text.len() as i64));
             data.extend_from_slice(text.as_bytes());
-            
+
             // List in nested tuple
             data.push(CqlTypeId::List as u8);
             let inner_list = self.generate_int_list_data(3);
             data.extend_from_slice(&inner_list);
         }
-        
+
         data
     }
 
     fn generate_simple_udt_data(&self, count: usize) -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         for i in 0..count {
             // UDT type name
             let type_name = "Person";
             data.extend_from_slice(&encode_vint(type_name.len() as i64));
             data.extend_from_slice(type_name.as_bytes());
-            
+
             // Field count
             data.extend_from_slice(&encode_vint(3));
-            
+
             // Field 1: name (string)
             let field_name = "name";
             data.extend_from_slice(&encode_vint(field_name.len() as i64));
@@ -680,14 +819,14 @@ impl M3PerformanceBenchmarks {
             let name_value = format!("Person_{}", i);
             data.extend_from_slice(&encode_vint(name_value.len() as i64));
             data.extend_from_slice(name_value.as_bytes());
-            
+
             // Field 2: age (int)
             let field_name = "age";
             data.extend_from_slice(&encode_vint(field_name.len() as i64));
             data.extend_from_slice(field_name.as_bytes());
             data.push(CqlTypeId::Int as u8);
             data.extend_from_slice(&((20 + i % 60) as i32).to_be_bytes());
-            
+
             // Field 3: active (boolean)
             let field_name = "active";
             data.extend_from_slice(&encode_vint(field_name.len() as i64));
@@ -695,29 +834,29 @@ impl M3PerformanceBenchmarks {
             data.push(CqlTypeId::Boolean as u8);
             data.push(if i % 2 == 0 { 1 } else { 0 });
         }
-        
+
         data
     }
 
     fn generate_complex_udt_data(&self, count: usize) -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         for i in 0..count {
             // Complex UDT with nested collections
             let type_name = "ComplexEntity";
             data.extend_from_slice(&encode_vint(type_name.len() as i64));
             data.extend_from_slice(type_name.as_bytes());
-            
+
             // Field count
             data.extend_from_slice(&encode_vint(4));
-            
+
             // Field 1: id (int)
             let field_name = "id";
             data.extend_from_slice(&encode_vint(field_name.len() as i64));
             data.extend_from_slice(field_name.as_bytes());
             data.push(CqlTypeId::Int as u8);
             data.extend_from_slice(&(i as i32).to_be_bytes());
-            
+
             // Field 2: tags (list of strings)
             let field_name = "tags";
             data.extend_from_slice(&encode_vint(field_name.len() as i64));
@@ -731,7 +870,7 @@ impl M3PerformanceBenchmarks {
                 data.extend_from_slice(&encode_vint(tag.len() as i64));
                 data.extend_from_slice(tag.as_bytes());
             }
-            
+
             // Field 3: metadata (map of string to string)
             let field_name = "metadata";
             data.extend_from_slice(&encode_vint(field_name.len() as i64));
@@ -740,7 +879,7 @@ impl M3PerformanceBenchmarks {
             data.extend_from_slice(&encode_vint(2)); // 2 key-value pairs
             data.push(CqlTypeId::Varchar as u8); // key type
             data.push(CqlTypeId::Varchar as u8); // value type
-            
+
             // First pair
             let key = "category";
             data.extend_from_slice(&encode_vint(key.len() as i64));
@@ -748,7 +887,7 @@ impl M3PerformanceBenchmarks {
             let value = format!("category_{}", i % 5);
             data.extend_from_slice(&encode_vint(value.len() as i64));
             data.extend_from_slice(value.as_bytes());
-            
+
             // Second pair
             let key = "priority";
             data.extend_from_slice(&encode_vint(key.len() as i64));
@@ -756,7 +895,7 @@ impl M3PerformanceBenchmarks {
             let value = format!("{}", i % 10);
             data.extend_from_slice(&encode_vint(value.len() as i64));
             data.extend_from_slice(value.as_bytes());
-            
+
             // Field 4: scores (list of floats)
             let field_name = "scores";
             data.extend_from_slice(&encode_vint(field_name.len() as i64));
@@ -769,7 +908,7 @@ impl M3PerformanceBenchmarks {
                 data.extend_from_slice(&score.to_be_bytes());
             }
         }
-        
+
         data
     }
 
@@ -778,59 +917,59 @@ impl M3PerformanceBenchmarks {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(count as i64));
         data.push(CqlTypeId::List as u8); // Outer list
-        
+
         for i in 0..count {
             // Map element in the list
             data.extend_from_slice(&encode_vint(2)); // 2 map entries
             data.push(CqlTypeId::Varchar as u8); // key type
-            data.push(CqlTypeId::List as u8);    // value type (list of tuples)
-            
+            data.push(CqlTypeId::List as u8); // value type (list of tuples)
+
             // First map entry
             let key = format!("key_{}", i);
             data.extend_from_slice(&encode_vint(key.len() as i64));
             data.extend_from_slice(key.as_bytes());
-            
+
             // Value: List of tuples
             data.extend_from_slice(&encode_vint(3)); // 3 tuples in list
             data.push(CqlTypeId::Tuple as u8);
-            
+
             for tuple_idx in 0..3 {
                 // Tuple: (Int, String)
                 data.extend_from_slice(&encode_vint(2)); // 2 elements in tuple
-                
+
                 // Int element
                 data.push(CqlTypeId::Int as u8);
                 data.extend_from_slice(&((i * 10 + tuple_idx) as i32).to_be_bytes());
-                
+
                 // String element
                 data.push(CqlTypeId::Varchar as u8);
                 let text = format!("nested_{}_{}", i, tuple_idx);
                 data.extend_from_slice(&encode_vint(text.len() as i64));
                 data.extend_from_slice(text.as_bytes());
             }
-            
+
             // Second map entry (similar structure)
             let key = format!("key2_{}", i);
             data.extend_from_slice(&encode_vint(key.len() as i64));
             data.extend_from_slice(key.as_bytes());
-            
+
             // Shorter list for variety
             data.extend_from_slice(&encode_vint(2)); // 2 tuples
             data.push(CqlTypeId::Tuple as u8);
-            
+
             for tuple_idx in 0..2 {
                 data.extend_from_slice(&encode_vint(2));
-                
+
                 data.push(CqlTypeId::Int as u8);
                 data.extend_from_slice(&((i * 100 + tuple_idx) as i32).to_be_bytes());
-                
+
                 data.push(CqlTypeId::Varchar as u8);
                 let text = format!("deep_{}_{}", i, tuple_idx);
                 data.extend_from_slice(&encode_vint(text.len() as i64));
                 data.extend_from_slice(text.as_bytes());
             }
         }
-        
+
         data
     }
 
@@ -852,22 +991,22 @@ impl M3PerformanceBenchmarks {
     fn generate_ecommerce_scenario_data(&self) -> Vec<u8> {
         // E-commerce product with complex attributes
         let mut data = Vec::new();
-        
+
         for i in 0..1000 {
             // Product UDT
             let type_name = "Product";
             data.extend_from_slice(&encode_vint(type_name.len() as i64));
             data.extend_from_slice(type_name.as_bytes());
-            
+
             data.extend_from_slice(&encode_vint(6)); // 6 fields
-            
+
             // id
             let field = "id";
             data.extend_from_slice(&encode_vint(field.len() as i64));
             data.extend_from_slice(field.as_bytes());
             data.push(CqlTypeId::Int as u8);
             data.extend_from_slice(&(i as i32).to_be_bytes());
-            
+
             // name
             let field = "name";
             data.extend_from_slice(&encode_vint(field.len() as i64));
@@ -876,7 +1015,7 @@ impl M3PerformanceBenchmarks {
             let name = format!("Product {}", i);
             data.extend_from_slice(&encode_vint(name.len() as i64));
             data.extend_from_slice(name.as_bytes());
-            
+
             // price
             let field = "price";
             data.extend_from_slice(&encode_vint(field.len() as i64));
@@ -884,7 +1023,7 @@ impl M3PerformanceBenchmarks {
             data.push(CqlTypeId::Float as u8);
             let price = (i as f32) * 9.99;
             data.extend_from_slice(&price.to_be_bytes());
-            
+
             // categories (list of strings)
             let field = "categories";
             data.extend_from_slice(&encode_vint(field.len() as i64));
@@ -897,7 +1036,7 @@ impl M3PerformanceBenchmarks {
                 data.extend_from_slice(&encode_vint(cat.len() as i64));
                 data.extend_from_slice(cat.as_bytes());
             }
-            
+
             // attributes (map)
             let field = "attributes";
             data.extend_from_slice(&encode_vint(field.len() as i64));
@@ -906,15 +1045,20 @@ impl M3PerformanceBenchmarks {
             data.extend_from_slice(&encode_vint(4)); // 4 attributes
             data.push(CqlTypeId::Varchar as u8);
             data.push(CqlTypeId::Varchar as u8);
-            
-            let attrs = [("color", "red"), ("size", "large"), ("brand", "BrandX"), ("material", "cotton")];
+
+            let attrs = [
+                ("color", "red"),
+                ("size", "large"),
+                ("brand", "BrandX"),
+                ("material", "cotton"),
+            ];
             for (key, value) in &attrs {
                 data.extend_from_slice(&encode_vint(key.len() as i64));
                 data.extend_from_slice(key.as_bytes());
                 data.extend_from_slice(&encode_vint(value.len() as i64));
                 data.extend_from_slice(value.as_bytes());
             }
-            
+
             // reviews (list of UDTs) - simplified as list of tuples
             let field = "reviews";
             data.extend_from_slice(&encode_vint(field.len() as i64));
@@ -922,15 +1066,15 @@ impl M3PerformanceBenchmarks {
             data.push(CqlTypeId::List as u8);
             data.extend_from_slice(&encode_vint(2)); // 2 reviews
             data.push(CqlTypeId::Tuple as u8);
-            
+
             for review_idx in 0..2 {
                 // Review tuple: (rating, comment)
                 data.extend_from_slice(&encode_vint(2));
-                
+
                 // Rating
                 data.push(CqlTypeId::Int as u8);
                 data.extend_from_slice(&((4 + review_idx) as i32).to_be_bytes());
-                
+
                 // Comment
                 data.push(CqlTypeId::Varchar as u8);
                 let comment = format!("Great product! Review {}", review_idx);
@@ -938,7 +1082,7 @@ impl M3PerformanceBenchmarks {
                 data.extend_from_slice(comment.as_bytes());
             }
         }
-        
+
         data
     }
 
@@ -957,13 +1101,13 @@ impl M3PerformanceBenchmarks {
     fn benchmark_primitive_parsing(&self, data: &[u8]) -> Result<BenchmarkPerformance> {
         let start = Instant::now();
         let initial_memory = self.estimate_memory_usage();
-        
+
         // Simple parsing simulation
         let _ = data.len(); // Simulate processing
-        
+
         let duration = start.elapsed();
         let final_memory = self.estimate_memory_usage();
-        
+
         Ok(BenchmarkPerformance {
             throughput_mbs: (data.len() as f64) / duration.as_secs_f64() / 1_000_000.0,
             memory_usage: final_memory - initial_memory,
@@ -971,32 +1115,35 @@ impl M3PerformanceBenchmarks {
         })
     }
 
-    fn benchmark_complex_parsing(&self, data: &[u8], _category: &str) -> Result<BenchmarkPerformance> {
+    fn benchmark_complex_parsing(
+        &self,
+        data: &[u8],
+        _category: &str,
+    ) -> Result<BenchmarkPerformance> {
         let start = Instant::now();
         let initial_memory = self.estimate_memory_usage();
-        
+
         // Use optimized parser
         let _result = self.optimized_parser.parse_optimized_list(data);
-        
+
         let duration = start.elapsed();
         let final_memory = self.estimate_memory_usage();
-        
+
         Ok(BenchmarkPerformance {
             throughput_mbs: (data.len() as f64) / duration.as_secs_f64() / 1_000_000.0,
             memory_usage: final_memory - initial_memory,
             latency_microseconds: duration.as_micros() as f64,
         })
     }
-
 
     fn benchmark_query_latency(&self, data: &[u8]) -> Result<BenchmarkPerformance> {
         let start = Instant::now();
-        
+
         // Simulate query processing
         let _result = self.optimized_parser.parse_optimized_list(data);
-        
+
         let duration = start.elapsed();
-        
+
         Ok(BenchmarkPerformance {
             throughput_mbs: 0.0,
             memory_usage: 0,
@@ -1004,15 +1151,19 @@ impl M3PerformanceBenchmarks {
         })
     }
 
-    fn benchmark_simd_parsing(&self, data: &[u8], _parser: &OptimizedComplexTypeParser) -> Result<BenchmarkPerformance> {
+    fn benchmark_simd_parsing(
+        &self,
+        data: &[u8],
+        _parser: &OptimizedComplexTypeParser,
+    ) -> Result<BenchmarkPerformance> {
         let start = Instant::now();
         let initial_memory = self.estimate_memory_usage();
-        
+
         let _result = self.optimized_parser.parse_optimized_list(data);
-        
+
         let duration = start.elapsed();
         let final_memory = self.estimate_memory_usage();
-        
+
         Ok(BenchmarkPerformance {
             throughput_mbs: (data.len() as f64) / duration.as_secs_f64() / 1_000_000.0,
             memory_usage: final_memory - initial_memory,
@@ -1023,13 +1174,13 @@ impl M3PerformanceBenchmarks {
     fn benchmark_baseline_parsing(&self, data: &[u8]) -> Result<BenchmarkPerformance> {
         let start = Instant::now();
         let initial_memory = self.estimate_memory_usage();
-        
+
         // Baseline parsing without optimizations
         let _result = parse_cql_value(data, CqlTypeId::List);
-        
+
         let duration = start.elapsed();
         let final_memory = self.estimate_memory_usage();
-        
+
         Ok(BenchmarkPerformance {
             throughput_mbs: (data.len() as f64) / duration.as_secs_f64() / 1_000_000.0,
             memory_usage: final_memory - initial_memory,
@@ -1041,14 +1192,18 @@ impl M3PerformanceBenchmarks {
         self.benchmark_complex_parsing(data, "scenario")
     }
 
-    fn check_targets(&self, complex_perf: &BenchmarkPerformance, primitive_perf: &BenchmarkPerformance) -> bool {
+    fn check_targets(
+        &self,
+        complex_perf: &BenchmarkPerformance,
+        primitive_perf: &BenchmarkPerformance,
+    ) -> bool {
         let performance_ratio = complex_perf.throughput_mbs / primitive_perf.throughput_mbs;
         let memory_ratio = complex_perf.memory_usage as f64 / primitive_perf.memory_usage as f64;
-        
-        performance_ratio >= (1.0 / self.targets.max_complex_slowdown_ratio) &&
-        memory_ratio <= self.targets.max_memory_increase_ratio &&
-        complex_perf.throughput_mbs >= self.targets.min_complex_throughput_mbs &&
-        complex_perf.latency_microseconds / 1000.0 <= self.targets.max_additional_latency_ms
+
+        performance_ratio >= (1.0 / self.targets.max_complex_slowdown_ratio)
+            && memory_ratio <= self.targets.max_memory_increase_ratio
+            && complex_perf.throughput_mbs >= self.targets.min_complex_throughput_mbs
+            && complex_perf.latency_microseconds / 1000.0 <= self.targets.max_additional_latency_ms
     }
 
     fn estimate_memory_usage(&self) -> usize {
@@ -1099,7 +1254,7 @@ mod tests {
             min_complex_throughput_mbs: 150.0,
             max_additional_latency_ms: 5.0,
         };
-        
+
         let benchmarks = M3PerformanceBenchmarks::new().with_targets(custom_targets);
         assert_eq!(benchmarks.targets.max_complex_slowdown_ratio, 1.5);
     }
@@ -1107,13 +1262,13 @@ mod tests {
     #[test]
     fn test_data_generation() {
         let benchmarks = M3PerformanceBenchmarks::new();
-        
+
         let int_list_data = benchmarks.generate_int_list_data(100);
         assert!(!int_list_data.is_empty());
-        
+
         let map_data = benchmarks.generate_string_int_map_data(50);
         assert!(!map_data.is_empty());
-        
+
         let nested_data = benchmarks.generate_nested_list_data(10, 5);
         assert!(!nested_data.is_empty());
     }

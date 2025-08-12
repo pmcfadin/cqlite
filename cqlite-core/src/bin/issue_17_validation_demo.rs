@@ -2,7 +2,7 @@
 //!
 //! This demonstrates the complete validation framework including:
 //! - Data integrity validation
-//! - Robust error handling 
+//! - Robust error handling
 //! - Format compatibility (Cassandra 5+ focus)
 //! - Real-time monitoring
 //! - Comprehensive reporting
@@ -40,7 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("✅ Real-time monitoring active");
             println!("   Event Type: {:?}", status.event_type);
             println!("   Message: {}", status.message);
-            println!("   Timestamp: {}", status.timestamp.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!(
+                "   Timestamp: {}",
+                status.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+            );
         }
         Err(e) => {
             println!("⚠️  Real-time status unavailable: {}", e);
@@ -51,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run comprehensive validation
     println!("🚀 Running comprehensive validation suite...");
     let start_time = Instant::now();
-    
+
     match framework.run_comprehensive_validation().await {
         Ok(report) => {
             let duration = start_time.elapsed();
@@ -63,7 +66,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("   Title: {}", report.title);
             println!("   Overall Status: {:?}", report.overall_status);
             println!("   Total Sections: {}", report.summary.total_sections);
-            println!("   Passed: {} ({:.1}%)", report.summary.passed_sections, report.summary.success_rate);
+            println!(
+                "   Passed: {} ({:.1}%)",
+                report.summary.passed_sections, report.summary.success_rate
+            );
             println!("   Failed: {}", report.summary.failed_sections);
             println!("   Warnings: {}", report.summary.warning_sections);
             println!();
@@ -78,15 +84,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cqlite_core::validation::ValidationSectionStatus::Error => "🚨",
                     cqlite_core::validation::ValidationSectionStatus::Skipped => "⏭️",
                 };
-                
+
                 println!("   {} {}: {}", status_icon, section.name, section.details);
-                
+
                 if !section.metrics.is_empty() {
                     for (key, value) in &section.metrics {
                         println!("      • {}: {:.2}", key, value);
                     }
                 }
-                
+
                 if !section.recommendations.is_empty() {
                     for recommendation in &section.recommendations {
                         println!("      💡 {}", recommendation);
@@ -97,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Generate and display reports in different formats
             println!("📄 Generating reports in multiple formats...");
-            
+
             // Generate comprehensive report
             let final_report = framework.generate_report(report.clone()).await?;
             println!("✅ Comprehensive report generated");
@@ -115,7 +121,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Show JSON format availability
             match framework.generate_json_report(&final_report) {
                 Ok(json_report) => {
-                    println!("✅ JSON report generated ({} characters)", json_report.len());
+                    println!(
+                        "✅ JSON report generated ({} characters)",
+                        json_report.len()
+                    );
                 }
                 Err(e) => {
                     println!("⚠️  JSON report generation failed: {}", e);
@@ -124,7 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Show Markdown format sample
             let markdown_report = framework.generate_markdown_report(&final_report);
-            println!("✅ Markdown report generated ({} characters)", markdown_report.len());
+            println!(
+                "✅ Markdown report generated ({} characters)",
+                markdown_report.len()
+            );
             println!();
 
             // Final status
@@ -141,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("     • {}: {}", section.name, section.details);
                     }
                 }
-                
+
                 let recommendations = final_report.get_all_recommendations();
                 if !recommendations.is_empty() {
                     println!("   Recommendations:");
@@ -161,8 +173,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("🎯 Issue #17 Validation Framework Demo Complete!");
     println!("   Framework Status: ✅ Ready for TestOrchestrator integration");
-    println!("   Components: 7 modules (core, data_integrity, error_handling, format_compatibility, performance, real_time, reports)");
+    println!(
+        "   Components: 7 modules (core, data_integrity, error_handling, format_compatibility, performance, real_time, reports)"
+    );
     println!("   Features: Cassandra 5+ focus, comprehensive error handling, real-time monitoring");
-    
+
     Ok(())
 }

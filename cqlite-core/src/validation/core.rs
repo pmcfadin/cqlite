@@ -3,10 +3,10 @@
 //! This module provides the core validation framework that coordinates all validation activities.
 
 use crate::error::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
 
 /// Core validation framework
 #[derive(Debug)]
@@ -34,7 +34,7 @@ pub struct ValidationConfig {
     pub log_level: String,
     /// Parallel validation threads
     pub parallel_threads: usize,
-    
+
     // Legacy fields for compatibility with existing validation modules
     /// Enable regression tests
     pub enable_regression_tests: bool,
@@ -67,12 +67,12 @@ impl Default for ValidationConfig {
             ],
             log_level: "info".to_string(),
             parallel_threads: 4,
-            
+
             // Legacy field defaults
             enable_regression_tests: true,
             enable_performance_tests: true,
             enable_edge_case_tests: true,
-            accuracy_threshold: 0.95, // 95% accuracy required
+            accuracy_threshold: 0.95,       // 95% accuracy required
             performance_threshold_ms: 5000, // 5 second max
             cqlsh_reference_path: None,
             test_data_paths: vec![
@@ -80,11 +80,7 @@ impl Default for ValidationConfig {
                 "test-env/cassandra5/sstables".to_string(),
                 "test-data".to_string(),
             ],
-            output_formats: vec![
-                "json".to_string(),
-                "csv".to_string(),
-                "table".to_string(),
-            ],
+            output_formats: vec!["json".to_string(), "csv".to_string(), "table".to_string()],
         }
     }
 }
@@ -156,10 +152,7 @@ impl ValidationFramework {
             shared_state: HashMap::new(),
         };
 
-        Ok(Self {
-            config,
-            context,
-        })
+        Ok(Self { config, context })
     }
 
     /// Get framework configuration
@@ -184,7 +177,8 @@ impl ValidationFramework {
         self.context.metrics.total_duration_ms += update.duration_ms;
         self.context.metrics.bytes_processed += update.bytes_processed;
         self.context.metrics.files_validated += update.files_validated;
-        self.context.metrics.peak_memory_mb = self.context.metrics.peak_memory_mb.max(update.memory_mb);
+        self.context.metrics.peak_memory_mb =
+            self.context.metrics.peak_memory_mb.max(update.memory_mb);
     }
 
     /// Get current session metrics
@@ -237,13 +231,13 @@ impl ValidationFramework {
     /// Cleanup resources
     pub fn cleanup(&mut self) -> Result<()> {
         self.set_phase(ValidationPhase::Cleanup);
-        
+
         // Cleanup operations
         self.context.shared_state.clear();
-        
+
         self.set_phase(ValidationPhase::Completed);
         log::info!("Validation framework cleanup completed");
-        
+
         Ok(())
     }
 }
@@ -304,32 +298,38 @@ mod tests {
         let config = ValidationConfig::default();
         let framework = ValidationFramework::new(config);
         assert!(framework.is_ok());
-        
+
         let framework = framework.unwrap();
-        assert_eq!(framework.context().current_phase, ValidationPhase::Initialization);
+        assert_eq!(
+            framework.context().current_phase,
+            ValidationPhase::Initialization
+        );
     }
 
     #[test]
     fn test_validation_phase_update() {
         let config = ValidationConfig::default();
         let mut framework = ValidationFramework::new(config).unwrap();
-        
+
         framework.set_phase(ValidationPhase::DataIntegrity);
-        assert_eq!(framework.context().current_phase, ValidationPhase::DataIntegrity);
+        assert_eq!(
+            framework.context().current_phase,
+            ValidationPhase::DataIntegrity
+        );
     }
 
     #[test]
     fn test_metrics_update() {
         let config = ValidationConfig::default();
         let mut framework = ValidationFramework::new(config).unwrap();
-        
+
         let update = ValidationMetricsUpdate::new()
             .with_tests(5)
             .with_bytes(1024)
             .with_files(2);
-        
+
         framework.update_metrics(update);
-        
+
         let metrics = framework.get_current_metrics();
         assert_eq!(metrics.total_tests, 5);
         assert_eq!(metrics.bytes_processed, 1024);
@@ -340,9 +340,12 @@ mod tests {
     fn test_shared_state() {
         let config = ValidationConfig::default();
         let mut framework = ValidationFramework::new(config).unwrap();
-        
+
         framework.set_shared_state("test_key".to_string(), "test_value".to_string());
-        assert_eq!(framework.get_shared_state("test_key"), Some(&"test_value".to_string()));
+        assert_eq!(
+            framework.get_shared_state("test_key"),
+            Some(&"test_value".to_string())
+        );
         assert_eq!(framework.get_shared_state("missing_key"), None);
     }
 
@@ -350,7 +353,7 @@ mod tests {
     fn test_configuration_flags() {
         let config = ValidationConfig::default();
         let framework = ValidationFramework::new(config).unwrap();
-        
+
         assert!(framework.is_comprehensive_enabled());
         assert!(framework.is_performance_enabled());
         assert!(framework.is_realtime_monitoring_enabled());

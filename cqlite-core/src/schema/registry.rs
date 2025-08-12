@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
-    Config, Result, Error,
-    schema::{
-        TableSchema, UdtRegistry, CqlType,
-        discovery::{SchemaDiscoveryEngine, SchemaDiscoveryConfig, SchemaInfo},
-    },
+    Config, Error, Result,
     platform::Platform,
-    types::UdtTypeDef,
+    schema::{
+        CqlType, TableSchema, UdtRegistry,
+        discovery::{SchemaDiscoveryConfig, SchemaDiscoveryEngine, SchemaInfo},
+    },
+    types::{ComparatorType, UdtTypeDef},
 };
 
 /// Configuration for schema registry
@@ -253,7 +253,8 @@ impl SchemaRegistry {
                 config.discovery_config.clone(),
                 platform.clone(),
                 core_config.clone(),
-            ).await?
+            )
+            .await?,
         );
 
         let validator = Arc::new(SchemaValidator::new());
@@ -283,7 +284,8 @@ impl SchemaRegistry {
         }
 
         // Use discovery engine to analyze SSTable files
-        let schema_info = self.discovery_engine
+        let schema_info = self
+            .discovery_engine
             .discover_schema(keyspace, table, sstable_files)
             .await?;
 
@@ -295,17 +297,14 @@ impl SchemaRegistry {
             table_schema.clone(),
             Some(schema_info),
             sstable_files.to_vec(),
-        ).await?;
+        )
+        .await?;
 
         Ok(table_schema)
     }
 
     /// Register a schema from external source
-    pub async fn register_schema(
-        &self,
-        schema: TableSchema,
-        source: SchemaSource,
-    ) -> Result<()> {
+    pub async fn register_schema(&self, schema: TableSchema, source: SchemaSource) -> Result<()> {
         let table_id = format!("{}.{}", schema.keyspace, schema.table);
 
         // Validate schema if validation is enabled
@@ -331,12 +330,12 @@ impl SchemaRegistry {
         // Store in registry
         {
             let mut schemas = self.schemas.write().await;
-            
+
             // Check if we need to create a new version
             if self.config.enable_versioning && schemas.contains_key(&table_id) {
                 self.create_schema_version(&table_id, &schema).await?;
             }
-            
+
             schemas.insert(table_id, entry);
         }
 
@@ -347,7 +346,7 @@ impl SchemaRegistry {
     pub async fn get_schema(&self, keyspace: &str, table: &str) -> Result<TableSchema> {
         let table_id = format!("{}.{}", keyspace, table);
         let schemas = self.schemas.read().await;
-        
+
         match schemas.get(&table_id) {
             Some(entry) => {
                 // Check if schema is still valid (cache TTL)
@@ -363,7 +362,10 @@ impl SchemaRegistry {
                 if self.config.enable_auto_discovery {
                     self.auto_discover_schema(keyspace, table).await
                 } else {
-                    Err(Error::Schema(format!("Schema not found: {}.{}", keyspace, table)))
+                    Err(Error::Schema(format!(
+                        "Schema not found: {}.{}",
+                        keyspace, table
+                    )))
                 }
             }
         }
@@ -373,7 +375,7 @@ impl SchemaRegistry {
     pub async fn get_schema_info(&self, keyspace: &str, table: &str) -> Result<Option<SchemaInfo>> {
         let table_id = format!("{}.{}", keyspace, table);
         let schemas = self.schemas.read().await;
-        
+
         match schemas.get(&table_id) {
             Some(entry) => Ok(entry.extended_info.clone()),
             None => Ok(None),
@@ -398,7 +400,8 @@ impl SchemaRegistry {
 
         // Sort by keyspace, then table name
         results.sort_by(|a, b| {
-            a.keyspace.cmp(&b.keyspace)
+            a.keyspace
+                .cmp(&b.keyspace)
                 .then_with(|| a.table.cmp(&b.table))
         });
 
@@ -426,13 +429,16 @@ impl SchemaRegistry {
         }
 
         // UDT validation
-        self.validate_schema_udts(&schema, &mut errors, &mut warnings).await;
+        self.validate_schema_udts(&schema, &mut errors, &mut warnings)
+            .await;
 
         // Column type validation
-        self.validate_column_types(&schema, &mut errors, &mut warnings).await;
+        self.validate_column_types(&schema, &mut errors, &mut warnings)
+            .await;
 
         // Performance recommendations
-        self.generate_performance_recommendations(&schema, &mut recommendations).await;
+        self.generate_performance_recommendations(&schema, &mut recommendations)
+            .await;
 
         // Determine overall status
         let status = if !errors.is_empty() {
@@ -462,21 +468,25 @@ impl SchemaRegistry {
     }
 
     /// Get schema version history
-    pub async fn get_schema_history(&self, keyspace: &str, table: &str) -> Result<Vec<SchemaVersion>> {
+    pub async fn get_schema_history(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Result<Vec<SchemaVersion>> {
         if !self.config.enable_versioning {
             return Err(Error::Schema("Schema versioning is disabled".to_string()));
         }
 
         let table_id = format!("{}.{}", keyspace, table);
         let history = self.version_history.read().await;
-        
+
         Ok(history.get(&table_id).cloned().unwrap_or_default())
     }
 
     /// Remove schema from registry
     pub async fn remove_schema(&self, keyspace: &str, table: &str) -> Result<()> {
         let table_id = format!("{}.{}", keyspace, table);
-        
+
         {
             let mut schemas = self.schemas.write().await;
             schemas.remove(&table_id);
@@ -505,21 +515,29 @@ impl SchemaRegistry {
 
     /// Export schema as JSON
     pub async fn export_schema_json(&self, keyspace: &str, table: &str) -> Result<String> {
-        self.export_schema_json_with_config(keyspace, table, &crate::schema::json_exporter::JsonExportConfig::default()).await
+        self.export_schema_json_with_config(
+            keyspace,
+            table,
+            &crate::schema::json_exporter::JsonExportConfig::default(),
+        )
+        .await
     }
 
     /// Export schema as JSON with custom configuration
     pub async fn export_schema_json_with_config(
-        &self, 
-        keyspace: &str, 
-        table: &str, 
-        config: &crate::schema::json_exporter::JsonExportConfig
+        &self,
+        keyspace: &str,
+        table: &str,
+        config: &crate::schema::json_exporter::JsonExportConfig,
     ) -> Result<String> {
         // Try extended schema info first
         if let Some(schema_info) = self.get_schema_info(keyspace, table).await? {
-            return self.discovery_engine.export_json_with_config(&schema_info, config).await;
+            return self
+                .discovery_engine
+                .export_json_with_config(&schema_info, config)
+                .await;
         }
-        
+
         // Fallback to basic TableSchema JSON
         let schema = self.get_schema(keyspace, table).await?;
         let exporter = crate::schema::json_exporter::JsonExporter::with_config(config.clone());
@@ -536,7 +554,8 @@ impl SchemaRegistry {
             pretty_format: false,
             ..Default::default()
         };
-        self.export_schema_json_with_config(keyspace, table, &config).await
+        self.export_schema_json_with_config(keyspace, table, &config)
+            .await
     }
 
     /// Export schema for API documentation (OpenAPI-compatible format)
@@ -548,7 +567,8 @@ impl SchemaRegistry {
             include_metadata: false,
             ..Default::default()
         };
-        self.export_schema_json_with_config(keyspace, table, &config).await
+        self.export_schema_json_with_config(keyspace, table, &config)
+            .await
     }
 
     /// Export schema for data pipeline tools
@@ -560,11 +580,15 @@ impl SchemaRegistry {
             include_performance_metrics: true,
             ..Default::default()
         };
-        self.export_schema_json_with_config(keyspace, table, &config).await
+        self.export_schema_json_with_config(keyspace, table, &config)
+            .await
     }
 
     /// Export multiple schemas as a JSON collection
-    pub async fn export_multiple_schemas_json(&self, schema_infos: &[SchemaInfo]) -> Result<String> {
+    pub async fn export_multiple_schemas_json(
+        &self,
+        schema_infos: &[SchemaInfo],
+    ) -> Result<String> {
         let exporter = crate::schema::json_exporter::JsonExporter::new();
         exporter.export_multiple_schemas(schema_infos)
     }
@@ -572,21 +596,27 @@ impl SchemaRegistry {
     /// Export all schemas in a keyspace as JSON collection
     pub async fn export_keyspace_schemas_json(&self, keyspace: &str) -> Result<String> {
         let mut schema_infos = Vec::new();
-        
+
         // Get all schemas in the keyspace
         for (_table_id, entry) in self.schemas.read().await.iter() {
             if entry.schema.keyspace == keyspace {
                 // Try to get extended schema info
-                if let Ok(Some(schema_info)) = self.get_schema_info(&entry.schema.keyspace, &entry.schema.table).await {
+                if let Ok(Some(schema_info)) = self
+                    .get_schema_info(&entry.schema.keyspace, &entry.schema.table)
+                    .await
+                {
                     schema_infos.push(schema_info);
                 }
             }
         }
-        
+
         if schema_infos.is_empty() {
-            return Err(Error::NotFound(format!("No schemas found in keyspace '{}'", keyspace)));
+            return Err(Error::NotFound(format!(
+                "No schemas found in keyspace '{}'",
+                keyspace
+            )));
         }
-        
+
         self.export_multiple_schemas_json(&schema_infos).await
     }
 
@@ -601,6 +631,171 @@ impl SchemaRegistry {
     pub async fn get_udt(&self, keyspace: &str, name: &str) -> Result<Option<UdtTypeDef>> {
         let registry = self.udt_registry.read().await;
         Ok(registry.get_udt(keyspace, name).cloned())
+    }
+
+    /// Get ComparatorType for a specific column in a table
+    pub async fn get_column_comparator(
+        &self,
+        keyspace: &str,
+        table: &str,
+        column: &str,
+    ) -> Result<ComparatorType> {
+        let schema = self.get_schema(keyspace, table).await?;
+
+        // Find the column
+        let column_def = schema
+            .columns
+            .iter()
+            .find(|c| c.name == column)
+            .ok_or_else(|| {
+                Error::Schema(format!(
+                    "Column '{}' not found in table '{}.{}'",
+                    column, keyspace, table
+                ))
+            })?;
+
+        // Parse the column type and create comparator
+        let cql_type = CqlType::parse(&column_def.data_type)?;
+        ComparatorType::from_cql_type(&cql_type)
+    }
+
+    /// Get ComparatorType for all columns in a table
+    pub async fn get_table_comparators(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Result<HashMap<String, ComparatorType>> {
+        let schema = self.get_schema(keyspace, table).await?;
+        let mut comparators = HashMap::new();
+
+        for column in &schema.columns {
+            let cql_type = CqlType::parse(&column.data_type)?;
+            let comparator = ComparatorType::from_cql_type(&cql_type)?;
+            comparators.insert(column.name.clone(), comparator);
+        }
+
+        Ok(comparators)
+    }
+
+    /// Get ComparatorType for partition key columns (for key comparison)
+    pub async fn get_partition_key_comparator(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Result<Vec<ComparatorType>> {
+        let schema = self.get_schema(keyspace, table).await?;
+        let mut comparators = Vec::new();
+
+        // Get partition keys in order
+        let ordered_keys = schema.ordered_partition_keys();
+        for key_column in ordered_keys {
+            let cql_type = CqlType::parse(&key_column.data_type)?;
+            let comparator = ComparatorType::from_cql_type(&cql_type)?;
+            comparators.push(comparator);
+        }
+
+        Ok(comparators)
+    }
+
+    /// Get ComparatorType for clustering key columns (for clustering comparison)
+    pub async fn get_clustering_key_comparator(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Result<Vec<ComparatorType>> {
+        let schema = self.get_schema(keyspace, table).await?;
+        let mut comparators = Vec::new();
+
+        // Get clustering keys in order
+        let ordered_keys = schema.ordered_clustering_keys();
+        for key_column in ordered_keys {
+            let cql_type = CqlType::parse(&key_column.data_type)?;
+            let comparator = ComparatorType::from_cql_type(&cql_type)?;
+            comparators.push(comparator);
+        }
+
+        Ok(comparators)
+    }
+
+    /// Validate column type compatibility using ComparatorType
+    pub async fn validate_column_type_compatibility(
+        &self,
+        keyspace: &str,
+        table: &str,
+        column: &str,
+        expected_type: &str,
+    ) -> Result<bool> {
+        let column_comparator = self.get_column_comparator(keyspace, table, column).await?;
+        let expected_cql_type = CqlType::parse(expected_type)?;
+        let expected_comparator = ComparatorType::from_cql_type(&expected_cql_type)?;
+
+        // Check if comparators are compatible (same type structure)
+        Ok(self.comparators_are_compatible(&column_comparator, &expected_comparator))
+    }
+
+    /// Check if two ComparatorTypes are compatible
+    fn comparators_are_compatible(&self, left: &ComparatorType, right: &ComparatorType) -> bool {
+        match (left, right) {
+            // Exact matches
+            (ComparatorType::Boolean, ComparatorType::Boolean) => true,
+            (ComparatorType::TinyInt, ComparatorType::TinyInt) => true,
+            (ComparatorType::SmallInt, ComparatorType::SmallInt) => true,
+            (ComparatorType::Int, ComparatorType::Int) => true,
+            (ComparatorType::BigInt, ComparatorType::BigInt) => true,
+            (ComparatorType::Float32, ComparatorType::Float32) => true,
+            (ComparatorType::Float, ComparatorType::Float) => true,
+            (ComparatorType::Text, ComparatorType::Text) => true,
+            (ComparatorType::Blob, ComparatorType::Blob) => true,
+            (ComparatorType::Timestamp, ComparatorType::Timestamp) => true,
+            (ComparatorType::Uuid, ComparatorType::Uuid) => true,
+            (ComparatorType::Json, ComparatorType::Json) => true,
+
+            // Collection types
+            (ComparatorType::List(l_elem), ComparatorType::List(r_elem)) => {
+                self.comparators_are_compatible(l_elem, r_elem)
+            }
+            (ComparatorType::Set(l_elem), ComparatorType::Set(r_elem)) => {
+                self.comparators_are_compatible(l_elem, r_elem)
+            }
+            (ComparatorType::Map(l_key, l_val), ComparatorType::Map(r_key, r_val)) => {
+                self.comparators_are_compatible(l_key, r_key)
+                    && self.comparators_are_compatible(l_val, r_val)
+            }
+
+            // Tuple types
+            (ComparatorType::Tuple(l_fields), ComparatorType::Tuple(r_fields)) => {
+                l_fields.len() == r_fields.len()
+                    && l_fields
+                        .iter()
+                        .zip(r_fields.iter())
+                        .all(|(l, r)| self.comparators_are_compatible(l, r))
+            }
+
+            // UDT types
+            (
+                ComparatorType::Udt {
+                    type_name: l_name,
+                    keyspace: l_ks,
+                    ..
+                },
+                ComparatorType::Udt {
+                    type_name: r_name,
+                    keyspace: r_ks,
+                    ..
+                },
+            ) => l_name == r_name && l_ks == r_ks,
+
+            // Frozen types
+            (ComparatorType::Frozen(l_inner), ComparatorType::Frozen(r_inner)) => {
+                self.comparators_are_compatible(l_inner, r_inner)
+            }
+
+            // Custom types
+            (ComparatorType::Custom(l_name), ComparatorType::Custom(r_name)) => l_name == r_name,
+
+            // No other combinations are compatible
+            _ => false,
+        }
     }
 
     /// Get registry statistics
@@ -625,7 +820,10 @@ impl SchemaRegistry {
         // Analyze schema distribution and status
         for entry in schemas.values() {
             let keyspace = &entry.schema.keyspace;
-            *stats.schemas_by_keyspace.entry(keyspace.clone()).or_insert(0) += 1;
+            *stats
+                .schemas_by_keyspace
+                .entry(keyspace.clone())
+                .or_insert(0) += 1;
 
             match entry.validation_status {
                 SchemaValidationStatus::Valid => stats.validated_schemas += 1,
@@ -724,7 +922,11 @@ impl SchemaRegistry {
         }
 
         let ttl = std::time::Duration::from_secs(self.config.cache_ttl_seconds);
-        entry.registered_at.elapsed().unwrap_or(std::time::Duration::ZERO) > ttl
+        entry
+            .registered_at
+            .elapsed()
+            .unwrap_or(std::time::Duration::ZERO)
+            > ttl
     }
 
     async fn refresh_schema(&self, keyspace: &str, table: &str) -> Result<TableSchema> {
@@ -737,9 +939,12 @@ impl SchemaRegistry {
         // Try to find SSTable files for this table
         // This is a placeholder - in practice, you'd scan the data directory
         let sstable_files = self.find_sstable_files(keyspace, table).await?;
-        
+
         if sstable_files.is_empty() {
-            return Err(Error::Schema(format!("No SSTables found for {}.{}", keyspace, table)));
+            return Err(Error::Schema(format!(
+                "No SSTables found for {}.{}",
+                keyspace, table
+            )));
         }
 
         self.discover_schema(keyspace, table, &sstable_files).await
@@ -775,14 +980,16 @@ impl SchemaRegistry {
         if pattern == "*" {
             return true;
         }
-        
+
         // For now, just exact match or contains
         text == pattern || text.contains(pattern)
     }
 
     async fn create_schema_version(&self, table_id: &str, new_schema: &TableSchema) -> Result<()> {
         let mut version_history = self.version_history.write().await;
-        let versions = version_history.entry(table_id.to_string()).or_insert_with(Vec::new);
+        let versions = version_history
+            .entry(table_id.to_string())
+            .or_insert_with(Vec::new);
 
         let version_number = versions.len() as u32 + 1;
         let changes = if versions.is_empty() {
@@ -816,16 +1023,16 @@ impl SchemaRegistry {
         Ok(())
     }
 
-    fn detect_schema_changes(&self, old_schema: &TableSchema, new_schema: &TableSchema) -> Vec<SchemaChange> {
+    fn detect_schema_changes(
+        &self,
+        old_schema: &TableSchema,
+        new_schema: &TableSchema,
+    ) -> Vec<SchemaChange> {
         let mut changes = Vec::new();
 
         // Compare columns
-        let old_columns: HashMap<_, _> = old_schema.columns.iter()
-            .map(|c| (&c.name, c))
-            .collect();
-        let new_columns: HashMap<_, _> = new_schema.columns.iter()
-            .map(|c| (&c.name, c))
-            .collect();
+        let old_columns: HashMap<_, _> = old_schema.columns.iter().map(|c| (&c.name, c)).collect();
+        let new_columns: HashMap<_, _> = new_schema.columns.iter().map(|c| (&c.name, c)).collect();
 
         // Find added columns
         for (name, column) in &new_columns {
@@ -833,7 +1040,10 @@ impl SchemaRegistry {
                 changes.push(SchemaChange {
                     change_type: SchemaChangeType::ColumnAdded,
                     component: name.to_string(),
-                    description: format!("Column '{}' added with type '{}'", name, column.data_type),
+                    description: format!(
+                        "Column '{}' added with type '{}'",
+                        name, column.data_type
+                    ),
                     old_value: None,
                     new_value: Some(column.data_type.clone()),
                 });
@@ -882,7 +1092,13 @@ impl SchemaRegistry {
         for column in &schema.columns {
             // Check if column type references a UDT
             if let Ok(cql_type) = CqlType::parse(&column.data_type) {
-                self.validate_cql_type_udts(&cql_type, &schema.keyspace, &udt_registry, errors, warnings);
+                self.validate_cql_type_udts(
+                    &cql_type,
+                    &schema.keyspace,
+                    &udt_registry,
+                    errors,
+                    warnings,
+                );
             }
         }
     }
@@ -946,25 +1162,26 @@ impl SchemaRegistry {
         recommendations: &mut Vec<String>,
     ) {
         // Check for potential performance issues
-        
+
         // Large partition keys
         if schema.partition_keys.len() > 3 {
             recommendations.push(
-                "Consider reducing the number of partition key columns for better performance".to_string()
+                "Consider reducing the number of partition key columns for better performance"
+                    .to_string(),
             );
         }
 
         // Many clustering keys
         if schema.clustering_keys.len() > 5 {
-            recommendations.push(
-                "Large number of clustering keys may impact query performance".to_string()
-            );
+            recommendations
+                .push("Large number of clustering keys may impact query performance".to_string());
         }
 
         // Column count
         if schema.columns.len() > 50 {
             recommendations.push(
-                "Consider using UDTs or denormalizing wide tables for better performance".to_string()
+                "Consider using UDTs or denormalizing wide tables for better performance"
+                    .to_string(),
             );
         }
     }
@@ -983,18 +1200,20 @@ impl SchemaRegistry {
         // Add primary key
         if !schema.partition_keys.is_empty() {
             cql.push_str(",\n  PRIMARY KEY (");
-            
+
             if schema.partition_keys.len() == 1 && schema.clustering_keys.is_empty() {
                 cql.push_str(&schema.partition_keys[0].name);
             } else {
                 // Composite primary key
                 cql.push('(');
                 for (i, pk) in schema.partition_keys.iter().enumerate() {
-                    if i > 0 { cql.push_str(", "); }
+                    if i > 0 {
+                        cql.push_str(", ");
+                    }
                     cql.push_str(&pk.name);
                 }
                 cql.push(')');
-                
+
                 if !schema.clustering_keys.is_empty() {
                     for ck in &schema.clustering_keys {
                         cql.push_str(", ");
@@ -1002,7 +1221,7 @@ impl SchemaRegistry {
                     }
                 }
             }
-            
+
             cql.push(')');
         }
 
@@ -1060,9 +1279,11 @@ mod tests {
         let core_config = Config::default();
         let platform = Arc::new(Platform::new(&core_config).await.unwrap());
 
-        let registry = SchemaRegistry::new(config, platform, core_config).await.unwrap();
+        let registry = SchemaRegistry::new(config, platform, core_config)
+            .await
+            .unwrap();
         let stats = registry.get_statistics().await.unwrap();
-        
+
         assert_eq!(stats.total_schemas, 0);
     }
 

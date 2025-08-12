@@ -8,7 +8,7 @@
 //! - Parallel execution planning
 
 use super::select_ast::*;
-use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
+use crate::{Error, Result, TableId, Value, schema::SchemaManager, storage::StorageEngine};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -647,20 +647,21 @@ impl ExecutionStep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::{Config, platform::Platform, schema::SchemaManager, storage::StorageEngine};
+    use tempfile::TempDir;
 
     async fn create_test_optimizer() -> SelectOptimizer {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
-        let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(temp_dir.path(), &config, platform.clone())
+                .await
+                .unwrap(),
+        );
         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
-        
-        SelectOptimizer {
-            schema,
-            storage,
-        }
+
+        SelectOptimizer { schema, storage }
     }
 
     #[tokio::test]

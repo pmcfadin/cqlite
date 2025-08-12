@@ -1,6 +1,6 @@
 //! Format analysis capabilities for Cassandra 5+ SSTable validation
 
-use crate::{ValidationError, ValidationResult, SSTableFileType, HexAnalyzer};
+use crate::{HexAnalyzer, SSTableFileType, ValidationError, ValidationResult};
 use std::path::Path;
 
 /// SSTable format analyzer for deep inspection
@@ -27,7 +27,7 @@ impl FormatAnalyzer {
     pub fn analyze_file(&self, path: &Path) -> Result<ValidationResult, ValidationError> {
         let file_type = SSTableFileType::from_path(path);
         let data = crate::utils::read_file_safe(path, 100 * 1024 * 1024)?; // 100MB limit
-        
+
         let mut result = ValidationResult {
             file_path: path.to_string_lossy().to_string(),
             format_version: None,
@@ -47,7 +47,10 @@ impl FormatAnalyzer {
             SSTableFileType::Partitions => self.analyze_partitions_file(&data, &mut result)?,
             SSTableFileType::Rows => self.analyze_rows_file(&data, &mut result)?,
             _ => {
-                result.warnings.push(format!("Unsupported file type for analysis: {:?}", file_type));
+                result.warnings.push(format!(
+                    "Unsupported file type for analysis: {:?}",
+                    file_type
+                ));
             }
         }
 
@@ -55,30 +58,44 @@ impl FormatAnalyzer {
         Ok(result)
     }
 
-    fn analyze_data_file(&self, data: &[u8], result: &mut ValidationResult) -> Result<(), ValidationError> {
+    fn analyze_data_file(
+        &self,
+        data: &[u8],
+        result: &mut ValidationResult,
+    ) -> Result<(), ValidationError> {
         // Check for BigFormat magic number
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             if magic == crate::format_constants::BIG_FORMAT_OA_MAGIC {
                 result.format_version = Some("BigFormat 'oa'".to_string());
             } else {
-                result.warnings.push(format!("Unexpected magic number: {:#x}", magic));
+                result
+                    .warnings
+                    .push(format!("Unexpected magic number: {:#x}", magic));
             }
         }
         Ok(())
     }
 
-    fn analyze_index_file(&self, data: &[u8], result: &mut ValidationResult) -> Result<(), ValidationError> {
+    fn analyze_index_file(
+        &self,
+        data: &[u8],
+        result: &mut ValidationResult,
+    ) -> Result<(), ValidationError> {
         // Basic index file validation
         if data.is_empty() {
             result.errors.push(ValidationError::StructureViolation {
-                reason: "Empty index file".to_string()
+                reason: "Empty index file".to_string(),
             });
         }
         Ok(())
     }
 
-    fn analyze_statistics_file(&self, data: &[u8], result: &mut ValidationResult) -> Result<(), ValidationError> {
+    fn analyze_statistics_file(
+        &self,
+        data: &[u8],
+        result: &mut ValidationResult,
+    ) -> Result<(), ValidationError> {
         // Check Statistics.db magic
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -89,7 +106,11 @@ impl FormatAnalyzer {
         Ok(())
     }
 
-    fn analyze_partitions_file(&self, data: &[u8], result: &mut ValidationResult) -> Result<(), ValidationError> {
+    fn analyze_partitions_file(
+        &self,
+        data: &[u8],
+        result: &mut ValidationResult,
+    ) -> Result<(), ValidationError> {
         // BTI Partitions.db analysis
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -100,7 +121,11 @@ impl FormatAnalyzer {
         Ok(())
     }
 
-    fn analyze_rows_file(&self, data: &[u8], result: &mut ValidationResult) -> Result<(), ValidationError> {
+    fn analyze_rows_file(
+        &self,
+        data: &[u8],
+        result: &mut ValidationResult,
+    ) -> Result<(), ValidationError> {
         // BTI Rows.db analysis
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -119,25 +144,26 @@ impl HexAnalyzer for FormatAnalyzer {
 
     fn find_magic_numbers(&self, data: &[u8]) -> Vec<(usize, u32)> {
         let mut magic_numbers = Vec::new();
-        
+
         for i in 0..data.len().saturating_sub(3) {
-            let magic = u32::from_be_bytes([data[i], data[i+1], data[i+2], data[i+3]]);
-            
+            let magic = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+
             // Check for known magic numbers
-            if magic == crate::format_constants::BIG_FORMAT_OA_MAGIC ||
-               magic == crate::format_constants::BTI_FORMAT_DA_MAGIC ||
-               magic == crate::format_constants::STATISTICS_MAGIC {
+            if magic == crate::format_constants::BIG_FORMAT_OA_MAGIC
+                || magic == crate::format_constants::BTI_FORMAT_DA_MAGIC
+                || magic == crate::format_constants::STATISTICS_MAGIC
+            {
                 magic_numbers.push((i, magic));
             }
         }
-        
+
         magic_numbers
     }
 
     fn analyze_vints(&self, data: &[u8]) -> Vec<(usize, i64, usize)> {
         let mut vints = Vec::new();
         let mut i = 0;
-        
+
         while i < data.len() {
             if let Some((value, size)) = self.try_decode_vint(&data[i..]) {
                 vints.push((i, value, size));
@@ -146,7 +172,7 @@ impl HexAnalyzer for FormatAnalyzer {
                 i += 1;
             }
         }
-        
+
         vints
     }
 }

@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{types::TableId, Config, Result, Value};
+use crate::{Config, Result, Value, types::TableId};
 
 /// Memory manager for caching and buffer management
 #[derive(Debug)]
@@ -242,10 +242,7 @@ impl MemoryManager {
         };
 
         let size = self.estimate_row_size(&data);
-        let row = Arc::new(CachedRow {
-            _data: data,
-            size,
-        });
+        let row = Arc::new(CachedRow { _data: data, size });
 
         let mut cache = self.row_cache.write();
 
@@ -349,7 +346,11 @@ impl MemoryManager {
             Value::Float32(_) => 4,
             Value::Set(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
             Value::Tuple(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
-            Value::Udt(udt) => udt.fields.iter().map(|f| f.value.as_ref().map_or(0, |v| self.estimate_value_size(v))).sum(),
+            Value::Udt(udt) => udt
+                .fields
+                .iter()
+                .map(|f| f.value.as_ref().map_or(0, |v| self.estimate_value_size(v)))
+                .sum(),
             Value::Frozen(boxed_value) => self.estimate_value_size(boxed_value),
             Value::Tombstone(_) => 16, // timestamp + type + optional TTL
         }

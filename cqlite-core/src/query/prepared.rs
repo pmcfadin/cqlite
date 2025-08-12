@@ -8,9 +8,9 @@
 //! - Reusability: Same query can be executed with different parameters
 
 use super::{
+    ParsedQuery,
     executor::{QueryExecutor, QueryResult},
     planner::QueryPlan,
-    ParsedQuery,
 };
 use crate::{Error, Result, Value};
 use std::collections::HashMap;

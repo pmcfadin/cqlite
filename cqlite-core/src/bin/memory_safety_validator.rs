@@ -1,5 +1,5 @@
 //! Memory Safety Validator Binary
-//! 
+//!
 //! Standalone binary to run comprehensive memory safety validation tests
 //! for the CQLite core database engine.
 
@@ -22,27 +22,27 @@ async fn main() {
                 .long("tool")
                 .value_name("TOOL")
                 .help("Specific tool to use (miri, valgrind, asan, all)")
-                .default_value("all")
+                .default_value("all"),
         )
         .arg(
             Arg::new("stress")
                 .short('s')
                 .long("stress")
                 .help("Run stress tests")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
                 .help("Verbose output")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("check-tools")
                 .long("check-tools")
                 .help("Check available tools and exit")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .get_matches();
 

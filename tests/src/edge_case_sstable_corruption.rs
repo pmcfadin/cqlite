@@ -3,12 +3,12 @@
 //! Comprehensive tests for SSTable format robustness, corruption handling,
 //! and extreme edge cases that could break Cassandra compatibility.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::parser::header::*;
 use cqlite_core::parser::types::*;
 use cqlite_core::parser::vint::*;
-use cqlite_core::{error::Result, Value};
+use cqlite_core::{Value, error::Result};
 use std::collections::HashMap;
 use std::io::Cursor;
 

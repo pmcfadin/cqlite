@@ -3,15 +3,15 @@
 //! This module provides comprehensive data integrity validation for Issue #17.
 //! It validates data consistency, corruption detection, and format integrity.
 
-use crate::error::{Result, Error};
+use super::reports::{ValidationSection, ValidationSectionStatus};
+use crate::error::{Error, Result};
 use crate::storage::sstable::reader::SSTableReader;
 use crate::types::Value;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
 use tokio::fs;
-use super::reports::{ValidationSection, ValidationSectionStatus};
 
 /// Data integrity validator
 #[derive(Debug)]
@@ -157,7 +157,7 @@ impl DataIntegrityValidator {
     pub async fn validate_all(&self) -> Result<IntegrityReport> {
         log::info!("Starting comprehensive data integrity validation");
         let start_time = Instant::now();
-        
+
         let mut all_checks = Vec::new();
         let mut total_bytes = 0u64;
 
@@ -177,7 +177,7 @@ impl DataIntegrityValidator {
         let total_duration = start_time.elapsed();
         let metrics = self.calculate_metrics(&all_checks, total_duration, total_bytes);
         let overall_status = self.determine_overall_status(&all_checks);
-        
+
         Ok(IntegrityReport {
             overall_status,
             summary: self.generate_summary(&all_checks, &metrics),
@@ -191,13 +191,20 @@ impl DataIntegrityValidator {
     /// Validate all files in a directory
     async fn validate_directory(&self, path: &Path) -> Result<Vec<IntegrityCheck>> {
         let mut checks = Vec::new();
-        
-        let mut entries = fs::read_dir(path).await
-            .map_err(|e| Error::storage(format!("Failed to read directory {}: {}", path.display(), e)))?;
 
-        while let Some(entry) = entries.next_entry().await
-            .map_err(|e| Error::storage(format!("Failed to read directory entry: {}", e)))? {
-            
+        let mut entries = fs::read_dir(path).await.map_err(|e| {
+            Error::storage(format!(
+                "Failed to read directory {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| Error::storage(format!("Failed to read directory entry: {}", e)))?
+        {
             let path = entry.path();
             if path.is_file() {
                 if let Some(ext) = path.extension() {
@@ -215,14 +222,19 @@ impl DataIntegrityValidator {
     /// Validate a single SSTable file
     async fn validate_sstable_file(&self, path: &Path) -> Result<Vec<IntegrityCheck>> {
         log::debug!("Validating SSTable file: {}", path.display());
-        
+
         let mut checks = Vec::new();
-        let file_size = fs::metadata(path).await
+        let file_size = fs::metadata(path)
+            .await
             .map_err(|e| Error::storage(format!("Failed to get file metadata: {}", e)))?
             .len();
 
         if file_size > self.config.max_file_size {
-            log::warn!("Skipping large file: {} ({} bytes)", path.display(), file_size);
+            log::warn!(
+                "Skipping large file: {} ({} bytes)",
+                path.display(),
+                file_size
+            );
             checks.push(IntegrityCheck {
                 name: format!("file_size_{}", path.file_name().unwrap().to_string_lossy()),
                 check_type: IntegrityCheckType::FormatStructure,
@@ -270,14 +282,15 @@ impl DataIntegrityValidator {
     async fn validate_checksum(&self, path: &Path) -> Result<IntegrityCheck> {
         let start_time = Instant::now();
         let file_name = path.file_name().unwrap().to_string_lossy();
-        
+
         // Read file contents
-        let contents = fs::read(path).await
+        let contents = fs::read(path)
+            .await
             .map_err(|e| Error::storage(format!("Failed to read file: {}", e)))?;
 
         // Calculate checksum (simplified - in real implementation would use CRC32 or similar)
         let calculated_checksum = self.calculate_file_checksum(&contents);
-        
+
         // For now, assume checksum is valid if we can calculate it
         let status = IntegrityStatus::Passed;
         let duration = start_time.elapsed();
@@ -298,7 +311,7 @@ impl DataIntegrityValidator {
     async fn validate_format_structure(&self, path: &Path) -> Result<IntegrityCheck> {
         let start_time = Instant::now();
         let file_name = path.file_name().unwrap().to_string_lossy();
-        
+
         let mut status = IntegrityStatus::Passed;
         let mut error_message = None;
         let mut bytes_validated = 0u64;
@@ -401,7 +414,7 @@ impl DataIntegrityValidator {
         let details = match fs::read(path).await {
             Ok(contents) => {
                 bytes_validated = contents.len() as u64;
-                
+
                 // Check for corruption patterns
                 if self.has_corruption_patterns(&contents) {
                     status = IntegrityStatus::Failed;
@@ -437,9 +450,9 @@ impl DataIntegrityValidator {
     /// Validate specific data types for a collection of files
     pub async fn validate_types(&self, types: &[String]) -> Result<super::ValidationReport> {
         log::info!("Validating specific data types: {:?}", types);
-        
+
         let mut report = super::ValidationReport::new("Data Type Validation");
-        
+
         for data_type in types {
             let type_result = self.validate_single_type(data_type).await?;
             let section = ValidationSection {
@@ -459,7 +472,7 @@ impl DataIntegrityValidator {
             };
             report.add_section(&format!("Type: {}", data_type), section);
         }
-        
+
         Ok(report)
     }
 
@@ -470,7 +483,7 @@ impl DataIntegrityValidator {
 
         // Create synthetic test data for the specific type
         let test_values = self.generate_test_values_for_type(data_type)?;
-        
+
         for (i, value) in test_values.iter().enumerate() {
             let check = self.validate_value_integrity(data_type, value, i).await?;
             checks.push(check);
@@ -482,7 +495,11 @@ impl DataIntegrityValidator {
 
         Ok(IntegrityReport {
             overall_status,
-            summary: format!("Validated {} test cases for type '{}'", checks.len(), data_type),
+            summary: format!(
+                "Validated {} test cases for type '{}'",
+                checks.len(),
+                data_type
+            ),
             recommendations: self.generate_type_recommendations(data_type, &checks),
             checks,
             metrics,
@@ -513,10 +530,7 @@ impl DataIntegrityValidator {
                 Value::BigInt(i64::MAX),
                 Value::BigInt(i64::MIN),
             ]),
-            "boolean" => Ok(vec![
-                Value::Boolean(true),
-                Value::Boolean(false),
-            ]),
+            "boolean" => Ok(vec![Value::Boolean(true), Value::Boolean(false)]),
             "float" => Ok(vec![
                 Value::Float(0.0),
                 Value::Float(3.14159),
@@ -534,14 +548,22 @@ impl DataIntegrityValidator {
                 Value::Blob(vec![0, 1, 2, 3, 4, 5]),
                 Value::Blob(vec![255; 1000]),
             ]),
-            _ => Err(Error::invalid_input(format!("Unsupported data type for validation: {}", data_type)))
+            _ => Err(Error::invalid_input(format!(
+                "Unsupported data type for validation: {}",
+                data_type
+            ))),
         }
     }
 
     /// Validate integrity of a specific value
-    async fn validate_value_integrity(&self, data_type: &str, value: &Value, index: usize) -> Result<IntegrityCheck> {
+    async fn validate_value_integrity(
+        &self,
+        data_type: &str,
+        value: &Value,
+        index: usize,
+    ) -> Result<IntegrityCheck> {
         let start_time = Instant::now();
-        
+
         // Simulate serialization/deserialization round-trip
         let status = match self.roundtrip_serialize(value) {
             Ok(_) => IntegrityStatus::Passed,
@@ -605,7 +627,7 @@ impl DataIntegrityValidator {
         let pattern_size = 4;
         let first_pattern = &contents[0..pattern_size];
         let mut repeating_count = 0;
-        
+
         for chunk in contents.chunks(pattern_size) {
             if chunk == first_pattern {
                 repeating_count += 1;
@@ -620,9 +642,10 @@ impl DataIntegrityValidator {
     async fn open_sstable_reader(&self, path: &Path) -> Result<SSTableReader> {
         // In a real implementation, this would open an actual SSTable reader
         // For now, we'll simulate success if the file exists and has reasonable size
-        let metadata = fs::metadata(path).await
+        let metadata = fs::metadata(path)
+            .await
             .map_err(|e| Error::storage(format!("Cannot read file metadata: {}", e)))?;
-        
+
         if metadata.len() < 8 {
             return Err(Error::invalid_format("File too small to be valid SSTable"));
         }
@@ -635,13 +658,16 @@ impl DataIntegrityValidator {
     }
 
     /// Validate types found in the reader
-    async fn validate_types_in_reader(&self, _reader: &SSTableReader) -> Result<Vec<IntegrityCheck>> {
+    async fn validate_types_in_reader(
+        &self,
+        _reader: &SSTableReader,
+    ) -> Result<Vec<IntegrityCheck>> {
         // In real implementation, would iterate through the SSTable and validate each data type
         let mut checks = Vec::new();
-        
+
         // For now, create placeholder validations
         let basic_types = ["text", "int", "bigint", "boolean", "uuid"];
-        
+
         for data_type in &basic_types {
             checks.push(IntegrityCheck {
                 name: format!("type_validation_{}", data_type),
@@ -654,17 +680,20 @@ impl DataIntegrityValidator {
                 timestamp: chrono::Utc::now(),
             });
         }
-        
+
         Ok(checks)
     }
 
     /// Validate collections found in the reader
-    async fn validate_collections_in_reader(&self, _reader: &SSTableReader) -> Result<Vec<IntegrityCheck>> {
+    async fn validate_collections_in_reader(
+        &self,
+        _reader: &SSTableReader,
+    ) -> Result<Vec<IntegrityCheck>> {
         // In real implementation, would validate collections (lists, sets, maps)
         let mut checks = Vec::new();
-        
+
         let collection_types = ["list", "set", "map"];
-        
+
         for collection_type in &collection_types {
             checks.push(IntegrityCheck {
                 name: format!("collection_validation_{}", collection_type),
@@ -677,7 +706,7 @@ impl DataIntegrityValidator {
                 timestamp: chrono::Utc::now(),
             });
         }
-        
+
         Ok(checks)
     }
 
@@ -706,12 +735,26 @@ impl DataIntegrityValidator {
     }
 
     /// Calculate comprehensive metrics
-    fn calculate_metrics(&self, checks: &[IntegrityCheck], total_duration: Duration, total_bytes: u64) -> IntegrityMetrics {
+    fn calculate_metrics(
+        &self,
+        checks: &[IntegrityCheck],
+        total_duration: Duration,
+        total_bytes: u64,
+    ) -> IntegrityMetrics {
         let total_checks = checks.len();
-        let passed_checks = checks.iter().filter(|c| c.status == IntegrityStatus::Passed).count();
-        let failed_checks = checks.iter().filter(|c| c.status == IntegrityStatus::Failed).count();
-        let warning_checks = checks.iter().filter(|c| c.status == IntegrityStatus::Warning).count();
-        
+        let passed_checks = checks
+            .iter()
+            .filter(|c| c.status == IntegrityStatus::Passed)
+            .count();
+        let failed_checks = checks
+            .iter()
+            .filter(|c| c.status == IntegrityStatus::Failed)
+            .count();
+        let warning_checks = checks
+            .iter()
+            .filter(|c| c.status == IntegrityStatus::Warning)
+            .count();
+
         let total_duration_ms = total_duration.as_millis() as u64;
         let avg_duration_ms = if total_checks > 0 {
             total_duration_ms as f64 / total_checks as f64
@@ -767,29 +810,39 @@ impl DataIntegrityValidator {
     /// Generate general recommendations
     fn generate_recommendations(&self, checks: &[IntegrityCheck]) -> Vec<String> {
         let mut recommendations = Vec::new();
-        
-        let failed_count = checks.iter().filter(|c| c.status == IntegrityStatus::Failed).count();
-        let warning_count = checks.iter().filter(|c| c.status == IntegrityStatus::Warning).count();
-        
+
+        let failed_count = checks
+            .iter()
+            .filter(|c| c.status == IntegrityStatus::Failed)
+            .count();
+        let warning_count = checks
+            .iter()
+            .filter(|c| c.status == IntegrityStatus::Warning)
+            .count();
+
         if failed_count > 0 {
             recommendations.push(format!(
                 "Address {} failed integrity checks to ensure data consistency",
                 failed_count
             ));
         }
-        
+
         if warning_count > 0 {
             recommendations.push(format!(
                 "Review {} warning conditions that may indicate potential issues",
                 warning_count
             ));
         }
-        
+
         // Check for corruption-related failures
-        let corruption_failures = checks.iter()
-            .filter(|c| c.check_type == IntegrityCheckType::Corruption && c.status == IntegrityStatus::Failed)
+        let corruption_failures = checks
+            .iter()
+            .filter(|c| {
+                c.check_type == IntegrityCheckType::Corruption
+                    && c.status == IntegrityStatus::Failed
+            })
             .count();
-        
+
         if corruption_failures > 0 {
             recommendations.push(
                 "Data corruption detected - consider backing up uncorrupted data and investigating the source".to_string()
@@ -799,33 +852,44 @@ impl DataIntegrityValidator {
         if recommendations.is_empty() {
             recommendations.push("All data integrity checks passed successfully".to_string());
         }
-        
+
         recommendations
     }
 
     /// Generate recommendations for specific data type
-    fn generate_type_recommendations(&self, data_type: &str, checks: &[IntegrityCheck]) -> Vec<String> {
+    fn generate_type_recommendations(
+        &self,
+        data_type: &str,
+        checks: &[IntegrityCheck],
+    ) -> Vec<String> {
         let mut recommendations = Vec::new();
-        
-        let failed_checks: Vec<_> = checks.iter().filter(|c| c.status == IntegrityStatus::Failed).collect();
-        
+
+        let failed_checks: Vec<_> = checks
+            .iter()
+            .filter(|c| c.status == IntegrityStatus::Failed)
+            .collect();
+
         if !failed_checks.is_empty() {
             recommendations.push(format!(
                 "Data type '{}' has {} validation failures - review serialization/deserialization logic",
                 data_type,
                 failed_checks.len()
             ));
-            
+
             // Add specific recommendations based on data type
             match data_type.to_lowercase().as_str() {
                 "text" | "varchar" => {
-                    recommendations.push("Consider UTF-8 encoding validation for text data".to_string());
+                    recommendations
+                        .push("Consider UTF-8 encoding validation for text data".to_string());
                 }
                 "int" | "bigint" => {
-                    recommendations.push("Verify integer overflow handling and endianness".to_string());
+                    recommendations
+                        .push("Verify integer overflow handling and endianness".to_string());
                 }
                 "float" => {
-                    recommendations.push("Check floating-point precision and NaN/infinity handling".to_string());
+                    recommendations.push(
+                        "Check floating-point precision and NaN/infinity handling".to_string(),
+                    );
                 }
                 "uuid" => {
                     recommendations.push("Ensure UUID format compliance with RFC 4122".to_string());
@@ -833,9 +897,12 @@ impl DataIntegrityValidator {
                 _ => {}
             }
         } else {
-            recommendations.push(format!("Data type '{}' validation completed successfully", data_type));
+            recommendations.push(format!(
+                "Data type '{}' validation completed successfully",
+                data_type
+            ));
         }
-        
+
         recommendations
     }
 }
@@ -855,10 +922,10 @@ mod tests {
     #[tokio::test]
     async fn test_generate_test_values() {
         let validator = DataIntegrityValidator::new(IntegrityConfig::default()).unwrap();
-        
+
         let text_values = validator.generate_test_values_for_type("text").unwrap();
         assert!(text_values.len() >= 3);
-        
+
         let int_values = validator.generate_test_values_for_type("int").unwrap();
         assert!(int_values.len() >= 3);
     }
@@ -866,11 +933,11 @@ mod tests {
     #[test]
     fn test_corruption_detection() {
         let validator = DataIntegrityValidator::new(IntegrityConfig::default()).unwrap();
-        
+
         // Test with corrupted data (all zeros)
         let corrupted_data = vec![0u8; 1000];
         assert!(validator.has_corruption_patterns(&corrupted_data));
-        
+
         // Test with valid-looking data
         let valid_data = (0..1000u8).collect::<Vec<_>>();
         assert!(!validator.has_corruption_patterns(&valid_data));
@@ -879,7 +946,7 @@ mod tests {
     #[test]
     fn test_integrity_metrics_calculation() {
         let validator = DataIntegrityValidator::new(IntegrityConfig::default()).unwrap();
-        
+
         let checks = vec![
             IntegrityCheck {
                 name: "test1".to_string(),
@@ -902,9 +969,9 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             },
         ];
-        
+
         let metrics = validator.calculate_metrics(&checks, Duration::from_millis(300), 3000);
-        
+
         assert_eq!(metrics.total_checks, 2);
         assert_eq!(metrics.passed_checks, 1);
         assert_eq!(metrics.failed_checks, 1);

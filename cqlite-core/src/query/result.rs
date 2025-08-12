@@ -669,8 +669,10 @@ impl ToJson for Value {
                 serde_json::Value::Array(json_list)
             }
             Value::Map(map) => {
-                let json_map: serde_json::Map<String, serde_json::Value> =
-                    map.iter().map(|(k, v)| (format!("{}", k), v.to_json())).collect();
+                let json_map: serde_json::Map<String, serde_json::Value> = map
+                    .iter()
+                    .map(|(k, v)| (format!("{}", k), v.to_json()))
+                    .collect();
                 serde_json::Value::Object(json_map)
             }
             Value::BigInt(i) => serde_json::Value::Number((*i).into()),
@@ -696,7 +698,10 @@ impl ToJson for Value {
             }
             Value::Udt(udt) => {
                 let mut json_obj = serde_json::Map::new();
-                json_obj.insert("_type".to_string(), serde_json::Value::String(udt.type_name.clone()));
+                json_obj.insert(
+                    "_type".to_string(),
+                    serde_json::Value::String(udt.type_name.clone()),
+                );
                 for field in &udt.fields {
                     let field_json = match &field.value {
                         Some(value) => value.to_json(),
@@ -709,9 +714,18 @@ impl ToJson for Value {
             Value::Frozen(boxed_value) => boxed_value.to_json(),
             Value::Tombstone(info) => {
                 let mut json_obj = serde_json::Map::new();
-                json_obj.insert("type".to_string(), serde_json::Value::String("tombstone".to_string()));
-                json_obj.insert("deletion_time".to_string(), serde_json::Value::Number(info.deletion_time.into()));
-                json_obj.insert("tombstone_type".to_string(), serde_json::Value::String(format!("{:?}", info.tombstone_type)));
+                json_obj.insert(
+                    "type".to_string(),
+                    serde_json::Value::String("tombstone".to_string()),
+                );
+                json_obj.insert(
+                    "deletion_time".to_string(),
+                    serde_json::Value::Number(info.deletion_time.into()),
+                );
+                json_obj.insert(
+                    "tombstone_type".to_string(),
+                    serde_json::Value::String(format!("{:?}", info.tombstone_type)),
+                );
                 if let Some(ttl) = info.ttl {
                     json_obj.insert("ttl".to_string(), serde_json::Value::Number(ttl.into()));
                 }

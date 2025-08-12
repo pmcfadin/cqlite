@@ -1,14 +1,14 @@
 //! Performance Monitoring and Baseline System
-//! 
+//!
 //! Provides continuous performance monitoring and regression detection
 //! for CQLite to ensure performance targets are maintained.
 
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
-use serde::{Serialize, Deserialize};
 
 /// Performance baseline metrics stored for comparison
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,18 +54,18 @@ pub struct PerformanceAlert {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertType {
-    Regression,      // Performance got worse
-    TargetMissed,   // Failed to meet target
-    Improvement,    // Performance got better
+    Regression,   // Performance got worse
+    TargetMissed, // Failed to meet target
+    Improvement,  // Performance got better
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertSeverity {
-    Critical,  // >25% degradation
-    High,      // 15-25% degradation  
-    Medium,    // 10-15% degradation
-    Low,       // 5-10% degradation
-    Info,      // <5% or improvement
+    Critical, // >25% degradation
+    High,     // 15-25% degradation
+    Medium,   // 10-15% degradation
+    Low,      // 5-10% degradation
+    Info,     // <5% or improvement
 }
 
 /// Performance monitoring system
@@ -197,17 +197,20 @@ impl PerformanceMonitor {
         {
             let mut measurements = self.measurements.lock().unwrap();
             measurements.push(measurement.clone());
-            
+
             // Keep only last 1000 measurements per metric
             let metric_name = measurement.metric_name.clone();
             let to_keep: Vec<bool> = measurements
                 .iter()
                 .map(|m| {
-                    let count = measurements.iter().filter(|other| other.metric_name == metric_name).count();
+                    let count = measurements
+                        .iter()
+                        .filter(|other| other.metric_name == metric_name)
+                        .count();
                     m.metric_name != metric_name || count <= 1000
                 })
                 .collect();
-            
+
             let mut i = 0;
             measurements.retain(|_| {
                 let keep = to_keep[i];
@@ -223,9 +226,13 @@ impl PerformanceMonitor {
     }
 
     /// Check for performance regressions and generate alerts
-    fn check_for_alerts(&self, measurement: &PerformanceMeasurement, baseline: &PerformanceBaseline) {
+    fn check_for_alerts(
+        &self,
+        measurement: &PerformanceMeasurement,
+        baseline: &PerformanceBaseline,
+    ) {
         let deviation = measurement.deviation_percent;
-        
+
         // Determine if this is a regression based on target direction
         let is_regression = match baseline.target_direction {
             TargetDirection::Higher => deviation < -5.0, // 5% decrease is concerning
@@ -286,7 +293,8 @@ impl PerformanceMonitor {
             AlertType::Improvement => "PERFORMANCE IMPROVEMENT",
         };
 
-        println!("{} {} - {}: {:.2} (baseline: {:.2}, deviation: {:.1}%)",
+        println!(
+            "{} {} - {}: {:.2} (baseline: {:.2}, deviation: {:.1}%)",
             emoji,
             alert_text,
             alert.metric_name,
@@ -308,23 +316,29 @@ impl PerformanceMonitor {
 
         // Summary
         let total_metrics = baselines.len();
-        let recent_measurements: Vec<_> = measurements.iter()
+        let recent_measurements: Vec<_> = measurements
+            .iter()
             .filter(|m| current_timestamp() - m.timestamp < 3600) // Last hour
             .collect();
-        let targets_met = recent_measurements.iter()
+        let targets_met = recent_measurements
+            .iter()
             .filter(|m| m.meets_target)
             .count();
 
         report.push_str(&format!("📊 Summary (Last Hour)\n"));
         report.push_str(&format!("----------------------\n"));
         report.push_str(&format!("Total Metrics Tracked: {}\n", total_metrics));
-        report.push_str(&format!("Recent Measurements: {}\n", recent_measurements.len()));
-        report.push_str(&format!("Targets Met: {} ({:.1}%)\n", 
-            targets_met, 
-            if !recent_measurements.is_empty() { 
-                targets_met as f64 / recent_measurements.len() as f64 * 100.0 
-            } else { 
-                0.0 
+        report.push_str(&format!(
+            "Recent Measurements: {}\n",
+            recent_measurements.len()
+        ));
+        report.push_str(&format!(
+            "Targets Met: {} ({:.1}%)\n",
+            targets_met,
+            if !recent_measurements.is_empty() {
+                targets_met as f64 / recent_measurements.len() as f64 * 100.0
+            } else {
+                0.0
             }
         ));
 
@@ -333,18 +347,24 @@ impl PerformanceMonitor {
         report.push_str(&format!("-----------------------------\n"));
 
         for (metric_name, baseline) in baselines.iter() {
-            let latest_measurement = measurements.iter()
+            let latest_measurement = measurements
+                .iter()
                 .filter(|m| m.metric_name == *metric_name)
                 .max_by_key(|m| m.timestamp);
 
             if let Some(measurement) = latest_measurement {
-                let status = if measurement.meets_target { "✅ PASS" } else { "❌ FAIL" };
+                let status = if measurement.meets_target {
+                    "✅ PASS"
+                } else {
+                    "❌ FAIL"
+                };
                 let direction = match baseline.target_direction {
                     TargetDirection::Higher => "↗️",
                     TargetDirection::Lower => "↘️",
                 };
-                
-                report.push_str(&format!("{} {} {}: {:.2} {} (target: {} {:.2})\n",
+
+                report.push_str(&format!(
+                    "{} {} {}: {:.2} {} (target: {} {:.2})\n",
                     status,
                     direction,
                     metric_name,
@@ -357,12 +377,16 @@ impl PerformanceMonitor {
                     baseline.target_value
                 ));
             } else {
-                report.push_str(&format!("⏳ PENDING {}: No measurements yet\n", metric_name));
+                report.push_str(&format!(
+                    "⏳ PENDING {}: No measurements yet\n",
+                    metric_name
+                ));
             }
         }
 
         // Recent alerts
-        let recent_alerts: Vec<_> = alerts.iter()
+        let recent_alerts: Vec<_> = alerts
+            .iter()
             .filter(|a| current_timestamp() - a.timestamp < 86400) // Last 24 hours
             .collect();
 
@@ -370,7 +394,8 @@ impl PerformanceMonitor {
             report.push_str(&format!("\n🚨 Recent Alerts (24h)\n"));
             report.push_str(&format!("----------------------\n"));
 
-            for alert in recent_alerts.iter().take(10) { // Show max 10 recent alerts
+            for alert in recent_alerts.iter().take(10) {
+                // Show max 10 recent alerts
                 let emoji = match alert.severity {
                     AlertSeverity::Critical => "🚨",
                     AlertSeverity::High => "⚠️",
@@ -379,7 +404,8 @@ impl PerformanceMonitor {
                     AlertSeverity::Info => "ℹ️",
                 };
 
-                report.push_str(&format!("{} {:?} - {}: {:.2} ({:.1}% deviation)\n",
+                report.push_str(&format!(
+                    "{} {:?} - {}: {:.2} ({:.1}% deviation)\n",
                     emoji,
                     alert.alert_type,
                     alert.metric_name,
@@ -394,19 +420,25 @@ impl PerformanceMonitor {
         report.push_str(&format!("--------------------\n"));
 
         for (metric_name, _baseline) in baselines.iter() {
-            let metric_measurements: Vec<_> = measurements.iter()
+            let metric_measurements: Vec<_> = measurements
+                .iter()
                 .filter(|m| m.metric_name == *metric_name)
                 .collect();
 
             if metric_measurements.len() >= 2 {
                 let recent = metric_measurements.iter().rev().take(5).collect::<Vec<_>>();
                 let avg_recent = recent.iter().map(|m| m.value).sum::<f64>() / recent.len() as f64;
-                
-                let older = metric_measurements.iter().rev().skip(5).take(5).collect::<Vec<_>>();
+
+                let older = metric_measurements
+                    .iter()
+                    .rev()
+                    .skip(5)
+                    .take(5)
+                    .collect::<Vec<_>>();
                 if !older.is_empty() {
                     let avg_older = older.iter().map(|m| m.value).sum::<f64>() / older.len() as f64;
                     let trend = ((avg_recent - avg_older) / avg_older) * 100.0;
-                    
+
                     let trend_icon = if trend > 5.0 {
                         "📈"
                     } else if trend < -5.0 {
@@ -414,9 +446,11 @@ impl PerformanceMonitor {
                     } else {
                         "➡️"
                     };
-                    
-                    report.push_str(&format!("{} {}: {:.1}% trend over recent measurements\n",
-                        trend_icon, metric_name, trend));
+
+                    report.push_str(&format!(
+                        "{} {}: {:.1}% trend over recent measurements\n",
+                        trend_icon, metric_name, trend
+                    ));
                 }
             }
         }
@@ -424,15 +458,19 @@ impl PerformanceMonitor {
         report.push_str(&format!("\n💡 Recommendations\n"));
         report.push_str(&format!("------------------\n"));
 
-        let critical_alerts = alerts.iter()
+        let critical_alerts = alerts
+            .iter()
             .filter(|a| matches!(a.severity, AlertSeverity::Critical))
             .count();
-        let high_alerts = alerts.iter()
+        let high_alerts = alerts
+            .iter()
             .filter(|a| matches!(a.severity, AlertSeverity::High))
             .count();
 
         if critical_alerts > 0 {
-            report.push_str("🚨 CRITICAL: Immediate attention required for performance regressions\n");
+            report.push_str(
+                "🚨 CRITICAL: Immediate attention required for performance regressions\n",
+            );
         }
         if high_alerts > 0 {
             report.push_str("⚠️ HIGH: Performance issues detected, investigate soon\n");
@@ -444,7 +482,9 @@ impl PerformanceMonitor {
             report.push_str("⏳ No recent measurements - ensure monitoring is active\n");
         }
 
-        report.push_str("\n🔄 Automatic monitoring active - Run benchmarks regularly to maintain baselines\n");
+        report.push_str(
+            "\n🔄 Automatic monitoring active - Run benchmarks regularly to maintain baselines\n",
+        );
 
         report
     }
@@ -467,9 +507,10 @@ impl PerformanceMonitor {
     pub fn get_recent_alerts(&self, hours: u64) -> Vec<PerformanceAlert> {
         let alerts = self.alerts.lock().unwrap();
         let cutoff = current_timestamp() - (hours * 3600);
-        alerts.iter()
+        alerts
+            .iter()
             .filter(|a| a.timestamp >= cutoff)
-            .cloned()  
+            .cloned()
             .collect()
     }
 }
@@ -483,10 +524,7 @@ fn current_timestamp() -> u64 {
 }
 
 fn get_environment_info() -> String {
-    format!("{} {}", 
-        std::env::consts::OS, 
-        std::env::consts::ARCH
-    )
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 impl Default for PerformanceMonitor {
@@ -505,7 +543,7 @@ mod tests {
     fn test_performance_monitor_creation() {
         let monitor = PerformanceMonitor::new();
         monitor.initialize_prd_baselines();
-        
+
         let baselines = monitor.baselines.lock().unwrap();
         assert!(!baselines.is_empty());
         assert!(baselines.contains_key("parse_speed_mb_per_sec"));
@@ -516,9 +554,9 @@ mod tests {
     fn test_record_measurement() {
         let monitor = PerformanceMonitor::new();
         monitor.initialize_prd_baselines();
-        
+
         monitor.record_measurement("parse_speed_mb_per_sec", 120.0, "MB/s");
-        
+
         let measurements = monitor.measurements.lock().unwrap();
         assert_eq!(measurements.len(), 1);
         assert_eq!(measurements[0].metric_name, "parse_speed_mb_per_sec");
@@ -530,10 +568,10 @@ mod tests {
     fn test_regression_detection() {
         let monitor = PerformanceMonitor::new();
         monitor.initialize_prd_baselines();
-        
+
         // Record a measurement that should trigger a regression alert
         monitor.record_measurement("parse_speed_mb_per_sec", 50.0, "MB/s"); // Well below baseline
-        
+
         let alerts = monitor.alerts.lock().unwrap();
         assert!(!alerts.is_empty());
         assert!(matches!(alerts[0].alert_type, AlertType::TargetMissed));
@@ -543,10 +581,10 @@ mod tests {
     fn test_performance_report_generation() {
         let monitor = PerformanceMonitor::new();
         monitor.initialize_prd_baselines();
-        
+
         monitor.record_measurement("parse_speed_mb_per_sec", 120.0, "MB/s");
         monitor.record_measurement("memory_usage_mb", 64.0, "MB");
-        
+
         let report = monitor.generate_performance_report();
         assert!(report.contains("Performance Monitoring Report"));
         assert!(report.contains("PASS"));

@@ -5,10 +5,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use cqlite_core::{
-    error::Error,
-    Result,
-};
+use cqlite_core::{Result, error::Error};
 
 /// Binary format verification results
 #[derive(Debug, Clone)]
@@ -46,7 +43,8 @@ impl SSTableFormatVerifier {
         let mut file = File::open(file_path)
             .map_err(|e| Error::storage(format!("Failed to open file: {}", e)))?;
 
-        let file_size = file.metadata()
+        let file_size = file
+            .metadata()
             .map_err(|e| Error::storage(format!("Failed to get file metadata: {}", e)))?
             .len();
 
@@ -69,7 +67,8 @@ impl SSTableFormatVerifier {
         warnings.extend(footer_result.footer_warnings.clone());
 
         // Verify data section integrity
-        let data_result = Self::verify_data_section(&mut file, &header_result.details, &footer_result)?;
+        let data_result =
+            Self::verify_data_section(&mut file, &header_result.details, &footer_result)?;
         issues.extend(data_result.issues);
         warnings.extend(data_result.warnings);
 
@@ -134,18 +133,18 @@ impl SSTableFormatVerifier {
 
         // Parse partition count (bytes 10-17, big-endian)
         let partition_count = u64::from_be_bytes([
-            header[10], header[11], header[12], header[13],
-            header[14], header[15], header[16], header[17],
+            header[10], header[11], header[12], header[13], header[14], header[15], header[16],
+            header[17],
         ]);
 
         // Parse timestamp range (bytes 18-33, big-endian)
         let min_timestamp = u64::from_be_bytes([
-            header[18], header[19], header[20], header[21],
-            header[22], header[23], header[24], header[25],
+            header[18], header[19], header[20], header[21], header[22], header[23], header[24],
+            header[25],
         ]);
         let max_timestamp = u64::from_be_bytes([
-            header[26], header[27], header[28], header[29],
-            header[30], header[31], header[0], header[1], // Note: This wraps around due to 32-byte limit
+            header[26], header[27], header[28], header[29], header[30], header[31], header[0],
+            header[1], // Note: This wraps around due to 32-byte limit
         ]);
 
         // Verify reserved bytes are zero (would be bytes 34-39, but we only have 32 bytes)
@@ -184,7 +183,9 @@ impl SSTableFormatVerifier {
     /// Verify SSTable footer format
     fn verify_footer(file: &mut File, file_size: u64) -> Result<FooterVerificationResult> {
         if file_size < 16 {
-            return Err(Error::storage("File too small to contain footer".to_string()));
+            return Err(Error::storage(
+                "File too small to contain footer".to_string(),
+            ));
         }
 
         let mut footer = [0u8; 16];
@@ -198,17 +199,16 @@ impl SSTableFormatVerifier {
 
         // Parse index offset (bytes 0-7, big-endian)
         let index_offset = u64::from_be_bytes([
-            footer[0], footer[1], footer[2], footer[3],
-            footer[4], footer[5], footer[6], footer[7],
+            footer[0], footer[1], footer[2], footer[3], footer[4], footer[5], footer[6], footer[7],
         ]);
 
         // Verify footer magic (bytes 8-15)
         let footer_magic = [
-            footer[8], footer[9], footer[10], footer[11],
-            footer[12], footer[13], footer[14], footer[15],
+            footer[8], footer[9], footer[10], footer[11], footer[12], footer[13], footer[14],
+            footer[15],
         ];
         let expected_footer_magic = [0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A];
-        
+
         if footer_magic != expected_footer_magic {
             issues.push(format!(
                 "Invalid footer magic: expected {:?}, found {:?}",
@@ -277,14 +277,17 @@ impl SSTableFormatVerifier {
                 Ok(_) => {
                     // Parse potential block header
                     let block_size = u32::from_be_bytes([
-                        block_header[8], block_header[9], block_header[10], block_header[11]
+                        block_header[8],
+                        block_header[9],
+                        block_header[10],
+                        block_header[11],
                     ]);
-                    
+
                     if block_size > 0 && block_size < 1024 * 1024 {
                         // Seems like a reasonable block size
                         estimated_entries += 10; // Rough estimate
                         current_pos += 16 + block_size as u64;
-                        
+
                         // Skip the block data
                         if file.seek(SeekFrom::Start(current_pos)).is_err() {
                             break;
@@ -318,8 +321,9 @@ impl SSTableFormatVerifier {
             .map_err(|e| Error::storage(format!("Failed to seek for endianness check: {}", e)))?;
 
         let mut flags_bytes = [0u8; 4];
-        file.read_exact(&mut flags_bytes)
-            .map_err(|e| Error::storage(format!("Failed to read flags for endianness check: {}", e)))?;
+        file.read_exact(&mut flags_bytes).map_err(|e| {
+            Error::storage(format!("Failed to read flags for endianness check: {}", e))
+        })?;
 
         // Check if flags make sense in big-endian
         let flags_be = u32::from_be_bytes(flags_bytes);
@@ -329,15 +333,14 @@ impl SSTableFormatVerifier {
         if flags_be <= 0xFF && flags_le > 0xFF {
             // Looks like big-endian encoding (correct)
         } else if flags_le <= 0xFF && flags_be > 0xFF {
-            issues.push("Data appears to be in little-endian format (should be big-endian)".to_string());
+            issues.push(
+                "Data appears to be in little-endian format (should be big-endian)".to_string(),
+            );
         } else if flags_be > 0xFF && flags_le > 0xFF {
             warnings.push("Cannot determine endianness from flags".to_string());
         }
 
-        Ok(EndiannessResult {
-            issues,
-            warnings,
-        })
+        Ok(EndiannessResult { issues, warnings })
     }
 
     /// Print detailed format analysis
@@ -349,27 +352,36 @@ impl SSTableFormatVerifier {
         println!("Magic bytes: {:?}", result.format_details.magic_bytes);
         println!("Flags: 0x{:08X}", result.format_details.flags);
         println!("  - Compression: {}", result.format_details.has_compression);
-        println!("  - Bloom filter: {}", result.format_details.has_bloom_filter);
+        println!(
+            "  - Bloom filter: {}",
+            result.format_details.has_bloom_filter
+        );
         println!("Partition count: {}", result.format_details.partition_count);
-        println!("Timestamp range: {} - {}", result.format_details.min_timestamp, result.format_details.max_timestamp);
+        println!(
+            "Timestamp range: {} - {}",
+            result.format_details.min_timestamp, result.format_details.max_timestamp
+        );
         println!("Index offset: {}", result.format_details.index_offset);
         println!("Footer magic: {:?}", result.format_details.footer_magic);
-        println!("Estimated entries: {}", result.format_details.estimated_entry_count);
-        
+        println!(
+            "Estimated entries: {}",
+            result.format_details.estimated_entry_count
+        );
+
         if !result.issues.is_empty() {
             println!("\n❌ Issues found:");
             for issue in &result.issues {
                 println!("  - {}", issue);
             }
         }
-        
+
         if !result.warnings.is_empty() {
             println!("\n⚠️ Warnings:");
             for warning in &result.warnings {
                 println!("  - {}", warning);
             }
         }
-        
+
         if result.is_valid {
             println!("\n✅ Format verification passed!");
         } else {
@@ -420,10 +432,10 @@ struct EndiannessResult {
 /// Standalone format verification utility
 pub fn verify_sstable_format(file_path: &Path) -> Result<()> {
     println!("🔍 Verifying SSTable format: {}", file_path.display());
-    
+
     let result = SSTableFormatVerifier::verify_format(file_path)?;
     SSTableFormatVerifier::print_format_analysis(&result);
-    
+
     if result.is_valid {
         Ok(())
     } else {
@@ -441,7 +453,7 @@ mod tests {
     fn test_format_verifier_invalid_file() {
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(b"invalid data").unwrap();
-        
+
         let result = SSTableFormatVerifier::verify_format(temp_file.path()).unwrap();
         assert!(!result.is_valid);
         assert!(!result.issues.is_empty());
@@ -450,10 +462,10 @@ mod tests {
     #[test]
     fn test_format_verifier_valid_header() {
         let mut temp_file = NamedTempFile::new().unwrap();
-        
+
         // Write a minimal valid SSTable
         let mut data = Vec::new();
-        
+
         // Header (32 bytes)
         data.extend_from_slice(&[0x5A, 0x5A, 0x5A, 0x5A]); // Magic
         data.extend_from_slice(b"oa"); // Version
@@ -461,16 +473,16 @@ mod tests {
         data.extend_from_slice(&0u64.to_be_bytes()); // Partition count
         data.extend_from_slice(&1234567890u64.to_be_bytes()); // Min timestamp
         data.extend_from_slice(&[0u8; 6]); // Padding to reach 32 bytes
-        
+
         // Minimal data section (16 bytes)
         data.extend_from_slice(&[0u8; 16]);
-        
+
         // Footer (16 bytes)
         data.extend_from_slice(&32u64.to_be_bytes()); // Index offset
         data.extend_from_slice(&[0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A]); // Footer magic
-        
+
         temp_file.write_all(&data).unwrap();
-        
+
         let result = SSTableFormatVerifier::verify_format(temp_file.path()).unwrap();
         assert!(result.is_valid || result.issues.len() <= 1); // May have minor issues but overall structure is correct
     }

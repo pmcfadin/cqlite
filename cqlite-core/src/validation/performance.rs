@@ -2,11 +2,11 @@
 //!
 //! This module provides performance validation and benchmarking for Issue #17.
 
-use crate::validation::{ValidationConfig, ValidationResult, ValidationType, ValidationStatus};
+use crate::validation::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use serde::{Deserialize, Serialize};
 
 /// Performance validator
 #[derive(Debug)]
@@ -105,9 +105,12 @@ pub fn generate_test_cases(_config: &ValidationConfig) -> Vec<PerformanceTestCas
 }
 
 /// Run a single performance test
-pub async fn run_test(test_case: PerformanceTestCase, _config: &ValidationConfig) -> ValidationResult {
+pub async fn run_test(
+    test_case: PerformanceTestCase,
+    _config: &ValidationConfig,
+) -> ValidationResult {
     let start_time = Instant::now();
-    
+
     let mut result = ValidationResult {
         test_name: test_case.name.clone(),
         test_type: ValidationType::Performance,
@@ -120,35 +123,48 @@ pub async fn run_test(test_case: PerformanceTestCase, _config: &ValidationConfig
         details: HashMap::new(),
         timestamp: chrono::Utc::now(),
     };
-    
+
     // Add test details
-    result.details.insert("description".to_string(), test_case.description.clone());
-    result.details.insert("benchmark_type".to_string(), format!("{:?}", test_case.benchmark_type));
-    result.details.insert("iterations".to_string(), test_case.iterations.to_string());
-    
+    result
+        .details
+        .insert("description".to_string(), test_case.description.clone());
+    result.details.insert(
+        "benchmark_type".to_string(),
+        format!("{:?}", test_case.benchmark_type),
+    );
+    result
+        .details
+        .insert("iterations".to_string(), test_case.iterations.to_string());
+
     // Simulate performance test execution
     let elapsed = start_time.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
     result.performance_ms = Some(elapsed_ms);
-    
+
     // Check against performance threshold
     if let Some(target_ms) = test_case.target_performance_ms {
         if elapsed_ms > target_ms {
             result.status = ValidationStatus::Failed;
-            result.errors.push(format!("Performance test failed: {}ms > {}ms target", elapsed_ms, target_ms));
+            result.errors.push(format!(
+                "Performance test failed: {}ms > {}ms target",
+                elapsed_ms, target_ms
+            ));
             result.accuracy_score = 0.0;
         }
     }
-    
+
     // Check against config threshold using default value
     let performance_threshold_ms = 1000u64; // Default performance threshold in ms
     if elapsed_ms > performance_threshold_ms {
         if result.status == ValidationStatus::Passed {
             result.status = ValidationStatus::Warning;
-            result.warnings.push(format!("Performance above config threshold: {}ms > {}ms", elapsed_ms, performance_threshold_ms));
+            result.warnings.push(format!(
+                "Performance above config threshold: {}ms > {}ms",
+                elapsed_ms, performance_threshold_ms
+            ));
         }
     }
-    
+
     result
 }
 
@@ -156,7 +172,7 @@ impl PerformanceValidator {
     /// Create a new performance validator
     pub fn new(framework: Arc<super::core::ValidationFramework>) -> crate::error::Result<Self> {
         let benchmarks = Self::create_default_benchmarks();
-        
+
         Ok(Self {
             framework,
             benchmarks,
@@ -192,7 +208,7 @@ impl PerformanceValidator {
                 iterations: 50,
                 warmup_iterations: 5,
                 target_throughput: Some(100.0), // 100 ops/sec
-                target_duration_ms: Some(100), // 100ms average
+                target_duration_ms: Some(100),  // 100ms average
             },
             BenchmarkSuite {
                 name: "Zero-Copy Deserialization".to_string(),
@@ -209,20 +225,25 @@ impl PerformanceValidator {
     /// Run all performance benchmarks (placeholder implementation)
     pub async fn run_benchmarks(&self) -> crate::error::Result<super::reports::ValidationReport> {
         log::info!("Starting Cassandra 5+ performance benchmarks");
-        
+
         let mut report = super::reports::ValidationReport::new("Performance Benchmarks");
-        
+
         // This would be implemented with actual benchmarking logic
         // For now, create a placeholder section
-        report.add_section("Performance", super::reports::ValidationSection {
-            name: "Performance Benchmarks".to_string(),
-            status: super::reports::ValidationSectionStatus::Passed,
-            details: "Performance benchmarks completed successfully".to_string(),
-            metrics: HashMap::new(),
-            recommendations: vec!["All performance targets met for Cassandra 5+ support".to_string()],
-            timestamp: chrono::Utc::now(),
-        });
-        
+        report.add_section(
+            "Performance",
+            super::reports::ValidationSection {
+                name: "Performance Benchmarks".to_string(),
+                status: super::reports::ValidationSectionStatus::Passed,
+                details: "Performance benchmarks completed successfully".to_string(),
+                metrics: HashMap::new(),
+                recommendations: vec![
+                    "All performance targets met for Cassandra 5+ support".to_string(),
+                ],
+                timestamp: chrono::Utc::now(),
+            },
+        );
+
         Ok(report)
     }
 }
@@ -235,11 +256,27 @@ mod tests {
     fn test_default_benchmarks_focus_cassandra5() {
         let benchmarks = PerformanceValidator::create_default_benchmarks();
         assert!(!benchmarks.is_empty());
-        
+
         // Ensure benchmarks focus on Cassandra 5+ features
-        assert!(benchmarks.iter().any(|b| b.description.contains("Cassandra 5+")));
-        assert!(benchmarks.iter().any(|b| b.description.contains("zero-copy")));
-        assert!(benchmarks.iter().any(|b| b.description.contains("LZ4, Snappy, Deflate")));
-        assert!(benchmarks.iter().any(|b| b.description.contains("CQL types")));
+        assert!(
+            benchmarks
+                .iter()
+                .any(|b| b.description.contains("Cassandra 5+"))
+        );
+        assert!(
+            benchmarks
+                .iter()
+                .any(|b| b.description.contains("zero-copy"))
+        );
+        assert!(
+            benchmarks
+                .iter()
+                .any(|b| b.description.contains("LZ4, Snappy, Deflate"))
+        );
+        assert!(
+            benchmarks
+                .iter()
+                .any(|b| b.description.contains("CQL types"))
+        );
     }
 }

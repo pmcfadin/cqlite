@@ -3,12 +3,12 @@
 //! Comprehensive tests for all CQL data types and their serialization/parsing
 //! compatibility with Cassandra 5+ format specifications.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::parser::types::*;
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
-use cqlite_core::parser::{parse_cql_value, serialize_cql_value, CqlTypeId};
-use cqlite_core::{error::Result, Value};
+use cqlite_core::parser::{CqlTypeId, parse_cql_value, serialize_cql_value};
+use cqlite_core::{Value, error::Result};
 use std::collections::HashMap;
 
 /// Comprehensive CQL type system test suite
@@ -237,7 +237,8 @@ impl TypeSystemTests {
         test_map.insert("key2".to_string(), Value::Integer(42));
         test_map.insert("key3".to_string(), Value::Boolean(true));
         // Convert HashMap to Vec<(Value, Value)>
-        let map_vec: Vec<(Value, Value)> = test_map.into_iter()
+        let map_vec: Vec<(Value, Value)> = test_map
+            .into_iter()
             .map(|(k, v)| (Value::Text(k), v))
             .collect();
         let map_value = Value::Map(map_vec);
@@ -306,7 +307,8 @@ impl TypeSystemTests {
             large_map.insert(format!("key_{:04}", i), Value::Integer(i));
         }
         // Convert HashMap to Vec<(Value, Value)>
-        let large_map_vec: Vec<(Value, Value)> = large_map.into_iter()
+        let large_map_vec: Vec<(Value, Value)> = large_map
+            .into_iter()
             .map(|(k, v)| (Value::Text(k), v))
             .collect();
         self.test_type_roundtrip("LARGE_MAP", CqlTypeId::Map, Value::Map(large_map_vec))?;

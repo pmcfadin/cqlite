@@ -6,10 +6,7 @@
 
 use super::statistics::*;
 use crate::error::Result;
-use nom::{
-    number::complete::be_u32,
-    IResult,
-};
+use nom::{IResult, number::complete::be_u32};
 use std::collections::HashMap;
 
 /// Enhanced Statistics.db header parser for real 'nb' format
@@ -45,7 +42,13 @@ pub fn parse_nb_format_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> 
 pub fn parse_nb_format_statistics_data(
     input: &[u8],
     header: &StatisticsHeader,
-) -> Result<(RowStatistics, TimestampStatistics, TableStatistics, PartitionStatistics, CompressionStatistics)> {
+) -> Result<(
+    RowStatistics,
+    TimestampStatistics,
+    TableStatistics,
+    PartitionStatistics,
+    CompressionStatistics,
+)> {
     // For the 'nb' format, we need to extract statistics from the variable-length
     // encoded data that follows. Based on analysis, this contains:
     // - Murmur3Partitioner string reference
@@ -54,7 +57,7 @@ pub fn parse_nb_format_statistics_data(
 
     // Initialize with reasonable defaults and try to extract what we can
     let parser_input = input;
-    
+
     // Try to find and parse specific statistics markers
     let (row_stats, remaining) = extract_row_statistics(parser_input, header)?;
     let (timestamp_stats, remaining) = extract_timestamp_statistics(remaining, header)?;
@@ -62,20 +65,29 @@ pub fn parse_nb_format_statistics_data(
     let (partition_stats, remaining) = extract_partition_statistics(remaining, header)?;
     let (compression_stats, _) = extract_compression_statistics(remaining, header)?;
 
-    Ok((row_stats, timestamp_stats, table_stats, partition_stats, compression_stats))
+    Ok((
+        row_stats,
+        timestamp_stats,
+        table_stats,
+        partition_stats,
+        compression_stats,
+    ))
 }
 
 /// Extract row statistics from binary data
-fn extract_row_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> Result<(RowStatistics, &'a [u8])> {
+fn extract_row_statistics<'a>(
+    input: &'a [u8],
+    header: &StatisticsHeader,
+) -> Result<(RowStatistics, &'a [u8])> {
     // For real files, we need to interpret the variable-length encoded data
     // The metadata fields in the header might contain row counts
     let estimated_rows = header.metadata2 as u64; // metadata2 was 101 in our example
-    
+
     let row_stats = RowStatistics {
         total_rows: estimated_rows,
         live_rows: (estimated_rows as f64 * 0.9) as u64, // Estimate 90% live
         tombstone_count: (estimated_rows as f64 * 0.1) as u64, // Estimate 10% tombstones
-        partition_count: (estimated_rows / 10).max(1), // Estimate ~10 rows per partition
+        partition_count: (estimated_rows / 10).max(1),   // Estimate ~10 rows per partition
         avg_rows_per_partition: if estimated_rows > 0 { 10.0 } else { 0.0 },
         row_size_histogram: create_default_row_histogram(estimated_rows),
     };
@@ -84,14 +96,17 @@ fn extract_row_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> Res
 }
 
 /// Extract timestamp statistics from binary data
-fn extract_timestamp_statistics<'a>(input: &'a [u8], _header: &StatisticsHeader) -> Result<(TimestampStatistics, &'a [u8])> {
+fn extract_timestamp_statistics<'a>(
+    input: &'a [u8],
+    _header: &StatisticsHeader,
+) -> Result<(TimestampStatistics, &'a [u8])> {
     // Look for timestamp patterns in the data
     // For now, create reasonable defaults based on current time
     let current_time_micros = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as i64;
-    
+
     let timestamp_stats = TimestampStatistics {
         min_timestamp: current_time_micros - 86400_000_000, // 1 day ago
         max_timestamp: current_time_micros,
@@ -106,10 +121,13 @@ fn extract_timestamp_statistics<'a>(input: &'a [u8], _header: &StatisticsHeader)
 }
 
 /// Extract table-level statistics from binary data
-fn extract_table_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> Result<(TableStatistics, &'a [u8])> {
+fn extract_table_statistics<'a>(
+    input: &'a [u8],
+    header: &StatisticsHeader,
+) -> Result<(TableStatistics, &'a [u8])> {
     // Use the data_length from header as an estimate of table size
     let estimated_size = header.data_length as u64 * 1000; // Scale up from header size
-    
+
     let table_stats = TableStatistics {
         disk_size: estimated_size,
         uncompressed_size: (estimated_size as f64 * 1.5) as u64, // Assume ~66% compression
@@ -117,7 +135,7 @@ fn extract_table_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> R
         compression_ratio: 0.66,
         block_count: (estimated_size / 8192).max(1), // 8KB blocks
         avg_block_size: 8192.0,
-        index_size: estimated_size / 20, // ~5% for index
+        index_size: estimated_size / 20,         // ~5% for index
         bloom_filter_size: estimated_size / 100, // ~1% for bloom filter
         level_count: 1,
     };
@@ -126,9 +144,12 @@ fn extract_table_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> R
 }
 
 /// Extract partition statistics from binary data
-fn extract_partition_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> Result<(PartitionStatistics, &'a [u8])> {
+fn extract_partition_statistics<'a>(
+    input: &'a [u8],
+    header: &StatisticsHeader,
+) -> Result<(PartitionStatistics, &'a [u8])> {
     let avg_size = (header.data_length as f64 * 100.0).max(1024.0); // Reasonable partition size
-    
+
     let partition_stats = PartitionStatistics {
         avg_partition_size: avg_size,
         min_partition_size: (avg_size * 0.1) as u64,
@@ -141,17 +162,20 @@ fn extract_partition_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) 
 }
 
 /// Extract compression statistics from binary data
-fn extract_compression_statistics<'a>(input: &'a [u8], header: &StatisticsHeader) -> Result<(CompressionStatistics, &'a [u8])> {
+fn extract_compression_statistics<'a>(
+    input: &'a [u8],
+    header: &StatisticsHeader,
+) -> Result<(CompressionStatistics, &'a [u8])> {
     // Default compression stats for 'nb' format (typically uses LZ4)
     let original_size = header.data_length as u64 * 1500; // Estimate original size
     let compressed_size = header.data_length as u64 * 1000;
-    
+
     let compression_stats = CompressionStatistics {
         algorithm: "LZ4".to_string(), // Common for Cassandra 5.0
         original_size,
         compressed_size,
         ratio: compressed_size as f64 / original_size as f64,
-        compression_speed: 150.0, // MB/s - typical for LZ4
+        compression_speed: 150.0,   // MB/s - typical for LZ4
         decompression_speed: 300.0, // MB/s - typical for LZ4
         compressed_blocks: (compressed_size / 4096).max(1), // 4KB blocks
     };
@@ -215,25 +239,41 @@ fn create_default_partition_histogram(avg_size: f64) -> Vec<PartitionSizeBucket>
 pub fn parse_enhanced_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> {
     // Parse the header using the enhanced nb-format parser
     let (remaining, mut header) = parse_nb_format_header(input)?;
-    
+
     // Parse the binary statistics data
-    let (row_stats, timestamp_stats, table_stats, partition_stats, compression_stats) = 
-        parse_nb_format_statistics_data(remaining, &header)
-            .map_err(|_| nom::Err::Error(nom::error::Error::new(remaining, nom::error::ErrorKind::Verify)))?;
-    
+    let (row_stats, timestamp_stats, table_stats, partition_stats, compression_stats) =
+        parse_nb_format_statistics_data(remaining, &header).map_err(|_| {
+            nom::Err::Error(nom::error::Error::new(
+                remaining,
+                nom::error::ErrorKind::Verify,
+            ))
+        })?;
+
     // Look for partitioner string to identify table
     if let Some(table_id) = extract_table_id_from_data(remaining) {
         header.table_id = Some(table_id);
     }
-    
+
     // Create enhanced metadata
     let mut metadata = HashMap::new();
-    metadata.insert("format".to_string(), "cassandra-5.0-nb-enhanced".to_string());
-    metadata.insert("parser_version".to_string(), "enhanced-real-format-1.0".to_string());
-    metadata.insert("header_version".to_string(), format!("0x{:08X}", header.version));
-    metadata.insert("statistics_kind".to_string(), format!("0x{:08X}", header.statistics_kind));
+    metadata.insert(
+        "format".to_string(),
+        "cassandra-5.0-nb-enhanced".to_string(),
+    );
+    metadata.insert(
+        "parser_version".to_string(),
+        "enhanced-real-format-1.0".to_string(),
+    );
+    metadata.insert(
+        "header_version".to_string(),
+        format!("0x{:08X}", header.version),
+    );
+    metadata.insert(
+        "statistics_kind".to_string(),
+        format!("0x{:08X}", header.statistics_kind),
+    );
     metadata.insert("data_length".to_string(), header.data_length.to_string());
-    
+
     // Look for partitioner info in the binary data
     if let Some(partitioner) = extract_partitioner_info(remaining) {
         metadata.insert("partitioner".to_string(), partitioner);
@@ -260,7 +300,7 @@ fn extract_table_id_from_data(data: &[u8]) -> Option<[u8; 16]> {
     if data.len() < 16 {
         return None;
     }
-    
+
     // For now, return None - this would require more sophisticated pattern matching
     None
 }
@@ -269,17 +309,19 @@ fn extract_table_id_from_data(data: &[u8]) -> Option<[u8; 16]> {
 fn extract_partitioner_info(data: &[u8]) -> Option<String> {
     // Look for the Murmur3Partitioner string that appears in the hex dump
     let murmur_pattern = b"org.apache.cassandra.dht.Murmur3Partitioner";
-    
+
     if let Some(_pos) = find_pattern(data, murmur_pattern) {
         return Some("org.apache.cassandra.dht.Murmur3Partitioner".to_string());
     }
-    
+
     None
 }
 
 /// Simple pattern finder
 fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Enhanced statistics reader that can handle both old and new formats
@@ -288,7 +330,7 @@ pub fn parse_statistics_with_fallback(input: &[u8]) -> IResult<&[u8], SSTableSta
     if let Ok(result) = parse_enhanced_statistics_file(input) {
         return Ok(result);
     }
-    
+
     // Fall back to the original parser for other formats
     super::statistics::parse_statistics_file(input)
 }
@@ -328,7 +370,10 @@ mod tests {
         let test_data = b"some data before org.apache.cassandra.dht.Murmur3Partitioner and after";
         let result = extract_partitioner_info(test_data);
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), "org.apache.cassandra.dht.Murmur3Partitioner");
+        assert_eq!(
+            result.unwrap(),
+            "org.apache.cassandra.dht.Murmur3Partitioner"
+        );
     }
 
     #[test]

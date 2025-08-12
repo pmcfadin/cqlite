@@ -5,12 +5,10 @@
 
 use cqlite_core::{
     Config, Value,
-    parser::{
-        header::{SSTableHeader, CompressionInfo, SSTableStats},
-    },
+    parser::header::{CompressionInfo, SSTableHeader, SSTableStats},
     platform::Platform,
     storage::sstable::writer::SSTableWriter,
-    types::{TableId, RowKey, UdtValue, UdtField},
+    types::{RowKey, TableId, UdtField, UdtValue},
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -21,142 +19,171 @@ use tokio::fs;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🏗️  SSTable Test Data Generator");
     println!("==============================");
-    
+
     // Create output directory
     let output_dir = "test_sstables";
     fs::create_dir_all(output_dir).await?;
-    
+
     // Generate different types of test SSTable files
     generate_simple_sstable(&output_dir).await?;
     generate_complex_types_sstable(&output_dir).await?;
     generate_large_dataset_sstable(&output_dir).await?;
     generate_cassandra_compatible_sstable(&output_dir).await?;
-    
+
     println!("\n✅ All test SSTable files generated in '{}'", output_dir);
     println!("🔍 Use these files to test CQLite parsing capabilities");
-    
+
     Ok(())
 }
 
 /// Generate simple SSTable with basic types
 async fn generate_simple_sstable(output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📝 Generating simple SSTable...");
-    
+
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
     let file_path = Path::new(output_dir).join("simple_test.sst");
-    
+
     let mut writer = SSTableWriter::create(&file_path, &config, platform).await?;
-    
+
     // Simple test data
     let test_data = vec![
-        (TableId::new("users".to_string()), RowKey::from("user1"), create_simple_user_record(1, "Alice", 25, true)),
-        (TableId::new("users".to_string()), RowKey::from("user2"), create_simple_user_record(2, "Bob", 30, false)),
-        (TableId::new("users".to_string()), RowKey::from("user3"), create_simple_user_record(3, "Carol", 28, true)),
-        (TableId::new("users".to_string()), RowKey::from("user4"), create_simple_user_record(4, "David", 35, true)),
-        (TableId::new("users".to_string()), RowKey::from("user5"), create_simple_user_record(5, "Eve", 22, false)),
+        (
+            TableId::new("users".to_string()),
+            RowKey::from("user1"),
+            create_simple_user_record(1, "Alice", 25, true),
+        ),
+        (
+            TableId::new("users".to_string()),
+            RowKey::from("user2"),
+            create_simple_user_record(2, "Bob", 30, false),
+        ),
+        (
+            TableId::new("users".to_string()),
+            RowKey::from("user3"),
+            create_simple_user_record(3, "Carol", 28, true),
+        ),
+        (
+            TableId::new("users".to_string()),
+            RowKey::from("user4"),
+            create_simple_user_record(4, "David", 35, true),
+        ),
+        (
+            TableId::new("users".to_string()),
+            RowKey::from("user5"),
+            create_simple_user_record(5, "Eve", 22, false),
+        ),
     ];
-    
+
     for (table_id, key, value) in test_data {
         writer.add_entry(&table_id, key, value).await?;
     }
-    
+
     writer.finish().await?;
-    
+
     println!("   ✓ Created simple_test.sst with {} records", 5);
     Ok(())
 }
 
 /// Generate SSTable with complex types (Lists, Sets, Maps, Tuples, UDTs)
-async fn generate_complex_types_sstable(output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn generate_complex_types_sstable(
+    output_dir: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🔧 Generating complex types SSTable...");
-    
+
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
     let file_path = Path::new(output_dir).join("complex_types_test.sst");
-    
+
     let mut writer = SSTableWriter::create(&file_path, &config, platform).await?;
-    
+
     // Complex test data
     let test_data = vec![
         (
-            TableId::new("complex_data".to_string()), 
-            RowKey::from("record1"), 
-            create_complex_record_1()
+            TableId::new("complex_data".to_string()),
+            RowKey::from("record1"),
+            create_complex_record_1(),
         ),
         (
-            TableId::new("complex_data".to_string()), 
-            RowKey::from("record2"), 
-            create_complex_record_2()
+            TableId::new("complex_data".to_string()),
+            RowKey::from("record2"),
+            create_complex_record_2(),
         ),
         (
-            TableId::new("complex_data".to_string()), 
-            RowKey::from("record3"), 
-            create_complex_record_3()
+            TableId::new("complex_data".to_string()),
+            RowKey::from("record3"),
+            create_complex_record_3(),
         ),
     ];
-    
+
     for (table_id, key, value) in test_data {
         writer.add_entry(&table_id, key, value).await?;
     }
-    
+
     writer.finish().await?;
-    
+
     println!("   ✓ Created complex_types_test.sst with complex data types");
     Ok(())
 }
 
 /// Generate large dataset for performance testing
-async fn generate_large_dataset_sstable(output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn generate_large_dataset_sstable(
+    output_dir: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📊 Generating large dataset SSTable...");
-    
+
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
     let file_path = Path::new(output_dir).join("large_dataset_test.sst");
-    
+
     let mut writer = SSTableWriter::create(&file_path, &config, platform).await?;
-    
+
     let record_count = 10000;
-    
+
     for i in 1..=record_count {
         let table_id = TableId::new("large_table".to_string());
         let key = RowKey::from(format!("key_{:06}", i));
         let value = create_performance_test_record(i);
-        
+
         writer.add_entry(&table_id, key, value).await?;
-        
+
         if i % 1000 == 0 {
             println!("   📈 Progress: {}/{} records", i, record_count);
         }
     }
-    
+
     writer.finish().await?;
-    
-    println!("   ✓ Created large_dataset_test.sst with {} records", record_count);
+
+    println!(
+        "   ✓ Created large_dataset_test.sst with {} records",
+        record_count
+    );
     Ok(())
 }
 
 /// Generate Cassandra-compatible SSTable with proper headers
-async fn generate_cassandra_compatible_sstable(output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn generate_cassandra_compatible_sstable(
+    output_dir: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🗄️  Generating Cassandra-compatible SSTable...");
-    
+
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
     let file_path = Path::new(output_dir).join("cassandra_compatible.sst");
-    
+
     // Create SSTable with proper Cassandra 5+ header
     let _header = create_cassandra_5_header();
     let mut writer = SSTableWriter::create(&file_path, &config, platform).await?;
-    
+
     // Add realistic e-commerce data
     let test_data = create_ecommerce_test_data();
-    
+
     for (table_id, key, value) in test_data {
         writer.add_entry(&table_id, key, value).await?;
     }
-    
+
     writer.finish().await?;
-    
+
     println!("   ✓ Created cassandra_compatible.sst with proper headers");
     Ok(())
 }
@@ -180,25 +207,25 @@ fn create_complex_record_1() -> Value {
         Value::Integer(92),
         Value::Integer(88),
     ]);
-    
+
     let tags_set = Value::Set(vec![
         Value::Text("developer".to_string()),
         Value::Text("rust".to_string()),
         Value::Text("database".to_string()),
     ]);
-    
+
     let metadata_map = Value::Map(vec![
         (Value::Text("projects".to_string()), Value::Integer(12)),
         (Value::Text("years_exp".to_string()), Value::Integer(5)),
         (Value::Text("team_size".to_string()), Value::Integer(8)),
     ]);
-    
+
     let location_tuple = Value::Tuple(vec![
         Value::Float(37.7749),   // latitude
         Value::Float(-122.4194), // longitude
         Value::Text("San Francisco".to_string()),
     ]);
-    
+
     // Main record tuple
     Value::Tuple(vec![
         Value::Integer(1),
@@ -218,14 +245,14 @@ fn create_complex_record_2() -> Value {
         Value::List(vec![Value::Integer(3), Value::Integer(4)]),
         Value::List(vec![Value::Integer(5), Value::Integer(6)]),
     ]);
-    
+
     let complex_map = Value::Map(vec![
         (
-            Value::Text("config".to_string()), 
+            Value::Text("config".to_string()),
             Value::Map(vec![
                 (Value::Text("enabled".to_string()), Value::Boolean(true)),
                 (Value::Text("timeout".to_string()), Value::Integer(30)),
-            ])
+            ]),
         ),
         (
             Value::Text("metrics".to_string()),
@@ -233,12 +260,12 @@ fn create_complex_record_2() -> Value {
                 Value::Float(0.95),
                 Value::Float(0.87),
                 Value::Float(0.92),
-            ])
+            ]),
         ),
     ]);
-    
+
     let address_udt = create_address_udt("456 Broadway", "New York", 10013, (40.7128, -74.0060));
-    
+
     Value::Tuple(vec![
         Value::Integer(2),
         Value::Text("Bob Smith".to_string()),
@@ -263,18 +290,18 @@ fn create_complex_record_3() -> Value {
             Value::Integer(2),
         ]),
     ]);
-    
+
     let frozen_history = Value::Frozen(Box::new(history_list));
     let address_udt = create_address_udt("789 Baker St", "London", 12345, (51.5074, -0.1278));
     let frozen_address = Value::Frozen(Box::new(address_udt));
-    
+
     let skills_set = Value::Set(vec![
         Value::Text("machine_learning".to_string()),
         Value::Text("python".to_string()),
         Value::Text("tensorflow".to_string()),
         Value::Text("data_analysis".to_string()),
     ]);
-    
+
     Value::Tuple(vec![
         Value::Integer(3),
         Value::Text("Carol Davis".to_string()),
@@ -308,7 +335,7 @@ fn create_address_udt(street: &str, city: &str, zipcode: i32, coordinates: (f64,
             ])),
         },
     ];
-    
+
     Value::Udt(UdtValue {
         type_name: "address".to_string(),
         keyspace: "ecommerce".to_string(),
@@ -319,18 +346,21 @@ fn create_address_udt(street: &str, city: &str, zipcode: i32, coordinates: (f64,
 /// Create performance test record with reasonable complexity
 fn create_performance_test_record(id: i32) -> Value {
     let scores = Value::List((1..=10).map(|i| Value::Integer(id % 100 + i)).collect());
-    
+
     let tags = Value::Set(vec![
         Value::Text(format!("tag_{}", id % 5)),
         Value::Text(format!("category_{}", id % 3)),
         Value::Text("performance_test".to_string()),
     ]);
-    
+
     let metadata = Value::Map(vec![
         (Value::Text("batch".to_string()), Value::Integer(id / 1000)),
-        (Value::Text("checksum".to_string()), Value::Integer(id * 31 % 1000)),
+        (
+            Value::Text("checksum".to_string()),
+            Value::Integer(id * 31 % 1000),
+        ),
     ]);
-    
+
     Value::Tuple(vec![
         Value::Integer(id),
         Value::Text(format!("record_{}", id)),
@@ -349,56 +379,66 @@ fn create_ecommerce_test_data() -> Vec<(TableId, RowKey, Value)> {
         (
             TableId::new("products".to_string()),
             RowKey::from("prod_1"),
-            create_product_record(1, "Laptop", 999.99, vec!["electronics", "computers"], true)
+            create_product_record(1, "Laptop", 999.99, vec!["electronics", "computers"], true),
         ),
         (
             TableId::new("products".to_string()),
             RowKey::from("prod_2"),
-            create_product_record(2, "Smartphone", 699.99, vec!["electronics", "mobile"], true)
+            create_product_record(2, "Smartphone", 699.99, vec!["electronics", "mobile"], true),
         ),
         (
             TableId::new("products".to_string()),
             RowKey::from("prod_3"),
-            create_product_record(3, "Book", 29.99, vec!["books", "education"], false)
+            create_product_record(3, "Book", 29.99, vec!["books", "education"], false),
         ),
-        
         // Orders table
         (
             TableId::new("orders".to_string()),
             RowKey::from("order_1"),
-            create_order_record(1, "user_1", vec![(1, 2), (3, 1)], 2059.97)
+            create_order_record(1, "user_1", vec![(1, 2), (3, 1)], 2059.97),
         ),
         (
             TableId::new("orders".to_string()),
             RowKey::from("order_2"),
-            create_order_record(2, "user_2", vec![(2, 1)], 699.99)
+            create_order_record(2, "user_2", vec![(2, 1)], 699.99),
         ),
-        
         // Users table
         (
             TableId::new("users".to_string()),
             RowKey::from("user_1"),
-            create_user_record(1, "alice@example.com", "Alice Johnson", "premium")
+            create_user_record(1, "alice@example.com", "Alice Johnson", "premium"),
         ),
         (
             TableId::new("users".to_string()),
             RowKey::from("user_2"),
-            create_user_record(2, "bob@example.com", "Bob Smith", "basic")
+            create_user_record(2, "bob@example.com", "Bob Smith", "basic"),
         ),
     ]
 }
 
-fn create_product_record(id: i32, name: &str, price: f64, categories: Vec<&str>, available: bool) -> Value {
+fn create_product_record(
+    id: i32,
+    name: &str,
+    price: f64,
+    categories: Vec<&str>,
+    available: bool,
+) -> Value {
     let categories_set = Value::Set(
-        categories.into_iter().map(|cat| Value::Text(cat.to_string())).collect()
+        categories
+            .into_iter()
+            .map(|cat| Value::Text(cat.to_string()))
+            .collect(),
     );
-    
+
     let specifications = Value::Map(vec![
         (Value::Text("weight".to_string()), Value::Float(2.5)),
-        (Value::Text("warranty_months".to_string()), Value::Integer(24)),
+        (
+            Value::Text("warranty_months".to_string()),
+            Value::Integer(24),
+        ),
         (Value::Text("rating".to_string()), Value::Float(4.5)),
     ]);
-    
+
     Value::Tuple(vec![
         Value::Integer(id),
         Value::Text(name.to_string()),
@@ -412,20 +452,29 @@ fn create_product_record(id: i32, name: &str, price: f64, categories: Vec<&str>,
 
 fn create_order_record(id: i32, user_id: &str, items: Vec<(i32, i32)>, total: f64) -> Value {
     let order_items = Value::List(
-        items.into_iter().map(|(product_id, quantity)| {
-            Value::Tuple(vec![
-                Value::Integer(product_id),
-                Value::Integer(quantity),
-            ])
-        }).collect()
+        items
+            .into_iter()
+            .map(|(product_id, quantity)| {
+                Value::Tuple(vec![Value::Integer(product_id), Value::Integer(quantity)])
+            })
+            .collect(),
     );
-    
+
     let order_metadata = Value::Map(vec![
-        (Value::Text("shipping_method".to_string()), Value::Text("standard".to_string())),
-        (Value::Text("payment_method".to_string()), Value::Text("credit_card".to_string())),
-        (Value::Text("discount_applied".to_string()), Value::Boolean(false)),
+        (
+            Value::Text("shipping_method".to_string()),
+            Value::Text("standard".to_string()),
+        ),
+        (
+            Value::Text("payment_method".to_string()),
+            Value::Text("credit_card".to_string()),
+        ),
+        (
+            Value::Text("discount_applied".to_string()),
+            Value::Boolean(false),
+        ),
     ]);
-    
+
     Value::Tuple(vec![
         Value::Integer(id),
         Value::Text(user_id.to_string()),
@@ -439,18 +488,24 @@ fn create_order_record(id: i32, user_id: &str, items: Vec<(i32, i32)>, total: f6
 fn create_user_record(id: i32, email: &str, name: &str, tier: &str) -> Value {
     let preferences = Value::Map(vec![
         (Value::Text("newsletter".to_string()), Value::Boolean(true)),
-        (Value::Text("notifications".to_string()), Value::Boolean(false)),
-        (Value::Text("theme".to_string()), Value::Text("dark".to_string())),
+        (
+            Value::Text("notifications".to_string()),
+            Value::Boolean(false),
+        ),
+        (
+            Value::Text("theme".to_string()),
+            Value::Text("dark".to_string()),
+        ),
     ]);
-    
+
     let purchase_history = Value::List(vec![
         Value::Integer(1),
         Value::Integer(3),
         Value::Integer(7),
     ]);
-    
+
     let address = create_address_udt("123 Main St", "San Francisco", 94102, (37.7749, -122.4194));
-    
+
     Value::Tuple(vec![
         Value::Integer(id),
         Value::Text(email.to_string()),
@@ -465,16 +520,19 @@ fn create_user_record(id: i32, email: &str, name: &str, tier: &str) -> Value {
 
 /// Create proper Cassandra 5+ SSTable header
 fn create_cassandra_5_header() -> SSTableHeader {
-    use std::collections::HashMap;
     use cqlite_core::parser::header::{CassandraVersion, ColumnInfo};
-    
+    use std::collections::HashMap;
+
     let mut properties = HashMap::new();
     properties.insert("format_version".to_string(), "oa".to_string());
     properties.insert("cassandra_version".to_string(), "5.0.0".to_string());
-    properties.insert("created_by".to_string(), "CQLite Test Generator".to_string());
+    properties.insert(
+        "created_by".to_string(),
+        "CQLite Test Generator".to_string(),
+    );
     properties.insert("bloom_filter_fp_chance".to_string(), "0.01".to_string());
     properties.insert("compression".to_string(), "LZ4Compressor".to_string());
-    
+
     SSTableHeader {
         cassandra_version: CassandraVersion::V5_0Release,
         version: 1,

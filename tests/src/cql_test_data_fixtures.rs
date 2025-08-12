@@ -60,7 +60,11 @@ impl PerformanceTestData {
                 expected_table_name: "events",
                 expected_columns: 4,
                 should_succeed: true,
-                expected_features: vec!["composite_primary_key", "clustering_key", "clustering_order"],
+                expected_features: vec![
+                    "composite_primary_key",
+                    "clustering_key",
+                    "clustering_order",
+                ],
             },
             CqlTestCase {
                 name: "collections_table",
@@ -140,7 +144,11 @@ impl PerformanceTestData {
                 expected_table_name: "time_series",
                 expected_columns: 8,
                 should_succeed: true,
-                expected_features: vec!["composite_partition_key", "multiple_clustering_keys", "clustering_order"],
+                expected_features: vec![
+                    "composite_partition_key",
+                    "multiple_clustering_keys",
+                    "clustering_order",
+                ],
             },
         ]
     }
@@ -272,7 +280,11 @@ impl PerformanceTestData {
             },
             TypeTestCase {
                 cql_type: "BIGINT",
-                test_values: vec!["1000000000000", "-9223372036854775808", "9223372036854775807"],
+                test_values: vec![
+                    "1000000000000",
+                    "-9223372036854775808",
+                    "9223372036854775807",
+                ],
                 expected_internal_type: "BigInt",
                 should_succeed: true,
             },
@@ -406,31 +418,31 @@ impl PerformanceTestData {
     /// Generate performance test schemas of various sizes
     pub fn performance_test_schemas() -> Vec<(String, String)> {
         let mut schemas = Vec::new();
-        
+
         // Small schema (10 columns)
         schemas.push((
             "small_schema".to_string(),
             Self::generate_schema_with_columns(10),
         ));
-        
+
         // Medium schema (50 columns)
         schemas.push((
             "medium_schema".to_string(),
             Self::generate_schema_with_columns(50),
         ));
-        
+
         // Large schema (200 columns)
         schemas.push((
             "large_schema".to_string(),
             Self::generate_schema_with_columns(200),
         ));
-        
+
         // Extra large schema (500 columns)
         schemas.push((
             "extra_large_schema".to_string(),
             Self::generate_schema_with_columns(500),
         ));
-        
+
         // Complex nested schema
         schemas.push((
             "complex_nested_schema".to_string(),
@@ -443,14 +455,14 @@ impl PerformanceTestData {
                 deep_map MAP<TEXT, FROZEN<MAP<TEXT, FROZEN<MAP<TEXT, LIST<INT>>>>>>
             );"#.to_string(),
         ));
-        
+
         schemas
     }
 
     /// Generate a schema with specified number of columns
     fn generate_schema_with_columns(num_columns: usize) -> String {
         let mut cql = String::from("CREATE TABLE generated_table (\n");
-        
+
         for i in 0..num_columns {
             let col_type = match i % 20 {
                 0 => "UUID",
@@ -474,14 +486,14 @@ impl PerformanceTestData {
                 18 => "MAP<TEXT, BIGINT>",
                 _ => "VARCHAR",
             };
-            
+
             if i == 0 {
                 cql.push_str(&format!("    col_{} {} PRIMARY KEY", i, col_type));
             } else {
                 cql.push_str(&format!(",\n    col_{} {}", i, col_type));
             }
         }
-        
+
         cql.push_str("\n);");
         cql
     }
@@ -510,7 +522,8 @@ impl PerformanceTestData {
                     created_at TIMESTAMP,
                     updated_at TIMESTAMP,
                     PRIMARY KEY ((customer_id, order_date), order_timestamp, order_id)
-                ) WITH CLUSTERING ORDER BY (order_timestamp DESC, order_id ASC);"#.to_string(),
+                ) WITH CLUSTERING ORDER BY (order_timestamp DESC, order_id ASC);"#
+                    .to_string(),
             ),
             (
                 "user_profiles".to_string(),
@@ -534,7 +547,8 @@ impl PerformanceTestData {
                     verification_status TEXT,
                     privacy_settings FROZEN<MAP<TEXT, BOOLEAN>>,
                     PRIMARY KEY (user_id, profile_type)
-                ) WITH CLUSTERING ORDER BY (profile_type ASC);"#.to_string(),
+                ) WITH CLUSTERING ORDER BY (profile_type ASC);"#
+                    .to_string(),
             ),
             (
                 "iot_sensor_data".to_string(),
@@ -558,7 +572,8 @@ impl PerformanceTestData {
                     battery_level FLOAT,
                     signal_strength INT,
                     PRIMARY KEY ((sensor_id, location, year), month, day, hour, timestamp)
-                ) WITH CLUSTERING ORDER BY (month ASC, day ASC, hour ASC, timestamp DESC);"#.to_string(),
+                ) WITH CLUSTERING ORDER BY (month ASC, day ASC, hour ASC, timestamp DESC);"#
+                    .to_string(),
             ),
             (
                 "social_media_posts".to_string(),
@@ -583,7 +598,8 @@ impl PerformanceTestData {
                     language TEXT,
                     content_warning SET<TEXT>,
                     PRIMARY KEY ((user_id, post_type), created_at, post_id)
-                ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);"#.to_string(),
+                ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);"#
+                    .to_string(),
             ),
             (
                 "financial_transactions".to_string(),
@@ -615,7 +631,8 @@ impl PerformanceTestData {
                     created_at TIMESTAMP,
                     updated_at TIMESTAMP,
                     PRIMARY KEY ((account_id, transaction_date), timestamp, transaction_id)
-                ) WITH CLUSTERING ORDER BY (timestamp DESC, transaction_id DESC);"#.to_string(),
+                ) WITH CLUSTERING ORDER BY (timestamp DESC, transaction_id DESC);"#
+                    .to_string(),
             ),
         ]
     }
@@ -744,34 +761,30 @@ impl CompatibilityTestFixtures {
 
     /// Get CQL statements that require Cassandra 4.0+
     pub fn cassandra_4_plus_cql() -> Vec<CqlTestCase> {
-        vec![
-            CqlTestCase {
-                name: "duration_type_v4",
-                cql: "CREATE TABLE events (id UUID PRIMARY KEY, name TEXT, duration DURATION);",
-                expected_table_name: "events",
-                expected_columns: 3,
-                should_succeed: true,
-                expected_features: vec!["cassandra_4_plus", "duration_type"],
-            },
-        ]
+        vec![CqlTestCase {
+            name: "duration_type_v4",
+            cql: "CREATE TABLE events (id UUID PRIMARY KEY, name TEXT, duration DURATION);",
+            expected_table_name: "events",
+            expected_columns: 3,
+            should_succeed: true,
+            expected_features: vec!["cassandra_4_plus", "duration_type"],
+        }]
     }
 
     /// Get CQL statements that require Cassandra 5.0+
     pub fn cassandra_5_plus_cql() -> Vec<CqlTestCase> {
-        vec![
-            CqlTestCase {
-                name: "enhanced_collections_v5",
-                cql: r#"CREATE TABLE enhanced_data (
+        vec![CqlTestCase {
+            name: "enhanced_collections_v5",
+            cql: r#"CREATE TABLE enhanced_data (
                     id UUID PRIMARY KEY,
                     vector_data LIST<DOUBLE>,
                     json_column JSON
                 );"#,
-                expected_table_name: "enhanced_data",
-                expected_columns: 3,
-                should_succeed: true,
-                expected_features: vec!["cassandra_5_plus", "vector_support", "json_type"],
-            },
-        ]
+            expected_table_name: "enhanced_data",
+            expected_columns: 3,
+            should_succeed: true,
+            expected_features: vec!["cassandra_5_plus", "vector_support", "json_type"],
+        }]
     }
 }
 
@@ -783,7 +796,7 @@ mod tests {
     fn test_basic_cql_statements() {
         let statements = PerformanceTestData::basic_cql_statements();
         assert!(!statements.is_empty());
-        
+
         for statement in &statements {
             assert!(!statement.cql.is_empty());
             assert!(!statement.expected_table_name.is_empty());
@@ -795,7 +808,7 @@ mod tests {
     fn test_error_test_cases() {
         let error_cases = PerformanceTestData::error_test_cases();
         assert!(!error_cases.is_empty());
-        
+
         for case in &error_cases {
             assert!(!case.name.is_empty());
             assert!(!case.malformed_cql.is_empty());
@@ -807,7 +820,7 @@ mod tests {
     fn test_type_conversion_cases() {
         let type_cases = PerformanceTestData::type_conversion_test_cases();
         assert!(!type_cases.is_empty());
-        
+
         for case in &type_cases {
             assert!(!case.cql_type.is_empty());
             assert!(!case.test_values.is_empty());
@@ -819,7 +832,7 @@ mod tests {
     fn test_json_schema_fixtures() {
         let schemas = JsonSchemaFixtures::all_schemas();
         assert!(!schemas.is_empty());
-        
+
         for (name, schema_json) in &schemas {
             assert!(!name.is_empty());
             assert!(!schema_json.is_empty());
@@ -833,7 +846,7 @@ mod tests {
     fn test_performance_schemas() {
         let schemas = PerformanceTestData::performance_test_schemas();
         assert!(!schemas.is_empty());
-        
+
         for (name, cql) in &schemas {
             assert!(!name.is_empty());
             assert!(!cql.is_empty());
@@ -845,7 +858,7 @@ mod tests {
     fn test_real_world_schemas() {
         let schemas = PerformanceTestData::real_world_schemas();
         assert!(!schemas.is_empty());
-        
+
         for (name, cql) in &schemas {
             assert!(!name.is_empty());
             assert!(!cql.is_empty());

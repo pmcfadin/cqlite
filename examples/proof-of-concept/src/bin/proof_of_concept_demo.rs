@@ -4,7 +4,7 @@
 //! with complex types. It creates test data, writes SSTable files, reads them back,
 //! and executes CQL queries to demonstrate end-to-end functionality.
 
-use cqlite_core::{Database, Config, Value};
+use cqlite_core::{Config, Database, Value};
 use std::path::Path;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -14,27 +14,27 @@ use tempfile::TempDir;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 CQLite Proof-of-Concept Demo");
     println!("=====================================");
-    
+
     // Create temporary directory for test
     let temp_dir = TempDir::new()?;
     let db_path = temp_dir.path();
-    
+
     println!("📁 Database path: {}", db_path.display());
-    
+
     // Step 1: Create database and test complex data
     println!("\n🔧 Step 1: Creating database and complex test data");
     let demo_result = run_proof_of_concept_demo(db_path).await?;
-    
+
     // Step 2: Performance metrics
     println!("\n📊 Step 2: Performance Analysis");
     print_performance_metrics(&demo_result);
-    
+
     // Step 3: Generate proof report
     println!("\n📋 Step 3: Proof-of-Concept Validation");
     generate_proof_report(&demo_result);
-    
+
     println!("\n✅ Proof-of-Concept Demo Complete!");
-    
+
     Ok(())
 }
 
@@ -61,44 +61,54 @@ struct QueryResult {
 }
 
 /// Run the complete proof-of-concept demo
-async fn run_proof_of_concept_demo(db_path: &Path) -> Result<ProofOfConceptResult, Box<dyn std::error::Error>> {
+async fn run_proof_of_concept_demo(
+    db_path: &Path,
+) -> Result<ProofOfConceptResult, Box<dyn std::error::Error>> {
     let overall_start = Instant::now();
-    
+
     // Initialize database with optimized config
     let start = Instant::now();
     let config = create_demo_config();
     let db = Database::open(db_path, config).await?;
     let setup_time_ms = start.elapsed().as_millis() as u64;
-    
+
     println!("   ✓ Database initialized in {}ms", setup_time_ms);
-    
+
     // Step 1: Create tables with complex types
     let start = Instant::now();
     create_complex_type_tables(&db).await?;
-    
+
     // Step 2: Insert test data with complex types
     let test_data = create_complex_test_data();
     insert_complex_test_data(&db, &test_data).await?;
     let insert_time_ms = start.elapsed().as_millis() as u64;
-    
-    println!("   ✓ Inserted {} complex records in {}ms", test_data.len(), insert_time_ms);
-    
+
+    println!(
+        "   ✓ Inserted {} complex records in {}ms",
+        test_data.len(),
+        insert_time_ms
+    );
+
     // Step 3: Execute complex queries
     let start = Instant::now();
     let query_results = execute_complex_queries(&db).await?;
     let query_time_ms = start.elapsed().as_millis() as u64;
-    
-    println!("   ✓ Executed {} queries in {}ms", query_results.len(), query_time_ms);
-    
+
+    println!(
+        "   ✓ Executed {} queries in {}ms",
+        query_results.len(),
+        query_time_ms
+    );
+
     // Step 4: Validate results
     let validation_success = validate_query_results(&query_results);
-    
+
     // Step 5: Collect memory usage stats
     let db_stats = db.stats().await?;
     let memory_usage_kb = (db_stats.memory_stats.total_memory_used / 1024) as usize;
-    
+
     db.close().await?;
-    
+
     Ok(ProofOfConceptResult {
         setup_time_ms,
         insert_time_ms,
@@ -121,19 +131,19 @@ async fn run_proof_of_concept_demo(db_path: &Path) -> Result<ProofOfConceptResul
 /// Create optimized configuration for demo
 fn create_demo_config() -> Config {
     let mut config = Config::default();
-    
+
     // Optimize for demo performance
     config.storage.memtable_size_threshold = 16 * 1024 * 1024; // 16MB memtable threshold
     config.storage.enable_bloom_filters = true;
     config.storage.compression.enabled = true;
     config.storage.compression.algorithm = cqlite_core::config::CompressionAlgorithm::Lz4;
-    
+
     // Enable complex type parsing (handled by default parser config)
     // Note: parser configuration is built into the system
-    
+
     // Query optimization (use available query config fields)
     config.query.query_parallelism = Some(4);
-    
+
     config
 }
 
@@ -148,10 +158,10 @@ async fn create_complex_type_tables(db: &Database) -> Result<(), Box<dyn std::er
             coordinates frozen<tuple<double, double>>
         )
     "#;
-    
+
     db.execute(create_udt_sql).await?;
     println!("   ✓ Created UDT 'address'");
-    
+
     // Create main test table with complex types
     let create_table_sql = r#"
         CREATE TABLE complex_test_data (
@@ -166,21 +176,21 @@ async fn create_complex_type_tables(db: &Database) -> Result<(), Box<dyn std::er
             active boolean
         )
     "#;
-    
+
     db.execute(create_table_sql).await?;
     println!("   ✓ Created table 'complex_test_data'");
-    
+
     // Create secondary indexes for complex queries
     let create_indexes = vec![
         "CREATE INDEX idx_name ON complex_test_data (name)",
         "CREATE INDEX idx_active ON complex_test_data (active)",
     ];
-    
+
     for index_sql in create_indexes {
         db.execute(index_sql).await?;
     }
     println!("   ✓ Created secondary indexes");
-    
+
     Ok(())
 }
 
@@ -212,7 +222,11 @@ fn create_complex_test_data() -> Vec<ComplexTestRecord> {
         ComplexTestRecord {
             id: 1,
             name: "Alice Johnson".to_string(),
-            tags: vec!["developer".to_string(), "rust".to_string(), "database".to_string()],
+            tags: vec![
+                "developer".to_string(),
+                "rust".to_string(),
+                "database".to_string(),
+            ],
             scores: vec![95, 87, 92, 88],
             metadata: vec![
                 ("projects".to_string(), 12),
@@ -238,10 +252,7 @@ fn create_complex_test_data() -> Vec<ComplexTestRecord> {
             name: "Bob Smith".to_string(),
             tags: vec!["manager".to_string(), "agile".to_string()],
             scores: vec![78, 91, 85],
-            metadata: vec![
-                ("reports".to_string(), 6),
-                ("budget".to_string(), 250000),
-            ],
+            metadata: vec![("reports".to_string(), 6), ("budget".to_string(), 250000)],
             location: (40.7128, -74.0060, "New York".to_string()),
             address: Address {
                 street: "456 Broadway".to_string(),
@@ -258,7 +269,12 @@ fn create_complex_test_data() -> Vec<ComplexTestRecord> {
         ComplexTestRecord {
             id: 3,
             name: "Carol Davis".to_string(),
-            tags: vec!["analyst".to_string(), "data".to_string(), "ml".to_string(), "python".to_string()],
+            tags: vec![
+                "analyst".to_string(),
+                "data".to_string(),
+                "ml".to_string(),
+                "python".to_string(),
+            ],
             scores: vec![99, 94, 97, 91, 88],
             metadata: vec![
                 ("models".to_string(), 23),
@@ -283,7 +299,11 @@ fn create_complex_test_data() -> Vec<ComplexTestRecord> {
         ComplexTestRecord {
             id: 4,
             name: "David Wilson".to_string(),
-            tags: vec!["devops".to_string(), "kubernetes".to_string(), "aws".to_string()],
+            tags: vec![
+                "devops".to_string(),
+                "kubernetes".to_string(),
+                "aws".to_string(),
+            ],
             scores: vec![89, 92, 94],
             metadata: vec![
                 ("deployments".to_string(), 847),
@@ -307,7 +327,12 @@ fn create_complex_test_data() -> Vec<ComplexTestRecord> {
         ComplexTestRecord {
             id: 5,
             name: "Eve Brown".to_string(),
-            tags: vec!["designer".to_string(), "ux".to_string(), "figma".to_string(), "research".to_string()],
+            tags: vec![
+                "designer".to_string(),
+                "ux".to_string(),
+                "figma".to_string(),
+                "research".to_string(),
+            ],
             scores: vec![96, 88, 93, 90, 87, 94],
             metadata: vec![
                 ("designs".to_string(), 78),
@@ -333,8 +358,8 @@ fn create_complex_test_data() -> Vec<ComplexTestRecord> {
 
 /// Insert complex test data into database
 async fn insert_complex_test_data(
-    db: &Database, 
-    test_data: &[ComplexTestRecord]
+    db: &Database,
+    test_data: &[ComplexTestRecord],
 ) -> Result<(), Box<dyn std::error::Error>> {
     for record in test_data {
         let insert_sql = r#"
@@ -342,31 +367,41 @@ async fn insert_complex_test_data(
                 id, name, tags, scores, metadata, location, address, history, active
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#;
-        
+
         // Convert complex data to CQL values
         let tags_value = Value::Set(
-            record.tags.iter().map(|tag| Value::Text(tag.clone())).collect()
+            record
+                .tags
+                .iter()
+                .map(|tag| Value::Text(tag.clone()))
+                .collect(),
         );
-        
+
         let scores_value = Value::List(
-            record.scores.iter().map(|score| Value::Integer(*score)).collect()
+            record
+                .scores
+                .iter()
+                .map(|score| Value::Integer(*score))
+                .collect(),
         );
-        
+
         let metadata_value = Value::Map(
-            record.metadata.iter()
+            record
+                .metadata
+                .iter()
                 .map(|(key, value)| (Value::Text(key.clone()), Value::Integer(*value)))
-                .collect()
+                .collect(),
         );
-        
+
         let location_value = Value::Tuple(vec![
             Value::Float(record.location.0),
             Value::Float(record.location.1),
             Value::Text(record.location.2.clone()),
         ]);
-        
+
         let address_value = create_address_udt(&record.address);
         let history_value = create_history_list(&record.history);
-        
+
         // Execute parameterized insert
         let params = vec![
             Value::Integer(record.id),
@@ -379,18 +414,18 @@ async fn insert_complex_test_data(
             history_value,
             Value::Boolean(record.active),
         ];
-        
+
         let prepared = db.prepare(insert_sql).await?;
         prepared.execute(&params).await?;
     }
-    
+
     Ok(())
 }
 
 /// Create address UDT value
 fn create_address_udt(address: &Address) -> Value {
-    use cqlite_core::types::{UdtValue, UdtField};
-    
+    use cqlite_core::types::{UdtField, UdtValue};
+
     let fields = vec![
         UdtField {
             name: "street".to_string(),
@@ -412,7 +447,7 @@ fn create_address_udt(address: &Address) -> Value {
             ])))),
         },
     ];
-    
+
     Value::Udt(UdtValue {
         type_name: "address".to_string(),
         keyspace: "default".to_string(),
@@ -422,7 +457,8 @@ fn create_address_udt(address: &Address) -> Value {
 
 /// Create history list value
 fn create_history_list(history: &[(i64, String, i32)]) -> Value {
-    let history_tuples: Vec<Value> = history.iter()
+    let history_tuples: Vec<Value> = history
+        .iter()
         .map(|(timestamp, event, value)| {
             Value::Tuple(vec![
                 Value::Timestamp(*timestamp),
@@ -431,49 +467,48 @@ fn create_history_list(history: &[(i64, String, i32)]) -> Value {
             ])
         })
         .collect();
-    
+
     Value::Frozen(Box::new(Value::List(history_tuples)))
 }
 
 /// Execute complex queries to prove functionality
-async fn execute_complex_queries(db: &Database) -> Result<Vec<QueryResult>, Box<dyn std::error::Error>> {
+async fn execute_complex_queries(
+    db: &Database,
+) -> Result<Vec<QueryResult>, Box<dyn std::error::Error>> {
     let queries = vec![
         // Basic select with complex types
         "SELECT * FROM complex_test_data WHERE id = 1",
-        
         // Query with collection operations
         "SELECT name, tags FROM complex_test_data WHERE active = true",
-        
         // Range query
         "SELECT id, name, scores FROM complex_test_data WHERE id >= 2 AND id <= 4",
-        
         // Query with UDT access
         "SELECT name, address.city FROM complex_test_data WHERE active = true",
-        
         // Count and aggregation
         "SELECT COUNT(*) FROM complex_test_data",
-        
         // Complex WHERE clause
         "SELECT name FROM complex_test_data WHERE active = true AND id > 1",
-        
         // Order by with limit
         "SELECT id, name FROM complex_test_data ORDER BY id DESC LIMIT 3",
-        
         // Query all records to test full table scan
         "SELECT id, name, active FROM complex_test_data",
     ];
-    
+
     let mut results = Vec::new();
-    
+
     for query in queries {
         let start = Instant::now();
-        
+
         match db.execute(query).await {
             Ok(result) => {
                 let execution_time = start.elapsed().as_millis() as u64;
-                println!("   ✓ Query '{}' returned {} rows in {}ms", 
-                        query, result.rows.len(), execution_time);
-                
+                println!(
+                    "   ✓ Query '{}' returned {} rows in {}ms",
+                    query,
+                    result.rows.len(),
+                    execution_time
+                );
+
                 results.push(QueryResult {
                     query: query.to_string(),
                     execution_time_ms: execution_time,
@@ -484,9 +519,11 @@ async fn execute_complex_queries(db: &Database) -> Result<Vec<QueryResult>, Box<
             }
             Err(e) => {
                 let execution_time = start.elapsed().as_millis() as u64;
-                println!("   ✗ Query '{}' failed in {}ms: {}", 
-                        query, execution_time, e);
-                
+                println!(
+                    "   ✗ Query '{}' failed in {}ms: {}",
+                    query, execution_time, e
+                );
+
                 results.push(QueryResult {
                     query: query.to_string(),
                     execution_time_ms: execution_time,
@@ -497,7 +534,7 @@ async fn execute_complex_queries(db: &Database) -> Result<Vec<QueryResult>, Box<
             }
         }
     }
-    
+
     Ok(results)
 }
 
@@ -505,11 +542,14 @@ async fn execute_complex_queries(db: &Database) -> Result<Vec<QueryResult>, Box<
 fn validate_query_results(results: &[QueryResult]) -> bool {
     let successful_queries = results.iter().filter(|r| r.success).count();
     let total_queries = results.len();
-    
-    println!("   📊 Query Success Rate: {}/{} ({:.1}%)", 
-             successful_queries, total_queries, 
-             (successful_queries as f64 / total_queries as f64) * 100.0);
-    
+
+    println!(
+        "   📊 Query Success Rate: {}/{} ({:.1}%)",
+        successful_queries,
+        total_queries,
+        (successful_queries as f64 / total_queries as f64) * 100.0
+    );
+
     // Validation criteria: at least 75% of queries should succeed
     successful_queries as f64 / total_queries as f64 >= 0.75
 }
@@ -517,18 +557,26 @@ fn validate_query_results(results: &[QueryResult]) -> bool {
 /// Print performance metrics
 fn print_performance_metrics(result: &ProofOfConceptResult) {
     println!("⏱️  Setup Time: {}ms", result.setup_time_ms);
-    println!("📝 Insert Time: {}ms ({} records)", result.insert_time_ms, result.total_records);
-    println!("🔍 Query Time: {}ms ({} queries)", result.query_time_ms, result.queries_executed.len());
+    println!(
+        "📝 Insert Time: {}ms ({} records)",
+        result.insert_time_ms, result.total_records
+    );
+    println!(
+        "🔍 Query Time: {}ms ({} queries)",
+        result.query_time_ms,
+        result.queries_executed.len()
+    );
     println!("💾 Memory Usage: {} KB", result.memory_usage_kb);
-    
+
     let total_time = result.setup_time_ms + result.insert_time_ms + result.query_time_ms;
     println!("⚡ Total Time: {}ms", total_time);
-    
+
     if result.total_records > 0 {
-        let records_per_second = (result.total_records as f64) / (result.insert_time_ms as f64 / 1000.0);
+        let records_per_second =
+            (result.total_records as f64) / (result.insert_time_ms as f64 / 1000.0);
         println!("📈 Insert Rate: {:.1} records/second", records_per_second);
     }
-    
+
     if !result.queries_executed.is_empty() {
         let avg_query_time = result.query_time_ms as f64 / result.queries_executed.len() as f64;
         println!("📊 Avg Query Time: {:.1}ms", avg_query_time);
@@ -539,41 +587,59 @@ fn print_performance_metrics(result: &ProofOfConceptResult) {
 fn generate_proof_report(result: &ProofOfConceptResult) {
     println!("📋 PROOF-OF-CONCEPT VALIDATION REPORT");
     println!("=====================================");
-    
+
     // Complex types support
     println!("🔧 Complex Types Tested:");
     for complex_type in &result.complex_types_tested {
         println!("   ✓ {}", complex_type);
     }
-    
+
     // Query execution results
     println!("\n🔍 Query Execution Results:");
-    let successful_queries: Vec<_> = result.queries_executed.iter().filter(|q| q.success).collect();
-    let failed_queries: Vec<_> = result.queries_executed.iter().filter(|q| !q.success).collect();
-    
+    let successful_queries: Vec<_> = result
+        .queries_executed
+        .iter()
+        .filter(|q| q.success)
+        .collect();
+    let failed_queries: Vec<_> = result
+        .queries_executed
+        .iter()
+        .filter(|q| !q.success)
+        .collect();
+
     println!("   ✅ Successful: {} queries", successful_queries.len());
     println!("   ❌ Failed: {} queries", failed_queries.len());
-    
+
     if !failed_queries.is_empty() {
         println!("\n   Failed Query Details:");
         for query in failed_queries {
-            println!("     ❌ '{}' - {}", query.query, 
-                     query.error_message.as_ref().unwrap_or(&"Unknown error".to_string()));
+            println!(
+                "     ❌ '{}' - {}",
+                query.query,
+                query
+                    .error_message
+                    .as_ref()
+                    .unwrap_or(&"Unknown error".to_string())
+            );
         }
     }
-    
+
     // Performance benchmarks
     println!("\n⚡ Performance Benchmarks:");
-    println!("   • Total execution time: {}ms", 
-             result.setup_time_ms + result.insert_time_ms + result.query_time_ms);
-    println!("   • Memory efficiency: {} KB for {} records", 
-             result.memory_usage_kb, result.total_records);
-    
+    println!(
+        "   • Total execution time: {}ms",
+        result.setup_time_ms + result.insert_time_ms + result.query_time_ms
+    );
+    println!(
+        "   • Memory efficiency: {} KB for {} records",
+        result.memory_usage_kb, result.total_records
+    );
+
     if result.total_records > 0 && result.insert_time_ms > 0 {
         let throughput = (result.total_records as f64) / (result.insert_time_ms as f64 / 1000.0);
         println!("   • Insert throughput: {:.1} records/second", throughput);
     }
-    
+
     // Final validation
     println!("\n🎯 Proof-of-Concept Status:");
     if result.validation_success {
@@ -588,7 +654,7 @@ fn generate_proof_report(result: &ProofOfConceptResult) {
         println!("      • Complex type parsing may need refinement");
         println!("      • Further development required");
     }
-    
+
     // Recommendations
     println!("\n📋 Next Steps:");
     if result.validation_success {

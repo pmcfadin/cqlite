@@ -1,7 +1,7 @@
+use serde::{Deserialize, Serialize};
+use std::io::{self, Error, ErrorKind};
 /// Docker integration module for running cqlsh commands in Cassandra containers
 use std::process::Command;
-use std::io::{self, Error, ErrorKind};
-use serde::{Deserialize, Serialize};
 
 /// Represents a Docker container
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,7 +26,13 @@ impl DockerCqlshClient {
     /// Find the running Cassandra container
     pub fn find_cassandra_container() -> io::Result<DockerContainer> {
         let output = Command::new("docker")
-            .args(&["ps", "--format", "{{.ID}}|{{.Names}}|{{.Image}}", "--filter", "status=running"])
+            .args(&[
+                "ps",
+                "--format",
+                "{{.ID}}|{{.Names}}|{{.Image}}",
+                "--filter",
+                "status=running",
+            ])
             .output()?;
 
         if !output.status.success() {
@@ -37,7 +43,7 @@ impl DockerCqlshClient {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         // Find Cassandra container
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('|').collect();
@@ -62,14 +68,7 @@ impl DockerCqlshClient {
     /// Execute a CQL query using cqlsh in the container
     pub fn execute_cql(&self, query: &str) -> io::Result<String> {
         let output = Command::new("docker")
-            .args(&[
-                "exec",
-                "-i",
-                &self.container.name,
-                "cqlsh",
-                "-e",
-                query,
-            ])
+            .args(&["exec", "-i", &self.container.name, "cqlsh", "-e", query])
             .output()?;
 
         if !output.status.success() {
@@ -113,16 +112,10 @@ impl DockerCqlshClient {
     pub fn execute_cql_file(&self, file_content: &str) -> io::Result<String> {
         // Create a temporary file in the container
         let temp_file = "/tmp/query.cql";
-        
+
         // Write the content to the container
         let mut child = Command::new("docker")
-            .args(&[
-                "exec",
-                "-i",
-                &self.container.name,
-                "tee",
-                temp_file,
-            ])
+            .args(&["exec", "-i", &self.container.name, "tee", temp_file])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()?;
@@ -136,24 +129,12 @@ impl DockerCqlshClient {
 
         // Execute the file
         let output = Command::new("docker")
-            .args(&[
-                "exec",
-                "-i",
-                &self.container.name,
-                "cqlsh",
-                "-f",
-                temp_file,
-            ])
+            .args(&["exec", "-i", &self.container.name, "cqlsh", "-f", temp_file])
             .output()?;
 
         // Clean up
         let _ = Command::new("docker")
-            .args(&[
-                "exec",
-                &self.container.name,
-                "rm",
-                temp_file,
-            ])
+            .args(&["exec", &self.container.name, "rm", temp_file])
             .output();
 
         if !output.status.success() {
@@ -177,8 +158,8 @@ impl DockerCqlshClient {
 
     /// Wait for Cassandra to be ready (with timeout)
     pub fn wait_until_ready(&self, timeout_secs: u64) -> io::Result<()> {
-        use std::time::{Duration, Instant};
         use std::thread;
+        use std::time::{Duration, Instant};
 
         let start = Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
@@ -199,13 +180,17 @@ impl DockerCqlshClient {
     /// Parse cqlsh output into structured format
     pub fn parse_cqlsh_output(output: &str) -> CqlshOutput {
         let lines: Vec<String> = output.lines().map(|s| s.to_string()).collect();
-        
+
         // Find header and data separator
         let mut header_index = None;
         let mut separator_index = None;
-        
+
         for (i, line) in lines.iter().enumerate() {
-            if line.contains("---") && line.chars().all(|c| c == '-' || c == '+' || c.is_whitespace()) {
+            if line.contains("---")
+                && line
+                    .chars()
+                    .all(|c| c == '-' || c == '+' || c.is_whitespace())
+            {
                 separator_index = Some(i);
                 if i > 0 {
                     header_index = Some(i - 1);
@@ -267,7 +252,7 @@ mod tests {
 "#;
 
         let parsed = DockerCqlshClient::parse_cqlsh_output(output);
-        
+
         assert_eq!(parsed.headers, vec!["id", "name", "age"]);
         assert_eq!(parsed.rows.len(), 3);
         assert_eq!(parsed.rows[0], vec!["1", "Alice", "30"]);

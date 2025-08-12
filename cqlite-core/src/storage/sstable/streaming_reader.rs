@@ -7,6 +7,8 @@
 //! - Memory-mapped I/O for very large files
 //! - Integration with compression ratio-based algorithm selection
 
+use memmap2::{Mmap, MmapOptions};
+use parking_lot::Mutex as SyncMutex;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,25 +16,23 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
-use memmap2::{Mmap, MmapOptions};
-use parking_lot::Mutex as SyncMutex;
 
 use crate::{
+    Config, Error, Result, RowKey, Value,
     parser::{
-        types::{parse_cql_value, CqlTypeId},
-        vint::parse_vint_length,
         SSTableHeader, SSTableParser,
+        types::{CqlTypeId, parse_cql_value},
+        vint::parse_vint_length,
     },
     platform::Platform,
     types::TableId,
-    Config, Error, Result, RowKey, Value,
 };
 
 use super::{
     bloom::BloomFilter,
     compression::{CompressionAlgorithm, CompressionReader},
     index::SSTableIndex,
-    reader::{SSTableReaderStats, BlockMeta},
+    reader::{BlockMeta, SSTableReaderStats},
 };
 
 /// Configuration for streaming SSTable reader
@@ -57,13 +57,13 @@ pub struct StreamingReaderConfig {
 impl Default for StreamingReaderConfig {
     fn default() -> Self {
         Self {
-            buffer_pool_size_mb: 32,           // 32MB buffer pool
-            buffer_size_bytes: 64 * 1024,      // 64KB buffers
+            buffer_pool_size_mb: 32,                // 32MB buffer pool
+            buffer_size_bytes: 64 * 1024,           // 64KB buffers
             mmap_threshold_bytes: 64 * 1024 * 1024, // 64MB threshold
-            max_memory_usage_mb: 128,          // 128MB max memory
-            streaming_chunk_size: 16 * 1024,   // 16KB streaming chunks
+            max_memory_usage_mb: 128,               // 128MB max memory
+            streaming_chunk_size: 16 * 1024,        // 16KB streaming chunks
             enable_progressive_loading: true,
-            prefetch_distance: 4,              // Prefetch 4 blocks ahead
+            prefetch_distance: 4, // Prefetch 4 blocks ahead
         }
     }
 }
@@ -96,7 +96,7 @@ impl BufferPool {
     /// Get a buffer from the pool or allocate a new one
     pub fn get_buffer(&self) -> Vec<u8> {
         let mut buffers = self.available_buffers.lock();
-        
+
         if let Some(mut buffer) = buffers.pop_front() {
             // Reuse existing buffer
             buffer.clear();
@@ -105,7 +105,8 @@ impl BufferPool {
         } else if self.allocated_count.load(Ordering::Relaxed) < self.max_buffers {
             // Allocate new buffer
             self.allocated_count.fetch_add(1, Ordering::Relaxed);
-            self.memory_usage.fetch_add(self.buffer_size as u64, Ordering::Relaxed);
+            self.memory_usage
+                .fetch_add(self.buffer_size as u64, Ordering::Relaxed);
             vec![0u8; self.buffer_size]
         } else {
             // Pool exhausted, wait for available buffer or allocate temporary
@@ -122,11 +123,12 @@ impl BufferPool {
                 return;
             }
         }
-        
+
         // Buffer doesn't fit criteria, let it be dropped
         if self.allocated_count.load(Ordering::Relaxed) > 0 {
             self.allocated_count.fetch_sub(1, Ordering::Relaxed);
-            self.memory_usage.fetch_sub(self.buffer_size as u64, Ordering::Relaxed);
+            self.memory_usage
+                .fetch_sub(self.buffer_size as u64, Ordering::Relaxed);
         }
     }
 
@@ -192,7 +194,11 @@ impl StreamingBlock {
     /// Get memory usage of this block
     pub fn memory_usage(&self) -> usize {
         let chunks_size: usize = self.compressed_chunks.iter().map(|c| c.len()).sum();
-        let decompressed_size = self.decompressed_data.as_ref().map(|d| d.len()).unwrap_or(0);
+        let decompressed_size = self
+            .decompressed_data
+            .as_ref()
+            .map(|d| d.len())
+            .unwrap_or(0);
         chunks_size + decompressed_size
     }
 }
@@ -234,7 +240,7 @@ impl StreamingSSTableReader {
     pub async fn open(path: &Path, _config: &Config, platform: Arc<Platform>) -> Result<Self> {
         let file = File::open(path).await?;
         let file_size = file.metadata().await?.len();
-        
+
         let streaming_config = StreamingReaderConfig::default();
 
         // Decide on I/O strategy based on file size
@@ -299,8 +305,12 @@ impl StreamingSSTableReader {
         };
 
         // Initialize buffer pool
-        let max_buffers = streaming_config.buffer_pool_size_mb * 1024 * 1024 / streaming_config.buffer_size_bytes;
-        let buffer_pool = Arc::new(BufferPool::new(streaming_config.buffer_size_bytes, max_buffers));
+        let max_buffers =
+            streaming_config.buffer_pool_size_mb * 1024 * 1024 / streaming_config.buffer_size_bytes;
+        let buffer_pool = Arc::new(BufferPool::new(
+            streaming_config.buffer_size_bytes,
+            max_buffers,
+        ));
 
         let stats = Arc::new(Mutex::new(SSTableReaderStats {
             file_size,
@@ -319,7 +329,7 @@ impl StreamingSSTableReader {
             file: file_handle,
             header,
             parser,
-            index: None, // Would load from file in real implementation
+            index: None,        // Would load from file in real implementation
             bloom_filter: None, // Would load from file in real implementation
             compression_reader,
             buffer_pool,
@@ -435,7 +445,9 @@ impl StreamingSSTableReader {
             total_memory_mb: total_memory as f64 / 1024.0 / 1024.0,
             loaded_blocks,
             total_block_memory_mb: total_block_memory as f64 / 1024.0 / 1024.0,
-            buffer_pool_utilization: self.buffer_pool.buffer_count() as f64 / (self.config.buffer_pool_size_mb * 1024 * 1024 / self.config.buffer_size_bytes) as f64,
+            buffer_pool_utilization: self.buffer_pool.buffer_count() as f64
+                / (self.config.buffer_pool_size_mb * 1024 * 1024 / self.config.buffer_size_bytes)
+                    as f64,
         })
     }
 
@@ -443,7 +455,7 @@ impl StreamingSSTableReader {
 
     async fn read_value_streaming(&self, offset: u64, size: u32) -> Result<Option<Value>> {
         let data = self.read_data_streaming(offset, size as usize).await?;
-        
+
         // Streaming decompression if needed
         let decompressed_data = if let Some(_compression_reader) = &self.compression_reader {
             self.decompress_streaming(&data).await?
@@ -458,7 +470,10 @@ impl StreamingSSTableReader {
         Ok(Some(value))
     }
 
-    async fn load_block_streaming(&self, offset: u64) -> Result<Option<Arc<Mutex<StreamingBlock>>>> {
+    async fn load_block_streaming(
+        &self,
+        offset: u64,
+    ) -> Result<Option<Arc<Mutex<StreamingBlock>>>> {
         // Check if block is already being loaded
         {
             let blocks = self.streaming_blocks.read().await;
@@ -474,10 +489,16 @@ impl StreamingSSTableReader {
         }
 
         let compressed_size = u32::from_be_bytes([
-            header_data[8], header_data[9], header_data[10], header_data[11]
+            header_data[8],
+            header_data[9],
+            header_data[10],
+            header_data[11],
         ]);
         let checksum = u32::from_be_bytes([
-            header_data[12], header_data[13], header_data[14], header_data[15]
+            header_data[12],
+            header_data[13],
+            header_data[14],
+            header_data[15],
         ]);
 
         // Create block metadata
@@ -501,12 +522,22 @@ impl StreamingSSTableReader {
         }
 
         // Start streaming the block data
-        self.stream_block_data(Arc::clone(&streaming_block), offset + 16, compressed_size as usize).await?;
+        self.stream_block_data(
+            Arc::clone(&streaming_block),
+            offset + 16,
+            compressed_size as usize,
+        )
+        .await?;
 
         Ok(Some(streaming_block))
     }
 
-    async fn stream_block_data(&self, streaming_block: Arc<Mutex<StreamingBlock>>, data_offset: u64, total_size: usize) -> Result<()> {
+    async fn stream_block_data(
+        &self,
+        streaming_block: Arc<Mutex<StreamingBlock>>,
+        data_offset: u64,
+        total_size: usize,
+    ) -> Result<()> {
         let chunk_size = self.config.streaming_chunk_size;
         let mut current_offset = data_offset;
         let mut remaining_size = total_size;
@@ -524,7 +555,9 @@ impl StreamingSSTableReader {
             remaining_size -= read_size;
 
             // Check memory pressure and yield if necessary
-            if self.current_memory_usage.load(Ordering::Relaxed) > (self.config.max_memory_usage_mb * 1024 * 1024) as u64 {
+            if self.current_memory_usage.load(Ordering::Relaxed)
+                > (self.config.max_memory_usage_mb * 1024 * 1024) as u64
+            {
                 tokio::task::yield_now().await;
             }
         }
@@ -537,7 +570,7 @@ impl StreamingSSTableReader {
             // Memory-mapped access
             let start = offset as usize;
             let end = (start + size).min(mmap.len());
-            
+
             if start < mmap.len() && end <= mmap.len() {
                 Ok(mmap[start..end].to_vec())
             } else {
@@ -548,13 +581,13 @@ impl StreamingSSTableReader {
             if let Some(ref file) = self.file {
                 let mut buffer = self.buffer_pool.get_buffer();
                 buffer.resize(size, 0);
-                
+
                 {
                     let mut file_guard = file.lock().await;
                     file_guard.seek(tokio::io::SeekFrom::Start(offset)).await?;
                     file_guard.read_exact(&mut buffer).await?;
                 }
-                
+
                 // Don't return buffer to pool immediately to avoid copying
                 Ok(buffer)
             } else {
@@ -569,21 +602,21 @@ impl StreamingSSTableReader {
             if compressed_data.len() > self.config.streaming_chunk_size {
                 let mut decompressed = Vec::new();
                 let chunk_size = self.config.streaming_chunk_size;
-                
+
                 for chunk_start in (0..compressed_data.len()).step_by(chunk_size) {
                     let chunk_end = (chunk_start + chunk_size).min(compressed_data.len());
                     let chunk = &compressed_data[chunk_start..chunk_end];
-                    
+
                     let mut reader = CompressionReader::new(compression_reader.algorithm().clone());
                     let chunk_decompressed = reader.read(chunk)?;
                     decompressed.extend_from_slice(&chunk_decompressed);
-                    
+
                     // Yield periodically for responsiveness
                     if chunk_start % (chunk_size * 4) == 0 {
                         tokio::task::yield_now().await;
                     }
                 }
-                
+
                 Ok(decompressed)
             } else {
                 // Small chunk, decompress directly
@@ -595,12 +628,16 @@ impl StreamingSSTableReader {
         }
     }
 
-    async fn wait_for_block_loading(&self, streaming_block: &Arc<Mutex<StreamingBlock>>, min_progress: f32) -> Result<()> {
+    async fn wait_for_block_loading(
+        &self,
+        streaming_block: &Arc<Mutex<StreamingBlock>>,
+        min_progress: f32,
+    ) -> Result<()> {
         const MAX_WAIT_MS: u64 = 5000; // 5 second timeout
         const CHECK_INTERVAL_MS: u64 = 10;
-        
+
         let start_time = std::time::Instant::now();
-        
+
         loop {
             {
                 let block_guard = streaming_block.lock().await;
@@ -608,16 +645,19 @@ impl StreamingSSTableReader {
                     return Ok(());
                 }
             }
-            
+
             if start_time.elapsed().as_millis() > MAX_WAIT_MS as u128 {
                 return Err(Error::corruption("Block loading timeout".to_string()));
             }
-            
+
             tokio::time::sleep(tokio::time::Duration::from_millis(CHECK_INTERVAL_MS)).await;
         }
     }
 
-    async fn parse_streaming_block_entries(&self, streaming_block: &Arc<Mutex<StreamingBlock>>) -> Result<Vec<(TableId, RowKey, Value)>> {
+    async fn parse_streaming_block_entries(
+        &self,
+        streaming_block: &Arc<Mutex<StreamingBlock>>,
+    ) -> Result<Vec<(TableId, RowKey, Value)>> {
         let compressed_data = {
             let block_guard = streaming_block.lock().await;
             let mut data = Vec::new();
@@ -637,7 +677,9 @@ impl StreamingSSTableReader {
         while offset < decompressed_data.len() {
             // Parse table ID
             let (remaining, table_id_len) = parse_vint_length(&decompressed_data[offset..])
-                .map_err(|e| Error::corruption(format!("Failed to parse table ID length: {:?}", e)))?;
+                .map_err(|e| {
+                    Error::corruption(format!("Failed to parse table ID length: {:?}", e))
+                })?;
             offset = decompressed_data.len() - remaining.len();
 
             if offset + table_id_len > decompressed_data.len() {
@@ -645,7 +687,8 @@ impl StreamingSSTableReader {
             }
 
             let table_id = TableId::new(
-                String::from_utf8_lossy(&decompressed_data[offset..offset + table_id_len]).into_owned()
+                String::from_utf8_lossy(&decompressed_data[offset..offset + table_id_len])
+                    .into_owned(),
             );
             offset += table_id_len;
 
@@ -670,8 +713,11 @@ impl StreamingSSTableReader {
                 break;
             }
 
-            let (_, value) = parse_cql_value(&decompressed_data[offset..offset + value_len], CqlTypeId::Varchar)
-                .map_err(|e| Error::corruption(format!("Failed to parse value: {:?}", e)))?;
+            let (_, value) = parse_cql_value(
+                &decompressed_data[offset..offset + value_len],
+                CqlTypeId::Varchar,
+            )
+            .map_err(|e| Error::corruption(format!("Failed to parse value: {:?}", e)))?;
             offset += value_len;
 
             entries.push((table_id, key, value));
@@ -687,7 +733,7 @@ impl StreamingSSTableReader {
         if current_usage > max_usage {
             // Apply backpressure by cleaning up old blocks
             self.cleanup_old_blocks().await?;
-            
+
             // If still over limit, apply more aggressive cleanup
             let current_usage = self.current_memory_usage.load(Ordering::Relaxed);
             if current_usage > max_usage {
@@ -700,19 +746,19 @@ impl StreamingSSTableReader {
 
     async fn cleanup_old_blocks(&self) -> Result<()> {
         let mut blocks_to_remove = Vec::new();
-        
+
         {
             let blocks = self.streaming_blocks.read().await;
             let mut block_ages: Vec<(u64, std::time::Instant)> = Vec::new();
-            
+
             for (&offset, block) in blocks.iter() {
                 let block_guard = block.lock().await;
                 block_ages.push((offset, block_guard.last_access));
             }
-            
+
             // Sort by age (oldest first)
             block_ages.sort_by_key(|(_, access_time)| *access_time);
-            
+
             // Remove oldest 25% of blocks
             let remove_count = (block_ages.len() / 4).max(1);
             for i in 0..remove_count {
@@ -727,7 +773,8 @@ impl StreamingSSTableReader {
                 if let Some(block) = blocks.remove(&offset) {
                     let block_guard = block.lock().await;
                     let memory_freed = block_guard.memory_usage() as u64;
-                    self.current_memory_usage.fetch_sub(memory_freed, Ordering::Relaxed);
+                    self.current_memory_usage
+                        .fetch_sub(memory_freed, Ordering::Relaxed);
                 }
             }
         }
@@ -765,16 +812,16 @@ mod tests {
     #[tokio::test]
     async fn test_buffer_pool() {
         let pool = BufferPool::new(1024, 10);
-        
+
         // Test buffer allocation
         let buffer1 = pool.get_buffer();
         assert_eq!(buffer1.len(), 1024);
         assert_eq!(pool.buffer_count(), 1);
-        
+
         // Test buffer return
         pool.return_buffer(buffer1);
         assert_eq!(pool.buffer_count(), 1); // Should still be 1 as buffer is reused
-        
+
         // Test buffer reuse
         let buffer2 = pool.get_buffer();
         assert_eq!(buffer2.len(), 1024);
@@ -810,7 +857,7 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_config() {
         let config = StreamingReaderConfig::default();
-        
+
         assert!(config.buffer_pool_size_mb > 0);
         assert!(config.buffer_size_bytes > 0);
         assert!(config.mmap_threshold_bytes > 0);

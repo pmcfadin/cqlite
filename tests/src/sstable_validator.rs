@@ -1,7 +1,7 @@
 //! Comprehensive SSTable validator for testing reader/writer functionality
 //! and Cassandra 5+ 'oa' format specification compliance
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,15 +10,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
+    Config, Result, RowKey, Value,
     storage::sstable::{
+        SSTableManager,
         bloom::BloomFilter,
         reader::SSTableReader,
         validation::{CassandraValidationFramework, TestResult, ValidationReport},
         writer::SSTableWriter,
-        SSTableManager,
     },
     types::{DataType, TableId},
-    Config, Result, RowKey, Value,
 };
 
 use tempfile::TempDir;
@@ -86,7 +86,10 @@ impl SSTableValidator {
 
         // Test 6: Bloom filter validation
         println!("🌸 Testing bloom filter functionality...");
-        report.add_test_result("bloom_filter", self.test_bloom_filter_functionality().await?);
+        report.add_test_result(
+            "bloom_filter",
+            self.test_bloom_filter_functionality().await?,
+        );
 
         // Test 7: Index functionality
         println!("📇 Testing index functionality...");
@@ -98,7 +101,10 @@ impl SSTableValidator {
 
         // Test 9: Performance validation
         println!("⚡ Testing performance characteristics...");
-        report.add_test_result("performance", self.test_performance_characteristics().await?);
+        report.add_test_result(
+            "performance",
+            self.test_performance_characteristics().await?,
+        );
 
         // Test 10: Cassandra compatibility
         println!("🔗 Testing Cassandra compatibility...");
@@ -115,16 +121,31 @@ impl SSTableValidator {
         let test_path = self.test_dir.path().join("basic_test.sst");
 
         // Write data
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+
         let test_data = vec![
-            (TableId::new("users"), RowKey::from("user1"), Value::Text("Alice".to_string())),
-            (TableId::new("users"), RowKey::from("user2"), Value::Text("Bob".to_string())),
-            (TableId::new("posts"), RowKey::from("post1"), Value::Text("Hello World".to_string())),
+            (
+                TableId::new("users"),
+                RowKey::from("user1"),
+                Value::Text("Alice".to_string()),
+            ),
+            (
+                TableId::new("users"),
+                RowKey::from("user2"),
+                Value::Text("Bob".to_string()),
+            ),
+            (
+                TableId::new("posts"),
+                RowKey::from("post1"),
+                Value::Text("Hello World".to_string()),
+            ),
         ];
 
         for (table_id, key, value) in &test_data {
-            writer.add_entry(table_id, key.clone(), value.clone()).await?;
+            writer
+                .add_entry(table_id, key.clone(), value.clone())
+                .await?;
         }
 
         writer.finish().await?;
@@ -135,7 +156,9 @@ impl SSTableValidator {
         }
 
         let file_size = fs::metadata(&test_path)
-            .map_err(|e| cqlite_core::error::Error::storage(format!("Failed to get metadata: {}", e)))?
+            .map_err(|e| {
+                cqlite_core::error::Error::storage(format!("Failed to get metadata: {}", e))
+            })?
             .len();
 
         if file_size == 0 {
@@ -165,7 +188,9 @@ impl SSTableValidator {
             }
         }
 
-        Ok(TestResult::success("Basic write/read functionality works correctly"))
+        Ok(TestResult::success(
+            "Basic write/read functionality works correctly",
+        ))
     }
 
     /// Test various data type serialization and deserialization
@@ -174,27 +199,70 @@ impl SSTableValidator {
 
         // Create test data with various types
         let test_data = vec![
-            (TableId::new("test"), RowKey::from("text"), Value::Text("Hello, 世界!".to_string())),
-            (TableId::new("test"), RowKey::from("integer"), Value::Integer(42)),
-            (TableId::new("test"), RowKey::from("bigint"), Value::BigInt(9223372036854775807)),
-            (TableId::new("test"), RowKey::from("float"), Value::Float(3.14159)),
-            (TableId::new("test"), RowKey::from("boolean_true"), Value::Boolean(true)),
-            (TableId::new("test"), RowKey::from("boolean_false"), Value::Boolean(false)),
+            (
+                TableId::new("test"),
+                RowKey::from("text"),
+                Value::Text("Hello, 世界!".to_string()),
+            ),
+            (
+                TableId::new("test"),
+                RowKey::from("integer"),
+                Value::Integer(42),
+            ),
+            (
+                TableId::new("test"),
+                RowKey::from("bigint"),
+                Value::BigInt(9223372036854775807),
+            ),
+            (
+                TableId::new("test"),
+                RowKey::from("float"),
+                Value::Float(3.14159),
+            ),
+            (
+                TableId::new("test"),
+                RowKey::from("boolean_true"),
+                Value::Boolean(true),
+            ),
+            (
+                TableId::new("test"),
+                RowKey::from("boolean_false"),
+                Value::Boolean(false),
+            ),
             (TableId::new("test"), RowKey::from("null"), Value::Null),
-            (TableId::new("test"), RowKey::from("blob"), Value::Blob(vec![0, 1, 2, 3, 255])),
-            (TableId::new("test"), RowKey::from("timestamp"), Value::Timestamp(
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64
-            )),
-            (TableId::new("test"), RowKey::from("uuid"), Value::Uuid(
-                [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]
-            )),
+            (
+                TableId::new("test"),
+                RowKey::from("blob"),
+                Value::Blob(vec![0, 1, 2, 3, 255]),
+            ),
+            (
+                TableId::new("test"),
+                RowKey::from("timestamp"),
+                Value::Timestamp(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_micros() as i64,
+                ),
+            ),
+            (
+                TableId::new("test"),
+                RowKey::from("uuid"),
+                Value::Uuid([
+                    0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a,
+                    0xbc, 0xde, 0xf0,
+                ]),
+            ),
         ];
 
         // Write data
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+
         for (table_id, key, value) in &test_data {
-            writer.add_entry(table_id, key.clone(), value.clone()).await?;
+            writer
+                .add_entry(table_id, key.clone(), value.clone())
+                .await?;
         }
 
         writer.finish().await?;
@@ -208,7 +276,10 @@ impl SSTableValidator {
                     if value != *expected_value {
                         return Ok(TestResult::failure(
                             "Data type serialization/deserialization failed",
-                            &format!("Key: {:?}, Expected: {:?}, Got: {:?}", key, expected_value, value),
+                            &format!(
+                                "Key: {:?}, Expected: {:?}, Got: {:?}",
+                                key, expected_value, value
+                            ),
                         ));
                     }
                 }
@@ -221,7 +292,9 @@ impl SSTableValidator {
             }
         }
 
-        Ok(TestResult::success("All data types serialize/deserialize correctly"))
+        Ok(TestResult::success(
+            "All data types serialize/deserialize correctly",
+        ))
     }
 
     /// Test complex data structures
@@ -233,17 +306,36 @@ impl SSTableValidator {
         let binary_data = (0..1000).map(|i| (i % 256) as u8).collect::<Vec<u8>>();
 
         let test_data = vec![
-            (TableId::new("large"), RowKey::from("text"), Value::Text(large_text)),
-            (TableId::new("large"), RowKey::from("binary"), Value::Blob(binary_data)),
-            (TableId::new("unicode"), RowKey::from("emoji"), Value::Text("🦀🚀🌟💾🔥".to_string())),
-            (TableId::new("unicode"), RowKey::from("mixed"), Value::Text("ASCII + 中文 + العربية + עברית".to_string())),
+            (
+                TableId::new("large"),
+                RowKey::from("text"),
+                Value::Text(large_text),
+            ),
+            (
+                TableId::new("large"),
+                RowKey::from("binary"),
+                Value::Blob(binary_data),
+            ),
+            (
+                TableId::new("unicode"),
+                RowKey::from("emoji"),
+                Value::Text("🦀🚀🌟💾🔥".to_string()),
+            ),
+            (
+                TableId::new("unicode"),
+                RowKey::from("mixed"),
+                Value::Text("ASCII + 中文 + العربية + עברית".to_string()),
+            ),
         ];
 
         // Write data
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+
         for (table_id, key, value) in &test_data {
-            writer.add_entry(table_id, key.clone(), value.clone()).await?;
+            writer
+                .add_entry(table_id, key.clone(), value.clone())
+                .await?;
         }
 
         writer.finish().await?;
@@ -270,7 +362,9 @@ impl SSTableValidator {
             }
         }
 
-        Ok(TestResult::success("Complex data structures handled correctly"))
+        Ok(TestResult::success(
+            "Complex data structures handled correctly",
+        ))
     }
 
     /// Test file format compliance
@@ -278,13 +372,21 @@ impl SSTableValidator {
         let test_path = self.test_dir.path().join("format_test.sst");
 
         // Create minimal SSTable
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        writer.add_entry(&TableId::new("test"), RowKey::from("key"), Value::Text("value".to_string())).await?;
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+        writer
+            .add_entry(
+                &TableId::new("test"),
+                RowKey::from("key"),
+                Value::Text("value".to_string()),
+            )
+            .await?;
         writer.finish().await?;
 
         // Read file as binary and validate format
-        let file_data = fs::read(&test_path)
-            .map_err(|e| cqlite_core::error::Error::storage(format!("Failed to read test file: {}", e)))?;
+        let file_data = fs::read(&test_path).map_err(|e| {
+            cqlite_core::error::Error::storage(format!("Failed to read test file: {}", e))
+        })?;
 
         // Check minimum file size
         if file_data.len() < 48 {
@@ -319,7 +421,9 @@ impl SSTableValidator {
             ));
         }
 
-        Ok(TestResult::success("File format complies with Cassandra 5+ 'oa' specification"))
+        Ok(TestResult::success(
+            "File format complies with Cassandra 5+ 'oa' specification",
+        ))
     }
 
     /// Test compression functionality
@@ -327,7 +431,10 @@ impl SSTableValidator {
         let algorithms = vec![
             ("lz4", cqlite_core::config::CompressionAlgorithm::Lz4),
             ("snappy", cqlite_core::config::CompressionAlgorithm::Snappy),
-            ("deflate", cqlite_core::config::CompressionAlgorithm::Deflate),
+            (
+                "deflate",
+                cqlite_core::config::CompressionAlgorithm::Deflate,
+            ),
         ];
 
         let mut results = Vec::new();
@@ -356,7 +463,10 @@ impl SSTableValidator {
         name: &str,
         algorithm: cqlite_core::config::CompressionAlgorithm,
     ) -> Result<TestResult> {
-        let test_path = self.test_dir.path().join(format!("compression_{}_test.sst", name));
+        let test_path = self
+            .test_dir
+            .path()
+            .join(format!("compression_{}_test.sst", name));
 
         // Create config with compression enabled
         let mut config = self.config.clone();
@@ -365,7 +475,7 @@ impl SSTableValidator {
 
         // Write compressible data
         let mut writer = SSTableWriter::create(&test_path, &config, self.platform.clone()).await?;
-        
+
         // Add repetitive data that should compress well
         for i in 0..100 {
             let table_id = TableId::new("compression_test");
@@ -378,7 +488,9 @@ impl SSTableValidator {
 
         // Check file size (should be much smaller than uncompressed)
         let file_size = fs::metadata(&test_path)
-            .map_err(|e| cqlite_core::error::Error::storage(format!("Failed to get metadata: {}", e)))?
+            .map_err(|e| {
+                cqlite_core::error::Error::storage(format!("Failed to get metadata: {}", e))
+            })?
             .len();
 
         // With 100KB of 'A' characters, compression should achieve significant reduction
@@ -391,10 +503,10 @@ impl SSTableValidator {
 
         // Verify we can read the data back
         let reader = SSTableReader::open(&test_path, &config, self.platform.clone()).await?;
-        
+
         let test_key = RowKey::from("key_050");
         let test_table = TableId::new("compression_test");
-        
+
         match reader.get(&test_table, &test_key).await? {
             Some(Value::Text(text)) => {
                 if text.len() != 1000 || !text.chars().all(|c| c == 'A') {
@@ -430,13 +542,19 @@ impl SSTableValidator {
         config.storage.bloom_filter_fp_rate = 0.01;
 
         let mut writer = SSTableWriter::create(&test_path, &config, self.platform.clone()).await?;
-        
+
         let table_id = TableId::new("bloom_test");
         let existing_keys = vec!["key1", "key2", "key3", "key4", "key5"];
-        
+
         // Add known keys
         for key in &existing_keys {
-            writer.add_entry(&table_id, RowKey::from(*key), Value::Text(format!("value_{}", key))).await?;
+            writer
+                .add_entry(
+                    &table_id,
+                    RowKey::from(*key),
+                    Value::Text(format!("value_{}", key)),
+                )
+                .await?;
         }
 
         writer.finish().await?;
@@ -447,7 +565,7 @@ impl SSTableValidator {
         // Test that existing keys are found
         for key in &existing_keys {
             match reader.get(&table_id, &RowKey::from(*key)).await? {
-                Some(_) => {}, // Good
+                Some(_) => {} // Good
                 None => {
                     return Ok(TestResult::failure(
                         "Bloom filter false negative",
@@ -460,7 +578,7 @@ impl SSTableValidator {
         // Test non-existing keys (should mostly return None due to bloom filter)
         let non_existing_keys = vec!["nonkey1", "nonkey2", "nonkey3", "nonkey4", "nonkey5"];
         let mut false_positives = 0;
-        
+
         for key in &non_existing_keys {
             if let Some(_) = reader.get(&table_id, &RowKey::from(*key)).await? {
                 false_positives += 1;
@@ -471,7 +589,11 @@ impl SSTableValidator {
         if false_positives > 2 {
             return Ok(TestResult::warning(
                 "High bloom filter false positive rate",
-                &format!("Got {} false positives out of {} tests", false_positives, non_existing_keys.len()),
+                &format!(
+                    "Got {} false positives out of {} tests",
+                    false_positives,
+                    non_existing_keys.len()
+                ),
             ));
         }
 
@@ -482,15 +604,22 @@ impl SSTableValidator {
     async fn test_index_functionality(&self) -> Result<TestResult> {
         let test_path = self.test_dir.path().join("index_test.sst");
 
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+
         let table_id = TableId::new("index_test");
-        
+
         // Add entries in non-sorted order to test indexing
         let keys = vec!["key_050", "key_010", "key_090", "key_030", "key_070"];
-        
+
         for key in &keys {
-            writer.add_entry(&table_id, RowKey::from(*key), Value::Text(format!("value_{}", key))).await?;
+            writer
+                .add_entry(
+                    &table_id,
+                    RowKey::from(*key),
+                    Value::Text(format!("value_{}", key)),
+                )
+                .await?;
         }
 
         writer.finish().await?;
@@ -501,8 +630,10 @@ impl SSTableValidator {
         // Test range scan
         let start_key = RowKey::from("key_020");
         let end_key = RowKey::from("key_080");
-        
-        let results = reader.scan(&table_id, Some(&start_key), Some(&end_key), None).await?;
+
+        let results = reader
+            .scan(&table_id, Some(&start_key), Some(&end_key), None)
+            .await?;
 
         // Should find keys in range: key_030, key_050, key_070
         if results.len() != 3 {
@@ -535,7 +666,9 @@ impl SSTableValidator {
 
         // Test 1: Empty values
         match self.test_empty_values().await {
-            Ok(result) if result.status == cqlite_core::storage::sstable::validation::TestStatus::Fail => {
+            Ok(result)
+                if result.status == cqlite_core::storage::sstable::validation::TestStatus::Fail =>
+            {
                 issues.push(format!("Empty values: {}", result.message));
             }
             Err(e) => issues.push(format!("Empty values test error: {}", e)),
@@ -544,7 +677,9 @@ impl SSTableValidator {
 
         // Test 2: Very long keys
         match self.test_long_keys().await {
-            Ok(result) if result.status == cqlite_core::storage::sstable::validation::TestStatus::Fail => {
+            Ok(result)
+                if result.status == cqlite_core::storage::sstable::validation::TestStatus::Fail =>
+            {
                 issues.push(format!("Long keys: {}", result.message));
             }
             Err(e) => issues.push(format!("Long keys test error: {}", e)),
@@ -553,7 +688,9 @@ impl SSTableValidator {
 
         // Test 3: Many small entries
         match self.test_many_small_entries().await {
-            Ok(result) if result.status == cqlite_core::storage::sstable::validation::TestStatus::Fail => {
+            Ok(result)
+                if result.status == cqlite_core::storage::sstable::validation::TestStatus::Fail =>
+            {
                 issues.push(format!("Many entries: {}", result.message));
             }
             Err(e) => issues.push(format!("Many entries test error: {}", e)),
@@ -573,18 +710,29 @@ impl SSTableValidator {
     /// Test empty values
     async fn test_empty_values(&self) -> Result<TestResult> {
         let test_path = self.test_dir.path().join("empty_values_test.sst");
-        
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        
+
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+
         let table_id = TableId::new("empty_test");
-        writer.add_entry(&table_id, RowKey::from("empty_text"), Value::Text("".to_string())).await?;
-        writer.add_entry(&table_id, RowKey::from("empty_blob"), Value::Blob(vec![])).await?;
-        writer.add_entry(&table_id, RowKey::from("null_value"), Value::Null).await?;
-        
+        writer
+            .add_entry(
+                &table_id,
+                RowKey::from("empty_text"),
+                Value::Text("".to_string()),
+            )
+            .await?;
+        writer
+            .add_entry(&table_id, RowKey::from("empty_blob"), Value::Blob(vec![]))
+            .await?;
+        writer
+            .add_entry(&table_id, RowKey::from("null_value"), Value::Null)
+            .await?;
+
         writer.finish().await?;
 
         let reader = SSTableReader::open(&test_path, &self.config, self.platform.clone()).await?;
-        
+
         // Verify we can read empty values
         if let Some(Value::Text(text)) = reader.get(&table_id, &RowKey::from("empty_text")).await? {
             if !text.is_empty() {
@@ -600,18 +748,29 @@ impl SSTableValidator {
     /// Test very long keys
     async fn test_long_keys(&self) -> Result<TestResult> {
         let test_path = self.test_dir.path().join("long_keys_test.sst");
-        
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        
+
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+
         let table_id = TableId::new("long_key_test");
         let long_key = "x".repeat(1000); // 1KB key
-        
-        writer.add_entry(&table_id, RowKey::from(long_key.clone()), Value::Text("value".to_string())).await?;
+
+        writer
+            .add_entry(
+                &table_id,
+                RowKey::from(long_key.clone()),
+                Value::Text("value".to_string()),
+            )
+            .await?;
         writer.finish().await?;
 
         let reader = SSTableReader::open(&test_path, &self.config, self.platform.clone()).await?;
-        
-        if reader.get(&table_id, &RowKey::from(long_key)).await?.is_none() {
+
+        if reader
+            .get(&table_id, &RowKey::from(long_key))
+            .await?
+            .is_none()
+        {
             return Ok(TestResult::failure("Could not read back long key", ""));
         }
 
@@ -621,25 +780,26 @@ impl SSTableValidator {
     /// Test many small entries
     async fn test_many_small_entries(&self) -> Result<TestResult> {
         let test_path = self.test_dir.path().join("many_entries_test.sst");
-        
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        
+
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+
         let table_id = TableId::new("many_test");
-        
+
         // Write 1000 small entries
         for i in 0..1000 {
             let key = RowKey::from(format!("key_{:06}", i));
             let value = Value::Text(format!("value_{}", i));
             writer.add_entry(&table_id, key, value).await?;
         }
-        
+
         writer.finish().await?;
 
         let reader = SSTableReader::open(&test_path, &self.config, self.platform.clone()).await?;
-        
+
         // Verify we can read all entries
         let results = reader.scan(&table_id, None, None, None).await?;
-        
+
         if results.len() != 1000 {
             return Ok(TestResult::failure(
                 "Not all entries were written/read",
@@ -653,39 +813,40 @@ impl SSTableValidator {
     /// Test performance characteristics
     async fn test_performance_characteristics(&self) -> Result<TestResult> {
         let test_path = self.test_dir.path().join("performance_test.sst");
-        
+
         let start_time = SystemTime::now();
-        
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
-        
+
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+
         let table_id = TableId::new("perf_test");
-        
+
         // Write 10,000 entries
         for i in 0..10_000 {
             let key = RowKey::from(format!("perf_key_{:08}", i));
             let value = Value::Text(format!("Performance test value number {}", i));
             writer.add_entry(&table_id, key, value).await?;
         }
-        
+
         writer.finish().await?;
-        
+
         let write_duration = start_time.elapsed().unwrap();
-        
+
         // Test read performance
         let read_start = SystemTime::now();
         let reader = SSTableReader::open(&test_path, &self.config, self.platform.clone()).await?;
-        
+
         // Random access test
         for i in (0..10_000).step_by(100) {
             let key = RowKey::from(format!("perf_key_{:08}", i));
             reader.get(&table_id, &key).await?;
         }
-        
+
         let read_duration = read_start.elapsed().unwrap();
-        
+
         let write_throughput = 10_000.0 / write_duration.as_secs_f64();
         let read_throughput = 100.0 / read_duration.as_secs_f64();
-        
+
         // Basic performance thresholds
         if write_throughput < 1000.0 {
             return Ok(TestResult::warning(
@@ -693,10 +854,10 @@ impl SSTableValidator {
                 &format!("Got {:.0} writes/sec", write_throughput),
             ));
         }
-        
+
         if read_throughput < 100.0 {
             return Ok(TestResult::warning(
-                "Read performance below threshold", 
+                "Read performance below threshold",
                 &format!("Got {:.0} reads/sec", read_throughput),
             ));
         }
@@ -748,6 +909,9 @@ mod tests {
     async fn test_basic_validation() {
         let validator = SSTableValidator::new().await.unwrap();
         let result = validator.test_basic_write_read().await.unwrap();
-        assert_eq!(result.status, cqlite_core::storage::sstable::validation::TestStatus::Pass);
+        assert_eq!(
+            result.status,
+            cqlite_core::storage::sstable::validation::TestStatus::Pass
+        );
     }
 }

@@ -10,7 +10,7 @@
 //! - Uses ZigZag encoding for signed integers to efficiently encode small negative values
 //! - Maximum 9 bytes total length
 
-use nom::{bytes::complete::take, IResult};
+use nom::{IResult, bytes::complete::take};
 
 /// Maximum bytes a VInt can occupy (Cassandra supports up to 9 bytes total)
 pub const MAX_VINT_SIZE: usize = 9;

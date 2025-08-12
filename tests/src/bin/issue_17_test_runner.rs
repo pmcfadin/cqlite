@@ -9,12 +9,11 @@
 /// - Robust error handling validation
 /// - Performance benchmarking
 /// - Real-world data validation
-
 use std::env;
 use std::time::Instant;
 
 use cqlite_tests::comprehensive_sstable_test_suite::{
-    run_comprehensive_sstable_tests, TestSuiteReport
+    TestSuiteReport, run_comprehensive_sstable_tests,
 };
 
 #[tokio::main]
@@ -52,8 +51,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("⚙️  Configuration:");
-    println!("   Performance Tests: {}", if run_performance_tests { "enabled" } else { "disabled" });
-    println!("   Verbose Output: {}", if verbose_output { "enabled" } else { "disabled" });
+    println!(
+        "   Performance Tests: {}",
+        if run_performance_tests {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "   Verbose Output: {}",
+        if verbose_output {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     if let Some(filter) = &specific_test_filter {
         println!("   Test Filter: {}", filter);
     }
@@ -84,16 +97,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if test_report.is_successful() {
         println!("🎉 SUCCESS: All Issue #17 requirements satisfied!");
         println!("   Total execution time: {:.2}s", total_time.as_secs_f64());
-        
+
         update_github_issue_status("completed").await?;
         generate_completion_report(&test_report).await?;
     } else {
         println!("❌ FAILED: Issue #17 requirements not yet met");
         println!("   Total execution time: {:.2}s", total_time.as_secs_f64());
-        
+
         update_github_issue_status("needs-work").await?;
         generate_work_needed_report(&test_report).await?;
-        
+
         return Err("Test suite requirements not satisfied".into());
     }
 
@@ -128,7 +141,7 @@ fn print_usage() {
 async fn update_github_issue_status(status: &str) -> Result<(), Box<dyn std::error::Error>> {
     // In a real implementation, this would update the GitHub issue via API
     println!("📝 Issue #17 status update: {}", status);
-    
+
     match status {
         "in-progress" => {
             println!("   🔄 Started testing core SSTable reading functionality");
@@ -146,18 +159,23 @@ async fn update_github_issue_status(status: &str) -> Result<(), Box<dyn std::err
             println!("   📊 Status: {}", status);
         }
     }
-    
+
     Ok(())
 }
 
-async fn generate_completion_report(report: &TestSuiteReport) -> Result<(), Box<dyn std::error::Error>> {
+async fn generate_completion_report(
+    report: &TestSuiteReport,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("📋 ISSUE #17 COMPLETION REPORT");
     println!("==============================");
     println!();
     println!("✅ REQUIREMENTS SATISFIED:");
     println!("   ✓ Core SSTable reading functionality validated");
-    println!("   ✓ Test coverage: {:.1}% (>90% requirement met)", report.coverage_percentage);
+    println!(
+        "   ✓ Test coverage: {:.1}% (>90% requirement met)",
+        report.coverage_percentage
+    );
     println!("   ✓ Cassandra version support validated");
     println!("   ✓ Error handling and edge cases tested");
     println!("   ✓ Performance characteristics verified");
@@ -165,10 +183,16 @@ async fn generate_completion_report(report: &TestSuiteReport) -> Result<(), Box<
     println!();
     println!("📊 DETAILED METRICS:");
     println!("   • Total Tests: {}", report.total_tests);
-    println!("   • Passed Tests: {} ({:.1}%)", report.passed_tests,
-            (report.passed_tests as f64 / report.total_tests as f64) * 100.0);
+    println!(
+        "   • Passed Tests: {} ({:.1}%)",
+        report.passed_tests,
+        (report.passed_tests as f64 / report.total_tests as f64) * 100.0
+    );
     println!("   • Failed Tests: {}", report.failed_tests);
-    println!("   • Execution Time: {:.2}s", report.total_execution_time.as_secs_f64());
+    println!(
+        "   • Execution Time: {:.2}s",
+        report.total_execution_time.as_secs_f64()
+    );
     println!();
     println!("🎯 QUALITY GATES:");
     println!("   ✅ >90% test coverage achieved");
@@ -196,32 +220,49 @@ async fn generate_completion_report(report: &TestSuiteReport) -> Result<(), Box<
     Ok(())
 }
 
-async fn generate_work_needed_report(report: &TestSuiteReport) -> Result<(), Box<dyn std::error::Error>> {
+async fn generate_work_needed_report(
+    report: &TestSuiteReport,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("⚠️  ISSUE #17 WORK NEEDED REPORT");
     println!("================================");
     println!();
     println!("❌ REQUIREMENTS NOT YET SATISFIED:");
-    
+
     if report.coverage_percentage < 90.0 {
-        println!("   ❌ Test coverage: {:.1}% (need >90%)", report.coverage_percentage);
-        println!("      → Add {} more test cases", 
-                ((90.0_f64 - report.coverage_percentage) / 100.0_f64 * report.total_tests as f64).ceil() as usize);
+        println!(
+            "   ❌ Test coverage: {:.1}% (need >90%)",
+            report.coverage_percentage
+        );
+        println!(
+            "      → Add {} more test cases",
+            ((90.0_f64 - report.coverage_percentage) / 100.0_f64 * report.total_tests as f64).ceil()
+                as usize
+        );
     }
-    
+
     if report.failed_tests > 0 {
         println!("   ❌ Failed tests: {}", report.failed_tests);
         println!("      → Fix failing functionality");
     }
-    
+
     println!();
     println!("📊 CURRENT STATUS:");
     println!("   • Total Tests: {}", report.total_tests);
-    println!("   • Passed: {} ({:.1}%)", report.passed_tests,
-            (report.passed_tests as f64 / report.total_tests as f64) * 100.0);
-    println!("   • Failed: {} ({:.1}%)", report.failed_tests,
-            (report.failed_tests as f64 / report.total_tests as f64) * 100.0);
-    println!("   • Coverage Gap: {:.1}%", 90.0 - report.coverage_percentage);
+    println!(
+        "   • Passed: {} ({:.1}%)",
+        report.passed_tests,
+        (report.passed_tests as f64 / report.total_tests as f64) * 100.0
+    );
+    println!(
+        "   • Failed: {} ({:.1}%)",
+        report.failed_tests,
+        (report.failed_tests as f64 / report.total_tests as f64) * 100.0
+    );
+    println!(
+        "   • Coverage Gap: {:.1}%",
+        90.0 - report.coverage_percentage
+    );
     println!();
     println!("🔧 RECOMMENDED ACTIONS:");
     println!("   1. Review failed test details above");
@@ -231,7 +272,7 @@ async fn generate_work_needed_report(report: &TestSuiteReport) -> Result<(), Box
     println!("   5. Re-run tests until >90% coverage achieved");
     println!();
     println!("🎯 PRIORITY AREAS:");
-    
+
     // Analyze failed tests by category
     let mut failed_categories = std::collections::HashMap::new();
     for test_result in &report.test_results {
@@ -240,11 +281,11 @@ async fn generate_work_needed_report(report: &TestSuiteReport) -> Result<(), Box
             *failed_categories.entry(category.to_string()).or_insert(0) += 1;
         }
     }
-    
+
     for (category, count) in failed_categories {
         println!("   • {}: {} failing tests", category, count);
     }
-    
+
     println!();
     println!("⏰ ESTIMATED TIME TO COMPLETION:");
     println!("   Based on current progress: 2-3 additional days");
@@ -268,17 +309,41 @@ pub fn generate_github_summary(report: &TestSuiteReport) -> String {
         {} Error handling validation\n\
         {} Performance verification\n\n\
         **Summary:** {}\n",
-        if report.is_successful() { "✅ COMPLETED" } else { "⚠️ IN PROGRESS" },
+        if report.is_successful() {
+            "✅ COMPLETED"
+        } else {
+            "⚠️ IN PROGRESS"
+        },
         report.coverage_percentage,
         report.passed_tests,
         report.failed_tests,
         report.total_tests,
         report.total_execution_time.as_secs_f64(),
-        if report.passed_tests > 0 { "✅" } else { "❌" },
-        if report.coverage_percentage >= 90.0 { "✅" } else { "❌" },
-        if report.passed_tests > report.total_tests * 2 / 3 { "✅" } else { "❌" },
-        if report.failed_tests == 0 { "✅" } else { "❌" },
-        if report.total_execution_time.as_secs() < 60 { "✅" } else { "❌" },
+        if report.passed_tests > 0 {
+            "✅"
+        } else {
+            "❌"
+        },
+        if report.coverage_percentage >= 90.0 {
+            "✅"
+        } else {
+            "❌"
+        },
+        if report.passed_tests > report.total_tests * 2 / 3 {
+            "✅"
+        } else {
+            "❌"
+        },
+        if report.failed_tests == 0 {
+            "✅"
+        } else {
+            "❌"
+        },
+        if report.total_execution_time.as_secs() < 60 {
+            "✅"
+        } else {
+            "❌"
+        },
         report.summary
     )
 }
@@ -289,7 +354,9 @@ mod tests {
 
     #[test]
     fn test_github_summary_generation() {
-        use integration_tests::comprehensive_sstable_test_suite::{TestSuiteReport, TestResult, TestStatus};
+        use integration_tests::comprehensive_sstable_test_suite::{
+            TestResult, TestStatus, TestSuiteReport,
+        };
         use std::time::Duration;
 
         let report = TestSuiteReport {

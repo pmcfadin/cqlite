@@ -1,12 +1,12 @@
 //! Memory Safety Test Suite for CQLite Core
-//! 
+//!
 //! This module provides comprehensive memory safety testing for the CQLite database engine,
 //! focusing on detecting memory leaks, buffer overflows, use-after-free bugs, and other
 //! memory-related issues.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::memory::MemoryManager;
@@ -65,12 +65,22 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         };
         if !ptr.is_null() {
             self.allocations.fetch_add(1, Ordering::SeqCst);
-            let new_total = self.total_allocated.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
-            
+            let new_total = self
+                .total_allocated
+                .fetch_add(layout.size(), Ordering::SeqCst)
+                + layout.size();
+
             // Update peak memory if necessary
             let current_peak = self.peak_memory.load(Ordering::SeqCst);
             if new_total > current_peak {
-                self.peak_memory.compare_exchange_weak(current_peak, new_total, Ordering::SeqCst, Ordering::SeqCst).ok();
+                self.peak_memory
+                    .compare_exchange_weak(
+                        current_peak,
+                        new_total,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .ok();
             }
         }
         ptr
@@ -82,7 +92,8 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             System.dealloc(ptr, layout);
         }
         self.deallocations.fetch_add(1, Ordering::SeqCst);
-        self.total_allocated.fetch_sub(layout.size(), Ordering::SeqCst);
+        self.total_allocated
+            .fetch_sub(layout.size(), Ordering::SeqCst);
     }
 }
 
@@ -118,7 +129,10 @@ impl MemorySafetyTests {
             // Test row cache operations
             for i in 0..1000 {
                 let key = format!("key_{}", i);
-                let data = vec![Value::Integer(i as i32), Value::Text(format!("value_{}", i))];
+                let data = vec![
+                    Value::Integer(i as i32),
+                    Value::Text(format!("value_{}", i)),
+                ];
                 memory_manager.put_row(&table_id, &key, data);
             }
 
@@ -187,7 +201,10 @@ impl MemorySafetyTests {
         let leaked_memory = final_memory.saturating_sub(initial_memory);
 
         if leaked_memory > 0 {
-            eprintln!("MemTable memory leak detected: {} bytes leaked", leaked_memory);
+            eprintln!(
+                "MemTable memory leak detected: {} bytes leaked",
+                leaked_memory
+            );
             return Err(format!("MemTable memory leak: {} bytes", leaked_memory).into());
         }
 
@@ -231,50 +248,54 @@ impl MemorySafetyTests {
     /// Test memory usage under concurrent stress
     pub async fn test_concurrent_memory_stress(&self) -> Result<(), Box<dyn std::error::Error>> {
         use tokio::task;
-        
+
         self.allocator.reset();
         let initial_memory = self.allocator.current_memory();
-        
+
         let mut handles = Vec::new();
-        
+
         // Spawn multiple concurrent tasks that stress memory allocation
         for task_id in 0..8 {
             let config = self.config.clone();
             let handle = task::spawn(async move {
                 let mut memtable = MemTable::new(&config)?;
                 let table_id = TableId::new(&format!("concurrent_table_{}", task_id));
-                
+
                 // Each task inserts 1000 entries
                 for i in 0..1000 {
                     let key = RowKey::from(format!("concurrent_key_{}_{}", task_id, i));
                     let value = Value::Text(format!("concurrent_value_{}_{}", task_id, i));
                     memtable.put(&table_id, key, value)?;
                 }
-                
+
                 // Scan to exercise read paths
                 let _results = memtable.scan(&table_id, None, None, Some(100))?;
-                
+
                 Ok::<(), crate::error::Error>(())
             });
             handles.push(handle);
         }
-        
+
         // Wait for all tasks to complete
         for handle in handles {
             handle.await??;
         }
-        
+
         // Allow some time for cleanup
         tokio::time::sleep(Duration::from_millis(200)).await;
-        
+
         let final_memory = self.allocator.current_memory();
         let leaked_memory = final_memory.saturating_sub(initial_memory);
-        
-        if leaked_memory > 1024 * 1024 { // Allow some tolerance for allocator overhead
-            eprintln!("Concurrent stress test memory leak: {} bytes", leaked_memory);
+
+        if leaked_memory > 1024 * 1024 {
+            // Allow some tolerance for allocator overhead
+            eprintln!(
+                "Concurrent stress test memory leak: {} bytes",
+                leaked_memory
+            );
             return Err(format!("Concurrent memory leak: {} bytes", leaked_memory).into());
         }
-        
+
         Ok(())
     }
 
@@ -283,15 +304,15 @@ impl MemorySafetyTests {
         // Test Arc::get_mut usage patterns
         let arc_data = Arc::new(vec![1, 2, 3, 4, 5]);
         let mut arc_clone = Arc::clone(&arc_data);
-        
+
         // This should fail because there are multiple references
         if Arc::get_mut(&mut arc_clone).is_some() {
             return Err("Arc::get_mut should fail when multiple references exist".into());
         }
-        
+
         // Drop the original reference
         drop(arc_data);
-        
+
         // Now it should succeed
         if Arc::get_mut(&mut arc_clone).is_none() {
             return Err("Arc::get_mut should succeed when only one reference exists".into());
@@ -330,7 +351,8 @@ impl MemorySafetyTests {
         let final_memory = self.allocator.current_memory();
         let leaked_memory = final_memory.saturating_sub(initial_memory);
 
-        if leaked_memory > 1024 { // Small tolerance for test overhead
+        if leaked_memory > 1024 {
+            // Small tolerance for test overhead
             eprintln!("Error cleanup test memory leak: {} bytes", leaked_memory);
             return Err(format!("Error cleanup memory leak: {} bytes", leaked_memory).into());
         }
@@ -367,13 +389,19 @@ impl MemorySafetyTests {
         println!("   ✓ Error cleanup test passed");
 
         println!("All memory safety tests passed! 🎉");
-        
+
         // Print memory usage statistics
         println!("\nMemory Usage Statistics:");
-        println!("  Peak memory usage: {} bytes", self.allocator.peak_memory());
+        println!(
+            "  Peak memory usage: {} bytes",
+            self.allocator.peak_memory()
+        );
         println!("  Total allocations: {}", self.allocator.allocations());
         println!("  Total deallocations: {}", self.allocator.deallocations());
-        println!("  Current memory: {} bytes", self.allocator.current_memory());
+        println!(
+            "  Current memory: {} bytes",
+            self.allocator.current_memory()
+        );
 
         Ok(())
     }
@@ -392,19 +420,22 @@ mod tests {
     #[tokio::test]
     async fn test_memory_safety_suite() {
         let tests = MemorySafetyTests::new();
-        tests.run_all_tests().await.expect("Memory safety tests failed");
+        tests
+            .run_all_tests()
+            .await
+            .expect("Memory safety tests failed");
     }
 
     #[test]
     fn test_tracking_allocator() {
         let allocator = TrackingAllocator::new();
-        
+
         // Test initial state
         assert_eq!(allocator.allocations(), 0);
         assert_eq!(allocator.deallocations(), 0);
         assert_eq!(allocator.current_memory(), 0);
         assert_eq!(allocator.peak_memory(), 0);
-        
+
         // Test reset
         allocator.reset();
         assert_eq!(allocator.allocations(), 0);
@@ -416,24 +447,32 @@ mod tests {
     #[test]
     fn test_memory_manager_basic_safety() {
         let tests = MemorySafetyTests::new();
-        tests.test_memory_manager_safety().expect("Memory manager safety test failed");
+        tests
+            .test_memory_manager_safety()
+            .expect("Memory manager safety test failed");
     }
 
     #[test]
     fn test_memtable_basic_safety() {
         let tests = MemorySafetyTests::new();
-        tests.test_memtable_memory_safety().expect("MemTable safety test failed");
+        tests
+            .test_memtable_memory_safety()
+            .expect("MemTable safety test failed");
     }
 
     #[test]
     fn test_buffer_overflow_basic() {
         let tests = MemorySafetyTests::new();
-        tests.test_buffer_overflow_protection().expect("Buffer overflow test failed");
+        tests
+            .test_buffer_overflow_protection()
+            .expect("Buffer overflow test failed");
     }
 
     #[test]
     fn test_unsafe_code_basic() {
         let tests = MemorySafetyTests::new();
-        tests.test_unsafe_code_safety().expect("Unsafe code test failed");
+        tests
+            .test_unsafe_code_safety()
+            .expect("Unsafe code test failed");
     }
 }

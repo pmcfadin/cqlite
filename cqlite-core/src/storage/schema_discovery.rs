@@ -4,7 +4,7 @@
 //! SSTable files, enabling the REPL to understand table structures and provide
 //! intelligent data access capabilities.
 
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -14,10 +14,10 @@ use tokio::sync::RwLock;
 
 use crate::{
     Config, Result,
-    schema::{TableSchema, Column},
-    storage::sstable::bulletproof_reader::BulletproofReader,
-    platform::Platform,
     parser::header::{CassandraVersion, ColumnInfo},
+    platform::Platform,
+    schema::{Column, TableSchema},
+    storage::sstable::bulletproof_reader::BulletproofReader,
     types::{DataType, Value},
 };
 
@@ -184,7 +184,9 @@ impl SchemaDiscovery {
         }
 
         // Perform discovery
-        let discovered = self.perform_schema_discovery(keyspace, table, sstable_files).await?;
+        let discovered = self
+            .perform_schema_discovery(keyspace, table, sstable_files)
+            .await?;
 
         // Cache the result
         if self.config.cache_schemas {
@@ -219,7 +221,7 @@ impl SchemaDiscovery {
                             cassandra_version = Some(header.cassandra_version);
                         }
                     }
-                    
+
                     // Merge with existing column data
                     self.merge_header_schema(&mut all_column_data, header_schema);
                 }
@@ -239,7 +241,9 @@ impl SchemaDiscovery {
         }
 
         // Infer final schema
-        let schema = self.infer_table_schema(keyspace, table, &all_column_data).await?;
+        let schema = self
+            .infer_table_schema(keyspace, table, &all_column_data)
+            .await?;
 
         // Calculate column statistics
         let column_stats = self.calculate_column_statistics(&all_column_data).await;
@@ -382,7 +386,11 @@ impl SchemaDiscovery {
         for (name, data) in column_data {
             let stat = ColumnStatistics {
                 name: name.clone(),
-                inferred_type: self.type_inference.infer_column_type(data).await.to_string(),
+                inferred_type: self
+                    .type_inference
+                    .infer_column_type(data)
+                    .await
+                    .to_string(),
                 type_confidence: data.calculate_type_confidence(),
                 null_percentage: data.calculate_null_percentage(),
                 unique_values: data.unique_values.len(),
@@ -398,14 +406,15 @@ impl SchemaDiscovery {
     }
 
     /// Calculate overall inference confidence
-    fn calculate_inference_confidence(&self, column_stats: &HashMap<String, ColumnStatistics>) -> f64 {
+    fn calculate_inference_confidence(
+        &self,
+        column_stats: &HashMap<String, ColumnStatistics>,
+    ) -> f64 {
         if column_stats.is_empty() {
             return 0.0;
         }
 
-        let total_confidence: f64 = column_stats.values()
-            .map(|stat| stat.type_confidence)
-            .sum();
+        let total_confidence: f64 = column_stats.values().map(|stat| stat.type_confidence).sum();
 
         total_confidence / column_stats.len() as f64
     }
@@ -429,10 +438,11 @@ impl SchemaDiscovery {
 
         // Simple cache eviction
         if cache.len() > 100 {
-            let oldest_key = cache.iter()
+            let oldest_key = cache
+                .iter()
                 .min_by_key(|(_, (_, time))| time)
                 .map(|(key, _)| key.clone());
-            
+
             if let Some(key) = oldest_key {
                 cache.remove(&key);
             }
@@ -459,7 +469,9 @@ impl SchemaDiscovery {
     ) {
         for sample in samples {
             for (column_name, value) in sample {
-                let entry = column_data.entry(column_name).or_insert_with(ColumnData::new);
+                let entry = column_data
+                    .entry(column_name)
+                    .or_insert_with(ColumnData::new);
                 entry.add_sample_value(value);
             }
         }
@@ -550,13 +562,10 @@ impl ColumnData {
         if self.sample_values.is_empty() {
             0.0
         } else {
-            let total_size: usize = self.sample_values.iter()
-                .map(|v| v.estimate_size())
-                .sum();
+            let total_size: usize = self.sample_values.iter().map(|v| v.estimate_size()).sum();
             total_size as f64 / self.sample_values.len() as f64
         }
     }
-
 }
 
 /// Type inference engine
@@ -574,9 +583,12 @@ impl TypeInferenceEngine {
         }
 
         // Otherwise, infer from sample data
-        if let Some(most_common_type) = column_data.type_frequency.iter()
+        if let Some(most_common_type) = column_data
+            .type_frequency
+            .iter()
             .max_by_key(|(_, count)| *count)
-            .map(|(type_name, _)| type_name) {
+            .map(|(type_name, _)| type_name)
+        {
             return self.string_to_data_type(most_common_type);
         }
 
@@ -693,16 +705,17 @@ impl ValueExt for Value {
             Value::Map(map) => {
                 map.iter()
                     .map(|(k, v)| k.estimate_size() + v.estimate_size())
-                    .sum::<usize>() + 16
+                    .sum::<usize>()
+                    + 16
             }
             Value::Json(_) => 64, // JSON estimate
             Value::TinyInt(_) => 1,
             Value::SmallInt(_) => 2,
             Value::Float32(_) => 4,
             Value::Tuple(t) => t.iter().map(|v| v.estimate_size()).sum::<usize>() + 8,
-            Value::Udt(_) => 32, // UDT estimate
+            Value::Udt(_) => 32,                   // UDT estimate
             Value::Frozen(f) => f.estimate_size(), // Recursive
-            Value::Tombstone(_) => 8, // Tombstone marker
+            Value::Tombstone(_) => 8,              // Tombstone marker
         }
     }
 }
@@ -719,8 +732,10 @@ mod tests {
         let core_config = Config::default();
         let platform = Arc::new(Platform::new(&core_config).await.unwrap());
 
-        let discovery = SchemaDiscovery::new(config, platform, core_config).await.unwrap();
-        
+        let discovery = SchemaDiscovery::new(config, platform, core_config)
+            .await
+            .unwrap();
+
         // Test that it was created successfully
         assert!(!discovery.config.cache_schemas || discovery.schema_cache.read().await.is_empty());
     }
@@ -728,7 +743,7 @@ mod tests {
     #[test]
     fn test_column_data_analysis() {
         let mut column_data = ColumnData::new();
-        
+
         // Add some sample values
         column_data.add_sample_value(Value::Text("test1".to_string()));
         column_data.add_sample_value(Value::Text("test2".to_string()));

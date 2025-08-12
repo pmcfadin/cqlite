@@ -4,17 +4,14 @@
 //! supporting multiple output formats and use cases including documentation,
 //! API integration, and data pipeline configuration.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::{
     Error, Result,
     schema::{
         TableSchema,
-        discovery::{
-            SchemaInfo, TableOptions, IndexType, CollectionType, 
-            SchemaMetadata,
-        },
+        discovery::{CollectionType, IndexType, SchemaInfo, SchemaMetadata, TableOptions},
     },
 };
 
@@ -338,7 +335,7 @@ impl JsonExporter {
     fn convert_schema_info_to_json(&self, schema_info: &SchemaInfo) -> Result<JsonSchema> {
         // Build columns with enhanced information
         let mut json_columns = Vec::new();
-        
+
         // Partition key columns
         for pk in &schema_info.partition_key {
             json_columns.push(JsonColumn {
@@ -421,38 +418,58 @@ impl JsonExporter {
 
         // Build primary key structure
         let primary_key = JsonPrimaryKey {
-            partition_keys: schema_info.partition_key.iter().map(|pk| pk.name.clone()).collect(),
-            clustering_keys: schema_info.clustering_keys.iter().map(|ck| JsonClusteringKey {
-                column: ck.name.clone(),
-                order: ck.order.clone(),
-            }).collect(),
+            partition_keys: schema_info
+                .partition_key
+                .iter()
+                .map(|pk| pk.name.clone())
+                .collect(),
+            clustering_keys: schema_info
+                .clustering_keys
+                .iter()
+                .map(|ck| JsonClusteringKey {
+                    column: ck.name.clone(),
+                    order: ck.order.clone(),
+                })
+                .collect(),
         };
 
         // Convert UDTs
         let udts = if self.config.include_udt_definitions {
-            schema_info.user_defined_types.iter().map(|udt| JsonUDT {
-                name: udt.name.clone(),
-                keyspace: udt.keyspace.clone(),
-                fields: udt.fields.iter().map(|field| JsonUDTField {
-                    name: field.name.clone(),
-                    data_type: field.field_type.clone(),
+            schema_info
+                .user_defined_types
+                .iter()
+                .map(|udt| JsonUDT {
+                    name: udt.name.clone(),
+                    keyspace: udt.keyspace.clone(),
+                    fields: udt
+                        .fields
+                        .iter()
+                        .map(|field| JsonUDTField {
+                            name: field.name.clone(),
+                            data_type: field.field_type.clone(),
+                            description: None,
+                        })
+                        .collect(),
                     description: None,
-                }).collect(),
-                description: None,
-            }).collect()
+                })
+                .collect()
         } else {
             Vec::new()
         };
 
         // Convert indexes
         let indexes = if self.config.include_index_definitions {
-            schema_info.indexes.iter().map(|idx| JsonIndex {
-                name: idx.name.clone(),
-                index_type: self.index_type_to_string(&idx.index_type),
-                target_column: idx.target_column.clone(),
-                options: idx.options.clone(),
-                description: None,
-            }).collect()
+            schema_info
+                .indexes
+                .iter()
+                .map(|idx| JsonIndex {
+                    name: idx.name.clone(),
+                    index_type: self.index_type_to_string(&idx.index_type),
+                    target_column: idx.target_column.clone(),
+                    options: idx.options.clone(),
+                    description: None,
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -496,8 +513,13 @@ impl JsonExporter {
 
         // Process all columns
         for column in &table_schema.columns {
-            let is_partition_key = table_schema.partition_keys.iter().any(|pk| pk.name == column.name);
-            let clustering_info = table_schema.clustering_keys.iter()
+            let is_partition_key = table_schema
+                .partition_keys
+                .iter()
+                .any(|pk| pk.name == column.name);
+            let clustering_info = table_schema
+                .clustering_keys
+                .iter()
                 .find(|ck| ck.name == column.name)
                 .map(|ck| ck.order.clone());
 
@@ -520,11 +542,19 @@ impl JsonExporter {
         }
 
         let primary_key = JsonPrimaryKey {
-            partition_keys: table_schema.partition_keys.iter().map(|pk| pk.name.clone()).collect(),
-            clustering_keys: table_schema.clustering_keys.iter().map(|ck| JsonClusteringKey {
-                column: ck.name.clone(),
-                order: ck.order.clone(),
-            }).collect(),
+            partition_keys: table_schema
+                .partition_keys
+                .iter()
+                .map(|pk| pk.name.clone())
+                .collect(),
+            clustering_keys: table_schema
+                .clustering_keys
+                .iter()
+                .map(|ck| JsonClusteringKey {
+                    column: ck.name.clone(),
+                    order: ck.order.clone(),
+                })
+                .collect(),
         };
 
         Ok(JsonSchema {
@@ -547,10 +577,14 @@ impl JsonExporter {
         })
     }
 
-    fn build_type_details(&self, data_type: &str, _collection_types: &HashMap<String, CollectionType>) -> Result<Option<JsonTypeDetails>> {
+    fn build_type_details(
+        &self,
+        data_type: &str,
+        _collection_types: &HashMap<String, CollectionType>,
+    ) -> Result<Option<JsonTypeDetails>> {
         // Basic type analysis - can be enhanced with proper type parsing
         let base_type = self.extract_base_type(data_type);
-        
+
         let mut type_details = JsonTypeDetails {
             base_type: base_type.clone(),
             collection_type: None,
@@ -613,7 +647,10 @@ impl JsonExporter {
 
     fn generate_example_values(&self, base_type: &str) -> Vec<String> {
         match base_type {
-            "text" | "varchar" => vec!["\"example text\"".to_string(), "\"another string\"".to_string()],
+            "text" | "varchar" => vec![
+                "\"example text\"".to_string(),
+                "\"another string\"".to_string(),
+            ],
             "int" => vec!["42".to_string(), "100".to_string()],
             "bigint" => vec!["1234567890".to_string()],
             "uuid" => vec!["550e8400-e29b-41d4-a716-446655440000".to_string()],
@@ -652,24 +689,48 @@ impl JsonExporter {
     fn convert_metadata(&self, metadata: &SchemaMetadata) -> Result<JsonMetadata> {
         Ok(JsonMetadata {
             exported_at: chrono::Utc::now().to_rfc3339(),
-            schema_discovered_at: metadata.discovered_at
+            schema_discovered_at: metadata
+                .discovered_at
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
                 .unwrap_or(None)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| "unknown".to_string()),
-            source_files: metadata.source_files.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+            source_files: metadata
+                .source_files
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
             total_rows_sampled: metadata.total_rows_sampled as u64,
-            cassandra_version: metadata.cassandra_version.as_ref().map(|v| format!("{:?}", v)),
+            cassandra_version: metadata
+                .cassandra_version
+                .as_ref()
+                .map(|v| format!("{:?}", v)),
             discovery_method: format!("{:?}", metadata.discovery_method),
             schema_version: metadata.version,
             validation_results: if self.config.include_validation_results {
                 Some(JsonValidationResults {
                     status: format!("{:?}", metadata.validation_results.status),
-                    errors: metadata.validation_results.errors.iter().map(|e| e.message.clone()).collect(),
-                    warnings: metadata.validation_results.warnings.iter().map(|w| w.message.clone()).collect(),
-                    files_analyzed: metadata.validation_results.consistency_results.files_analyzed as u32,
-                    schema_mismatches: metadata.validation_results.consistency_results.schema_mismatches as u32,
+                    errors: metadata
+                        .validation_results
+                        .errors
+                        .iter()
+                        .map(|e| e.message.clone())
+                        .collect(),
+                    warnings: metadata
+                        .validation_results
+                        .warnings
+                        .iter()
+                        .map(|w| w.message.clone())
+                        .collect(),
+                    files_analyzed: metadata
+                        .validation_results
+                        .consistency_results
+                        .files_analyzed as u32,
+                    schema_mismatches: metadata
+                        .validation_results
+                        .consistency_results
+                        .schema_mismatches as u32,
                 })
             } else {
                 None
@@ -681,7 +742,8 @@ impl JsonExporter {
                     data_sampling_time_ms: metadata.performance_metrics.data_sampling_time_ms,
                     type_inference_time_ms: metadata.performance_metrics.type_inference_time_ms,
                     validation_time_ms: metadata.performance_metrics.validation_time_ms,
-                    peak_memory_usage_bytes: metadata.performance_metrics.peak_memory_usage_bytes as u64,
+                    peak_memory_usage_bytes: metadata.performance_metrics.peak_memory_usage_bytes
+                        as u64,
                 })
             } else {
                 None
@@ -748,7 +810,7 @@ mod tests {
             include_metadata: false,
             ..Default::default()
         };
-        
+
         let exporter = JsonExporter::with_config(config);
         assert_eq!(exporter.config.format_variant, JsonFormat::Compact);
         assert!(!exporter.config.pretty_format);
@@ -759,10 +821,12 @@ mod tests {
     fn test_type_details_generation() {
         let exporter = JsonExporter::new();
         let collection_types = HashMap::new();
-        
-        let type_details = exporter.build_type_details("text", &collection_types).unwrap();
+
+        let type_details = exporter
+            .build_type_details("text", &collection_types)
+            .unwrap();
         assert!(type_details.is_some());
-        
+
         let type_details = type_details.unwrap();
         assert_eq!(type_details.base_type, "text");
         assert!(type_details.example_values.is_some());
@@ -771,7 +835,7 @@ mod tests {
     #[test]
     fn test_collection_type_extraction() {
         let exporter = JsonExporter::new();
-        
+
         assert_eq!(exporter.extract_collection_type("list<text>"), "list");
         assert_eq!(exporter.extract_collection_type("set<int>"), "set");
         assert_eq!(exporter.extract_collection_type("map<text, int>"), "map");
@@ -780,10 +844,10 @@ mod tests {
     #[test]
     fn test_element_types_extraction() {
         let exporter = JsonExporter::new();
-        
+
         let elements = exporter.extract_element_types("list<text>");
         assert_eq!(elements, vec!["text"]);
-        
+
         let elements = exporter.extract_element_types("map<text, int>");
         assert_eq!(elements, vec!["text", "int"]);
     }

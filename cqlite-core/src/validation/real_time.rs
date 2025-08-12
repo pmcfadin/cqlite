@@ -3,8 +3,8 @@
 //! This module provides real-time monitoring and validation for Issue #17.
 
 use crate::error::Result;
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Real-time validator
 #[derive(Debug)]
@@ -136,7 +136,7 @@ impl RealtimeValidator {
         }
 
         log::info!("Starting real-time validation monitoring");
-        
+
         // In a real implementation, this would start a background monitoring task
         // For now, just log that monitoring is started
         Ok(())
@@ -195,7 +195,8 @@ impl RealtimeValidator {
 
     /// Get events by type
     pub fn get_events_by_type(&self, event_type: ValidationEventType) -> Vec<ValidationEvent> {
-        self.event_history.iter()
+        self.event_history
+            .iter()
             .filter(|event| event.event_type == event_type)
             .cloned()
             .collect()
@@ -204,7 +205,9 @@ impl RealtimeValidator {
     /// Get validation statistics
     pub fn get_statistics(&self) -> ValidationStatistics {
         let total_events = self.event_history.len();
-        let completed_events = self.get_events_by_type(ValidationEventType::Completed).len();
+        let completed_events = self
+            .get_events_by_type(ValidationEventType::Completed)
+            .len();
         let failed_events = self.get_events_by_type(ValidationEventType::Failed).len();
         let error_events = self.get_events_by_type(ValidationEventType::Error).len();
         let warning_events = self.get_events_by_type(ValidationEventType::Warning).len();
@@ -326,7 +329,7 @@ mod tests {
     fn test_event_recording() {
         let config = MonitoringConfig::default();
         let mut validator = RealtimeValidator::new(config).unwrap();
-        
+
         let event = ValidationEvent {
             event_id: "test".to_string(),
             event_type: ValidationEventType::Completed,
@@ -342,7 +345,7 @@ mod tests {
                 metrics: None,
             },
         };
-        
+
         let result = validator.record_event(event);
         assert!(result.is_ok());
         assert_eq!(validator.event_history.len(), 1);
@@ -351,23 +354,18 @@ mod tests {
     #[test]
     fn test_event_filtering() {
         let mut config = MonitoringConfig::default();
-        config.event_filters = vec![
-            EventFilter {
-                event_type: Some(ValidationEventType::Error),
-                enabled: true,
-            },
-        ];
-        
+        config.event_filters = vec![EventFilter {
+            event_type: Some(ValidationEventType::Error),
+            enabled: true,
+        }];
+
         let mut validator = RealtimeValidator::new(config).unwrap();
-        
+
         // This should be recorded (Error type)
-        let error_event = RealtimeValidator::create_error_event(
-            "TestValidator", 
-            Some("test1"), 
-            "Test error"
-        );
+        let error_event =
+            RealtimeValidator::create_error_event("TestValidator", Some("test1"), "Test error");
         validator.record_event(error_event).unwrap();
-        
+
         // This should be filtered out (Completed type)
         let completed_event = ValidationEvent {
             event_id: "test".to_string(),
@@ -385,19 +383,22 @@ mod tests {
             },
         };
         validator.record_event(completed_event).unwrap();
-        
+
         // Only the error event should be recorded
         assert_eq!(validator.event_history.len(), 1);
-        assert_eq!(validator.event_history[0].event_type, ValidationEventType::Error);
+        assert_eq!(
+            validator.event_history[0].event_type,
+            ValidationEventType::Error
+        );
     }
 
     #[test]
     fn test_event_history_limit() {
         let mut config = MonitoringConfig::default();
         config.max_event_history = 2;
-        
+
         let mut validator = RealtimeValidator::new(config).unwrap();
-        
+
         // Add 3 events
         for i in 0..3 {
             let event = ValidationEvent {
@@ -417,7 +418,7 @@ mod tests {
             };
             validator.record_event(event).unwrap();
         }
-        
+
         // Should only keep the last 2 events
         assert_eq!(validator.event_history.len(), 2);
         assert_eq!(validator.event_history[0].event_id, "test1");
@@ -428,7 +429,7 @@ mod tests {
     fn test_validation_statistics() {
         let config = MonitoringConfig::default();
         let mut validator = RealtimeValidator::new(config).unwrap();
-        
+
         // Add various types of events
         let events = vec![
             RealtimeValidator::create_error_event("TestValidator", Some("test1"), "Error 1"),
@@ -449,11 +450,11 @@ mod tests {
                 },
             },
         ];
-        
+
         for event in events {
             validator.record_event(event).unwrap();
         }
-        
+
         let stats = validator.get_statistics();
         assert_eq!(stats.total_events, 3);
         assert_eq!(stats.completed_events, 1);
@@ -465,15 +466,34 @@ mod tests {
     fn test_get_events_by_type() {
         let config = MonitoringConfig::default();
         let mut validator = RealtimeValidator::new(config).unwrap();
-        
+
         // Add error and progress events
-        validator.record_event(RealtimeValidator::create_error_event("TestValidator", Some("test1"), "Error 1")).unwrap();
-        validator.record_event(RealtimeValidator::create_progress_event("TestValidator", "test2", 50.0, "Progress")).unwrap();
-        validator.record_event(RealtimeValidator::create_error_event("TestValidator", Some("test3"), "Error 2")).unwrap();
-        
+        validator
+            .record_event(RealtimeValidator::create_error_event(
+                "TestValidator",
+                Some("test1"),
+                "Error 1",
+            ))
+            .unwrap();
+        validator
+            .record_event(RealtimeValidator::create_progress_event(
+                "TestValidator",
+                "test2",
+                50.0,
+                "Progress",
+            ))
+            .unwrap();
+        validator
+            .record_event(RealtimeValidator::create_error_event(
+                "TestValidator",
+                Some("test3"),
+                "Error 2",
+            ))
+            .unwrap();
+
         let error_events = validator.get_events_by_type(ValidationEventType::Error);
         let progress_events = validator.get_events_by_type(ValidationEventType::Progress);
-        
+
         assert_eq!(error_events.len(), 2);
         assert_eq!(progress_events.len(), 1);
     }

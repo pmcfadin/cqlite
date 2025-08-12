@@ -9,14 +9,14 @@
 //! - Sub-millisecond partition key lookups
 //! - Query latency competitive with Cassandra performance
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::error::Result;
 use cqlite_core::memory::MemoryManager;
 use cqlite_core::parser::header::SSTableHeader;
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::{types::TableId, Config, RowKey, Value};
+use cqlite_core::{Config, RowKey, Value, types::TableId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -188,7 +188,7 @@ impl PerformanceValidationSuite {
         let temp_dir = TempDir::new().map_err(|e| {
             cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to create temp dir: {}", e)
+                format!("Failed to create temp dir: {}", e),
             ))
         })?;
 
@@ -510,7 +510,7 @@ impl PerformanceValidationSuite {
             handle.await.map_err(|e| {
                 cqlite_core::error::Error::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("Thread join error: {}", e)
+                    format!("Thread join error: {}", e),
                 ))
             })?;
         }

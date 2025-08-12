@@ -10,16 +10,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
+    Error, Result,
     config::Config,
     platform::Platform,
     storage::sstable::{
-        bulletproof_reader::BulletproofReader,
-        reader::{SSTableReader, IntegrityCheckResult, IntegrityStatus, SSTableReaderHealthMetrics},
         SSTableManager,
+        bulletproof_reader::BulletproofReader,
         format_detector::SSTableFormat,
+        reader::{
+            IntegrityCheckResult, IntegrityStatus, SSTableReader, SSTableReaderHealthMetrics,
+        },
     },
-    types::{TableId, Value, RowKey},
-    Result, Error,
+    types::{RowKey, TableId, Value},
 };
 
 use tempfile::TempDir;
@@ -91,7 +93,7 @@ impl ComprehensiveSSTableTestSuite {
     /// Discover test data paths from various locations
     fn discover_test_data_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        
+
         // Standard test data locations
         let potential_paths = vec![
             "test-env/cassandra5/data",
@@ -145,7 +147,7 @@ impl ComprehensiveSSTableTestSuite {
 
         // Generate comprehensive report
         let report = self.generate_comprehensive_report().await?;
-        
+
         Ok(report)
     }
 
@@ -164,7 +166,11 @@ impl ComprehensiveSSTableTestSuite {
 
         self.test_results.push(TestResult {
             test_name: "basic_reader_initialization".to_string(),
-            status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+            status: if test_result.is_ok() {
+                TestStatus::Pass
+            } else {
+                TestStatus::Fail
+            },
             message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
             execution_time,
             details: None,
@@ -177,7 +183,11 @@ impl ComprehensiveSSTableTestSuite {
 
         self.test_results.push(TestResult {
             test_name: "bulletproof_reader_functionality".to_string(),
-            status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+            status: if test_result.is_ok() {
+                TestStatus::Pass
+            } else {
+                TestStatus::Fail
+            },
             message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
             execution_time,
             details: None,
@@ -190,7 +200,11 @@ impl ComprehensiveSSTableTestSuite {
 
         self.test_results.push(TestResult {
             test_name: "health_metrics_functionality".to_string(),
-            status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+            status: if test_result.is_ok() {
+                TestStatus::Pass
+            } else {
+                TestStatus::Fail
+            },
             message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
             execution_time,
             details: None,
@@ -227,7 +241,11 @@ impl ComprehensiveSSTableTestSuite {
 
             self.test_results.push(TestResult {
                 test_name: format!("format_compatibility_{}", test_id),
-                status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+                status: if test_result.is_ok() {
+                    TestStatus::Pass
+                } else {
+                    TestStatus::Fail
+                },
                 message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
                 execution_time,
                 details: None,
@@ -269,7 +287,11 @@ impl ComprehensiveSSTableTestSuite {
 
             self.test_results.push(TestResult {
                 test_name: format!("error_handling_{}", test_id),
-                status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+                status: if test_result.is_ok() {
+                    TestStatus::Pass
+                } else {
+                    TestStatus::Fail
+                },
                 message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
                 execution_time,
                 details: None,
@@ -307,7 +329,11 @@ impl ComprehensiveSSTableTestSuite {
 
             self.test_results.push(TestResult {
                 test_name: format!("performance_{}", test_id),
-                status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+                status: if test_result.is_ok() {
+                    TestStatus::Pass
+                } else {
+                    TestStatus::Fail
+                },
                 message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
                 execution_time,
                 details: None,
@@ -330,8 +356,15 @@ impl ComprehensiveSSTableTestSuite {
             let execution_time = start_time.elapsed();
 
             self.test_results.push(TestResult {
-                test_name: format!("real_data_{}", test_data_path.file_name().unwrap().to_string_lossy()),
-                status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+                test_name: format!(
+                    "real_data_{}",
+                    test_data_path.file_name().unwrap().to_string_lossy()
+                ),
+                status: if test_result.is_ok() {
+                    TestStatus::Pass
+                } else {
+                    TestStatus::Fail
+                },
                 message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
                 execution_time,
                 details: None,
@@ -366,7 +399,11 @@ impl ComprehensiveSSTableTestSuite {
 
             self.test_results.push(TestResult {
                 test_name: format!("memory_safety_{}", test_id),
-                status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+                status: if test_result.is_ok() {
+                    TestStatus::Pass
+                } else {
+                    TestStatus::Fail
+                },
                 message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
                 execution_time,
                 details: None,
@@ -401,7 +438,11 @@ impl ComprehensiveSSTableTestSuite {
 
             self.test_results.push(TestResult {
                 test_name: format!("concurrency_{}", test_id),
-                status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+                status: if test_result.is_ok() {
+                    TestStatus::Pass
+                } else {
+                    TestStatus::Fail
+                },
                 message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
                 execution_time,
                 details: None,
@@ -436,7 +477,11 @@ impl ComprehensiveSSTableTestSuite {
 
             self.test_results.push(TestResult {
                 test_name: format!("integration_{}", test_id),
-                status: if test_result.is_ok() { TestStatus::Pass } else { TestStatus::Fail },
+                status: if test_result.is_ok() {
+                    TestStatus::Pass
+                } else {
+                    TestStatus::Fail
+                },
                 message: test_result.unwrap_or_else(|e| format!("Failed: {}", e)),
                 execution_time,
                 details: None,
@@ -499,10 +544,14 @@ impl ComprehensiveSSTableTestSuite {
 
         // Verify health metrics are populated
         if health_metrics.file_accessible && health_metrics.total_file_size > 0 {
-            Ok(format!("Health metrics: {} bytes, accessible: {}", 
-                      health_metrics.total_file_size, health_metrics.file_accessible))
+            Ok(format!(
+                "Health metrics: {} bytes, accessible: {}",
+                health_metrics.total_file_size, health_metrics.file_accessible
+            ))
         } else {
-            Err(Error::storage("Health metrics not properly populated".to_string()))
+            Err(Error::storage(
+                "Health metrics not properly populated".to_string(),
+            ))
         }
     }
 
@@ -536,7 +585,9 @@ impl ComprehensiveSSTableTestSuite {
     async fn test_corrupted_file_handling(&self) -> Result<String> {
         let test_file = self.temp_dir.path().join("corrupted.sst");
         // Write partially corrupted data
-        let corrupted_data: Vec<u8> = (0..100).map(|i| if i % 10 == 0 { 0xFF } else { (i % 256) as u8 }).collect();
+        let corrupted_data: Vec<u8> = (0..100)
+            .map(|i| if i % 10 == 0 { 0xFF } else { (i % 256) as u8 })
+            .collect();
         std::fs::write(&test_file, corrupted_data)?;
 
         match SSTableReader::open(&test_file, &self.config, self.platform.clone()).await {
@@ -554,9 +605,11 @@ impl ComprehensiveSSTableTestSuite {
 
     async fn test_missing_file_handling(&self) -> Result<String> {
         let non_existent_file = self.temp_dir.path().join("does_not_exist.sst");
-        
+
         match SSTableReader::open(&non_existent_file, &self.config, self.platform.clone()).await {
-            Ok(_) => Err(Error::storage("Should not open non-existent file".to_string())),
+            Ok(_) => Err(Error::storage(
+                "Should not open non-existent file".to_string(),
+            )),
             Err(_) => Ok("Missing file properly handled".to_string()),
         }
     }
@@ -656,11 +709,8 @@ impl ComprehensiveSSTableTestSuite {
 
     async fn test_sstable_manager_integration(&self) -> Result<String> {
         // Test integration with SSTableManager
-        let manager = SSTableManager::new(
-            self.temp_dir.path(),
-            &self.config,
-            self.platform.clone(),
-        ).await?;
+        let manager =
+            SSTableManager::new(self.temp_dir.path(), &self.config, self.platform.clone()).await?;
 
         let _stats = manager.stats().await?;
         Ok("SSTableManager integration successful".to_string())
@@ -679,12 +729,29 @@ impl ComprehensiveSSTableTestSuite {
     /// Generate comprehensive test report
     async fn generate_comprehensive_report(&self) -> Result<TestSuiteReport> {
         let total_tests = self.test_results.len();
-        let passed_tests = self.test_results.iter().filter(|r| r.status == TestStatus::Pass).count();
-        let failed_tests = self.test_results.iter().filter(|r| r.status == TestStatus::Fail).count();
-        let skipped_tests = self.test_results.iter().filter(|r| r.status == TestStatus::Skip).count();
-        let warning_tests = self.test_results.iter().filter(|r| r.status == TestStatus::Warning).count();
+        let passed_tests = self
+            .test_results
+            .iter()
+            .filter(|r| r.status == TestStatus::Pass)
+            .count();
+        let failed_tests = self
+            .test_results
+            .iter()
+            .filter(|r| r.status == TestStatus::Fail)
+            .count();
+        let skipped_tests = self
+            .test_results
+            .iter()
+            .filter(|r| r.status == TestStatus::Skip)
+            .count();
+        let warning_tests = self
+            .test_results
+            .iter()
+            .filter(|r| r.status == TestStatus::Warning)
+            .count();
 
-        let total_execution_time: Duration = self.test_results.iter().map(|r| r.execution_time).sum();
+        let total_execution_time: Duration =
+            self.test_results.iter().map(|r| r.execution_time).sum();
 
         let coverage_percentage = if total_tests > 0 {
             (passed_tests as f64 / total_tests as f64) * 100.0
@@ -716,7 +783,10 @@ impl ComprehensiveSSTableTestSuite {
             "🔴 CRITICAL - Major functionality broken"
         };
 
-        format!("SSTable Core Reading Functionality: {} ({:.1}% coverage)", status, coverage_percentage)
+        format!(
+            "SSTable Core Reading Functionality: {} ({:.1}% coverage)",
+            status, coverage_percentage
+        )
     }
 }
 
@@ -740,16 +810,31 @@ impl TestSuiteReport {
         println!("========================================================");
         println!("📊 Summary:");
         println!("   Total Tests: {}", self.total_tests);
-        println!("   ✅ Passed: {} ({:.1}%)", self.passed_tests, 
-                (self.passed_tests as f64 / self.total_tests as f64) * 100.0);
-        println!("   ❌ Failed: {} ({:.1}%)", self.failed_tests,
-                (self.failed_tests as f64 / self.total_tests as f64) * 100.0);
-        println!("   ⚠️  Warnings: {} ({:.1}%)", self.warning_tests,
-                (self.warning_tests as f64 / self.total_tests as f64) * 100.0);
-        println!("   ⏭️  Skipped: {} ({:.1}%)", self.skipped_tests,
-                (self.skipped_tests as f64 / self.total_tests as f64) * 100.0);
+        println!(
+            "   ✅ Passed: {} ({:.1}%)",
+            self.passed_tests,
+            (self.passed_tests as f64 / self.total_tests as f64) * 100.0
+        );
+        println!(
+            "   ❌ Failed: {} ({:.1}%)",
+            self.failed_tests,
+            (self.failed_tests as f64 / self.total_tests as f64) * 100.0
+        );
+        println!(
+            "   ⚠️  Warnings: {} ({:.1}%)",
+            self.warning_tests,
+            (self.warning_tests as f64 / self.total_tests as f64) * 100.0
+        );
+        println!(
+            "   ⏭️  Skipped: {} ({:.1}%)",
+            self.skipped_tests,
+            (self.skipped_tests as f64 / self.total_tests as f64) * 100.0
+        );
         println!("   📈 Coverage: {:.1}%", self.coverage_percentage);
-        println!("   ⏱️  Total Time: {:.2}s", self.total_execution_time.as_secs_f64());
+        println!(
+            "   ⏱️  Total Time: {:.2}s",
+            self.total_execution_time.as_secs_f64()
+        );
         println!();
         println!("🎯 {}", self.summary);
         println!();
@@ -763,9 +848,13 @@ impl TestSuiteReport {
                 TestStatus::Warning => "⚠️",
                 TestStatus::Skip => "⏭️",
             };
-            println!("   {} {} ({:.2}s): {}", 
-                    status_icon, result.test_name, 
-                    result.execution_time.as_secs_f64(), result.message);
+            println!(
+                "   {} {} ({:.2}s): {}",
+                status_icon,
+                result.test_name,
+                result.execution_time.as_secs_f64(),
+                result.message
+            );
         }
 
         println!();
@@ -778,7 +867,10 @@ impl TestSuiteReport {
         } else {
             println!("❗ ACTION REQUIRED for Issue #17:");
             if self.coverage_percentage < 90.0 {
-                println!("   • Increase test coverage to >90% (currently {:.1}%)", self.coverage_percentage);
+                println!(
+                    "   • Increase test coverage to >90% (currently {:.1}%)",
+                    self.coverage_percentage
+                );
             }
             if self.failed_tests > 0 {
                 println!("   • Fix {} failing test(s)", self.failed_tests);

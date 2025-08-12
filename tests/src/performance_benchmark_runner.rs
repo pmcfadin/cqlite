@@ -300,10 +300,7 @@ impl PerformanceBenchmarkRunner {
                 .map_err(|e| {
                     cqlite_core::error::Error::Io(std::io::Error::new(
                         std::io::ErrorKind::Other,
-                        format!(
-                            "Failed to create output directory: {}",
-                            e
-                        ),
+                        format!("Failed to create output directory: {}", e),
                     ))
                 })?;
         }
@@ -800,7 +797,7 @@ impl PerformanceBenchmarkRunner {
         fs::write(report_path, report).await.map_err(|e| {
             cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to write report: {}", e)
+                format!("Failed to write report: {}", e),
             ))
         })?;
 
@@ -818,14 +815,14 @@ impl PerformanceBenchmarkRunner {
         let json_content = serde_json::to_string_pretty(results).map_err(|e| {
             cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to serialize results: {}", e)
+                format!("Failed to serialize results: {}", e),
             ))
         })?;
 
         fs::write(json_path, json_content).await.map_err(|e| {
             cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to write JSON: {}", e)
+                format!("Failed to write JSON: {}", e),
             ))
         })?;
 

@@ -3,11 +3,11 @@
 //! This module tests extreme boundary conditions, malformed data handling,
 //! and edge cases that could break Cassandra compatibility.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
-use cqlite_core::{error::Result, Value};
+use cqlite_core::{Value, error::Result};
 use std::collections::HashMap;
 
 /// Comprehensive edge case test suite for data types
@@ -519,7 +519,8 @@ impl EdgeCaseDataTypeTests {
             large_map.insert(format!("key_{:06}", i), Value::Integer(i));
         }
         // Convert HashMap to Vec<(Value, Value)>
-        let map_vec: Vec<(Value, Value)> = large_map.into_iter()
+        let map_vec: Vec<(Value, Value)> = large_map
+            .into_iter()
             .map(|(k, v)| (Value::Text(k), v))
             .collect();
         let map_value = Value::Map(map_vec);

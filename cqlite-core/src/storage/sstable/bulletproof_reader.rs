@@ -4,16 +4,16 @@
 //! Cassandra version (2.x, 3.x, 4.x, 5.x) with automatic format detection
 //! and proper compression handling.
 
-use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::BufReader;
+use std::path::{Path, PathBuf};
 
-use crate::{Error, Result};
 use super::{
-    format_detector::{SSTableFormat, SSTableInfo, SSTableComponent},
-    compression_info::CompressionInfo,
     chunk_decompressor::{ChunkDecompressor, create_decompressor_from_file},
+    compression_info::CompressionInfo,
+    format_detector::{SSTableComponent, SSTableFormat, SSTableInfo},
 };
+use crate::{Error, Result};
 
 /// Bulletproof SSTable reader with automatic format detection
 pub struct BulletproofReader {
@@ -29,223 +29,245 @@ pub struct BulletproofReader {
 
 impl BulletproofReader {
     /// Create a new bulletproof reader from any SSTable file path
-    /// 
+    ///
     /// This will automatically detect the format version and set up
     /// proper compression handling if needed.
     pub fn open<P: AsRef<Path>>(sstable_path: P) -> Result<Self> {
         let path = sstable_path.as_ref();
         let info = SSTableInfo::from_path(path)?;
-        
-        let base_dir = path.parent()
+
+        let base_dir = path
+            .parent()
             .ok_or_else(|| Error::InvalidPath("No parent directory".to_string()))?
             .to_path_buf();
-        
+
         println!("🚀 Opening SSTable with bulletproof reader:");
         println!("   Format: {:?}", info.format);
         println!("   Generation: {}", info.generation);
         println!("   Size: {}", info.size);
         println!("   Component: {:?}", info.component);
         println!("   Base: {}", info.base_name);
-        
+
         let mut reader = Self {
             info,
             base_dir,
             decompressor: None,
             data_reader: None,
         };
-        
+
         reader.initialize()?;
         Ok(reader)
     }
-    
+
     /// Initialize the reader by setting up compression and opening files
     fn initialize(&mut self) -> Result<()> {
         // Set up compression if the format supports it
         if self.info.format.supports_compression() {
             if let Err(e) = self.setup_compression() {
-                println!("⚠️  Compression setup failed: {}, trying without compression", e);
+                println!(
+                    "⚠️  Compression setup failed: {}, trying without compression",
+                    e
+                );
             }
         }
-        
+
         // Open the Data.db file
         self.open_data_file()?;
-        
+
         Ok(())
     }
-    
+
     /// Set up compression by reading CompressionInfo.db if it exists
     fn setup_compression(&mut self) -> Result<()> {
-        let compression_info_path = self.info.companion_path(
-            SSTableComponent::CompressionInfo, 
-            &self.base_dir
-        );
-        
+        let compression_info_path = self
+            .info
+            .companion_path(SSTableComponent::CompressionInfo, &self.base_dir);
+
         if compression_info_path.exists() {
             println!("📦 Found CompressionInfo.db, setting up decompression");
-            
+
             let decompressor = create_decompressor_from_file(&compression_info_path)?;
             self.decompressor = Some(decompressor);
-            
+
             println!("✅ Compression setup complete");
         } else {
             println!("📄 No CompressionInfo.db found, assuming uncompressed data");
         }
-        
+
         Ok(())
     }
-    
+
     /// Open the Data.db file for reading
     fn open_data_file(&mut self) -> Result<()> {
-        let data_path = self.info.companion_path(
-            SSTableComponent::Data, 
-            &self.base_dir
-        );
-        
+        let data_path = self
+            .info
+            .companion_path(SSTableComponent::Data, &self.base_dir);
+
         if !data_path.exists() {
-            return Err(Error::InvalidPath(format!("Data.db file not found: {:?}", data_path)));
+            return Err(Error::InvalidPath(format!(
+                "Data.db file not found: {:?}",
+                data_path
+            )));
         }
-        
-        let file = File::open(&data_path)
-            .map_err(|e| Error::Io(e))?;
+
+        let file = File::open(&data_path).map_err(|e| Error::Io(e))?;
         let reader = BufReader::new(file);
-        
+
         self.data_reader = Some(reader);
-        
+
         println!("📂 Data.db file opened: {:?}", data_path);
         Ok(())
     }
-    
+
     /// Read raw data from the SSTable at specified offset and length
-    /// 
+    ///
     /// This automatically handles compression if present
     pub fn read_raw_data(&mut self, offset: u64, length: usize) -> Result<Vec<u8>> {
-        let reader = self.data_reader.as_mut()
+        let reader = self
+            .data_reader
+            .as_mut()
             .ok_or_else(|| Error::InvalidState("Data reader not initialized".to_string()))?;
-        
+
         if let Some(decompressor) = &mut self.decompressor {
             // Use chunk-based decompression
             decompressor.read_data(reader, offset, length)
         } else {
             // Read directly from uncompressed file
-            use std::io::{Seek, SeekFrom, Read};
-            
-            reader.seek(SeekFrom::Start(offset))
+            use std::io::{Read, Seek, SeekFrom};
+
+            reader
+                .seek(SeekFrom::Start(offset))
                 .map_err(|e| Error::Io(e))?;
-            
+
             let mut buffer = vec![0u8; length];
-            reader.read_exact(&mut buffer)
-                .map_err(|e| Error::Io(e))?;
-            
+            reader.read_exact(&mut buffer).map_err(|e| Error::Io(e))?;
+
             Ok(buffer)
         }
     }
-    
+
     /// Read the entire SSTable data (for debugging)
     pub fn read_all_data(&mut self) -> Result<Vec<u8>> {
         if let Some(decompressor) = &mut self.decompressor {
-            let reader = self.data_reader.as_mut()
+            let reader = self
+                .data_reader
+                .as_mut()
                 .ok_or_else(|| Error::InvalidState("Data reader not initialized".to_string()))?;
-            
+
             decompressor.read_all_data(reader)
         } else {
-            let reader = self.data_reader.as_mut()
+            let reader = self
+                .data_reader
+                .as_mut()
                 .ok_or_else(|| Error::InvalidState("Data reader not initialized".to_string()))?;
-            
-            use std::io::{Seek, SeekFrom, Read};
-            
+
+            use std::io::{Read, Seek, SeekFrom};
+
             // Get file size
-            let current_pos = reader.stream_position()
+            let current_pos = reader.stream_position().map_err(|e| Error::Io(e))?;
+            let file_size = reader.seek(SeekFrom::End(0)).map_err(|e| Error::Io(e))?;
+            reader
+                .seek(SeekFrom::Start(current_pos))
                 .map_err(|e| Error::Io(e))?;
-            let file_size = reader.seek(SeekFrom::End(0))
-                .map_err(|e| Error::Io(e))?;
-            reader.seek(SeekFrom::Start(current_pos))
-                .map_err(|e| Error::Io(e))?;
-            
+
             // Read entire file
-            reader.seek(SeekFrom::Start(0))
-                .map_err(|e| Error::Io(e))?;
-            
+            reader.seek(SeekFrom::Start(0)).map_err(|e| Error::Io(e))?;
+
             let mut buffer = Vec::with_capacity(file_size as usize);
-            reader.read_to_end(&mut buffer)
-                .map_err(|e| Error::Io(e))?;
-            
+            reader.read_to_end(&mut buffer).map_err(|e| Error::Io(e))?;
+
             Ok(buffer)
         }
     }
-    
+
     /// Parse SSTable data using format-specific parser
-    /// 
+    ///
     /// This is where we'll implement the actual SSTable parsing
     /// based on the detected format version
     pub fn parse_sstable_data(&mut self) -> Result<Vec<SSTableEntry>> {
         let data = self.read_all_data()?;
-        
-        println!("🔍 Parsing SSTable data ({} bytes) with format {:?}", 
-                 data.len(), self.info.format);
-        
+
+        println!(
+            "🔍 Parsing SSTable data ({} bytes) with format {:?}",
+            data.len(),
+            self.info.format
+        );
+
         match &self.info.format {
-            SSTableFormat::V4x(_) | SSTableFormat::V5x(_) => {
-                self.parse_modern_format(&data)
-            }
-            SSTableFormat::V3x(_) => {
-                self.parse_v3_format(&data)
-            }
-            SSTableFormat::V2x(_) => {
-                self.parse_v2_format(&data)
-            }
-            SSTableFormat::Unknown(version) => {
-                Err(Error::UnsupportedFormat(format!("Unknown SSTable version: {}", version)))
-            }
+            SSTableFormat::V4x(_) | SSTableFormat::V5x(_) => self.parse_modern_format(&data),
+            SSTableFormat::V3x(_) => self.parse_v3_format(&data),
+            SSTableFormat::V2x(_) => self.parse_v2_format(&data),
+            SSTableFormat::Unknown(version) => Err(Error::UnsupportedFormat(format!(
+                "Unknown SSTable version: {}",
+                version
+            ))),
         }
     }
-    
+
     /// Parse modern SSTable format (4.x, 5.x) with proper 'oa' format parsing
     fn parse_modern_format(&self, data: &[u8]) -> Result<Vec<SSTableEntry>> {
         println!("🆕 Parsing modern SSTable format with proper 'oa' format parsing");
-        
+
         if data.len() < 8 {
-            return Err(Error::InvalidFormat("Data too short for 'oa' format header".to_string()));
+            return Err(Error::InvalidFormat(
+                "Data too short for 'oa' format header".to_string(),
+            ));
         }
-        
+
         // Parse the 'oa' format header
         let header = self.parse_oa_header(data)?;
-        println!("📋 Parsed 'oa' header: version={}, partition_count={}", header.format_version, header.partition_count);
-        
+        println!(
+            "📋 Parsed 'oa' header: version={}, partition_count={}",
+            header.format_version, header.partition_count
+        );
+
         // Parse data blocks following the header
         let entries = self.parse_data_blocks(data, &header)?;
-        
-        println!("✅ Parsed {} entries from {} bytes using structured parsing", entries.len(), data.len());
+
+        println!(
+            "✅ Parsed {} entries from {} bytes using structured parsing",
+            entries.len(),
+            data.len()
+        );
         Ok(entries)
     }
-    
+
     /// Parse Cassandra 'oa' format header
     fn parse_oa_header(&self, data: &[u8]) -> Result<OaFormatHeader> {
         if data.len() < 8 {
-            return Err(Error::InvalidFormat("Insufficient data for 'oa' header".to_string()));
+            return Err(Error::InvalidFormat(
+                "Insufficient data for 'oa' header".to_string(),
+            ));
         }
-        
+
         // Read magic number (first 4 bytes) - should be 0x6F610000 for 'oa' format
         let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         if magic != 0x6F610000 {
-            println!("⚠️  Magic number mismatch: expected 0x6F610000, got 0x{:08x}", magic);
+            println!(
+                "⚠️  Magic number mismatch: expected 0x6F610000, got 0x{:08x}",
+                magic
+            );
         }
-        
+
         // Read format version (next 4 bytes)
         let format_version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         println!("📄 'oa' format version: {}", format_version);
-        
+
         let mut offset = 8;
-        
+
         // Read partition count using VInt encoding
         let (partition_count, vint_bytes) = self.read_vint(&data[offset..])?;
         offset += vint_bytes;
-        
+
         // Read additional metadata using VInt encoding
         let (metadata_size, vint_bytes) = self.read_vint(&data[offset..])?;
         offset += vint_bytes;
-        
-        println!("📊 Partition count: {}, metadata size: {}", partition_count, metadata_size);
-        
+
+        println!(
+            "📊 Partition count: {}, metadata size: {}",
+            partition_count, metadata_size
+        );
+
         Ok(OaFormatHeader {
             magic_number: magic,
             format_version,
@@ -254,25 +276,31 @@ impl BulletproofReader {
             header_size: offset,
         })
     }
-    
+
     /// Parse data blocks following the 'oa' header
     fn parse_data_blocks(&self, data: &[u8], header: &OaFormatHeader) -> Result<Vec<SSTableEntry>> {
         let mut entries = Vec::new();
         let mut offset = header.header_size;
-        
-        println!("🔧 Parsing {} partitions starting at offset {}", header.partition_count, offset);
-        
+
+        println!(
+            "🔧 Parsing {} partitions starting at offset {}",
+            header.partition_count, offset
+        );
+
         for partition_idx in 0..header.partition_count {
             if offset >= data.len() {
-                println!("⚠️  Reached end of data while parsing partition {}", partition_idx);
+                println!(
+                    "⚠️  Reached end of data while parsing partition {}",
+                    partition_idx
+                );
                 break;
             }
-            
+
             match self.parse_partition_block(&data[offset..], partition_idx) {
                 Ok((entry, bytes_consumed)) => {
                     entries.push(entry);
                     offset += bytes_consumed;
-                    
+
                     if offset >= data.len() {
                         break;
                     }
@@ -285,81 +313,114 @@ impl BulletproofReader {
                 }
             }
         }
-        
+
         Ok(entries)
     }
-    
+
     /// Parse a single partition block
-    fn parse_partition_block(&self, data: &[u8], partition_idx: u64) -> Result<(SSTableEntry, usize)> {
+    fn parse_partition_block(
+        &self,
+        data: &[u8],
+        partition_idx: u64,
+    ) -> Result<(SSTableEntry, usize)> {
         if data.len() < 4 {
-            return Err(Error::InvalidFormat("Insufficient data for partition block".to_string()));
+            return Err(Error::InvalidFormat(
+                "Insufficient data for partition block".to_string(),
+            ));
         }
-        
+
         let mut offset = 0;
-        
+
         // Read partition key length using VInt
         let (key_length, vint_bytes) = self.read_vint(&data[offset..])?;
         offset += vint_bytes;
-        
+
         if offset + key_length as usize > data.len() {
-            return Err(Error::InvalidFormat("Partition key extends beyond data".to_string()));
+            return Err(Error::InvalidFormat(
+                "Partition key extends beyond data".to_string(),
+            ));
         }
-        
+
         // Read partition key
         let key_data = &data[offset..offset + key_length as usize];
         offset += key_length as usize;
-        
+
         // Read row count using VInt
         let (row_count, vint_bytes) = self.read_vint(&data[offset..])?;
         offset += vint_bytes;
-        
-        println!("🔑 Partition {}: key_length={}, row_count={}", partition_idx, key_length, row_count);
-        
+
+        println!(
+            "🔑 Partition {}: key_length={}, row_count={}",
+            partition_idx, key_length, row_count
+        );
+
         // For now, create a simple entry with the partition key
         let key_str = if key_data.len() == 16 {
             // Format as UUID if it's 16 bytes
             format!(
                 "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                key_data[0], key_data[1], key_data[2], key_data[3],
-                key_data[4], key_data[5], key_data[6], key_data[7],
-                key_data[8], key_data[9], key_data[10], key_data[11],
-                key_data[12], key_data[13], key_data[14], key_data[15]
+                key_data[0],
+                key_data[1],
+                key_data[2],
+                key_data[3],
+                key_data[4],
+                key_data[5],
+                key_data[6],
+                key_data[7],
+                key_data[8],
+                key_data[9],
+                key_data[10],
+                key_data[11],
+                key_data[12],
+                key_data[13],
+                key_data[14],
+                key_data[15]
             )
         } else {
             // Format as hex string for other lengths
-            key_data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("")
+            key_data
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join("")
         };
-        
+
         // Skip row data for now (would need more complex parsing)
         // For each row, we'd need to parse clustering keys, column data, etc.
-        
+
         let entry = SSTableEntry {
             key: crate::RowKey::from(key_data.to_vec()),
             values: vec![crate::Value::Text(key_str)],
-            timestamp: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64),
+            timestamp: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64,
+            ),
             generation: Some(self.info.generation),
             format_info: format!("oa_format:partition={}", partition_idx),
         };
-        
+
         Ok((entry, offset))
     }
-    
+
     /// Read Variable Length Integer (VInt) from data
     fn read_vint(&self, data: &[u8]) -> Result<(u64, usize)> {
         if data.is_empty() {
             return Err(Error::InvalidFormat("Empty data for VInt".to_string()));
         }
-        
+
         let mut result = 0u64;
         let mut bytes_read = 0;
-        
+
         for (i, &byte) in data.iter().enumerate() {
-            if i >= 10 { // VInt should not exceed 10 bytes for u64
+            if i >= 10 {
+                // VInt should not exceed 10 bytes for u64
                 return Err(Error::InvalidFormat("VInt too long".to_string()));
             }
-            
+
             bytes_read += 1;
-            
+
             if byte & 0x80 == 0 {
                 // Most significant bit is 0, this is the last byte
                 result = (result << 7) | (byte as u64);
@@ -369,24 +430,23 @@ impl BulletproofReader {
                 result = (result << 7) | ((byte & 0x7F) as u64);
             }
         }
-        
+
         Ok((result, bytes_read))
     }
-    
-    
+
     /// Read legacy varint format for backwards compatibility
     fn read_varint(&self, data: &[u8]) -> Result<(u64, usize)> {
         if data.is_empty() {
             return Err(Error::InvalidFormat("Empty data for varint".to_string()));
         }
-        
+
         let mut result = 0u64;
         let mut shift = 0;
         let mut bytes_read = 0;
-        
+
         for &byte in data {
             bytes_read += 1;
-            
+
             if byte & 0x80 == 0 {
                 // Most significant bit is 0, this is the last byte
                 result |= (byte as u64) << shift;
@@ -395,13 +455,13 @@ impl BulletproofReader {
                 // Most significant bit is 1, more bytes follow
                 result |= ((byte & 0x7F) as u64) << shift;
                 shift += 7;
-                
+
                 if shift >= 64 {
                     return Err(Error::InvalidFormat("Varint overflow".to_string()));
                 }
             }
         }
-        
+
         Ok((result, bytes_read))
     }
     /// Parse V3.x format
@@ -410,26 +470,24 @@ impl BulletproofReader {
         // TODO: Implement V3.x specific parsing
         Ok(Vec::new())
     }
-    
+
     /// Parse V2.x format
     fn parse_v2_format(&self, _data: &[u8]) -> Result<Vec<SSTableEntry>> {
         println!("📜 Parsing V2.x SSTable format");
         // TODO: Implement V2.x specific parsing
         Ok(Vec::new())
     }
-    
-    
-    
+
     /// Get information about the SSTable
     pub fn info(&self) -> &SSTableInfo {
         &self.info
     }
-    
+
     /// Get compression information if available
     pub fn compression_info(&self) -> Option<&CompressionInfo> {
         self.decompressor.as_ref().map(|d| d.compression_info())
     }
-    
+
     /// Get cache statistics if compression is enabled
     pub fn cache_stats(&self) -> Option<(usize, usize)> {
         self.decompressor.as_ref().map(|d| d.cache_stats())
@@ -490,12 +548,14 @@ impl BulletproofReader {
         // Read the data file directly
         use std::fs::File;
         use std::io::Read;
-        
-        let data_file_path = self.base_dir.join(format!("{}-Data.db", self.info.base_name));
+
+        let data_file_path = self
+            .base_dir
+            .join(format!("{}-Data.db", self.info.base_name));
         let mut file = File::open(&data_file_path)?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
-        
+
         // Parse using the existing logic but with dummy values for new fields
         self.parse_modern_format_readonly(&data)
     }
@@ -503,14 +563,14 @@ impl BulletproofReader {
     /// Parse modern format without mutable access using proper 'oa' format
     fn parse_modern_format_readonly(&self, data: &[u8]) -> Result<Vec<SSTableEntry>> {
         if data.len() < 8 {
-            return Err(Error::InvalidFormat("Data too short for 'oa' format".to_string()));
+            return Err(Error::InvalidFormat(
+                "Data too short for 'oa' format".to_string(),
+            ));
         }
-        
+
         // Parse using the proper 'oa' format
         match self.parse_oa_header(data) {
-            Ok(header) => {
-                self.parse_data_blocks(data, &header)
-            }
+            Ok(header) => self.parse_data_blocks(data, &header),
             Err(_) => {
                 // Fallback to basic parsing if header parsing fails
                 println!("⚠️  'oa' header parsing failed, using fallback");
@@ -572,50 +632,58 @@ impl SSTableEntryStream {
 /// Utility function to test reading an SSTable directory
 pub fn test_read_sstable_directory<P: AsRef<Path>>(dir_path: P) -> Result<()> {
     let dir = dir_path.as_ref();
-    
+
     println!("🧪 Testing bulletproof SSTable reading in: {:?}", dir);
-    
+
     // Find Data.db files
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| Error::Io(e))?;
-    
+    let entries = std::fs::read_dir(dir).map_err(|e| Error::Io(e))?;
+
     for entry in entries {
         let entry = entry.map_err(|e| Error::Io(e))?;
         let path = entry.path();
-        
-        if path.file_name()
+
+        if path
+            .file_name()
             .and_then(|s| s.to_str())
             .map(|s| s.ends_with("-Data.db"))
-            .unwrap_or(false) 
+            .unwrap_or(false)
         {
             println!("\n📂 Testing SSTable: {:?}", path);
-            
+
             match BulletproofReader::open(path) {
                 Ok(mut reader) => {
                     println!("✅ Successfully opened SSTable");
-                    
+
                     if let Some(compression_info) = reader.compression_info() {
                         println!("📦 Compression: {}", compression_info.algorithm);
                         println!("📏 Chunk size: {} bytes", compression_info.chunk_length);
                     }
-                    
+
                     // Try to read first 1KB of data
                     match reader.read_raw_data(0, 1024) {
                         Ok(data) => {
                             println!("📄 Read {} bytes successfully", data.len());
-                            println!("🔍 First 32 bytes: {:02x?}", &data[..std::cmp::min(32, data.len())]);
-                            
+                            println!(
+                                "🔍 First 32 bytes: {:02x?}",
+                                &data[..std::cmp::min(32, data.len())]
+                            );
+
                             // Try to parse the data
                             match reader.parse_sstable_data() {
                                 Ok(entries) => {
                                     println!("✅ Parsed {} entries", entries.len());
                                     for (i, entry) in entries.iter().take(3).enumerate() {
-                                        println!("   Entry {}: key='{:?}' ({})", 
-                                                 i, entry.key, entry.format_info);
+                                        println!(
+                                            "   Entry {}: key='{:?}' ({})",
+                                            i, entry.key, entry.format_info
+                                        );
                                     }
                                 }
                                 Err(e) => {
-                                    println!("⚠️  Parsing failed (this is expected for now): {}", e);
+                                    println!(
+                                        "⚠️  Parsing failed (this is expected for now): {}",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -630,7 +698,7 @@ pub fn test_read_sstable_directory<P: AsRef<Path>>(dir_path: P) -> Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -641,24 +709,25 @@ mod tests {
     #[test]
     fn test_vint_reading() {
         let reader = BulletproofReader {
-            info: SSTableInfo::from_path(&std::path::PathBuf::from("test-nb-1-big-Data.db")).unwrap(),
+            info: SSTableInfo::from_path(&std::path::PathBuf::from("test-nb-1-big-Data.db"))
+                .unwrap(),
             base_dir: std::path::PathBuf::new(),
             decompressor: None,
             data_reader: None,
         };
-        
+
         // Test simple VInt (single byte)
         let data = [0x05]; // Value 5
         let (value, bytes_read) = reader.read_vint(&data).unwrap();
         assert_eq!(value, 5);
         assert_eq!(bytes_read, 1);
-        
+
         // Test multi-byte VInt
         let data = [0x81, 0x00]; // Value 128 in VInt encoding
         let (value, bytes_read) = reader.read_vint(&data).unwrap();
         assert_eq!(value, 128);
         assert_eq!(bytes_read, 2);
-        
+
         // Test legacy varint for backwards compatibility
         let data = [0x80, 0x01]; // Value 128 in legacy varint
         let (value, bytes_read) = reader.read_varint(&data).unwrap();

@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Mutex;
 
 use crate::error::Error;
-use crate::{platform::Platform, types::TableId, Config, Result, RowKey, Value};
+use crate::{Config, Result, RowKey, Value, platform::Platform, types::TableId};
 
 /// WAL entry types
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

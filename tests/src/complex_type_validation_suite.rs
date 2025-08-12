@@ -9,7 +9,7 @@
 //!
 //! All tests use REAL Cassandra SSTable data for 100% compatibility validation.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::types::{DataType, Value};
@@ -160,7 +160,7 @@ impl ComplexTypeValidationSuite {
         // 1. Collection Type Validation
         self.validate_collection_types().await?;
 
-        // 2. User Defined Type Validation  
+        // 2. User Defined Type Validation
         self.validate_udt_types().await?;
 
         // 3. Tuple Type Validation
@@ -187,7 +187,10 @@ impl ComplexTypeValidationSuite {
         self.finalize_results(total_duration);
 
         println!("✅ Complex Type Validation Complete!");
-        println!("⏱️  Total execution time: {:.2}s", total_duration.as_secs_f64());
+        println!(
+            "⏱️  Total execution time: {:.2}s",
+            total_duration.as_secs_f64()
+        );
         self.print_summary();
 
         Ok(self.results.clone())
@@ -196,7 +199,7 @@ impl ComplexTypeValidationSuite {
     /// Validate collection types (List, Set, Map) against real Cassandra data
     async fn validate_collection_types(&mut self) -> Result<()> {
         println!("📋 Validating Collection Types (List, Set, Map)");
-        
+
         let mut category_result = CategoryResult {
             category: "Collections".to_string(),
             tests_passed: 0,
@@ -207,19 +210,21 @@ impl ComplexTypeValidationSuite {
 
         // Test List<T> types
         self.test_list_types(&mut category_result).await?;
-        
+
         // Test Set<T> types
         self.test_set_types(&mut category_result).await?;
-        
+
         // Test Map<K,V> types
         self.test_map_types(&mut category_result).await?;
 
         // Calculate coverage
         let total_collection_tests = 45; // Comprehensive collection test count
-        category_result.coverage_percentage = 
+        category_result.coverage_percentage =
             (category_result.tests_passed as f64 / total_collection_tests as f64) * 100.0;
 
-        self.results.category_results.insert("Collections".to_string(), category_result);
+        self.results
+            .category_results
+            .insert("Collections".to_string(), category_result);
         Ok(())
     }
 
@@ -346,7 +351,7 @@ impl ComplexTypeValidationSuite {
     /// Validate User Defined Types with real schema data
     async fn validate_udt_types(&mut self) -> Result<()> {
         println!("🏗️  Validating User Defined Types (UDT)");
-        
+
         let mut category_result = CategoryResult {
             category: "UDT".to_string(),
             tests_passed: 0,
@@ -357,25 +362,28 @@ impl ComplexTypeValidationSuite {
 
         // Test basic UDT structures
         self.test_basic_udt_structures(&mut category_result).await?;
-        
+
         // Test nested UDT structures
-        self.test_nested_udt_structures(&mut category_result).await?;
-        
+        self.test_nested_udt_structures(&mut category_result)
+            .await?;
+
         // Test UDT with collections
         self.test_udt_with_collections(&mut category_result).await?;
 
         let total_udt_tests = 20;
-        category_result.coverage_percentage = 
+        category_result.coverage_percentage =
             (category_result.tests_passed as f64 / total_udt_tests as f64) * 100.0;
 
-        self.results.category_results.insert("UDT".to_string(), category_result);
+        self.results
+            .category_results
+            .insert("UDT".to_string(), category_result);
         Ok(())
     }
 
     /// Validate Tuple types with heterogeneous data
     async fn validate_tuple_types(&mut self) -> Result<()> {
         println!("📦 Validating Tuple Types");
-        
+
         let mut category_result = CategoryResult {
             category: "Tuples".to_string(),
             tests_passed: 0,
@@ -386,17 +394,26 @@ impl ComplexTypeValidationSuite {
 
         // Test various tuple combinations
         let tuple_test_cases = vec![
-            ("tuple<text,int>", vec![Value::Text("hello".to_string()), Value::Integer(42)]),
-            ("tuple<uuid,text,boolean>", vec![
-                Value::Uuid([1u8; 16]),
-                Value::Text("test".to_string()),
-                Value::Boolean(true)
-            ]),
-            ("tuple<bigint,float,text>", vec![
-                Value::BigInt(9223372036854775807),
-                Value::Float(3.14159),
-                Value::Text("pi".to_string())
-            ]),
+            (
+                "tuple<text,int>",
+                vec![Value::Text("hello".to_string()), Value::Integer(42)],
+            ),
+            (
+                "tuple<uuid,text,boolean>",
+                vec![
+                    Value::Uuid([1u8; 16]),
+                    Value::Text("test".to_string()),
+                    Value::Boolean(true),
+                ],
+            ),
+            (
+                "tuple<bigint,float,text>",
+                vec![
+                    Value::BigInt(9223372036854775807),
+                    Value::Float(3.14159),
+                    Value::Text("pi".to_string()),
+                ],
+            ),
         ];
 
         for (type_def, test_data) in tuple_test_cases {
@@ -423,17 +440,19 @@ impl ComplexTypeValidationSuite {
         }
 
         let total_tuple_tests = 15;
-        category_result.coverage_percentage = 
+        category_result.coverage_percentage =
             (category_result.tests_passed as f64 / total_tuple_tests as f64) * 100.0;
 
-        self.results.category_results.insert("Tuples".to_string(), category_result);
+        self.results
+            .category_results
+            .insert("Tuples".to_string(), category_result);
         Ok(())
     }
 
     /// Validate Frozen types (immutable collections)
     async fn validate_frozen_types(&mut self) -> Result<()> {
         println!("🧊 Validating Frozen Types");
-        
+
         let mut category_result = CategoryResult {
             category: "Frozen".to_string(),
             tests_passed: 0,
@@ -474,17 +493,19 @@ impl ComplexTypeValidationSuite {
         }
 
         let total_frozen_tests = 12;
-        category_result.coverage_percentage = 
+        category_result.coverage_percentage =
             (category_result.tests_passed as f64 / total_frozen_tests as f64) * 100.0;
 
-        self.results.category_results.insert("Frozen".to_string(), category_result);
+        self.results
+            .category_results
+            .insert("Frozen".to_string(), category_result);
         Ok(())
     }
 
     /// Validate complex nested structures
     async fn validate_nested_complex_types(&mut self) -> Result<()> {
         println!("🎭 Validating Nested Complex Types");
-        
+
         let mut category_result = CategoryResult {
             category: "NestedComplex".to_string(),
             tests_passed: 0,
@@ -526,17 +547,19 @@ impl ComplexTypeValidationSuite {
         }
 
         let total_nested_tests = 10;
-        category_result.coverage_percentage = 
+        category_result.coverage_percentage =
             (category_result.tests_passed as f64 / total_nested_tests as f64) * 100.0;
 
-        self.results.category_results.insert("NestedComplex".to_string(), category_result);
+        self.results
+            .category_results
+            .insert("NestedComplex".to_string(), category_result);
         Ok(())
     }
 
     /// Validate edge cases and boundary conditions
     async fn validate_edge_cases(&mut self) -> Result<()> {
         println!("⚠️  Validating Edge Cases");
-        
+
         let mut category_result = CategoryResult {
             category: "EdgeCases".to_string(),
             tests_passed: 0,
@@ -552,17 +575,19 @@ impl ComplexTypeValidationSuite {
         self.test_malformed_data(&mut category_result).await?;
 
         let total_edge_tests = 25;
-        category_result.coverage_percentage = 
+        category_result.coverage_percentage =
             (category_result.tests_passed as f64 / total_edge_tests as f64) * 100.0;
 
-        self.results.category_results.insert("EdgeCases".to_string(), category_result);
+        self.results
+            .category_results
+            .insert("EdgeCases".to_string(), category_result);
         Ok(())
     }
 
     /// Run performance benchmarks for complex types
     async fn run_performance_benchmarks(&mut self) -> Result<()> {
         println!("📊 Running Performance Benchmarks");
-        
+
         // Performance tests focus on real-world usage patterns
         let benchmark_cases = vec![
             "Large Lists (10k elements)",
@@ -574,28 +599,35 @@ impl ComplexTypeValidationSuite {
 
         for case in benchmark_cases {
             let start_time = Instant::now();
-            
+
             // Simulate performance testing
             // In real implementation, this would test actual parsing/serialization
             let iterations = self.config.performance_iterations;
             for _ in 0..iterations {
                 // Perform actual operations here
             }
-            
+
             let total_time = start_time.elapsed();
             let avg_time_per_op = total_time / iterations as u32;
-            
-            self.results.performance_metrics.insert(case.to_string(), PerformanceMetric {
-                type_name: case.to_string(),
-                avg_parse_time_ns: avg_time_per_op.as_nanos() as u64,
-                avg_serialize_time_ns: avg_time_per_op.as_nanos() as u64,
-                min_time_ns: avg_time_per_op.as_nanos() as u64,
-                max_time_ns: avg_time_per_op.as_nanos() as u64,
-                throughput_ops_per_sec: iterations as f64 / total_time.as_secs_f64(),
-                memory_usage_bytes: 0, // Would measure actual memory usage
-            });
-            
-            println!("  📈 {}: {:.2} ops/sec", case, iterations as f64 / total_time.as_secs_f64());
+
+            self.results.performance_metrics.insert(
+                case.to_string(),
+                PerformanceMetric {
+                    type_name: case.to_string(),
+                    avg_parse_time_ns: avg_time_per_op.as_nanos() as u64,
+                    avg_serialize_time_ns: avg_time_per_op.as_nanos() as u64,
+                    min_time_ns: avg_time_per_op.as_nanos() as u64,
+                    max_time_ns: avg_time_per_op.as_nanos() as u64,
+                    throughput_ops_per_sec: iterations as f64 / total_time.as_secs_f64(),
+                    memory_usage_bytes: 0, // Would measure actual memory usage
+                },
+            );
+
+            println!(
+                "  📈 {}: {:.2} ops/sec",
+                case,
+                iterations as f64 / total_time.as_secs_f64()
+            );
         }
 
         Ok(())
@@ -604,13 +636,13 @@ impl ComplexTypeValidationSuite {
     /// Validate against real Cassandra SSTable data
     async fn validate_real_cassandra_data(&mut self) -> Result<()> {
         println!("💾 Validating Against Real Cassandra Data");
-        
+
         // This would validate against actual SSTable files
         // For now, we'll simulate the validation
-        
+
         let data_files = vec![
             "user_profiles.sstable",
-            "product_catalog.sstable", 
+            "product_catalog.sstable",
             "analytics_events.sstable",
         ];
 
@@ -627,18 +659,22 @@ impl ComplexTypeValidationSuite {
         }
 
         // Update compatibility summary
-        self.results.compatibility_summary.format_compatibility = 
+        self.results.compatibility_summary.format_compatibility =
             (passed as f64 / total as f64) * 100.0;
 
         Ok(())
     }
 
     // Implementation helper methods
-    
-    async fn test_list_parsing<T: AsRef<str>>(&mut self, type_def: &str, test_data: &[T]) -> Result<()> {
+
+    async fn test_list_parsing<T: AsRef<str>>(
+        &mut self,
+        type_def: &str,
+        test_data: &[T],
+    ) -> Result<()> {
         use cqlite_core::parser::complex_types::{ComplexTypeParser, TypeParsingContext};
-        use cqlite_core::types::Value;
         use cqlite_core::schema::CqlType;
+        use cqlite_core::types::Value;
         use std::collections::HashMap;
 
         // Create parser with context
@@ -652,16 +688,23 @@ impl ComplexTypeValidationSuite {
         };
 
         // Parse the list type definition
-        let parsed_type = parser.parse_type_with_context(type_def, &context)
-            .map_err(|e| Error::Schema(format!("Failed to parse list type '{}': {}", type_def, e)))?;
+        let parsed_type = parser
+            .parse_type_with_context(type_def, &context)
+            .map_err(|e| {
+                Error::Schema(format!("Failed to parse list type '{}': {}", type_def, e))
+            })?;
 
         // Verify it's a list type
         if !matches!(parsed_type.cql_type, CqlType::List(_)) {
-            return Err(Error::Schema(format!("Expected list type, got: {:?}", parsed_type.cql_type)));
+            return Err(Error::Schema(format!(
+                "Expected list type, got: {:?}",
+                parsed_type.cql_type
+            )));
         }
 
         // Test serialization and deserialization with real data
-        let list_values: Vec<Value> = test_data.iter()
+        let list_values: Vec<Value> = test_data
+            .iter()
             .map(|s| self.parse_string_to_value(s.as_ref(), &parsed_type.cql_type))
             .collect::<Result<Vec<_>>>()?;
 
@@ -669,28 +712,33 @@ impl ComplexTypeValidationSuite {
 
         // Test binary serialization (simulate Cassandra binary format)
         let serialized = self.serialize_value_to_binary(&list_value, &parsed_type.cql_type)?;
-        
+
         // Test binary deserialization
         let deserialized = self.deserialize_binary_to_value(&serialized, &parsed_type.cql_type)?;
 
         // Verify round-trip integrity
         if !self.values_equal(&list_value, &deserialized) {
             return Err(Error::Schema(format!(
-                "List round-trip failed. Original: {:?}, Deserialized: {:?}", 
+                "List round-trip failed. Original: {:?}, Deserialized: {:?}",
                 list_value, deserialized
             )));
         }
 
         // Test edge cases
-        self.test_list_edge_cases(type_def, &parsed_type.cql_type).await?;
+        self.test_list_edge_cases(type_def, &parsed_type.cql_type)
+            .await?;
 
         Ok(())
     }
 
-    async fn test_set_parsing<T: AsRef<str>>(&mut self, type_def: &str, test_data: &[T]) -> Result<()> {
+    async fn test_set_parsing<T: AsRef<str>>(
+        &mut self,
+        type_def: &str,
+        test_data: &[T],
+    ) -> Result<()> {
         use cqlite_core::parser::complex_types::{ComplexTypeParser, TypeParsingContext};
-        use cqlite_core::types::Value;
         use cqlite_core::schema::CqlType;
+        use cqlite_core::types::Value;
         use std::collections::{HashMap, HashSet};
 
         // Create parser with context
@@ -704,18 +752,24 @@ impl ComplexTypeValidationSuite {
         };
 
         // Parse the set type definition
-        let parsed_type = parser.parse_type_with_context(type_def, &context)
-            .map_err(|e| Error::Schema(format!("Failed to parse set type '{}': {}", type_def, e)))?;
+        let parsed_type = parser
+            .parse_type_with_context(type_def, &context)
+            .map_err(|e| {
+                Error::Schema(format!("Failed to parse set type '{}': {}", type_def, e))
+            })?;
 
         // Verify it's a set type
         if !matches!(parsed_type.cql_type, CqlType::Set(_)) {
-            return Err(Error::Schema(format!("Expected set type, got: {:?}", parsed_type.cql_type)));
+            return Err(Error::Schema(format!(
+                "Expected set type, got: {:?}",
+                parsed_type.cql_type
+            )));
         }
 
         // Convert test data to values, ensuring uniqueness
         let mut unique_values = HashSet::new();
         let mut set_values = Vec::new();
-        
+
         for s in test_data {
             let value = self.parse_string_to_value(s.as_ref(), &parsed_type.cql_type)?;
             let value_str = format!("{:?}", value); // Use debug representation for uniqueness check
@@ -736,21 +790,28 @@ impl ComplexTypeValidationSuite {
             for value in deserialized_set {
                 let value_str = format!("{:?}", value);
                 if !seen.insert(value_str) {
-                    return Err(Error::Schema("Set contains duplicate values after deserialization".to_string()));
+                    return Err(Error::Schema(
+                        "Set contains duplicate values after deserialization".to_string(),
+                    ));
                 }
             }
         }
 
         // Test set-specific operations
-        self.test_set_operations(type_def, &parsed_type.cql_type).await?;
+        self.test_set_operations(type_def, &parsed_type.cql_type)
+            .await?;
 
         Ok(())
     }
 
-    async fn test_map_parsing<K: AsRef<str>, V: AsRef<str>>(&mut self, type_def: &str, test_data: &[(K, V)]) -> Result<()> {
+    async fn test_map_parsing<K: AsRef<str>, V: AsRef<str>>(
+        &mut self,
+        type_def: &str,
+        test_data: &[(K, V)],
+    ) -> Result<()> {
         use cqlite_core::parser::complex_types::{ComplexTypeParser, TypeParsingContext};
-        use cqlite_core::types::Value;
         use cqlite_core::schema::CqlType;
+        use cqlite_core::types::Value;
         use std::collections::HashMap;
 
         // Create parser with context
@@ -764,18 +825,25 @@ impl ComplexTypeValidationSuite {
         };
 
         // Parse the map type definition
-        let parsed_type = parser.parse_type_with_context(type_def, &context)
-            .map_err(|e| Error::Schema(format!("Failed to parse map type '{}': {}", type_def, e)))?;
+        let parsed_type = parser
+            .parse_type_with_context(type_def, &context)
+            .map_err(|e| {
+                Error::Schema(format!("Failed to parse map type '{}': {}", type_def, e))
+            })?;
 
         // Verify it's a map type and extract key/value types
         let (key_type, value_type) = if let CqlType::Map(ref k, ref v) = parsed_type.cql_type {
             (k.as_ref(), v.as_ref())
         } else {
-            return Err(Error::Schema(format!("Expected map type, got: {:?}", parsed_type.cql_type)));
+            return Err(Error::Schema(format!(
+                "Expected map type, got: {:?}",
+                parsed_type.cql_type
+            )));
         };
 
         // Convert test data to key-value pairs
-        let map_pairs: Vec<(Value, Value)> = test_data.iter()
+        let map_pairs: Vec<(Value, Value)> = test_data
+            .iter()
             .map(|(k, v)| {
                 let key_value = self.parse_string_to_value(k.as_ref(), key_type)?;
                 let value_value = self.parse_string_to_value(v.as_ref(), value_type)?;
@@ -795,13 +863,16 @@ impl ComplexTypeValidationSuite {
             for (key, _) in deserialized_map {
                 let key_str = format!("{:?}", key);
                 if !seen_keys.insert(key_str) {
-                    return Err(Error::Schema("Map contains duplicate keys after deserialization".to_string()));
+                    return Err(Error::Schema(
+                        "Map contains duplicate keys after deserialization".to_string(),
+                    ));
                 }
             }
         }
 
         // Test map-specific operations
-        self.test_map_operations(type_def, &parsed_type.cql_type).await?;
+        self.test_map_operations(type_def, &parsed_type.cql_type)
+            .await?;
 
         Ok(())
     }
@@ -811,7 +882,10 @@ impl ComplexTypeValidationSuite {
         Ok(())
     }
 
-    async fn test_nested_udt_structures(&self, _category_result: &mut CategoryResult) -> Result<()> {
+    async fn test_nested_udt_structures(
+        &self,
+        _category_result: &mut CategoryResult,
+    ) -> Result<()> {
         // Implement nested UDT tests
         Ok(())
     }
@@ -882,17 +956,30 @@ impl ComplexTypeValidationSuite {
     fn parse_string_to_value(&self, s: &str, cql_type: &CqlType) -> Result<Value> {
         match cql_type {
             CqlType::Text => Ok(Value::Text(s.to_string())),
-            CqlType::Int => Ok(Value::Integer(s.parse().map_err(|_| Error::storage("Invalid integer".to_string()))?)),
-            CqlType::BigInt => Ok(Value::BigInt(s.parse().map_err(|_| Error::storage("Invalid bigint".to_string()))?)),
-            CqlType::Boolean => Ok(Value::Boolean(s.parse().map_err(|_| Error::storage("Invalid boolean".to_string()))?)),
+            CqlType::Int => {
+                Ok(Value::Integer(s.parse().map_err(|_| {
+                    Error::storage("Invalid integer".to_string())
+                })?))
+            }
+            CqlType::BigInt => {
+                Ok(Value::BigInt(s.parse().map_err(|_| {
+                    Error::storage("Invalid bigint".to_string())
+                })?))
+            }
+            CqlType::Boolean => {
+                Ok(Value::Boolean(s.parse().map_err(|_| {
+                    Error::storage("Invalid boolean".to_string())
+                })?))
+            }
             CqlType::Uuid => {
-                let uuid_bytes: [u8; 16] = s.as_bytes()
+                let uuid_bytes: [u8; 16] = s
+                    .as_bytes()
                     .get(..16)
                     .ok_or_else(|| Error::storage("Invalid UUID length".to_string()))?
                     .try_into()
                     .map_err(|_| Error::storage("Invalid UUID format".to_string()))?;
                 Ok(Value::Uuid(uuid_bytes))
-            },
+            }
             _ => Ok(Value::Text(s.to_string())), // Default fallback
         }
     }
@@ -942,10 +1029,16 @@ impl ComplexTypeValidationSuite {
 
     fn finalize_results(&mut self, _total_duration: Duration) {
         // Calculate final statistics
-        let total_tests: usize = self.results.category_results.values()
+        let total_tests: usize = self
+            .results
+            .category_results
+            .values()
             .map(|r| r.tests_passed + r.tests_failed)
             .sum();
-        let passed_tests: usize = self.results.category_results.values()
+        let passed_tests: usize = self
+            .results
+            .category_results
+            .values()
             .map(|r| r.tests_passed)
             .sum();
 
@@ -955,12 +1048,17 @@ impl ComplexTypeValidationSuite {
         self.results.success = self.results.failed_tests == 0;
 
         // Calculate overall compatibility metrics
-        let avg_coverage: f64 = self.results.category_results.values()
+        let avg_coverage: f64 = self
+            .results
+            .category_results
+            .values()
             .map(|r| r.coverage_percentage)
-            .sum::<f64>() / self.results.category_results.len() as f64;
+            .sum::<f64>()
+            / self.results.category_results.len() as f64;
 
         self.results.compatibility_summary.type_coverage = avg_coverage;
-        self.results.compatibility_summary.cassandra_version = self.config.cassandra_version.clone();
+        self.results.compatibility_summary.cassandra_version =
+            self.config.cassandra_version.clone();
     }
 
     fn print_summary(&self) {
@@ -970,30 +1068,42 @@ impl ComplexTypeValidationSuite {
         println!("✅ Total Tests: {}", self.results.total_tests);
         println!("✅ Passed: {}", self.results.passed_tests);
         println!("❌ Failed: {}", self.results.failed_tests);
-        println!("📈 Success Rate: {:.1}%", 
-            (self.results.passed_tests as f64 / self.results.total_tests as f64) * 100.0);
+        println!(
+            "📈 Success Rate: {:.1}%",
+            (self.results.passed_tests as f64 / self.results.total_tests as f64) * 100.0
+        );
         println!();
 
         for (category, result) in &self.results.category_results {
-            println!("📂 {}: {:.1}% coverage ({}/{} passed)", 
-                category, result.coverage_percentage, result.tests_passed, 
-                result.tests_passed + result.tests_failed);
+            println!(
+                "📂 {}: {:.1}% coverage ({}/{} passed)",
+                category,
+                result.coverage_percentage,
+                result.tests_passed,
+                result.tests_passed + result.tests_failed
+            );
         }
 
         println!();
-        println!("🎯 Cassandra {} Compatibility: {:.1}%", 
+        println!(
+            "🎯 Cassandra {} Compatibility: {:.1}%",
             self.results.compatibility_summary.cassandra_version,
-            self.results.compatibility_summary.format_compatibility);
+            self.results.compatibility_summary.format_compatibility
+        );
     }
 
     /// Generate detailed validation report
     pub fn generate_report(&self, output_path: &Path) -> Result<()> {
         let report_json = serde_json::to_string_pretty(&self.results)
             .map_err(|e| Error::serialization(format!("Failed to serialize report: {}", e)))?;
-        
-        fs::write(output_path, report_json)
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to write report: {}", e))))?;
-        
+
+        fs::write(output_path, report_json).map_err(|e| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to write report: {}", e),
+            ))
+        })?;
+
         println!("📄 Validation report written to: {}", output_path.display());
         Ok(())
     }

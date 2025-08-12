@@ -11,8 +11,8 @@
 
 use crate::{
     error::{Error, Result},
-    parser::vint::{parse_vint_length},
-    types::{Value, TombstoneType},
+    parser::vint::parse_vint_length,
+    types::{TombstoneType, Value},
 };
 use std::collections::HashMap;
 
@@ -166,12 +166,12 @@ impl RowCellStateMachine {
 
         while consumed < data.len() && !self.is_complete() && !self.has_error() {
             let remaining = &data[consumed..];
-            
+
             match self.process_current_state(remaining) {
                 Ok(bytes_consumed) => {
                     consumed += bytes_consumed;
-                                self.offset += bytes_consumed;
-                    
+                    self.offset += bytes_consumed;
+
                     // Prevent infinite loops
                     if bytes_consumed == 0 {
                         self.state = State::Error("No progress made in state machine".to_string());
@@ -217,8 +217,14 @@ impl RowCellStateMachine {
 
         // Parse timestamp (8 bytes, big-endian)
         let timestamp = i64::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         offset += 8;
 
@@ -232,7 +238,10 @@ impl RowCellStateMachine {
                 return Err(Error::corruption("Insufficient data for TTL"));
             }
             ttl = Some(u32::from_be_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
             ]));
             offset += 4;
         }
@@ -240,10 +249,15 @@ impl RowCellStateMachine {
         if flags & 0x02 != 0 {
             // Local deletion time present (4 bytes)
             if data.len() < offset + 4 {
-                return Err(Error::corruption("Insufficient data for local deletion time"));
+                return Err(Error::corruption(
+                    "Insufficient data for local deletion time",
+                ));
             }
             local_deletion_time = Some(u32::from_be_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
             ]));
             offset += 4;
         }
@@ -300,17 +314,20 @@ impl RowCellStateMachine {
             }
 
             // Parse component length (VInt)
-            let (remaining, component_len) = parse_vint_length(&data[offset..])
-                .map_err(|_| Error::corruption(format!(
+            let (remaining, component_len) = parse_vint_length(&data[offset..]).map_err(|_| {
+                Error::corruption(format!(
                     "Failed to parse partition key component {} length",
                     i
-                )))?;
+                ))
+            })?;
             offset = data.len() - remaining.len();
 
             if component_len > remaining.len() {
                 return Err(Error::corruption(format!(
                     "Partition key component {} length {} exceeds available data {}",
-                    i, component_len, remaining.len()
+                    i,
+                    component_len,
+                    remaining.len()
                 )));
             }
 
@@ -365,22 +382,35 @@ impl RowCellStateMachine {
 
         // Parse deletion timestamp (8 bytes)
         if data.len() < offset + 8 {
-            return Err(Error::corruption("Insufficient data for deletion timestamp"));
+            return Err(Error::corruption(
+                "Insufficient data for deletion timestamp",
+            ));
         }
 
         let deletion_time = i64::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         offset += 8;
 
         // Parse local deletion time (4 bytes)
         if data.len() < offset + 4 {
-            return Err(Error::corruption("Insufficient data for local deletion time"));
+            return Err(Error::corruption(
+                "Insufficient data for local deletion time",
+            ));
         }
 
         let local_deletion_time = u32::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
         offset += 4;
 
@@ -444,11 +474,9 @@ impl RowCellStateMachine {
             }
 
             // Parse column name length and data
-            let (remaining, name_len) = parse_vint_length(&data[offset..])
-                .map_err(|_| Error::corruption(format!(
-                    "Failed to parse static column {} name length",
-                    i
-                )))?;
+            let (remaining, name_len) = parse_vint_length(&data[offset..]).map_err(|_| {
+                Error::corruption(format!("Failed to parse static column {} name length", i))
+            })?;
             offset = data.len() - remaining.len();
 
             if name_len > remaining.len() {
@@ -458,19 +486,15 @@ impl RowCellStateMachine {
                 )));
             }
 
-            let column_name = String::from_utf8(remaining[..name_len].to_vec())
-                .map_err(|_| Error::corruption(format!(
-                    "Invalid UTF-8 in static column {} name",
-                    i
-                )))?;
+            let column_name = String::from_utf8(remaining[..name_len].to_vec()).map_err(|_| {
+                Error::corruption(format!("Invalid UTF-8 in static column {} name", i))
+            })?;
             offset += name_len;
 
             // Parse column value length and data
-            let (remaining, value_len) = parse_vint_length(&data[offset..])
-                .map_err(|_| Error::corruption(format!(
-                    "Failed to parse static column {} value length",
-                    i
-                )))?;
+            let (remaining, value_len) = parse_vint_length(&data[offset..]).map_err(|_| {
+                Error::corruption(format!("Failed to parse static column {} value length", i))
+            })?;
             offset = data.len() - remaining.len();
 
             if value_len > remaining.len() {
@@ -558,7 +582,9 @@ impl RowCellStateMachine {
         offset = data.len() - remaining.len();
 
         if key_len > remaining.len() {
-            return Err(Error::corruption("Clustering key length exceeds available data"));
+            return Err(Error::corruption(
+                "Clustering key length exceeds available data",
+            ));
         }
 
         let clustering_key = remaining[..key_len].to_vec();
@@ -566,12 +592,20 @@ impl RowCellStateMachine {
 
         // Parse row timestamp (8 bytes)
         if data.len() < offset + 8 {
-            return Err(Error::corruption("Insufficient data for clustering row timestamp"));
+            return Err(Error::corruption(
+                "Insufficient data for clustering row timestamp",
+            ));
         }
 
         let timestamp = i64::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         offset += 8;
 
@@ -627,22 +661,35 @@ impl RowCellStateMachine {
 
         // Parse deletion timestamp (8 bytes)
         if data.len() < offset + 8 {
-            return Err(Error::corruption("Insufficient data for row deletion timestamp"));
+            return Err(Error::corruption(
+                "Insufficient data for row deletion timestamp",
+            ));
         }
 
         let deletion_time = i64::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         offset += 8;
 
         // Parse local deletion time (4 bytes)
         if data.len() < offset + 4 {
-            return Err(Error::corruption("Insufficient data for row local deletion time"));
+            return Err(Error::corruption(
+                "Insufficient data for row local deletion time",
+            ));
         }
 
         let local_deletion_time = u32::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
         offset += 4;
 
@@ -665,7 +712,9 @@ impl RowCellStateMachine {
         offset = data.len() - remaining.len();
 
         if name_len > remaining.len() {
-            return Err(Error::corruption("Column name length exceeds available data"));
+            return Err(Error::corruption(
+                "Column name length exceeds available data",
+            ));
         }
 
         let column_name = String::from_utf8(remaining[..name_len].to_vec())
@@ -678,7 +727,9 @@ impl RowCellStateMachine {
         offset = data.len() - remaining.len();
 
         if value_len > remaining.len() {
-            return Err(Error::corruption("Column value length exceeds available data"));
+            return Err(Error::corruption(
+                "Column value length exceeds available data",
+            ));
         }
 
         // Parse the actual value
@@ -733,10 +784,10 @@ mod tests {
     #[test]
     fn test_state_transitions() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Test basic state progression
         assert_eq!(state_machine.current_state(), &State::Header);
-        
+
         // Reset should return to header state
         state_machine.reset();
         assert_eq!(state_machine.current_state(), &State::Header);
@@ -745,11 +796,11 @@ mod tests {
     #[test]
     fn test_error_handling() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Test with insufficient data
         let result = state_machine.process(&[0x01]); // Too small for header
         assert!(result.is_ok()); // Should handle gracefully but may not progress
-        
+
         // Check if error state is set appropriately
         if state_machine.has_error() {
             assert!(state_machine.error_message().is_some());
@@ -759,25 +810,25 @@ mod tests {
     #[test]
     fn test_minimal_valid_row() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Create minimal valid row data
         let mut data = Vec::new();
-        
+
         // Row header: flags (1) + timestamp (8)
         data.push(0x00); // No TTL or deletion
         data.extend_from_slice(&42i64.to_be_bytes()); // Timestamp
-        
+
         // Partition key: component count (1) + component length (1) + component ("k")
         data.push(0x02); // 1 component (vint encoded: 1 -> 2 in zigzag)
         data.push(0x02); // 1 byte length (vint encoded: 1 -> 2 in zigzag)
         data.push(b'k'); // Component data
-        
+
         // Clustering row count: 0 (no clustering rows)
         data.push(0x00); // 0 rows (vint encoded: 0 -> 0)
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
-        
+
         // Should eventually reach complete state
         let consumed = result.unwrap();
         assert!(consumed <= data.len());

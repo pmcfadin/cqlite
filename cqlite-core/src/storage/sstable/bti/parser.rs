@@ -2,10 +2,10 @@
 //!
 //! Implements parsing of BTI trie-indexed files
 
-use crate::error::Result;
-use super::{BtiError, BtiLookupResult, MAX_TRIE_DEPTH};
-use super::nodes::{TrieNode, NodeParser};
 use super::encoder::ByteComparableEncoder;
+use super::nodes::{NodeParser, TrieNode};
+use super::{BtiError, BtiLookupResult, MAX_TRIE_DEPTH};
+use crate::error::Result;
 use crate::types::Value;
 use std::collections::HashMap;
 use std::fs::File;
@@ -30,7 +30,7 @@ impl PartitionsParser {
     pub fn new(mut file: File) -> Result<Self> {
         // Read BTI header to get root offset
         let root_offset = Self::parse_bti_header(&mut file)?;
-        
+
         Ok(Self {
             file,
             root_offset,
@@ -44,32 +44,34 @@ impl PartitionsParser {
     fn parse_bti_header(file: &mut File) -> Result<u64> {
         let mut header = [0u8; 16];
         file.read_exact(&mut header)?;
-        
+
         // BTI header format:
         // - Magic number (4 bytes): 0x6461_0000
         // - Version (2 bytes)
         // - Flags (2 bytes)
         // - Root offset (8 bytes)
-        
+
         let magic = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         if magic != 0x6461_0000 {
-            return Err(BtiError::CorruptedTrie(
-                format!("Invalid BTI magic number: 0x{:08x}", magic)
-            ).into());
+            return Err(BtiError::CorruptedTrie(format!(
+                "Invalid BTI magic number: 0x{:08x}",
+                magic
+            ))
+            .into());
         }
-        
+
         let version = u16::from_be_bytes([header[4], header[5]]);
         if version != 0x0001 {
-            return Err(BtiError::CorruptedTrie(
-                format!("Unsupported BTI version: {}", version)
-            ).into());
+            return Err(
+                BtiError::CorruptedTrie(format!("Unsupported BTI version: {}", version)).into(),
+            );
         }
-        
+
         let root_offset = u64::from_be_bytes([
-            header[8], header[9], header[10], header[11],
-            header[12], header[13], header[14], header[15]
+            header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+            header[15],
         ]);
-        
+
         Ok(root_offset)
     }
 
@@ -77,20 +79,25 @@ impl PartitionsParser {
     pub fn lookup_partition(&mut self, partition_key: &[Value]) -> Result<Option<BtiLookupResult>> {
         // Encode partition key to byte-comparable format
         let encoded_key = self.encoder.encode_composite_key(partition_key)?;
-        
+
         // Traverse trie from root
         self.lookup_in_trie(&encoded_key, self.root_offset, 0)
     }
 
     /// Lookup in trie starting from given node
-    fn lookup_in_trie(&mut self, key: &[u8], node_offset: u64, depth: usize) -> Result<Option<BtiLookupResult>> {
+    fn lookup_in_trie(
+        &mut self,
+        key: &[u8],
+        node_offset: u64,
+        depth: usize,
+    ) -> Result<Option<BtiLookupResult>> {
         if depth > MAX_TRIE_DEPTH {
             return Err(BtiError::MaxDepthExceeded(depth).into());
         }
 
         // Load node from cache or parse from file
         let node = self.load_node(node_offset)?;
-        
+
         // Check if we've consumed the entire key
         if depth >= key.len() {
             // If node has payload, we found our result
@@ -100,16 +107,16 @@ impl PartitionsParser {
                 return Ok(None);
             }
         }
-        
+
         // Get next character in key
         let ch = key[depth];
-        
+
         // Find transition for this character
         if let Some(target_ref) = node.find_transition(ch) {
             if target_ref.is_null() {
                 return Ok(None);
             }
-            
+
             // Recursively search in target node
             self.lookup_in_trie(key, target_ref.absolute_position, depth + 1)
         } else {
@@ -126,19 +133,23 @@ impl PartitionsParser {
 
         // Seek to node position
         self.file.seek(SeekFrom::Start(offset))?;
-        
+
         // Read node data (assuming max node size of 4KB for now)
         let mut buffer = vec![0u8; 4096];
         let bytes_read = self.file.read(&mut buffer)?;
         buffer.truncate(bytes_read);
-        
+
         // Parse node
-        let (_, node) = self.node_parser.parse_node(&buffer, offset)
-            .map_err(|e| BtiError::CorruptedTrie(format!("Failed to parse node at offset {}: {:?}", offset, e)))?;
-        
+        let (_, node) = self.node_parser.parse_node(&buffer, offset).map_err(|e| {
+            BtiError::CorruptedTrie(format!(
+                "Failed to parse node at offset {}: {:?}",
+                offset, e
+            ))
+        })?;
+
         // Cache node
         self.node_cache.insert(offset, node.clone());
-        
+
         Ok(node)
     }
 
@@ -147,33 +158,44 @@ impl PartitionsParser {
         if payload.len() < 8 {
             return Err(BtiError::CorruptedTrie("Payload too short".to_string()).into());
         }
-        
+
         // Payload format:
         // - Data offset (8 bytes)
         // - Data size (4 bytes, optional)
         // - Row index offset (8 bytes, optional)
-        
+
         let data_offset = u64::from_be_bytes([
-            payload[0], payload[1], payload[2], payload[3],
-            payload[4], payload[5], payload[6], payload[7]
+            payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+            payload[7],
         ]);
-        
+
         let data_size = if payload.len() >= 12 {
-            Some(u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]))
+            Some(u32::from_be_bytes([
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
+            ]))
         } else {
             None
         };
-        
+
         let row_index_offset = if payload.len() >= 20 {
             let offset = u64::from_be_bytes([
-                payload[12], payload[13], payload[14], payload[15],
-                payload[16], payload[17], payload[18], payload[19]
+                payload[12],
+                payload[13],
+                payload[14],
+                payload[15],
+                payload[16],
+                payload[17],
+                payload[18],
+                payload[19],
             ]);
             if offset != 0 { Some(offset) } else { None }
         } else {
             None
         };
-        
+
         Ok(BtiLookupResult {
             data_offset,
             data_size,
@@ -205,7 +227,7 @@ impl RowsParser {
     /// Create new rows parser
     pub fn new(mut file: File) -> Result<Self> {
         let root_offset = Self::parse_bti_header(&mut file)?;
-        
+
         Ok(Self {
             file,
             root_offset,
@@ -227,13 +249,18 @@ impl RowsParser {
     }
 
     /// Lookup in trie (same implementation as PartitionsParser)
-    fn lookup_in_trie(&mut self, key: &[u8], node_offset: u64, depth: usize) -> Result<Option<BtiLookupResult>> {
+    fn lookup_in_trie(
+        &mut self,
+        key: &[u8],
+        node_offset: u64,
+        depth: usize,
+    ) -> Result<Option<BtiLookupResult>> {
         if depth > MAX_TRIE_DEPTH {
             return Err(BtiError::MaxDepthExceeded(depth).into());
         }
 
         let node = self.load_node(node_offset)?;
-        
+
         if depth >= key.len() {
             if let Some(payload) = node.payload() {
                 return Ok(Some(self.parse_lookup_result(payload)?));
@@ -241,14 +268,14 @@ impl RowsParser {
                 return Ok(None);
             }
         }
-        
+
         let ch = key[depth];
-        
+
         if let Some(target_ref) = node.find_transition(ch) {
             if target_ref.is_null() {
                 return Ok(None);
             }
-            
+
             self.lookup_in_trie(key, target_ref.absolute_position, depth + 1)
         } else {
             Ok(None)
@@ -262,16 +289,20 @@ impl RowsParser {
         }
 
         self.file.seek(SeekFrom::Start(offset))?;
-        
+
         let mut buffer = vec![0u8; 4096];
         let bytes_read = self.file.read(&mut buffer)?;
         buffer.truncate(bytes_read);
-        
-        let (_, node) = self.node_parser.parse_node(&buffer, offset)
-            .map_err(|e| BtiError::CorruptedTrie(format!("Failed to parse node at offset {}: {:?}", offset, e)))?;
-        
+
+        let (_, node) = self.node_parser.parse_node(&buffer, offset).map_err(|e| {
+            BtiError::CorruptedTrie(format!(
+                "Failed to parse node at offset {}: {:?}",
+                offset, e
+            ))
+        })?;
+
         self.node_cache.insert(offset, node.clone());
-        
+
         Ok(node)
     }
 
@@ -323,16 +354,20 @@ impl<'a> Iterator for PartitionIterator<'a> {
                 match self.parser.parse_lookup_result(payload) {
                     Ok(result) => {
                         let key = key_prefix.clone();
-                        
+
                         // Add child nodes to stack for further traversal
                         for (ch, target_ref) in node.get_transitions() {
                             if !target_ref.is_null() {
                                 let mut child_key = key_prefix.clone();
                                 child_key.push(ch);
-                                self.stack.push((target_ref.absolute_position, depth + 1, child_key));
+                                self.stack.push((
+                                    target_ref.absolute_position,
+                                    depth + 1,
+                                    child_key,
+                                ));
                             }
                         }
-                        
+
                         return Some(Ok((key, result)));
                     }
                     Err(e) => return Some(Err(e)),
@@ -343,12 +378,13 @@ impl<'a> Iterator for PartitionIterator<'a> {
                     if !target_ref.is_null() {
                         let mut child_key = key_prefix.clone();
                         child_key.push(ch);
-                        self.stack.push((target_ref.absolute_position, depth + 1, child_key));
+                        self.stack
+                            .push((target_ref.absolute_position, depth + 1, child_key));
                     }
                 }
             }
         }
-        
+
         None
     }
 }
@@ -362,10 +398,10 @@ mod tests {
     fn test_bti_header_parsing() {
         let mut header = Vec::new();
         header.extend_from_slice(&0x6461_0000u32.to_be_bytes()); // Magic
-        header.extend_from_slice(&0x0001u16.to_be_bytes());       // Version
-        header.extend_from_slice(&0x0000u16.to_be_bytes());       // Flags
-        header.extend_from_slice(&0x1000u64.to_be_bytes());       // Root offset
-        
+        header.extend_from_slice(&0x0001u16.to_be_bytes()); // Version
+        header.extend_from_slice(&0x0000u16.to_be_bytes()); // Flags
+        header.extend_from_slice(&0x1000u64.to_be_bytes()); // Root offset
+
         let mut cursor = Cursor::new(header);
         let root_offset = PartitionsParser::parse_bti_header(&mut cursor).unwrap();
         assert_eq!(root_offset, 0x1000);
@@ -378,7 +414,7 @@ mod tests {
         header.extend_from_slice(&0x0001u16.to_be_bytes());
         header.extend_from_slice(&0x0000u16.to_be_bytes());
         header.extend_from_slice(&0x1000u64.to_be_bytes());
-        
+
         let mut cursor = Cursor::new(header);
         let result = PartitionsParser::parse_bti_header(&mut cursor);
         assert!(result.is_err());
@@ -400,13 +436,13 @@ mod tests {
         assert_eq!(result.data_offset, 0x123456789ABCDEF);
         assert_eq!(result.data_size, None);
         assert_eq!(result.row_index_offset, None);
-        
+
         // Full payload with data size and row index
         let mut full_payload = Vec::new();
         full_payload.extend_from_slice(&0x123456789ABCDEFu64.to_be_bytes()); // Data offset
-        full_payload.extend_from_slice(&0x12345678u32.to_be_bytes());        // Data size
+        full_payload.extend_from_slice(&0x12345678u32.to_be_bytes()); // Data size
         full_payload.extend_from_slice(&0xFEDCBA9876543210u64.to_be_bytes()); // Row index offset
-        
+
         let result = parser.parse_lookup_result(&full_payload).unwrap();
         assert_eq!(result.data_offset, 0x123456789ABCDEF);
         assert_eq!(result.data_size, Some(0x12345678));

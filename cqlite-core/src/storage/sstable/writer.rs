@@ -10,14 +10,13 @@ use crate::schema::CqlType;
 use crate::storage::sstable::bloom::BloomFilter;
 use crate::storage::sstable::compression::{Compression, CompressionStats};
 use crate::storage::sstable::index::IndexEntry;
-use crate::{platform::Platform, types::TableId, Config, Result, RowKey, Value};
+use crate::{Config, Result, RowKey, Value, platform::Platform, types::TableId};
 
 /// Cassandra 5+ compatible SSTable format version ('oa' format)
 const CASSANDRA_FORMAT_VERSION: &[u8] = b"oa";
 
 /// Magic bytes for Cassandra SSTable file identification  
 const CASSANDRA_MAGIC: [u8; 4] = [0x5A, 0x5A, 0x5A, 0x5A];
-
 
 /// CRC32 polynomial for checksumming
 const CRC32_POLYNOMIAL: u32 = 0xEDB88320;
@@ -373,7 +372,7 @@ impl SSTableWriter {
             CqlType::Tuple(_) => DataType::LIST, // Map to closest existing
             CqlType::Udt(_, _) => DataType::JSON, // Map to closest existing
             CqlType::Frozen(_) => DataType::BLOB, // Map to closest existing
-            _ => DataType::TEXT, // Default fallback
+            _ => DataType::TEXT,                 // Default fallback
         };
         data.push(data_type_id);
 
@@ -427,7 +426,6 @@ impl SSTableWriter {
             }
         }
     }
-
 
     /// Write Cassandra-compatible variable-length integer (VInt)
     fn write_cassandra_vint(&self, data: &mut Vec<u8>, value: u64) -> Result<()> {

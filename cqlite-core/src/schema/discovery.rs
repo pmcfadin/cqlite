@@ -14,9 +14,9 @@ use tokio::sync::RwLock;
 
 use crate::{
     Config, Result,
-    schema::{ClusteringColumn, UdtRegistry},
     parser::header::{CassandraVersion, SSTableHeader},
     platform::Platform,
+    schema::{ClusteringColumn, UdtRegistry},
     types::Value,
 };
 
@@ -511,41 +511,46 @@ impl SchemaDiscoveryEngine {
 
         // Perform comprehensive schema discovery
         let mut discovery_context = DiscoveryContext::new(keyspace, table, sstable_files);
-        
+
         // Phase 1: Extract metadata from headers
         self.extract_header_metadata(&mut discovery_context).await?;
-        
+
         // Phase 2: Sample data for type inference
-        self.sample_data_for_inference(&mut discovery_context).await?;
-        
+        self.sample_data_for_inference(&mut discovery_context)
+            .await?;
+
         // Phase 3: Discover UDTs and complex types
         if self.config.enable_udt_discovery {
             self.discover_udts(&mut discovery_context).await?;
         }
-        
+
         // Phase 4: Analyze collections
         if self.config.enable_collection_analysis {
-            self.analyze_collection_types(&mut discovery_context).await?;
+            self.analyze_collection_types(&mut discovery_context)
+                .await?;
         }
-        
+
         // Phase 5: Discover indexes
         if self.config.enable_index_discovery {
             self.discover_indexes(&mut discovery_context).await?;
         }
-        
+
         // Phase 6: Infer complete schema
         let schema_info = self.build_schema_info(&mut discovery_context).await?;
-        
+
         // Phase 7: Validate schema
         let validated_schema = if self.config.enable_cross_file_validation {
-            self.validator.validate_schema(&schema_info, &discovery_context).await?
+            self.validator
+                .validate_schema(&schema_info, &discovery_context)
+                .await?
         } else {
             schema_info
         };
 
         // Calculate discovery metrics
         let discovery_time = start_time.elapsed().unwrap_or(Duration::ZERO);
-        let final_schema = self.add_performance_metrics(validated_schema, discovery_time, &discovery_context);
+        let final_schema =
+            self.add_performance_metrics(validated_schema, discovery_time, &discovery_context);
 
         // Cache the result
         if self.config.enable_schema_cache {
@@ -566,17 +571,27 @@ impl SchemaDiscoveryEngine {
     }
 
     /// Export schema as JSON with custom configuration
-    pub async fn export_json_with_config(&self, schema: &SchemaInfo, config: &crate::schema::json_exporter::JsonExportConfig) -> Result<String> {
+    pub async fn export_json_with_config(
+        &self,
+        schema: &SchemaInfo,
+        config: &crate::schema::json_exporter::JsonExportConfig,
+    ) -> Result<String> {
         self.exporter.export_json_with_config(schema, config).await
     }
 
     /// Generate schema comparison report
-    pub async fn compare_schemas(&self, schema1: &SchemaInfo, schema2: &SchemaInfo) -> Result<String> {
-        self.exporter.generate_comparison_report(schema1, schema2).await
+    pub async fn compare_schemas(
+        &self,
+        schema1: &SchemaInfo,
+        schema2: &SchemaInfo,
+    ) -> Result<String> {
+        self.exporter
+            .generate_comparison_report(schema1, schema2)
+            .await
     }
 
     // Private implementation methods follow...
-    
+
     async fn get_cached_schema(&self, cache_key: &str) -> Option<SchemaInfo> {
         let cache = self.schema_cache.read().await;
         if let Some((schema, cached_at)) = cache.get(cache_key) {
@@ -594,10 +609,11 @@ impl SchemaDiscoveryEngine {
 
         // Simple cache eviction
         if cache.len() > 100 {
-            let oldest_key = cache.iter()
+            let oldest_key = cache
+                .iter()
                 .min_by_key(|(_, (_, time))| time)
                 .map(|(key, _)| key.clone());
-            
+
             if let Some(key) = oldest_key {
                 cache.remove(&key);
             }
@@ -683,7 +699,11 @@ impl SchemaValidator {
     }
 
     /// Validate schema consistency and correctness
-    async fn validate_schema(&self, schema: &SchemaInfo, _context: &DiscoveryContext) -> Result<SchemaInfo> {
+    async fn validate_schema(
+        &self,
+        schema: &SchemaInfo,
+        _context: &DiscoveryContext,
+    ) -> Result<SchemaInfo> {
         // TODO: Implement comprehensive validation
         Ok(schema.clone())
     }
@@ -707,11 +727,19 @@ impl SchemaExporter {
 
     /// Export schema as JSON
     async fn export_json(&self, schema: &SchemaInfo) -> Result<String> {
-        self.export_json_with_config(schema, &crate::schema::json_exporter::JsonExportConfig::default()).await
+        self.export_json_with_config(
+            schema,
+            &crate::schema::json_exporter::JsonExportConfig::default(),
+        )
+        .await
     }
 
     /// Export schema as JSON with custom configuration
-    async fn export_json_with_config(&self, schema: &SchemaInfo, config: &crate::schema::json_exporter::JsonExportConfig) -> Result<String> {
+    async fn export_json_with_config(
+        &self,
+        schema: &SchemaInfo,
+        config: &crate::schema::json_exporter::JsonExportConfig,
+    ) -> Result<String> {
         let exporter = crate::schema::json_exporter::JsonExporter::with_config(config.clone());
         exporter.export_schema_info(schema)
     }
@@ -757,7 +785,11 @@ impl SchemaExporter {
     }
 
     /// Generate schema comparison report
-    async fn generate_comparison_report(&self, _schema1: &SchemaInfo, _schema2: &SchemaInfo) -> Result<String> {
+    async fn generate_comparison_report(
+        &self,
+        _schema1: &SchemaInfo,
+        _schema2: &SchemaInfo,
+    ) -> Result<String> {
         // TODO: Implement comparison report generation
         todo!("Implement comparison report generation")
     }
@@ -824,8 +856,10 @@ mod tests {
         let core_config = Config::default();
         let platform = Arc::new(Platform::new(&core_config).await.unwrap());
 
-        let engine = SchemaDiscoveryEngine::new(config, platform, core_config).await.unwrap();
-        
+        let engine = SchemaDiscoveryEngine::new(config, platform, core_config)
+            .await
+            .unwrap();
+
         // Test basic functionality
         assert!(engine.schema_cache.read().await.is_empty());
     }
@@ -834,7 +868,7 @@ mod tests {
     fn test_discovery_context_creation() {
         let files = vec![PathBuf::from("test.sst")];
         let context = DiscoveryContext::new("test_ks", "test_table", &files);
-        
+
         assert_eq!(context.keyspace, "test_ks");
         assert_eq!(context.table, "test_table");
         assert_eq!(context.source_files.len(), 1);

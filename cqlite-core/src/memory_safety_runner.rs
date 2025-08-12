@@ -1,12 +1,12 @@
 //! Memory Safety Test Runner
-//! 
+//!
 //! This module provides tools to run memory safety tests using various tools
 //! including Miri, Valgrind, and AddressSanitizer.
 
-use std::process::{Command, Stdio};
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 pub struct MemorySafetyRunner {
     pub miri_available: bool,
@@ -48,7 +48,9 @@ impl MemorySafetyRunner {
     /// Check if AddressSanitizer is available
     fn check_asan_available() -> bool {
         // Check if we can compile with AddressSanitizer
-        env::var("RUSTFLAGS").unwrap_or_default().contains("-Zsanitizer=address")
+        env::var("RUSTFLAGS")
+            .unwrap_or_default()
+            .contains("-Zsanitizer=address")
             || Command::new("rustc")
                 .args(&["--print", "target-features"])
                 .stdout(Stdio::null())
@@ -65,22 +67,24 @@ impl MemorySafetyRunner {
         }
 
         println!("Running memory safety tests with Miri...");
-        
+
         // Set Miri flags for better error detection
         // SAFETY: Setting environment variable in single-threaded context during test initialization
         // This is safe because it happens before any threads are spawned and affects only the current process
         unsafe {
             env::set_var("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-ignore-leaks");
         }
-        
+
         let output = Command::new("cargo")
             .args(&[
-                "miri", "test",
-                "--package", "cqlite-core",
+                "miri",
+                "test",
+                "--package",
+                "cqlite-core",
                 "--lib",
                 "memory_safety_tests::",
                 "--",
-                "--test-threads=1" // Run tests sequentially for better error reporting
+                "--test-threads=1", // Run tests sequentially for better error reporting
             ])
             .output()?;
 
@@ -109,10 +113,11 @@ impl MemorySafetyRunner {
         let output = Command::new("cargo")
             .args(&[
                 "test",
-                "--package", "cqlite-core",
+                "--package",
+                "cqlite-core",
                 "--lib",
                 "memory_safety_tests::",
-                "--no-run"
+                "--no-run",
             ])
             .output()?;
 
@@ -132,7 +137,7 @@ impl MemorySafetyRunner {
                 "--track-origins=yes",
                 "--verbose",
                 "--error-exitcode=1",
-                &test_binary
+                &test_binary,
             ])
             .output()?;
 
@@ -161,11 +166,14 @@ impl MemorySafetyRunner {
 
         let output = Command::new("cargo")
             .args(&[
-                "+nightly", "test",
-                "--package", "cqlite-core",
+                "+nightly",
+                "test",
+                "--package",
+                "cqlite-core",
                 "--lib",
                 "memory_safety_tests::",
-                "--target", "x86_64-unknown-linux-gnu"
+                "--target",
+                "x86_64-unknown-linux-gnu",
             ])
             .env("RUSTFLAGS", "-Zsanitizer=address")
             .output()?;
@@ -193,13 +201,12 @@ impl MemorySafetyRunner {
         for entry in fs::read_dir(target_dir)? {
             let entry = entry?;
             let path = entry.path();
-            let filename = path.file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("");
-                
-            if filename.starts_with("cqlite_core-") && 
-               filename.contains("memory_safety_tests") &&
-               !filename.ends_with(".d") {
+            let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+
+            if filename.starts_with("cqlite_core-")
+                && filename.contains("memory_safety_tests")
+                && !filename.ends_with(".d")
+            {
                 return Ok(path.to_string_lossy().to_string());
             }
         }
@@ -214,12 +221,13 @@ impl MemorySafetyRunner {
         let output = Command::new("cargo")
             .args(&[
                 "test",
-                "--package", "cqlite-core",
+                "--package",
+                "cqlite-core",
                 "--release", // Use release mode for realistic performance
                 "--lib",
                 "test_concurrent_memory_stress",
                 "--",
-                "--ignored" // Run ignored stress tests
+                "--ignored", // Run ignored stress tests
             ])
             .env("RUST_TEST_THREADS", "1") // Single thread for better monitoring
             .output()?;
@@ -295,7 +303,12 @@ impl MemorySafetyRunner {
             println!("🎉 All available memory safety tests passed!");
             Ok(())
         } else {
-            Err(format!("{} out of {} tests failed", test_count - passed_count, test_count).into())
+            Err(format!(
+                "{} out of {} tests failed",
+                test_count - passed_count,
+                test_count
+            )
+            .into())
         }
     }
 
@@ -303,9 +316,19 @@ impl MemorySafetyRunner {
     pub fn print_available_tools(&self) {
         println!("Memory Safety Tools Available:");
         println!("  Miri: {}", if self.miri_available { "✓" } else { "✗" });
-        println!("  Valgrind: {}", if self.valgrind_available { "✓" } else { "✗" });
-        println!("  AddressSanitizer: {}", if self.asan_available { "✓" } else { "✗" });
-        
+        println!(
+            "  Valgrind: {}",
+            if self.valgrind_available {
+                "✓"
+            } else {
+                "✗"
+            }
+        );
+        println!(
+            "  AddressSanitizer: {}",
+            if self.asan_available { "✓" } else { "✗" }
+        );
+
         if !self.miri_available {
             println!("  To install Miri: rustup component add miri");
         }
@@ -331,7 +354,7 @@ mod tests {
     #[test]
     fn test_runner_creation() {
         let runner = MemorySafetyRunner::new();
-        
+
         // Test should not panic
         runner.print_available_tools();
     }
@@ -339,7 +362,7 @@ mod tests {
     #[test]
     fn test_tool_detection() {
         let runner = MemorySafetyRunner::new();
-        
+
         // These might be false in CI environments, but should not panic
         println!("Miri available: {}", runner.miri_available);
         println!("Valgrind available: {}", runner.valgrind_available);

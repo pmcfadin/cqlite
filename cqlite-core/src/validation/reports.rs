@@ -3,8 +3,8 @@
 //! This module provides comprehensive report generation for Issue #17 validation results.
 
 use crate::error::{Error, Result};
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Validation report
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,11 +108,31 @@ impl ValidationReport {
     /// Update the summary statistics
     fn update_summary(&mut self) {
         let total = self.sections.len();
-        let passed = self.sections.iter().filter(|s| s.status == ValidationSectionStatus::Passed).count();
-        let failed = self.sections.iter().filter(|s| s.status == ValidationSectionStatus::Failed).count();
-        let warning = self.sections.iter().filter(|s| s.status == ValidationSectionStatus::Warning).count();
-        let error = self.sections.iter().filter(|s| s.status == ValidationSectionStatus::Error).count();
-        let skipped = self.sections.iter().filter(|s| s.status == ValidationSectionStatus::Skipped).count();
+        let passed = self
+            .sections
+            .iter()
+            .filter(|s| s.status == ValidationSectionStatus::Passed)
+            .count();
+        let failed = self
+            .sections
+            .iter()
+            .filter(|s| s.status == ValidationSectionStatus::Failed)
+            .count();
+        let warning = self
+            .sections
+            .iter()
+            .filter(|s| s.status == ValidationSectionStatus::Warning)
+            .count();
+        let error = self
+            .sections
+            .iter()
+            .filter(|s| s.status == ValidationSectionStatus::Error)
+            .count();
+        let skipped = self
+            .sections
+            .iter()
+            .filter(|s| s.status == ValidationSectionStatus::Skipped)
+            .count();
 
         let success_rate = if total > 0 {
             (passed as f64 / total as f64) * 100.0
@@ -148,14 +168,19 @@ impl ValidationReport {
 
     /// Get failed sections
     pub fn get_failed_sections(&self) -> Vec<&ValidationSection> {
-        self.sections.iter()
-            .filter(|s| s.status == ValidationSectionStatus::Failed || s.status == ValidationSectionStatus::Error)
+        self.sections
+            .iter()
+            .filter(|s| {
+                s.status == ValidationSectionStatus::Failed
+                    || s.status == ValidationSectionStatus::Error
+            })
             .collect()
     }
 
     /// Get all recommendations
     pub fn get_all_recommendations(&self) -> Vec<String> {
-        self.sections.iter()
+        self.sections
+            .iter()
             .flat_map(|s| s.recommendations.iter())
             .cloned()
             .collect()
@@ -178,22 +203,35 @@ impl ReportGenerator {
     /// Generate report in text format
     pub fn generate_text_report(&self, report: &ValidationReport) -> String {
         let mut output = String::new();
-        
+
         // Header
         output.push_str(&format!("# {}\n\n", report.title));
-        output.push_str(&format!("Generated: {}\n", report.timestamp.format("%Y-%m-%d %H:%M:%S UTC")));
+        output.push_str(&format!(
+            "Generated: {}\n",
+            report.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
         output.push_str(&format!("Overall Status: {:?}\n\n", report.overall_status));
 
         // Summary
         output.push_str("## Summary\n\n");
-        output.push_str(&format!("- Total Sections: {}\n", report.summary.total_sections));
-        output.push_str(&format!("- Passed: {} ({:.1}%)\n", 
-                                report.summary.passed_sections, 
-                                report.summary.success_rate));
+        output.push_str(&format!(
+            "- Total Sections: {}\n",
+            report.summary.total_sections
+        ));
+        output.push_str(&format!(
+            "- Passed: {} ({:.1}%)\n",
+            report.summary.passed_sections, report.summary.success_rate
+        ));
         output.push_str(&format!("- Failed: {}\n", report.summary.failed_sections));
-        output.push_str(&format!("- Warnings: {}\n", report.summary.warning_sections));
+        output.push_str(&format!(
+            "- Warnings: {}\n",
+            report.summary.warning_sections
+        ));
         output.push_str(&format!("- Errors: {}\n", report.summary.error_sections));
-        output.push_str(&format!("- Skipped: {}\n\n", report.summary.skipped_sections));
+        output.push_str(&format!(
+            "- Skipped: {}\n\n",
+            report.summary.skipped_sections
+        ));
 
         // Sections
         output.push_str("## Validation Results\n\n");
@@ -206,7 +244,10 @@ impl ReportGenerator {
                 ValidationSectionStatus::Skipped => "⏭️",
             };
 
-            output.push_str(&format!("### {} {} - {:?}\n\n", status_icon, section.name, section.status));
+            output.push_str(&format!(
+                "### {} {} - {:?}\n\n",
+                status_icon, section.name, section.status
+            ));
             output.push_str(&format!("{}\n\n", section.details));
 
             if !section.metrics.is_empty() {
@@ -247,32 +288,50 @@ impl ReportGenerator {
     /// Generate report in Markdown format
     pub fn generate_markdown_report(&self, report: &ValidationReport) -> String {
         let mut output = String::new();
-        
+
         // Header
         output.push_str(&format!("# {}\n\n", report.title));
-        output.push_str(&format!("**Generated:** {}\n", report.timestamp.format("%Y-%m-%d %H:%M:%S UTC")));
-        output.push_str(&format!("**Overall Status:** {:?}\n\n", report.overall_status));
+        output.push_str(&format!(
+            "**Generated:** {}\n",
+            report.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+        output.push_str(&format!(
+            "**Overall Status:** {:?}\n\n",
+            report.overall_status
+        ));
 
         // Summary table
         output.push_str("## Summary\n\n");
         output.push_str("| Metric | Count | Percentage |\n");
         output.push_str("|--------|-------|------------|\n");
-        output.push_str(&format!("| Total Sections | {} | 100.0% |\n", report.summary.total_sections));
-        output.push_str(&format!("| ✅ Passed | {} | {:.1}% |\n", 
-                                report.summary.passed_sections, 
-                                report.summary.success_rate));
-        output.push_str(&format!("| ❌ Failed | {} | {:.1}% |\n", 
-                                report.summary.failed_sections,
-                                (report.summary.failed_sections as f64 / report.summary.total_sections as f64) * 100.0));
-        output.push_str(&format!("| ⚠️ Warnings | {} | {:.1}% |\n", 
-                                report.summary.warning_sections,
-                                (report.summary.warning_sections as f64 / report.summary.total_sections as f64) * 100.0));
-        output.push_str(&format!("| 🚨 Errors | {} | {:.1}% |\n", 
-                                report.summary.error_sections,
-                                (report.summary.error_sections as f64 / report.summary.total_sections as f64) * 100.0));
-        output.push_str(&format!("| ⏭️ Skipped | {} | {:.1}% |\n\n", 
-                                report.summary.skipped_sections,
-                                (report.summary.skipped_sections as f64 / report.summary.total_sections as f64) * 100.0));
+        output.push_str(&format!(
+            "| Total Sections | {} | 100.0% |\n",
+            report.summary.total_sections
+        ));
+        output.push_str(&format!(
+            "| ✅ Passed | {} | {:.1}% |\n",
+            report.summary.passed_sections, report.summary.success_rate
+        ));
+        output.push_str(&format!(
+            "| ❌ Failed | {} | {:.1}% |\n",
+            report.summary.failed_sections,
+            (report.summary.failed_sections as f64 / report.summary.total_sections as f64) * 100.0
+        ));
+        output.push_str(&format!(
+            "| ⚠️ Warnings | {} | {:.1}% |\n",
+            report.summary.warning_sections,
+            (report.summary.warning_sections as f64 / report.summary.total_sections as f64) * 100.0
+        ));
+        output.push_str(&format!(
+            "| 🚨 Errors | {} | {:.1}% |\n",
+            report.summary.error_sections,
+            (report.summary.error_sections as f64 / report.summary.total_sections as f64) * 100.0
+        ));
+        output.push_str(&format!(
+            "| ⏭️ Skipped | {} | {:.1}% |\n\n",
+            report.summary.skipped_sections,
+            (report.summary.skipped_sections as f64 / report.summary.total_sections as f64) * 100.0
+        ));
 
         // Sections
         output.push_str("## Validation Results\n\n");
@@ -312,23 +371,38 @@ impl ReportGenerator {
     /// Generate a summary report
     pub fn generate_summary_report(&self, report: &ValidationReport) -> String {
         let mut output = String::new();
-        
-        output.push_str(&format!("{} - {}\n", report.title, report.overall_status.status_text()));
-        output.push_str(&format!("Success Rate: {:.1}% ({}/{} sections passed)\n", 
-                                report.summary.success_rate,
-                                report.summary.passed_sections,
-                                report.summary.total_sections));
+
+        output.push_str(&format!(
+            "{} - {}\n",
+            report.title,
+            report.overall_status.status_text()
+        ));
+        output.push_str(&format!(
+            "Success Rate: {:.1}% ({}/{} sections passed)\n",
+            report.summary.success_rate,
+            report.summary.passed_sections,
+            report.summary.total_sections
+        ));
 
         if report.summary.failed_sections > 0 {
-            output.push_str(&format!("Failed Sections: {}\n", report.summary.failed_sections));
+            output.push_str(&format!(
+                "Failed Sections: {}\n",
+                report.summary.failed_sections
+            ));
         }
 
         if report.summary.warning_sections > 0 {
-            output.push_str(&format!("Warning Sections: {}\n", report.summary.warning_sections));
+            output.push_str(&format!(
+                "Warning Sections: {}\n",
+                report.summary.warning_sections
+            ));
         }
 
         if report.summary.error_sections > 0 {
-            output.push_str(&format!("Error Sections: {}\n", report.summary.error_sections));
+            output.push_str(&format!(
+                "Error Sections: {}\n",
+                report.summary.error_sections
+            ));
         }
 
         output
@@ -374,7 +448,7 @@ mod tests {
     #[test]
     fn test_add_section_updates_summary() {
         let mut report = ValidationReport::new("Test Report");
-        
+
         let section = ValidationSection {
             name: "Test Section".to_string(),
             status: ValidationSectionStatus::Passed,
@@ -383,9 +457,9 @@ mod tests {
             recommendations: vec!["Test recommendation".to_string()],
             timestamp: chrono::Utc::now(),
         };
-        
+
         report.add_section("test", section);
-        
+
         assert_eq!(report.summary.total_sections, 1);
         assert_eq!(report.summary.passed_sections, 1);
         assert_eq!(report.summary.success_rate, 100.0);
@@ -395,7 +469,7 @@ mod tests {
     #[test]
     fn test_failed_section_affects_overall_status() {
         let mut report = ValidationReport::new("Test Report");
-        
+
         let failed_section = ValidationSection {
             name: "Failed Section".to_string(),
             status: ValidationSectionStatus::Failed,
@@ -404,9 +478,9 @@ mod tests {
             recommendations: vec!["Fix the failure".to_string()],
             timestamp: chrono::Utc::now(),
         };
-        
+
         report.add_section("failed", failed_section);
-        
+
         assert_eq!(report.summary.total_sections, 1);
         assert_eq!(report.summary.failed_sections, 1);
         assert_eq!(report.summary.success_rate, 0.0);
@@ -416,7 +490,7 @@ mod tests {
     #[test]
     fn test_warning_section_affects_overall_status() {
         let mut report = ValidationReport::new("Test Report");
-        
+
         let warning_section = ValidationSection {
             name: "Warning Section".to_string(),
             status: ValidationSectionStatus::Warning,
@@ -425,9 +499,9 @@ mod tests {
             recommendations: vec!["Address the warning".to_string()],
             timestamp: chrono::Utc::now(),
         };
-        
+
         report.add_section("warning", warning_section);
-        
+
         assert_eq!(report.summary.total_sections, 1);
         assert_eq!(report.summary.warning_sections, 1);
         assert_eq!(report.overall_status, ValidationReportStatus::Warning);
@@ -436,7 +510,7 @@ mod tests {
     #[test]
     fn test_mixed_sections_status_priority() {
         let mut report = ValidationReport::new("Test Report");
-        
+
         // Add passed section
         let passed_section = ValidationSection {
             name: "Passed Section".to_string(),
@@ -447,7 +521,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         report.add_section("passed", passed_section);
-        
+
         // Add warning section
         let warning_section = ValidationSection {
             name: "Warning Section".to_string(),
@@ -458,10 +532,10 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         report.add_section("warning", warning_section);
-        
+
         // Should be warning status (not failed)
         assert_eq!(report.overall_status, ValidationReportStatus::Warning);
-        
+
         // Add failed section
         let failed_section = ValidationSection {
             name: "Failed Section".to_string(),
@@ -472,7 +546,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         report.add_section("failed", failed_section);
-        
+
         // Should now be failed status (failure takes priority)
         assert_eq!(report.overall_status, ValidationReportStatus::Failed);
         assert_eq!(report.summary.success_rate, 33.333333333333336); // 1 out of 3 passed
@@ -481,7 +555,7 @@ mod tests {
     #[test]
     fn test_get_failed_sections() {
         let mut report = ValidationReport::new("Test Report");
-        
+
         let passed_section = ValidationSection {
             name: "Passed Section".to_string(),
             status: ValidationSectionStatus::Passed,
@@ -491,7 +565,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         report.add_section("passed", passed_section);
-        
+
         let failed_section = ValidationSection {
             name: "Failed Section".to_string(),
             status: ValidationSectionStatus::Failed,
@@ -501,7 +575,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         report.add_section("failed", failed_section);
-        
+
         let error_section = ValidationSection {
             name: "Error Section".to_string(),
             status: ValidationSectionStatus::Error,
@@ -511,7 +585,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         report.add_section("error", error_section);
-        
+
         let failed_sections = report.get_failed_sections();
         assert_eq!(failed_sections.len(), 2); // Failed + Error sections
         assert!(failed_sections.iter().any(|s| s.name == "Failed Section"));
@@ -521,17 +595,20 @@ mod tests {
     #[test]
     fn test_get_all_recommendations() {
         let mut report = ValidationReport::new("Test Report");
-        
+
         let section1 = ValidationSection {
             name: "Section 1".to_string(),
             status: ValidationSectionStatus::Passed,
             details: "Details".to_string(),
             metrics: HashMap::new(),
-            recommendations: vec!["Recommendation 1".to_string(), "Recommendation 2".to_string()],
+            recommendations: vec![
+                "Recommendation 1".to_string(),
+                "Recommendation 2".to_string(),
+            ],
             timestamp: chrono::Utc::now(),
         };
         report.add_section("section1", section1);
-        
+
         let section2 = ValidationSection {
             name: "Section 2".to_string(),
             status: ValidationSectionStatus::Warning,
@@ -541,7 +618,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         report.add_section("section2", section2);
-        
+
         let all_recommendations = report.get_all_recommendations();
         assert_eq!(all_recommendations.len(), 3);
         assert!(all_recommendations.contains(&"Recommendation 1".to_string()));
@@ -559,10 +636,10 @@ mod tests {
     async fn test_generate_report() {
         let generator = ReportGenerator::new(ReportFormat::Comprehensive).unwrap();
         let report = ValidationReport::new("Test Report");
-        
+
         let result = generator.generate_report(report.clone()).await;
         assert!(result.is_ok());
-        
+
         let generated_report = result.unwrap();
         assert_eq!(generated_report.title, "Test Report");
     }
@@ -572,7 +649,7 @@ mod tests {
         assert_eq!(ValidationReportStatus::Passed.status_text(), "PASSED");
         assert_eq!(ValidationReportStatus::Failed.status_text(), "FAILED");
         assert_eq!(ValidationReportStatus::Warning.status_text(), "WARNING");
-        
+
         assert_eq!(ValidationSectionStatus::Passed.status_text(), "PASSED");
         assert_eq!(ValidationSectionStatus::Failed.status_text(), "FAILED");
         assert_eq!(ValidationSectionStatus::Warning.status_text(), "WARNING");

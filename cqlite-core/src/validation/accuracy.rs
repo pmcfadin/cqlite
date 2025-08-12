@@ -3,12 +3,12 @@
 //! This module provides comprehensive validation of data parsing accuracy
 //! by comparing CQLite output with reference cqlsh output.
 
+use crate::validation::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
-use serde::{Deserialize, Serialize};
-use crate::validation::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
 
 /// Test case for data accuracy validation
 #[derive(Debug, Clone)]
@@ -25,10 +25,10 @@ pub struct AccuracyTestCase {
 /// Accuracy validation levels
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AccuracyLevel {
-    ByteLevel,      // Exact byte-for-byte comparison
-    ValueLevel,     // Compare parsed values semantically
-    TypeLevel,      // Ensure correct data type interpretation
-    FormatLevel,    // Compare output format structure
+    ByteLevel,   // Exact byte-for-byte comparison
+    ValueLevel,  // Compare parsed values semantically
+    TypeLevel,   // Ensure correct data type interpretation
+    FormatLevel, // Compare output format structure
 }
 
 /// CQL data types for testing
@@ -55,12 +55,12 @@ pub enum CqlDataType {
     Time,
     Timestamp,
     Duration,
-    
+
     // Collection types
     List(Box<CqlDataType>),
     Set(Box<CqlDataType>),
     Map(Box<CqlDataType>, Box<CqlDataType>),
-    
+
     // Complex types
     Tuple(Vec<CqlDataType>),
     UserDefinedType(String),
@@ -106,47 +106,50 @@ pub struct FormatDifference {
 /// Severity of value mismatches
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MismatchSeverity {
-    Critical,  // Wrong data type or corrupted value
-    Major,     // Significant value difference
-    Minor,     // Formatting or precision difference
-    Cosmetic,  // Whitespace or presentation difference
+    Critical, // Wrong data type or corrupted value
+    Major,    // Significant value difference
+    Minor,    // Formatting or precision difference
+    Cosmetic, // Whitespace or presentation difference
 }
 
 /// Impact of format differences
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FormatImpact {
-    Breaking,    // Would break parsers
-    Functional,  // Changes meaning
-    Cosmetic,    // Visual difference only
+    Breaking,   // Would break parsers
+    Functional, // Changes meaning
+    Cosmetic,   // Visual difference only
 }
 
 /// Generate comprehensive accuracy test cases
 pub fn generate_test_cases(config: &ValidationConfig) -> Vec<AccuracyTestCase> {
     let mut test_cases = Vec::new();
-    
+
     // Generate test cases for each data type
     for data_type in get_all_data_types() {
         test_cases.extend(generate_data_type_tests(&data_type, config));
     }
-    
+
     // Generate collection-specific tests
     test_cases.extend(generate_collection_tests(config));
-    
+
     // Generate complex query tests
     test_cases.extend(generate_query_tests(config));
-    
+
     // Generate schema validation tests
     test_cases.extend(generate_schema_tests(config));
-    
+
     test_cases
 }
 
 /// Generate test cases for a specific data type
-fn generate_data_type_tests(data_type: &CqlDataType, config: &ValidationConfig) -> Vec<AccuracyTestCase> {
+fn generate_data_type_tests(
+    data_type: &CqlDataType,
+    config: &ValidationConfig,
+) -> Vec<AccuracyTestCase> {
     let mut tests = Vec::new();
-    
+
     let type_name = format!("{:?}", data_type).to_lowercase();
-    
+
     // Find matching test data paths
     for test_path in &config.test_data_directories {
         if let Ok(entries) = std::fs::read_dir(test_path) {
@@ -155,7 +158,10 @@ fn generate_data_type_tests(data_type: &CqlDataType, config: &ValidationConfig) 
                 if path.is_dir() && path.to_string_lossy().contains(&type_name) {
                     tests.push(AccuracyTestCase {
                         name: format!("{} Accuracy Test", type_name),
-                        description: format!("Validate accurate parsing of {} data type", type_name),
+                        description: format!(
+                            "Validate accurate parsing of {} data type",
+                            type_name
+                        ),
                         sstable_path: path.to_string_lossy().to_string(),
                         schema_path: None,
                         expected_data_type: data_type.clone(),
@@ -166,7 +172,7 @@ fn generate_data_type_tests(data_type: &CqlDataType, config: &ValidationConfig) 
             }
         }
     }
-    
+
     tests
 }
 
@@ -196,7 +202,10 @@ fn generate_collection_tests(config: &ValidationConfig) -> Vec<AccuracyTestCase>
             description: "Validate accurate parsing of MAP collections".to_string(),
             sstable_path: find_test_data_by_pattern(config, "collections").unwrap_or_default(),
             schema_path: None,
-            expected_data_type: CqlDataType::Map(Box::new(CqlDataType::Text), Box::new(CqlDataType::Int)),
+            expected_data_type: CqlDataType::Map(
+                Box::new(CqlDataType::Text),
+                Box::new(CqlDataType::Int),
+            ),
             test_query: Some("SELECT map_col FROM collections_table LIMIT 10".to_string()),
             validation_level: AccuracyLevel::ValueLevel,
         },
@@ -238,17 +247,15 @@ fn generate_query_tests(config: &ValidationConfig) -> Vec<AccuracyTestCase> {
 
 /// Generate schema validation tests
 fn generate_schema_tests(config: &ValidationConfig) -> Vec<AccuracyTestCase> {
-    vec![
-        AccuracyTestCase {
-            name: "Schema Inference Accuracy".to_string(),
-            description: "Validate accurate schema inference from SSTable metadata".to_string(),
-            sstable_path: find_test_data_by_pattern(config, "all_types").unwrap_or_default(),
-            schema_path: None,
-            expected_data_type: CqlDataType::Text, // Schema validation
-            test_query: None,
-            validation_level: AccuracyLevel::TypeLevel,
-        },
-    ]
+    vec![AccuracyTestCase {
+        name: "Schema Inference Accuracy".to_string(),
+        description: "Validate accurate schema inference from SSTable metadata".to_string(),
+        sstable_path: find_test_data_by_pattern(config, "all_types").unwrap_or_default(),
+        schema_path: None,
+        expected_data_type: CqlDataType::Text, // Schema validation
+        test_query: None,
+        validation_level: AccuracyLevel::TypeLevel,
+    }]
 }
 
 /// Run a single accuracy test
@@ -270,7 +277,9 @@ pub async fn run_test(test_case: AccuracyTestCase, config: &ValidationConfig) ->
     // Skip if test data doesn't exist
     if !Path::new(&test_case.sstable_path).exists() {
         result.status = ValidationStatus::Skipped;
-        result.errors.push(format!("Test data not found: {}", test_case.sstable_path));
+        result
+            .errors
+            .push(format!("Test data not found: {}", test_case.sstable_path));
         result.performance_ms = Some(start_time.elapsed().as_millis() as u64);
         return result;
     }
@@ -292,23 +301,38 @@ pub async fn run_test(test_case: AccuracyTestCase, config: &ValidationConfig) ->
 
     result.accuracy_score = calculate_overall_accuracy(&metrics);
     result.performance_ms = Some(start_time.elapsed().as_millis() as u64);
-    
+
     // Set status based on accuracy using default threshold
     let accuracy_threshold = 0.95; // Default accuracy threshold
     if result.accuracy_score >= accuracy_threshold {
         result.status = ValidationStatus::Passed;
     } else if result.accuracy_score >= accuracy_threshold * 0.8 {
         result.status = ValidationStatus::Warning;
-        result.warnings.push(format!("Accuracy below threshold: {:.2}%", result.accuracy_score * 100.0));
+        result.warnings.push(format!(
+            "Accuracy below threshold: {:.2}%",
+            result.accuracy_score * 100.0
+        ));
     } else {
         result.status = ValidationStatus::Failed;
-        result.errors.push(format!("Accuracy too low: {:.2}%", result.accuracy_score * 100.0));
+        result.errors.push(format!(
+            "Accuracy too low: {:.2}%",
+            result.accuracy_score * 100.0
+        ));
     }
 
     // Add detailed metrics to result
-    result.details.insert("validation_level".to_string(), format!("{:?}", test_case.validation_level));
-    result.details.insert("data_type".to_string(), format!("{:?}", test_case.expected_data_type));
-    result.details.insert("metrics".to_string(), serde_json::to_string(&metrics).unwrap_or_default());
+    result.details.insert(
+        "validation_level".to_string(),
+        format!("{:?}", test_case.validation_level),
+    );
+    result.details.insert(
+        "data_type".to_string(),
+        format!("{:?}", test_case.expected_data_type),
+    );
+    result.details.insert(
+        "metrics".to_string(),
+        serde_json::to_string(&metrics).unwrap_or_default(),
+    );
 
     result
 }
@@ -356,14 +380,17 @@ fn find_test_data_by_pattern(config: &ValidationConfig, pattern: &str) -> Option
 }
 
 /// Get reference data from cqlsh
-async fn get_cqlsh_reference_data(cqlsh_path: &str, test_case: &AccuracyTestCase) -> Option<String> {
+async fn get_cqlsh_reference_data(
+    cqlsh_path: &str,
+    test_case: &AccuracyTestCase,
+) -> Option<String> {
     if let Some(query) = &test_case.test_query {
         let output = Command::new(cqlsh_path)
             .arg("-e")
             .arg(query)
             .output()
             .ok()?;
-        
+
         if output.status.success() {
             Some(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
@@ -375,27 +402,29 @@ async fn get_cqlsh_reference_data(cqlsh_path: &str, test_case: &AccuracyTestCase
 }
 
 /// Get CQLite output for comparison
-async fn get_cqlite_output(test_case: &AccuracyTestCase, _config: &ValidationConfig) -> Result<String, String> {
+async fn get_cqlite_output(
+    test_case: &AccuracyTestCase,
+    _config: &ValidationConfig,
+) -> Result<String, String> {
     let mut cmd = Command::new("cqlite");
-    
+
     if let Some(query) = &test_case.test_query {
-        cmd.arg("select")
-           .arg(&test_case.sstable_path)
-           .arg(query);
+        cmd.arg("select").arg(&test_case.sstable_path).arg(query);
     } else {
         cmd.arg("read")
-           .arg(&test_case.sstable_path)
-           .arg("--limit")
-           .arg("10");
+            .arg(&test_case.sstable_path)
+            .arg("--limit")
+            .arg("10");
     }
-    
+
     if let Some(schema) = &test_case.schema_path {
         cmd.arg("--schema").arg(schema);
     }
-    
-    let output = cmd.output()
+
+    let output = cmd
+        .output()
         .map_err(|e| format!("Failed to execute CQLite: {}", e))?;
-    
+
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -404,7 +433,11 @@ async fn get_cqlite_output(test_case: &AccuracyTestCase, _config: &ValidationCon
 }
 
 /// Calculate accuracy metrics by comparing outputs
-fn calculate_accuracy_metrics(reference: &str, actual: &str, validation_level: &AccuracyLevel) -> AccuracyMetrics {
+fn calculate_accuracy_metrics(
+    reference: &str,
+    actual: &str,
+    validation_level: &AccuracyLevel,
+) -> AccuracyMetrics {
     match validation_level {
         AccuracyLevel::ByteLevel => calculate_byte_level_accuracy(reference, actual),
         AccuracyLevel::ValueLevel => calculate_value_level_accuracy(reference, actual),
@@ -416,7 +449,7 @@ fn calculate_accuracy_metrics(reference: &str, actual: &str, validation_level: &
 /// Calculate byte-level accuracy (exact match)
 fn calculate_byte_level_accuracy(reference: &str, actual: &str) -> AccuracyMetrics {
     let exact_match = reference == actual;
-    
+
     AccuracyMetrics {
         total_rows_compared: 1,
         matching_rows: if exact_match { 1 } else { 0 },
@@ -426,7 +459,9 @@ fn calculate_byte_level_accuracy(reference: &str, actual: &str) -> AccuracyMetri
         byte_level_matches: if exact_match { 1 } else { 0 },
         semantic_matches: 0,
         data_type_errors: Vec::new(),
-        value_mismatches: if exact_match { Vec::new() } else {
+        value_mismatches: if exact_match {
+            Vec::new()
+        } else {
             vec![ValueMismatch {
                 row_index: 0,
                 column_name: "output".to_string(),
@@ -446,22 +481,23 @@ fn calculate_value_level_accuracy(reference: &str, actual: &str) -> AccuracyMetr
     // This is a simplified implementation - in practice would parse JSON/CSV
     let ref_lines: Vec<&str> = reference.lines().collect();
     let actual_lines: Vec<&str> = actual.lines().collect();
-    
+
     let total_rows = ref_lines.len().max(actual_lines.len());
-    let matching_rows = ref_lines.iter()
+    let matching_rows = ref_lines
+        .iter()
         .zip(actual_lines.iter())
         .filter(|(ref_line, actual_line)| {
             // Semantic comparison - could parse and compare values
             ref_line.trim() == actual_line.trim()
         })
         .count();
-    
+
     let accuracy = if total_rows > 0 {
         matching_rows as f64 / total_rows as f64
     } else {
         1.0
     };
-    
+
     AccuracyMetrics {
         total_rows_compared: total_rows,
         matching_rows,
@@ -511,7 +547,10 @@ fn calculate_format_level_accuracy(_reference: &str, _actual: &str) -> AccuracyM
 }
 
 /// Run basic validation when no reference data is available
-async fn run_basic_validation(_test_case: &AccuracyTestCase, _config: &ValidationConfig) -> AccuracyMetrics {
+async fn run_basic_validation(
+    _test_case: &AccuracyTestCase,
+    _config: &ValidationConfig,
+) -> AccuracyMetrics {
     // Basic validation - check if CQLite can parse the data without errors
     AccuracyMetrics {
         total_rows_compared: 1,
@@ -531,8 +570,8 @@ async fn run_basic_validation(_test_case: &AccuracyTestCase, _config: &Validatio
 fn calculate_overall_accuracy(metrics: &AccuracyMetrics) -> f64 {
     // Weighted average of different accuracy types
     let weights = (0.4, 0.4, 0.2); // (type, value, format)
-    
-    weights.0 * metrics.type_accuracy +
-    weights.1 * metrics.value_accuracy +
-    weights.2 * metrics.format_accuracy
+
+    weights.0 * metrics.type_accuracy
+        + weights.1 * metrics.value_accuracy
+        + weights.2 * metrics.format_accuracy
 }

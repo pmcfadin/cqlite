@@ -7,11 +7,15 @@
 //! - CQL data type parsing validation
 //! - BTI index parsing integration tests
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::{
     error::Error,
-    parser::{header::{self, parse_sstable_header, serialize_sstable_header}, types, vint, CqlTypeId, SSTableParser},
+    parser::{
+        CqlTypeId, SSTableParser,
+        header::{self, parse_sstable_header, serialize_sstable_header},
+        types, vint,
+    },
     types::Value,
 };
 use std::fs;
@@ -36,7 +40,8 @@ impl ParserValidationSuite {
         let test_data_path = current_dir.join(TEST_ENV_PATH);
 
         Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default()).unwrap(),
+            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
+                .unwrap(),
             test_data_path,
             temp_dir: None,
         }
@@ -306,7 +311,8 @@ mod header_validation_tests {
 
         // Parse the header
         let (header, parsed_bytes) = suite
-            .parser.parse_sstable_header(&test_header_bytes)
+            .parser
+            .parse_sstable_header(&test_header_bytes)
             .expect("Failed to parse test header");
 
         assert_eq!(
@@ -335,8 +341,7 @@ mod header_validation_tests {
         assert_eq!(header.columns[0].key_position, Some(0));
 
         // Test serialization roundtrip
-        let reserialized = suite
-            .parser;
+        let reserialized = suite.parser;
         cqlite_core::parser::header::serialize_sstable_header(&header)
             .expect("Failed to reserialize header");
         assert_eq!(

@@ -3,10 +3,10 @@
 //! This module provides comprehensive performance regression detection and tracking
 //! to ensure CQLite maintains its performance targets over time and across releases.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::error::Result;
-use cqlite_core::{types::TableId, Config, RowKey, Value};
+use cqlite_core::{Config, RowKey, Value, types::TableId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -172,7 +172,7 @@ impl PerformanceRegressionFramework {
         let temp_dir = TempDir::new().map_err(|e| {
             cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to create temp dir: {}", e)
+                format!("Failed to create temp dir: {}", e),
             ))
         })?;
 
@@ -692,14 +692,14 @@ impl PerformanceRegressionFramework {
         let content = fs::read_to_string(path).await.map_err(|e| {
             cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to read baseline: {}", e)
+                format!("Failed to read baseline: {}", e),
             ))
         })?;
 
         serde_json::from_str(&content).map_err(|e| {
             cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to parse baseline: {}", e)
+                format!("Failed to parse baseline: {}", e),
             ))
         })
     }
@@ -709,7 +709,7 @@ impl PerformanceRegressionFramework {
         let content = serde_json::to_string_pretty(baseline).map_err(|e| {
             cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to serialize baseline: {}", e)
+                format!("Failed to serialize baseline: {}", e),
             ))
         })?;
 
@@ -718,7 +718,7 @@ impl PerformanceRegressionFramework {
             .map_err(|e| {
                 cqlite_core::error::Error::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("Failed to write baseline: {}", e)
+                    format!("Failed to write baseline: {}", e),
                 ))
             })
     }

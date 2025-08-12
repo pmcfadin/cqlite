@@ -2,9 +2,9 @@
 //!
 //! This module contains utility functions for the FFI interface.
 
+use crate::error::{CQLITE_ERROR_INIT, set_last_error};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::Runtime;
-use crate::error::{CQLITE_ERROR_INIT, set_last_error};
 
 /// Global runtime storage
 static RUNTIME: OnceLock<Arc<Mutex<Option<Arc<Runtime>>>>> = OnceLock::new();
@@ -13,7 +13,7 @@ static RUNTIME: OnceLock<Arc<Mutex<Option<Arc<Runtime>>>>> = OnceLock::new();
 pub fn get_or_create_runtime() -> Result<Arc<Runtime>, std::io::Error> {
     let runtime_mutex = RUNTIME.get_or_init(|| Arc::new(Mutex::new(None)));
     let mut runtime_guard = runtime_mutex.lock().unwrap();
-    
+
     if let Some(ref runtime) = *runtime_guard {
         Ok(runtime.clone())
     } else {

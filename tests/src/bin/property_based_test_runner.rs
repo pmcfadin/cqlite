@@ -1,12 +1,11 @@
 #!/usr/bin/env cargo
 
 /// Property-Based Testing Runner for CQLite - Issue #17
-/// 
+///
 /// This module implements comprehensive property-based testing to ensure data integrity
 /// and correctness across various Cassandra data types and edge cases.
-/// 
+///
 /// CRITICAL SUCCESS FACTOR: Command-line test execution MUST work reliably!
-
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -99,24 +98,24 @@ impl PropertyBasedTestRunner {
             total_execution_time: Duration::from_secs(0),
         };
 
-        PropertyBasedTestRunner {
-            config,
-            suite,
-        }
+        PropertyBasedTestRunner { config, suite }
     }
 
     pub fn run_all_tests(&mut self) -> Result<()> {
         println!("🎯 Issue #17: Property-Based Testing Runner");
         println!("============================================");
-        println!("Configuration: {} cases per test, timeout: {}s", 
-                 self.config.cases, self.config.timeout.as_secs());
+        println!(
+            "Configuration: {} cases per test, timeout: {}s",
+            self.config.cases,
+            self.config.timeout.as_secs()
+        );
         println!();
 
         let test_names = vec![
             "Serialization Round-trip",
-            "Collection Consistency", 
+            "Collection Consistency",
             "Temporal Properties",
-            "Binary Data Integrity"
+            "Binary Data Integrity",
         ];
 
         let mut total_cases = 0;
@@ -125,7 +124,7 @@ impl PropertyBasedTestRunner {
 
         for test_name in test_names {
             println!("🔍 Running: {}", test_name);
-            
+
             let result = match test_name {
                 "Serialization Round-trip" => self.test_serialization_roundtrip(),
                 "Collection Consistency" => self.test_collection_consistency(),
@@ -133,19 +132,30 @@ impl PropertyBasedTestRunner {
                 "Binary Data Integrity" => self.test_binary_data_integrity(),
                 _ => unreachable!(),
             };
-            
+
             match result {
                 Ok(result) => {
                     total_cases += result.cases_run;
                     if result.success {
                         total_successes += 1;
-                        println!("  ✅ {} ({} cases, {:.2}s)", 
-                                test_name, result.cases_run, result.execution_time.as_secs_f64());
-                        println!("  📋 Properties verified: {}", result.properties_verified.join(", "));
+                        println!(
+                            "  ✅ {} ({} cases, {:.2}s)",
+                            test_name,
+                            result.cases_run,
+                            result.execution_time.as_secs_f64()
+                        );
+                        println!(
+                            "  📋 Properties verified: {}",
+                            result.properties_verified.join(", ")
+                        );
                     } else {
                         total_failures += 1;
-                        println!("  ❌ {} ({} cases, {:.2}s)", 
-                                test_name, result.cases_run, result.execution_time.as_secs_f64());
+                        println!(
+                            "  ❌ {} ({} cases, {:.2}s)",
+                            test_name,
+                            result.cases_run,
+                            result.execution_time.as_secs_f64()
+                        );
                         if let Some(error) = &result.error_message {
                             println!("  🐛 Error: {}", error);
                         }
@@ -173,7 +183,11 @@ impl PropertyBasedTestRunner {
         self.suite.total_cases = total_cases;
         self.suite.total_successes = total_successes;
         self.suite.total_failures = total_failures;
-        self.suite.total_execution_time = self.suite.start_time.elapsed().unwrap_or(Duration::from_secs(0));
+        self.suite.total_execution_time = self
+            .suite
+            .start_time
+            .elapsed()
+            .unwrap_or(Duration::from_secs(0));
 
         // Print summary
         self.print_summary();
@@ -188,10 +202,10 @@ impl PropertyBasedTestRunner {
     // Stub implementations for property tests
     fn test_serialization_roundtrip(&mut self) -> Result<PropertyTestResult> {
         let start_time = Instant::now();
-        
+
         // Simulate running property tests
         std::thread::sleep(Duration::from_millis(100));
-        
+
         Ok(PropertyTestResult {
             test_name: "serialization_roundtrip".to_string(),
             success: true,
@@ -209,10 +223,10 @@ impl PropertyBasedTestRunner {
 
     fn test_collection_consistency(&mut self) -> Result<PropertyTestResult> {
         let start_time = Instant::now();
-        
+
         // Simulate running property tests
         std::thread::sleep(Duration::from_millis(150));
-        
+
         Ok(PropertyTestResult {
             test_name: "collection_consistency".to_string(),
             success: true,
@@ -230,10 +244,10 @@ impl PropertyBasedTestRunner {
 
     fn test_temporal_properties(&mut self) -> Result<PropertyTestResult> {
         let start_time = Instant::now();
-        
+
         // Simulate running property tests
         std::thread::sleep(Duration::from_millis(120));
-        
+
         Ok(PropertyTestResult {
             test_name: "temporal_properties".to_string(),
             success: true,
@@ -251,10 +265,10 @@ impl PropertyBasedTestRunner {
 
     fn test_binary_data_integrity(&mut self) -> Result<PropertyTestResult> {
         let start_time = Instant::now();
-        
+
         // Simulate running property tests
         std::thread::sleep(Duration::from_millis(80));
-        
+
         Ok(PropertyTestResult {
             test_name: "binary_data_integrity".to_string(),
             success: true,
@@ -278,7 +292,10 @@ impl PropertyBasedTestRunner {
         println!("Total Cases: {}", self.suite.total_cases);
         println!("Successes: {}", self.suite.total_successes);
         println!("Failures: {}", self.suite.total_failures);
-        println!("Total Time: {:.2}s", self.suite.total_execution_time.as_secs_f64());
+        println!(
+            "Total Time: {:.2}s",
+            self.suite.total_execution_time.as_secs_f64()
+        );
         println!();
 
         if self.suite.total_failures == 0 {
@@ -296,10 +313,9 @@ impl PropertyBasedTestRunner {
     pub fn save_results(&self, output_path: &PathBuf) -> Result<()> {
         let json_output = serde_json::to_string_pretty(&self.suite)
             .context("Failed to serialize test results")?;
-        
-        std::fs::write(output_path, json_output)
-            .context("Failed to write results file")?;
-        
+
+        std::fs::write(output_path, json_output).context("Failed to write results file")?;
+
         println!("📄 Results saved to: {}", output_path.display());
         Ok(())
     }
@@ -309,53 +325,65 @@ fn main() -> Result<()> {
     let matches = Command::new("property_based_test_runner")
         .version("1.0.0")
         .about("Property-Based Testing Runner for CQLite Issue #17")
-        .arg(Arg::new("cases")
-            .long("cases")
-            .value_name("NUMBER")
-            .help("Number of test cases to run per property")
-            .default_value("100"))
-        .arg(Arg::new("timeout")
-            .long("timeout")
-            .value_name("SECONDS")
-            .help("Timeout per test in seconds")
-            .default_value("30"))
-        .arg(Arg::new("output")
-            .long("output")
-            .short('o')
-            .value_name("FILE")
-            .help("Output file for test results")
-            .default_value("property_test_results.json"))
-        .arg(Arg::new("verbose")
-            .long("verbose")
-            .short('v')
-            .help("Enable verbose output")
-            .action(clap::ArgAction::SetTrue))
-        .arg(Arg::new("help")
-            .long("help")
-            .help("Print help information")
-            .action(clap::ArgAction::Help))
+        .arg(
+            Arg::new("cases")
+                .long("cases")
+                .value_name("NUMBER")
+                .help("Number of test cases to run per property")
+                .default_value("100"),
+        )
+        .arg(
+            Arg::new("timeout")
+                .long("timeout")
+                .value_name("SECONDS")
+                .help("Timeout per test in seconds")
+                .default_value("30"),
+        )
+        .arg(
+            Arg::new("output")
+                .long("output")
+                .short('o')
+                .value_name("FILE")
+                .help("Output file for test results")
+                .default_value("property_test_results.json"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .long("verbose")
+                .short('v')
+                .help("Enable verbose output")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("help")
+                .long("help")
+                .help("Print help information")
+                .action(clap::ArgAction::Help),
+        )
         .get_matches();
 
     // Parse configuration from command line
-    let cases: u32 = matches.get_one::<String>("cases")
+    let cases: u32 = matches
+        .get_one::<String>("cases")
         .unwrap()
         .parse()
         .context("Invalid number of cases")?;
-    
-    let timeout_secs: u64 = matches.get_one::<String>("timeout")
+
+    let timeout_secs: u64 = matches
+        .get_one::<String>("timeout")
         .unwrap()
         .parse()
         .context("Invalid timeout value")?;
-    
+
     let output_path = PathBuf::from(matches.get_one::<String>("output").unwrap());
-    
+
     let mut config = PropertyTestConfig::default();
     config.cases = cases;
     config.timeout = Duration::from_secs(timeout_secs);
 
     // Create and run test runner
     let mut runner = PropertyBasedTestRunner::new(config);
-    
+
     match runner.run_all_tests() {
         Ok(()) => {
             runner.save_results(&output_path)?;

@@ -1,8 +1,8 @@
 //! Format deviation detection for Cassandra 5+ SSTable validation
 
-use crate::{ValidationError, ValidationResult, SSTableFileType, DeviationDetector};
-use std::path::Path;
+use crate::{DeviationDetector, SSTableFileType, ValidationError, ValidationResult};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Format deviation detector for identifying non-compliance
 #[derive(Debug)]
@@ -13,10 +13,10 @@ pub struct FormatDeviationDetector {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToleranceLevel {
-    Zero,       // No deviations allowed
-    Minimal,    // Minor deviations allowed
-    Standard,   // Standard tolerance
-    Relaxed,    // High tolerance
+    Zero,     // No deviations allowed
+    Minimal,  // Minor deviations allowed
+    Standard, // Standard tolerance
+    Relaxed,  // High tolerance
 }
 
 impl Default for FormatDeviationDetector {
@@ -42,17 +42,17 @@ impl FormatDeviationDetector {
         use std::collections::HashMap;
         self.reference_patterns.insert(file_type, pattern);
     }
-    
+
     pub fn detect_format_deviations(&self, data: &[u8]) -> Vec<String> {
         let mut deviations = Vec::new();
 
         // Check for known magic numbers
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-            let is_known_magic = magic == crate::format_constants::BIG_FORMAT_OA_MAGIC ||
-                               magic == crate::format_constants::BTI_FORMAT_DA_MAGIC ||
-                               magic == crate::format_constants::STATISTICS_MAGIC;
-            
+            let is_known_magic = magic == crate::format_constants::BIG_FORMAT_OA_MAGIC
+                || magic == crate::format_constants::BTI_FORMAT_DA_MAGIC
+                || magic == crate::format_constants::STATISTICS_MAGIC;
+
             if !is_known_magic {
                 deviations.push(format!("Unknown magic number: {:#x}", magic));
             }
@@ -70,23 +70,23 @@ impl FormatDeviationDetector {
     pub fn detect_file_deviations(&self, path: &Path) -> Result<Vec<String>, ValidationError> {
         let file_type = SSTableFileType::from_path(path);
         let data = crate::utils::read_file_safe(path, 100 * 1024 * 1024)?; // 100MB limit
-        
+
         let mut deviations = Vec::new();
-        
+
         // Check against known format patterns
         match file_type {
             SSTableFileType::Data => {
                 deviations.extend(self.detect_data_deviations(&data)?);
-            },
+            }
             SSTableFileType::Statistics => {
                 deviations.extend(self.detect_statistics_deviations(&data)?);
-            },
+            }
             SSTableFileType::Partitions | SSTableFileType::Rows => {
                 deviations.extend(self.detect_bti_deviations(&data)?);
-            },
+            }
             SSTableFileType::Index => {
                 deviations.extend(self.detect_index_deviations(&data)?);
-            },
+            }
             _ => {
                 deviations.push(format!("Unknown file type pattern: {:?}", file_type));
             }
@@ -94,7 +94,7 @@ impl FormatDeviationDetector {
 
         // Apply tolerance filtering
         let filtered_deviations = self.filter_by_tolerance(deviations);
-        
+
         Ok(filtered_deviations)
     }
 
@@ -105,8 +105,11 @@ impl FormatDeviationDetector {
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             if magic != crate::format_constants::BIG_FORMAT_OA_MAGIC {
-                deviations.push(format!("Unexpected magic number: {:#x} (expected {:#x})", 
-                    magic, crate::format_constants::BIG_FORMAT_OA_MAGIC));
+                deviations.push(format!(
+                    "Unexpected magic number: {:#x} (expected {:#x})",
+                    magic,
+                    crate::format_constants::BIG_FORMAT_OA_MAGIC
+                ));
             }
         }
 
@@ -114,8 +117,11 @@ impl FormatDeviationDetector {
         if data.len() >= 6 {
             let version = u16::from_be_bytes([data[4], data[5]]);
             if version != crate::format_constants::SUPPORTED_VERSION {
-                deviations.push(format!("Unsupported version: {:#x} (expected {:#x})", 
-                    version, crate::format_constants::SUPPORTED_VERSION));
+                deviations.push(format!(
+                    "Unsupported version: {:#x} (expected {:#x})",
+                    version,
+                    crate::format_constants::SUPPORTED_VERSION
+                ));
             }
         }
 
@@ -171,7 +177,9 @@ impl FormatDeviationDetector {
                 deviations.push("BTI block size is zero".to_string());
             } else if block_size > 1024 * 1024 {
                 deviations.push(format!("BTI block size too large: {}", block_size));
-            } else if !block_size.is_power_of_two() && block_size != crate::format_constants::BTI_DEFAULT_BLOCK_SIZE {
+            } else if !block_size.is_power_of_two()
+                && block_size != crate::format_constants::BTI_DEFAULT_BLOCK_SIZE
+            {
                 deviations.push(format!("Non-standard BTI block size: {}", block_size));
             }
         }
@@ -218,45 +226,53 @@ impl FormatDeviationDetector {
     fn filter_by_tolerance(&self, deviations: Vec<String>) -> Vec<String> {
         match self.tolerance_level {
             ToleranceLevel::Zero => deviations,
-            ToleranceLevel::Minimal => {
-                deviations.into_iter()
-                    .filter(|d| !d.contains("alignment") && !d.contains("unusually"))
-                    .collect()
-            },
-            ToleranceLevel::Standard => {
-                deviations.into_iter()
-                    .filter(|d| d.contains("magic") || d.contains("version") || d.contains("empty"))
-                    .collect()
-            },
-            ToleranceLevel::Relaxed => {
-                deviations.into_iter()
-                    .filter(|d| d.contains("magic") || d.contains("empty"))
-                    .collect()
-            }
+            ToleranceLevel::Minimal => deviations
+                .into_iter()
+                .filter(|d| !d.contains("alignment") && !d.contains("unusually"))
+                .collect(),
+            ToleranceLevel::Standard => deviations
+                .into_iter()
+                .filter(|d| d.contains("magic") || d.contains("version") || d.contains("empty"))
+                .collect(),
+            ToleranceLevel::Relaxed => deviations
+                .into_iter()
+                .filter(|d| d.contains("magic") || d.contains("empty"))
+                .collect(),
         }
     }
 }
 
 impl DeviationDetector for FormatDeviationDetector {
-    fn compare_with_reference(&self, file1: &Path, file2: &Path) -> Result<Vec<String>, ValidationError> {
+    fn compare_with_reference(
+        &self,
+        file1: &Path,
+        file2: &Path,
+    ) -> Result<Vec<String>, ValidationError> {
         let data1 = crate::utils::read_file_safe(file1, 50 * 1024 * 1024)?;
         let data2 = crate::utils::read_file_safe(file2, 50 * 1024 * 1024)?;
-        
+
         let mut differences = Vec::new();
 
         if data1.len() != data2.len() {
-            differences.push(format!("File sizes differ: {} vs {}", data1.len(), data2.len()));
+            differences.push(format!(
+                "File sizes differ: {} vs {}",
+                data1.len(),
+                data2.len()
+            ));
         }
 
         let min_len = data1.len().min(data2.len());
         let mut diff_count = 0;
-        
+
         for i in 0..min_len {
             if data1[i] != data2[i] {
                 diff_count += 1;
-                if diff_count <= 10 { // Report first 10 differences
-                    differences.push(format!("Byte difference at offset {}: {:#x} vs {:#x}", 
-                        i, data1[i], data2[i]));
+                if diff_count <= 10 {
+                    // Report first 10 differences
+                    differences.push(format!(
+                        "Byte difference at offset {}: {:#x} vs {:#x}",
+                        i, data1[i], data2[i]
+                    ));
                 }
             }
         }
@@ -274,10 +290,10 @@ impl DeviationDetector for FormatDeviationDetector {
         // Check for known magic numbers
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-            let is_known_magic = magic == crate::format_constants::BIG_FORMAT_OA_MAGIC ||
-                               magic == crate::format_constants::BTI_FORMAT_DA_MAGIC ||
-                               magic == crate::format_constants::STATISTICS_MAGIC;
-            
+            let is_known_magic = magic == crate::format_constants::BIG_FORMAT_OA_MAGIC
+                || magic == crate::format_constants::BTI_FORMAT_DA_MAGIC
+                || magic == crate::format_constants::STATISTICS_MAGIC;
+
             if !is_known_magic {
                 deviations.push(format!("Unknown magic number: {:#x}", magic));
             }

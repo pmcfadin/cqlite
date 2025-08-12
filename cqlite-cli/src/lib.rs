@@ -13,10 +13,10 @@ pub mod config;
 pub mod test_infrastructure;
 
 // Re-export commonly used types for testing
-pub use cli::{OutputFormat, ImportFormat, ExportFormat};
+pub use cli::{ExportFormat, ImportFormat, OutputFormat};
 
 // Re-export CLI types for external use
-pub use commands::{Cli, Commands, AdminCommands, SchemaCommands, BenchCommands};
+pub use commands::{AdminCommands, BenchCommands, Cli, Commands, SchemaCommands};
 pub use config::Config;
 
 #[cfg(test)]

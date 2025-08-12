@@ -44,14 +44,14 @@ pub use result::{
 pub use select_ast::*;
 pub use select_executor::SelectExecutor;
 pub use select_optimizer::{OptimizedQueryPlan, SelectOptimizer};
-pub use select_parser::{parse_select, SelectParser};
+pub use select_parser::{SelectParser, parse_select};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    memory::MemoryManager, schema::SchemaManager, storage::StorageEngine, Config, Result, TableId,
-    Value,
+    Config, Result, TableId, Value, memory::MemoryManager, schema::SchemaManager,
+    storage::StorageEngine,
 };
 
 /// Query execution statistics

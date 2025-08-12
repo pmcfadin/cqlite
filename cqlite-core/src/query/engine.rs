@@ -4,6 +4,7 @@
 //! parsing, planning, and execution of CQL queries.
 
 use super::{
+    QueryStats,
     executor::{QueryExecutor, QueryResult},
     parser::QueryParser,
     planner::QueryPlanner,
@@ -12,10 +13,9 @@ use super::{
     select_optimizer::SelectOptimizer,
     // Advanced SELECT components
     select_parser,
-    QueryStats,
 };
 use crate::{
-    memory::MemoryManager, schema::SchemaManager, storage::StorageEngine, Config, Result, Value,
+    Config, Result, Value, memory::MemoryManager, schema::SchemaManager, storage::StorageEngine,
 };
 use dashmap::DashMap;
 use std::sync::Arc;

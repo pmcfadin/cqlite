@@ -6,10 +6,10 @@
 use super::vint::{parse_vint, parse_vint_length};
 use crate::error::Result;
 use nom::{
+    IResult,
     bytes::complete::take,
     multi::count,
-    number::complete::{be_u16, be_u32, be_u64, be_u8},
-    IResult,
+    number::complete::{be_u8, be_u16, be_u32, be_u64},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -40,10 +40,10 @@ impl CassandraVersion {
             CassandraVersion::V5_0Beta => 0xA007_0000,    // Cassandra 5.0 Beta
             CassandraVersion::V5_0Release => 0x4316_0000, // Cassandra 5.0 Release
             CassandraVersion::V5_0NewBig => 0x0040_0000,  // Cassandra 5.0 'nb' (new big) format
-            CassandraVersion::V5_0Bti => 0x6461_0000,     // Cassandra 5.0 BTI (Big Trie-Indexed) format
+            CassandraVersion::V5_0Bti => 0x6461_0000, // Cassandra 5.0 BTI (Big Trie-Indexed) format
         }
     }
-    
+
     /// Parse magic number to version
     pub fn from_magic_number(magic: u32) -> Option<CassandraVersion> {
         match magic {
@@ -56,7 +56,7 @@ impl CassandraVersion {
             _ => None,
         }
     }
-    
+
     /// Get human-readable version string
     pub fn version_string(&self) -> &'static str {
         match self {
@@ -159,15 +159,11 @@ pub struct ColumnInfo {
 /// Parse the SSTable magic number and version, supporting multiple Cassandra versions
 pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion, u16)> {
     let (input, magic) = be_u32(input)?;
-    
+
     // Detect Cassandra version from magic number
-    let cassandra_version = CassandraVersion::from_magic_number(magic)
-        .ok_or_else(|| {
-            nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            ))
-        })?;
+    let cassandra_version = CassandraVersion::from_magic_number(magic).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
 
     // Handle different format versions - 'nb' format has different header structure
     let (input, version) = match cassandra_version {
@@ -184,7 +180,7 @@ pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion
             (input, version)
         }
     };
-    
+
     // For now, we support version 0x0001 across all Cassandra versions
     // This can be extended in the future for version-specific handling
     if version != SUPPORTED_VERSION {
@@ -518,21 +514,51 @@ mod tests {
 
     #[test]
     fn test_cassandra_version_from_magic() {
-        assert_eq!(CassandraVersion::from_magic_number(0x6F61_0000), Some(CassandraVersion::Legacy));
-        assert_eq!(CassandraVersion::from_magic_number(0xAD01_0000), Some(CassandraVersion::V5_0Alpha));
-        assert_eq!(CassandraVersion::from_magic_number(0xA007_0000), Some(CassandraVersion::V5_0Beta));
-        assert_eq!(CassandraVersion::from_magic_number(0x4316_0000), Some(CassandraVersion::V5_0Release));
-        assert_eq!(CassandraVersion::from_magic_number(0x0040_0000), Some(CassandraVersion::V5_0NewBig));
+        assert_eq!(
+            CassandraVersion::from_magic_number(0x6F61_0000),
+            Some(CassandraVersion::Legacy)
+        );
+        assert_eq!(
+            CassandraVersion::from_magic_number(0xAD01_0000),
+            Some(CassandraVersion::V5_0Alpha)
+        );
+        assert_eq!(
+            CassandraVersion::from_magic_number(0xA007_0000),
+            Some(CassandraVersion::V5_0Beta)
+        );
+        assert_eq!(
+            CassandraVersion::from_magic_number(0x4316_0000),
+            Some(CassandraVersion::V5_0Release)
+        );
+        assert_eq!(
+            CassandraVersion::from_magic_number(0x0040_0000),
+            Some(CassandraVersion::V5_0NewBig)
+        );
         assert_eq!(CassandraVersion::from_magic_number(0xDEADBEEF), None);
     }
 
     #[test]
     fn test_cassandra_version_strings() {
-        assert_eq!(CassandraVersion::Legacy.version_string(), "Legacy 'oa' format");
-        assert_eq!(CassandraVersion::V5_0Alpha.version_string(), "Cassandra 5.0 Alpha");
-        assert_eq!(CassandraVersion::V5_0Beta.version_string(), "Cassandra 5.0 Beta");
-        assert_eq!(CassandraVersion::V5_0Release.version_string(), "Cassandra 5.0 Release");
-        assert_eq!(CassandraVersion::V5_0NewBig.version_string(), "Cassandra 5.0 'nb' (new big) format");
+        assert_eq!(
+            CassandraVersion::Legacy.version_string(),
+            "Legacy 'oa' format"
+        );
+        assert_eq!(
+            CassandraVersion::V5_0Alpha.version_string(),
+            "Cassandra 5.0 Alpha"
+        );
+        assert_eq!(
+            CassandraVersion::V5_0Beta.version_string(),
+            "Cassandra 5.0 Beta"
+        );
+        assert_eq!(
+            CassandraVersion::V5_0Release.version_string(),
+            "Cassandra 5.0 Release"
+        );
+        assert_eq!(
+            CassandraVersion::V5_0NewBig.version_string(),
+            "Cassandra 5.0 'nb' (new big) format"
+        );
     }
 
     #[test]
@@ -592,13 +618,13 @@ mod tests {
     #[test]
     fn test_header_serialization_roundtrip() {
         use std::collections::HashMap;
-        
+
         let mut properties = HashMap::new();
         properties.insert("test_key".to_string(), "test_value".to_string());
-        
+
         let mut compression_params = HashMap::new();
         compression_params.insert("level".to_string(), "6".to_string());
-        
+
         let header = SSTableHeader {
             cassandra_version: CassandraVersion::V5_0NewBig,
             version: SUPPORTED_VERSION,
@@ -632,10 +658,10 @@ mod tests {
 
         // Serialize the header
         let serialized = serialize_sstable_header(&header).unwrap();
-        
+
         // Parse it back
         let (_, parsed_header) = parse_sstable_header(&serialized).unwrap();
-        
+
         // Verify all fields match
         assert_eq!(parsed_header.cassandra_version, header.cassandra_version);
         assert_eq!(parsed_header.version, header.version);
@@ -643,7 +669,10 @@ mod tests {
         assert_eq!(parsed_header.keyspace, header.keyspace);
         assert_eq!(parsed_header.table_name, header.table_name);
         assert_eq!(parsed_header.generation, header.generation);
-        assert_eq!(parsed_header.compression.algorithm, header.compression.algorithm);
+        assert_eq!(
+            parsed_header.compression.algorithm,
+            header.compression.algorithm
+        );
         assert_eq!(parsed_header.stats.row_count, header.stats.row_count);
         assert_eq!(parsed_header.columns.len(), header.columns.len());
         assert_eq!(parsed_header.properties, header.properties);

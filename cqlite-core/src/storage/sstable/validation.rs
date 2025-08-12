@@ -7,8 +7,8 @@ use std::process::Command;
 
 use crate::storage::sstable::writer::SSTableWriter;
 use crate::types::TableId;
-use crate::{error::Error, Result, RowKey, Value};
-use crate::{platform::Platform, Config};
+use crate::{Config, platform::Platform};
+use crate::{Result, RowKey, Value, error::Error};
 use std::sync::Arc;
 
 /// Validation framework for Cassandra compatibility

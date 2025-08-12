@@ -3,13 +3,13 @@
 //! Integration tests that work with real CQL files and test the complete
 //! schema parsing pipeline from CQL input to validated schema output.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use crate::fixtures::test_data::*;
+use cqlite_core::Config;
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::SSTableParser;
-use cqlite_core::schema::{TableSchema, UdtRegistry, CqlType};
-use cqlite_core::Config;
+use cqlite_core::schema::{CqlType, TableSchema, UdtRegistry};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ impl CqlIntegrationTestSuite {
     pub async fn new() -> Result<Self> {
         let temp_dir = TempDir::new()
             .map_err(|e| Error::schema(format!("Failed to create temp dir: {}", e)))?;
-        
+
         Ok(Self {
             temp_dir,
             schema_manager: None,
@@ -54,8 +54,10 @@ impl CqlIntegrationTestSuite {
     pub async fn initialize_schema_manager(&mut self) -> Result<()> {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let storage = Arc::new(StorageEngine::open(std::path::Path::new("./test_data"), &config, platform).await?);
-        
+        let storage = Arc::new(
+            StorageEngine::open(std::path::Path::new("./test_data"), &config, platform).await?,
+        );
+
         self.schema_manager = Some(SchemaManager::new_with_storage(storage, &config).await?);
         Ok(())
     }
@@ -63,31 +65,31 @@ impl CqlIntegrationTestSuite {
     /// Run all integration tests
     pub async fn run_all_tests(&mut self) -> Result<IntegrationTestReport> {
         println!("🔗 Starting CQL Integration Test Suite");
-        
+
         // Initialize schema manager
         self.initialize_schema_manager().await?;
-        
+
         // Test CQL file parsing
         self.test_cql_file_parsing().await?;
-        
+
         // Test schema validation workflow
         self.test_schema_validation_workflow().await?;
-        
+
         // Test UDT integration
         self.test_udt_integration().await?;
-        
+
         // Test complex schema scenarios
         self.test_complex_schema_scenarios().await?;
-        
+
         // Test schema roundtrip (CQL -> JSON -> CQL)
         self.test_schema_roundtrip().await?;
-        
+
         // Test error recovery and graceful degradation
         self.test_error_recovery().await?;
-        
+
         // Test performance with large schemas
         self.test_large_schema_performance().await?;
-        
+
         Ok(self.generate_report())
     }
 
@@ -95,13 +97,13 @@ impl CqlIntegrationTestSuite {
     async fn test_cql_file_parsing(&mut self) -> Result<()> {
         let test_name = "cql_file_parsing";
         let start_time = std::time::Instant::now();
-        
+
         // Create comprehensive test CQL files
         let test_files = self.create_comprehensive_cql_files()?;
-        
+
         let mut failures = Vec::new();
         let mut schemas_validated = 0;
-        
+
         for (file_path, expected_characteristics) in &test_files {
             match fs::read_to_string(file_path) {
                 Ok(cql_content) => {
@@ -111,13 +113,17 @@ impl CqlIntegrationTestSuite {
                             if let Err(e) = schema.validate() {
                                 failures.push(format!(
                                     "File '{}': Schema validation failed: {}",
-                                    file_path.display(), e
+                                    file_path.display(),
+                                    e
                                 ));
                             } else {
                                 schemas_validated += 1;
-                                
+
                                 // Check expected characteristics
-                                if !self.schema_matches_characteristics(&schema, expected_characteristics) {
+                                if !self.schema_matches_characteristics(
+                                    &schema,
+                                    expected_characteristics,
+                                ) {
                                     failures.push(format!(
                                         "File '{}': Schema doesn't match expected characteristics",
                                         file_path.display()
@@ -128,7 +134,8 @@ impl CqlIntegrationTestSuite {
                         Err(e) => {
                             failures.push(format!(
                                 "File '{}': Failed to parse CQL: {}",
-                                file_path.display(), e
+                                file_path.display(),
+                                e
                             ));
                         }
                     }
@@ -136,32 +143,43 @@ impl CqlIntegrationTestSuite {
                 Err(e) => {
                     failures.push(format!(
                         "File '{}': Failed to read file: {}",
-                        file_path.display(), e
+                        file_path.display(),
+                        e
                     ));
                 }
             }
         }
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
-        
+
         let result = IntegrationTestResult {
             test_name: test_name.to_string(),
             passed: failures.is_empty(),
-            error_message: if failures.is_empty() { None } else { Some(failures.join("; ")) },
+            error_message: if failures.is_empty() {
+                None
+            } else {
+                Some(failures.join("; "))
+            },
             execution_time_ms: execution_time,
             files_processed: test_files.len(),
             schemas_validated,
         };
-        
+
         self.results.insert(test_name.to_string(), result.clone());
-        
+
         if result.passed {
-            println!("✅ CQL file parsing tests passed ({}/{} files)", 
-                    schemas_validated, test_files.len());
+            println!(
+                "✅ CQL file parsing tests passed ({}/{} files)",
+                schemas_validated,
+                test_files.len()
+            );
         } else {
-            println!("❌ CQL file parsing tests failed: {}", result.error_message.unwrap());
+            println!(
+                "❌ CQL file parsing tests failed: {}",
+                result.error_message.unwrap()
+            );
         }
-        
+
         Ok(())
     }
 
@@ -169,7 +187,7 @@ impl CqlIntegrationTestSuite {
     async fn test_schema_validation_workflow(&mut self) -> Result<()> {
         let test_name = "schema_validation_workflow";
         let start_time = std::time::Instant::now();
-        
+
         let workflow_tests = vec![
             // Test 1: Load schema from CQL, validate, save as JSON
             WorkflowTest {
@@ -186,7 +204,6 @@ impl CqlIntegrationTestSuite {
                 "#,
                 expected_features: vec!["composite_primary_key", "collections", "clustering_order"],
             },
-            
             // Test 2: Complex types and UDTs
             WorkflowTest {
                 name: "complex_types_workflow",
@@ -200,7 +217,6 @@ impl CqlIntegrationTestSuite {
                 "#,
                 expected_features: vec!["nested_collections", "tuples", "frozen_types"],
             },
-            
             // Test 3: All data types comprehensive test
             WorkflowTest {
                 name: "all_types_workflow",
@@ -234,10 +250,10 @@ impl CqlIntegrationTestSuite {
                 expected_features: vec!["all_primitive_types", "all_collection_types"],
             },
         ];
-        
+
         let mut failures = Vec::new();
         let mut schemas_validated = 0;
-        
+
         for workflow_test in &workflow_tests {
             // Step 1: Parse CQL to schema
             match self.parse_cql_to_schema(workflow_test.input_cql).await {
@@ -250,29 +266,27 @@ impl CqlIntegrationTestSuite {
                         ));
                         continue;
                     }
-                    
+
                     schemas_validated += 1;
-                    
+
                     // Step 3: Convert to JSON and back
                     match serde_json::to_string_pretty(&schema) {
-                        Ok(json) => {
-                            match TableSchema::from_json(&json) {
-                                Ok(roundtrip_schema) => {
-                                    if !self.schemas_equivalent(&schema, &roundtrip_schema) {
-                                        failures.push(format!(
-                                            "Workflow '{}': JSON roundtrip changed schema",
-                                            workflow_test.name
-                                        ));
-                                    }
-                                }
-                                Err(e) => {
+                        Ok(json) => match TableSchema::from_json(&json) {
+                            Ok(roundtrip_schema) => {
+                                if !self.schemas_equivalent(&schema, &roundtrip_schema) {
                                     failures.push(format!(
-                                        "Workflow '{}': JSON parsing failed: {}",
-                                        workflow_test.name, e
+                                        "Workflow '{}': JSON roundtrip changed schema",
+                                        workflow_test.name
                                     ));
                                 }
                             }
-                        }
+                            Err(e) => {
+                                failures.push(format!(
+                                    "Workflow '{}': JSON parsing failed: {}",
+                                    workflow_test.name, e
+                                ));
+                            }
+                        },
                         Err(e) => {
                             failures.push(format!(
                                 "Workflow '{}': JSON serialization failed: {}",
@@ -280,7 +294,7 @@ impl CqlIntegrationTestSuite {
                             ));
                         }
                     }
-                    
+
                     // Step 4: Check expected features
                     if !self.schema_has_features(&schema, &workflow_test.expected_features) {
                         failures.push(format!(
@@ -297,27 +311,36 @@ impl CqlIntegrationTestSuite {
                 }
             }
         }
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
-        
+
         let result = IntegrationTestResult {
             test_name: test_name.to_string(),
             passed: failures.is_empty(),
-            error_message: if failures.is_empty() { None } else { Some(failures.join("; ")) },
+            error_message: if failures.is_empty() {
+                None
+            } else {
+                Some(failures.join("; "))
+            },
             execution_time_ms: execution_time,
             files_processed: workflow_tests.len(),
             schemas_validated,
         };
-        
+
         self.results.insert(test_name.to_string(), result.clone());
-        
+
         if result.passed {
-            println!("✅ Schema validation workflow tests passed ({} workflows)", 
-                    workflow_tests.len());
+            println!(
+                "✅ Schema validation workflow tests passed ({} workflows)",
+                workflow_tests.len()
+            );
         } else {
-            println!("❌ Schema validation workflow tests failed: {}", result.error_message.unwrap());
+            println!(
+                "❌ Schema validation workflow tests failed: {}",
+                result.error_message.unwrap()
+            );
         }
-        
+
         Ok(())
     }
 
@@ -325,7 +348,7 @@ impl CqlIntegrationTestSuite {
     async fn test_udt_integration(&mut self) -> Result<()> {
         let test_name = "udt_integration";
         let start_time = std::time::Instant::now();
-        
+
         // Test UDT definition and usage
         let udt_tests = vec![
             // Simple UDT
@@ -344,7 +367,6 @@ impl CqlIntegrationTestSuite {
                 work_address FROZEN<address>
             );
             "#,
-            
             // Nested UDTs
             r#"
             CREATE TYPE contact_info (
@@ -364,7 +386,6 @@ impl CqlIntegrationTestSuite {
                 emergency_contact FROZEN<person>
             );
             "#,
-            
             // UDT in collections
             r#"
             CREATE TYPE tag (
@@ -381,10 +402,10 @@ impl CqlIntegrationTestSuite {
             );
             "#,
         ];
-        
+
         let mut failures = Vec::new();
         let mut schemas_validated = 0;
-        
+
         for (i, udt_cql) in udt_tests.iter().enumerate() {
             // In a real implementation, this would parse UDT definitions first
             // For now, we simulate by testing the table schema parsing
@@ -393,19 +414,20 @@ impl CqlIntegrationTestSuite {
                     if let Err(e) = schema.validate() {
                         failures.push(format!(
                             "UDT test {}: Schema validation failed: {}",
-                            i + 1, e
+                            i + 1,
+                            e
                         ));
                     } else {
                         schemas_validated += 1;
-                        
+
                         // Check that UDT types are properly handled
                         let has_udt_columns = schema.columns.iter().any(|col| {
-                            col.data_type.contains("FROZEN<") || 
-                            col.data_type.to_lowercase().contains("address") ||
-                            col.data_type.to_lowercase().contains("person") ||
-                            col.data_type.to_lowercase().contains("tag")
+                            col.data_type.contains("FROZEN<")
+                                || col.data_type.to_lowercase().contains("address")
+                                || col.data_type.to_lowercase().contains("person")
+                                || col.data_type.to_lowercase().contains("tag")
                         });
-                        
+
                         if !has_udt_columns {
                             failures.push(format!(
                                 "UDT test {}: No UDT columns detected in schema",
@@ -415,33 +437,40 @@ impl CqlIntegrationTestSuite {
                     }
                 }
                 Err(e) => {
-                    failures.push(format!(
-                        "UDT test {}: Failed to parse: {}",
-                        i + 1, e
-                    ));
+                    failures.push(format!("UDT test {}: Failed to parse: {}", i + 1, e));
                 }
             }
         }
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
-        
+
         let result = IntegrationTestResult {
             test_name: test_name.to_string(),
             passed: failures.is_empty(),
-            error_message: if failures.is_empty() { None } else { Some(failures.join("; ")) },
+            error_message: if failures.is_empty() {
+                None
+            } else {
+                Some(failures.join("; "))
+            },
             execution_time_ms: execution_time,
             files_processed: udt_tests.len(),
             schemas_validated,
         };
-        
+
         self.results.insert(test_name.to_string(), result.clone());
-        
+
         if result.passed {
-            println!("✅ UDT integration tests passed ({} tests)", udt_tests.len());
+            println!(
+                "✅ UDT integration tests passed ({} tests)",
+                udt_tests.len()
+            );
         } else {
-            println!("❌ UDT integration tests failed: {}", result.error_message.unwrap());
+            println!(
+                "❌ UDT integration tests failed: {}",
+                result.error_message.unwrap()
+            );
         }
-        
+
         Ok(())
     }
 
@@ -449,13 +478,13 @@ impl CqlIntegrationTestSuite {
     async fn test_complex_schema_scenarios(&mut self) -> Result<()> {
         let test_name = "complex_scenarios";
         let start_time = std::time::Instant::now();
-        
+
         // Create complex real-world-like schemas
         let complex_schemas = self.create_complex_schema_scenarios();
-        
+
         let mut failures = Vec::new();
         let mut schemas_validated = 0;
-        
+
         for (scenario_name, cql) in &complex_schemas {
             match self.parse_cql_to_schema(cql).await {
                 Ok(schema) => {
@@ -466,7 +495,7 @@ impl CqlIntegrationTestSuite {
                         ));
                     } else {
                         schemas_validated += 1;
-                        
+
                         // Additional complexity checks
                         if !self.is_complex_schema(&schema) {
                             failures.push(format!(
@@ -484,26 +513,36 @@ impl CqlIntegrationTestSuite {
                 }
             }
         }
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
-        
+
         let result = IntegrationTestResult {
             test_name: test_name.to_string(),
             passed: failures.is_empty(),
-            error_message: if failures.is_empty() { None } else { Some(failures.join("; ")) },
+            error_message: if failures.is_empty() {
+                None
+            } else {
+                Some(failures.join("; "))
+            },
             execution_time_ms: execution_time,
             files_processed: complex_schemas.len(),
             schemas_validated,
         };
-        
+
         self.results.insert(test_name.to_string(), result.clone());
-        
+
         if result.passed {
-            println!("✅ Complex scenario tests passed ({} scenarios)", complex_schemas.len());
+            println!(
+                "✅ Complex scenario tests passed ({} scenarios)",
+                complex_schemas.len()
+            );
         } else {
-            println!("❌ Complex scenario tests failed: {}", result.error_message.unwrap());
+            println!(
+                "❌ Complex scenario tests failed: {}",
+                result.error_message.unwrap()
+            );
         }
-        
+
         Ok(())
     }
 
@@ -511,17 +550,17 @@ impl CqlIntegrationTestSuite {
     async fn test_schema_roundtrip(&mut self) -> Result<()> {
         let test_name = "schema_roundtrip";
         let start_time = std::time::Instant::now();
-        
+
         let roundtrip_tests = vec![
             "CREATE TABLE simple (id UUID PRIMARY KEY, name TEXT);",
             "CREATE TABLE with_clustering (a UUID, b TIMESTAMP, c TEXT, PRIMARY KEY (a, b));",
             "CREATE TABLE with_collections (id UUID PRIMARY KEY, tags SET<TEXT>, metadata MAP<TEXT, TEXT>);",
             "CREATE TABLE complex_pk (a UUID, b TEXT, c INT, d TIMESTAMP, PRIMARY KEY ((a, b), c, d));",
         ];
-        
+
         let mut failures = Vec::new();
         let mut schemas_validated = 0;
-        
+
         for (i, cql) in roundtrip_tests.iter().enumerate() {
             // CQL -> Schema
             match self.parse_cql_to_schema(cql).await {
@@ -533,15 +572,16 @@ impl CqlIntegrationTestSuite {
                             match TableSchema::from_json(&json) {
                                 Ok(roundtrip_schema) => {
                                     schemas_validated += 1;
-                                    
+
                                     // Compare schemas
-                                    if !self.schemas_equivalent(&original_schema, &roundtrip_schema) {
+                                    if !self.schemas_equivalent(&original_schema, &roundtrip_schema)
+                                    {
                                         failures.push(format!(
                                             "Roundtrip test {}: Schemas not equivalent after roundtrip",
                                             i + 1
                                         ));
                                     }
-                                    
+
                                     // Validate both schemas
                                     if let Err(e) = original_schema.validate() {
                                         failures.push(format!(
@@ -549,7 +589,7 @@ impl CqlIntegrationTestSuite {
                                             i + 1, e
                                         ));
                                     }
-                                    
+
                                     if let Err(e) = roundtrip_schema.validate() {
                                         failures.push(format!(
                                             "Roundtrip test {}: Roundtrip schema validation failed: {}",
@@ -560,7 +600,8 @@ impl CqlIntegrationTestSuite {
                                 Err(e) => {
                                     failures.push(format!(
                                         "Roundtrip test {}: JSON -> Schema failed: {}",
-                                        i + 1, e
+                                        i + 1,
+                                        e
                                     ));
                                 }
                             }
@@ -568,7 +609,8 @@ impl CqlIntegrationTestSuite {
                         Err(e) => {
                             failures.push(format!(
                                 "Roundtrip test {}: Schema -> JSON failed: {}",
-                                i + 1, e
+                                i + 1,
+                                e
                             ));
                         }
                     }
@@ -576,31 +618,42 @@ impl CqlIntegrationTestSuite {
                 Err(e) => {
                     failures.push(format!(
                         "Roundtrip test {}: CQL -> Schema failed: {}",
-                        i + 1, e
+                        i + 1,
+                        e
                     ));
                 }
             }
         }
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
-        
+
         let result = IntegrationTestResult {
             test_name: test_name.to_string(),
             passed: failures.is_empty(),
-            error_message: if failures.is_empty() { None } else { Some(failures.join("; ")) },
+            error_message: if failures.is_empty() {
+                None
+            } else {
+                Some(failures.join("; "))
+            },
             execution_time_ms: execution_time,
             files_processed: roundtrip_tests.len(),
             schemas_validated,
         };
-        
+
         self.results.insert(test_name.to_string(), result.clone());
-        
+
         if result.passed {
-            println!("✅ Schema roundtrip tests passed ({} roundtrips)", roundtrip_tests.len());
+            println!(
+                "✅ Schema roundtrip tests passed ({} roundtrips)",
+                roundtrip_tests.len()
+            );
         } else {
-            println!("❌ Schema roundtrip tests failed: {}", result.error_message.unwrap());
+            println!(
+                "❌ Schema roundtrip tests failed: {}",
+                result.error_message.unwrap()
+            );
         }
-        
+
         Ok(())
     }
 
@@ -608,27 +661,35 @@ impl CqlIntegrationTestSuite {
     async fn test_error_recovery(&mut self) -> Result<()> {
         let test_name = "error_recovery";
         let start_time = std::time::Instant::now();
-        
+
         let error_scenarios = vec![
             // Partial CQL (should handle gracefully)
             ("incomplete_table", "CREATE TABLE users (id UUID"),
-            
             // Invalid types (should provide good error messages)
-            ("invalid_type", "CREATE TABLE users (id INVALID_TYPE PRIMARY KEY);"),
-            
+            (
+                "invalid_type",
+                "CREATE TABLE users (id INVALID_TYPE PRIMARY KEY);",
+            ),
             // Malformed primary key
-            ("malformed_pk", "CREATE TABLE users (id UUID, PRIMARY KEY ());"),
-            
+            (
+                "malformed_pk",
+                "CREATE TABLE users (id UUID, PRIMARY KEY ());",
+            ),
             // Invalid collection syntax
-            ("invalid_collection", "CREATE TABLE users (id UUID PRIMARY KEY, data LIST<>);"),
-            
+            (
+                "invalid_collection",
+                "CREATE TABLE users (id UUID PRIMARY KEY, data LIST<>);",
+            ),
             // Reserved keywords without quotes
-            ("reserved_keyword", "CREATE TABLE select (id UUID PRIMARY KEY);"),
+            (
+                "reserved_keyword",
+                "CREATE TABLE select (id UUID PRIMARY KEY);",
+            ),
         ];
-        
+
         let mut failures = Vec::new();
         let mut errors_handled = 0;
-        
+
         for (scenario, malformed_cql) in &error_scenarios {
             match self.parse_cql_to_schema(malformed_cql).await {
                 Ok(_) => {
@@ -639,7 +700,7 @@ impl CqlIntegrationTestSuite {
                 }
                 Err(e) => {
                     errors_handled += 1;
-                    
+
                     // Check that error message is helpful
                     let error_msg = format!("{}", e);
                     if error_msg.is_empty() || error_msg == "Unknown error" {
@@ -651,26 +712,36 @@ impl CqlIntegrationTestSuite {
                 }
             }
         }
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
-        
+
         let result = IntegrationTestResult {
             test_name: test_name.to_string(),
             passed: failures.is_empty(),
-            error_message: if failures.is_empty() { None } else { Some(failures.join("; ")) },
+            error_message: if failures.is_empty() {
+                None
+            } else {
+                Some(failures.join("; "))
+            },
             execution_time_ms: execution_time,
             files_processed: error_scenarios.len(),
             schemas_validated: errors_handled,
         };
-        
+
         self.results.insert(test_name.to_string(), result.clone());
-        
+
         if result.passed {
-            println!("✅ Error recovery tests passed ({} errors handled)", errors_handled);
+            println!(
+                "✅ Error recovery tests passed ({} errors handled)",
+                errors_handled
+            );
         } else {
-            println!("❌ Error recovery tests failed: {}", result.error_message.unwrap());
+            println!(
+                "❌ Error recovery tests failed: {}",
+                result.error_message.unwrap()
+            );
         }
-        
+
         Ok(())
     }
 
@@ -678,29 +749,31 @@ impl CqlIntegrationTestSuite {
     async fn test_large_schema_performance(&mut self) -> Result<()> {
         let test_name = "large_schema_performance";
         let start_time = std::time::Instant::now();
-        
+
         // Generate large schema with many columns and complex types
         let large_cql = self.generate_large_schema_cql();
-        
+
         let perf_tests = vec![
             ("single_large_parse", 1, &large_cql),
             ("repeated_parse", 10, &large_cql),
             ("concurrent_parse", 5, &large_cql), // Simulate concurrent parsing
         ];
-        
+
         let mut failures = Vec::new();
         let mut schemas_validated = 0;
-        
+
         for (test_type, iterations, cql) in &perf_tests {
             let test_start = std::time::Instant::now();
-            
+
             for i in 0..*iterations {
                 match self.parse_cql_to_schema(cql).await {
                     Ok(schema) => {
                         if let Err(e) = schema.validate() {
                             failures.push(format!(
                                 "Performance test '{}' iteration {}: Validation failed: {}",
-                                test_type, i + 1, e
+                                test_type,
+                                i + 1,
+                                e
                             ));
                             break;
                         }
@@ -709,24 +782,26 @@ impl CqlIntegrationTestSuite {
                     Err(e) => {
                         failures.push(format!(
                             "Performance test '{}' iteration {}: Parsing failed: {}",
-                            test_type, i + 1, e
+                            test_type,
+                            i + 1,
+                            e
                         ));
                         break;
                     }
                 }
             }
-            
+
             let test_duration = test_start.elapsed();
             let avg_latency_ms = test_duration.as_millis() as f64 / *iterations as f64;
-            
+
             // Performance thresholds
             let max_avg_latency_ms = match *test_type {
                 "single_large_parse" => 500.0, // 500ms for single large parse
-                "repeated_parse" => 100.0,      // 100ms average for repeated
-                "concurrent_parse" => 200.0,    // 200ms average for concurrent
+                "repeated_parse" => 100.0,     // 100ms average for repeated
+                "concurrent_parse" => 200.0,   // 200ms average for concurrent
                 _ => 1000.0,
             };
-            
+
             if avg_latency_ms > max_avg_latency_ms {
                 failures.push(format!(
                     "Performance test '{}': Average latency {:.2}ms exceeds threshold {:.2}ms",
@@ -734,27 +809,36 @@ impl CqlIntegrationTestSuite {
                 ));
             }
         }
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
-        
+
         let result = IntegrationTestResult {
             test_name: test_name.to_string(),
             passed: failures.is_empty(),
-            error_message: if failures.is_empty() { None } else { Some(failures.join("; ")) },
+            error_message: if failures.is_empty() {
+                None
+            } else {
+                Some(failures.join("; "))
+            },
             execution_time_ms: execution_time,
             files_processed: perf_tests.len(),
             schemas_validated,
         };
-        
+
         self.results.insert(test_name.to_string(), result.clone());
-        
+
         if result.passed {
-            println!("✅ Large schema performance tests passed ({} schemas validated)", 
-                    schemas_validated);
+            println!(
+                "✅ Large schema performance tests passed ({} schemas validated)",
+                schemas_validated
+            );
         } else {
-            println!("❌ Large schema performance tests failed: {}", result.error_message.unwrap());
+            println!(
+                "❌ Large schema performance tests failed: {}",
+                result.error_message.unwrap()
+            );
         }
-        
+
         Ok(())
     }
 
@@ -763,11 +847,11 @@ impl CqlIntegrationTestSuite {
         let total_tests = self.results.len();
         let passed_tests = self.results.values().filter(|r| r.passed).count();
         let failed_tests = total_tests - passed_tests;
-        
+
         let total_time_ms: u64 = self.results.values().map(|r| r.execution_time_ms).sum();
         let total_files: usize = self.results.values().map(|r| r.files_processed).sum();
         let total_schemas: usize = self.results.values().map(|r| r.schemas_validated).sum();
-        
+
         IntegrationTestReport {
             total_tests,
             passed_tests,
@@ -785,36 +869,38 @@ impl CqlIntegrationTestSuite {
     async fn parse_cql_to_schema(&self, cql: &str) -> Result<TableSchema> {
         // This is a placeholder for actual CQL parsing
         // In a real implementation, this would use a proper CQL parser
-        
+
         if cql.trim().is_empty() {
             return Err(Error::schema("Empty CQL input".to_string()));
         }
-        
+
         // Basic validation
         if !cql.to_uppercase().contains("CREATE TABLE") {
             return Err(Error::schema("Not a CREATE TABLE statement".to_string()));
         }
-        
+
         // Extract table name (very basic)
-        let table_name = if let Some(captures) = regex::Regex::new(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(\w+)\.)?(\w+)")
-            .unwrap()
-            .captures(cql)
+        let table_name = if let Some(captures) =
+            regex::Regex::new(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(\w+)\.)?(\w+)")
+                .unwrap()
+                .captures(cql)
         {
-            captures.get(2).map(|m| m.as_str()).unwrap_or("unknown_table")
+            captures
+                .get(2)
+                .map(|m| m.as_str())
+                .unwrap_or("unknown_table")
         } else {
             return Err(Error::schema("Could not extract table name".to_string()));
         };
-        
+
         // Create a more sophisticated schema based on CQL content
-        let mut columns = vec![
-            cqlite_core::schema::Column {
-                name: "id".to_string(),
-                data_type: "uuid".to_string(),
-                nullable: false,
-                default: None,
-            }
-        ];
-        
+        let mut columns = vec![cqlite_core::schema::Column {
+            name: "id".to_string(),
+            data_type: "uuid".to_string(),
+            nullable: false,
+            default: None,
+        }];
+
         // Add additional columns based on CQL content
         if cql.contains("name TEXT") {
             columns.push(cqlite_core::schema::Column {
@@ -824,7 +910,7 @@ impl CqlIntegrationTestSuite {
                 default: None,
             });
         }
-        
+
         if cql.contains("SET<") {
             columns.push(cqlite_core::schema::Column {
                 name: "tags".to_string(),
@@ -833,7 +919,7 @@ impl CqlIntegrationTestSuite {
                 default: None,
             });
         }
-        
+
         if cql.contains("MAP<") {
             columns.push(cqlite_core::schema::Column {
                 name: "metadata".to_string(),
@@ -842,7 +928,7 @@ impl CqlIntegrationTestSuite {
                 default: None,
             });
         }
-        
+
         Ok(TableSchema {
             keyspace: "test".to_string(),
             table: table_name.to_string(),
@@ -860,7 +946,7 @@ impl CqlIntegrationTestSuite {
     /// Create comprehensive CQL test files
     fn create_comprehensive_cql_files(&self) -> Result<Vec<(PathBuf, SchemaCharacteristics)>> {
         let mut test_files = Vec::new();
-        
+
         let test_cases = vec![
             (
                 "simple_table.cql",
@@ -920,40 +1006,44 @@ impl CqlIntegrationTestSuite {
                 },
             ),
         ];
-        
+
         for (filename, cql_content, characteristics) in test_cases {
             let file_path = self.temp_dir.path().join(filename);
             fs::write(&file_path, cql_content)
                 .map_err(|e| Error::schema(format!("Failed to write test file: {}", e)))?;
-            
+
             test_files.push((file_path, characteristics));
         }
-        
+
         Ok(test_files)
     }
 
     /// Check if schema matches expected characteristics
-    fn schema_matches_characteristics(&self, schema: &TableSchema, characteristics: &SchemaCharacteristics) -> bool {
-        schema.columns.len() == characteristics.expected_columns &&
-        self.schema_has_collections(schema) == characteristics.has_collections &&
-        !schema.clustering_keys.is_empty() == characteristics.has_clustering
+    fn schema_matches_characteristics(
+        &self,
+        schema: &TableSchema,
+        characteristics: &SchemaCharacteristics,
+    ) -> bool {
+        schema.columns.len() == characteristics.expected_columns
+            && self.schema_has_collections(schema) == characteristics.has_collections
+            && !schema.clustering_keys.is_empty() == characteristics.has_clustering
     }
 
     /// Check if schema has collections
     fn schema_has_collections(&self, schema: &TableSchema) -> bool {
         schema.columns.iter().any(|col| {
-            col.data_type.to_lowercase().contains("list<") ||
-            col.data_type.to_lowercase().contains("set<") ||
-            col.data_type.to_lowercase().contains("map<")
+            col.data_type.to_lowercase().contains("list<")
+                || col.data_type.to_lowercase().contains("set<")
+                || col.data_type.to_lowercase().contains("map<")
         })
     }
 
     /// Check if schemas are equivalent
     fn schemas_equivalent(&self, schema1: &TableSchema, schema2: &TableSchema) -> bool {
-        schema1.table == schema2.table &&
-        schema1.partition_keys.len() == schema2.partition_keys.len() &&
-        schema1.clustering_keys.len() == schema2.clustering_keys.len() &&
-        schema1.columns.len() == schema2.columns.len()
+        schema1.table == schema2.table
+            && schema1.partition_keys.len() == schema2.partition_keys.len()
+            && schema1.clustering_keys.len() == schema2.clustering_keys.len()
+            && schema1.columns.len() == schema2.columns.len()
     }
 
     /// Check if schema has expected features
@@ -977,41 +1067,57 @@ impl CqlIntegrationTestSuite {
                 }
                 "nested_collections" => {
                     let has_nested = schema.columns.iter().any(|col| {
-                        col.data_type.contains("LIST<FROZEN<MAP<") ||
-                        col.data_type.contains("MAP<TEXT, LIST<") ||
-                        col.data_type.contains("SET<MAP<")
+                        col.data_type.contains("LIST<FROZEN<MAP<")
+                            || col.data_type.contains("MAP<TEXT, LIST<")
+                            || col.data_type.contains("SET<MAP<")
                     });
                     if !has_nested {
                         return false;
                     }
                 }
                 "tuples" => {
-                    let has_tuples = schema.columns.iter().any(|col| {
-                        col.data_type.to_uppercase().contains("TUPLE<")
-                    });
+                    let has_tuples = schema
+                        .columns
+                        .iter()
+                        .any(|col| col.data_type.to_uppercase().contains("TUPLE<"));
                     if !has_tuples {
                         return false;
                     }
                 }
                 "frozen_types" => {
-                    let has_frozen = schema.columns.iter().any(|col| {
-                        col.data_type.to_uppercase().contains("FROZEN<")
-                    });
+                    let has_frozen = schema
+                        .columns
+                        .iter()
+                        .any(|col| col.data_type.to_uppercase().contains("FROZEN<"));
                     if !has_frozen {
                         return false;
                     }
                 }
                 "all_primitive_types" => {
                     // Check for a good variety of primitive types
-                    let type_count = schema.columns.iter().map(|col| &col.data_type).collect::<std::collections::HashSet<_>>().len();
+                    let type_count = schema
+                        .columns
+                        .iter()
+                        .map(|col| &col.data_type)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len();
                     if type_count < 10 {
                         return false;
                     }
                 }
                 "all_collection_types" => {
-                    let has_list = schema.columns.iter().any(|col| col.data_type.to_uppercase().contains("LIST<"));
-                    let has_set = schema.columns.iter().any(|col| col.data_type.to_uppercase().contains("SET<"));
-                    let has_map = schema.columns.iter().any(|col| col.data_type.to_uppercase().contains("MAP<"));
+                    let has_list = schema
+                        .columns
+                        .iter()
+                        .any(|col| col.data_type.to_uppercase().contains("LIST<"));
+                    let has_set = schema
+                        .columns
+                        .iter()
+                        .any(|col| col.data_type.to_uppercase().contains("SET<"));
+                    let has_map = schema
+                        .columns
+                        .iter()
+                        .any(|col| col.data_type.to_uppercase().contains("MAP<"));
                     if !(has_list && has_set && has_map) {
                         return false;
                     }
@@ -1039,7 +1145,8 @@ impl CqlIntegrationTestSuite {
                     metadata MAP<TEXT, TEXT>,
                     tags SET<TEXT>,
                     PRIMARY KEY ((customer_id, order_date), order_timestamp, order_id)
-                ) WITH CLUSTERING ORDER BY (order_timestamp DESC, order_id ASC);"#.to_string(),
+                ) WITH CLUSTERING ORDER BY (order_timestamp DESC, order_id ASC);"#
+                    .to_string(),
             ),
             (
                 "iot_sensor_data".to_string(),
@@ -1056,7 +1163,8 @@ impl CqlIntegrationTestSuite {
                     raw_data BLOB,
                     metadata TUPLE<UUID, TIMESTAMP, TEXT, MAP<TEXT, TEXT>>,
                     PRIMARY KEY ((sensor_id, location, year), month, day, hour, timestamp)
-                ) WITH CLUSTERING ORDER BY (month ASC, day ASC, hour ASC, timestamp DESC);"#.to_string(),
+                ) WITH CLUSTERING ORDER BY (month ASC, day ASC, hour ASC, timestamp DESC);"#
+                    .to_string(),
             ),
             (
                 "social_media_posts".to_string(),
@@ -1074,22 +1182,23 @@ impl CqlIntegrationTestSuite {
                     visibility_settings FROZEN<MAP<TEXT, BOOLEAN>>,
                     attachment_metadata LIST<FROZEN<MAP<TEXT, TEXT>>>,
                     PRIMARY KEY ((user_id, post_type), created_at, post_id)
-                ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);"#.to_string(),
+                ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);"#
+                    .to_string(),
             ),
         ]
     }
 
     /// Check if schema is sufficiently complex for testing
     fn is_complex_schema(&self, schema: &TableSchema) -> bool {
-        schema.columns.len() >= 5 &&
-        (schema.partition_keys.len() > 1 || !schema.clustering_keys.is_empty()) &&
-        self.schema_has_collections(schema)
+        schema.columns.len() >= 5
+            && (schema.partition_keys.len() > 1 || !schema.clustering_keys.is_empty())
+            && self.schema_has_collections(schema)
     }
 
     /// Generate large schema CQL for performance testing
     fn generate_large_schema_cql(&self) -> String {
         let mut cql = String::from("CREATE TABLE large_test_table (\n");
-        
+
         // Add many columns of different types
         for i in 0..100 {
             let col_type = match i % 10 {
@@ -1104,14 +1213,14 @@ impl CqlIntegrationTestSuite {
                 8 => "MAP<TEXT, BIGINT>",
                 _ => "BLOB",
             };
-            
+
             if i == 0 {
                 cql.push_str(&format!("    col_{} {} PRIMARY KEY", i, col_type));
             } else {
                 cql.push_str(&format!(",\n    col_{} {}", i, col_type));
             }
         }
-        
+
         cql.push_str("\n);");
         cql
     }
@@ -1151,36 +1260,49 @@ impl IntegrationTestReport {
     pub fn print_report(&self) {
         println!("\n🔗 CQL Integration Test Report");
         println!("{}", "=".repeat(50));
-        
+
         println!("📊 Summary:");
         println!("  Total Tests: {}", self.total_tests);
-        println!("  Passed: {} ({:.1}%)", self.passed_tests, 
-                (self.passed_tests as f64 / self.total_tests as f64) * 100.0);
-        println!("  Failed: {} ({:.1}%)", self.failed_tests,
-                (self.failed_tests as f64 / self.total_tests as f64) * 100.0);
+        println!(
+            "  Passed: {} ({:.1}%)",
+            self.passed_tests,
+            (self.passed_tests as f64 / self.total_tests as f64) * 100.0
+        );
+        println!(
+            "  Failed: {} ({:.1}%)",
+            self.failed_tests,
+            (self.failed_tests as f64 / self.total_tests as f64) * 100.0
+        );
         println!("  Total Time: {}ms", self.total_execution_time_ms);
         println!("  Files Processed: {}", self.total_files_processed);
         println!("  Schemas Validated: {}", self.total_schemas_validated);
-        
+
         println!("\n📋 Test Results:");
         let mut sorted_results: Vec<_> = self.test_results.values().collect();
         sorted_results.sort_by_key(|r| &r.test_name);
-        
+
         for result in sorted_results {
-            let status = if result.passed { "✅ PASS" } else { "❌ FAIL" };
-            println!("  {} - {} ({}ms, {}/{} files/schemas)", 
-                    result.test_name, status, 
-                    result.execution_time_ms, 
-                    result.files_processed, 
-                    result.schemas_validated);
-            
+            let status = if result.passed {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
+            println!(
+                "  {} - {} ({}ms, {}/{} files/schemas)",
+                result.test_name,
+                status,
+                result.execution_time_ms,
+                result.files_processed,
+                result.schemas_validated
+            );
+
             if let Some(error) = &result.error_message {
                 println!("    Error: {}", error);
             }
         }
-        
+
         println!("\n{}", "=".repeat(50));
-        
+
         if self.failed_tests == 0 {
             println!("🎉 All integration tests passed!");
         } else {
@@ -1205,10 +1327,12 @@ mod tests {
     #[tokio::test]
     async fn test_basic_cql_parsing_simulation() {
         let suite = CqlIntegrationTestSuite::new().await.unwrap();
-        
-        let result = suite.parse_cql_to_schema("CREATE TABLE users (id UUID PRIMARY KEY);").await;
+
+        let result = suite
+            .parse_cql_to_schema("CREATE TABLE users (id UUID PRIMARY KEY);")
+            .await;
         assert!(result.is_ok());
-        
+
         let schema = result.unwrap();
         assert_eq!(schema.table, "users");
         assert_eq!(schema.partition_keys.len(), 1);

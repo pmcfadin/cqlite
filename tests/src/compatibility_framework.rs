@@ -3,13 +3,16 @@
 //! This module provides a complete testing framework for validating CQLite's
 //! compatibility with Cassandra 5+ SSTable format and data structures.
 
-use cqlite_core::{schema::SchemaManager, platform::Platform};
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats, parse_sstable_header, serialize_sstable_header, CassandraVersion};
+use cqlite_core::parser::header::{
+    CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
+    parse_sstable_header, serialize_sstable_header,
+};
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::{types::TableId, Config, RowKey, storage::StorageEngine, Value};
+use cqlite_core::{Config, RowKey, Value, storage::StorageEngine, types::TableId};
+use cqlite_core::{platform::Platform, schema::SchemaManager};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -63,11 +66,12 @@ pub struct CompatibilityTestFramework {
 impl CompatibilityTestFramework {
     /// Create a new test framework instance
     pub fn new(config: CompatibilityTestConfig) -> Result<Self> {
-        let temp_dir = TempDir::new()
-            .map_err(|e| Error::Io(std::io::Error::new(
+        let temp_dir = TempDir::new().map_err(|e| {
+            Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to create temp directory: {}", e)
-            )))?;
+                format!("Failed to create temp directory: {}", e),
+            ))
+        })?;
 
         let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
 

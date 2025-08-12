@@ -7,10 +7,10 @@
 use super::vint::{parse_vint, parse_vint_length};
 use crate::error::{Error, Result};
 use nom::{
+    IResult,
     bytes::complete::take,
     multi::count,
-    number::complete::{be_f64, be_i64, be_u32, be_u64, be_u8},
-    IResult,
+    number::complete::{be_f64, be_i64, be_u8, be_u32, be_u64},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ pub struct StatisticsHeader {
     pub data_length: u32,
     /// Additional metadata field
     pub metadata1: u32,
-    /// Additional metadata field 
+    /// Additional metadata field
     pub metadata2: u32,
     /// Additional metadata field
     pub metadata3: u32,
@@ -243,7 +243,7 @@ pub fn parse_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> 
 /// This function is kept for backward compatibility
 pub fn parse_statistics_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> {
     let (input, version) = be_u32(input)?;
-    
+
     // Check if this looks like the new 'nb' format
     if version == 4 && input.len() >= 28 {
         // This is likely the new format, parse accordingly
@@ -254,7 +254,7 @@ pub fn parse_statistics_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader>
         let (input, metadata2) = be_u32(input)?;
         let (input, metadata3) = be_u32(input)?;
         let (input, checksum) = be_u32(input)?;
-        
+
         return Ok((
             input,
             StatisticsHeader {
@@ -269,12 +269,12 @@ pub fn parse_statistics_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader>
             },
         ));
     }
-    
+
     // Legacy format parsing
     let (input, table_id_raw) = take(16u8)(input)?;
     let mut table_id_array = [0u8; 16];
     table_id_array.copy_from_slice(table_id_raw);
-    
+
     let (input, section_count) = be_u32(input)?;
     let (input, file_size) = be_u64(input)?;
     let (input, checksum) = be_u32(input)?;
@@ -302,7 +302,8 @@ pub fn parse_row_statistics(input: &[u8]) -> IResult<&[u8], RowStatistics> {
     let (input, partition_count) = parse_vint_as_u64(input)?;
     let (input, avg_rows_per_partition) = be_f64(input)?;
     let (input, histogram_count) = be_u32(input)?;
-    let (input, row_size_histogram) = count(parse_row_size_bucket, histogram_count as usize)(input)?;
+    let (input, row_size_histogram) =
+        count(parse_row_size_bucket, histogram_count as usize)(input)?;
 
     Ok((
         input,
@@ -348,7 +349,10 @@ pub fn parse_timestamp_statistics(input: &[u8]) -> IResult<&[u8], TimestampStati
 }
 
 /// Parse column-level statistics
-pub fn parse_column_statistics(input: &[u8], column_count: u32) -> IResult<&[u8], Vec<ColumnStatistics>> {
+pub fn parse_column_statistics(
+    input: &[u8],
+    column_count: u32,
+) -> IResult<&[u8], Vec<ColumnStatistics>> {
     count(parse_single_column_statistics, column_count as usize)(input)
 }
 
@@ -436,7 +440,8 @@ pub fn parse_partition_statistics(input: &[u8]) -> IResult<&[u8], PartitionStati
     let (input, large_partition_percentage) = be_f64(input)?;
 
     let (input, histogram_count) = be_u32(input)?;
-    let (input, size_histogram) = count(parse_partition_size_bucket, histogram_count as usize)(input)?;
+    let (input, size_histogram) =
+        count(parse_partition_size_bucket, histogram_count as usize)(input)?;
 
     Ok((
         input,
@@ -571,7 +576,9 @@ impl StatisticsAnalyzer {
 
         StatisticsSummary {
             total_rows: stats.row_stats.total_rows,
-            live_data_percentage: (stats.row_stats.live_rows as f64 / stats.row_stats.total_rows as f64) * 100.0,
+            live_data_percentage: (stats.row_stats.live_rows as f64
+                / stats.row_stats.total_rows as f64)
+                * 100.0,
             compression_efficiency: stats.compression_stats.ratio * 100.0,
             timestamp_range_days: Self::calculate_timestamp_range_days(stats),
             largest_partition_mb: stats.partition_stats.max_partition_size as f64 / 1_048_576.0,
@@ -586,7 +593,7 @@ impl StatisticsAnalyzer {
         let live_ratio = stats.row_stats.live_rows as f64 / stats.row_stats.total_rows as f64;
         let compression_ratio = stats.compression_stats.ratio;
         let partition_efficiency = 1.0 - (stats.partition_stats.large_partition_percentage / 100.0);
-        
+
         (live_ratio + compression_ratio + partition_efficiency) / 3.0 * 100.0
     }
 
@@ -612,11 +619,14 @@ impl StatisticsAnalyzer {
         let mut recommendations = Vec::new();
 
         if stats.table_stats.disk_size > 1_073_741_824 {
-            recommendations.push("Large SSTable detected - consider more frequent compaction".to_string());
+            recommendations
+                .push("Large SSTable detected - consider more frequent compaction".to_string());
         }
 
         if stats.row_stats.avg_rows_per_partition < 10.0 {
-            recommendations.push("Low average rows per partition - partition key may be too granular".to_string());
+            recommendations.push(
+                "Low average rows per partition - partition key may be too granular".to_string(),
+            );
         }
 
         recommendations
@@ -626,7 +636,8 @@ impl StatisticsAnalyzer {
         let mut score = 100.0;
 
         // Deduct for high tombstone ratio
-        let tombstone_ratio = stats.row_stats.tombstone_count as f64 / stats.row_stats.total_rows as f64;
+        let tombstone_ratio =
+            stats.row_stats.tombstone_count as f64 / stats.row_stats.total_rows as f64;
         score -= tombstone_ratio * 30.0;
 
         // Deduct for poor compression
@@ -641,7 +652,8 @@ impl StatisticsAnalyzer {
     }
 
     fn calculate_timestamp_range_days(stats: &SSTableStatistics) -> f64 {
-        let range_micros = stats.timestamp_stats.max_timestamp - stats.timestamp_stats.min_timestamp;
+        let range_micros =
+            stats.timestamp_stats.max_timestamp - stats.timestamp_stats.min_timestamp;
         range_micros as f64 / (1_000_000.0 * 60.0 * 60.0 * 24.0)
     }
 }
@@ -664,7 +676,9 @@ pub struct StatisticsSummary {
 pub fn serialize_statistics(_stats: &SSTableStatistics) -> Result<Vec<u8>> {
     // This would implement the reverse of parsing for complete round-trip testing
     // For now, return an error indicating this is not implemented
-    Err(Error::corruption("Statistics serialization not yet implemented"))
+    Err(Error::corruption(
+        "Statistics serialization not yet implemented",
+    ))
 }
 
 #[cfg(test)]
@@ -676,9 +690,8 @@ mod tests {
         let test_data = vec![
             0x00, 0x00, 0x00, 0x01, // version = 1
             // table_id (16 bytes)
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            0x00, 0x00, 0x00, 0x05, // section_count = 5
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10, 0x00, 0x00, 0x00, 0x05, // section_count = 5
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // file_size = 4096
             0x12, 0x34, 0x56, 0x78, // checksum
         ];
@@ -697,7 +710,7 @@ mod tests {
     fn test_statistics_analyzer() {
         let stats = create_test_statistics();
         let summary = StatisticsAnalyzer::analyze(&stats);
-        
+
         assert!(summary.total_rows > 0);
         assert!(summary.health_score >= 0.0 && summary.health_score <= 100.0);
         assert!(summary.live_data_percentage >= 0.0 && summary.live_data_percentage <= 100.0);

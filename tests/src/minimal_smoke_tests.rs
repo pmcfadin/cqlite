@@ -3,11 +3,11 @@
 //! These tests verify basic functionality without complex integration
 //! to establish that the test infrastructure is working.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::config::ParserConfig;
 use cqlite_core::parser::SSTableParser;
+use cqlite_core::parser::config::ParserConfig;
 use cqlite_core::{Value, types::*};
 
 /// Basic smoke test to verify the test framework loads
@@ -38,7 +38,7 @@ fn test_basic_value_types() {
     let bool_val = Value::Boolean(true);
     let int_val = Value::Integer(42);
     let text_val = Value::Text("test".to_string());
-    
+
     assert!(matches!(null_val, Value::Null));
     assert!(matches!(bool_val, Value::Boolean(true)));
     assert!(matches!(int_val, Value::Integer(42)));
@@ -54,15 +54,15 @@ fn test_collection_value_types() {
         (Value::Text("key2".to_string()), Value::Integer(2)),
     ];
     let map_val = Value::Map(map_pairs);
-    
+
     // Test List
     let list_items = vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)];
     let list_val = Value::List(list_items);
-    
-    // Test Set  
+
+    // Test Set
     let set_items = vec![Value::Text("a".to_string()), Value::Text("b".to_string())];
     let set_val = Value::Set(set_items);
-    
+
     assert!(matches!(map_val, Value::Map(_)));
     assert!(matches!(list_val, Value::List(_)));
     assert!(matches!(set_val, Value::Set(_)));
@@ -85,20 +85,20 @@ async fn test_async_functionality() {
 }
 
 /// Performance baseline test
-#[test] 
+#[test]
 fn test_performance_baseline() {
     use std::time::Instant;
-    
+
     let start = Instant::now();
-    
+
     // Create 1000 simple values to establish baseline
     let mut values = Vec::new();
     for i in 0..1000 {
         values.push(Value::Integer(i));
     }
-    
+
     let duration = start.elapsed();
-    
+
     // Should complete in reasonable time (< 10ms for 1000 simple operations)
     assert!(duration.as_millis() < 10, "Basic operations should be fast");
     assert_eq!(values.len(), 1000, "All values created");
@@ -110,12 +110,12 @@ fn test_memory_baseline() {
     // Create structures that would typically use memory
     let large_text = Value::Text("x".repeat(1000));
     let large_blob = Value::Blob(vec![0u8; 1000]);
-    
+
     // Basic checks that they're created properly
     if let Value::Text(s) = &large_text {
         assert_eq!(s.len(), 1000);
     }
-    
+
     if let Value::Blob(b) = &large_blob {
         assert_eq!(b.len(), 1000);
     }

@@ -135,7 +135,7 @@ impl ParserBenchmarks {
                     Err(_) => {
                         return Err(crate::Error::corruption(
                             "VInt decode failed during benchmark",
-                        ))
+                        ));
                     }
                 }
             }
@@ -179,7 +179,7 @@ impl ParserBenchmarks {
                     Err(_) => {
                         return Err(crate::Error::corruption(
                             "Header parse failed during benchmark",
-                        ))
+                        ));
                     }
                 }
             }
@@ -246,7 +246,7 @@ impl ParserBenchmarks {
                                 Err(_) => {
                                     return Err(crate::Error::corruption(
                                         "Type parse failed during benchmark",
-                                    ))
+                                    ));
                                 }
                             }
                         }

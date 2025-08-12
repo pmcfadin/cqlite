@@ -16,10 +16,10 @@ use super::{
     select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
 };
 use crate::{
+    Error, Result, TableId,
     schema::SchemaManager,
     storage::StorageEngine,
     types::{RowKey, Value},
-    Error, Result, TableId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -79,7 +79,10 @@ enum AggregateValue {
 impl SelectExecutor {
     /// Create a new SELECT executor
     pub fn new(schema: Arc<SchemaManager>, storage: Arc<StorageEngine>) -> Self {
-        Self { _schema: schema, storage }
+        Self {
+            _schema: schema,
+            storage,
+        }
     }
 
     /// Execute an optimized query plan
@@ -208,10 +211,6 @@ impl SelectExecutor {
 
         Ok(results)
     }
-
-
-
-
 
     /// Evaluate SSTable predicates against a row
     fn evaluate_sstable_predicates(
@@ -573,24 +572,25 @@ impl SelectExecutor {
             };
 
             // Find or create group
-            let group_index = if let Some(index) = agg_state.groups.iter().position(|(k, _)| k == &group_key) {
-                index
-            } else {
-                let initial_aggregates = agg_plan
-                    .aggregates
-                    .iter()
-                    .map(|agg_comp| match agg_comp.function {
-                        AggregateType::Count => AggregateValue::Count(0),
-                        AggregateType::Sum => AggregateValue::Sum(0.0),
-                        AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
-                        AggregateType::Min => AggregateValue::Min(Value::Null),
-                        AggregateType::Max => AggregateValue::Max(Value::Null),
-                    })
-                    .collect();
-                agg_state.groups.push((group_key, initial_aggregates));
-                agg_state.groups.len() - 1
-            };
-            
+            let group_index =
+                if let Some(index) = agg_state.groups.iter().position(|(k, _)| k == &group_key) {
+                    index
+                } else {
+                    let initial_aggregates = agg_plan
+                        .aggregates
+                        .iter()
+                        .map(|agg_comp| match agg_comp.function {
+                            AggregateType::Count => AggregateValue::Count(0),
+                            AggregateType::Sum => AggregateValue::Sum(0.0),
+                            AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
+                            AggregateType::Min => AggregateValue::Min(Value::Null),
+                            AggregateType::Max => AggregateValue::Max(Value::Null),
+                        })
+                        .collect();
+                    agg_state.groups.push((group_key, initial_aggregates));
+                    agg_state.groups.len() - 1
+                };
+
             let group_aggregates = &mut agg_state.groups[group_index].1;
 
             // Update each aggregate
@@ -675,9 +675,9 @@ impl SelectExecutor {
                 row_values.insert(agg_comp.alias.clone(), result_value);
             }
 
-            result_rows.push(QueryRow { 
-                values: row_values, 
-                key: RowKey::new(vec![]), 
+            result_rows.push(QueryRow {
+                values: row_values,
+                key: RowKey::new(vec![]),
                 metadata: Default::default(),
             });
         }
@@ -729,7 +729,7 @@ impl SelectExecutor {
 
             projected_rows.push(QueryRow {
                 values: projected_values,
-                key: RowKey::new(vec![]), 
+                key: RowKey::new(vec![]),
                 metadata: Default::default(),
             });
         }
@@ -790,20 +790,21 @@ impl SelectExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::{Config, platform::Platform};
+    use tempfile::TempDir;
 
     async fn create_test_executor() -> SelectExecutor {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
-        let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(temp_dir.path(), &config, platform.clone())
+                .await
+                .unwrap(),
+        );
         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
-        
-        SelectExecutor {
-            schema,
-            storage,
-        }
+
+        SelectExecutor { schema, storage }
     }
 
     #[tokio::test]

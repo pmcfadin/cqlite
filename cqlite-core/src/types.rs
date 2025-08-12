@@ -1,8 +1,15 @@
 //! Core data types for CQLite
 
+pub mod comparator;
+
+#[cfg(test)]
+mod comparator_test;
+
+pub use comparator::ComparatorType;
+
+use crate::schema::CqlType;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use crate::schema::CqlType;
 
 /// Database value type that can hold any supported data type
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,7 +156,8 @@ impl UdtValue {
 
     /// Get a field value by name
     pub fn get_field(&self, name: &str) -> Option<&Value> {
-        self.fields.iter()
+        self.fields
+            .iter()
             .find(|f| f.name == name)
             .and_then(|f| f.value.as_ref())
     }
@@ -224,7 +232,9 @@ impl UdtTypeDef {
                 if !Self::is_compatible_type(&field_value.data_type(), &field_def.field_type) {
                     return Err(crate::Error::schema(format!(
                         "Field '{}' type mismatch: expected {:?}, found {:?}",
-                        field_def.name, field_def.field_type, field_value.data_type()
+                        field_def.name,
+                        field_def.field_type,
+                        field_value.data_type()
                     )));
                 }
             } else if !field_def.nullable {
@@ -293,7 +303,7 @@ impl Value {
                     elements[0].data_type()
                 };
                 CqlType::List(Box::new(element_type))
-            },
+            }
             Value::Set(elements) => {
                 let element_type = if elements.is_empty() {
                     CqlType::Text
@@ -301,7 +311,7 @@ impl Value {
                     elements[0].data_type()
                 };
                 CqlType::Set(Box::new(element_type))
-            },
+            }
             Value::Map(pairs) => {
                 let (key_type, value_type) = if pairs.is_empty() {
                     (CqlType::Text, CqlType::Text)
@@ -309,22 +319,26 @@ impl Value {
                     (pairs[0].0.data_type(), pairs[0].1.data_type())
                 };
                 CqlType::Map(Box::new(key_type), Box::new(value_type))
-            },
+            }
             Value::Tuple(fields) => {
                 let field_types = fields.iter().map(|f| f.data_type()).collect();
                 CqlType::Tuple(field_types)
-            },
+            }
             Value::Udt(udt) => {
-                let fields = udt.fields.iter().map(|f| {
-                    let field_type = if let Some(ref value) = f.value {
-                        value.data_type()
-                    } else {
-                        CqlType::Text // Default for null fields
-                    };
-                    (f.name.clone(), field_type)
-                }).collect();
+                let fields = udt
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let field_type = if let Some(ref value) = f.value {
+                            value.data_type()
+                        } else {
+                            CqlType::Text // Default for null fields
+                        };
+                        (f.name.clone(), field_type)
+                    })
+                    .collect();
                 CqlType::Udt(udt.type_name.clone(), fields)
-            },
+            }
             Value::Frozen(inner) => CqlType::Frozen(Box::new(inner.data_type())),
             Value::Tombstone(_) => CqlType::Text, // Tombstones don't have a specific type
         }
@@ -355,7 +369,7 @@ impl Value {
                 } else {
                     false
                 }
-            },
+            }
             _ => false,
         }
     }
@@ -400,7 +414,7 @@ impl Value {
             range_end: None,
         })
     }
-    
+
     /// Create a range tombstone for clustering key ranges
     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
         Value::Tombstone(TombstoneInfo {
@@ -411,9 +425,14 @@ impl Value {
             range_end: Some(end_key),
         })
     }
-    
+
     /// Create a range tombstone with TTL for clustering key ranges
-    pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    pub fn range_tombstone_with_ttl(
+        deletion_time: i64,
+        start_key: RowKey,
+        end_key: RowKey,
+        ttl: i64,
+    ) -> Self {
         Value::Tombstone(TombstoneInfo {
             deletion_time,
             tombstone_type: TombstoneType::RangeTombstone,
@@ -422,7 +441,7 @@ impl Value {
             range_end: Some(end_key),
         })
     }
-    
+
     /// Get the tombstone type if this is a tombstone
     pub fn tombstone_type(&self) -> Option<TombstoneType> {
         match self {
@@ -430,7 +449,7 @@ impl Value {
             _ => None,
         }
     }
-    
+
     /// Check if this tombstone covers a specific key (for range tombstones)
     pub fn tombstone_covers_key(&self, key: &RowKey) -> bool {
         match self {
@@ -441,12 +460,12 @@ impl Value {
                     (None, Some(end)) => key <= end,
                     (None, None) => false,
                 }
-            },
+            }
             Value::Tombstone(_) => true, // Row and cell tombstones cover their specific key
             _ => false,
         }
     }
-    
+
     /// Get TTL information from tombstone
     pub fn tombstone_ttl(&self) -> Option<i64> {
         match self {
@@ -454,7 +473,7 @@ impl Value {
             _ => None,
         }
     }
-    
+
     /// Check if this is a specific type of tombstone
     pub fn is_tombstone_type(&self, tombstone_type: TombstoneType) -> bool {
         match self {
@@ -462,13 +481,13 @@ impl Value {
             _ => false,
         }
     }
-    
+
     /// Get range information for range tombstones
     pub fn tombstone_range(&self) -> Option<(Option<&RowKey>, Option<&RowKey>)> {
         match self {
             Value::Tombstone(info) if info.tombstone_type == TombstoneType::RangeTombstone => {
                 Some((info.range_start.as_ref(), info.range_end.as_ref()))
-            },
+            }
             _ => None,
         }
     }
@@ -550,35 +569,35 @@ impl Value {
             Value::Json(j) => {
                 let json_str = j.to_string();
                 4 + json_str.len()
-            },
+            }
             Value::List(list) => {
                 let mut size = 4 + 1; // count + element type
                 for item in list {
                     size += item.size_estimate();
                 }
                 size
-            },
+            }
             Value::Set(set) => {
                 let mut size = 4 + 1; // count + element type
                 for item in set {
                     size += item.size_estimate();
                 }
                 size
-            },
+            }
             Value::Map(map) => {
                 let mut size = 4 + 2; // count + key_type + value_type
                 for (key, value) in map {
                     size += key.size_estimate() + value.size_estimate();
                 }
                 size
-            },
+            }
             Value::Tuple(tuple) => {
                 let mut size = 4; // count
                 for item in tuple {
                     size += 1 + item.size_estimate(); // type + value
                 }
                 size
-            },
+            }
             Value::Udt(udt_value) => {
                 let mut size = 4 + udt_value.type_name.len() + 4 + udt_value.keyspace.len() + 4; // type name + keyspace + field count
                 for field in &udt_value.fields {
@@ -590,7 +609,7 @@ impl Value {
                     }
                 }
                 size
-            },
+            }
             Value::Frozen(inner) => inner.size_estimate(),
             Value::Tombstone(_) => 16, // timestamp + type + optional TTL
         }
@@ -636,13 +655,15 @@ impl Value {
                 let first_type = list[0].data_type();
                 for item in list.iter().skip(1) {
                     if item.data_type() != first_type {
-                        return Err(crate::Error::schema(
-                            format!("List contains mixed types: {:?} and {:?}", first_type, item.data_type())
-                        ));
+                        return Err(crate::Error::schema(format!(
+                            "List contains mixed types: {:?} and {:?}",
+                            first_type,
+                            item.data_type()
+                        )));
                     }
                 }
                 Ok(())
-            },
+            }
             Value::Set(set) => {
                 if set.is_empty() {
                     return Ok(());
@@ -650,9 +671,11 @@ impl Value {
                 let first_type = set[0].data_type();
                 for item in set.iter().skip(1) {
                     if item.data_type() != first_type {
-                        return Err(crate::Error::schema(
-                            format!("Set contains mixed types: {:?} and {:?}", first_type, item.data_type())
-                        ));
+                        return Err(crate::Error::schema(format!(
+                            "Set contains mixed types: {:?} and {:?}",
+                            first_type,
+                            item.data_type()
+                        )));
                     }
                 }
                 // Check for duplicates in set
@@ -660,13 +683,14 @@ impl Value {
                 for item in set {
                     let item_str = format!("{}", item);
                     if !seen.insert(item_str.clone()) {
-                        return Err(crate::Error::schema(
-                            format!("Set contains duplicate value: {}", item_str)
-                        ));
+                        return Err(crate::Error::schema(format!(
+                            "Set contains duplicate value: {}",
+                            item_str
+                        )));
                     }
                 }
                 Ok(())
-            },
+            }
             Value::Map(map) => {
                 if map.is_empty() {
                     return Ok(());
@@ -674,32 +698,37 @@ impl Value {
                 let (first_key, first_value) = &map[0];
                 let key_type = first_key.data_type();
                 let value_type = first_value.data_type();
-                
+
                 for (key, value) in map.iter().skip(1) {
                     if key.data_type() != key_type {
-                        return Err(crate::Error::schema(
-                            format!("Map contains mixed key types: {:?} and {:?}", key_type, key.data_type())
-                        ));
+                        return Err(crate::Error::schema(format!(
+                            "Map contains mixed key types: {:?} and {:?}",
+                            key_type,
+                            key.data_type()
+                        )));
                     }
                     if value.data_type() != value_type {
-                        return Err(crate::Error::schema(
-                            format!("Map contains mixed value types: {:?} and {:?}", value_type, value.data_type())
-                        ));
+                        return Err(crate::Error::schema(format!(
+                            "Map contains mixed value types: {:?} and {:?}",
+                            value_type,
+                            value.data_type()
+                        )));
                     }
                 }
-                
+
                 // Check for duplicate keys
                 let mut seen_keys = std::collections::HashSet::new();
                 for (key, _) in map {
                     let key_str = format!("{}", key);
                     if !seen_keys.insert(key_str.clone()) {
-                        return Err(crate::Error::schema(
-                            format!("Map contains duplicate key: {}", key_str)
-                        ));
+                        return Err(crate::Error::schema(format!(
+                            "Map contains duplicate key: {}",
+                            key_str
+                        )));
                     }
                 }
                 Ok(())
-            },
+            }
             _ => Ok(()), // Non-collections are always valid
         }
     }
@@ -712,7 +741,7 @@ impl PartialOrd for Value {
             (Value::Null, Value::Null) => Some(Ordering::Equal),
             (Value::Null, _) => Some(Ordering::Less),
             (_, Value::Null) => Some(Ordering::Greater),
-            
+
             (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
             (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
             (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
@@ -724,7 +753,7 @@ impl PartialOrd for Value {
             (Value::TinyInt(a), Value::TinyInt(b)) => a.partial_cmp(b),
             (Value::SmallInt(a), Value::SmallInt(b)) => a.partial_cmp(b),
             (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b),
-            
+
             // For complex types, compare by string representation
             (a, b) => a.to_string().partial_cmp(&b.to_string()),
         }
@@ -805,20 +834,20 @@ impl fmt::Display for Value {
             Value::Frozen(inner) => {
                 write!(f, "FROZEN({})", inner)
             }
-            Value::Tombstone(info) => {
-                match info.tombstone_type {
-                    TombstoneType::RowTombstone => write!(f, "TOMBSTONE(ROW@{})", info.deletion_time),
-                    TombstoneType::CellTombstone => write!(f, "TOMBSTONE(CELL@{})", info.deletion_time),
-                    TombstoneType::RangeTombstone => write!(f, "TOMBSTONE(RANGE@{})", info.deletion_time),
-                    TombstoneType::TtlExpiration => {
-                        if let Some(ttl) = info.ttl {
-                            write!(f, "TOMBSTONE(TTL@{}+{})", info.deletion_time, ttl)
-                        } else {
-                            write!(f, "TOMBSTONE(TTL@{})", info.deletion_time)
-                        }
+            Value::Tombstone(info) => match info.tombstone_type {
+                TombstoneType::RowTombstone => write!(f, "TOMBSTONE(ROW@{})", info.deletion_time),
+                TombstoneType::CellTombstone => write!(f, "TOMBSTONE(CELL@{})", info.deletion_time),
+                TombstoneType::RangeTombstone => {
+                    write!(f, "TOMBSTONE(RANGE@{})", info.deletion_time)
+                }
+                TombstoneType::TtlExpiration => {
+                    if let Some(ttl) = info.ttl {
+                        write!(f, "TOMBSTONE(TTL@{}+{})", info.deletion_time, ttl)
+                    } else {
+                        write!(f, "TOMBSTONE(TTL@{})", info.deletion_time)
                     }
                 }
-            }
+            },
         }
     }
 }
@@ -1132,8 +1161,14 @@ mod tests {
             type_name: "Person".to_string(),
             keyspace: "test".to_string(),
             fields: vec![
-                UdtField { name: "name".to_string(), value: Some(Value::Text("John".to_string())) },
-                UdtField { name: "age".to_string(), value: Some(Value::Integer(30)) },
+                UdtField {
+                    name: "name".to_string(),
+                    value: Some(Value::Text("John".to_string())),
+                },
+                UdtField {
+                    name: "age".to_string(),
+                    value: Some(Value::Integer(30)),
+                },
             ],
         });
         assert!(matches!(udt.data_type(), CqlType::Udt(_, _)));

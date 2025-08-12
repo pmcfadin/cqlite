@@ -1,6 +1,6 @@
+use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
 use std::path::PathBuf;
-use anyhow::{Context, Result, anyhow};
 
 #[derive(ValueEnum, Clone, Debug)]
 pub enum OutputFormat {
@@ -103,7 +103,10 @@ impl CassandraVersion {
     }
 
     pub fn is_supported(&self) -> bool {
-        matches!(self, CassandraVersion::V311 | CassandraVersion::V400 | CassandraVersion::V500)
+        matches!(
+            self,
+            CassandraVersion::V311 | CassandraVersion::V400 | CassandraVersion::V500
+        )
     }
 }
 
@@ -127,9 +130,14 @@ pub fn detect_sstable_version(sstable_path: &PathBuf) -> Result<String> {
         file.seek(SeekFrom::Start(4))?;
         let mut version_bytes = vec![0u8; 4];
         file.read_exact(&mut version_bytes)?;
-        
-        let version = u32::from_be_bytes([version_bytes[0], version_bytes[1], version_bytes[2], version_bytes[3]]);
-        
+
+        let version = u32::from_be_bytes([
+            version_bytes[0],
+            version_bytes[1],
+            version_bytes[2],
+            version_bytes[3],
+        ]);
+
         match version {
             0x0001 => Ok("3.11".to_string()),
             0x0002 => Ok("4.0".to_string()),
@@ -141,7 +149,7 @@ pub fn detect_sstable_version(sstable_path: &PathBuf) -> Result<String> {
         file.seek(SeekFrom::End(-512))?;
         let mut footer = vec![0u8; 512];
         file.read(&mut footer)?;
-        
+
         if footer.iter().any(|&b| b != 0) {
             // Has footer - likely newer format
             Ok("4.0".to_string())
@@ -155,31 +163,36 @@ pub fn detect_sstable_version(sstable_path: &PathBuf) -> Result<String> {
 /// Validate Cassandra version string
 pub fn validate_cassandra_version(version: &str) -> Result<CassandraVersion> {
     let cassandra_version = CassandraVersion::from_string(version);
-    
+
     if !cassandra_version.is_supported() {
         return Err(anyhow!(
-            "Unsupported Cassandra version: {}. Supported versions: 3.11, 4.0, 5.0", 
+            "Unsupported Cassandra version: {}. Supported versions: 3.11, 4.0, 5.0",
             version
         ));
     }
-    
+
     Ok(cassandra_version)
 }
 
 /// Create enhanced error message with version context
-pub fn create_version_error(base_error: &str, detected_version: Option<&str>, provided_version: Option<&str>) -> String {
+pub fn create_version_error(
+    base_error: &str,
+    detected_version: Option<&str>,
+    provided_version: Option<&str>,
+) -> String {
     let mut error_msg = base_error.to_string();
-    
+
     if let Some(detected) = detected_version {
         error_msg.push_str(&format!("\nDetected SSTable version: {}", detected));
     }
-    
+
     if let Some(provided) = provided_version {
         error_msg.push_str(&format!("\nProvided Cassandra version: {}", provided));
     }
-    
+
     error_msg.push_str("\nHint: Try using --auto-detect flag for automatic version detection");
-    error_msg.push_str("\n      or specify --cassandra-version to override (supported: 3.11, 4.0, 5.0)");
-    
+    error_msg
+        .push_str("\n      or specify --cassandra-version to override (supported: 3.11, 4.0, 5.0)");
+
     error_msg
 }

@@ -230,22 +230,34 @@ pub fn demonstrate_real_world_examples() {
     println!();
 
     let examples = vec![
-        ("E-commerce Analytics", vec![
-            "SELECT customer_id, COUNT(*) as orders, SUM(total) as revenue FROM orders WHERE status = 'completed' GROUP BY customer_id HAVING SUM(total) > 1000 ORDER BY revenue DESC LIMIT 100",
-            "SELECT p.category, AVG(r.rating) as avg_rating FROM products p JOIN reviews r ON p.id = r.product_id GROUP BY p.category ORDER BY avg_rating DESC",
-        ]),
-        ("IoT Sensor Data", vec![
-            "SELECT sensor_id, AVG(temperature), MAX(humidity) FROM sensor_readings WHERE timestamp > '2024-01-01' AND location IN ('warehouse_a', 'warehouse_b') GROUP BY sensor_id",
-            "SELECT DATE(timestamp) as day, COUNT(*) as events FROM sensor_alerts WHERE severity = 'critical' GROUP BY day ORDER BY day DESC LIMIT 30",
-        ]),
-        ("User Behavior Analytics", vec![
-            "SELECT user_id, action_type, COUNT(*) FROM user_events WHERE session_id IS NOT NULL AND timestamp BETWEEN '2024-01-01' AND '2024-01-31' GROUP BY user_id, action_type",
-            "SELECT page_url, COUNT(DISTINCT user_id) as unique_visitors FROM page_views WHERE referrer LIKE '%google%' GROUP BY page_url ORDER BY unique_visitors DESC LIMIT 50",
-        ]),
-        ("Financial Data", vec![
-            "SELECT account_type, SUM(amount) as total_balance FROM accounts WHERE status = 'active' AND balance > 0 GROUP BY account_type",
-            "SELECT t.transaction_type, COUNT(*), AVG(t.amount) FROM transactions t WHERE t.amount > 10000 AND t.created_at > '2024-01-01' GROUP BY t.transaction_type",
-        ]),
+        (
+            "E-commerce Analytics",
+            vec![
+                "SELECT customer_id, COUNT(*) as orders, SUM(total) as revenue FROM orders WHERE status = 'completed' GROUP BY customer_id HAVING SUM(total) > 1000 ORDER BY revenue DESC LIMIT 100",
+                "SELECT p.category, AVG(r.rating) as avg_rating FROM products p JOIN reviews r ON p.id = r.product_id GROUP BY p.category ORDER BY avg_rating DESC",
+            ],
+        ),
+        (
+            "IoT Sensor Data",
+            vec![
+                "SELECT sensor_id, AVG(temperature), MAX(humidity) FROM sensor_readings WHERE timestamp > '2024-01-01' AND location IN ('warehouse_a', 'warehouse_b') GROUP BY sensor_id",
+                "SELECT DATE(timestamp) as day, COUNT(*) as events FROM sensor_alerts WHERE severity = 'critical' GROUP BY day ORDER BY day DESC LIMIT 30",
+            ],
+        ),
+        (
+            "User Behavior Analytics",
+            vec![
+                "SELECT user_id, action_type, COUNT(*) FROM user_events WHERE session_id IS NOT NULL AND timestamp BETWEEN '2024-01-01' AND '2024-01-31' GROUP BY user_id, action_type",
+                "SELECT page_url, COUNT(DISTINCT user_id) as unique_visitors FROM page_views WHERE referrer LIKE '%google%' GROUP BY page_url ORDER BY unique_visitors DESC LIMIT 50",
+            ],
+        ),
+        (
+            "Financial Data",
+            vec![
+                "SELECT account_type, SUM(amount) as total_balance FROM accounts WHERE status = 'active' AND balance > 0 GROUP BY account_type",
+                "SELECT t.transaction_type, COUNT(*), AVG(t.amount) FROM transactions t WHERE t.amount > 10000 AND t.created_at > '2024-01-01' GROUP BY t.transaction_type",
+            ],
+        ),
     ];
 
     for (category, queries) in examples {

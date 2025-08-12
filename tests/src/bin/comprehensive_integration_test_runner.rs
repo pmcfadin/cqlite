@@ -2,12 +2,11 @@
 ///
 /// Standalone executable for running the complete CQLite integration test suite.
 /// This runner provides a CI/CD friendly interface with clear pass/fail results.
-
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_tests::comprehensive_integration_test_suite::{
+    ComprehensiveIntegrationTestSuite, IntegrationTestConfig, print_integration_test_results,
     run_comprehensive_integration_tests, run_quick_integration_tests,
-    print_integration_test_results, IntegrationTestConfig, ComprehensiveIntegrationTestSuite
 };
 use std::env;
 use std::path::PathBuf;
@@ -17,17 +16,17 @@ use tokio;
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
-    
+
     println!("🧪 CQLite Comprehensive Integration Test Runner");
     println!("{}", "=".repeat(60));
-    
+
     // Parse command line arguments
     let mut test_mode = "full";
     let mut test_data_path = PathBuf::from("test-env/cassandra5/sstables");
     let mut timeout_seconds = 300u64;
     let mut fail_fast = false;
     let mut detailed_reporting = true;
-    
+
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -36,7 +35,9 @@ async fn main() {
                     test_mode = &args[i + 1];
                     i += 2;
                 } else {
-                    eprintln!("Error: --mode requires a value (full, quick, real-only, performance-only)");
+                    eprintln!(
+                        "Error: --mode requires a value (full, quick, real-only, performance-only)"
+                    );
                     process::exit(1);
                 }
             }
@@ -86,7 +87,10 @@ async fn main() {
 
     // Validate test data path
     if !test_data_path.exists() {
-        eprintln!("❌ Error: Test data path does not exist: {}", test_data_path.display());
+        eprintln!(
+            "❌ Error: Test data path does not exist: {}",
+            test_data_path.display()
+        );
         eprintln!("💡 Hint: Run './test-env/cassandra5/manage.sh all' to generate test data");
         process::exit(1);
     }
@@ -177,12 +181,17 @@ async fn main() {
     // Process results
     match test_results {
         Ok(results) => {
-            println!("\n⏱️  Total execution time: {:.2}s", total_time.as_secs_f64());
+            println!(
+                "\n⏱️  Total execution time: {:.2}s",
+                total_time.as_secs_f64()
+            );
             print_integration_test_results(&results);
-            
+
             // Determine exit code based on results
             let success_threshold = 0.8; // 80% compatibility required for success
-            let exit_code = if results.overall_compatibility_score >= success_threshold && results.failed_tests == 0 {
+            let exit_code = if results.overall_compatibility_score >= success_threshold
+                && results.failed_tests == 0
+            {
                 println!("\n🎉 ALL TESTS PASSED - CQLite is compatible with Cassandra 5+");
                 0
             } else if results.overall_compatibility_score >= success_threshold {
@@ -199,12 +208,22 @@ async fn main() {
             // Print CI/CD friendly summary
             println!("\n📊 CI/CD Summary:");
             println!("  • Exit Code: {}", exit_code);
-            println!("  • Success Rate: {:.1}%", 
-                    (results.passed_tests as f64 / results.total_tests as f64) * 100.0);
-            println!("  • Compatibility Score: {:.3}", results.overall_compatibility_score);
-            println!("  • Performance Score: {:.3}", results.overall_performance_score);
-            println!("  • Total Data Processed: {:.2} MB", 
-                    results.total_bytes_processed as f64 / 1024.0 / 1024.0);
+            println!(
+                "  • Success Rate: {:.1}%",
+                (results.passed_tests as f64 / results.total_tests as f64) * 100.0
+            );
+            println!(
+                "  • Compatibility Score: {:.3}",
+                results.overall_compatibility_score
+            );
+            println!(
+                "  • Performance Score: {:.3}",
+                results.overall_performance_score
+            );
+            println!(
+                "  • Total Data Processed: {:.2} MB",
+                results.total_bytes_processed as f64 / 1024.0 / 1024.0
+            );
             println!("  • Files Tested: {}", results.total_files_tested);
 
             // Generate machine-readable results for CI/CD
@@ -217,19 +236,22 @@ async fn main() {
         Err(e) => {
             eprintln!("💥 INTEGRATION TESTS FAILED: {}", e);
             eprintln!("⏱️  Execution time: {:.2}s", total_time.as_secs_f64());
-            
+
             // Check if it's a timeout
             if total_time.as_secs() >= timeout_seconds {
                 eprintln!("⏰ Tests exceeded timeout of {} seconds", timeout_seconds);
                 eprintln!("💡 Try running with --mode quick or increase --timeout");
             }
-            
+
             // Check common issues
             if e.to_string().contains("No such file") {
-                eprintln!("💡 Hint: Make sure test data exists at {}", test_data_path.display());
+                eprintln!(
+                    "💡 Hint: Make sure test data exists at {}",
+                    test_data_path.display()
+                );
                 eprintln!("        Run: cd test-env/cassandra5 && ./manage.sh all");
             }
-            
+
             process::exit(3);
         }
     }
@@ -242,7 +264,9 @@ fn print_help() {
     println!("    comprehensive_integration_test_runner [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("    -m, --mode <MODE>           Test mode: full, quick, real-only, performance-only, collections-only");
+    println!(
+        "    -m, --mode <MODE>           Test mode: full, quick, real-only, performance-only, collections-only"
+    );
     println!("                                [default: full]");
     println!("    -d, --test-data <PATH>      Path to test SSTable data");
     println!("                                [default: test-env/cassandra5/sstables]");
@@ -278,9 +302,11 @@ fn print_help() {
     println!("    comprehensive_integration_test_runner --mode performance-only --timeout 600");
 }
 
-fn generate_ci_results(results: &cqlite_tests::comprehensive_integration_test_suite::IntegrationTestSuiteResults) -> Result<(), Box<dyn std::error::Error>> {
-    use std::fs;
+fn generate_ci_results(
+    results: &cqlite_tests::comprehensive_integration_test_suite::IntegrationTestSuiteResults,
+) -> Result<(), Box<dyn std::error::Error>> {
     use serde_json;
+    use std::fs;
 
     // Create a CI-friendly JSON report
     let ci_report = serde_json::json!({
@@ -330,7 +356,10 @@ fn generate_ci_results(results: &cqlite_tests::comprehensive_integration_test_su
     });
 
     // Write to file
-    fs::write("integration_test_results.json", serde_json::to_string_pretty(&ci_report)?)?;
+    fs::write(
+        "integration_test_results.json",
+        serde_json::to_string_pretty(&ci_report)?,
+    )?;
     println!("📄 CI results written to: integration_test_results.json");
 
     // Also write a simple status file for easier CI integration
@@ -339,7 +368,7 @@ fn generate_ci_results(results: &cqlite_tests::comprehensive_integration_test_su
     } else {
         "FAIL"
     };
-    
+
     fs::write("integration_test_status.txt", format!("{}\n", status))?;
     println!("📄 CI status written to: integration_test_status.txt");
 
@@ -350,7 +379,9 @@ fn generate_ci_results(results: &cqlite_tests::comprehensive_integration_test_su
 
 /// Generate a GitHub Actions summary
 #[allow(dead_code)]
-fn generate_github_summary(results: &cqlite_tests::comprehensive_integration_test_suite::IntegrationTestSuiteResults) {
+fn generate_github_summary(
+    results: &cqlite_tests::comprehensive_integration_test_suite::IntegrationTestSuiteResults,
+) {
     if let Ok(github_step_summary) = std::env::var("GITHUB_STEP_SUMMARY") {
         let summary = format!(
             "## 🧪 CQLite Integration Test Results\n\n\
@@ -374,7 +405,11 @@ fn generate_github_summary(results: &cqlite_tests::comprehensive_integration_tes
             results.overall_performance_score,
             results.total_bytes_processed as f64 / 1024.0 / 1024.0,
             results.total_execution_time_ms as f64 / 1000.0,
-            if results.overall_compatibility_score >= 0.8 { "✅ PASS" } else { "❌ FAIL" },
+            if results.overall_compatibility_score >= 0.8 {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            },
             if results.critical_issues.is_empty() {
                 "No critical issues found."
             } else {
@@ -391,9 +426,9 @@ fn generate_github_summary(results: &cqlite_tests::comprehensive_integration_tes
 /// Check if running in CI environment
 #[allow(dead_code)]
 fn is_ci_environment() -> bool {
-    std::env::var("CI").is_ok() || 
-    std::env::var("GITHUB_ACTIONS").is_ok() ||
-    std::env::var("JENKINS_URL").is_ok() ||
-    std::env::var("TRAVIS").is_ok() ||
-    std::env::var("CIRCLECI").is_ok()
+    std::env::var("CI").is_ok()
+        || std::env::var("GITHUB_ACTIONS").is_ok()
+        || std::env::var("JENKINS_URL").is_ok()
+        || std::env::var("TRAVIS").is_ok()
+        || std::env::var("CIRCLECI").is_ok()
 }

@@ -535,7 +535,7 @@ impl CLIIntegrationTestSuite {
         println!("{} ({:.2}s)", status_symbol, execution_time as f64 / 1000.0);
 
         let details = self.generate_test_details(test_name, &output.status, &stdout, &stderr);
-        
+
         Ok(CLITestResult {
             test_name: test_name.to_string(),
             success,

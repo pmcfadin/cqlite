@@ -27,13 +27,13 @@ mod smoke_tests {
     #[test]
     fn test_execution_timing() {
         let start = Instant::now();
-        
+
         // Simulate some work
         let _result: Vec<i32> = (0..1000).map(|x| x * 2).collect();
-        
+
         let duration = start.elapsed();
         println!("Test execution took: {:?}", duration);
-        
+
         // Should complete quickly (baseline timing test)
         assert!(duration.as_millis() < 100, "Should complete in <100ms");
     }
@@ -48,7 +48,7 @@ mod smoke_tests {
     #[test]
     fn test_file_system_basics() {
         use std::env;
-        
+
         // Test basic file system operations
         let temp_dir = env::temp_dir();
         assert!(temp_dir.exists(), "Temp directory should exist");
@@ -65,13 +65,13 @@ mod smoke_tests {
     #[test]
     fn test_baseline_performance() {
         let start = Instant::now();
-        
+
         // Perform a reasonable amount of work for baseline
         let _: usize = (0..10000).map(|x| x.to_string().len()).sum();
-        
+
         let duration = start.elapsed();
         println!("Baseline performance test took: {:?}", duration);
-        
+
         // Establish baseline - should be reasonably fast
         assert!(duration.as_millis() < 1000, "Should complete in <1000ms");
     }
@@ -79,12 +79,10 @@ mod smoke_tests {
     #[test]
     fn test_concurrent_baseline() {
         use std::thread;
-        
+
         // Test that basic threading works
-        let handle = thread::spawn(|| {
-            42
-        });
-        
+        let handle = thread::spawn(|| 42);
+
         let result = handle.join().unwrap();
         assert_eq!(result, 42, "Thread execution should work");
     }
@@ -94,7 +92,7 @@ mod smoke_tests {
         // Test environment detection for cross-platform validation
         let os = std::env::consts::OS;
         println!("Running on OS: {}", os);
-        
+
         // Verify we can detect the OS
         assert!(
             os == "linux" || os == "macos" || os == "windows",
@@ -119,9 +117,12 @@ mod integration_baseline {
         // Verify core module exists
         let core_path = PathBuf::from("cqlite-core");
         assert!(core_path.exists(), "cqlite-core directory should exist");
-        
+
         let core_manifest = core_path.join("Cargo.toml");
-        assert!(core_manifest.exists(), "cqlite-core Cargo.toml should exist");
+        assert!(
+            core_manifest.exists(),
+            "cqlite-core Cargo.toml should exist"
+        );
     }
 
     #[test]
@@ -129,9 +130,12 @@ mod integration_baseline {
         // Verify testing framework exists
         let framework_path = PathBuf::from("testing-framework");
         assert!(framework_path.exists(), "testing-framework should exist");
-        
+
         let framework_manifest = framework_path.join("Cargo.toml");
-        assert!(framework_manifest.exists(), "testing-framework Cargo.toml should exist");
+        assert!(
+            framework_manifest.exists(),
+            "testing-framework Cargo.toml should exist"
+        );
     }
 }
 

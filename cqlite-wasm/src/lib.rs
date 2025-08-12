@@ -180,10 +180,7 @@ impl CQLiteDB {
     /// This is an async operation that initializes the database storage.
     #[wasm_bindgen]
     pub async fn open(&mut self) -> Result<(), JsValue> {
-        self.database
-            .open()
-            .await
-            .map_err(|e| e)
+        self.database.open().await.map_err(|e| e)
     }
 
     /// Execute a SQL statement
@@ -197,11 +194,7 @@ impl CQLiteDB {
     /// A Promise that resolves to the query result
     #[wasm_bindgen]
     pub async fn execute(&self, sql: String) -> Result<JsValue, JsValue> {
-        let result = self
-            .database
-            .execute(&sql)
-            .await
-            .map_err(|e| e)?;
+        let result = self.database.execute(&sql).await.map_err(|e| e)?;
 
         Ok(result)
     }
@@ -217,11 +210,7 @@ impl CQLiteDB {
     /// A prepared statement handle
     #[wasm_bindgen]
     pub async fn prepare(&self, sql: String) -> Result<PreparedStatement, JsValue> {
-        let stmt = self
-            .database
-            .prepare(&sql)
-            .await
-            .map_err(|e| e)?;
+        let stmt = self.database.prepare(&sql).await.map_err(|e| e)?;
 
         Ok(PreparedStatement { statement: stmt })
     }
@@ -234,11 +223,7 @@ impl CQLiteDB {
     /// * `data` - Data object to insert
     #[wasm_bindgen]
     pub async fn insert(&self, table: String, data: JsValue) -> Result<JsValue, JsValue> {
-        let result = self
-            .database
-            .insert(&table, data)
-            .await
-            .map_err(|e| e)?;
+        let result = self.database.insert(&table, data).await.map_err(|e| e)?;
 
         Ok(result)
     }
@@ -327,20 +312,13 @@ impl CQLiteDB {
     /// * `name` - Table name
     #[wasm_bindgen]
     pub async fn drop_table(&self, name: String) -> Result<(), JsValue> {
-        self.database
-            .drop_table(&name)
-            .await
-            .map_err(|e| e)
+        self.database.drop_table(&name).await.map_err(|e| e)
     }
 
     /// List all tables
     #[wasm_bindgen]
     pub async fn list_tables(&self) -> Result<JsValue, JsValue> {
-        let tables = self
-            .database
-            .list_tables()
-            .await
-            .map_err(|e| e)?;
+        let tables = self.database.list_tables().await.map_err(|e| e)?;
 
         Ok(JsValue::NULL) // Stub implementation
     }
@@ -348,11 +326,7 @@ impl CQLiteDB {
     /// Get database statistics
     #[wasm_bindgen]
     pub async fn stats(&self) -> Result<JsValue, JsValue> {
-        let stats = self
-            .database
-            .stats()
-            .await
-            .map_err(|e| e)?;
+        let stats = self.database.stats().await.map_err(|e| e)?;
 
         Ok(JsValue::NULL) // Stub implementation
     }
@@ -360,56 +334,37 @@ impl CQLiteDB {
     /// Flush all pending writes
     #[wasm_bindgen]
     pub async fn flush(&self) -> Result<(), JsValue> {
-        self.database
-            .flush()
-            .await
-            .map_err(|e| e)
+        self.database.flush().await.map_err(|e| e)
     }
 
     /// Perform manual compaction
     #[wasm_bindgen]
     pub async fn compact(&self) -> Result<(), JsValue> {
-        self.database
-            .compact()
-            .await
-            .map_err(|e| e)
+        self.database.compact().await.map_err(|e| e)
     }
 
     /// Close the database
     #[wasm_bindgen]
     pub async fn close(&mut self) -> Result<(), JsValue> {
-        self.database
-            .close()
-            .await
-            .map_err(|e| e)
+        self.database.close().await.map_err(|e| e)
     }
 
     /// Export database to JSON
     #[wasm_bindgen]
     pub async fn export_json(&self) -> Result<String, JsValue> {
-        self.database
-            .export_json()
-            .await
-            .map_err(|e| e)
+        self.database.export_json().await.map_err(|e| e)
     }
 
     /// Import database from JSON
     #[wasm_bindgen]
     pub async fn import_json(&self, json: String) -> Result<(), JsValue> {
-        self.database
-            .import_json(&json)
-            .await
-            .map_err(|e| e)
+        self.database.import_json(&json).await.map_err(|e| e)
     }
 
     /// Create a transaction
     #[wasm_bindgen]
     pub async fn begin_transaction(&self) -> Result<Transaction, JsValue> {
-        let tx = self
-            .database
-            .begin_transaction()
-            .await
-            .map_err(|e| e)?;
+        let tx = self.database.begin_transaction().await.map_err(|e| e)?;
 
         Ok(Transaction { transaction: tx })
     }
@@ -430,12 +385,12 @@ impl PreparedStatement {
     /// * `params` - Array of parameter values
     #[wasm_bindgen]
     pub async fn execute(&self, params: JsValue) -> Result<JsValue, JsValue> {
-        let _params = if params.is_undefined() || params.is_null() { JsValue::NULL } else { params };
-        let result = self
-            .statement
-            .execute(_params)
-            .await
-            .map_err(|e| e)?;
+        let _params = if params.is_undefined() || params.is_null() {
+            JsValue::NULL
+        } else {
+            params
+        };
+        let result = self.statement.execute(_params).await.map_err(|e| e)?;
 
         Ok(result)
     }
@@ -452,11 +407,7 @@ impl Transaction {
     /// Execute a statement within the transaction
     #[wasm_bindgen]
     pub async fn execute(&self, sql: String) -> Result<JsValue, JsValue> {
-        let result = self
-            .transaction
-            .execute(&sql)
-            .await
-            .map_err(|e| e)?;
+        let result = self.transaction.execute(&sql).await.map_err(|e| e)?;
 
         Ok(result)
     }
@@ -464,19 +415,13 @@ impl Transaction {
     /// Commit the transaction
     #[wasm_bindgen]
     pub async fn commit(&self) -> Result<(), JsValue> {
-        self.transaction
-            .commit()
-            .await
-            .map_err(|e| e)
+        self.transaction.commit().await.map_err(|e| e)
     }
 
     /// Rollback the transaction
     #[wasm_bindgen]
     pub async fn rollback(&self) -> Result<(), JsValue> {
-        self.transaction
-            .rollback()
-            .await
-            .map_err(|e| e)
+        self.transaction.rollback().await.map_err(|e| e)
     }
 }
 
@@ -491,10 +436,7 @@ impl Iterator {
     /// Move to the next item
     #[wasm_bindgen]
     pub async fn next(&mut self) -> Result<bool, JsValue> {
-        self.iterator
-            .next()
-            .await
-            .map_err(|e| e)
+        self.iterator.next().await.map_err(|e| e)
     }
 
     /// Get the current key

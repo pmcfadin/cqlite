@@ -13,7 +13,7 @@ pub struct Config {
     pub repl: ReplConfig,
     pub data_directory: Option<PathBuf>,
     pub default_keyspace: Option<String>,
-    
+
     // Legacy fields for backward compatibility
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_history: Option<bool>,

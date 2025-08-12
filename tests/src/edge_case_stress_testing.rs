@@ -3,11 +3,11 @@
 //! Comprehensive stress tests for large data volumes, memory constraints,
 //! and performance edge cases that could break Cassandra compatibility.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::parser::types::*;
 use cqlite_core::parser::vint::*;
-use cqlite_core::{error::Result, Value};
+use cqlite_core::{Value, error::Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -247,7 +247,7 @@ impl StressTestFramework {
                         return Err(format!(
                             "List serialization failed at chunk {}: {:?}",
                             chunk, e
-                        ))
+                        ));
                     }
                 }
 
@@ -357,7 +357,7 @@ impl StressTestFramework {
                         return Err(format!(
                             "String serialization failed for size {}: {:?}",
                             size, e
-                        ))
+                        ));
                     }
                 }
             }
@@ -425,7 +425,9 @@ impl StressTestFramework {
                 // Periodically test serialization of current map
                 if batch % 10 == 0 {
                     // Convert HashMap to Vec<(Value, Value)>
-                    let map_vec: Vec<(Value, Value)> = huge_map.clone().into_iter()
+                    let map_vec: Vec<(Value, Value)> = huge_map
+                        .clone()
+                        .into_iter()
                         .map(|(k, v)| (Value::Text(k), v))
                         .collect();
                     let map_value = Value::Map(map_vec);
@@ -437,7 +439,7 @@ impl StressTestFramework {
                             return Err(format!(
                                 "Map serialization failed at batch {}: {:?}",
                                 batch, e
-                            ))
+                            ));
                         }
                     }
 
@@ -627,7 +629,7 @@ impl StressTestFramework {
                         return Err(format!(
                             "Blob serialization failed for size {}: {:?}",
                             size, e
-                        ))
+                        ));
                     }
                 }
             }

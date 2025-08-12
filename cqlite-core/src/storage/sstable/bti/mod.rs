@@ -3,8 +3,8 @@
 //! This module implements support for Cassandra 5.0's BTI format, which uses
 //! trie-based indexes for improved performance over the legacy BIG format.
 
-pub mod nodes;
 pub mod encoder;
+pub mod nodes;
 pub mod parser;
 
 use crate::error::Error;
@@ -84,7 +84,11 @@ impl std::fmt::Display for BtiError {
                 write!(f, "Invalid BTI trie node type: 0x{:02x}", node_type)
             }
             BtiError::MaxDepthExceeded(depth) => {
-                write!(f, "BTI trie depth exceeded maximum: {} > {}", depth, MAX_TRIE_DEPTH)
+                write!(
+                    f,
+                    "BTI trie depth exceeded maximum: {} > {}",
+                    depth, MAX_TRIE_DEPTH
+                )
             }
             BtiError::InvalidByteComparableKey(key) => {
                 write!(f, "Invalid byte-comparable key: {}", key)
@@ -148,7 +152,7 @@ mod tests {
         assert_eq!(detect_format(BTI_MAGIC_NUMBER), FormatType::Bti);
         assert_eq!(detect_format(0x6F61_0000), FormatType::Big); // Legacy 'oa' format
         assert_eq!(detect_format(0x0040_0000), FormatType::Big); // Cassandra 5.0 'nb' format
-        
+
         assert!(is_bti_format(BTI_MAGIC_NUMBER));
         assert!(!is_bti_format(0x6F61_0000));
     }
@@ -159,10 +163,16 @@ mod tests {
         assert!(err.to_string().contains("Invalid BTI trie node type: 0xFF"));
 
         let err = BtiError::MaxDepthExceeded(150);
-        assert!(err.to_string().contains("BTI trie depth exceeded maximum: 150"));
+        assert!(
+            err.to_string()
+                .contains("BTI trie depth exceeded maximum: 150")
+        );
 
         let err = BtiError::InvalidByteComparableKey("bad_key".to_string());
-        assert!(err.to_string().contains("Invalid byte-comparable key: bad_key"));
+        assert!(
+            err.to_string()
+                .contains("Invalid byte-comparable key: bad_key")
+        );
     }
 
     #[test]

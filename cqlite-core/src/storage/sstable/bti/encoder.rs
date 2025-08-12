@@ -3,9 +3,9 @@
 //! Converts CQL keys to byte sequences where lexicographic comparison
 //! of unsigned bytes produces the same result as typed comparison.
 
+use super::BtiError;
 use crate::error::Result;
 use crate::types::Value;
-use super::BtiError;
 
 /// Byte-comparable key encoder
 pub struct ByteComparableEncoder {
@@ -16,9 +16,7 @@ pub struct ByteComparableEncoder {
 impl ByteComparableEncoder {
     /// Create new encoder
     pub fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
     /// Encode a single value to byte-comparable format
@@ -31,7 +29,7 @@ impl ByteComparableEncoder {
     /// Encode a composite key (multiple values) to byte-comparable format
     pub fn encode_composite_key(&mut self, values: &[Value]) -> Result<Vec<u8>> {
         self.buffer.clear();
-        
+
         for (i, value) in values.iter().enumerate() {
             if i > 0 {
                 // Add separator byte between key components
@@ -39,7 +37,7 @@ impl ByteComparableEncoder {
             }
             self.encode_value_to_buffer(value)?;
         }
-        
+
         Ok(self.buffer.clone())
     }
 
@@ -60,9 +58,11 @@ impl ByteComparableEncoder {
             Value::Map(map) => self.encode_map_vec(map),
             Value::Frozen(inner) => self.encode_value_to_buffer(inner),
             _ => {
-                return Err(BtiError::InvalidByteComparableKey(
-                    format!("Unsupported value type for byte-comparable encoding: {:?}", value)
-                ).into());
+                return Err(BtiError::InvalidByteComparableKey(format!(
+                    "Unsupported value type for byte-comparable encoding: {:?}",
+                    value
+                ))
+                .into());
             }
         }
     }
@@ -106,14 +106,12 @@ impl ByteComparableEncoder {
         Ok(())
     }
 
-
     /// Encode UUID bytes with proper byte ordering
     fn encode_uuid_bytes(&mut self, uuid: &[u8; 16]) -> Result<()> {
         // UUID bytes are naturally comparable
         self.buffer.extend_from_slice(uuid);
         Ok(())
     }
-
 
     /// Encode timestamp (microseconds since epoch)
     fn encode_timestamp(&mut self, timestamp: i64) -> Result<()> {
@@ -130,7 +128,7 @@ impl ByteComparableEncoder {
     /// Encode float with IEEE 754 ordering adjustment
     fn encode_float(&mut self, value: f32) -> Result<()> {
         let bits = value.to_bits();
-        
+
         // Adjust for proper ordering of IEEE 754 floats
         let adjusted = if (bits & 0x80000000) == 0 {
             // Positive: flip sign bit
@@ -139,16 +137,16 @@ impl ByteComparableEncoder {
             // Negative: flip all bits
             !bits
         };
-        
+
         self.buffer.extend_from_slice(&adjusted.to_be_bytes());
         Ok(())
     }
 
-
     /// Encode blob (binary data)
     fn encode_blob(&mut self, bytes: &[u8]) -> Result<()> {
         // Raw bytes with length prefix for proper comparison
-        self.buffer.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        self.buffer
+            .extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         self.buffer.extend_from_slice(bytes);
         Ok(())
     }
@@ -156,8 +154,9 @@ impl ByteComparableEncoder {
     /// Encode list with element-by-element encoding
     fn encode_list(&mut self, items: &[Value]) -> Result<()> {
         // Length prefix
-        self.buffer.extend_from_slice(&(items.len() as u32).to_be_bytes());
-        
+        self.buffer
+            .extend_from_slice(&(items.len() as u32).to_be_bytes());
+
         // Encode each element
         for item in items {
             self.encode_value_to_buffer(item)?;
@@ -169,54 +168,58 @@ impl ByteComparableEncoder {
     fn encode_set(&mut self, items: &[Value]) -> Result<()> {
         // For byte-comparable encoding, we need to sort the encoded items
         let mut encoded_items = Vec::new();
-        
+
         for item in items {
             let mut encoder = ByteComparableEncoder::new();
             let encoded = encoder.encode_value(item)?;
             encoded_items.push(encoded);
         }
-        
+
         // Sort encoded items lexicographically
         encoded_items.sort();
-        
+
         // Length prefix
-        self.buffer.extend_from_slice(&(encoded_items.len() as u32).to_be_bytes());
-        
+        self.buffer
+            .extend_from_slice(&(encoded_items.len() as u32).to_be_bytes());
+
         // Add sorted encoded items
         for encoded_item in encoded_items {
-            self.buffer.extend_from_slice(&(encoded_item.len() as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(encoded_item.len() as u32).to_be_bytes());
             self.buffer.extend_from_slice(&encoded_item);
         }
         Ok(())
     }
 
-
     /// Encode map from Vec of tuples with sorted key-value pairs
     fn encode_map_vec(&mut self, map: &Vec<(Value, Value)>) -> Result<()> {
         // Encode key-value pairs and sort by encoded keys
         let mut encoded_pairs = Vec::new();
-        
+
         for (key, value) in map {
             let mut key_encoder = ByteComparableEncoder::new();
             let encoded_key = key_encoder.encode_value(key)?;
-            
+
             let mut value_encoder = ByteComparableEncoder::new();
             let encoded_value = value_encoder.encode_value(value)?;
-            
+
             encoded_pairs.push((encoded_key, encoded_value));
         }
-        
+
         // Sort by encoded keys
         encoded_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        
+
         // Length prefix
-        self.buffer.extend_from_slice(&(encoded_pairs.len() as u32).to_be_bytes());
-        
+        self.buffer
+            .extend_from_slice(&(encoded_pairs.len() as u32).to_be_bytes());
+
         // Add sorted pairs
         for (encoded_key, encoded_value) in encoded_pairs {
-            self.buffer.extend_from_slice(&(encoded_key.len() as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(encoded_key.len() as u32).to_be_bytes());
             self.buffer.extend_from_slice(&encoded_key);
-            self.buffer.extend_from_slice(&(encoded_value.len() as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(encoded_value.len() as u32).to_be_bytes());
             self.buffer.extend_from_slice(&encoded_value);
         }
         Ok(())
@@ -232,20 +235,24 @@ impl ByteComparableDecoder {
         if encoded.is_empty() {
             return "<empty>".to_string();
         }
-        
+
         // Simple hex representation for debugging
-        let hex: String = encoded.iter()
+        let hex: String = encoded
+            .iter()
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join(" ");
-        
+
         // Try to detect if it looks like text
         if let Ok(text) = std::str::from_utf8(encoded) {
-            if text.chars().all(|c| c.is_ascii_graphic() || c.is_ascii_whitespace()) {
+            if text
+                .chars()
+                .all(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+            {
                 return format!("\"{}\" ({})", text.trim_end_matches('\0'), hex);
             }
         }
-        
+
         format!("0x{}", hex)
     }
 }
@@ -253,17 +260,19 @@ impl ByteComparableDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use std::collections::HashMap;
+    use uuid::Uuid;
 
     #[test]
     fn test_text_encoding() {
         let mut encoder = ByteComparableEncoder::new();
-        
+
         let encoded_a = encoder.encode_value(&Value::Text("a".to_string())).unwrap();
         let encoded_b = encoder.encode_value(&Value::Text("b".to_string())).unwrap();
-        let encoded_aa = encoder.encode_value(&Value::Text("aa".to_string())).unwrap();
-        
+        let encoded_aa = encoder
+            .encode_value(&Value::Text("aa".to_string()))
+            .unwrap();
+
         // Lexicographic comparison should match string comparison
         assert!(encoded_a < encoded_b);
         assert!(encoded_a < encoded_aa);
@@ -273,11 +282,11 @@ mod tests {
     #[test]
     fn test_integer_encoding() {
         let mut encoder = ByteComparableEncoder::new();
-        
+
         let encoded_neg = encoder.encode_value(&Value::Int(-100)).unwrap();
         let encoded_zero = encoder.encode_value(&Value::Int(0)).unwrap();
         let encoded_pos = encoder.encode_value(&Value::Int(100)).unwrap();
-        
+
         // Proper numeric ordering
         assert!(encoded_neg < encoded_zero);
         assert!(encoded_zero < encoded_pos);
@@ -286,10 +295,10 @@ mod tests {
     #[test]
     fn test_boolean_encoding() {
         let mut encoder = ByteComparableEncoder::new();
-        
+
         let encoded_false = encoder.encode_value(&Value::Boolean(false)).unwrap();
         let encoded_true = encoder.encode_value(&Value::Boolean(true)).unwrap();
-        
+
         // false < true
         assert!(encoded_false < encoded_true);
     }
@@ -297,37 +306,28 @@ mod tests {
     #[test]
     fn test_uuid_encoding() {
         let mut encoder = ByteComparableEncoder::new();
-        
+
         let uuid1 = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let uuid2 = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
-        
+
         let encoded1 = encoder.encode_value(&Value::Uuid(uuid1)).unwrap();
         let encoded2 = encoder.encode_value(&Value::Uuid(uuid2)).unwrap();
-        
+
         assert!(encoded1 < encoded2);
     }
 
     #[test]
     fn test_composite_key_encoding() {
         let mut encoder = ByteComparableEncoder::new();
-        
-        let key1 = vec![
-            Value::Text("partition1".to_string()),
-            Value::Int(1),
-        ];
-        let key2 = vec![
-            Value::Text("partition1".to_string()),
-            Value::Int(2),
-        ];
-        let key3 = vec![
-            Value::Text("partition2".to_string()),
-            Value::Int(1),
-        ];
-        
+
+        let key1 = vec![Value::Text("partition1".to_string()), Value::Int(1)];
+        let key2 = vec![Value::Text("partition1".to_string()), Value::Int(2)];
+        let key3 = vec![Value::Text("partition2".to_string()), Value::Int(1)];
+
         let encoded1 = encoder.encode_composite_key(&key1).unwrap();
         let encoded2 = encoder.encode_composite_key(&key2).unwrap();
         let encoded3 = encoder.encode_composite_key(&key3).unwrap();
-        
+
         // Proper composite key ordering
         assert!(encoded1 < encoded2); // Same partition, different clustering
         assert!(encoded2 < encoded3); // Different partition
@@ -336,13 +336,13 @@ mod tests {
     #[test]
     fn test_list_encoding() {
         let mut encoder = ByteComparableEncoder::new();
-        
+
         let list1 = Value::List(vec![Value::Int(1), Value::Int(2)]);
         let list2 = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
-        
+
         let encoded1 = encoder.encode_value(&list1).unwrap();
         let encoded2 = encoder.encode_value(&list2).unwrap();
-        
+
         // Shorter list should come first
         assert!(encoded1 < encoded2);
     }
@@ -350,13 +350,15 @@ mod tests {
     #[test]
     fn test_float_special_values() {
         let mut encoder = ByteComparableEncoder::new();
-        
-        let neg_inf = encoder.encode_value(&Value::Float(f32::NEG_INFINITY)).unwrap();
+
+        let neg_inf = encoder
+            .encode_value(&Value::Float(f32::NEG_INFINITY))
+            .unwrap();
         let neg_one = encoder.encode_value(&Value::Float(-1.0)).unwrap();
         let zero = encoder.encode_value(&Value::Float(0.0)).unwrap();
         let one = encoder.encode_value(&Value::Float(1.0)).unwrap();
         let pos_inf = encoder.encode_value(&Value::Float(f32::INFINITY)).unwrap();
-        
+
         // Proper float ordering
         assert!(neg_inf < neg_one);
         assert!(neg_one < zero);
@@ -369,7 +371,7 @@ mod tests {
         let text_bytes = b"hello\0";
         let decoded = ByteComparableDecoder::decode_key_debug(text_bytes);
         assert!(decoded.contains("hello"));
-        
+
         let binary_bytes = &[0xFF, 0xFE, 0xFD];
         let decoded = ByteComparableDecoder::decode_key_debug(binary_bytes);
         assert!(decoded.starts_with("0x"));
@@ -378,10 +380,14 @@ mod tests {
     #[test]
     fn test_encoder_reuse() {
         let mut encoder = ByteComparableEncoder::new();
-        
-        let encoded1 = encoder.encode_value(&Value::Text("test1".to_string())).unwrap();
-        let encoded2 = encoder.encode_value(&Value::Text("test2".to_string())).unwrap();
-        
+
+        let encoded1 = encoder
+            .encode_value(&Value::Text("test1".to_string()))
+            .unwrap();
+        let encoded2 = encoder
+            .encode_value(&Value::Text("test2".to_string()))
+            .unwrap();
+
         // Each encoding should be independent
         assert_ne!(encoded1, encoded2);
         assert!(encoded1 < encoded2);

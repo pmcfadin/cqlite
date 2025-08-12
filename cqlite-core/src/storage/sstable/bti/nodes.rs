@@ -2,12 +2,12 @@
 //!
 //! Implements the four BTI trie node types: PAYLOAD_ONLY, SINGLE, SPARSE, and DENSE
 
-use crate::error::Result;
 use super::BtiError;
+use crate::error::Result;
 use nom::{
+    IResult,
     bytes::complete::take,
     number::complete::{be_u8, be_u16, be_u64},
-    IResult,
 };
 use std::collections::HashMap;
 
@@ -79,9 +79,7 @@ impl NodeRef {
 #[derive(Debug, Clone)]
 pub enum TrieNode {
     /// Final node with payload data
-    PayloadOnly {
-        payload: Vec<u8>,
-    },
+    PayloadOnly { payload: Vec<u8> },
     /// Node with single transition
     Single {
         character: u8,
@@ -127,7 +125,9 @@ impl TrieNode {
     pub fn find_transition(&self, ch: u8) -> Option<NodeRef> {
         match self {
             TrieNode::PayloadOnly { .. } => None,
-            TrieNode::Single { character, target, .. } => {
+            TrieNode::Single {
+                character, target, ..
+            } => {
                 if *character == ch {
                     Some(*target)
                 } else {
@@ -141,7 +141,12 @@ impl TrieNode {
                     .ok()
                     .map(|idx| transitions[idx].1)
             }
-            TrieNode::Dense { first_char, last_char, targets, .. } => {
+            TrieNode::Dense {
+                first_char,
+                last_char,
+                targets,
+                ..
+            } => {
                 if ch >= *first_char && ch <= *last_char {
                     let idx = (ch - first_char) as usize;
                     targets.get(idx).and_then(|t| *t)
@@ -156,11 +161,17 @@ impl TrieNode {
     pub fn get_transitions(&self) -> Vec<(u8, NodeRef)> {
         match self {
             TrieNode::PayloadOnly { .. } => Vec::new(),
-            TrieNode::Single { character, target, .. } => {
+            TrieNode::Single {
+                character, target, ..
+            } => {
                 vec![(*character, *target)]
             }
             TrieNode::Sparse { transitions, .. } => transitions.clone(),
-            TrieNode::Dense { first_char,  targets, .. } => {
+            TrieNode::Dense {
+                first_char,
+                targets,
+                ..
+            } => {
                 let mut result = Vec::new();
                 for (i, target) in targets.iter().enumerate() {
                     if let Some(target_ref) = target {
@@ -177,13 +188,17 @@ impl TrieNode {
     pub fn estimated_size(&self) -> usize {
         match self {
             TrieNode::PayloadOnly { payload } => 1 + payload.len(),
-            TrieNode::Single { payload, .. } => {
-                1 + 1 + 8 + payload.as_ref().map_or(0, |p| p.len())
-            }
-            TrieNode::Sparse { transitions, payload } => {
-                1 + 2 + transitions.len() * (1 + 8) + payload.as_ref().map_or(0, |p| p.len())
-            }
-            TrieNode::Dense { first_char, last_char, targets: _, payload } => {
+            TrieNode::Single { payload, .. } => 1 + 1 + 8 + payload.as_ref().map_or(0, |p| p.len()),
+            TrieNode::Sparse {
+                transitions,
+                payload,
+            } => 1 + 2 + transitions.len() * (1 + 8) + payload.as_ref().map_or(0, |p| p.len()),
+            TrieNode::Dense {
+                first_char,
+                last_char,
+                targets: _,
+                payload,
+            } => {
                 let range_size = (*last_char - *first_char + 1) as usize;
                 1 + 2 + range_size * 8 + payload.as_ref().map_or(0, |p| p.len())
             }
@@ -210,14 +225,19 @@ impl NodeParser {
     }
 
     /// Parse a BTI trie node from bytes
-    pub fn parse_node<'a>(&mut self, input: &'a [u8], position: u64) -> IResult<&'a [u8], TrieNode> {
+    pub fn parse_node<'a>(
+        &mut self,
+        input: &'a [u8],
+        position: u64,
+    ) -> IResult<&'a [u8], TrieNode> {
         self.position = position;
-        
+
         let (input, header) = be_u8(input)?;
-        let node_type = NodeType::from_header_byte(header)
-            .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))?;
+        let node_type = NodeType::from_header_byte(header).map_err(|_| {
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+        })?;
         let payload_flags = header & 0x0F;
-        
+
         match node_type {
             NodeType::PayloadOnly => self.parse_payload_only_node(input, payload_flags),
             NodeType::Single => self.parse_single_node(input, payload_flags),
@@ -227,30 +247,40 @@ impl NodeParser {
     }
 
     /// Parse PAYLOAD_ONLY node
-    fn parse_payload_only_node<'a>(&self, input: &'a [u8], flags: u8) -> IResult<&'a [u8], TrieNode> {
+    fn parse_payload_only_node<'a>(
+        &self,
+        input: &'a [u8],
+        flags: u8,
+    ) -> IResult<&'a [u8], TrieNode> {
         let has_payload = (flags & 0x01) != 0;
-        
+
         if has_payload {
             let (input, payload_size) = be_u16(input)?;
             let (input, payload) = take(payload_size as usize)(input)?;
-            Ok((input, TrieNode::PayloadOnly {
-                payload: payload.to_vec(),
-            }))
+            Ok((
+                input,
+                TrieNode::PayloadOnly {
+                    payload: payload.to_vec(),
+                },
+            ))
         } else {
-            Ok((input, TrieNode::PayloadOnly {
-                payload: Vec::new(),
-            }))
+            Ok((
+                input,
+                TrieNode::PayloadOnly {
+                    payload: Vec::new(),
+                },
+            ))
         }
     }
 
     /// Parse SINGLE node
     fn parse_single_node<'a>(&self, input: &'a [u8], flags: u8) -> IResult<&'a [u8], TrieNode> {
         let has_payload = (flags & 0x01) != 0;
-        
+
         let (input, character) = be_u8(input)?;
         let (input, target_offset) = self.parse_compressed_pointer(input)?;
         let target = NodeRef::new(target_offset, self.position);
-        
+
         let (input, payload) = if has_payload {
             let (input, payload_size) = be_u16(input)?;
             let (input, payload_data) = take(payload_size as usize)(input)?;
@@ -258,22 +288,25 @@ impl NodeParser {
         } else {
             (input, None)
         };
-        
-        Ok((input, TrieNode::Single {
-            character,
-            target,
-            payload,
-        }))
+
+        Ok((
+            input,
+            TrieNode::Single {
+                character,
+                target,
+                payload,
+            },
+        ))
     }
 
     /// Parse SPARSE node
     fn parse_sparse_node<'a>(&self, input: &'a [u8], flags: u8) -> IResult<&'a [u8], TrieNode> {
         let has_payload = (flags & 0x01) != 0;
-        
+
         let (input, transition_count) = be_u8(input)?;
         let mut transitions = Vec::with_capacity(transition_count as usize);
         let mut remaining = input;
-        
+
         // Parse characters
         let mut characters = Vec::with_capacity(transition_count as usize);
         for _ in 0..transition_count {
@@ -281,7 +314,7 @@ impl NodeParser {
             characters.push(ch);
             remaining = new_remaining;
         }
-        
+
         // Parse targets
         for ch in characters {
             let (new_remaining, target_offset) = self.parse_compressed_pointer(remaining)?;
@@ -289,7 +322,7 @@ impl NodeParser {
             transitions.push((ch, target));
             remaining = new_remaining;
         }
-        
+
         let (remaining, payload) = if has_payload {
             let (remaining, payload_size) = be_u16(remaining)?;
             let (remaining, payload_data) = take(payload_size as usize)(remaining)?;
@@ -297,28 +330,34 @@ impl NodeParser {
         } else {
             (remaining, None)
         };
-        
-        Ok((remaining, TrieNode::Sparse {
-            transitions,
-            payload,
-        }))
+
+        Ok((
+            remaining,
+            TrieNode::Sparse {
+                transitions,
+                payload,
+            },
+        ))
     }
 
     /// Parse DENSE node
     fn parse_dense_node<'a>(&self, input: &'a [u8], flags: u8) -> IResult<&'a [u8], TrieNode> {
         let has_payload = (flags & 0x01) != 0;
-        
+
         let (input, first_char) = be_u8(input)?;
         let (input, last_char) = be_u8(input)?;
-        
+
         if first_char > last_char {
-            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
         }
-        
+
         let range_size = (last_char - first_char + 1) as usize;
         let mut targets = Vec::with_capacity(range_size);
         let mut remaining = input;
-        
+
         // Parse targets (may include null pointers)
         for _ in 0..range_size {
             let (new_remaining, target_offset) = self.parse_compressed_pointer(remaining)?;
@@ -330,7 +369,7 @@ impl NodeParser {
             targets.push(target);
             remaining = new_remaining;
         }
-        
+
         let (remaining, payload) = if has_payload {
             let (remaining, payload_size) = be_u16(remaining)?;
             let (remaining, payload_data) = take(payload_size as usize)(remaining)?;
@@ -338,13 +377,16 @@ impl NodeParser {
         } else {
             (remaining, None)
         };
-        
-        Ok((remaining, TrieNode::Dense {
-            first_char,
-            last_char,
-            targets,
-            payload,
-        }))
+
+        Ok((
+            remaining,
+            TrieNode::Dense {
+                first_char,
+                last_char,
+                targets,
+                payload,
+            },
+        ))
     }
 
     /// Parse compressed pointer (variable-size based on distance)
@@ -365,8 +407,8 @@ pub fn select_optimal_node_type(transitions: &[(u8, NodeRef)]) -> NodeType {
             if let Some((min_char, max_char)) = get_character_range(transitions) {
                 let range_size = (max_char - min_char + 1) as usize;
                 let dense_size = 1 + 2 + range_size * 8; // header + range + targets
-                let sparse_size = 1 + 1 + n * (1 + 8);   // header + count + char+target pairs
-                
+                let sparse_size = 1 + 1 + n * (1 + 8); // header + count + char+target pairs
+
                 if dense_size <= sparse_size && range_size <= 256 {
                     NodeType::Dense
                 } else {
@@ -384,15 +426,15 @@ fn get_character_range(transitions: &[(u8, NodeRef)]) -> Option<(u8, u8)> {
     if transitions.is_empty() {
         return None;
     }
-    
+
     let mut min_char = transitions[0].0;
     let mut max_char = transitions[0].0;
-    
+
     for &(ch, _) in transitions.iter().skip(1) {
         min_char = min_char.min(ch);
         max_char = max_char.max(ch);
     }
-    
+
     Some((min_char, max_char))
 }
 
@@ -402,11 +444,14 @@ mod tests {
 
     #[test]
     fn test_node_type_parsing() {
-        assert_eq!(NodeType::from_header_byte(0x00).unwrap(), NodeType::PayloadOnly);
+        assert_eq!(
+            NodeType::from_header_byte(0x00).unwrap(),
+            NodeType::PayloadOnly
+        );
         assert_eq!(NodeType::from_header_byte(0x10).unwrap(), NodeType::Single);
         assert_eq!(NodeType::from_header_byte(0x20).unwrap(), NodeType::Sparse);
         assert_eq!(NodeType::from_header_byte(0x30).unwrap(), NodeType::Dense);
-        
+
         assert!(NodeType::from_header_byte(0x40).is_err());
     }
 
@@ -423,7 +468,7 @@ mod tests {
         let node_ref = NodeRef::new(100, 1000);
         assert_eq!(node_ref.offset, 100);
         assert_eq!(node_ref.absolute_position, 1100);
-        
+
         let null_ref = NodeRef::null();
         assert!(null_ref.is_null());
     }
@@ -432,11 +477,11 @@ mod tests {
     fn test_optimal_node_type_selection() {
         // Empty transitions -> PayloadOnly
         assert_eq!(select_optimal_node_type(&[]), NodeType::PayloadOnly);
-        
+
         // Single transition -> Single
         let single = vec![(b'a', NodeRef::null())];
         assert_eq!(select_optimal_node_type(&single), NodeType::Single);
-        
+
         // Dense range -> Dense (a, b, c)
         let dense = vec![
             (b'a', NodeRef::null()),
@@ -444,7 +489,7 @@ mod tests {
             (b'c', NodeRef::null()),
         ];
         assert_eq!(select_optimal_node_type(&dense), NodeType::Dense);
-        
+
         // Sparse transitions -> Sparse (a, x, z)
         let sparse = vec![
             (b'a', NodeRef::null()),
@@ -461,7 +506,7 @@ mod tests {
         };
         assert_eq!(payload_node.find_transition(b'a'), None);
         assert_eq!(payload_node.get_transitions().len(), 0);
-        
+
         let single_node = TrieNode::Single {
             character: b'a',
             target: NodeRef::new(100, 1000),
@@ -479,11 +524,11 @@ mod tests {
             (b'c', NodeRef::null()),
             (b'b', NodeRef::null()),
         ];
-        
+
         let (min, max) = get_character_range(&transitions).unwrap();
         assert_eq!(min, b'a');
         assert_eq!(max, b'c');
-        
+
         assert_eq!(get_character_range(&[]), None);
     }
 }

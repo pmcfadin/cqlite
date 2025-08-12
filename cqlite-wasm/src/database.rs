@@ -43,7 +43,10 @@ impl WasmDatabase {
     }
 
     /// Prepare a statement (async stub)
-    pub async fn prepare(&self, _sql: &str) -> Result<crate::query::WasmPreparedStatement, JsValue> {
+    pub async fn prepare(
+        &self,
+        _sql: &str,
+    ) -> Result<crate::query::WasmPreparedStatement, JsValue> {
         Ok(crate::query::WasmPreparedStatement::new())
     }
 
@@ -53,12 +56,22 @@ impl WasmDatabase {
     }
 
     /// Select data (async stub)
-    pub async fn select(&self, _table: &str, _conditions: JsValue, _limit: Option<u32>) -> Result<JsValue, JsValue> {
+    pub async fn select(
+        &self,
+        _table: &str,
+        _conditions: JsValue,
+        _limit: Option<u32>,
+    ) -> Result<JsValue, JsValue> {
         Ok(JsValue::NULL)
     }
 
     /// Update data (async stub)
-    pub async fn update(&self, _table: &str, _data: JsValue, _conditions: JsValue) -> Result<JsValue, JsValue> {
+    pub async fn update(
+        &self,
+        _table: &str,
+        _data: JsValue,
+        _conditions: JsValue,
+    ) -> Result<JsValue, JsValue> {
         Ok(JsValue::NULL)
     }
 

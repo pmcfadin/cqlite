@@ -3,9 +3,9 @@
 //! This module provides utilities for creating test data fixtures,
 //! including SSTable files, schema definitions, and sample data.
 
-use std::path::PathBuf;
-use serde_json::Value;
 use super::TestResult;
+use serde_json::Value;
+use std::path::PathBuf;
 
 /// Builder for creating test data fixtures
 #[derive(Debug)]
@@ -104,95 +104,103 @@ impl TestDataBuilder {
     pub fn new<P: Into<PathBuf>>(output_dir: P) -> TestResult<Self> {
         let output_dir = output_dir.into();
         std::fs::create_dir_all(&output_dir)?;
-        
+
         Ok(Self {
             output_dir,
             fixtures: Vec::new(),
         })
     }
-    
+
     /// Add a fixture to the builder
     pub fn add_fixture(mut self, fixture: TestFixture) -> Self {
         self.fixtures.push(fixture);
         self
     }
-    
+
     /// Add an SSTable fixture
-    pub fn add_sstable<S: Into<String>>(mut self, name: S, sstable: SSTableFixture) -> TestResult<Self> {
+    pub fn add_sstable<S: Into<String>>(
+        mut self,
+        name: S,
+        sstable: SSTableFixture,
+    ) -> TestResult<Self> {
         let name = name.into();
         let file_path = self.output_dir.join(format!("{}.sstable", name));
-        
+
         let fixture = TestFixture {
             name: name.clone(),
             file_path,
             content: FixtureContent::SSTable(sstable.build()),
         };
-        
+
         self.fixtures.push(fixture);
         Ok(self)
     }
-    
+
     /// Add a schema fixture
-    pub fn add_schema<S: Into<String>>(mut self, name: S, schema: SchemaFixture) -> TestResult<Self> {
+    pub fn add_schema<S: Into<String>>(
+        mut self,
+        name: S,
+        schema: SchemaFixture,
+    ) -> TestResult<Self> {
         let name = name.into();
         let file_path = self.output_dir.join(format!("{}.json", name));
-        
+
         let fixture = TestFixture {
             name: name.clone(),
             file_path,
             content: FixtureContent::Schema(schema.build()),
         };
-        
+
         self.fixtures.push(fixture);
         Ok(self)
     }
-    
+
     /// Add a JSON fixture
     pub fn add_json<S: Into<String>>(mut self, name: S, json: Value) -> Self {
         let name = name.into();
         let file_path = self.output_dir.join(format!("{}.json", name));
-        
+
         let fixture = TestFixture {
             name: name.clone(),
             file_path,
             content: FixtureContent::Json(json),
         };
-        
+
         self.fixtures.push(fixture);
         self
     }
-    
+
     /// Add a text fixture
     pub fn add_text<S: Into<String>, T: Into<String>>(mut self, name: S, text: T) -> Self {
         let name = name.into();
         let file_path = self.output_dir.join(format!("{}.txt", name));
-        
+
         let fixture = TestFixture {
             name: name.clone(),
             file_path,
             content: FixtureContent::Text(text.into()),
         };
-        
+
         self.fixtures.push(fixture);
         self
     }
-    
+
     /// Build and write all fixtures to disk
     pub fn build(self) -> TestResult<Vec<TestFixture>> {
         let mut built_fixtures = Vec::new();
-        
+
         for fixture in self.fixtures {
             fixture.write_to_disk()?;
             built_fixtures.push(fixture);
         }
-        
+
         Ok(built_fixtures)
     }
-    
+
     /// Create common test fixtures
     pub fn create_common_fixtures(output_dir: PathBuf) -> TestResult<Vec<TestFixture>> {
         let mut builder = Self::new(output_dir)?;
-        
+
         // Add basic schema fixture
         let schema = SchemaFixture::new("test_keyspace")
             .add_table(
@@ -201,7 +209,7 @@ impl TestDataBuilder {
                     .add_column("name", "TEXT", false)
                     .add_column("email", "TEXT", true)
                     .add_column("age", "INT", true)
-                    .with_primary_key(vec!["id".to_string()])
+                    .with_primary_key(vec!["id".to_string()]),
             )?
             .add_table(
                 TableSchema::new("posts")
@@ -210,11 +218,11 @@ impl TestDataBuilder {
                     .add_column("title", "TEXT", false)
                     .add_column("content", "TEXT", true)
                     .add_column("created_at", "TIMESTAMP", false)
-                    .with_primary_key(vec!["user_id".to_string(), "post_id".to_string()])
+                    .with_primary_key(vec!["user_id".to_string(), "post_id".to_string()]),
             )?;
-        
+
         builder = builder.add_schema("basic_schema", schema)?;
-        
+
         // Add basic SSTable fixture
         let sstable = SSTableFixture::new("users")
             .add_column("id", "UUID")
@@ -233,9 +241,9 @@ impl TestDataBuilder {
                 Value::String("jane@example.com".to_string()),
                 Value::Number(serde_json::Number::from(25)),
             ]);
-        
+
         builder = builder.add_sstable("basic_users", sstable)?;
-        
+
         // Add sample CQL queries
         builder = builder.add_text("sample_queries", 
             "CREATE KEYSPACE test WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};\n\
@@ -244,7 +252,7 @@ impl TestDataBuilder {
              INSERT INTO users (id, name, email, age) VALUES (uuid(), 'Test User', 'test@example.com', 30);\n\
              SELECT * FROM users;"
         );
-        
+
         builder.build()
     }
 }
@@ -278,7 +286,7 @@ impl TestFixture {
         }
         Ok(())
     }
-    
+
     /// Read fixture content from disk
     pub fn read_from_disk(&self) -> TestResult<String> {
         Ok(std::fs::read_to_string(&self.file_path)?)
@@ -296,34 +304,36 @@ impl SSTableFixture {
             metadata: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Add a column definition
     pub fn add_column<S: Into<String>, T: Into<String>>(mut self, name: S, data_type: T) -> Self {
         self.column_names.push(name.into());
         self
     }
-    
+
     /// Add a data row
     pub fn add_row(mut self, row: Vec<Value>) -> Self {
         self.data_rows.push(row);
         self
     }
-    
+
     /// Set compression type
     pub fn with_compression<S: Into<String>>(mut self, compression: S) -> Self {
         self.compression = Some(compression.into());
         self
     }
-    
+
     /// Add metadata
     pub fn with_metadata<S: Into<String>>(mut self, key: S, value: Value) -> Self {
         self.metadata.insert(key.into(), value);
         self
     }
-    
+
     /// Build the SSTable data
     pub fn build(self) -> SSTableData {
-        let columns = self.column_names.into_iter()
+        let columns = self
+            .column_names
+            .into_iter()
             .enumerate()
             .map(|(i, name)| ColumnDef {
                 name,
@@ -332,11 +342,13 @@ impl SSTableFixture {
                 is_static: false,
             })
             .collect();
-        
-        let rows = self.data_rows.into_iter()
+
+        let rows = self
+            .data_rows
+            .into_iter()
             .map(|values| Row { values })
             .collect();
-        
+
         SSTableData {
             table_name: self.table_name,
             columns,
@@ -355,19 +367,19 @@ impl SchemaFixture {
             custom_types: Vec::new(),
         }
     }
-    
+
     /// Add a table schema
     pub fn add_table(mut self, table: TableSchema) -> TestResult<Self> {
         self.tables.push(table);
         Ok(self)
     }
-    
+
     /// Add a custom type
     pub fn add_custom_type(mut self, custom_type: CustomType) -> Self {
         self.custom_types.push(custom_type);
         self
     }
-    
+
     /// Build the schema data
     pub fn build(self) -> SchemaData {
         SchemaData {
@@ -389,9 +401,14 @@ impl TableSchema {
             options: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Add a column
-    pub fn add_column<S: Into<String>, T: Into<String>>(mut self, name: S, data_type: T, is_nullable: bool) -> Self {
+    pub fn add_column<S: Into<String>, T: Into<String>>(
+        mut self,
+        name: S,
+        data_type: T,
+        is_nullable: bool,
+    ) -> Self {
         self.columns.push(ColumnDef {
             name: name.into(),
             data_type: data_type.into(),
@@ -400,19 +417,19 @@ impl TableSchema {
         });
         self
     }
-    
+
     /// Set primary key
     pub fn with_primary_key(mut self, primary_key: Vec<String>) -> Self {
         self.primary_key = primary_key;
         self
     }
-    
+
     /// Set clustering key
     pub fn with_clustering_key(mut self, clustering_key: Vec<String>) -> Self {
         self.clustering_key = clustering_key;
         self
     }
-    
+
     /// Add table option
     pub fn with_option<S: Into<String>>(mut self, key: S, value: Value) -> Self {
         self.options.insert(key.into(), value);
@@ -421,7 +438,7 @@ impl TableSchema {
 }
 
 // Implement Serialize for all data structures
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 struct SerializableSSTableData {
@@ -513,17 +530,25 @@ impl serde::Serialize for SchemaData {
     {
         let serializable = SerializableSchemaData {
             keyspace: self.keyspace.clone(),
-            tables: self.tables.iter().map(|t| SerializableTableSchema {
-                name: t.name.clone(),
-                columns: t.columns.iter().map(|c| c.into()).collect(),
-                primary_key: t.primary_key.clone(),
-                clustering_key: t.clustering_key.clone(),
-                options: t.options.clone(),
-            }).collect(),
-            custom_types: self.custom_types.iter().map(|ct| SerializableCustomType {
-                name: ct.name.clone(),
-                fields: ct.fields.iter().map(|f| f.into()).collect(),
-            }).collect(),
+            tables: self
+                .tables
+                .iter()
+                .map(|t| SerializableTableSchema {
+                    name: t.name.clone(),
+                    columns: t.columns.iter().map(|c| c.into()).collect(),
+                    primary_key: t.primary_key.clone(),
+                    clustering_key: t.clustering_key.clone(),
+                    options: t.options.clone(),
+                })
+                .collect(),
+            custom_types: self
+                .custom_types
+                .iter()
+                .map(|ct| SerializableCustomType {
+                    name: ct.name.clone(),
+                    fields: ct.fields.iter().map(|f| f.into()).collect(),
+                })
+                .collect(),
         };
         serializable.serialize(serializer)
     }
@@ -533,23 +558,23 @@ impl serde::Serialize for SchemaData {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     #[test]
     fn test_test_data_builder() {
         let temp_dir = TempDir::new().unwrap();
         let builder = TestDataBuilder::new(temp_dir.path()).unwrap();
-        
+
         let fixtures = builder
             .add_json("test", serde_json::json!({"test": "data"}))
             .add_text("sample", "Hello, World!")
             .build()
             .unwrap();
-        
+
         assert_eq!(fixtures.len(), 2);
         assert!(fixtures[0].file_path.exists());
         assert!(fixtures[1].file_path.exists());
     }
-    
+
     #[test]
     fn test_sstable_fixture() {
         let sstable = SSTableFixture::new("test_table")
@@ -561,12 +586,12 @@ mod tests {
             ])
             .with_compression("LZ4")
             .build();
-        
+
         assert_eq!(sstable.table_name, "test_table");
         assert_eq!(sstable.columns.len(), 2);
         assert_eq!(sstable.rows.len(), 1);
     }
-    
+
     #[test]
     fn test_schema_fixture() {
         let schema = SchemaFixture::new("test_keyspace")
@@ -574,11 +599,11 @@ mod tests {
                 TableSchema::new("users")
                     .add_column("id", "UUID", false)
                     .add_column("name", "TEXT", false)
-                    .with_primary_key(vec!["id".to_string()])
+                    .with_primary_key(vec!["id".to_string()]),
             )
             .unwrap()
             .build();
-        
+
         assert_eq!(schema.keyspace, "test_keyspace");
         assert_eq!(schema.tables.len(), 1);
         assert_eq!(schema.tables[0].name, "users");

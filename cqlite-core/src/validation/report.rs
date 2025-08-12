@@ -3,10 +3,10 @@
 //! This module provides comprehensive reporting capabilities for
 //! validation results, performance metrics, and analysis summaries.
 
+use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use serde::{Deserialize, Serialize};
-use crate::error::{Error, Result};
 
 /// Report format options
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,23 +88,26 @@ impl ReportGenerator {
     /// Generate Markdown format report
     fn generate_markdown_report(&self, report_data: &ValidationReport) -> Result<String> {
         let mut output = String::new();
-        
+
         output.push_str(&format!("# Validation Report\n\n"));
-        output.push_str(&format!("**Date**: {}\n", report_data.timestamp.format("%Y-%m-%d %H:%M:%S UTC")));
+        output.push_str(&format!(
+            "**Date**: {}\n",
+            report_data.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
         output.push_str(&format!("**Test Suite**: {}\n\n", report_data.test_suite));
-        
+
         output.push_str("## Summary\n\n");
         output.push_str(&format!("- Total Tests: {}\n", report_data.total_tests));
         output.push_str(&format!("- Passed: {}\n", report_data.passed_tests));
         output.push_str(&format!("- Failed: {}\n", report_data.failed_tests));
-        
+
         if !report_data.errors.is_empty() {
             output.push_str("\n## Errors\n\n");
             for error in &report_data.errors {
                 output.push_str(&format!("- {}\n", error));
             }
         }
-        
+
         if !report_data.warnings.is_empty() {
             output.push_str("\n## Warnings\n\n");
             for warning in &report_data.warnings {
@@ -118,14 +121,22 @@ impl ReportGenerator {
     /// Generate console format report
     fn generate_console_report(&self, report_data: &ValidationReport) -> Result<String> {
         let mut output = String::new();
-        
-        output.push_str(&format!("🔍 Validation Report - {}\n", report_data.test_suite));
-        output.push_str(&format!("📅 Generated: {}\n\n", report_data.timestamp.format("%Y-%m-%d %H:%M:%S UTC")));
-        
+
+        output.push_str(&format!(
+            "🔍 Validation Report - {}\n",
+            report_data.test_suite
+        ));
+        output.push_str(&format!(
+            "📅 Generated: {}\n\n",
+            report_data.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+
         let pass_rate = (report_data.passed_tests as f64 / report_data.total_tests as f64) * 100.0;
-        output.push_str(&format!("📊 Results: {}/{} tests passed ({:.1}%)\n", 
-            report_data.passed_tests, report_data.total_tests, pass_rate));
-        
+        output.push_str(&format!(
+            "📊 Results: {}/{} tests passed ({:.1}%)\n",
+            report_data.passed_tests, report_data.total_tests, pass_rate
+        ));
+
         if report_data.failed_tests > 0 {
             output.push_str(&format!("❌ {} tests failed\n", report_data.failed_tests));
         }
@@ -136,23 +147,31 @@ impl ReportGenerator {
     /// Generate HTML format report
     fn generate_html_report(&self, report_data: &ValidationReport) -> Result<String> {
         let mut output = String::new();
-        
+
         output.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
         output.push_str("<title>CQLite Validation Report</title>\n");
         output.push_str("<meta charset=\"utf-8\">\n");
         output.push_str("</head>\n<body>\n");
-        
-        output.push_str(&format!("<h1>Validation Report: {}</h1>\n", report_data.test_suite));
-        output.push_str(&format!("<p><strong>Date:</strong> {}</p>\n", 
-            report_data.timestamp.format("%Y-%m-%d %H:%M:%S UTC")));
-        
+
+        output.push_str(&format!(
+            "<h1>Validation Report: {}</h1>\n",
+            report_data.test_suite
+        ));
+        output.push_str(&format!(
+            "<p><strong>Date:</strong> {}</p>\n",
+            report_data.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+
         output.push_str("<h2>Summary</h2>\n");
-        output.push_str(&format!("<p>Total Tests: {}</p>\n", report_data.total_tests));
+        output.push_str(&format!(
+            "<p>Total Tests: {}</p>\n",
+            report_data.total_tests
+        ));
         output.push_str(&format!("<p>Passed: {}</p>\n", report_data.passed_tests));
         output.push_str(&format!("<p>Failed: {}</p>\n", report_data.failed_tests));
-        
+
         output.push_str("</body>\n</html>\n");
-        
+
         Ok(output)
     }
 }
@@ -190,8 +209,11 @@ impl ValidationReport {
 
 impl fmt::Display for ValidationReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ValidationReport: {} ({}/{} passed)", 
-            self.test_suite, self.passed_tests, self.total_tests)
+        write!(
+            f,
+            "ValidationReport: {} ({}/{} passed)",
+            self.test_suite, self.passed_tests, self.total_tests
+        )
     }
 }
 

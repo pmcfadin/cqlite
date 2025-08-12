@@ -2,11 +2,11 @@
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tempfile::TempDir;
 use std::time::Duration;
-use serde::{Serialize, Deserialize};
+use tempfile::TempDir;
 
 /// Configuration for CLI integration tests
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,11 +52,13 @@ impl CLIIntegrationTestSuite {
         }
     }
 
-    pub async fn run_all_tests(&mut self) -> Result<Vec<CLITestResult>, Box<dyn std::error::Error>> {
+    pub async fn run_all_tests(
+        &mut self,
+    ) -> Result<Vec<CLITestResult>, Box<dyn std::error::Error>> {
         // Run basic CLI tests
         self.test_help_command().await?;
         self.test_version_command().await?;
-        
+
         Ok(self.results.clone())
     }
 
@@ -65,7 +67,7 @@ impl CLIIntegrationTestSuite {
         let output = Command::new("cargo")
             .args(&["run", "--bin", "cqlite", "--", "--help"])
             .output()?;
-        
+
         let result = CLITestResult {
             test_name: "help_command".to_string(),
             success: output.status.success(),
@@ -74,7 +76,7 @@ impl CLIIntegrationTestSuite {
             execution_time: start.elapsed(),
             exit_code: output.status.code(),
         };
-        
+
         self.results.push(result);
         Ok(())
     }
@@ -84,7 +86,7 @@ impl CLIIntegrationTestSuite {
         let output = Command::new("cargo")
             .args(&["run", "--bin", "cqlite", "--", "--version"])
             .output()?;
-        
+
         let result = CLITestResult {
             test_name: "version_command".to_string(),
             success: output.status.success(),
@@ -93,7 +95,7 @@ impl CLIIntegrationTestSuite {
             execution_time: start.elapsed(),
             exit_code: output.status.code(),
         };
-        
+
         self.results.push(result);
         Ok(())
     }

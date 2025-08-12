@@ -4,11 +4,11 @@
 //! regression testing for CQLite to ensure it meets all performance targets.
 
 use clap::{Arg, Command};
-use std::path::PathBuf;
-use std::process;
 use cqlite_tests::{
     BenchmarkRunnerConfig, PerformanceBenchmarkRunner, PerformanceTargets, TestConfiguration,
 };
+use std::path::PathBuf;
+use std::process;
 use tokio;
 
 #[tokio::main]

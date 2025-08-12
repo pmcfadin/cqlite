@@ -7,12 +7,12 @@
 use std::collections::HashMap;
 
 use nom::{
+    IResult,
     branch::alt,
-    bytes::complete::{tag_no_case},
+    bytes::complete::tag_no_case,
     character::complete::{char, multispace0},
     combinator::map,
     sequence::tuple,
-    IResult,
 };
 
 use serde::{Deserialize, Serialize};
@@ -157,7 +157,10 @@ impl ComplexTypeParser {
                 let parsed_type = self.analyze_parsed_type(cql_type, context)?;
                 Ok(parsed_type)
             }
-            Err(e) => Err(Error::Schema(format!("Failed to parse type '{}': {:?}", type_str, e))),
+            Err(e) => Err(Error::Schema(format!(
+                "Failed to parse type '{}': {:?}",
+                type_str, e
+            ))),
         }
     }
 
@@ -181,7 +184,7 @@ impl ComplexTypeParser {
     }
 
     // Internal implementation methods
-    
+
     fn parse_cql_type_internal<'a>(
         &self,
         input: &'a str,
@@ -279,7 +282,9 @@ impl ComplexTypeParser {
                 map(tag_no_case("float"), |_| CqlType::Float),
                 map(tag_no_case("double"), |_| CqlType::Double),
                 map(tag_no_case("decimal"), |_| CqlType::Decimal),
-                map(alt((tag_no_case("text"), tag_no_case("varchar"))), |_| CqlType::Text),
+                map(alt((tag_no_case("text"), tag_no_case("varchar"))), |_| {
+                    CqlType::Text
+                }),
                 map(tag_no_case("ascii"), |_| CqlType::Ascii),
                 map(tag_no_case("blob"), |_| CqlType::Blob),
                 map(tag_no_case("timestamp"), |_| CqlType::Timestamp),
@@ -315,11 +320,24 @@ impl ComplexTypeParser {
 
     fn calculate_complexity_score(&self, cql_type: &CqlType) -> u32 {
         match cql_type {
-            CqlType::Boolean | CqlType::TinyInt | CqlType::SmallInt | CqlType::Int
-            | CqlType::BigInt | CqlType::Float | CqlType::Double | CqlType::Text
-            | CqlType::Ascii | CqlType::Blob | CqlType::Timestamp | CqlType::Date
-            | CqlType::Time | CqlType::Uuid | CqlType::TimeUuid | CqlType::Inet
-            | CqlType::Duration | CqlType::Decimal => 1,
+            CqlType::Boolean
+            | CqlType::TinyInt
+            | CqlType::SmallInt
+            | CqlType::Int
+            | CqlType::BigInt
+            | CqlType::Float
+            | CqlType::Double
+            | CqlType::Text
+            | CqlType::Ascii
+            | CqlType::Blob
+            | CqlType::Timestamp
+            | CqlType::Date
+            | CqlType::Time
+            | CqlType::Uuid
+            | CqlType::TimeUuid
+            | CqlType::Inet
+            | CqlType::Duration
+            | CqlType::Decimal => 1,
 
             CqlType::List(inner) | CqlType::Set(inner) => {
                 5 + self.calculate_complexity_score(inner)
@@ -353,30 +371,45 @@ impl ComplexTypeParser {
 
     fn categorize_type(&self, cql_type: &CqlType) -> TypeCategory {
         match cql_type {
-            CqlType::Boolean | CqlType::TinyInt | CqlType::SmallInt | CqlType::Int
-            | CqlType::BigInt | CqlType::Float | CqlType::Double | CqlType::Decimal
-            | CqlType::Text | CqlType::Ascii | CqlType::Blob | CqlType::Timestamp
-            | CqlType::Date | CqlType::Time | CqlType::Uuid | CqlType::TimeUuid
-            | CqlType::Inet | CqlType::Duration => TypeCategory::Primitive,
+            CqlType::Boolean
+            | CqlType::TinyInt
+            | CqlType::SmallInt
+            | CqlType::Int
+            | CqlType::BigInt
+            | CqlType::Float
+            | CqlType::Double
+            | CqlType::Decimal
+            | CqlType::Text
+            | CqlType::Ascii
+            | CqlType::Blob
+            | CqlType::Timestamp
+            | CqlType::Date
+            | CqlType::Time
+            | CqlType::Uuid
+            | CqlType::TimeUuid
+            | CqlType::Inet
+            | CqlType::Duration => TypeCategory::Primitive,
 
             CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) => TypeCategory::Collection,
 
-            CqlType::Frozen(inner) => {
-                match self.categorize_type(inner) {
-                    TypeCategory::Collection => TypeCategory::Frozen,
-                    other => other,
-                }
-            }
+            CqlType::Frozen(inner) => match self.categorize_type(inner) {
+                TypeCategory::Collection => TypeCategory::Frozen,
+                other => other,
+            },
 
             CqlType::Custom(_) => TypeCategory::UserDefined,
             _ => TypeCategory::Primitive,
         }
     }
 
-    fn extract_type_metadata(&self, cql_type: &CqlType, context: &TypeParsingContext) -> TypeMetadata {
+    fn extract_type_metadata(
+        &self,
+        cql_type: &CqlType,
+        context: &TypeParsingContext,
+    ) -> TypeMetadata {
         let is_frozen = matches!(cql_type, CqlType::Frozen(_));
         let nesting_level = context.depth as u32;
-        
+
         let (element_count, is_map) = match cql_type {
             CqlType::Map(_, _) => (None, true),
             _ => (None, false),
@@ -424,7 +457,10 @@ impl ComplexTypeParser {
             }
             Value::Map(pairs) => {
                 if pairs.is_empty() {
-                    Ok(CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)))
+                    Ok(CqlType::Map(
+                        Box::new(CqlType::Text),
+                        Box::new(CqlType::Text),
+                    ))
                 } else {
                     let (key, value) = &pairs[0];
                     let key_type = self.infer_cql_type_from_value(key)?;
@@ -463,8 +499,9 @@ impl ComplexTypeParser {
 
             CqlType::List(inner) => format!("list<{}>", self.format_cql_type(inner)),
             CqlType::Set(inner) => format!("set<{}>", self.format_cql_type(inner)),
-            CqlType::Map(key, value) => format!("map<{}, {}>", 
-                self.format_cql_type(key), 
+            CqlType::Map(key, value) => format!(
+                "map<{}, {}>",
+                self.format_cql_type(key),
                 self.format_cql_type(value)
             ),
 
@@ -488,7 +525,7 @@ mod tests {
     #[test]
     fn test_primitive_type_parsing() {
         let parser = ComplexTypeParser::new();
-        
+
         let result = parser.parse_type("text").unwrap();
         assert_eq!(result.cql_type, CqlType::Text);
         assert_eq!(result.category, TypeCategory::Primitive);
@@ -498,7 +535,7 @@ mod tests {
     #[test]
     fn test_collection_type_parsing() {
         let parser = ComplexTypeParser::new();
-        
+
         let result = parser.parse_type("list<int>").unwrap();
         assert!(matches!(result.cql_type, CqlType::List(_)));
         assert_eq!(result.category, TypeCategory::Collection);
@@ -508,7 +545,7 @@ mod tests {
     #[test]
     fn test_map_type_parsing() {
         let parser = ComplexTypeParser::new();
-        
+
         let result = parser.parse_type("map<text, bigint>").unwrap();
         if let CqlType::Map(key, value) = result.cql_type {
             assert_eq!(*key, CqlType::Text);
@@ -522,12 +559,15 @@ mod tests {
     #[test]
     fn test_type_inference_from_value() {
         let parser = ComplexTypeParser::new();
-        
+
         let int_value = Value::Integer(42);
         let inferred = parser.infer_type_from_value(&int_value).unwrap();
         assert_eq!(inferred.cql_type, CqlType::Int);
-        
-        let list_value = Value::List(vec![Value::Text("a".to_string()), Value::Text("b".to_string())]);
+
+        let list_value = Value::List(vec![
+            Value::Text("a".to_string()),
+            Value::Text("b".to_string()),
+        ]);
         let inferred = parser.infer_type_from_value(&list_value).unwrap();
         if let CqlType::List(inner) = inferred.cql_type {
             assert_eq!(*inner, CqlType::Text);

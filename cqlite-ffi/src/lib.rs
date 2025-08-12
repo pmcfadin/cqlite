@@ -286,7 +286,9 @@ pub unsafe extern "C" fn cqlite_execute_prepared(
     let params_vec: Vec<cqlite_value_t> = if params.is_null() || param_count == 0 {
         Vec::new()
     } else {
-        (0..param_count).map(|_| cqlite_value_t { _private: [] }).collect()
+        (0..param_count)
+            .map(|_| cqlite_value_t { _private: [] })
+            .collect()
     };
     match query::execute_prepared(stmt_ref, &params_vec) {
         Ok(query_result) => {

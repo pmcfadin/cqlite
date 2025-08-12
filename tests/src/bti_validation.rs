@@ -5,7 +5,7 @@
 
 use cqlite_core::{
     error::Error,
-    parser::{header::*, vint::*, SSTableParser},
+    parser::{SSTableParser, header::*, vint::*},
     storage::sstable::index::*,
 };
 use std::fs;
@@ -94,7 +94,8 @@ impl BtiValidationSuite {
         let test_data_path = current_dir.join("test-env/cassandra5");
 
         Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default()).unwrap(),
+            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
+                .unwrap(),
             test_data_path,
         }
     }
@@ -135,9 +136,9 @@ impl BtiValidationSuite {
     /// Parse BTI header from bytes
     pub fn parse_bti_header(&self, input: &[u8]) -> Result<(BtiHeader, usize), Error> {
         use nom::{
+            IResult,
             bytes::complete::take,
             number::complete::{be_u16, be_u32, be_u64},
-            IResult,
         };
 
         fn parse_bti_header_impl(input: &[u8]) -> IResult<&[u8], BtiHeader> {
@@ -186,10 +187,10 @@ impl BtiValidationSuite {
     /// Parse BTI node from bytes
     pub fn parse_bti_node(&self, input: &[u8]) -> Result<(BtiNode, usize), Error> {
         use nom::{
+            IResult,
             bytes::complete::take,
             multi::count,
-            number::complete::{be_u16, be_u32, be_u64, be_u8},
-            IResult,
+            number::complete::{be_u8, be_u16, be_u32, be_u64},
         };
 
         fn parse_bti_entry(input: &[u8]) -> IResult<&[u8], BtiEntry> {

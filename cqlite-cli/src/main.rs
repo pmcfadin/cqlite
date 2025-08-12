@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use cqlite_core::{Database, Config as CoreConfig};
+use cqlite_core::{Config as CoreConfig, Database};
 use std::path::PathBuf;
 use tracing::info;
 
@@ -264,7 +264,6 @@ pub enum Commands {
     },
 }
 
-
 #[derive(Subcommand)]
 pub enum AdminCommands {
     /// Display database information
@@ -429,21 +428,54 @@ async fn main() -> Result<()> {
             interactive,
             progress,
             export,
-        }) => commands::read_sstable_enhanced(&sstable_path, &schema, limit, skip, generation, cli.format, cli.auto_detect, cli.cassandra_version, interactive, progress, export).await,
+        }) => {
+            commands::read_sstable_enhanced(
+                &sstable_path,
+                &schema,
+                limit,
+                skip,
+                generation,
+                cli.format,
+                cli.auto_detect,
+                cli.cassandra_version,
+                interactive,
+                progress,
+                export,
+            )
+            .await
+        }
         Some(Commands::ValidateSstable {
             sstable_path,
             schema,
             deep,
             fix,
             report,
-        }) => commands::validate_sstable(&sstable_path, schema.as_deref(), deep, fix, report.as_deref()).await,
+        }) => {
+            commands::validate_sstable(
+                &sstable_path,
+                schema.as_deref(),
+                deep,
+                fix,
+                report.as_deref(),
+            )
+            .await
+        }
         Some(Commands::AnalyzeSstable {
             sstable_path,
             schema,
             detailed,
             infer_schema,
             report,
-        }) => commands::analyze_sstable(&sstable_path, schema.as_deref(), detailed, infer_schema, report.as_deref()).await,
+        }) => {
+            commands::analyze_sstable(
+                &sstable_path,
+                schema.as_deref(),
+                detailed,
+                infer_schema,
+                report.as_deref(),
+            )
+            .await
+        }
         Some(Commands::BenchmarkSstable {
             sstable_path,
             schema,
@@ -451,22 +483,57 @@ async fn main() -> Result<()> {
             operations,
             report,
             memory_profile,
-        }) => commands::benchmark_sstable(&sstable_path, schema.as_deref(), iterations, &operations, report.as_deref(), memory_profile).await,
-        Some(Commands::Info { sstable_path, detailed, format, validate, schema }) => {
-            commands::info::execute_info_command(&sstable_path, detailed, format, validate, schema.as_deref(), cli.auto_detect, cli.cassandra_version).await
-        },
-        Some(Commands::Select { 
-            sstable_path, 
-            schema, 
-            query, 
-            format, 
-            auto_detect, 
+        }) => {
+            commands::benchmark_sstable(
+                &sstable_path,
+                schema.as_deref(),
+                iterations,
+                &operations,
+                report.as_deref(),
+                memory_profile,
+            )
+            .await
+        }
+        Some(Commands::Info {
+            sstable_path,
+            detailed,
+            format,
+            validate,
+            schema,
+        }) => {
+            commands::info::execute_info_command(
+                &sstable_path,
+                detailed,
+                format,
+                validate,
+                schema.as_deref(),
+                cli.auto_detect,
+                cli.cassandra_version,
+            )
+            .await
+        }
+        Some(Commands::Select {
+            sstable_path,
+            schema,
+            query,
+            format,
+            auto_detect,
             cassandra_version,
             page_size: _,
             buffer_size: _,
             parallel: _,
             max_memory_mb: _,
-        }) => commands::execute_select_query(&sstable_path, &schema, &query, format, auto_detect, cassandra_version).await,
+        }) => {
+            commands::execute_select_query(
+                &sstable_path,
+                &schema,
+                &query,
+                format,
+                auto_detect,
+                cassandra_version,
+            )
+            .await
+        }
         None => {
             // Default to help message for now
             println!("CQLite CLI v{}", env!("CARGO_PKG_VERSION"));
@@ -485,40 +552,43 @@ async fn initialize_database(db_path: &PathBuf, config: &config::Config) -> Resu
 
     // Convert CLI config to core config
     let core_config = create_core_config(config)?;
-    
+
     info!("Initializing database at: {}", db_path.display());
-    
+
     // Open the database with the core configuration
-    let database = Database::open(db_path, core_config).await
+    let database = Database::open(db_path, core_config)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize database: {}", e))?;
-    
+
     info!("Database initialized successfully");
-    
+
     Ok(database)
 }
 
 /// Convert CLI configuration to core database configuration
 fn create_core_config(cli_config: &config::Config) -> Result<CoreConfig> {
     let mut core_config = CoreConfig::default();
-    
+
     // Apply CLI configuration settings to core config
     if let Some(memory_limit_mb) = cli_config.performance.memory_limit_mb {
         core_config.memory.max_memory = memory_limit_mb * 1024 * 1024; // Convert MB to bytes
     }
-    
+
     // Set cache size from CLI config
     core_config.memory.block_cache.max_size = cli_config.performance.cache_size_mb * 1024 * 1024; // Convert MB to bytes
-    
+
     // Set query timeout
-    core_config.query.max_execution_time = std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
-    
+    core_config.query.max_execution_time =
+        std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
+
     // Enable optimizations for better performance
     core_config.query.enable_optimization = true;
     core_config.storage.enable_bloom_filters = true;
-    
+
     // Validate the configuration
-    core_config.validate()
+    core_config
+        .validate()
         .map_err(|e| anyhow::anyhow!("Invalid database configuration: {}", e))?;
-    
+
     Ok(core_config)
 }

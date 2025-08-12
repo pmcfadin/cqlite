@@ -1,5 +1,5 @@
 /// Cassandra testing utilities using Docker cqlsh integration
-use crate::docker::{DockerCqlshClient, CqlshOutput};
+use crate::docker::{CqlshOutput, DockerCqlshClient};
 use std::io;
 
 /// Cassandra test runner that uses Docker containers
@@ -19,7 +19,7 @@ impl CassandraTestRunner {
     pub fn setup(&self) -> io::Result<()> {
         // Wait for Cassandra to be ready
         self.client.wait_until_ready(30)?;
-        
+
         // Create test keyspace
         let create_keyspace = r#"
             CREATE KEYSPACE IF NOT EXISTS cqlite_test 
@@ -28,9 +28,9 @@ impl CassandraTestRunner {
                 'replication_factor': 1
             };
         "#;
-        
+
         self.client.execute_cql(create_keyspace)?;
-        
+
         Ok(())
     }
 
@@ -49,7 +49,8 @@ impl CassandraTestRunner {
 
     /// Create a test table with sample data
     pub fn create_test_table(&self, table_name: &str) -> io::Result<()> {
-        let create_table = format!(r#"
+        let create_table = format!(
+            r#"
             USE cqlite_test;
             CREATE TABLE IF NOT EXISTS {} (
                 id UUID PRIMARY KEY,
@@ -58,12 +59,15 @@ impl CassandraTestRunner {
                 age INT,
                 created_at TIMESTAMP
             );
-        "#, table_name);
+        "#,
+            table_name
+        );
 
         self.client.execute_cql(&create_table)?;
 
         // Insert sample data
-        let insert_data = format!(r#"
+        let insert_data = format!(
+            r#"
             USE cqlite_test;
             INSERT INTO {} (id, name, email, age, created_at) 
             VALUES (uuid(), 'Alice Johnson', 'alice@example.com', 30, toTimestamp(now()));
@@ -76,7 +80,9 @@ impl CassandraTestRunner {
             
             INSERT INTO {} (id, name, email, age, created_at) 
             VALUES (uuid(), 'Diana Prince', 'diana@example.com', 28, toTimestamp(now()));
-        "#, table_name, table_name, table_name, table_name);
+        "#,
+            table_name, table_name, table_name, table_name
+        );
 
         self.client.execute_cql(&insert_data)?;
         Ok(())
@@ -90,14 +96,18 @@ impl CassandraTestRunner {
     }
 
     /// Compare query results between CQLite and Cassandra
-    pub fn compare_results(&self, query: &str, cqlite_result: &str) -> io::Result<ComparisonResult> {
+    pub fn compare_results(
+        &self,
+        query: &str,
+        cqlite_result: &str,
+    ) -> io::Result<ComparisonResult> {
         let cassandra_output = self.execute_test_query(query)?;
-        
+
         // Parse CQLite result (assuming it's in a similar format)
         let cqlite_output = DockerCqlshClient::parse_cqlsh_output(cqlite_result);
-        
+
         let matches = compare_outputs(&cassandra_output, &cqlite_output);
-        
+
         Ok(ComparisonResult {
             query: query.to_string(),
             cassandra_result: cassandra_output,
@@ -184,19 +194,19 @@ fn compare_outputs(cassandra: &CqlshOutput, cqlite: &CqlshOutput) -> bool {
     if cassandra.headers != cqlite.headers {
         return false;
     }
-    
+
     // Compare number of rows
     if cassandra.rows.len() != cqlite.rows.len() {
         return false;
     }
-    
+
     // Compare each row (allowing for different ordering)
     let mut cassandra_rows = cassandra.rows.clone();
     let mut cqlite_rows = cqlite.rows.clone();
-    
+
     cassandra_rows.sort();
     cqlite_rows.sort();
-    
+
     cassandra_rows == cqlite_rows
 }
 

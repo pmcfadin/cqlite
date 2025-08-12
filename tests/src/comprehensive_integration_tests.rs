@@ -3,15 +3,15 @@
 //! This module provides complete integration testing infrastructure for CQLite,
 //! including real SSTable compatibility, CLI testing, and performance validation.
 
-use cqlite_core::{storage::StorageEngine, platform::Platform};
+use cqlite_core::{platform::Platform, storage::StorageEngine};
 
 use cqlite_core::{
-    error::Result,
-    parser::types::{parse_cql_value, serialize_cql_value, CqlTypeId},
-    parser::SSTableParser,
-    schema::SchemaManager,
-    types::{Value, RowKey, TableId},
     Config,
+    error::Result,
+    parser::SSTableParser,
+    parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value},
+    schema::SchemaManager,
+    types::{RowKey, TableId, Value},
 };
 
 use assert_cmd::prelude::*;
@@ -101,12 +101,18 @@ pub struct ComprehensiveIntegrationTestSuite {
 impl ComprehensiveIntegrationTestSuite {
     pub fn new(config: IntegrationTestConfig) -> Result<Self> {
         let temp_dir = TempDir::new().map_err(|e| {
-            cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create temp dir: {}", e)))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create temp dir: {}", e),
+            ))
         })?;
 
         let test_data_path = temp_dir.path().join("test_data");
         fs::create_dir_all(&test_data_path).map_err(|e| {
-            cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create test data dir: {}", e)))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create test data dir: {}", e),
+            ))
         })?;
 
         Ok(Self {
@@ -213,10 +219,18 @@ impl ComprehensiveIntegrationTestSuite {
         println!("🔧 Running basic functionality tests...");
 
         // Run each test individually
-        self.run_individual_test("Schema Creation", || self.test_schema_creation(), results).await;
-        self.run_individual_test("Data Storage", || self.test_data_storage(), results).await;
-        self.run_individual_test("Query Parsing", || self.test_query_parsing(), results).await;
-        self.run_individual_test("Value Serialization", || self.test_value_serialization(), results).await;
+        self.run_individual_test("Schema Creation", || self.test_schema_creation(), results)
+            .await;
+        self.run_individual_test("Data Storage", || self.test_data_storage(), results)
+            .await;
+        self.run_individual_test("Query Parsing", || self.test_query_parsing(), results)
+            .await;
+        self.run_individual_test(
+            "Value Serialization",
+            || self.test_value_serialization(),
+            results,
+        )
+        .await;
 
         Ok(())
     }
@@ -226,11 +240,36 @@ impl ComprehensiveIntegrationTestSuite {
         println!("📊 Running real SSTable compatibility tests...");
 
         // Run each test individually
-        self.run_individual_test("Simple Types SSTable", || self.test_simple_types_sstable(), results).await;
-        self.run_individual_test("Collections SSTable", || self.test_collections_sstable(), results).await;
-        self.run_individual_test("Large SSTable Streaming", || self.test_large_sstable_streaming(), results).await;
-        self.run_individual_test("Binary Format Validation", || self.test_binary_format_validation(), results).await;
-        self.run_individual_test("Schema Validation", || self.test_schema_validation(), results).await;
+        self.run_individual_test(
+            "Simple Types SSTable",
+            || self.test_simple_types_sstable(),
+            results,
+        )
+        .await;
+        self.run_individual_test(
+            "Collections SSTable",
+            || self.test_collections_sstable(),
+            results,
+        )
+        .await;
+        self.run_individual_test(
+            "Large SSTable Streaming",
+            || self.test_large_sstable_streaming(),
+            results,
+        )
+        .await;
+        self.run_individual_test(
+            "Binary Format Validation",
+            || self.test_binary_format_validation(),
+            results,
+        )
+        .await;
+        self.run_individual_test(
+            "Schema Validation",
+            || self.test_schema_validation(),
+            results,
+        )
+        .await;
 
         Ok(())
     }
@@ -243,12 +282,26 @@ impl ComprehensiveIntegrationTestSuite {
         println!("💻 Running CLI integration tests...");
 
         // Run each test individually
-        self.run_individual_test("CLI Help Command", || self.test_cli_help(), results).await;
-        self.run_individual_test("CLI Version Command", || self.test_cli_version(), results).await;
-        self.run_individual_test("CLI Parse Command", || self.test_cli_parse_command(), results).await;
-        self.run_individual_test("CLI Export JSON", || self.test_cli_export_json(), results).await;
-        self.run_individual_test("CLI Export CSV", || self.test_cli_export_csv(), results).await;
-        self.run_individual_test("CLI Error Handling", || self.test_cli_error_handling(), results).await;
+        self.run_individual_test("CLI Help Command", || self.test_cli_help(), results)
+            .await;
+        self.run_individual_test("CLI Version Command", || self.test_cli_version(), results)
+            .await;
+        self.run_individual_test(
+            "CLI Parse Command",
+            || self.test_cli_parse_command(),
+            results,
+        )
+        .await;
+        self.run_individual_test("CLI Export JSON", || self.test_cli_export_json(), results)
+            .await;
+        self.run_individual_test("CLI Export CSV", || self.test_cli_export_csv(), results)
+            .await;
+        self.run_individual_test(
+            "CLI Error Handling",
+            || self.test_cli_error_handling(),
+            results,
+        )
+        .await;
 
         Ok(())
     }
@@ -258,10 +311,18 @@ impl ComprehensiveIntegrationTestSuite {
         println!("⚡ Running performance tests...");
 
         // Run each test individually
-        self.run_individual_test("Parse Speed Benchmark", || self.test_parse_speed_benchmark(), results).await;
-        self.run_individual_test("Memory Usage Test", || self.test_memory_usage(), results).await;
-        self.run_individual_test("Throughput Test", || self.test_throughput(), results).await;
-        self.run_individual_test("Latency Test", || self.test_latency(), results).await;
+        self.run_individual_test(
+            "Parse Speed Benchmark",
+            || self.test_parse_speed_benchmark(),
+            results,
+        )
+        .await;
+        self.run_individual_test("Memory Usage Test", || self.test_memory_usage(), results)
+            .await;
+        self.run_individual_test("Throughput Test", || self.test_throughput(), results)
+            .await;
+        self.run_individual_test("Latency Test", || self.test_latency(), results)
+            .await;
 
         Ok(())
     }
@@ -271,12 +332,30 @@ impl ComprehensiveIntegrationTestSuite {
         println!("⚠️  Running edge case tests...");
 
         // Run each test individually
-        self.run_individual_test("Null Values", || self.test_null_values(), results).await;
-        self.run_individual_test("Empty Collections", || self.test_empty_collections(), results).await;
-        self.run_individual_test("Unicode Data", || self.test_unicode_data(), results).await;
-        self.run_individual_test("Large Binary Data", || self.test_large_binary_data(), results).await;
-        self.run_individual_test("Corrupt Data Recovery", || self.test_corrupt_data_recovery(), results).await;
-        self.run_individual_test("Schema Migration", || self.test_schema_migration(), results).await;
+        self.run_individual_test("Null Values", || self.test_null_values(), results)
+            .await;
+        self.run_individual_test(
+            "Empty Collections",
+            || self.test_empty_collections(),
+            results,
+        )
+        .await;
+        self.run_individual_test("Unicode Data", || self.test_unicode_data(), results)
+            .await;
+        self.run_individual_test(
+            "Large Binary Data",
+            || self.test_large_binary_data(),
+            results,
+        )
+        .await;
+        self.run_individual_test(
+            "Corrupt Data Recovery",
+            || self.test_corrupt_data_recovery(),
+            results,
+        )
+        .await;
+        self.run_individual_test("Schema Migration", || self.test_schema_migration(), results)
+            .await;
 
         Ok(())
     }
@@ -289,10 +368,26 @@ impl ComprehensiveIntegrationTestSuite {
         println!("🔀 Running concurrent access tests...");
 
         // Run each test individually
-        self.run_individual_test("Concurrent Reads", || self.test_concurrent_reads(), results).await;
-        self.run_individual_test("Concurrent Writes", || self.test_concurrent_writes(), results).await;
-        self.run_individual_test("Read-Write Consistency", || self.test_read_write_consistency(), results).await;
-        self.run_individual_test("Resource Contention", || self.test_resource_contention(), results).await;
+        self.run_individual_test("Concurrent Reads", || self.test_concurrent_reads(), results)
+            .await;
+        self.run_individual_test(
+            "Concurrent Writes",
+            || self.test_concurrent_writes(),
+            results,
+        )
+        .await;
+        self.run_individual_test(
+            "Read-Write Consistency",
+            || self.test_read_write_consistency(),
+            results,
+        )
+        .await;
+        self.run_individual_test(
+            "Resource Contention",
+            || self.test_resource_contention(),
+            results,
+        )
+        .await;
 
         Ok(())
     }
@@ -371,7 +466,7 @@ impl ComprehensiveIntegrationTestSuite {
 
         // Create a test schema - simplified for testing
         let table_id = TableId::new("test_schema");
-        
+
         // Note: ColumnSchema and TableSchema don't exist in current API
         // This test focuses on basic schema manager functionality
         println!("Testing schema creation for table: {}", table_id.name());
@@ -570,7 +665,10 @@ impl ComprehensiveIntegrationTestSuite {
         cmd.arg("--help");
 
         let output = cmd.output().map_err(|e| {
-            cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to execute CLI: {}", e)))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to execute CLI: {}", e),
+            ))
         })?;
 
         if !output.status.success() {
@@ -613,7 +711,10 @@ impl ComprehensiveIntegrationTestSuite {
         cmd.arg("--version");
 
         let output = cmd.output().map_err(|e| {
-            cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to execute CLI: {}", e)))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to execute CLI: {}", e),
+            ))
         })?;
 
         if !output.status.success() {
@@ -926,11 +1027,17 @@ impl ComprehensiveIntegrationTestSuite {
     async fn generate_test_reports(&self, results: &IntegrationTestResults) -> Result<()> {
         let report_path = self.test_data_path.join("integration_test_report.json");
         let report_json = serde_json::to_string_pretty(results).map_err(|e| {
-            cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to serialize report: {}", e)))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to serialize report: {}", e),
+            ))
         })?;
 
         fs::write(&report_path, report_json).map_err(|e| {
-            cqlite_core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to write report: {}", e)))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to write report: {}", e),
+            ))
         })?;
 
         println!("📄 Test report written to: {}", report_path.display());

@@ -9,17 +9,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::{
     Config, Error, Result, Value,
-    schema::{SchemaManager, TableSchema},
-    storage::sstable_data_manager::{
-        SSTableDataManager, SSTableDataManagerConfig, DataRow, TableDiscovery, TableInfo, CacheStatistics,
-    },
     platform::Platform,
     query::result::{QueryResult, QueryRow},
+    schema::{SchemaManager, TableSchema},
+    storage::sstable_data_manager::{
+        CacheStatistics, DataRow, SSTableDataManager, SSTableDataManagerConfig, TableDiscovery,
+        TableInfo,
+    },
 };
 
 /// REPL data access configuration
@@ -170,7 +171,8 @@ impl ReplDataApi {
                 platform,
                 core_config,
                 schema_manager,
-            ).await?
+            )
+            .await?,
         );
 
         Ok(Self {
@@ -185,7 +187,7 @@ impl ReplDataApi {
     /// Initialize the API with a data directory
     pub async fn initialize(&self, data_dir: &Path) -> Result<TableDiscovery> {
         let discovery = self.data_manager.discover_tables(data_dir).await?;
-        
+
         // Cache the discovery results
         {
             let mut cache = self.discovery_cache.write().await;
@@ -200,7 +202,10 @@ impl ReplDataApi {
         // Validate keyspace exists
         let keyspaces = self.list_keyspaces().await?;
         if !keyspaces.contains(&keyspace.to_string()) {
-            return Err(Error::Query(format!("Keyspace '{}' does not exist", keyspace)));
+            return Err(Error::Query(format!(
+                "Keyspace '{}' does not exist",
+                keyspace
+            )));
         }
 
         let mut context = self.query_context.write().await;
@@ -224,10 +229,11 @@ impl ReplDataApi {
     ) -> Result<ReplQueryResult> {
         let start_time = Instant::now();
         let context = self.query_context.read().await;
-        
+
         // Ensure we have a keyspace
-        let keyspace = context.keyspace.as_ref()
-            .ok_or_else(|| Error::Query("No keyspace selected. Use 'USE keyspace;' first.".to_string()))?;
+        let keyspace = context.keyspace.as_ref().ok_or_else(|| {
+            Error::Query("No keyspace selected. Use 'USE keyspace;' first.".to_string())
+        })?;
 
         // Apply context limits
         let effective_limit = limit
@@ -237,10 +243,15 @@ impl ReplDataApi {
 
         // Check query cache if enabled
         if self.config.enable_query_cache {
-            let cache_key = format!("{}:{}:{}:{:?}:{:?}", 
-                keyspace, table, columns.as_ref().map(|c| c.join(",")).unwrap_or_default(),
-                where_clause, effective_limit);
-            
+            let cache_key = format!(
+                "{}:{}:{}:{:?}:{:?}",
+                keyspace,
+                table,
+                columns.as_ref().map(|c| c.join(",")).unwrap_or_default(),
+                where_clause,
+                effective_limit
+            );
+
             if let Some((cached_result, cached_at)) = self.get_cached_query(&cache_key).await {
                 let cache_ttl = Duration::from_secs(self.config.query_cache_ttl_seconds);
                 if cached_at.elapsed() < cache_ttl {
@@ -253,12 +264,15 @@ impl ReplDataApi {
         }
 
         // Execute the query
-        let rows = self.data_manager.query_data(
-            keyspace,
-            table,
-            where_clause.as_deref(),
-            Some(effective_limit),
-        ).await?;
+        let rows = self
+            .data_manager
+            .query_data(
+                keyspace,
+                table,
+                where_clause.as_deref(),
+                Some(effective_limit),
+            )
+            .await?;
 
         // Get schema information
         let schema = self.data_manager.get_table_schema(keyspace, table).await?;
@@ -272,7 +286,10 @@ impl ReplDataApi {
             rows_returned: rows.len(),
             total_rows_available: None, // Would require separate count query
             from_cache: false,
-            source_files: rows.iter().map(|r| r.metadata.source_file.clone()).collect(),
+            source_files: rows
+                .iter()
+                .map(|r| r.metadata.source_file.clone())
+                .collect(),
             bytes_read: self.estimate_bytes_read(&rows),
             cache_hit_ratio: self.calculate_cache_hit_ratio().await,
         };
@@ -285,9 +302,14 @@ impl ReplDataApi {
 
         // Cache the result if enabled
         if self.config.enable_query_cache {
-            let cache_key = format!("{}:{}:{}:{:?}:{:?}", 
-                keyspace, table, columns.as_ref().map(|c| c.join(",")).unwrap_or_default(),
-                where_clause, effective_limit);
+            let cache_key = format!(
+                "{}:{}:{}:{:?}:{:?}",
+                keyspace,
+                table,
+                columns.as_ref().map(|c| c.join(",")).unwrap_or_default(),
+                where_clause,
+                effective_limit
+            );
             self.cache_query_result(cache_key, result.clone()).await;
         }
 
@@ -305,7 +327,9 @@ impl ReplDataApi {
             ks.to_string()
         } else {
             let context = self.query_context.read().await;
-            context.keyspace.as_ref()
+            context
+                .keyspace
+                .as_ref()
                 .ok_or_else(|| Error::Query("No keyspace selected".to_string()))?
                 .clone()
         };
@@ -315,7 +339,11 @@ impl ReplDataApi {
 
         // Get detailed information for each table
         for table_name in table_names {
-            if let Ok(Some(_schema)) = self.data_manager.get_table_schema(&target_keyspace, &table_name).await {
+            if let Ok(Some(_schema)) = self
+                .data_manager
+                .get_table_schema(&target_keyspace, &table_name)
+                .await
+            {
                 // Get table info from discovery cache
                 let discovery = self.get_discovery_cache().await;
                 if let Some((ref discovery_data, _)) = discovery {
@@ -356,30 +384,40 @@ impl ReplDataApi {
             ks.to_string()
         } else {
             let context = self.query_context.read().await;
-            context.keyspace.as_ref()
+            context
+                .keyspace
+                .as_ref()
                 .ok_or_else(|| Error::Query("No keyspace selected".to_string()))?
                 .clone()
         };
 
-        self.data_manager.get_table_schema(&target_keyspace, table).await?
-            .ok_or_else(|| Error::Table(format!("Table {}.{} not found or no schema available", target_keyspace, table)))
+        self.data_manager
+            .get_table_schema(&target_keyspace, table)
+            .await?
+            .ok_or_else(|| {
+                Error::Table(format!(
+                    "Table {}.{} not found or no schema available",
+                    target_keyspace, table
+                ))
+            })
     }
 
     /// Get system information and statistics
     pub async fn get_system_info(&self) -> Result<SystemInfo> {
         let cache_stats = self.data_manager.get_cache_stats();
         let (discovery_in_progress, last_discovery) = self.data_manager.get_discovery_status();
-        
+
         let discovery_info = self.get_discovery_cache().await;
-        let (total_keyspaces, total_tables, total_sstables) = if let Some((ref discovery, _)) = discovery_info {
-            (
-                discovery.keyspaces.len(),
-                discovery.keyspaces.iter().map(|ks| ks.tables.len()).sum(),
-                discovery.total_sstables,
-            )
-        } else {
-            (0, 0, 0)
-        };
+        let (total_keyspaces, total_tables, total_sstables) =
+            if let Some((ref discovery, _)) = discovery_info {
+                (
+                    discovery.keyspaces.len(),
+                    discovery.keyspaces.iter().map(|ks| ks.tables.len()).sum(),
+                    discovery.total_sstables,
+                )
+            } else {
+                (0, 0, 0)
+            };
 
         let memory_usage_mb = cache_stats.current_cache_size_bytes / (1024 * 1024);
 
@@ -398,19 +436,19 @@ impl ReplDataApi {
     /// Update query context settings
     pub async fn update_context(&self, updates: QueryContextUpdate) -> Result<()> {
         let mut context = self.query_context.write().await;
-        
+
         if let Some(timeout) = updates.timeout_seconds {
             context.timeout = Duration::from_secs(timeout);
         }
-        
+
         if let Some(limit) = updates.limit {
             context.limit = Some(limit.min(self.config.max_rows_per_query));
         }
-        
+
         if let Some(timing) = updates.timing_enabled {
             context.timing_enabled = timing;
         }
-        
+
         if let Some(page_size) = updates.page_size {
             context.page_size = Some(page_size);
         }
@@ -430,7 +468,7 @@ impl ReplDataApi {
             let mut query_cache = self.query_cache.write().await;
             query_cache.clear();
         }
-        
+
         {
             let mut discovery_cache = self.discovery_cache.write().await;
             *discovery_cache = None;
@@ -452,10 +490,11 @@ impl ReplDataApi {
 
         // Simple cache eviction (keep last 100 queries)
         if cache.len() > 100 {
-            let oldest_key = cache.iter()
+            let oldest_key = cache
+                .iter()
                 .min_by_key(|(_, (_, time))| time)
                 .map(|(key, _)| key.clone());
-            
+
             if let Some(key) = oldest_key {
                 cache.remove(&key);
             }
@@ -477,7 +516,7 @@ impl ReplDataApi {
 
         for data_row in rows {
             let mut row_values = Vec::new();
-            
+
             // Determine column order
             let columns = if let Some(cols) = requested_columns {
                 cols.clone()
@@ -489,14 +528,18 @@ impl ReplDataApi {
 
             // Extract values in order
             for column_name in &columns {
-                let value = data_row.columns.get(column_name)
+                let value = data_row
+                    .columns
+                    .get(column_name)
                     .cloned()
                     .unwrap_or(Value::Null);
                 row_values.push(value);
             }
 
             let query_row = QueryRow {
-                values: row_values.into_iter().enumerate()
+                values: row_values
+                    .into_iter()
+                    .enumerate()
                     .map(|(i, value)| (format!("col_{}", i), value))
                     .collect(),
                 key: data_row.key.clone(),
@@ -533,12 +576,16 @@ impl ReplDataApi {
     }
 
     fn assess_table_health(&self, table_info: &TableInfo) -> String {
-        let healthy_files = table_info.sstable_files.iter()
-            .filter(|f| f.health_status == crate::storage::sstable_data_manager::FileHealthStatus::Healthy)
+        let healthy_files = table_info
+            .sstable_files
+            .iter()
+            .filter(|f| {
+                f.health_status == crate::storage::sstable_data_manager::FileHealthStatus::Healthy
+            })
             .count();
-        
+
         let total_files = table_info.sstable_files.len();
-        
+
         if healthy_files == total_files {
             "Healthy".to_string()
         } else if healthy_files > total_files / 2 {
@@ -596,12 +643,9 @@ mod tests {
         let platform = Arc::new(Platform::new(&core_config).await.unwrap());
         let schema_manager = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 
-        let api = ReplDataApi::new(
-            config,
-            platform,
-            core_config,
-            schema_manager,
-        ).await.unwrap();
+        let api = ReplDataApi::new(config, platform, core_config, schema_manager)
+            .await
+            .unwrap();
 
         let context = api.get_context().await;
         assert!(context.keyspace.is_none());
@@ -616,12 +660,9 @@ mod tests {
         let platform = Arc::new(Platform::new(&core_config).await.unwrap());
         let schema_manager = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 
-        let api = ReplDataApi::new(
-            config,
-            platform,
-            core_config,
-            schema_manager,
-        ).await.unwrap();
+        let api = ReplDataApi::new(config, platform, core_config, schema_manager)
+            .await
+            .unwrap();
 
         let updates = QueryContextUpdate {
             timeout_seconds: Some(60),
@@ -631,7 +672,7 @@ mod tests {
         };
 
         api.update_context(updates).await.unwrap();
-        
+
         let context = api.get_context().await;
         assert_eq!(context.timeout, Duration::from_secs(60));
         assert_eq!(context.limit, Some(200));

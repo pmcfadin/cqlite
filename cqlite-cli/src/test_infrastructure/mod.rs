@@ -7,20 +7,20 @@
 //! - Integration test framework
 //! - Performance testing utilities
 
-pub mod container;
+pub mod assertions;
 pub mod cli_helpers;
+pub mod container;
 pub mod fixtures;
 pub mod integration;
 pub mod performance;
-pub mod assertions;
 
 // Re-export commonly used types
+pub use assertions::{ErrorAssertion, OutputAssertion, ResultAssertion};
+pub use cli_helpers::{CliTestBuilder, CliTestRunner, CommandAssertion};
 pub use container::{TestContainer, TestDatabase, TestEnvironment};
-pub use cli_helpers::{CliTestRunner, CliTestBuilder, CommandAssertion};
-pub use fixtures::{TestDataBuilder, SSTableFixture, SchemaFixture};
-pub use integration::{IntegrationTestSuite, E2ETestRunner};
-pub use performance::{PerformanceTestRunner, BenchmarkSuite};
-pub use assertions::{ResultAssertion, OutputAssertion, ErrorAssertion};
+pub use fixtures::{SSTableFixture, SchemaFixture, TestDataBuilder};
+pub use integration::{E2ETestRunner, IntegrationTestSuite};
+pub use performance::{BenchmarkSuite, PerformanceTestRunner};
 
 /// Common test result type
 pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -51,27 +51,27 @@ impl TestConfig {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;
         self
     }
-    
+
     pub fn with_parallel(mut self) -> Self {
         self.parallel = true;
         self
     }
-    
+
     pub fn with_verbose(mut self) -> Self {
         self.verbose = true;
         self
     }
-    
+
     pub fn with_temp_dir<P: Into<std::path::PathBuf>>(mut self, dir: P) -> Self {
         self.temp_dir = Some(dir.into());
         self
     }
-    
+
     pub fn no_cleanup(mut self) -> Self {
         self.cleanup = false;
         self
@@ -96,7 +96,9 @@ macro_rules! assert_cli_success {
         $cmd.assert().success();
     };
     ($cmd:expr, $expected:expr) => {
-        $cmd.assert().success().stdout(predicates::str::contains($expected));
+        $cmd.assert()
+            .success()
+            .stdout(predicates::str::contains($expected));
     };
 }
 
@@ -107,6 +109,8 @@ macro_rules! assert_cli_error {
         $cmd.assert().failure();
     };
     ($cmd:expr, $expected:expr) => {
-        $cmd.assert().failure().stderr(predicates::str::contains($expected));
+        $cmd.assert()
+            .failure()
+            .stderr(predicates::str::contains($expected));
     };
 }

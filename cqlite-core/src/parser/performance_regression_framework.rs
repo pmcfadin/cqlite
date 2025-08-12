@@ -3,7 +3,7 @@
 //! This framework provides automated performance regression testing to ensure
 //! M3 complex types maintain performance targets across code changes.
 
-use super::m3_performance_benchmarks::{M3PerformanceBenchmarks, M3BenchmarkResult};
+use super::m3_performance_benchmarks::{M3BenchmarkResult, M3PerformanceBenchmarks};
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -108,9 +108,9 @@ pub enum RegressionSeverity {
 impl Default for RegressionThresholds {
     fn default() -> Self {
         Self {
-            max_performance_degradation: 0.1,  // 10%
-            max_memory_increase: 0.2,          // 20%
-            max_latency_increase: 0.15,        // 15%
+            max_performance_degradation: 0.1, // 10%
+            max_memory_increase: 0.2,         // 20%
+            max_latency_increase: 0.15,       // 15%
             min_runs_for_significance: 5,
             confidence_interval: 0.95,
         }
@@ -182,12 +182,14 @@ impl BaselineStorage {
 
     fn store_baseline(&self, baseline: &BaselineData) -> Result<()> {
         if let Some(parent) = self.storage_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| crate::Error::storage(format!("Failed to create baseline directory: {}", e)))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                crate::Error::storage(format!("Failed to create baseline directory: {}", e))
+            })?;
         }
 
-        let json = serde_json::to_string_pretty(baseline)
-            .map_err(|e| crate::Error::Serialization(format!("Failed to serialize baseline: {}", e)))?;
+        let json = serde_json::to_string_pretty(baseline).map_err(|e| {
+            crate::Error::Serialization(format!("Failed to serialize baseline: {}", e))
+        })?;
 
         fs::write(&self.storage_path, json)
             .map_err(|e| crate::Error::storage(format!("Failed to write baseline file: {}", e)))?;
@@ -241,7 +243,7 @@ impl PerformanceRegressionFramework {
 
         // Load existing baseline
         let baseline = self.baseline_storage.load_baseline()?;
-        
+
         // Run current benchmarks
         let current_results = self.run_current_benchmarks()?;
 
@@ -267,14 +269,14 @@ impl PerformanceRegressionFramework {
         println!("🚀 Running current performance benchmarks...");
 
         let mut all_results = Vec::new();
-        
+
         // Run multiple iterations for statistical significance
         for run in 1..=self.config.runs_per_test {
             println!("   Run {}/{}", run, self.config.runs_per_test);
-            
+
             let mut benchmarks = M3PerformanceBenchmarks::new();
             benchmarks.run_m3_validation()?;
-            
+
             // Extract results (in real implementation, would get from benchmarks)
             // For now, simulate results
             all_results.extend(self.simulate_benchmark_results(run));
@@ -287,7 +289,7 @@ impl PerformanceRegressionFramework {
     /// Simulate benchmark results for demonstration
     fn simulate_benchmark_results(&self, run: usize) -> Vec<M3BenchmarkResult> {
         let base_performance = 100.0 - (run as f64 * 0.5); // Slight variation per run
-        
+
         vec![
             M3BenchmarkResult {
                 name: "list_performance".to_string(),
@@ -319,15 +321,18 @@ impl PerformanceRegressionFramework {
     }
 
     /// Aggregate benchmark results across multiple runs
-    fn aggregate_benchmark_results(&self, all_results: Vec<M3BenchmarkResult>) -> Vec<M3BenchmarkResult> {
+    fn aggregate_benchmark_results(
+        &self,
+        all_results: Vec<M3BenchmarkResult>,
+    ) -> Vec<M3BenchmarkResult> {
         let mut grouped: HashMap<String, Vec<M3BenchmarkResult>> = HashMap::new();
-        
+
         for result in all_results {
             grouped.entry(result.name.clone()).or_default().push(result);
         }
 
         let mut aggregated = Vec::new();
-        
+
         for (name, results) in grouped {
             if results.is_empty() {
                 continue;
@@ -335,10 +340,26 @@ impl PerformanceRegressionFramework {
 
             // Calculate averages
             let count = results.len() as f64;
-            let avg_complex_performance = results.iter().map(|r| r.complex_performance_mbs).sum::<f64>() / count;
-            let avg_primitive_baseline = results.iter().map(|r| r.primitive_baseline_mbs).sum::<f64>() / count;
-            let avg_memory_complex = (results.iter().map(|r| r.memory_complex_bytes).sum::<usize>() as f64 / count) as usize;
-            let avg_memory_baseline = (results.iter().map(|r| r.memory_baseline_bytes).sum::<usize>() as f64 / count) as usize;
+            let avg_complex_performance = results
+                .iter()
+                .map(|r| r.complex_performance_mbs)
+                .sum::<f64>()
+                / count;
+            let avg_primitive_baseline = results
+                .iter()
+                .map(|r| r.primitive_baseline_mbs)
+                .sum::<f64>()
+                / count;
+            let avg_memory_complex = (results
+                .iter()
+                .map(|r| r.memory_complex_bytes)
+                .sum::<usize>() as f64
+                / count) as usize;
+            let avg_memory_baseline = (results
+                .iter()
+                .map(|r| r.memory_baseline_bytes)
+                .sum::<usize>() as f64
+                / count) as usize;
             let avg_latency = results.iter().map(|r| r.latency_microseconds).sum::<f64>() / count;
 
             aggregated.push(M3BenchmarkResult {
@@ -365,15 +386,18 @@ impl PerformanceRegressionFramework {
         baseline: &BaselineData,
         current_results: &[M3BenchmarkResult],
     ) -> Result<Vec<RegressionTestResult>> {
-        println!("📊 Comparing with baseline from {}", 
+        println!(
+            "📊 Comparing with baseline from {}",
             chrono::DateTime::from_timestamp(baseline.timestamp as i64, 0)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                .unwrap_or_else(|| "unknown".to_string()));
+                .unwrap_or_else(|| "unknown".to_string())
+        );
 
         let mut regression_results = Vec::new();
 
         for current in current_results {
-            if let Some(baseline_result) = baseline.results.iter().find(|b| b.name == current.name) {
+            if let Some(baseline_result) = baseline.results.iter().find(|b| b.name == current.name)
+            {
                 let test_result = self.analyze_regression(baseline_result, current);
                 regression_results.push(test_result);
             } else {
@@ -391,23 +415,27 @@ impl PerformanceRegressionFramework {
         current: &M3BenchmarkResult,
     ) -> RegressionTestResult {
         // Calculate performance change
-        let performance_change = (current.complex_performance_mbs - baseline.complex_performance_mbs) 
+        let performance_change = (current.complex_performance_mbs
+            - baseline.complex_performance_mbs)
             / baseline.complex_performance_mbs;
 
         // Calculate memory change
-        let memory_change = (current.memory_complex_bytes as f64 - baseline.memory_complex_bytes as f64) 
+        let memory_change = (current.memory_complex_bytes as f64
+            - baseline.memory_complex_bytes as f64)
             / baseline.memory_complex_bytes as f64;
 
         // Calculate latency change
-        let latency_change = (current.latency_microseconds - baseline.latency_microseconds) 
+        let latency_change = (current.latency_microseconds - baseline.latency_microseconds)
             / baseline.latency_microseconds;
 
         // Determine if this is a regression
-        let is_performance_regression = performance_change < -self.thresholds.max_performance_degradation;
+        let is_performance_regression =
+            performance_change < -self.thresholds.max_performance_degradation;
         let is_memory_regression = memory_change > self.thresholds.max_memory_increase;
         let is_latency_regression = latency_change > self.thresholds.max_latency_increase;
 
-        let is_regression = is_performance_regression || is_memory_regression || is_latency_regression;
+        let is_regression =
+            is_performance_regression || is_memory_regression || is_latency_regression;
 
         // Determine severity
         let severity = if !is_regression {
@@ -417,7 +445,9 @@ impl PerformanceRegressionFramework {
                 performance_change.abs() / self.thresholds.max_performance_degradation,
                 memory_change / self.thresholds.max_memory_increase,
                 latency_change / self.thresholds.max_latency_increase,
-            ].iter().fold(0.0f64, |a, &b| a.max(b));
+            ]
+            .iter()
+            .fold(0.0f64, |a, &b| a.max(b));
 
             if max_degradation >= 3.0 {
                 RegressionSeverity::Critical
@@ -473,7 +503,9 @@ impl PerformanceRegressionFramework {
             self.baseline_storage.store_baseline(&baseline)?;
             println!("✅ New baseline established and stored");
         } else {
-            println!("📝 New baseline established (not stored - set auto_store_baselines=true to persist)");
+            println!(
+                "📝 New baseline established (not stored - set auto_store_baselines=true to persist)"
+            );
         }
 
         Ok(())
@@ -482,18 +514,21 @@ impl PerformanceRegressionFramework {
     /// Generate detailed regression report
     fn generate_regression_report(&self, results: &[RegressionTestResult]) -> Result<()> {
         let report = self.format_regression_report(results);
-        
+
         // Write to file
-        let report_path = self.baseline_storage.storage_path
+        let report_path = self
+            .baseline_storage
+            .storage_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("regression_report.md");
 
-        fs::write(&report_path, &report)
-            .map_err(|e| crate::Error::storage(format!("Failed to write regression report: {}", e)))?;
+        fs::write(&report_path, &report).map_err(|e| {
+            crate::Error::storage(format!("Failed to write regression report: {}", e))
+        })?;
 
         println!("📊 Regression report written to: {}", report_path.display());
-        
+
         // Print summary
         self.print_regression_summary(results);
 
@@ -507,30 +542,38 @@ impl PerformanceRegressionFramework {
 
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
         report.push_str(&format!("**Generated**: {}\n", timestamp));
-        
+
         if let Some(commit) = &self.config.git_commit_hash {
             report.push_str(&format!("**Git Commit**: {}\n", commit));
         }
-        
-        report.push_str(&format!("**Environment**: {} {} with {}\n", 
+
+        report.push_str(&format!(
+            "**Environment**: {} {} with {}\n",
             self.config.environment_info.os,
             self.config.environment_info.architecture,
-            self.config.environment_info.cpu_model));
-        report.push_str(&format!("**Runs per test**: {}\n\n", self.config.runs_per_test));
+            self.config.environment_info.cpu_model
+        ));
+        report.push_str(&format!(
+            "**Runs per test**: {}\n\n",
+            self.config.runs_per_test
+        ));
 
         // Summary
         let regressions = results.iter().filter(|r| r.is_regression).count();
         let total = results.len();
-        
+
         report.push_str("## Summary\n\n");
         report.push_str(&format!("- **Total Tests**: {}\n", total));
         report.push_str(&format!("- **Regressions Detected**: {}\n", regressions));
-        report.push_str(&format!("- **Pass Rate**: {:.1}%\n\n", ((total - regressions) as f64 / total as f64) * 100.0));
+        report.push_str(&format!(
+            "- **Pass Rate**: {:.1}%\n\n",
+            ((total - regressions) as f64 / total as f64) * 100.0
+        ));
 
         // Regression details
         if regressions > 0 {
             report.push_str("## 🚨 Detected Regressions\n\n");
-            
+
             for result in results.iter().filter(|r| r.is_regression) {
                 let severity_emoji = match result.severity {
                     RegressionSeverity::Critical => "🔴",
@@ -540,44 +583,57 @@ impl PerformanceRegressionFramework {
                     RegressionSeverity::None => "🟢",
                 };
 
-                report.push_str(&format!("### {} {} ({:?})\n\n", severity_emoji, result.test_name, result.severity));
-                
+                report.push_str(&format!(
+                    "### {} {} ({:?})\n\n",
+                    severity_emoji, result.test_name, result.severity
+                ));
+
                 if result.performance_change < 0.0 {
-                    report.push_str(&format!("- **Performance**: {:.1}% slower ({:.2} → {:.2} MB/s)\n", 
+                    report.push_str(&format!(
+                        "- **Performance**: {:.1}% slower ({:.2} → {:.2} MB/s)\n",
                         result.performance_change.abs() * 100.0,
                         result.baseline_performance,
-                        result.current_performance));
+                        result.current_performance
+                    ));
                 }
-                
+
                 if result.memory_change > 0.0 {
-                    report.push_str(&format!("- **Memory**: {:.1}% more ({} → {} bytes)\n", 
+                    report.push_str(&format!(
+                        "- **Memory**: {:.1}% more ({} → {} bytes)\n",
                         result.memory_change * 100.0,
                         result.baseline_memory,
-                        result.current_memory));
+                        result.current_memory
+                    ));
                 }
-                
+
                 if result.latency_change > 0.0 {
-                    report.push_str(&format!("- **Latency**: {:.1}% higher ({:.1} → {:.1} μs)\n", 
+                    report.push_str(&format!(
+                        "- **Latency**: {:.1}% higher ({:.1} → {:.1} μs)\n",
                         result.latency_change * 100.0,
                         result.baseline_latency,
-                        result.current_latency));
+                        result.current_latency
+                    ));
                 }
-                
-                report.push_str(&format!("- **Confidence**: {:.1}%\n\n", result.confidence * 100.0));
+
+                report.push_str(&format!(
+                    "- **Confidence**: {:.1}%\n\n",
+                    result.confidence * 100.0
+                ));
             }
         }
 
         // All results table
         report.push_str("## Detailed Results\n\n");
-        report.push_str("| Test | Status | Performance Change | Memory Change | Latency Change |\n");
+        report
+            .push_str("| Test | Status | Performance Change | Memory Change | Latency Change |\n");
         report.push_str("|------|--------|-------------------|---------------|----------------|\n");
-        
+
         for result in results {
             let status = if result.is_regression {
                 match result.severity {
                     RegressionSeverity::Critical => "🔴 CRITICAL",
                     RegressionSeverity::Major => "🟠 MAJOR",
-                    RegressionSeverity::Moderate => "🟡 MODERATE", 
+                    RegressionSeverity::Moderate => "🟡 MODERATE",
                     RegressionSeverity::Minor => "🔵 MINOR",
                     RegressionSeverity::None => "🟢 PASS",
                 }
@@ -596,9 +652,18 @@ impl PerformanceRegressionFramework {
         }
 
         report.push_str("\n## Thresholds\n\n");
-        report.push_str(&format!("- **Max Performance Degradation**: {:.1}%\n", self.thresholds.max_performance_degradation * 100.0));
-        report.push_str(&format!("- **Max Memory Increase**: {:.1}%\n", self.thresholds.max_memory_increase * 100.0));
-        report.push_str(&format!("- **Max Latency Increase**: {:.1}%\n", self.thresholds.max_latency_increase * 100.0));
+        report.push_str(&format!(
+            "- **Max Performance Degradation**: {:.1}%\n",
+            self.thresholds.max_performance_degradation * 100.0
+        ));
+        report.push_str(&format!(
+            "- **Max Memory Increase**: {:.1}%\n",
+            self.thresholds.max_memory_increase * 100.0
+        ));
+        report.push_str(&format!(
+            "- **Max Latency Increase**: {:.1}%\n",
+            self.thresholds.max_latency_increase * 100.0
+        ));
 
         report
     }
@@ -608,31 +673,36 @@ impl PerformanceRegressionFramework {
         println!("\n📊 REGRESSION TEST SUMMARY");
         println!("================================");
 
-        let regressions = results.iter().filter(|r| r.is_regression).collect::<Vec<_>>();
-        
+        let regressions = results
+            .iter()
+            .filter(|r| r.is_regression)
+            .collect::<Vec<_>>();
+
         if regressions.is_empty() {
             println!("✅ ALL TESTS PASSED - No regressions detected!");
         } else {
             println!("🚨 {} REGRESSION(S) DETECTED:", regressions.len());
-            
+
             for result in &regressions {
                 let severity_str = match result.severity {
                     RegressionSeverity::Critical => "CRITICAL",
-                    RegressionSeverity::Major => "MAJOR", 
+                    RegressionSeverity::Major => "MAJOR",
                     RegressionSeverity::Moderate => "MODERATE",
                     RegressionSeverity::Minor => "MINOR",
                     RegressionSeverity::None => "NONE",
                 };
-                
-                println!("   - {} ({}): {:.1}% perf, {:.1}% memory, {:.1}% latency", 
+
+                println!(
+                    "   - {} ({}): {:.1}% perf, {:.1}% memory, {:.1}% latency",
                     result.test_name,
                     severity_str,
                     result.performance_change * 100.0,
                     result.memory_change * 100.0,
-                    result.latency_change * 100.0);
+                    result.latency_change * 100.0
+                );
             }
         }
-        
+
         println!("================================\n");
     }
 
@@ -640,13 +710,13 @@ impl PerformanceRegressionFramework {
     pub fn update_baseline(&mut self, force: bool) -> Result<()> {
         if !force && !self.config.auto_store_baselines {
             return Err(crate::Error::InvalidOperation(
-                "Baseline update requires force=true or auto_store_baselines=true".to_string()
+                "Baseline update requires force=true or auto_store_baselines=true".to_string(),
             ));
         }
 
         let current_results = self.run_current_benchmarks()?;
         self.establish_baseline(&current_results)?;
-        
+
         println!("✅ Baseline updated with current performance results");
         Ok(())
     }
@@ -673,7 +743,7 @@ mod tests {
     fn test_regression_framework_creation() {
         let temp_dir = TempDir::new().unwrap();
         let framework = PerformanceRegressionFramework::new(temp_dir.path().join("baseline.json"));
-        
+
         assert_eq!(framework.thresholds.max_performance_degradation, 0.1);
         assert_eq!(framework.config.runs_per_test, 5);
     }
@@ -739,7 +809,7 @@ mod tests {
         // Store and load
         storage.store_baseline(&baseline).unwrap();
         let loaded = storage.load_baseline().unwrap();
-        
+
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
         assert_eq!(loaded.timestamp, 1234567890);

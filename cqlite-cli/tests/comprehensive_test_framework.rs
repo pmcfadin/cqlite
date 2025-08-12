@@ -16,7 +16,7 @@ use insta::assert_snapshot;
 use mockall::predicate::*;
 use predicates::prelude::*;
 use proptest::prelude::*;
-use quickcheck::{quickcheck, TestResult};
+use quickcheck::{TestResult, quickcheck};
 use rstest::*;
 use serial_test::serial;
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tempfile::{TempDir, NamedTempFile};
+use tempfile::{NamedTempFile, TempDir};
 use test_case::test_case;
 use tokio_test;
 use trycmd::TestCases;
@@ -55,7 +55,7 @@ impl Default for TestFrameworkConfig {
             enable_coverage_tests: true,
             parallel_execution: true,
             test_timeout: Duration::from_secs(300), // 5 minutes
-            coverage_threshold: 90.0, // >90% coverage requirement
+            coverage_threshold: 90.0,               // >90% coverage requirement
             temp_dir: None,
             verbose_output: false,
         }
@@ -145,7 +145,9 @@ impl ComprehensiveTestFramework {
     }
 
     /// Execute comprehensive test suite
-    pub async fn run_comprehensive_tests(&mut self) -> Result<TestResults, Box<dyn std::error::Error>> {
+    pub async fn run_comprehensive_tests(
+        &mut self,
+    ) -> Result<TestResults, Box<dyn std::error::Error>> {
         println!("🧪 Starting Comprehensive CQLite CLI Testing Framework");
         println!("{}", "=".repeat(60));
 
@@ -234,11 +236,9 @@ impl ComprehensiveTestFramework {
 
         for (filename, record_count, scenario_type) in test_scenarios {
             let file_path = db_dir.join(filename);
-            self.test_data_manager.create_test_sstable(
-                &file_path,
-                record_count,
-                scenario_type,
-            ).await?;
+            self.test_data_manager
+                .create_test_sstable(&file_path, record_count, scenario_type)
+                .await?;
         }
 
         Ok(())
@@ -270,7 +270,9 @@ impl ComprehensiveTestFramework {
     }
 
     /// Run integration tests for CLI workflows
-    async fn run_integration_tests(&mut self) -> Result<Vec<IntegrationTestResult>, Box<dyn std::error::Error>> {
+    async fn run_integration_tests(
+        &mut self,
+    ) -> Result<Vec<IntegrationTestResult>, Box<dyn std::error::Error>> {
         let mut results = Vec::new();
 
         // Test basic CLI commands workflow
@@ -311,7 +313,9 @@ impl ComprehensiveTestFramework {
     }
 
     /// Run performance benchmarks and regression tests
-    async fn run_performance_tests(&mut self) -> Result<Vec<PerformanceTestResult>, Box<dyn std::error::Error>> {
+    async fn run_performance_tests(
+        &mut self,
+    ) -> Result<Vec<PerformanceTestResult>, Box<dyn std::error::Error>> {
         let mut results = Vec::new();
 
         // Benchmark CLI startup time
@@ -333,7 +337,9 @@ impl ComprehensiveTestFramework {
     }
 
     /// Generate comprehensive coverage report
-    async fn generate_coverage_report(&mut self) -> Result<CoverageResults, Box<dyn std::error::Error>> {
+    async fn generate_coverage_report(
+        &mut self,
+    ) -> Result<CoverageResults, Box<dyn std::error::Error>> {
         // This would integrate with cargo-llvm-cov or tarpaulin
         // For now, return mock data
         Ok(CoverageResults {
@@ -353,11 +359,18 @@ impl ComprehensiveTestFramework {
         let unit_success = results.unit_test_results.iter().all(|r| r.success);
         let integration_success = results.integration_test_results.iter().all(|r| r.success);
         let e2e_success = results.e2e_test_results.iter().all(|r| r.success);
-        let performance_success = results.performance_test_results.iter()
+        let performance_success = results
+            .performance_test_results
+            .iter()
             .all(|r| !r.regression_detected);
-        let coverage_success = results.coverage_results.line_coverage >= self.config.coverage_threshold;
+        let coverage_success =
+            results.coverage_results.line_coverage >= self.config.coverage_threshold;
 
-        unit_success && integration_success && e2e_success && performance_success && coverage_success
+        unit_success
+            && integration_success
+            && e2e_success
+            && performance_success
+            && coverage_success
     }
 
     /// Print comprehensive test summary
@@ -367,52 +380,119 @@ impl ComprehensiveTestFramework {
         println!("{}", "=".repeat(50));
 
         // Unit tests summary
-        let unit_passed = results.unit_test_results.iter().filter(|r| r.success).count();
+        let unit_passed = results
+            .unit_test_results
+            .iter()
+            .filter(|r| r.success)
+            .count();
         let unit_total = results.unit_test_results.len();
-        println!("📋 Unit Tests:        {}/{} passed ({:.1}%)", 
-                unit_passed, unit_total, 
-                if unit_total > 0 { unit_passed as f64 / unit_total as f64 * 100.0 } else { 0.0 });
+        println!(
+            "📋 Unit Tests:        {}/{} passed ({:.1}%)",
+            unit_passed,
+            unit_total,
+            if unit_total > 0 {
+                unit_passed as f64 / unit_total as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
 
-        // Integration tests summary  
-        let integration_passed = results.integration_test_results.iter().filter(|r| r.success).count();
+        // Integration tests summary
+        let integration_passed = results
+            .integration_test_results
+            .iter()
+            .filter(|r| r.success)
+            .count();
         let integration_total = results.integration_test_results.len();
-        println!("🔗 Integration Tests: {}/{} passed ({:.1}%)",
-                integration_passed, integration_total,
-                if integration_total > 0 { integration_passed as f64 / integration_total as f64 * 100.0 } else { 0.0 });
+        println!(
+            "🔗 Integration Tests: {}/{} passed ({:.1}%)",
+            integration_passed,
+            integration_total,
+            if integration_total > 0 {
+                integration_passed as f64 / integration_total as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
 
         // E2E tests summary
-        let e2e_passed = results.e2e_test_results.iter().filter(|r| r.success).count();
+        let e2e_passed = results
+            .e2e_test_results
+            .iter()
+            .filter(|r| r.success)
+            .count();
         let e2e_total = results.e2e_test_results.len();
-        println!("🌐 E2E Tests:         {}/{} passed ({:.1}%)",
-                e2e_passed, e2e_total,
-                if e2e_total > 0 { e2e_passed as f64 / e2e_total as f64 * 100.0 } else { 0.0 });
+        println!(
+            "🌐 E2E Tests:         {}/{} passed ({:.1}%)",
+            e2e_passed,
+            e2e_total,
+            if e2e_total > 0 {
+                e2e_passed as f64 / e2e_total as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
 
         // Performance tests summary
-        let perf_passed = results.performance_test_results.iter().filter(|r| !r.regression_detected).count();
+        let perf_passed = results
+            .performance_test_results
+            .iter()
+            .filter(|r| !r.regression_detected)
+            .count();
         let perf_total = results.performance_test_results.len();
-        println!("⚡ Performance Tests: {}/{} passed ({:.1}%)",
-                perf_passed, perf_total,
-                if perf_total > 0 { perf_passed as f64 / perf_total as f64 * 100.0 } else { 0.0 });
+        println!(
+            "⚡ Performance Tests: {}/{} passed ({:.1}%)",
+            perf_passed,
+            perf_total,
+            if perf_total > 0 {
+                perf_passed as f64 / perf_total as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
 
         // Coverage summary
         println!("📊 Code Coverage:");
-        println!("   Line Coverage:     {:.1}%", results.coverage_results.line_coverage);
-        println!("   Branch Coverage:   {:.1}%", results.coverage_results.branch_coverage);
-        println!("   Function Coverage: {:.1}%", results.coverage_results.function_coverage);
+        println!(
+            "   Line Coverage:     {:.1}%",
+            results.coverage_results.line_coverage
+        );
+        println!(
+            "   Branch Coverage:   {:.1}%",
+            results.coverage_results.branch_coverage
+        );
+        println!(
+            "   Function Coverage: {:.1}%",
+            results.coverage_results.function_coverage
+        );
 
         // Overall result
         println!();
-        let status_symbol = if results.overall_success { "✅" } else { "❌" };
-        let status_text = if results.overall_success { "PASSED" } else { "FAILED" };
-        println!("{} Overall Result: {} ({:.2}s)", 
-                status_symbol, status_text, results.total_duration.as_secs_f64());
+        let status_symbol = if results.overall_success {
+            "✅"
+        } else {
+            "❌"
+        };
+        let status_text = if results.overall_success {
+            "PASSED"
+        } else {
+            "FAILED"
+        };
+        println!(
+            "{} Overall Result: {} ({:.2}s)",
+            status_symbol,
+            status_text,
+            results.total_duration.as_secs_f64()
+        );
 
         if !results.overall_success {
             println!();
             println!("❌ Issues detected:");
             if results.coverage_results.line_coverage < self.config.coverage_threshold {
-                println!("   • Code coverage below threshold ({:.1}% < {:.1}%)",
-                        results.coverage_results.line_coverage, self.config.coverage_threshold);
+                println!(
+                    "   • Code coverage below threshold ({:.1}% < {:.1}%)",
+                    results.coverage_results.line_coverage, self.config.coverage_threshold
+                );
             }
             // Add other failure reasons...
         }
@@ -494,7 +574,9 @@ impl MockRegistry {
 
 // Implementation stubs for individual test methods
 impl ComprehensiveTestFramework {
-    async fn test_cli_argument_parsing(&self) -> Result<UnitTestResult, Box<dyn std::error::Error>> {
+    async fn test_cli_argument_parsing(
+        &self,
+    ) -> Result<UnitTestResult, Box<dyn std::error::Error>> {
         // Implementation
         Ok(UnitTestResult {
             test_name: "cli_argument_parsing".to_string(),
@@ -506,7 +588,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn test_configuration_loading(&self) -> Result<UnitTestResult, Box<dyn std::error::Error>> {
+    async fn test_configuration_loading(
+        &self,
+    ) -> Result<UnitTestResult, Box<dyn std::error::Error>> {
         // Implementation
         Ok(UnitTestResult {
             test_name: "configuration_loading".to_string(),
@@ -567,10 +651,16 @@ impl ComprehensiveTestFramework {
     }
 
     // Integration test method stubs
-    async fn test_basic_cli_workflow(&self) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
+    async fn test_basic_cli_workflow(
+        &self,
+    ) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
         Ok(IntegrationTestResult {
             workflow_name: "basic_cli_workflow".to_string(),
-            commands_tested: vec!["help".to_string(), "version".to_string(), "info".to_string()],
+            commands_tested: vec![
+                "help".to_string(),
+                "version".to_string(),
+                "info".to_string(),
+            ],
             success: true,
             duration: Duration::from_millis(500),
             output_validation: true,
@@ -578,7 +668,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn test_query_execution_workflow(&self) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
+    async fn test_query_execution_workflow(
+        &self,
+    ) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
         Ok(IntegrationTestResult {
             workflow_name: "query_execution_workflow".to_string(),
             commands_tested: vec!["query".to_string(), "export".to_string()],
@@ -589,7 +681,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn test_export_workflow(&self) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
+    async fn test_export_workflow(
+        &self,
+    ) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
         Ok(IntegrationTestResult {
             workflow_name: "export_workflow".to_string(),
             commands_tested: vec!["export".to_string()],
@@ -600,7 +694,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn test_repl_workflow(&self) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
+    async fn test_repl_workflow(
+        &self,
+    ) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
         Ok(IntegrationTestResult {
             workflow_name: "repl_workflow".to_string(),
             commands_tested: vec!["repl".to_string()],
@@ -611,7 +707,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn test_error_recovery_workflow(&self) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
+    async fn test_error_recovery_workflow(
+        &self,
+    ) -> Result<IntegrationTestResult, Box<dyn std::error::Error>> {
         Ok(IntegrationTestResult {
             workflow_name: "error_recovery_workflow".to_string(),
             commands_tested: vec!["query".to_string(), "info".to_string()],
@@ -623,7 +721,9 @@ impl ComprehensiveTestFramework {
     }
 
     // E2E test method stubs
-    async fn test_data_exploration_scenario(&self) -> Result<E2ETestResult, Box<dyn std::error::Error>> {
+    async fn test_data_exploration_scenario(
+        &self,
+    ) -> Result<E2ETestResult, Box<dyn std::error::Error>> {
         Ok(E2ETestResult {
             scenario_name: "data_exploration_scenario".to_string(),
             user_workflow: vec![
@@ -652,7 +752,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn test_performance_monitoring_scenario(&self) -> Result<E2ETestResult, Box<dyn std::error::Error>> {
+    async fn test_performance_monitoring_scenario(
+        &self,
+    ) -> Result<E2ETestResult, Box<dyn std::error::Error>> {
         Ok(E2ETestResult {
             scenario_name: "performance_monitoring_scenario".to_string(),
             user_workflow: vec![
@@ -666,7 +768,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn test_complete_error_recovery_scenario(&self) -> Result<E2ETestResult, Box<dyn std::error::Error>> {
+    async fn test_complete_error_recovery_scenario(
+        &self,
+    ) -> Result<E2ETestResult, Box<dyn std::error::Error>> {
         Ok(E2ETestResult {
             scenario_name: "complete_error_recovery_scenario".to_string(),
             user_workflow: vec![
@@ -682,7 +786,9 @@ impl ComprehensiveTestFramework {
     }
 
     // Performance benchmark method stubs
-    async fn benchmark_cli_startup(&self) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
+    async fn benchmark_cli_startup(
+        &self,
+    ) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
         Ok(PerformanceTestResult {
             benchmark_name: "cli_startup".to_string(),
             operations_per_second: 50.0,
@@ -692,7 +798,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn benchmark_sstable_parsing(&self) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
+    async fn benchmark_sstable_parsing(
+        &self,
+    ) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
         Ok(PerformanceTestResult {
             benchmark_name: "sstable_parsing".to_string(),
             operations_per_second: 1250.0,
@@ -702,7 +810,9 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn benchmark_query_execution(&self) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
+    async fn benchmark_query_execution(
+        &self,
+    ) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
         Ok(PerformanceTestResult {
             benchmark_name: "query_execution".to_string(),
             operations_per_second: 890.0,
@@ -712,17 +822,21 @@ impl ComprehensiveTestFramework {
         })
     }
 
-    async fn benchmark_memory_usage(&self) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
+    async fn benchmark_memory_usage(
+        &self,
+    ) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
         Ok(PerformanceTestResult {
             benchmark_name: "memory_usage".to_string(),
             operations_per_second: 0.0, // Not applicable
             memory_usage_mb: 28.5,
-            baseline_comparison: 3.2, // 3.2% more memory usage
+            baseline_comparison: 3.2,   // 3.2% more memory usage
             regression_detected: false, // Still within acceptable limits
         })
     }
 
-    async fn benchmark_concurrent_operations(&self) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
+    async fn benchmark_concurrent_operations(
+        &self,
+    ) -> Result<PerformanceTestResult, Box<dyn std::error::Error>> {
         Ok(PerformanceTestResult {
             benchmark_name: "concurrent_operations".to_string(),
             operations_per_second: 2100.0,

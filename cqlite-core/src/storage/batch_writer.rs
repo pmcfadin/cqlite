@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::storage::sstable::SSTableManager;
 use crate::storage::wal::WriteAheadLog;
-use crate::{types::TableId, Config, Result, RowKey, Value};
+use crate::{Config, Result, RowKey, Value, types::TableId};
 
 /// Batch writer for efficient write operations
 #[derive(Debug)]

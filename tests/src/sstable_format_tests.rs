@@ -3,16 +3,16 @@
 //! Comprehensive tests for Cassandra 5+ SSTable format compatibility,
 //! including header parsing, data blocks, and metadata validation.
 
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::parser::header::{
-    parse_sstable_header, serialize_sstable_header, ColumnInfo, CompressionInfo, SSTableHeader,
-    SSTableStats, SSTABLE_MAGIC, SUPPORTED_VERSION, CassandraVersion,
+    CassandraVersion, ColumnInfo, CompressionInfo, SSTABLE_MAGIC, SSTableHeader, SSTableStats,
+    SUPPORTED_VERSION, parse_sstable_header, serialize_sstable_header,
 };
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::{error::Result, Value};
+use cqlite_core::{Value, error::Result};
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 
@@ -24,7 +24,8 @@ pub struct SSTableFormatTests {
 impl SSTableFormatTests {
     pub fn new() -> Self {
         Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default()).unwrap(),
+            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
+                .unwrap(),
         }
     }
 

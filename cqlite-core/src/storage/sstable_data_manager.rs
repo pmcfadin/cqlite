@@ -15,10 +15,10 @@ use tokio::sync::{RwLock as AsyncRwLock, Semaphore};
 
 use crate::{
     Config, Error, Result, RowKey, Value,
+    parser::header::CassandraVersion,
+    platform::Platform,
     schema::{SchemaManager, TableSchema},
     storage::sstable::bulletproof_reader::BulletproofReader,
-    platform::Platform,
-    parser::header::CassandraVersion,
 };
 
 /// Configuration for the SSTable data manager
@@ -225,7 +225,7 @@ impl SSTableDataManager {
         schema_manager: Arc<SchemaManager>,
     ) -> Result<Self> {
         let operation_semaphore = Arc::new(Semaphore::new(config.max_concurrent_ops));
-        
+
         let manager = Self {
             config,
             platform,
@@ -257,7 +257,7 @@ impl SSTableDataManager {
     /// Discover all available keyspaces and tables
     pub async fn discover_tables(&self, data_dir: &Path) -> Result<TableDiscovery> {
         let _start_time = Instant::now();
-        
+
         // Check if discovery is already in progress
         {
             let mut state = self.discovery_state.write();
@@ -271,7 +271,7 @@ impl SSTableDataManager {
         }
 
         let discovery_result = self.perform_discovery(data_dir).await;
-        
+
         // Update discovery state
         {
             let mut state = self.discovery_state.write();
@@ -292,12 +292,19 @@ impl SSTableDataManager {
         let mut total_sstables = 0;
 
         // Scan for keyspace directories
-        let mut keyspace_entries = self.platform.fs().read_dir(data_dir).await
-            .map_err(|e| Error::Io(std::io::Error::other(format!("Failed to read data directory: {}", e))))?;
+        let mut keyspace_entries = self.platform.fs().read_dir(data_dir).await.map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Failed to read data directory: {}",
+                e
+            )))
+        })?;
 
-        while let Some(entry) = keyspace_entries.next_entry().await
-            .map_err(|e| Error::Io(std::io::Error::other(format!("Error reading directory entry: {}", e))))? {
-            
+        while let Some(entry) = keyspace_entries.next_entry().await.map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Error reading directory entry: {}",
+                e
+            )))
+        })? {
             let path = entry.path();
             if path.is_dir() {
                 if let Some(keyspace_name) = path.file_name().and_then(|n| n.to_str()) {
@@ -306,8 +313,12 @@ impl SSTableDataManager {
                         continue;
                     }
 
-                    if let Ok(keyspace_info) = self.discover_keyspace_tables(&path, keyspace_name).await {
-                        total_sstables += keyspace_info.tables.iter()
+                    if let Ok(keyspace_info) =
+                        self.discover_keyspace_tables(&path, keyspace_name).await
+                    {
+                        total_sstables += keyspace_info
+                            .tables
+                            .iter()
                             .map(|t| t.sstable_files.len())
                             .sum::<usize>();
                         keyspaces.push(keyspace_info);
@@ -320,7 +331,7 @@ impl SSTableDataManager {
         {
             let mut discovered = self.discovered_tables.write().await;
             discovered.clear();
-            
+
             for keyspace in &keyspaces {
                 for table in &keyspace.tables {
                     let full_name = format!("{}.{}", keyspace.name, table.name);
@@ -337,15 +348,31 @@ impl SSTableDataManager {
     }
 
     /// Discover tables within a keyspace
-    async fn discover_keyspace_tables(&self, keyspace_path: &Path, keyspace_name: &str) -> Result<KeyspaceInfo> {
+    async fn discover_keyspace_tables(
+        &self,
+        keyspace_path: &Path,
+        keyspace_name: &str,
+    ) -> Result<KeyspaceInfo> {
         let mut tables = Vec::new();
 
-        let mut table_entries = self.platform.fs().read_dir(keyspace_path).await
-            .map_err(|e| Error::Io(std::io::Error::other(format!("Failed to read keyspace directory: {}", e))))?;
+        let mut table_entries = self
+            .platform
+            .fs()
+            .read_dir(keyspace_path)
+            .await
+            .map_err(|e| {
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to read keyspace directory: {}",
+                    e
+                )))
+            })?;
 
-        while let Some(entry) = table_entries.next_entry().await
-            .map_err(|e| Error::Io(std::io::Error::other(format!("Error reading table entry: {}", e))))? {
-            
+        while let Some(entry) = table_entries.next_entry().await.map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Error reading table entry: {}",
+                e
+            )))
+        })? {
             let path = entry.path();
             if path.is_dir() {
                 if let Some(table_name) = path.file_name().and_then(|n| n.to_str()) {
@@ -367,26 +394,42 @@ impl SSTableDataManager {
     }
 
     /// Discover SSTable files for a specific table
-    async fn discover_table_sstables(&self, table_path: &Path, table_name: &str) -> Result<TableInfo> {
+    async fn discover_table_sstables(
+        &self,
+        table_path: &Path,
+        table_name: &str,
+    ) -> Result<TableInfo> {
         let mut sstable_files = Vec::new();
         let mut total_size_bytes = 0u64;
         let mut last_modified = None;
 
-        let mut file_entries = self.platform.fs().read_dir(table_path).await
-            .map_err(|e| Error::Io(std::io::Error::other(format!("Failed to read table directory: {}", e))))?;
+        let mut file_entries = self.platform.fs().read_dir(table_path).await.map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Failed to read table directory: {}",
+                e
+            )))
+        })?;
 
-        while let Some(entry) = file_entries.next_entry().await
-            .map_err(|e| Error::Io(std::io::Error::other(format!("Error reading file entry: {}", e))))? {
-            
+        while let Some(entry) = file_entries.next_entry().await.map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Error reading file entry: {}",
+                e
+            )))
+        })? {
             let path = entry.path();
             if let Some(extension) = path.extension() {
-                if extension == "db" { // Cassandra SSTable data files
-                    let metadata = entry.metadata().await
-                        .map_err(|e| Error::Io(std::io::Error::other(format!("Failed to get file metadata: {}", e))))?;
-                    
+                if extension == "db" {
+                    // Cassandra SSTable data files
+                    let metadata = entry.metadata().await.map_err(|e| {
+                        Error::Io(std::io::Error::other(format!(
+                            "Failed to get file metadata: {}",
+                            e
+                        )))
+                    })?;
+
                     let size_bytes = metadata.len();
                     total_size_bytes += size_bytes;
-                    
+
                     if last_modified.is_none() || metadata.modified().ok() > last_modified {
                         last_modified = metadata.modified().ok();
                     }
@@ -399,11 +442,9 @@ impl SSTableDataManager {
 
         // Try to load schema information
         let schema = self.load_table_schema(table_name).await.ok();
-        
+
         // Estimate total rows
-        let estimated_rows = sstable_files.iter()
-            .map(|f| f.estimated_rows)
-            .sum();
+        let estimated_rows = sstable_files.iter().map(|f| f.estimated_rows).sum();
 
         Ok(TableInfo {
             name: table_name.to_string(),
@@ -454,7 +495,10 @@ impl SSTableDataManager {
             return Ok(reader.clone());
         }
 
-        let _permit = self.operation_semaphore.acquire().await
+        let _permit = self
+            .operation_semaphore
+            .acquire()
+            .await
             .map_err(|_| Error::Io(std::io::Error::other("Semaphore acquisition failed")))?;
 
         // Double-check after acquiring permit
@@ -462,11 +506,10 @@ impl SSTableDataManager {
             return Ok(reader.clone());
         }
 
-        let reader = Arc::new(
-            BulletproofReader::open(file_path)?
-        );
-        
-        self.readers_pool.insert(file_path.to_path_buf(), reader.clone());
+        let reader = Arc::new(BulletproofReader::open(file_path)?);
+
+        self.readers_pool
+            .insert(file_path.to_path_buf(), reader.clone());
         Ok(reader)
     }
 
@@ -489,8 +532,10 @@ impl SSTableDataManager {
         }
 
         // Load from disk
-        let rows = self.load_table_data_from_disk(keyspace, table, limit).await?;
-        
+        let rows = self
+            .load_table_data_from_disk(keyspace, table, limit)
+            .await?;
+
         // Cache the results
         let cache_entry = CachedDataEntry {
             size_bytes: self.estimate_rows_size(&rows),
@@ -515,16 +560,15 @@ impl SSTableDataManager {
         limit: Option<usize>,
     ) -> Result<Vec<DataRow>> {
         let full_table_name = format!("{}.{}", keyspace, table);
-        
+
         // Get table info
         let table_info = {
             let discovered = self.discovered_tables.read().await;
             discovered.get(&full_table_name).cloned()
         };
 
-        let table_info = table_info.ok_or_else(|| {
-            Error::Table(format!("Table {}.{} not found", keyspace, table))
-        })?;
+        let table_info = table_info
+            .ok_or_else(|| Error::Table(format!("Table {}.{} not found", keyspace, table)))?;
 
         let mut all_rows = Vec::new();
         let mut loaded_count = 0;
@@ -536,12 +580,14 @@ impl SSTableDataManager {
             }
 
             let reader = self.get_or_create_reader(&file_info.path).await?;
-            let file_rows = self.load_rows_from_reader(&reader, &table_info, limit).await?;
-            
+            let file_rows = self
+                .load_rows_from_reader(&reader, &table_info, limit)
+                .await?;
+
             for row in file_rows {
                 all_rows.push(row);
                 loaded_count += 1;
-                
+
                 if let Some(limit) = limit {
                     if loaded_count >= limit {
                         break;
@@ -567,13 +613,15 @@ impl SSTableDataManager {
         limit: Option<usize>,
     ) -> Result<Vec<DataRow>> {
         let mut rows = Vec::new();
-        
+
         // Use streaming reader for memory efficiency
         let mut entry_stream = reader.stream_entries().await?;
         let mut count = 0;
 
         while let Some(entry) = entry_stream.next().await? {
-            let data_row = self.convert_entry_to_row(entry, table_info, reader.get_file_path()).await?;
+            let data_row = self
+                .convert_entry_to_row(entry, table_info, reader.get_file_path())
+                .await?;
             rows.push(data_row);
             count += 1;
 
@@ -600,7 +648,8 @@ impl SSTableDataManager {
         if let Some(ref schema) = table_info.schema {
             for (i, column) in schema.columns.iter().enumerate() {
                 if i < entry.values.len() {
-                    let parsed_value = self.parse_column_value(&entry.values[i], &column.data_type)?;
+                    let parsed_value =
+                        self.parse_column_value(&entry.values[i], &column.data_type)?;
                     columns.insert(column.name.clone(), parsed_value);
                 }
             }
@@ -641,7 +690,7 @@ impl SSTableDataManager {
         limit: Option<usize>,
     ) -> Result<Vec<DataRow>> {
         let rows = self.load_table_data(keyspace, table, None).await?;
-        
+
         // Apply filtering if where clause is provided
         let filtered_rows = if let Some(_where_clause) = where_clause {
             // TODO: Implement proper CQL WHERE clause parsing and filtering
@@ -661,10 +710,14 @@ impl SSTableDataManager {
     }
 
     /// Get table schema information
-    pub async fn get_table_schema(&self, keyspace: &str, table: &str) -> Result<Option<TableSchema>> {
+    pub async fn get_table_schema(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Result<Option<TableSchema>> {
         let full_table_name = format!("{}.{}", keyspace, table);
         let discovered = self.discovered_tables.read().await;
-        
+
         if let Some(table_info) = discovered.get(&full_table_name) {
             Ok(table_info.schema.clone())
         } else {
@@ -679,7 +732,7 @@ impl SSTableDataManager {
             .keys()
             .map(|full_name| full_name.split('.').next().unwrap_or("").to_string())
             .collect();
-        
+
         keyspaces.sort();
         keyspaces.dedup();
         Ok(keyspaces)
@@ -699,7 +752,7 @@ impl SSTableDataManager {
                 }
             })
             .collect();
-        
+
         Ok(tables)
     }
 
@@ -755,25 +808,18 @@ impl SSTableDataManager {
         } else {
             stats.cache_misses += 1;
         }
-        
+
         // Update average access time (simple moving average)
         let new_time_micros = access_time.as_micros() as u64;
-        stats.avg_access_time_micros = 
-            (stats.avg_access_time_micros + new_time_micros) / 2;
-        
+        stats.avg_access_time_micros = (stats.avg_access_time_micros + new_time_micros) / 2;
+
         stats.cache_entries = self.data_cache.len();
-        stats.current_cache_size_bytes = self.data_cache
-            .iter()
-            .map(|entry| entry.size_bytes)
-            .sum();
+        stats.current_cache_size_bytes = self.data_cache.iter().map(|entry| entry.size_bytes).sum();
     }
 
     async fn maybe_evict_cache(&self) {
         let max_size_bytes = self.config.max_cache_size_mb * 1024 * 1024;
-        let current_size: usize = self.data_cache
-            .iter()
-            .map(|entry| entry.size_bytes)
-            .sum();
+        let current_size: usize = self.data_cache.iter().map(|entry| entry.size_bytes).sum();
 
         if current_size > max_size_bytes {
             self.evict_lru_entries(current_size - max_size_bytes).await;
@@ -785,17 +831,18 @@ impl SSTableDataManager {
         let mut bytes_evicted = 0;
 
         // Collect entries sorted by last access time
-        let mut sorted_entries: Vec<_> = self.data_cache
+        let mut sorted_entries: Vec<_> = self
+            .data_cache
             .iter()
             .map(|entry| (entry.key().clone(), entry.last_accessed, entry.size_bytes))
             .collect();
-        
+
         sorted_entries.sort_by_key(|(_, last_accessed, _)| *last_accessed);
 
         for (key, _, size) in sorted_entries {
             entries_to_remove.push(key);
             bytes_evicted += size;
-            
+
             if bytes_evicted >= bytes_to_evict {
                 break;
             }
@@ -823,12 +870,9 @@ mod tests {
         let platform = Arc::new(Platform::new(&core_config).await.unwrap());
         let schema_manager = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 
-        let manager = SSTableDataManager::new(
-            config,
-            platform,
-            core_config,
-            schema_manager,
-        ).await.unwrap();
+        let manager = SSTableDataManager::new(config, platform, core_config, schema_manager)
+            .await
+            .unwrap();
 
         let stats = manager.get_cache_stats();
         assert_eq!(stats.cache_entries, 0);
@@ -843,18 +887,15 @@ mod tests {
         let platform = Arc::new(Platform::new(&core_config).await.unwrap());
         let schema_manager = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 
-        let manager = SSTableDataManager::new(
-            config,
-            platform,
-            core_config,
-            schema_manager,
-        ).await.unwrap();
+        let manager = SSTableDataManager::new(config, platform, core_config, schema_manager)
+            .await
+            .unwrap();
 
         // Test initial state
         let stats = manager.get_cache_stats();
         assert_eq!(stats.cache_hits, 0);
         assert_eq!(stats.cache_misses, 0);
-        
+
         // Test discovery status
         let (in_progress, last_discovery) = manager.get_discovery_status();
         assert!(!in_progress);
