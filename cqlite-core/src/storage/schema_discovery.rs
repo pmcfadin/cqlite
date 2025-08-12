@@ -310,15 +310,25 @@ impl SchemaDiscovery {
         let mut entry_stream = reader.stream_entries().await?;
         let mut count = 0;
 
+        // Get column names from the header to avoid generic fabrication
+        let header = reader.get_header().await?;
+        let column_names: Vec<String> = header.columns.iter().map(|col| col.name.clone()).collect();
+
         while let Some(entry) = entry_stream.next().await? {
             if count >= self.config.max_sample_rows {
                 break;
             }
 
-            // Convert entry to column-value map
+            // Convert entry to column-value map using actual column names
             let mut row_data = HashMap::new();
             for (i, value) in entry.values.iter().enumerate() {
-                let column_name = format!("column_{}", i); // Generic name, will be refined
+                let column_name = if i < column_names.len() {
+                    // Use actual column name from header
+                    column_names[i].clone()
+                } else {
+                    // Fallback for extra values (should not happen in well-formed SSTable)
+                    format!("unknown_column_{}", i)
+                };
                 row_data.insert(column_name, value.clone());
             }
 
