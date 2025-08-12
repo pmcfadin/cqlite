@@ -4,7 +4,6 @@
 
 use crate::error::{Error, Result};
 use std::collections::HashMap;
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 /// Validation report
@@ -101,7 +100,7 @@ impl ValidationReport {
     }
 
     /// Add a validation section
-    pub fn add_section(&mut self, name: &str, section: ValidationSection) {
+    pub fn add_section(&mut self, _name: &str, section: ValidationSection) {
         self.sections.push(section);
         self.update_summary();
     }
@@ -242,7 +241,7 @@ impl ReportGenerator {
     /// Generate report in JSON format
     pub fn generate_json_report(&self, report: &ValidationReport) -> Result<String> {
         serde_json::to_string_pretty(report)
-            .map_err(|e| Error::serialization(format!("Failed to serialize report to JSON: {}", e)))
+            .map_err(|e| Error::internal(format!("Failed to serialize report to JSON: {}", e)))
     }
 
     /// Generate report in Markdown format

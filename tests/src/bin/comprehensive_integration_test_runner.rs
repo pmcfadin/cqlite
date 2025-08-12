@@ -1,8 +1,9 @@
+/// Comprehensive Integration Test Runner
+///
+/// Standalone executable for running the complete CQLite integration test suite.
+/// This runner provides a CI/CD friendly interface with clear pass/fail results.
+
 use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
-//! Comprehensive Integration Test Runner
-//!
-//! Standalone executable for running the complete CQLite integration test suite.
-//! This runner provides a CI/CD friendly interface with clear pass/fail results.
 
 use cqlite_tests::comprehensive_integration_test_suite::{
     run_comprehensive_integration_tests, run_quick_integration_tests,

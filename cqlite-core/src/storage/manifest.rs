@@ -84,7 +84,8 @@ pub struct Manifest {
     state: Arc<RwLock<ManifestState>>,
 
     /// Configuration
-    config: Config,
+    #[allow(dead_code)]
+    _config: Config,
 
     /// Sequence number for ordering
     sequence: Arc<RwLock<u64>>,
@@ -115,7 +116,7 @@ impl Manifest {
         Ok(Self {
             manifest_path,
             state: Arc::new(RwLock::new(state)),
-            config: config.clone(),
+            _config: config.clone(),
             sequence: Arc::new(RwLock::new(0)),
         })
     }

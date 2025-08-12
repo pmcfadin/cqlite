@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-// use colored::*; // Optional dependency for colored output
+use colored::Colorize; // For colored terminal output
 use tokio;
 
 use cqlite_core::{

@@ -449,14 +449,18 @@ pub struct SchemaDiscoveryEngine {
     /// Configuration
     config: SchemaDiscoveryConfig,
     /// Platform abstraction
+    #[allow(dead_code)]
     platform: Arc<Platform>,
     /// Core configuration
+    #[allow(dead_code)]
     core_config: Config,
     /// Schema cache
     schema_cache: Arc<RwLock<HashMap<String, (SchemaInfo, SystemTime)>>>,
     /// UDT registry for managing discovered UDTs
+    #[allow(dead_code)]
     udt_registry: Arc<RwLock<UdtRegistry>>,
     /// Type inference engine
+    #[allow(dead_code)]
     type_inference: Arc<TypeInferenceEngine>,
     /// Schema validator
     validator: Arc<SchemaValidator>,
@@ -606,11 +610,17 @@ impl SchemaDiscoveryEngine {
 struct DiscoveryContext {
     keyspace: String,
     table: String,
+    #[allow(dead_code)]
     source_files: Vec<PathBuf>,
+    #[allow(dead_code)]
     headers: Vec<SSTableHeader>,
+    #[allow(dead_code)]
     column_samples: HashMap<String, Vec<Value>>,
+    #[allow(dead_code)]
     discovered_udts: HashMap<String, UDTDefinition>,
+    #[allow(dead_code)]
     collection_types: HashMap<String, CollectionType>,
+    #[allow(dead_code)]
     indexes: Vec<IndexDefinition>,
     table_options: TableOptions,
     total_rows_sampled: usize,
@@ -655,6 +665,7 @@ impl TypeInferenceEngine {
     }
 
     /// Infer column type from sample values
+    #[allow(dead_code)]
     async fn infer_column_type(&self, _samples: &[Value]) -> Result<TypeInfo> {
         // TODO: Implement sophisticated type inference
         todo!("Implement type inference logic")
@@ -706,6 +717,7 @@ impl SchemaExporter {
     }
 
     /// Export schema as compact JSON (minimal format)
+    #[allow(dead_code)]
     async fn export_json_compact(&self, schema: &SchemaInfo) -> Result<String> {
         let config = crate::schema::json_exporter::JsonExportConfig {
             format_variant: crate::schema::json_exporter::JsonFormat::Compact,
@@ -719,6 +731,7 @@ impl SchemaExporter {
     }
 
     /// Export schema for API documentation (OpenAPI-compatible format)
+    #[allow(dead_code)]
     async fn export_json_openapi(&self, schema: &SchemaInfo) -> Result<String> {
         let config = crate::schema::json_exporter::JsonExportConfig {
             format_variant: crate::schema::json_exporter::JsonFormat::OpenApi,
@@ -731,6 +744,7 @@ impl SchemaExporter {
     }
 
     /// Export schema for data pipeline tools
+    #[allow(dead_code)]
     async fn export_json_pipeline(&self, schema: &SchemaInfo) -> Result<String> {
         let config = crate::schema::json_exporter::JsonExportConfig {
             format_variant: crate::schema::json_exporter::JsonFormat::DataPipeline,

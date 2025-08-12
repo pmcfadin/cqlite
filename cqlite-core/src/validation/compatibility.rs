@@ -94,8 +94,9 @@ pub enum ViolationSeverity {
 pub fn generate_test_cases(config: &ValidationConfig) -> Vec<CompatibilityTestCase> {
     let mut test_cases = Vec::new();
     
-    // Generate tests for each output format
-    for format in &config.output_formats {
+    // Generate tests for default output formats
+    let default_formats = vec!["csv".to_string(), "json".to_string(), "pretty".to_string()];
+    for format in &default_formats {
         test_cases.extend(generate_format_tests(format, config));
     }
     
@@ -119,7 +120,7 @@ fn generate_format_tests(format: &str, config: &ValidationConfig) -> Vec<Compati
     let mut tests = Vec::new();
     
     // Find test data
-    for test_path in &config.test_data_paths {
+    for test_path in &config.test_data_directories {
         if let Ok(entries) = std::fs::read_dir(test_path) {
             for entry in entries.flatten().take(3) { // Limit to 3 test cases per format
                 let path = entry.path();
@@ -229,7 +230,7 @@ fn generate_standard_format_tests(config: &ValidationConfig) -> Vec<Compatibilit
 }
 
 /// Generate error handling tests
-fn generate_error_handling_tests(config: &ValidationConfig) -> Vec<CompatibilityTestCase> {
+fn generate_error_handling_tests(_config: &ValidationConfig) -> Vec<CompatibilityTestCase> {
     vec![
         CompatibilityTestCase {
             name: "Error Message Compatibility".to_string(),
@@ -304,7 +305,7 @@ pub async fn run_test(test_case: CompatibilityTestCase, config: &ValidationConfi
 }
 
 /// Get CQLite output for the test case
-async fn get_cqlite_output(test_case: &CompatibilityTestCase, config: &ValidationConfig) -> Result<String, String> {
+async fn get_cqlite_output(test_case: &CompatibilityTestCase, _config: &ValidationConfig) -> Result<String, String> {
     use std::process::Command;
     
     let mut cmd = Command::new("cqlite");
@@ -344,7 +345,7 @@ async fn get_cqlite_output(test_case: &CompatibilityTestCase, config: &Validatio
 }
 
 /// Get reference output (e.g., from cqlsh)
-async fn get_reference_output(test_case: &CompatibilityTestCase, config: &ValidationConfig) -> Option<String> {
+async fn get_reference_output(_test_case: &CompatibilityTestCase, _config: &ValidationConfig) -> Option<String> {
     // For now, return None - in a full implementation, this would get cqlsh output
     // This would require setting up a Cassandra instance and running equivalent queries
     None
@@ -416,7 +417,7 @@ async fn validate_compatibility(
 }
 
 /// Validate table format compatibility
-fn validate_table_format(output: &str, reference: Option<&String>) -> CompatibilityMetrics {
+fn validate_table_format(output: &str, _reference: Option<&String>) -> CompatibilityMetrics {
     let mut metrics = CompatibilityMetrics {
         format_compliance_score: 0.0,
         header_compatibility: false,

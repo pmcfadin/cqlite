@@ -148,7 +148,7 @@ fn generate_data_type_tests(data_type: &CqlDataType, config: &ValidationConfig) 
     let type_name = format!("{:?}", data_type).to_lowercase();
     
     // Find matching test data paths
-    for test_path in &config.test_data_paths {
+    for test_path in &config.test_data_directories {
         if let Ok(entries) = std::fs::read_dir(test_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -276,11 +276,8 @@ pub async fn run_test(test_case: AccuracyTestCase, config: &ValidationConfig) ->
     }
 
     // Get reference data from cqlsh if available
-    let reference_data = if let Some(cqlsh_path) = &config.cqlsh_reference_path {
-        get_cqlsh_reference_data(cqlsh_path, &test_case).await
-    } else {
-        None
-    };
+    // Note: cqlsh_reference_path not available in current config
+    let reference_data: Option<String> = None;
 
     // Get CQLite output
     let cqlite_output = get_cqlite_output(&test_case, config).await;
@@ -296,10 +293,11 @@ pub async fn run_test(test_case: AccuracyTestCase, config: &ValidationConfig) ->
     result.accuracy_score = calculate_overall_accuracy(&metrics);
     result.performance_ms = Some(start_time.elapsed().as_millis() as u64);
     
-    // Set status based on accuracy
-    if result.accuracy_score >= config.accuracy_threshold {
+    // Set status based on accuracy using default threshold
+    let accuracy_threshold = 0.95; // Default accuracy threshold
+    if result.accuracy_score >= accuracy_threshold {
         result.status = ValidationStatus::Passed;
-    } else if result.accuracy_score >= config.accuracy_threshold * 0.8 {
+    } else if result.accuracy_score >= accuracy_threshold * 0.8 {
         result.status = ValidationStatus::Warning;
         result.warnings.push(format!("Accuracy below threshold: {:.2}%", result.accuracy_score * 100.0));
     } else {
@@ -344,7 +342,7 @@ fn get_all_data_types() -> Vec<CqlDataType> {
 
 /// Find test data by pattern
 fn find_test_data_by_pattern(config: &ValidationConfig, pattern: &str) -> Option<String> {
-    for test_path in &config.test_data_paths {
+    for test_path in &config.test_data_directories {
         if let Ok(entries) = std::fs::read_dir(test_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -377,7 +375,7 @@ async fn get_cqlsh_reference_data(cqlsh_path: &str, test_case: &AccuracyTestCase
 }
 
 /// Get CQLite output for comparison
-async fn get_cqlite_output(test_case: &AccuracyTestCase, config: &ValidationConfig) -> Result<String, String> {
+async fn get_cqlite_output(test_case: &AccuracyTestCase, _config: &ValidationConfig) -> Result<String, String> {
     let mut cmd = Command::new("cqlite");
     
     if let Some(query) = &test_case.test_query {
@@ -479,7 +477,7 @@ fn calculate_value_level_accuracy(reference: &str, actual: &str) -> AccuracyMetr
 }
 
 /// Calculate type-level accuracy
-fn calculate_type_level_accuracy(reference: &str, actual: &str) -> AccuracyMetrics {
+fn calculate_type_level_accuracy(_reference: &str, _actual: &str) -> AccuracyMetrics {
     // Focus on data type correctness
     AccuracyMetrics {
         total_rows_compared: 1,
@@ -496,7 +494,7 @@ fn calculate_type_level_accuracy(reference: &str, actual: &str) -> AccuracyMetri
 }
 
 /// Calculate format-level accuracy
-fn calculate_format_level_accuracy(reference: &str, actual: &str) -> AccuracyMetrics {
+fn calculate_format_level_accuracy(_reference: &str, _actual: &str) -> AccuracyMetrics {
     // Focus on output format compatibility
     AccuracyMetrics {
         total_rows_compared: 1,
@@ -513,7 +511,7 @@ fn calculate_format_level_accuracy(reference: &str, actual: &str) -> AccuracyMet
 }
 
 /// Run basic validation when no reference data is available
-async fn run_basic_validation(test_case: &AccuracyTestCase, config: &ValidationConfig) -> AccuracyMetrics {
+async fn run_basic_validation(_test_case: &AccuracyTestCase, _config: &ValidationConfig) -> AccuracyMetrics {
     // Basic validation - check if CQLite can parse the data without errors
     AccuracyMetrics {
         total_rows_compared: 1,

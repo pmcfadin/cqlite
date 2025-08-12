@@ -1,19 +1,19 @@
-//! Issue #17 Test Runner - Core SSTable Reading Functionality Validation
-//!
-//! This binary provides a comprehensive test runner specifically for Issue #17:
-//! "🔍 HIGH: Test and validate core SSTable reading functionality"
-//!
-//! Requirements:
-//! - Comprehensive testing with >90% coverage
-//! - Support for Cassandra 3.x, 4.x, and 5.x formats
-//! - Robust error handling validation
-//! - Performance benchmarking
-//! - Real-world data validation
+/// Issue #17 Test Runner - Core SSTable Reading Functionality Validation
+///
+/// This binary provides a comprehensive test runner specifically for Issue #17:
+/// "🔍 HIGH: Test and validate core SSTable reading functionality"
+///
+/// Requirements:
+/// - Comprehensive testing with >90% coverage
+/// - Support for Cassandra 3.x, 4.x, and 5.x formats
+/// - Robust error handling validation
+/// - Performance benchmarking
+/// - Real-world data validation
 
 use std::env;
 use std::time::Instant;
 
-use cqlite_integration_tests::comprehensive_sstable_test_suite::{
+use cqlite_tests::comprehensive_sstable_test_suite::{
     run_comprehensive_sstable_tests, TestSuiteReport
 };
 
@@ -206,7 +206,7 @@ async fn generate_work_needed_report(report: &TestSuiteReport) -> Result<(), Box
     if report.coverage_percentage < 90.0 {
         println!("   ❌ Test coverage: {:.1}% (need >90%)", report.coverage_percentage);
         println!("      → Add {} more test cases", 
-                ((90.0 - report.coverage_percentage) / 100.0 * report.total_tests as f64).ceil() as usize);
+                ((90.0_f64 - report.coverage_percentage) / 100.0_f64 * report.total_tests as f64).ceil() as usize);
     }
     
     if report.failed_tests > 0 {
@@ -235,7 +235,7 @@ async fn generate_work_needed_report(report: &TestSuiteReport) -> Result<(), Box
     // Analyze failed tests by category
     let mut failed_categories = std::collections::HashMap::new();
     for test_result in &report.test_results {
-        if test_result.status == cqlite_integration_tests::comprehensive_sstable_test_suite::TestStatus::Fail {
+        if test_result.status == cqlite_tests::TestStatus::Fail {
             let category = test_result.test_name.split('_').next().unwrap_or("unknown");
             *failed_categories.entry(category.to_string()).or_insert(0) += 1;
         }
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_github_summary_generation() {
-        use cqlite_integration_tests::comprehensive_sstable_test_suite::{TestSuiteReport, TestResult, TestStatus};
+        use integration_tests::comprehensive_sstable_test_suite::{TestSuiteReport, TestResult, TestStatus};
         use std::time::Duration;
 
         let report = TestSuiteReport {

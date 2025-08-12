@@ -63,9 +63,9 @@ pub struct SchemaRegistry {
     /// Configuration
     config: SchemaRegistryConfig,
     /// Platform abstraction
-    platform: Arc<Platform>,
+    _platform: Arc<Platform>,
     /// Core configuration
-    core_config: Config,
+    _core_config: Config,
     /// Registered table schemas by keyspace.table
     schemas: Arc<RwLock<HashMap<String, SchemaEntry>>>,
     /// UDT registry for managing user-defined types
@@ -92,7 +92,7 @@ struct SchemaEntry {
     /// Validation status
     validation_status: SchemaValidationStatus,
     /// Associated SSTable files
-    associated_files: Vec<PathBuf>,
+    _associated_files: Vec<PathBuf>,
 }
 
 /// Source of schema information
@@ -261,8 +261,8 @@ impl SchemaRegistry {
 
         Ok(Self {
             config,
-            platform,
-            core_config,
+            _platform: platform,
+            _core_config: core_config,
             schemas: Arc::new(RwLock::new(HashMap::new())),
             udt_registry,
             discovery_engine,
@@ -325,7 +325,7 @@ impl SchemaRegistry {
             registered_at: SystemTime::now(),
             source,
             validation_status,
-            associated_files: Vec::new(),
+            _associated_files: Vec::new(),
         };
 
         // Store in registry
@@ -660,7 +660,7 @@ impl SchemaRegistry {
             registered_at: SystemTime::now(),
             source,
             validation_status: SchemaValidationStatus::Valid, // Discovery implies validation
-            associated_files: sstable_files,
+            _associated_files: sstable_files,
         };
 
         let mut schemas = self.schemas.write().await;

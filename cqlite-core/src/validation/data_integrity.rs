@@ -3,16 +3,15 @@
 //! This module provides comprehensive data integrity validation for Issue #17.
 //! It validates data consistency, corruption detection, and format integrity.
 
-use crate::error::{Error, Result};
-use crate::parser::types::CqlValue;
+use crate::error::{Result, Error};
 use crate::storage::sstable::reader::SSTableReader;
-use crate::types::{Value, DataType};
+use crate::types::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use super::reports::{ValidationSection, ValidationSectionStatus};
 
 /// Data integrity validator
 #[derive(Debug)]
@@ -147,6 +146,11 @@ impl DataIntegrityValidator {
             results: HashMap::new(),
             metrics: HashMap::new(),
         })
+    }
+
+    /// Validate data integrity (primary interface)
+    pub async fn validate_data_integrity(&self) -> Result<IntegrityReport> {
+        self.validate_all().await
     }
 
     /// Run comprehensive data integrity validation
@@ -296,22 +300,21 @@ impl DataIntegrityValidator {
         let file_name = path.file_name().unwrap().to_string_lossy();
         
         let mut status = IntegrityStatus::Passed;
-        let mut details = String::new();
         let mut error_message = None;
         let mut bytes_validated = 0u64;
 
         // Try to open the SSTable file
-        match self.open_sstable_reader(path).await {
-            Ok(reader) => {
-                details = format!("Format structure valid, header parsed successfully");
-                bytes_validated = reader.file_size().unwrap_or(0);
+        let details = match self.open_sstable_reader(path).await {
+            Ok(_reader) => {
+                bytes_validated = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                format!("Format structure valid, header parsed successfully")
             }
             Err(e) => {
                 status = IntegrityStatus::Failed;
                 error_message = Some(e.to_string());
-                details = format!("Format structure validation failed: {}", e);
+                format!("Format structure validation failed: {}", e)
             }
-        }
+        };
 
         let duration = start_time.elapsed();
 
@@ -391,32 +394,31 @@ impl DataIntegrityValidator {
         let file_name = path.file_name().unwrap().to_string_lossy();
 
         let mut status = IntegrityStatus::Passed;
-        let mut details = String::new();
         let mut error_message = None;
         let mut bytes_validated = 0u64;
 
         // Read file and check for corruption indicators
-        match fs::read(path).await {
+        let details = match fs::read(path).await {
             Ok(contents) => {
                 bytes_validated = contents.len() as u64;
                 
                 // Check for corruption patterns
                 if self.has_corruption_patterns(&contents) {
                     status = IntegrityStatus::Failed;
-                    details = "Corruption patterns detected in file data".to_string();
+                    "Corruption patterns detected in file data".to_string()
                 } else if self.has_suspicious_patterns(&contents) {
                     status = IntegrityStatus::Warning;
-                    details = "Suspicious patterns detected, possible corruption".to_string();
+                    "Suspicious patterns detected, possible corruption".to_string()
                 } else {
-                    details = "No corruption detected".to_string();
+                    "No corruption detected".to_string()
                 }
             }
             Err(e) => {
                 status = IntegrityStatus::Error;
                 error_message = Some(e.to_string());
-                details = format!("Could not read file for corruption detection: {}", e);
+                format!("Could not read file for corruption detection: {}", e)
             }
-        }
+        };
 
         let duration = start_time.elapsed();
 
@@ -440,7 +442,22 @@ impl DataIntegrityValidator {
         
         for data_type in types {
             let type_result = self.validate_single_type(data_type).await?;
-            report.add_section(&format!("Type: {}", data_type), type_result.into());
+            let section = ValidationSection {
+                name: format!("Type: {}", data_type),
+                status: match type_result.overall_status {
+                    IntegrityStatus::Passed => ValidationSectionStatus::Passed,
+                    IntegrityStatus::Warning => ValidationSectionStatus::Warning,
+                    IntegrityStatus::Failed => ValidationSectionStatus::Failed,
+                    IntegrityStatus::Error => ValidationSectionStatus::Error,
+                    IntegrityStatus::Skipped => ValidationSectionStatus::Warning,
+                    IntegrityStatus::Timeout => ValidationSectionStatus::Failed,
+                },
+                details: type_result.summary,
+                metrics: std::collections::HashMap::new(),
+                recommendations: type_result.recommendations,
+                timestamp: chrono::Utc::now(),
+            };
+            report.add_section(&format!("Type: {}", data_type), section);
         }
         
         Ok(report)
@@ -504,8 +521,8 @@ impl DataIntegrityValidator {
                 Value::Float(0.0),
                 Value::Float(3.14159),
                 Value::Float(-3.14159),
-                Value::Float(f32::MAX),
-                Value::Float(f32::MIN),
+                Value::Float(f64::MAX),
+                Value::Float(f64::MIN),
             ]),
             "uuid" => Ok(vec![
                 Value::Uuid([0u8; 16]),
@@ -611,11 +628,14 @@ impl DataIntegrityValidator {
         }
 
         // Create a mock reader - in real implementation would be actual SSTableReader
-        SSTableReader::open(path).await
+        // For now, create mock config and platform
+        let config = crate::config::Config::default();
+        let platform = std::sync::Arc::new(crate::platform::Platform::new(&config).await?);
+        SSTableReader::open(path, &config, platform).await
     }
 
     /// Validate types found in the reader
-    async fn validate_types_in_reader(&self, reader: &SSTableReader) -> Result<Vec<IntegrityCheck>> {
+    async fn validate_types_in_reader(&self, _reader: &SSTableReader) -> Result<Vec<IntegrityCheck>> {
         // In real implementation, would iterate through the SSTable and validate each data type
         let mut checks = Vec::new();
         
@@ -639,7 +659,7 @@ impl DataIntegrityValidator {
     }
 
     /// Validate collections found in the reader
-    async fn validate_collections_in_reader(&self, reader: &SSTableReader) -> Result<Vec<IntegrityCheck>> {
+    async fn validate_collections_in_reader(&self, _reader: &SSTableReader) -> Result<Vec<IntegrityCheck>> {
         // In real implementation, would validate collections (lists, sets, maps)
         let mut checks = Vec::new();
         
@@ -731,7 +751,7 @@ impl DataIntegrityValidator {
     }
 
     /// Generate summary text
-    fn generate_summary(&self, checks: &[IntegrityCheck], metrics: &IntegrityMetrics) -> String {
+    fn generate_summary(&self, _checks: &[IntegrityCheck], metrics: &IntegrityMetrics) -> String {
         format!(
             "Data integrity validation completed: {}/{} checks passed ({:.1}% success rate). \
              Validated {:.2} MB at {:.2} MB/s. Duration: {}ms",

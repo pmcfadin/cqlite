@@ -4,7 +4,7 @@
 //! capabilities with sample data and guided examples.
 
 use anyhow::Result;
-use colored::*;
+use colored::Colorize;
 use cqlite_core::{Database, Config as CoreConfig};
 use std::path::Path;
 

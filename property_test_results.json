@@ -1,0 +1,101 @@
+{
+  "start_time": {
+    "secs_since_epoch": 1754066872,
+    "nanos_since_epoch": 599884000
+  },
+  "config": {
+    "cases": 5,
+    "max_shrink_iters": 100,
+    "timeout": {
+      "secs": 5,
+      "nanos": 0
+    },
+    "enable_parallel": true,
+    "test_categories": [
+      "primitive_types",
+      "collection_types",
+      "temporal_types",
+      "binary_data"
+    ],
+    "data_generators": {
+      "max_string_length": 1000,
+      "max_collection_size": 100,
+      "max_blob_size": 10240,
+      "enable_unicode": true,
+      "enable_edge_cases": true
+    }
+  },
+  "results": [
+    {
+      "test_name": "serialization_roundtrip",
+      "success": true,
+      "cases_run": 5,
+      "execution_time": {
+        "secs": 0,
+        "nanos": 110043209
+      },
+      "error_message": null,
+      "shrinking_iterations": 0,
+      "properties_verified": [
+        "serialization_succeeds",
+        "deserialization_succeeds",
+        "roundtrip_equality"
+      ]
+    },
+    {
+      "test_name": "collection_consistency",
+      "success": true,
+      "cases_run": 5,
+      "execution_time": {
+        "secs": 0,
+        "nanos": 159742542
+      },
+      "error_message": null,
+      "shrinking_iterations": 0,
+      "properties_verified": [
+        "list_ordering_preserved",
+        "set_uniqueness_maintained",
+        "map_key_consistency"
+      ]
+    },
+    {
+      "test_name": "temporal_properties",
+      "success": true,
+      "cases_run": 5,
+      "execution_time": {
+        "secs": 0,
+        "nanos": 129892167
+      },
+      "error_message": null,
+      "shrinking_iterations": 0,
+      "properties_verified": [
+        "timestamp_ordering",
+        "date_validity",
+        "duration_consistency"
+      ]
+    },
+    {
+      "test_name": "binary_data_integrity",
+      "success": true,
+      "cases_run": 5,
+      "execution_time": {
+        "secs": 0,
+        "nanos": 87412375
+      },
+      "error_message": null,
+      "shrinking_iterations": 0,
+      "properties_verified": [
+        "blob_data_preserved",
+        "binary_roundtrip",
+        "size_consistency"
+      ]
+    }
+  ],
+  "total_cases": 20,
+  "total_successes": 4,
+  "total_failures": 0,
+  "total_execution_time": {
+    "secs": 0,
+    "nanos": 487418000
+  }
+}

@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::query_processor::{CQLQueryProcessor, QueryExecutionContext};
 use crate::repl_integration::{REPLQueryExecutor, REPLSchemaExplorer};
 use anyhow::Result;
-use colored::*;
+use colored::Colorize;
 use cqlite_core::{
     schema::SchemaManager,
     storage::StorageEngine,

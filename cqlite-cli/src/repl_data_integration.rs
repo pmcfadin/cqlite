@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use colored::*;
+use colored::Colorize;
 use prettytable::{Cell, Row, Table};
 
 use cqlite_core::{

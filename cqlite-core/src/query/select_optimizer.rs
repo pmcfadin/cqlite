@@ -16,8 +16,10 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct SelectOptimizer {
     /// Schema manager for metadata
+    #[allow(dead_code)]
     schema: Arc<SchemaManager>,
     /// Storage engine for statistics
+    #[allow(dead_code)]
     storage: Arc<StorageEngine>,
 }
 
@@ -609,16 +611,22 @@ impl SelectOptimizer {
 struct TableStatistics {
     row_count: u64,
     size_bytes: u64,
+    #[allow(dead_code)]
     average_row_size: u64,
+    #[allow(dead_code)]
     column_statistics: HashMap<String, ColumnStatistics>,
 }
 
 /// Column-level statistics
 #[derive(Debug, Clone)]
 struct ColumnStatistics {
+    #[allow(dead_code)]
     distinct_values: u64,
+    #[allow(dead_code)]
     null_count: u64,
+    #[allow(dead_code)]
     min_value: Option<Value>,
+    #[allow(dead_code)]
     max_value: Option<Value>,
 }
 

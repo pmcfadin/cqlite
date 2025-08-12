@@ -2,10 +2,9 @@
 //!
 //! This module provides the core validation framework that coordinates all validation activities.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +34,24 @@ pub struct ValidationConfig {
     pub log_level: String,
     /// Parallel validation threads
     pub parallel_threads: usize,
+    
+    // Legacy fields for compatibility with existing validation modules
+    /// Enable regression tests
+    pub enable_regression_tests: bool,
+    /// Enable performance tests
+    pub enable_performance_tests: bool,
+    /// Enable edge case tests
+    pub enable_edge_case_tests: bool,
+    /// Accuracy threshold (0.0 - 1.0)
+    pub accuracy_threshold: f64,
+    /// Performance threshold in milliseconds
+    pub performance_threshold_ms: u64,
+    /// Path to cqlsh reference binary
+    pub cqlsh_reference_path: Option<String>,
+    /// Test data paths for validation
+    pub test_data_paths: Vec<String>,
+    /// Output formats supported
+    pub output_formats: Vec<String>,
 }
 
 impl Default for ValidationConfig {
@@ -50,6 +67,24 @@ impl Default for ValidationConfig {
             ],
             log_level: "info".to_string(),
             parallel_threads: 4,
+            
+            // Legacy field defaults
+            enable_regression_tests: true,
+            enable_performance_tests: true,
+            enable_edge_case_tests: true,
+            accuracy_threshold: 0.95, // 95% accuracy required
+            performance_threshold_ms: 5000, // 5 second max
+            cqlsh_reference_path: None,
+            test_data_paths: vec![
+                "test-env/cassandra5/data/cassandra5-sstables".to_string(),
+                "test-env/cassandra5/sstables".to_string(),
+                "test-data".to_string(),
+            ],
+            output_formats: vec![
+                "json".to_string(),
+                "csv".to_string(),
+                "table".to_string(),
+            ],
         }
     }
 }
@@ -139,8 +174,8 @@ impl ValidationFramework {
 
     /// Update validation phase
     pub fn set_phase(&mut self, phase: ValidationPhase) {
-        self.context.current_phase = phase;
         log::info!("Validation phase changed to: {:?}", phase);
+        self.context.current_phase = phase;
     }
 
     /// Update metrics

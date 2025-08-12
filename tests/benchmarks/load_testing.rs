@@ -4,7 +4,8 @@
 //! and system stability under high load.
 
 use cqlite_core::platform::Platform;
-use cqlite_core::{types::TableId, Config, RowKey, StorageEngine, Value};
+use cqlite_core::{types::TableId, Config, RowKey, Value};
+use cqlite_core::storage::StorageEngine;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -216,7 +217,8 @@ fn benchmark_basic_load_test(c: &mut Criterion) {
             BenchmarkId::new("concurrent_load", thread_count),
             thread_count,
             |b, &thread_count| {
-                b.to_async(&rt).iter(|| async {
+                b.iter(|| {
+                    rt.block_on(async {
                     let temp_dir = TempDir::new().unwrap();
                     let config = Config::performance_optimized();
                     let platform = Arc::new(Platform::new(&config).await.unwrap());

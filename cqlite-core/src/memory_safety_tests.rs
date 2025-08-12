@@ -59,7 +59,10 @@ impl TrackingAllocator {
 
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = System.alloc(layout);
+        let ptr = unsafe {
+            // SAFETY: Layout is validated before this call and System allocator is safe
+            System.alloc(layout)
+        };
         if !ptr.is_null() {
             self.allocations.fetch_add(1, Ordering::SeqCst);
             let new_total = self.total_allocated.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
@@ -74,7 +77,10 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout);
+        unsafe {
+            // SAFETY: ptr and layout match a previous allocation from System.alloc
+            System.dealloc(ptr, layout);
+        }
         self.deallocations.fetch_add(1, Ordering::SeqCst);
         self.total_allocated.fetch_sub(layout.size(), Ordering::SeqCst);
     }

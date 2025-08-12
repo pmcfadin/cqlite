@@ -26,11 +26,11 @@ anyhow = { workspace = true }
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
 
-# Compression and checksums
-lz4_flex = { workspace = true }
-snap = { version = "1.1", optional = true }
-flate2 = { version = "1.0", optional = true }
-zstd = { version = "0.13", optional = true }
+# Compression and checksums - feature-gated
+lz4_flex = { workspace = true, optional = true }
+snap = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
 crc32fast = { workspace = true }
 
 # Concurrency and collections
@@ -49,6 +49,8 @@ bit-vec = "0.8"
 num_cpus = "1.0"
 base64 = "0.21"
 
+# Features defined at end of file to avoid duplicates
+
 # Additional dependencies
 uuid = { version = "1.10", features = ["v4"] }
 regex = "1.10"
@@ -61,6 +63,7 @@ async-trait = "0.1.88"
 colored = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = "0.4"
 
 # Optional WASM support
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -92,12 +95,16 @@ name = "performance_baseline_runner"
 path = "src/bin/performance_baseline_runner.rs"
 
 [features]
-default = ["compression", "lz4", "metrics"]
-compression = []
-lz4 = []
-snappy = ["snap"]
-deflate = ["flate2"]
-zstd = ["dep:zstd"]
+default = ["lz4", "metrics"]
+
+# Compression features - properly feature-gated
+lz4 = ["dep:lz4_flex"]
+snappy = ["dep:snap"]
+gzip = ["dep:flate2"]  
+zstd_compression = ["dep:zstd"]
+all-compression = ["lz4", "snappy", "gzip", "zstd_compression"]
+
+# Other features
 metrics = []
 pest = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]

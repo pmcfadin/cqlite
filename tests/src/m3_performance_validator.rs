@@ -1,8 +1,8 @@
 use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
-//! M3 Performance Validation Test Runner
-//!
-//! Comprehensive test runner for validating M3 complex type performance targets.
-//! This runner executes all performance benchmarks and generates validation reports.
+/// M3 Performance Validation Test Runner
+///
+/// Comprehensive test runner for validating M3 complex type performance targets.
+/// This runner executes all performance benchmarks and generates validation reports.
 
 use cqlite_core::parser::{
     M3PerformanceBenchmarks, OptimizedComplexTypeParser, PerformanceRegressionFramework,

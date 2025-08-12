@@ -364,7 +364,7 @@ fn try_parse_vint(data: &[u8]) -> Option<(usize, i64)> {
     Some((total_length, signed_value))
 }
 
-fn validate_vint_roundtrip(value: i64) -> bool {
+fn validate_vint_roundtrip(_value: i64) -> bool {
     // Simplified validation - in real implementation would use CQLite's VInt encoder
     true
 }

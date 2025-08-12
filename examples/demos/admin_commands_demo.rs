@@ -8,7 +8,7 @@
 //! 
 //! This is a standalone demo showing the implementation that was added to interactive.rs
 
-use colored::*;
+use colored::Colorize;
 use prettytable::{Cell, Row, Table};
 use std::collections::HashMap;
 

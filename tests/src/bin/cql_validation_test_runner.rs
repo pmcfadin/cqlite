@@ -5,12 +5,12 @@
 //! generates consolidated reports.
 
 use cqlite_tests::cql_parser_validation_suite::{CqlParserValidationSuite, ValidationReport};
-use cqlite_tests::cql_integration_tests::{CqlIntegrationTestSuite, IntegrationTestReport};
 use cqlite_tests::cql_performance_benchmarks::{CqlPerformanceBenchmarkSuite, BenchmarkReport};
+use cqlite_tests::cql_integration_tests::{CqlIntegrationTestSuite, IntegrationTestResult};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use clap::{App, Arg, ArgMatches};
+use clap::{Command, Arg, ArgMatches};
 
 /// Main test runner orchestrating all CQL validation tests
 #[derive(Debug)]
@@ -46,7 +46,7 @@ pub struct TestRunnerConfig {
 #[derive(Debug)]
 pub struct ConsolidatedTestResults {
     pub validation_report: Option<ValidationReport>,
-    pub integration_report: Option<IntegrationTestReport>,
+    pub integration_report: Option<ValidationReport>,
     pub benchmark_report: Option<BenchmarkReport>,
     pub total_execution_time_ms: u64,
     pub overall_success: bool,
@@ -620,60 +620,60 @@ struct BenchmarkSummary {
 }
 
 /// Parse command line arguments
-fn parse_args() -> ArgMatches<'static> {
-    App::new("CQL Validation Test Runner")
+fn parse_args() -> ArgMatches {
+    Command::new("CQL Validation Test Runner")
         .version("1.0")
         .about("Comprehensive test runner for CQL schema validation")
-        .arg(Arg::with_name("validation")
+        .arg(Arg::new("validation")
             .long("validation")
             .help("Run validation suite tests")
-            .takes_value(false))
-        .arg(Arg::with_name("integration")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("integration")
             .long("integration")
             .help("Run integration tests")
-            .takes_value(false))
-        .arg(Arg::with_name("benchmarks")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("benchmarks")
             .long("benchmarks")
             .help("Run performance benchmarks")
-            .takes_value(false))
-        .arg(Arg::with_name("output")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("output")
             .short("o")
             .long("output")
             .value_name("DIR")
             .help("Output directory for reports")
-            .takes_value(true))
-        .arg(Arg::with_name("verbose")
+            .action(clap::ArgAction::Set))
+        .arg(Arg::new("verbose")
             .short("v")
             .long("verbose")
             .help("Verbose output")
-            .takes_value(false))
-        .arg(Arg::with_name("html")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("html")
             .long("html")
             .help("Generate HTML reports")
-            .takes_value(false))
-        .arg(Arg::with_name("timeout")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("timeout")
             .long("timeout")
             .value_name("SECONDS")
             .help("Test timeout in seconds")
-            .takes_value(true))
+            .action(clap::ArgAction::Set))
         .get_matches()
 }
 
 /// Create test runner configuration from command line arguments
 fn create_config_from_args(matches: &ArgMatches) -> TestRunnerConfig {
-    let run_all = !matches.is_present("validation") && 
-                  !matches.is_present("integration") && 
-                  !matches.is_present("benchmarks");
+    let run_all = !matches.get_flag("validation") && 
+                  !matches.get_flag("integration") && 
+                  !matches.get_flag("benchmarks");
     
     TestRunnerConfig {
-        run_validation_suite: run_all || matches.is_present("validation"),
-        run_integration_tests: run_all || matches.is_present("integration"),
-        run_performance_benchmarks: run_all || matches.is_present("benchmarks"),
-        output_dir: matches.value_of("output").unwrap_or("target/test_reports").to_string(),
-        verbose: matches.is_present("verbose"),
-        generate_html: matches.is_present("html"),
+        run_validation_suite: run_all || matches.get_flag("validation"),
+        run_integration_tests: run_all || matches.get_flag("integration"),
+        run_performance_benchmarks: run_all || matches.get_flag("benchmarks"),
+        output_dir: matches.get_one::<String>("output").map(|s| s.as_str()).unwrap_or("target/test_reports").to_string(),
+        verbose: matches.get_flag("verbose"),
+        generate_html: matches.get_flag("html"),
         benchmark_iterations: None,
-        timeout_seconds: matches.value_of("timeout")
+        timeout_seconds: matches.get_one::<String>("timeout")
             .and_then(|s| s.parse().ok())
             .unwrap_or(300),
     }

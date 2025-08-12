@@ -4,7 +4,7 @@
 
 use clap::{Arg, Command};
 use std::process;
-use cqlite_integration_tests::{
+use cqlite_tests::{
     run_compatibility_validation, run_performance_validation, run_quick_compatibility_check,
     IntegrationTestConfig, IntegrationTestRunner,
 };

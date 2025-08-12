@@ -7,10 +7,11 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use tempfile::{TempDir, NamedTempFile};
 use serde_json::{json, Value};
+use wait_timeout::ChildExt;
 
 /// Test configuration for SSTable integration tests
 #[derive(Debug)]
@@ -38,6 +39,43 @@ impl SSTableTestConfig {
 /// Create a CLI command instance with proper timeout
 fn get_cli_command() -> Command {
     Command::cargo_bin("cqlite").unwrap()
+}
+
+/// Helper function to run a command with timeout
+fn run_command_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<std::process::Output> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    
+    match child.wait_timeout(timeout)? {
+        Some(status) => {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            
+            if let Some(ref mut stdout_handle) = child.stdout {
+                std::io::Read::read_to_end(stdout_handle, &mut stdout)?;
+            }
+            if let Some(ref mut stderr_handle) = child.stderr {
+                std::io::Read::read_to_end(stderr_handle, &mut stderr)?;
+            }
+            
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+        None => {
+            // Timeout occurred, kill the child process
+            let _ = child.kill();
+            child.wait()?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Command timed out"
+            ))
+        }
+    }
 }
 
 /// Create test schema files for different data types

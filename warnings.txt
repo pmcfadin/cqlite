@@ -1,0 +1,4 @@
+warning: unused variable: `value`
+warning: `cqlite-validator` (bin "cqlite-validator" test) generated 1 warning
+warning: build failed, waiting for other jobs to finish...
+warning: `cqlite-core` (lib test) generated 2 warnings

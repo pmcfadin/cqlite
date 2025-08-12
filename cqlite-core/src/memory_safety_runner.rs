@@ -67,6 +67,8 @@ impl MemorySafetyRunner {
         println!("Running memory safety tests with Miri...");
         
         // Set Miri flags for better error detection
+        // SAFETY: Setting environment variable in single-threaded context during test initialization
+        // This is safe because it happens before any threads are spawned and affects only the current process
         env::set_var("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-ignore-leaks");
         
         let output = Command::new("cargo")
@@ -148,6 +150,8 @@ impl MemorySafetyRunner {
         println!("Running memory safety tests with AddressSanitizer...");
 
         // Set environment variables for AddressSanitizer
+        // SAFETY: Setting environment variables in single-threaded context during test initialization
+        // This is safe because it happens before any threads are spawned and affects only the current process
         env::set_var("RUSTFLAGS", "-Zsanitizer=address");
         env::set_var("ASAN_OPTIONS", "detect_odr_violation=0:abort_on_error=1");
 

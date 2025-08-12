@@ -8,7 +8,7 @@
 
 use clap::{Arg, Command};
 use std::time::Instant;
-use cqlite_integration_tests::{
+use cqlite_tests::{
     CLIIntegrationTestSuite, CLITestConfig, ComprehensiveIntegrationTestSuite,
     IntegrationTestConfig, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
 };

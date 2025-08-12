@@ -21,6 +21,7 @@ pub struct StatisticsReader {
     /// Parsed statistics data
     statistics: SSTableStatistics,
     /// Platform abstraction for file operations
+    #[allow(dead_code)]
     platform: Arc<Platform>,
 }
 

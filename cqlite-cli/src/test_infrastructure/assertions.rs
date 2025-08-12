@@ -387,7 +387,7 @@ impl TableAssertion {
     }
     
     /// Assert table has specific header
-    pub fn has_header<S: AsRef<str>>(self, header_name: S) -> TestResult<Self> {
+    pub fn has_header<S: AsRef<str>>(&self, header_name: S) -> TestResult<&Self> {
         let header_name = header_name.as_ref();
         if !self.headers.contains(&header_name.to_string()) {
             return Err(format!(
@@ -399,7 +399,7 @@ impl TableAssertion {
     }
     
     /// Assert cell value at specific position
-    pub fn cell_equals<S: AsRef<str>>(self, row: usize, col: usize, expected: S) -> TestResult<Self> {
+    pub fn cell_equals<S: AsRef<str>>(&self, row: usize, col: usize, expected: S) -> TestResult<&Self> {
         let expected = expected.as_ref();
         
         if row >= self.rows.len() {

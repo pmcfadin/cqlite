@@ -55,6 +55,10 @@ pub struct PerformanceTargets {
     pub max_avg_latency_ms: f64,
     pub max_memory_usage_kb: usize,
     pub max_p99_latency_ms: u64,
+    pub max_complex_slowdown_ratio: f64,
+    pub max_memory_increase_ratio: f64,
+    pub min_complex_throughput_mbs: f64,
+    pub max_additional_latency_ms: u64,
 }
 
 impl CqlPerformanceBenchmarkSuite {

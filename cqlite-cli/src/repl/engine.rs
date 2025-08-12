@@ -13,7 +13,7 @@ use cqlite_core::{Database, QueryResult};
 use std::io::{self, Write, BufRead};
 use std::path::Path;
 use std::sync::Arc;
-use colored::*;
+use colored::Colorize;
 use anyhow::Result;
 
 /// Core REPL engine configuration

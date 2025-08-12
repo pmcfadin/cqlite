@@ -39,7 +39,8 @@ pub struct StorageEngine {
     manifest: Arc<manifest::Manifest>,
 
     /// Platform abstraction
-    platform: Arc<Platform>,
+    #[allow(dead_code)]
+    _platform: Arc<Platform>,
 
     /// Storage configuration
     config: Config,
@@ -91,7 +92,7 @@ impl StorageEngine {
             wal,
             compaction,
             manifest,
-            platform,
+            _platform: platform,
             config: config.clone(),
             batch_writer,
         })

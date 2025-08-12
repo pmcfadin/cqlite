@@ -955,7 +955,7 @@ mod tests {
         };
 
         let generator = SSTableTestFixtureGenerator::new(config, temp_dir.path().to_path_buf());
-        let fixture = generator.generate_simple_types_fixture().await.unwrap();
+        let fixture = generator.unwrap().generate_simple_types_fixture().await.unwrap();
 
         assert_eq!(fixture.name, "simple_types_sstable");
         assert!(fixture.file_path.exists());
@@ -973,9 +973,9 @@ mod tests {
         };
 
         let generator = SSTableTestFixtureGenerator::new(config, temp_dir.path().to_path_buf());
-        let fixture = generator.generate_simple_types_fixture().await.unwrap();
+        let fixture = generator.unwrap().generate_simple_types_fixture().await.unwrap();
 
-        let validator = SSTableTestFixtureValidator::new()?;
+        let validator = SSTableTestFixtureValidator::new().unwrap();
         let validation_result = validator.validate_fixture(&fixture).await.unwrap();
 
         assert_eq!(validation_result.fixture_name, "simple_types_sstable");

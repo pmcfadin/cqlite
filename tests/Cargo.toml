@@ -6,7 +6,7 @@ publish = false
 description = "Comprehensive test suite for CQLite Cassandra 5+ compatibility"
 
 [lib]
-name = "integration_tests"
+name = "cqlite_tests"
 path = "src/lib.rs"
 
 [dependencies]
@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 # Logging for tests
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+env_logger = "0.11"
 
 # Additional dependencies for Phase 2 testing
 rand = "0.8"
@@ -44,6 +45,13 @@ regex = "1.10"
 # Command line interface for test runner
 clap = { version = "4.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# Additional missing dependencies for test compilation
+colored = { workspace = true }
+hex = "0.4"
+base64 = "0.21"
+futures = { workspace = true }
+parking_lot = { workspace = true }
 
 [[bench]]
 name = "end_to_end_bench"
@@ -85,3 +93,7 @@ path = "src/bin/property_based_test_runner.rs"
 [[bin]]
 name = "performance_regression_test_runner"
 path = "src/bin/performance_regression_test_runner.rs"
+
+[[bin]]
+name = "issue_17_test_runner"
+path = "src/bin/issue_17_test_runner.rs"

@@ -2,10 +2,8 @@
 //!
 //! This module provides real-time monitoring and validation for Issue #17.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 /// Real-time validator

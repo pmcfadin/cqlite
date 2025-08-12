@@ -708,6 +708,7 @@ fn default_order() -> String {
 /// Schema management service for handling table schemas and UDT definitions
 #[derive(Debug)]
 pub struct SchemaManager {
+    #[allow(dead_code)]
     storage: Arc<StorageEngine>,
     schemas: HashMap<String, TableSchema>,
     /// UDT registry for managing User Defined Types

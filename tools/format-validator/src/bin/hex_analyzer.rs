@@ -4,7 +4,7 @@
 //! interpretation of structures, magic numbers, and data layouts.
 
 use clap::{Arg, Command};
-use colored::*;
+use colored::Colorize;
 use format_validator::{
     format_constants::*,
     utils::{format_hex_dump, read_file_safe},

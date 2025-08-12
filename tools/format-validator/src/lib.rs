@@ -12,7 +12,7 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Format validation error types
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ValidationError {
     #[error("Invalid magic number: expected {expected:#010x}, found {found:#010x}")]
     InvalidMagic { expected: u32, found: u32 },
@@ -45,7 +45,7 @@ pub enum ValidationError {
     BtiFormat { reason: String },
     
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
     
     #[error("Parse error: {0}")]
     Parse(String),
@@ -97,7 +97,7 @@ pub mod format_constants {
 }
 
 /// File type detection
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SSTableFileType {
     Data,
     Index,
@@ -169,8 +169,8 @@ pub mod utils {
     
     /// Read file into memory with size limit
     pub fn read_file_safe(path: &Path, max_size: usize) -> Result<Vec<u8>, ValidationError> {
-        let mut file = File::open(path)?;
-        let metadata = file.metadata()?;
+        let mut file = File::open(path).map_err(|e| ValidationError::Io(e.to_string()))?;
+        let metadata = file.metadata().map_err(|e| ValidationError::Io(e.to_string()))?;
         
         if metadata.len() > max_size as u64 {
             return Err(ValidationError::StructureViolation {
@@ -179,7 +179,7 @@ pub mod utils {
         }
         
         let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
+        file.read_to_end(&mut buffer).map_err(|e| ValidationError::Io(e.to_string()))?;
         Ok(buffer)
     }
     

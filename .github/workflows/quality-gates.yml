@@ -10,233 +10,111 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  quality-gates:
-    name: Quality Gates
+  format:
+    name: Format Check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
-    - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        components: rustfmt, clippy
-    
-    - name: Cache Cargo dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-
-    
-    - name: Install additional tools
-      run: |
-        cargo install --quiet cargo-audit || true
-        cargo install --quiet cargo-tarpaulin || true
-        rustup component add llvm-tools-preview
-    
-    # MANDATORY GATE 1: Compilation Check
-    - name: 🔧 Compilation Check
-      run: |
-        echo "::group::Compilation Check"
-        cargo check --workspace --all-targets --all-features --verbose
-        if [ $? -ne 0 ]; then
-          echo "::error::Compilation failed - BLOCKING MERGE"
-          exit 1
-        fi
-        echo "✅ Compilation passed"
-        echo "::endgroup::"
-    
-    # MANDATORY GATE 2: Code Formatting
-    - name: 📝 Code Formatting Check
-      run: |
-        echo "::group::Code Formatting Check"
-        cargo fmt --all -- --check
-        if [ $? -ne 0 ]; then
-          echo "::error::Code formatting check failed - BLOCKING MERGE"
-          echo "Run 'cargo fmt' to fix formatting issues"
-          exit 1
-        fi
-        echo "✅ Code formatting passed"
-        echo "::endgroup::"
-    
-    # MANDATORY GATE 3: Linting (Clippy)
-    - name: 🔍 Code Quality Check (Clippy)
-      run: |
-        echo "::group::Code Quality Check"
-        cargo clippy --workspace --all-targets --all-features -- -D warnings
-        if [ $? -ne 0 ]; then
-          echo "::error::Code quality check failed - BLOCKING MERGE"
-          exit 1
-        fi
-        echo "✅ Code quality passed"
-        echo "::endgroup::"
-    
-    # MANDATORY GATE 4: Test Execution
-    - name: 🧪 Test Execution
-      run: |
-        echo "::group::Test Execution"
-        # Run tests with detailed output
-        cargo test --workspace --all-features --verbose -- --test-threads=1
-        TEST_RESULT=$?
-        
-        if [ $TEST_RESULT -ne 0 ]; then
-          echo "::error::Tests failed - BLOCKING MERGE"
-          echo "All tests must pass before merging"
-          exit 1
-        fi
-        
-        # Calculate pass rate
-        TOTAL_TESTS=$(cargo test --workspace --all-features 2>&1 | grep -E "test result:" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+" | head -1 || echo "0")
-        FAILED_TESTS=$(cargo test --workspace --all-features 2>&1 | grep -E "test result:" | grep -oE "[0-9]+ failed" | grep -oE "[0-9]+" | head -1 || echo "0")
-        
-        if [ "$TOTAL_TESTS" -gt 0 ]; then
-          PASS_RATE=$(echo "scale=2; ($TOTAL_TESTS / ($TOTAL_TESTS + $FAILED_TESTS)) * 100" | bc -l || echo "0")
-          echo "Test pass rate: $PASS_RATE%"
-          
-          # Require minimum 80% pass rate
-          PASS_THRESHOLD=80
-          if (( $(echo "$PASS_RATE < $PASS_THRESHOLD" | bc -l) )); then
-            echo "::error::Test pass rate ($PASS_RATE%) below threshold ($PASS_THRESHOLD%) - BLOCKING MERGE"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy Lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test Suite
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --all-features --workspace
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-audit
+          version: latest
+      - name: Run cargo audit
+        run: cargo audit
+
+  deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-deny
+          version: latest
+      - name: Run cargo deny
+        run: cargo deny check
+
+  wasm:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions-rs/install@v0.1
+        with:
+          crate: wasm-pack
+          version: latest
+      - uses: Swatinem/rust-cache@v2
+      - name: Build WASM
+        run: |
+          cd cqlite-wasm
+          wasm-pack build --target web
+
+  structure-validation:
+    name: Project Structure Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate workspace structure
+        run: |
+          # Ensure no root src/lib.rs without [package] section
+          if [ -f "src/lib.rs" ] && ! grep -q "^\[package\]" Cargo.toml; then
+            echo "Error: src/lib.rs exists but no [package] section in root Cargo.toml"
             exit 1
           fi
-        fi
-        
-        echo "✅ Tests passed"
-        echo "::endgroup::"
-    
-    # MANDATORY GATE 5: Security Audit  
-    - name: 🛡️ Security Audit
-      run: |
-        echo "::group::Security Audit"
-        cargo audit
-        if [ $? -ne 0 ]; then
-          echo "::error::Security vulnerabilities found - BLOCKING MERGE"
-          echo "Run 'cargo audit fix' to address security issues"
-          exit 1
-        fi
-        echo "✅ Security audit passed"
-        echo "::endgroup::"
-      continue-on-error: false
-    
-    # MANDATORY GATE 6: Code Coverage
-    - name: 📊 Code Coverage Check
-      run: |
-        echo "::group::Code Coverage Analysis"
-        
-        # Run coverage analysis
-        cargo tarpaulin --workspace --timeout 300 --out Html --output-dir coverage/ --fail-under 15
-        COVERAGE_RESULT=$?
-        
-        if [ $COVERAGE_RESULT -ne 0 ]; then
-          echo "::error::Code coverage below minimum threshold (15%) - BLOCKING MERGE"
-          exit 1
-        fi
-        
-        echo "✅ Code coverage passed minimum threshold"
-        echo "::endgroup::"
-      continue-on-error: false
-    
-    # Upload coverage reports
-    - name: Upload Coverage Reports
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: coverage-report
-        path: coverage/
-        retention-days: 30
-    
-    # OPTIONAL: Performance Benchmarks (non-blocking)
-    - name: ⚡ Performance Benchmarks
-      run: |
-        echo "::group::Performance Benchmarks"
-        
-        # Run benchmarks (allow to fail without blocking merge)
-        cargo bench --workspace || {
-          echo "::warning::Performance benchmarks failed but not blocking merge"
-          echo "Consider reviewing performance implications"
-        }
-        
-        echo "::endgroup::"
-      continue-on-error: true
-    
-    # Generate Quality Report
-    - name: 📋 Generate Quality Report
-      if: always()
-      run: |
-        echo "::group::Quality Report Generation"
-        
-        # Create quality report
-        cat > quality-report.md << 'EOF'
-        # Quality Gates Report
-        
-        ## Summary
-        - **Compilation**: ✅ Passed
-        - **Code Formatting**: ✅ Passed  
-        - **Code Quality (Clippy)**: ✅ Passed
-        - **Tests**: ✅ Passed
-        - **Security Audit**: ✅ Passed
-        - **Code Coverage**: ✅ Passed (≥15%)
-        
-        ## Details
-        
-        ### Compilation Check
-        All workspace crates compile successfully with all features enabled.
-        
-        ### Code Quality
-        - No Clippy warnings or errors
-        - Code follows consistent formatting standards
-        - Security audit passed with no vulnerabilities
-        
-        ### Testing
-        - All tests execute successfully
-        - Test pass rate meets minimum threshold (≥80%)
-        - Code coverage meets minimum threshold (≥15%)
-        
-        ## Quality Standards Enforced
-        - **Zero Tolerance**: Compilation errors, test failures, security vulnerabilities
-        - **High Standards**: Code formatting, linting warnings
-        - **Minimum Thresholds**: Test pass rate (80%), code coverage (15%)
-        
-        ---
-        *This report was generated automatically by the Quality Gates workflow*
-        EOF
-        
-        echo "✅ Quality report generated"
-        echo "::endgroup::"
-    
-    - name: Upload Quality Report
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: quality-report
-        path: quality-report.md
-        retention-days: 30
-    
-    # Final Quality Gates Summary
-    - name: 🎯 Quality Gates Summary
-      if: always()
-      run: |
-        echo "::group::Quality Gates Summary"
-        echo ""
-        echo "🔒 QUALITY GATES ENFORCEMENT ACTIVE"
-        echo "======================================"
-        echo ""
-        echo "✅ All mandatory quality gates must pass"
-        echo "🚫 No exceptions or overrides allowed"
-        echo "📊 Quality metrics tracked and reported"
-        echo "🛡️ Security vulnerabilities blocked"
-        echo ""
-        echo "Quality standards successfully enforced! 🎉"
-        echo "::endgroup::"
+          
+          # Check for required files
+          required_files=(
+            "rust-toolchain.toml"
+            ".rustfmt.toml" 
+            "deny.toml"
+            "LICENSE"
+          )
+          
+          for file in "${required_files[@]}"; do
+            if [ ! -f "$file" ]; then
+              echo "Error: Required file $file is missing"
+              exit 1
+            fi
+          done

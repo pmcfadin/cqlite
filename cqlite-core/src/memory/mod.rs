@@ -95,7 +95,7 @@ struct Block {
 #[derive(Debug)]
 struct CachedRow {
     /// Row data
-    data: Vec<Value>,
+    _data: Vec<Value>,
 
     /// Row size estimate
     size: usize,
@@ -243,7 +243,7 @@ impl MemoryManager {
 
         let size = self.estimate_row_size(&data);
         let row = Arc::new(CachedRow {
-            data,
+            _data: data,
             size,
         });
 

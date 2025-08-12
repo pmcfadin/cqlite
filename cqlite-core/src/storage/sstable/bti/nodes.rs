@@ -196,6 +196,7 @@ pub struct NodeParser {
     /// Current parsing position
     position: u64,
     /// Page cache for efficient reading
+    #[allow(dead_code)]
     page_cache: HashMap<u64, Vec<u8>>,
 }
 

@@ -12,6 +12,7 @@ pub mod directory_integration_tests;
 pub mod index;
 pub mod performance_benchmarks;
 pub mod reader;
+pub use reader::SSTableReader;
 pub mod statistics_reader;
 pub mod streaming_reader;
 pub mod tombstone_merger;

@@ -4,7 +4,7 @@
 //! interactive REPL environment, focusing on real Cassandra SSTable data processing.
 
 use anyhow::Result;
-use colored::*;
+use colored::Colorize;
 use cqlite_core::{
     query::{
         QueryEngine, QueryResult, QueryType, ParsedQuery, QueryParser,

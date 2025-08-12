@@ -20,14 +20,14 @@ mod tests {
     const CLI_BINARY: &str = "cqlite";
 
     /// Test helper to create a temporary database
-    fn create_temp_database() -> Result<(TempDir, PathBuf)> {
+    pub fn create_temp_database() -> Result<(TempDir, PathBuf)> {
         let temp_dir = TempDir::new()?;
         let db_path = temp_dir.path().join("test.db");
         Ok((temp_dir, db_path))
     }
 
     /// Test helper to run CLI commands
-    fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
+    pub fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
         Command::new("cargo")
             .args(&["run", "--bin", CLI_BINARY, "--"])
             .args(args)
@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_cli_help() -> Result<()> {
-        let output = run_cli_command(&["--help"])?;
+        let output = super::tests::run_cli_command(&["--help"])?;
         assert!(output.status.success(), "CLI help should succeed");
         
         let stdout = String::from_utf8(output.stdout)?;
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn test_cli_version() -> Result<()> {
-        let output = run_cli_command(&["--version"])?;
+        let output = super::tests::run_cli_command(&["--version"])?;
         assert!(output.status.success(), "CLI version should succeed");
         
         let stdout = String::from_utf8(output.stdout)?;
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn test_cli_invalid_argument() -> Result<()> {
-        let output = run_cli_command(&["--invalid-argument"])?;
+        let output = super::tests::run_cli_command(&["--invalid-argument"])?;
         assert!(!output.status.success(), "Invalid argument should fail");
         
         let stderr = String::from_utf8(output.stderr)?;
@@ -75,7 +75,7 @@ mod tests {
     fn test_query_command_basic() -> Result<()> {
         let (_temp_dir, db_path) = create_temp_database()?;
         
-        let output = run_cli_command(&[
+        let output = super::tests::run_cli_command(&[
             "--database", db_path.to_str().unwrap(),
             "query", 
             "SELECT 1"
@@ -92,7 +92,7 @@ mod tests {
     fn test_query_command_with_timing() -> Result<()> {
         let (_temp_dir, db_path) = create_temp_database()?;
         
-        let output = run_cli_command(&[
+        let output = super::tests::run_cli_command(&[
             "--database", db_path.to_str().unwrap(),
             "query", 
             "--timing",
@@ -108,7 +108,7 @@ mod tests {
     fn test_query_command_with_explain() -> Result<()> {
         let (_temp_dir, db_path) = create_temp_database()?;
         
-        let output = run_cli_command(&[
+        let output = super::tests::run_cli_command(&[
             "--database", db_path.to_str().unwrap(),
             "query", 
             "--explain",
@@ -274,7 +274,7 @@ memory_limit_mb = 512
 level = "info"
 "#)?;
         
-        let output = run_cli_command(&[
+        let output = super::tests::run_cli_command(&[
             "--database", db_path.to_str().unwrap(),
             "--config", config_path.to_str().unwrap(),
             "admin", "info"
@@ -288,7 +288,7 @@ level = "info"
     #[test]
     fn test_sstable_auto_detect() -> Result<()> {
         // Test auto-detection feature
-        let output = run_cli_command(&[
+        let output = super::tests::run_cli_command(&[
             "--auto-detect",
             "--cassandra-version", "5.0",
             "info", "/tmp/nonexistent/sstable/path"
@@ -323,7 +323,7 @@ level = "info"
     #[test]
     fn test_error_handling() -> Result<()> {
         // Test with non-existent database file
-        let output = run_cli_command(&[
+        let output = super::tests::run_cli_command(&[
             "--database", "/tmp/nonexistent.db",
             "query", "SELECT 1"
         ])?;
@@ -376,10 +376,10 @@ mod performance_tests {
     #[test]
     #[ignore] // Run with: cargo test --ignored
     fn test_large_query_performance() -> Result<()> {
-        let (_temp_dir, db_path) = create_temp_database()?;
+        let (_temp_dir, db_path) = super::tests::create_temp_database()?;
         
         let start = std::time::Instant::now();
-        let output = run_cli_command(&[
+        let output = super::tests::run_cli_command(&[
             "--database", db_path.to_str().unwrap(),
             "--format", "json",
             "query", "SELECT 1"

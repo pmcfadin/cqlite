@@ -172,17 +172,24 @@ pub unsafe extern "C" fn cqlite_execute(
         return CQLITE_ERROR_NULL_POINTER;
     }
 
-    let sql_str = match unsafe { CStr::from_ptr(sql).to_str() } {
+    let sql_str = match unsafe {
+        // SAFETY: sql is validated as non-null above and is a valid null-terminated C string
+        CStr::from_ptr(sql).to_str()
+    } {
         Ok(s) => s,
         Err(_) => return CQLITE_ERROR_INVALID_UTF8,
     };
 
-    let db_ref = unsafe { &*(db as *const database::CQLiteDB) };
+    let db_ref = unsafe {
+        // SAFETY: db is validated as non-null above and was created by cqlite_open
+        &*(db as *const database::CQLiteDB)
+    };
     match query::execute_query(db_ref, sql_str) {
         Ok(query_result) => {
             if !result.is_null() {
                 let boxed_result = Box::into_raw(Box::new(query_result));
                 unsafe {
+                    // SAFETY: result is validated as non-null above and boxed_result is a valid pointer
                     *result = boxed_result as *mut cqlite_result_t;
                 }
             }
@@ -214,16 +221,23 @@ pub unsafe extern "C" fn cqlite_prepare(
         return CQLITE_ERROR_NULL_POINTER;
     }
 
-    let sql_str = match unsafe { CStr::from_ptr(sql).to_str() } {
+    let sql_str = match unsafe {
+        // SAFETY: sql is validated as non-null above and is a valid null-terminated C string
+        CStr::from_ptr(sql).to_str()
+    } {
         Ok(s) => s,
         Err(_) => return CQLITE_ERROR_INVALID_UTF8,
     };
 
-    let db_ref = unsafe { &*(db as *const database::CQLiteDB) };
+    let db_ref = unsafe {
+        // SAFETY: db is validated as non-null above and was created by cqlite_open
+        &*(db as *const database::CQLiteDB)
+    };
     match query::prepare_statement(db_ref, sql_str) {
         Ok(prepared_stmt) => {
             let boxed_stmt = Box::into_raw(Box::new(prepared_stmt));
             unsafe {
+                // SAFETY: stmt is validated as non-null above and boxed_stmt is a valid pointer
                 *stmt = boxed_stmt as *mut cqlite_stmt_t;
             }
             CQLITE_OK
@@ -259,10 +273,16 @@ pub unsafe extern "C" fn cqlite_execute_prepared(
     let _params_slice = if params.is_null() || param_count == 0 {
         &[]
     } else {
-        unsafe { std::slice::from_raw_parts(params, param_count) }
+        unsafe {
+            // SAFETY: params is validated as non-null and param_count provides the correct length
+            std::slice::from_raw_parts(params, param_count)
+        }
     };
 
-    let stmt_ref = unsafe { &*(stmt as *const query::CQLiteStatement) };
+    let stmt_ref = unsafe {
+        // SAFETY: stmt is validated as non-null above and was created by cqlite_prepare
+        &*(stmt as *const query::CQLiteStatement)
+    };
     let params_vec: Vec<cqlite_value_t> = if params.is_null() || param_count == 0 {
         Vec::new()
     } else {
@@ -273,6 +293,7 @@ pub unsafe extern "C" fn cqlite_execute_prepared(
             if !result.is_null() {
                 let boxed_result = Box::into_raw(Box::new(query_result));
                 unsafe {
+                    // SAFETY: result is validated as non-null above and boxed_result is a valid pointer
                     *result = boxed_result as *mut cqlite_result_t;
                 }
             }
@@ -295,6 +316,7 @@ pub unsafe extern "C" fn cqlite_execute_prepared(
 pub unsafe extern "C" fn cqlite_stmt_free(stmt: *mut cqlite_stmt_t) {
     if !stmt.is_null() {
         unsafe {
+            // SAFETY: stmt was created by cqlite_prepare and is valid
             let _ = Box::from_raw(stmt as *mut query::CQLiteStatement);
         }
     }
@@ -313,6 +335,7 @@ pub unsafe extern "C" fn cqlite_stmt_free(stmt: *mut cqlite_stmt_t) {
 pub unsafe extern "C" fn cqlite_result_free(result: *mut cqlite_result_t) {
     if !result.is_null() {
         unsafe {
+            // SAFETY: result was created by a cqlite query function and is valid
             let _ = Box::from_raw(result as *mut query::CQLiteResult);
         }
     }
@@ -332,7 +355,10 @@ pub unsafe extern "C" fn cqlite_result_row_count(result: *const cqlite_result_t)
     if result.is_null() {
         return 0;
     }
-    let result_ref = unsafe { &*(result as *const query::CQLiteResult) };
+    let result_ref = unsafe {
+        // SAFETY: result is validated as non-null above and was created by a cqlite query function
+        &*(result as *const query::CQLiteResult)
+    };
     query::get_row_count(result_ref)
 }
 
@@ -350,7 +376,10 @@ pub unsafe extern "C" fn cqlite_result_column_count(result: *const cqlite_result
     if result.is_null() {
         return 0;
     }
-    let result_ref = unsafe { &*(result as *const query::CQLiteResult) };
+    let result_ref = unsafe {
+        // SAFETY: result is validated as non-null above and was created by a cqlite query function
+        &*(result as *const query::CQLiteResult)
+    };
     query::get_column_count(result_ref)
 }
 
@@ -376,10 +405,14 @@ pub unsafe extern "C" fn cqlite_result_column_info(
         return CQLITE_ERROR_NULL_POINTER;
     }
 
-    let result_ref = unsafe { &*(result as *const query::CQLiteResult) };
+    let result_ref = unsafe {
+        // SAFETY: result is validated as non-null above and was created by a cqlite query function
+        &*(result as *const query::CQLiteResult)
+    };
     match query::get_column_info(result_ref, column_index) {
         Ok(info) => {
             unsafe {
+                // SAFETY: column_info is validated as non-null above and info is a valid column_info_t
                 *column_info = info;
             }
             CQLITE_OK
@@ -412,10 +445,14 @@ pub unsafe extern "C" fn cqlite_result_get_value(
         return CQLITE_ERROR_NULL_POINTER;
     }
 
-    let result_ref = unsafe { &*(result as *const query::CQLiteResult) };
+    let result_ref = unsafe {
+        // SAFETY: result is validated as non-null above and was created by a cqlite query function
+        &*(result as *const query::CQLiteResult)
+    };
     match query::get_result_value(result_ref, row_index, column_index) {
         Ok(val) => {
             unsafe {
+                // SAFETY: value is validated as non-null above and val is a valid cqlite_value_t
                 *value = val;
             }
             CQLITE_OK
@@ -447,6 +484,7 @@ pub extern "C" fn cqlite_error_message() -> *const c_char {
 pub unsafe extern "C" fn cqlite_string_free(str_ptr: *mut c_char) {
     if !str_ptr.is_null() {
         unsafe {
+            // SAFETY: str_ptr was created by CQLite and is a valid C string
             let _ = CString::from_raw(str_ptr);
         }
     }
@@ -478,7 +516,10 @@ pub unsafe extern "C" fn cqlite_iterator_create(
         return CQLITE_ERROR_NULL_POINTER;
     }
 
-    let table_str = match unsafe { CStr::from_ptr(table_name).to_str() } {
+    let table_str = match unsafe {
+        // SAFETY: table_name is validated as non-null above and is a valid null-terminated C string
+        CStr::from_ptr(table_name).to_str()
+    } {
         Ok(s) => s,
         Err(_) => return CQLITE_ERROR_INVALID_UTF8,
     };
@@ -486,7 +527,10 @@ pub unsafe extern "C" fn cqlite_iterator_create(
     let start_key_str = if start_key.is_null() {
         None
     } else {
-        match unsafe { CStr::from_ptr(start_key).to_str() } {
+        match unsafe {
+            // SAFETY: start_key is validated as non-null above and is a valid null-terminated C string
+            CStr::from_ptr(start_key).to_str()
+        } {
             Ok(s) => Some(s),
             Err(_) => return CQLITE_ERROR_INVALID_UTF8,
         }
@@ -495,17 +539,24 @@ pub unsafe extern "C" fn cqlite_iterator_create(
     let end_key_str = if end_key.is_null() {
         None
     } else {
-        match unsafe { CStr::from_ptr(end_key).to_str() } {
+        match unsafe {
+            // SAFETY: end_key is validated as non-null above and is a valid null-terminated C string
+            CStr::from_ptr(end_key).to_str()
+        } {
             Ok(s) => Some(s),
             Err(_) => return CQLITE_ERROR_INVALID_UTF8,
         }
     };
 
-    let db_ref = unsafe { &*(db as *const database::CQLiteDB) };
+    let db_ref = unsafe {
+        // SAFETY: db is validated as non-null above and was created by cqlite_open
+        &*(db as *const database::CQLiteDB)
+    };
     match iterator::create_iterator(db_ref, table_str, start_key_str, end_key_str) {
         Ok(iter) => {
             let boxed_iter = Box::into_raw(Box::new(iter));
             unsafe {
+                // SAFETY: iterator is validated as non-null above and boxed_iter is a valid pointer
                 *iterator = boxed_iter as *mut cqlite_iterator_t;
             }
             CQLITE_OK
@@ -531,7 +582,10 @@ pub unsafe extern "C" fn cqlite_iterator_next(iterator: *mut cqlite_iterator_t) 
         return CQLITE_ERROR_NULL_POINTER;
     }
 
-    let iterator_ref = unsafe { &mut *(iterator as *mut iterator::CQLiteIterator) };
+    let iterator_ref = unsafe {
+        // SAFETY: iterator is validated as non-null above and was created by cqlite_iterator_create
+        &mut *(iterator as *mut iterator::CQLiteIterator)
+    };
     iterator::next_item(iterator_ref)
 }
 
@@ -555,10 +609,14 @@ pub unsafe extern "C" fn cqlite_iterator_key(
         return CQLITE_ERROR_NULL_POINTER;
     }
 
-    let iterator_ref = unsafe { &*(iterator as *const iterator::CQLiteIterator) };
+    let iterator_ref = unsafe {
+        // SAFETY: iterator is validated as non-null above and was created by cqlite_iterator_create
+        &*(iterator as *const iterator::CQLiteIterator)
+    };
     match iterator::get_current_key(iterator_ref) {
         Ok(k) => {
             unsafe {
+                // SAFETY: key is validated as non-null above and k is a valid cqlite_value_t
                 *key = k;
             }
             CQLITE_OK
@@ -587,10 +645,14 @@ pub unsafe extern "C" fn cqlite_iterator_value(
         return CQLITE_ERROR_NULL_POINTER;
     }
 
-    let iterator_ref = unsafe { &*(iterator as *const iterator::CQLiteIterator) };
+    let iterator_ref = unsafe {
+        // SAFETY: iterator is validated as non-null above and was created by cqlite_iterator_create
+        &*(iterator as *const iterator::CQLiteIterator)
+    };
     match iterator::get_current_value(iterator_ref) {
         Ok(v) => {
             unsafe {
+                // SAFETY: value is validated as non-null above and v is a valid cqlite_value_t
                 *value = v;
             }
             CQLITE_OK
@@ -612,6 +674,7 @@ pub unsafe extern "C" fn cqlite_iterator_value(
 pub unsafe extern "C" fn cqlite_iterator_free(iterator: *mut cqlite_iterator_t) {
     if !iterator.is_null() {
         unsafe {
+            // SAFETY: iterator was created by cqlite_iterator_create and is valid
             let _ = Box::from_raw(iterator as *mut iterator::CQLiteIterator);
         }
     }

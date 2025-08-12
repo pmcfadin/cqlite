@@ -28,9 +28,9 @@ pub struct ComplexTypeParser {
     /// UDT registry for resolving user-defined types
     udt_registry: Option<UdtRegistry>,
     /// Enable strict type validation
-    strict_validation: bool,
+    _strict_validation: bool,
     /// Support for experimental features
-    experimental_features: bool,
+    _experimental_features: bool,
 }
 
 /// Type parsing context with metadata
@@ -104,8 +104,8 @@ impl ComplexTypeParser {
     pub fn new() -> Self {
         Self {
             udt_registry: None,
-            strict_validation: true,
-            experimental_features: false,
+            _strict_validation: true,
+            _experimental_features: false,
         }
     }
 

@@ -3,11 +3,9 @@
 //! This module provides comprehensive error handling validation for Issue #17.
 //! It tests robust error handling for corrupted/unsupported files and recovery strategies.
 
-use crate::error::{Error, Result, ErrorCategory};
-use crate::parser::error::{ParserError, ErrorContext};
+use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -167,7 +165,7 @@ impl ErrorHandler {
     /// Run comprehensive error handling validation
     pub async fn validate_error_handling(&self) -> Result<ErrorHandlingReport> {
         log::info!("Starting comprehensive error handling validation");
-        let start_time = Instant::now();
+        let _start_time = Instant::now();
         
         let mut all_scenarios = Vec::new();
 
@@ -336,7 +334,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: scenario_name.to_string(),
             scenario_type: ErrorScenarioType::CorruptedData,
-            status,
+            status: status.clone(),
             expected_error: Some("Corruption".to_string()),
             actual_error,
             recovery_attempted,
@@ -369,7 +367,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "corrupted_header".to_string(),
             scenario_type: ErrorScenarioType::CorruptedData,
-            status,
+            status: status.clone(),
             expected_error: Some("Invalid header".to_string()),
             actual_error,
             recovery_attempted,
@@ -404,7 +402,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "corrupted_data_section".to_string(),
             scenario_type: ErrorScenarioType::CorruptedData,
-            status,
+            status: status.clone(),
             expected_error: Some("Data corruption".to_string()),
             actual_error,
             recovery_attempted,
@@ -439,7 +437,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "invalid_checksum".to_string(),
             scenario_type: ErrorScenarioType::CorruptedData,
-            status,
+            status: status.clone(),
             expected_error: Some("Checksum mismatch".to_string()),
             actual_error,
             recovery_attempted,
@@ -467,7 +465,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "truncated_file".to_string(),
             scenario_type: ErrorScenarioType::CorruptedData,
-            status,
+            status: status.clone(),
             expected_error: Some("Unexpected EOF".to_string()),
             actual_error,
             recovery_attempted,
@@ -499,7 +497,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "unsupported_version".to_string(),
             scenario_type: ErrorScenarioType::UnsupportedFormat,
-            status,
+            status: status.clone(),
             expected_error: Some("Unsupported version".to_string()),
             actual_error,
             recovery_attempted,
@@ -526,7 +524,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "wrong_file_type".to_string(),
             scenario_type: ErrorScenarioType::UnsupportedFormat,
-            status,
+            status: status.clone(),
             expected_error: Some("Invalid format".to_string()),
             actual_error,
             recovery_attempted,
@@ -560,7 +558,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "invalid_magic_bytes".to_string(),
             scenario_type: ErrorScenarioType::UnsupportedFormat,
-            status,
+            status: status.clone(),
             expected_error: Some("Invalid magic bytes".to_string()),
             actual_error,
             recovery_attempted,
@@ -592,7 +590,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "future_format_version".to_string(),
             scenario_type: ErrorScenarioType::UnsupportedFormat,
-            status,
+            status: status.clone(),
             expected_error: Some("Unsupported future format".to_string()),
             actual_error,
             recovery_attempted,
@@ -617,7 +615,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "file_not_found".to_string(),
             scenario_type: ErrorScenarioType::IoError,
-            status,
+            status: status.clone(),
             expected_error: Some("No such file".to_string()),
             actual_error,
             recovery_attempted,
@@ -645,7 +643,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "permission_denied".to_string(),
             scenario_type: ErrorScenarioType::IoError,
-            status,
+            status: status.clone(),
             expected_error: Some("Permission denied".to_string()),
             actual_error,
             recovery_attempted,
@@ -669,7 +667,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "disk_full".to_string(),
             scenario_type: ErrorScenarioType::IoError,
-            status,
+            status: status.clone(),
             expected_error: Some("No space left on device".to_string()),
             actual_error,
             recovery_attempted,
@@ -693,7 +691,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "network_unavailable".to_string(),
             scenario_type: ErrorScenarioType::NetworkError,
-            status,
+            status: status.clone(),
             expected_error: Some("Network unreachable".to_string()),
             actual_error,
             recovery_attempted,
@@ -720,7 +718,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "large_file_processing".to_string(),
             scenario_type: ErrorScenarioType::MemoryLimit,
-            status,
+            status: status.clone(),
             expected_error: Some("Memory limit exceeded".to_string()),
             actual_error,
             recovery_attempted,
@@ -744,7 +742,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "memory_exhaustion".to_string(),
             scenario_type: ErrorScenarioType::MemoryLimit,
-            status,
+            status: status.clone(),
             expected_error: Some("Out of memory".to_string()),
             actual_error,
             recovery_attempted,
@@ -768,7 +766,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "operation_timeout".to_string(),
             scenario_type: ErrorScenarioType::Timeout,
-            status,
+            status: status.clone(),
             expected_error: Some("Operation timed out".to_string()),
             actual_error,
             recovery_attempted,
@@ -792,7 +790,7 @@ impl ErrorHandler {
         Ok(ErrorScenarioResult {
             scenario_name: "network_timeout".to_string(),
             scenario_type: ErrorScenarioType::Timeout,
-            status,
+            status: status.clone(),
             expected_error: Some("Network timeout".to_string()),
             actual_error,
             recovery_attempted,
@@ -822,7 +820,7 @@ impl ErrorHandler {
                 let error_message = error.to_string();
                 
                 // Check if the error type matches expectations
-                let status = if self.is_expected_error(&error, expected_error_type) {
+                let status = if self.is_expected_error(&error, &expected_error_type) {
                     ErrorHandlingStatus::Passed
                 } else {
                     ErrorHandlingStatus::Warning
@@ -830,7 +828,7 @@ impl ErrorHandler {
 
                 // Attempt recovery
                 let (recovery_attempted, recovery_successful) = 
-                    self.attempt_recovery(&error, expected_error_type).await?;
+                    self.attempt_recovery(&error, &expected_error_type).await?;
 
                 Ok((status, Some(error_message), recovery_attempted, recovery_successful))
             }
@@ -880,7 +878,7 @@ impl ErrorHandler {
     }
 
     /// Check if an error is of the expected type
-    fn is_expected_error(&self, error: &Error, expected_type: ErrorScenarioType) -> bool {
+    fn is_expected_error(&self, error: &Error, expected_type: &ErrorScenarioType) -> bool {
         match expected_type {
             ErrorScenarioType::CorruptedData => {
                 matches!(error, Error::Corruption(_) | Error::InvalidFormat(_))
@@ -905,7 +903,7 @@ impl ErrorHandler {
     async fn attempt_recovery(
         &self,
         error: &Error,
-        error_type: ErrorScenarioType,
+        error_type: &ErrorScenarioType,
     ) -> Result<(bool, bool)> {
         // Find applicable recovery strategies
         let applicable_strategies: Vec<_> = self.recovery_strategies.iter()
@@ -1033,7 +1031,7 @@ impl ErrorHandler {
         // Simulate permission denied scenario
         let error = Error::storage("Permission denied");
         let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, ErrorScenarioType::IoError).await?;
+            self.attempt_recovery(&error, &ErrorScenarioType::IoError).await?;
         
         Ok((
             ErrorHandlingStatus::Passed,
@@ -1047,7 +1045,7 @@ impl ErrorHandler {
     async fn simulate_disk_full_error(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::storage("No space left on device");
         let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, ErrorScenarioType::IoError).await?;
+            self.attempt_recovery(&error, &ErrorScenarioType::IoError).await?;
         
         Ok((
             ErrorHandlingStatus::Passed,
@@ -1061,7 +1059,7 @@ impl ErrorHandler {
     async fn simulate_network_error(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::storage("Network unreachable");
         let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, ErrorScenarioType::NetworkError).await?;
+            self.attempt_recovery(&error, &ErrorScenarioType::NetworkError).await?;
         
         Ok((
             ErrorHandlingStatus::Passed,
@@ -1075,7 +1073,7 @@ impl ErrorHandler {
     async fn simulate_memory_exhaustion(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::memory("Out of memory");
         let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, ErrorScenarioType::MemoryLimit).await?;
+            self.attempt_recovery(&error, &ErrorScenarioType::MemoryLimit).await?;
         
         Ok((
             ErrorHandlingStatus::Passed,
@@ -1089,7 +1087,7 @@ impl ErrorHandler {
     async fn simulate_operation_timeout(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::internal("Operation timed out");
         let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, ErrorScenarioType::Timeout).await?;
+            self.attempt_recovery(&error, &ErrorScenarioType::Timeout).await?;
         
         Ok((
             ErrorHandlingStatus::Passed,
@@ -1103,7 +1101,7 @@ impl ErrorHandler {
     async fn simulate_network_timeout(&self) -> Result<(ErrorHandlingStatus, Option<String>, bool, bool)> {
         let error = Error::internal("Network timeout");
         let (recovery_attempted, recovery_successful) = 
-            self.attempt_recovery(&error, ErrorScenarioType::Timeout).await?;
+            self.attempt_recovery(&error, &ErrorScenarioType::Timeout).await?;
         
         Ok((
             ErrorHandlingStatus::Passed,

@@ -4,8 +4,10 @@
 //! ensuring that test fixtures, CLI commands, and compatibility features work correctly.
 
 use crate::{
-    CLIIntegrationTestSuite, CLITestConfig, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
-    SSTableTestFixtureValidator,
+    CLIIntegrationTestSuite, CLITestConfig,
+    real_sstable_test_fixtures::{
+        SSTableTestFixtureConfig, SSTableTestFixtureGenerator, SSTableTestFixtureValidator,
+    },
 };
 use serde_json;
 use std::collections::HashMap;

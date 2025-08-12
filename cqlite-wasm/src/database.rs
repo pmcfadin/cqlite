@@ -53,7 +53,7 @@ impl WasmDatabase {
     }
 
     /// Select data (async stub)
-    pub async fn select(&self, _table: &str, _conditions: Option<JsValue>, _limit: Option<u32>) -> Result<JsValue, JsValue> {
+    pub async fn select(&self, _table: &str, _conditions: JsValue, _limit: Option<u32>) -> Result<JsValue, JsValue> {
         Ok(JsValue::NULL)
     }
 
@@ -113,14 +113,14 @@ impl WasmDatabase {
     }
 
     /// Begin a transaction
-    pub fn begin_transaction(&mut self) -> Result<WasmTransaction, JsValue> {
+    pub async fn begin_transaction(&self) -> Result<WasmTransaction, JsValue> {
         Ok(WasmTransaction {
             _private: std::marker::PhantomData,
         })
     }
 
     /// Create an iterator
-    pub fn create_iterator(&mut self) -> Result<WasmIterator, JsValue> {
+    pub async fn create_iterator(&self) -> Result<WasmIterator, JsValue> {
         Ok(WasmIterator {
             _private: std::marker::PhantomData,
         })

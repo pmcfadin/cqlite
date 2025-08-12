@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub struct SelectExecutor {
     /// Schema manager for metadata
-    schema: Arc<SchemaManager>,
+    _schema: Arc<SchemaManager>,
     /// Storage engine for SSTable access
     storage: Arc<StorageEngine>,
 }
@@ -50,9 +50,9 @@ pub struct ExecutionContext {
 /// Streaming query result iterator
 pub struct QueryResultStream {
     /// Receiver for query results
-    receiver: mpsc::Receiver<Result<QueryRow>>,
+    _receiver: mpsc::Receiver<Result<QueryRow>>,
     /// Execution context
-    context: ExecutionContext,
+    _context: ExecutionContext,
 }
 
 /// Aggregation state for GROUP BY operations
@@ -79,7 +79,7 @@ enum AggregateValue {
 impl SelectExecutor {
     /// Create a new SELECT executor
     pub fn new(schema: Arc<SchemaManager>, storage: Arc<StorageEngine>) -> Self {
-        Self { schema, storage }
+        Self { _schema: schema, storage }
     }
 
     /// Execute an optimized query plan

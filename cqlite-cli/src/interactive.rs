@@ -1,6 +1,6 @@
 use crate::{config::Config, repl::{ReplEngine, ReplConfig, ReplMode}};
 use anyhow::Result;
-use colored::*;
+use colored::Colorize;
 use cqlite_core::{
     schema::{SchemaManager, TableSchema},
     storage::StorageEngine,

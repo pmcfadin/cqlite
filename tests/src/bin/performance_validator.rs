@@ -6,7 +6,7 @@
 use clap::{Arg, Command};
 use std::path::PathBuf;
 use std::process;
-use cqlite_integration_tests::{
+use cqlite_tests::{
     BenchmarkRunnerConfig, PerformanceBenchmarkRunner, PerformanceTargets, TestConfiguration,
 };
 use tokio;
@@ -230,11 +230,10 @@ async fn main() {
             performance_iterations: iterations,
             enable_profiling: true,
             performance_targets: PerformanceTargets {
-                max_parse_time_1gb_seconds: parse_target,
-                max_memory_usage_mb: memory_target,
-                max_lookup_latency_ms: latency_target,
-                min_write_throughput_ops_sec: write_throughput,
-                min_read_throughput_ops_sec: read_throughput,
+                max_complex_slowdown_ratio: 2.0,
+                max_memory_increase_ratio: 1.5,
+                min_complex_throughput_mbs: parse_target * 100.0,
+                max_additional_latency_ms: latency_target,
             },
         },
     };

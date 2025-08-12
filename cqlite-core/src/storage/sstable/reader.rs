@@ -189,6 +189,7 @@ pub struct SSTableReader {
     /// SSTable header information
     header: SSTableHeader,
     /// Parser for SSTable format
+    #[allow(dead_code)]
     parser: SSTableParser,
     /// Index for efficient lookups
     index: Option<SSTableIndex>,

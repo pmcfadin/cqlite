@@ -50,6 +50,9 @@ pub mod parser_validation;
 /// BTI (Big Trie Index) format validation tests for Cassandra 5.0+
 pub mod bti_validation;
 
+/// Comprehensive SSTable test suite for Issue #17
+pub mod comprehensive_sstable_test_suite;
+
 // Re-export main test runner functions
 pub use integration_runner::{
     run_compatibility_validation, run_performance_validation, run_quick_compatibility_check,
@@ -60,6 +63,12 @@ pub use integration_runner::{
 pub use compatibility_framework::{
     CompatibilityTestConfig, CompatibilityTestFramework, CompatibilityTestResult,
 };
+
+// Re-export CLI integration test components
+pub use cli_integration_tests::{CLIIntegrationTestSuite, CLITestConfig, CLITestResult};
+
+// Re-export SSTable test fixture components (initial export)
+// Note: real_sstable_test_fixtures is exported again below with additional types
 
 pub use performance_benchmarks::{BenchmarkConfig, BenchmarkResult as PerfBenchmarkResult, PerformanceBenchmarks};
 pub use sstable_format_tests::SSTableFormatTests;
@@ -88,7 +97,6 @@ pub mod edge_case_stress_testing;
 
 // Real SSTable compatibility testing against actual Cassandra 5 files
 pub mod real_sstable_compatibility_test;
-pub mod comprehensive_sstable_test_suite;
 
 // Re-export edge case testing components
 pub use edge_case_runner::{
@@ -103,16 +111,15 @@ pub mod comprehensive_integration_tests;
 pub mod real_sstable_test_fixtures;
 pub mod validation_test_runner;
 
-// Re-export comprehensive integration testing components
-pub use cli_integration_tests::{CLIIntegrationTestSuite, CLITestConfig, CLITestResult};
+// Re-export comprehensive integration testing components (commented out to avoid conflicts with cli_integration_tests)
+// pub use integration::cli_tests::{get_cli_binary, create_temp_db};
 pub use collection_compatibility_tests::{
     CollectionCompatibilityTester, TestResult as CollectionTestResult, 
     PerformanceMetrics as CollectionPerformanceMetrics,
 };
-pub use comprehensive_integration_tests::{
-    ComprehensiveIntegrationTestSuite, IntegrationTestConfig as CITIntegrationTestConfig, 
-    IntegrationTestResults as CITIntegrationTestResults,
-    PerformanceMetrics, TestReport, TestStatus,
+pub use comprehensive_sstable_test_suite::{
+    run_comprehensive_sstable_tests, TestSuiteReport, ComprehensiveSSTableTestSuite,
+    TestResult, TestStatus, TestDetails, PerformanceMetrics,
 };
 pub use real_sstable_test_fixtures::{
     SSTableTestFixture, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
@@ -173,9 +180,6 @@ pub mod cql_test_data_fixtures;
 // Re-export CQL validation components
 pub use cql_parser_validation_suite::{
     CqlParserValidationSuite, ValidationReport, ValidationResult as CqlValidationResult, PerformanceMetric,
-};
-pub use cql_integration_tests::{
-    CqlIntegrationTestSuite, IntegrationTestReport, IntegrationTestResult,
 };
 pub use cql_performance_benchmarks::{
     CqlPerformanceBenchmarkSuite, BenchmarkReport, BenchmarkResult as CqlBenchmarkResult, PerformanceTargets,

@@ -52,7 +52,8 @@ pub struct MemTable {
     /// Global sequence number counter
     sequence: AtomicU64,
     /// Configuration
-    config: Config,
+    #[allow(dead_code)]
+    _config: Config,
 }
 
 impl MemTable {
@@ -62,7 +63,7 @@ impl MemTable {
             data: BTreeMap::new(),
             size: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
-            config: config.clone(),
+            _config: config.clone(),
         })
     }
 

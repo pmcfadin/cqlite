@@ -31,6 +31,7 @@ pub struct SSTableWriter {
     config: Config,
 
     /// Platform abstraction
+    #[allow(dead_code)]
     platform: Arc<Platform>,
 
     /// Current offset in the file

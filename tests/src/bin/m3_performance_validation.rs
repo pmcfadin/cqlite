@@ -3,7 +3,7 @@
 //! Executable for running comprehensive M3 complex type performance validation.
 //! This binary can be used in CI/CD pipelines and for development validation.
 
-use clap::{App, Arg, ArgMatches};
+use clap::{Command, Arg, ArgMatches};
 use std::process;
 use std::time::Instant;
 
@@ -16,7 +16,7 @@ use m3_performance_validator::{M3PerformanceValidator, ValidationConfig};
 use cqlite_core::parser::PerformanceTargets;
 
 fn main() {
-    let matches = App::new("M3 Performance Validator")
+    let matches = Command::new("M3 Performance Validator")
         .version("1.0.0")
         .author("CQLite Team")
         .about("Validates M3 complex type performance targets")
@@ -108,7 +108,7 @@ fn main() {
     // Setup logging
     if !matches.is_present("quiet") {
         env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Info)
+            // Remove log filter - using println! instead
             .init();
     }
 
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_config_parsing() {
-        let matches = App::new("test")
+        let matches = Command::new("test")
             .arg(Arg::with_name("throughput-target").long("throughput-target").takes_value(true))
             .arg(Arg::with_name("memory-ratio").long("memory-ratio").takes_value(true))
             .arg(Arg::with_name("latency-limit").long("latency-limit").takes_value(true))
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_strict_mode() {
-        let matches = App::new("test")
+        let matches = Command::new("test")
             .arg(Arg::with_name("strict").long("strict"))
             .arg(Arg::with_name("throughput-target").long("throughput-target").takes_value(true).default_value("100"))
             .arg(Arg::with_name("memory-ratio").long("memory-ratio").takes_value(true).default_value("1.5"))

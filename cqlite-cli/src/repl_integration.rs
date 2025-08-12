@@ -6,7 +6,7 @@
 use crate::query_processor::{CQLQueryProcessor, QueryExecutionContext, REPLQueryResult};
 use crate::interactive::ReplSession;
 use anyhow::Result;
-use colored::*;
+use colored::Colorize;
 use cqlite_core::{Database, query::QueryEngine, schema::SchemaManager, storage::StorageEngine};
 use std::sync::Arc;
 use std::time::Instant;

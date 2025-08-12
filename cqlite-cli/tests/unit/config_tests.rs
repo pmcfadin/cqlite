@@ -112,7 +112,11 @@ fn test_config_environment_variable_override() {
     // This test would verify environment variable overrides
     // The actual implementation would depend on your config loading logic
     
-    std::env::set_var("CQLITE_CACHE_SIZE_MB", "512");
+    unsafe {
+        // SAFETY: Setting environment variable in single-threaded test context
+        // This is safe because it's within a test function and affects only the current process
+        std::env::set_var("CQLITE_CACHE_SIZE_MB", "512");
+    }
     
     // In a real implementation, you'd test that the config loader
     // picks up environment variables

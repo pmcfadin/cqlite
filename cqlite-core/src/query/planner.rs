@@ -138,7 +138,7 @@ pub struct QueryHints {
 #[derive(Debug)]
 pub struct QueryPlanner {
     /// Schema manager reference
-    schema: Arc<SchemaManager>,
+    _schema: Arc<SchemaManager>,
     /// Configuration
     config: Config,
     /// Cost model
@@ -176,7 +176,7 @@ impl QueryPlanner {
     /// Create a new query planner
     pub fn new(schema: Arc<SchemaManager>, config: &Config) -> Self {
         Self {
-            schema,
+            _schema: schema,
             config: config.clone(),
             cost_model: CostModel::default(),
         }
