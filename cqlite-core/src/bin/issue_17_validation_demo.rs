@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("✅ Comprehensive report generated");
 
             // Show text format sample
-            let text_report = framework.report_generator.generate_text_report(&final_report);
+            let text_report = framework.generate_text_report(&final_report);
             println!();
             println!("📝 Sample Text Report (first 500 chars):");
             println!("{}", &text_report[..text_report.len().min(500)]);
@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!();
 
             // Show JSON format availability
-            match framework.report_generator.generate_json_report(&final_report) {
+            match framework.generate_json_report(&final_report) {
                 Ok(json_report) => {
                     println!("✅ JSON report generated ({} characters)", json_report.len());
                 }
@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Show Markdown format sample
-            let markdown_report = framework.report_generator.generate_markdown_report(&final_report);
+            let markdown_report = framework.generate_markdown_report(&final_report);
             println!("✅ Markdown report generated ({} characters)", markdown_report.len());
             println!();
 

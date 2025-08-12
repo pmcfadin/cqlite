@@ -556,6 +556,21 @@ impl Issue17ValidationFramework {
     pub async fn generate_report(&self, report: reports::ValidationReport) -> crate::error::Result<reports::ValidationReport> {
         self.report_generator.generate_report(report).await
     }
+    
+    /// Generate text report
+    pub fn generate_text_report(&self, report: &reports::ValidationReport) -> String {
+        self.report_generator.generate_text_report(report)
+    }
+    
+    /// Generate JSON report
+    pub fn generate_json_report(&self, report: &reports::ValidationReport) -> crate::error::Result<String> {
+        self.report_generator.generate_json_report(report)
+    }
+    
+    /// Generate markdown report
+    pub fn generate_markdown_report(&self, report: &reports::ValidationReport) -> String {
+        self.report_generator.generate_markdown_report(report)
+    }
 }
 
 #[cfg(test)]

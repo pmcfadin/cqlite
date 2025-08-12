@@ -24,7 +24,7 @@ use cqlite_core::{
     },
 };
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(name = "sstable_data_demo")]
 #[command(about = "Demo of SSTable data loading and caching system")]
 #[command(version = "1.0")]
@@ -332,7 +332,9 @@ impl SstableDataDemo {
                 if let Ok(schema) = self.data_api.describe_table(table_name, Some(keyspace)).await {
                     println!("✅ Schema found with {} columns:", schema.columns.len());
                     for (i, column) in schema.columns.iter().take(10).enumerate() {
-                        let key_type = if column.is_primary_key { " (PK)" } else { "" };
+                        // Note: Column struct doesn't have is_primary_key field
+                        // We'll indicate this is sample column data
+                        let key_type = ""; // Removed is_primary_key check as field doesn't exist
                         println!("  {}. {} : {}{}", 
                             i + 1, 
                             column.name.yellow(), 

@@ -17,7 +17,14 @@ pub mod statistics_reader;
 pub mod streaming_reader;
 pub mod tombstone_merger;
 pub mod validation;
+pub mod row_cell_state_machine;
 pub mod writer;
+
+// Test modules
+#[cfg(test)]
+mod row_cell_state_machine_test;
+#[cfg(test)]
+mod oa_format_compliance_test;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
