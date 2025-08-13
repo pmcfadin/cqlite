@@ -2014,14 +2014,8 @@ impl SSTableReader {
 
     /// Parse value using exact schema type information
     fn parse_value_with_schema_type(&self, value_data: &[u8], data_type: &str) -> Result<Value> {
-        use crate::schema::CqlType;
-        // Schema-based parsing implementation would use crate::parser::types::parse_cql_value;
-
-        // Parse CQL type from schema
-        let cql_type = CqlType::parse(data_type)?;
-        
-        // Convert to ComparatorType for decoding
-        let comparator = ComparatorType::from_cql_type(&cql_type)?;
+        // Convert data type string directly to ComparatorType for decoding
+        let comparator = ComparatorType::from_data_type(data_type)?;
         
         // Use comparator to decode the value properly
         match &comparator {
@@ -2079,7 +2073,6 @@ impl SSTableReader {
                     // Parse UUID from 16 bytes
                     let uuid_bytes: [u8; 16] = value_data.try_into()
                         .map_err(|_| Error::corruption("Invalid UUID byte array"))?;
-                    let uuid = uuid::Uuid::from_bytes(uuid_bytes);
                     Ok(Value::Uuid(uuid_bytes))
                 } else {
                     Err(Error::corruption("Invalid UUID value length"))
