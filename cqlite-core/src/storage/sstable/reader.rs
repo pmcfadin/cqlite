@@ -20,11 +20,11 @@ use crate::{
     parser::{
         SSTableHeader, SSTableParser,
         header::CassandraVersion,
-        types::{CqlTypeId, parse_cql_value},
         vint::parse_vint_length,
     },
     platform::Platform,
-    types::TableId,
+    schema::{ClusteringColumn, Column, KeyColumn, TableSchema},
+    types::{ComparatorType, TableId},
 };
 
 use super::{
@@ -774,9 +774,9 @@ impl SSTableReader {
             buffer
         };
 
-        // Parse the value
-        let (_, value) = parse_cql_value(&data, CqlTypeId::Varchar) // Type should be determined from context
-            .map_err(|e| Error::corruption(format!("Failed to parse value: {:?}", e)))?;
+        // TODO: Parse value using schema-driven type information
+        // For now, preserve raw data until schema is available
+        let value = Value::Blob(data.to_vec());
 
         // Extract write time from value (placeholder - would need to be parsed from SSTable)
         let _write_time = std::time::SystemTime::now()
@@ -1443,7 +1443,14 @@ impl SSTableReader {
 
         // Process multiple rows in the block
         while offset < data.len() {
-            let mut state_machine = RowCellStateMachine::new();
+            // Create state machine with schema information if available
+            let mut state_machine = if let Some(schema) = self.get_table_schema() {
+                // TODO: Get comparator from schema registry (for now use default)
+                let comparator = ComparatorType::Blob; // Default bytes comparator
+                RowCellStateMachine::with_schema(schema, comparator)
+            } else {
+                RowCellStateMachine::new()
+            };
 
             // Process data starting from current offset
             let remaining_data = &data[offset..];
@@ -1851,7 +1858,7 @@ impl SSTableReader {
         Err(Error::corruption("Not clustering key format".to_string()))
     }
 
-    /// Enhanced column value parsing with Cassandra 5.0 type detection and collection support
+    /// Parse column value using schema-driven approach (no heuristics)
     fn parse_column_value_enhanced(
         &self,
         value_data: &[u8],
@@ -1862,241 +1869,65 @@ impl SSTableReader {
             return Ok(Value::Null);
         }
 
-        // Enhanced parsing for Cassandra 5.0 serialization format
-        // Check for cell metadata header in the first few bytes
-        let mut offset = 0;
-
-        // Skip cell flags if present (Cassandra 5.0 format)
-        if value_data.len() > 1 && (value_data[0] & 0x80) != 0 {
-            offset += 1; // Skip flags byte
-
-            // Skip timestamp if present (8 bytes)
-            if offset + 8 <= value_data.len() {
-                offset += 8;
-            }
-
-            // Skip TTL if present (4 bytes)
-            if offset < value_data.len()
-                && (value_data[0] & 0x40) != 0
-                && offset + 4 <= value_data.len()
-            {
-                offset += 4;
-            }
-        }
-
-        // Parse the actual value data
-        let actual_value_data = &value_data[offset..];
-
-        if actual_value_data.is_empty() {
-            return Ok(Value::Null);
-        }
-
-        // ENHANCEMENT: First try to parse as collection types using enhanced parsers
-        if let Ok(collection_value) = self.try_parse_collection_enhanced(actual_value_data) {
-            return Ok(collection_value);
-        }
-
-        // Schema-driven parsing using column metadata from SSTable header
-        // Use actual column type information instead of heuristic guessing
-        self.parse_value_with_schema_metadata(actual_value_data, _table_id, _key)
+        // TODO: Use schema information to determine actual type
+        // For now, preserve raw data without type guessing
+        Ok(Value::Blob(value_data.to_vec()))
     }
 
-    /// Parse value using schema metadata from SSTable header
-    /// This method uses actual column type information instead of guessing types
-    fn parse_value_with_schema_metadata(
-        &self,
-        data: &[u8],
-        _table_id: &TableId,
-        _key: &RowKey,
-    ) -> Result<Value> {
-        // TODO: Implement proper schema-driven parsing when column name/context is available
-        // For now, use header column metadata to inform parsing decisions
 
-        // Access column metadata from SSTable header
-        let _columns = &self.header.columns;
 
-        // Without specific column context, we cannot determine the exact type
-        // This is a limitation that needs to be addressed by passing column information
-        // to this parsing method in a future enhancement
 
-        // For safety, fall back to blob to preserve data integrity
-        // This avoids incorrect type assumptions that could corrupt data
-        Ok(Value::Blob(data.to_vec()))
+
+    /// Get table schema from header information
+    fn get_table_schema(&self) -> Option<TableSchema> {
+        // Try to construct a basic schema from header information
+        if self.header.columns.is_empty() {
+            return None;
+        }
+
+        let mut columns = Vec::new();
+        let mut partition_keys = Vec::new();
+        let mut clustering_keys = Vec::new();
+
+        // Convert header columns to schema columns
+        for col_info in self.header.columns.iter() {
+            let column = Column {
+                name: col_info.name.clone(),
+                data_type: col_info.column_type.clone(), // Use column_type field
+                nullable: true,
+                default: None,
+            };
+
+            // Check if this is a key column based on primary key and clustering status
+            if col_info.is_primary_key && !col_info.is_clustering {
+                // This is a partition key
+                partition_keys.push(KeyColumn {
+                    name: col_info.name.clone(),
+                    data_type: col_info.column_type.clone(),
+                    position: partition_keys.len(),
+                });
+            } else if col_info.is_clustering {
+                clustering_keys.push(ClusteringColumn {
+                    name: col_info.name.clone(),
+                    data_type: col_info.column_type.clone(),
+                    position: clustering_keys.len(),
+                    order: "ASC".to_string(),
+                });
+            }
+
+            columns.push(column);
+        }
+
+        Some(TableSchema {
+            keyspace: self.header.keyspace.clone(),
+            table: self.header.table_name.clone(),
+            partition_keys,
+            clustering_keys,
+            columns,
+            comments: HashMap::new(),
+        })
     }
 
-    /// Try parsing as collection types using enhanced Cassandra 5.0+ parsers
-    fn try_parse_collection_enhanced(&self, data: &[u8]) -> Result<Value> {
-        use crate::parser::types::{
-            parse_list_enhanced, parse_map_enhanced, parse_set_enhanced, parse_udt_enhanced,
-        };
-
-        if data.len() < 2 {
-            return Err(Error::corruption(
-                "Data too short for collection parsing".to_string(),
-            ));
-        }
-
-        // Check for collection type markers in Cassandra 5.0+ format
-        // Lists often start with element count (vint) followed by type info
-        if let Ok((_, list_value)) = parse_list_enhanced(data) {
-            if !matches!(list_value, Value::List(ref v) if v.is_empty()) {
-                println!(
-                    "Successfully parsed as enhanced list with {} elements",
-                    match &list_value {
-                        Value::List(v) => v.len(),
-                        _ => 0,
-                    }
-                );
-                return Ok(list_value);
-            }
-        }
-
-        // Try parsing as set
-        if let Ok((_, set_value)) = parse_set_enhanced(data) {
-            if !matches!(set_value, Value::Set(ref v) if v.is_empty()) {
-                println!(
-                    "Successfully parsed as enhanced set with {} elements",
-                    match &set_value {
-                        Value::Set(v) => v.len(),
-                        _ => 0,
-                    }
-                );
-                return Ok(set_value);
-            }
-        }
-
-        // Try parsing as map
-        if let Ok((_, map_value)) = parse_map_enhanced(data) {
-            if !matches!(map_value, Value::Map(ref v) if v.is_empty()) {
-                println!(
-                    "Successfully parsed as enhanced map with {} pairs",
-                    match &map_value {
-                        Value::Map(v) => v.len(),
-                        _ => 0,
-                    }
-                );
-                return Ok(map_value);
-            }
-        }
-
-        // Try parsing as UDT
-        if let Ok((_, udt_value)) = parse_udt_enhanced(data) {
-            println!(
-                "Successfully parsed as enhanced UDT: {}",
-                match &udt_value {
-                    Value::Udt(udt) => format!("{}.{}", udt.keyspace, udt.type_name),
-                    _ => "unknown".to_string(),
-                }
-            );
-            return Ok(udt_value);
-        }
-
-        Err(Error::corruption(
-            "Could not parse as any collection type".to_string(),
-        ))
-    }
-
-    /// Parse CQL value with fallback handling for robust parsing
-    fn parse_cql_value_with_fallback(
-        &self,
-        data: &[u8],
-        type_id: CqlTypeId,
-    ) -> Result<(usize, Value)> {
-        // Try the primary parsing first
-        match parse_cql_value(data, type_id) {
-            Ok((remaining, value)) => {
-                let consumed = data.len() - remaining.len();
-                Ok((consumed, value))
-            }
-            Err(_) => {
-                // Fallback strategies based on type
-                match type_id {
-                    CqlTypeId::Varchar | CqlTypeId::Ascii => {
-                        // For text types, try different approaches
-                        self.parse_text_field_robust(data)
-                    }
-                    CqlTypeId::Uuid => {
-                        // For UUID, expect exactly 16 bytes without validation
-                        if data.len() >= 16 {
-                            let uuid_bytes = &data[..16];
-                            let mut uuid_array = [0u8; 16];
-                            uuid_array.copy_from_slice(uuid_bytes);
-                            Ok((16, Value::Uuid(uuid_array)))
-                        } else {
-                            Err(Error::corruption(
-                                "Insufficient data for UUID parsing".to_string(),
-                            ))
-                        }
-                    }
-                    CqlTypeId::Timestamp => {
-                        // For timestamps, validate the value makes sense
-                        if data.len() >= 8 {
-                            let timestamp = i64::from_be_bytes([
-                                data[0], data[1], data[2], data[3], data[4], data[5], data[6],
-                                data[7],
-                            ]);
-                            // Convert from milliseconds to microseconds if needed
-                            let timestamp_micros = if timestamp < 1_000_000_000_000 {
-                                timestamp * 1000 // Convert ms to µs
-                            } else {
-                                timestamp // Already in µs
-                            };
-                            Ok((8, Value::Timestamp(timestamp_micros)))
-                        } else {
-                            Err(Error::corruption(
-                                "Insufficient data for timestamp parsing".to_string(),
-                            ))
-                        }
-                    }
-                    _ => {
-                        // For other types, fall back to blob
-                        Ok((data.len(), Value::Blob(data.to_vec())))
-                    }
-                }
-            }
-        }
-    }
-
-    /// Robust text field parsing with multiple strategies
-    fn parse_text_field_robust(&self, data: &[u8]) -> Result<(usize, Value)> {
-        // Strategy 1: Check if data starts with a length prefix
-        if data.len() > 4 {
-            // Try parsing as length-prefixed string (4-byte length + data)
-            let length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-            if length > 0 && length <= data.len() - 4 && length < 1_000_000 {
-                // Reasonable size limit
-                let text_data = &data[4..4 + length];
-                if let Ok(text) = std::str::from_utf8(text_data) {
-                    return Ok((4 + length, Value::Text(text.to_string())));
-                }
-            }
-        }
-
-        // Strategy 2: Check if data starts with a vint length prefix
-        if let Ok((remaining, length)) = parse_vint_length(data) {
-            let prefix_len = data.len() - remaining.len();
-            if length > 0 && length <= remaining.len() && length < 1_000_000 {
-                let text_data = &remaining[..length];
-                if let Ok(text) = std::str::from_utf8(text_data) {
-                    return Ok((prefix_len + length, Value::Text(text.to_string())));
-                }
-            }
-        }
-
-        // Strategy 3: Try parsing as raw UTF-8 (null-terminated or full data)
-        if let Ok(text) = std::str::from_utf8(data) {
-            // Check for null termination
-            if let Some(null_pos) = text.find('\0') {
-                let clean_text = &text[..null_pos];
-                return Ok((null_pos + 1, Value::Text(clean_text.to_string())));
-            } else {
-                return Ok((data.len(), Value::Text(text.to_string())));
-            }
-        }
-
-        // Strategy 4: Fall back to blob if text parsing fails
-        Ok((data.len(), Value::Blob(data.to_vec())))
-    }
 
     /// Extract generation number from SSTable file path with enhanced pattern matching
     fn extract_generation_from_path(path: &Path) -> u64 {

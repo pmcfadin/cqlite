@@ -229,14 +229,14 @@ pub mod utils {
         let mut result = String::new();
         for (i, chunk) in slice.chunks(16).enumerate() {
             let addr = start + i * 16;
-            result.push_str(&format!("{:08x}: ", addr));
+            result.push_str(&format!("{addr:08x}: "));
 
             // Hex bytes
             for (j, byte) in chunk.iter().enumerate() {
                 if j == 8 {
                     result.push(' ');
                 }
-                result.push_str(&format!("{:02x} ", byte));
+                result.push_str(&format!("{byte:02x} "));
             }
 
             // Padding for short lines

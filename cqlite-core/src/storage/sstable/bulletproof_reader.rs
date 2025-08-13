@@ -354,36 +354,12 @@ impl BulletproofReader {
             partition_idx, key_length, row_count
         );
 
-        // For now, create a simple entry with the partition key
-        let key_str = if key_data.len() == 16 {
-            // Format as UUID if it's 16 bytes
-            format!(
-                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                key_data[0],
-                key_data[1],
-                key_data[2],
-                key_data[3],
-                key_data[4],
-                key_data[5],
-                key_data[6],
-                key_data[7],
-                key_data[8],
-                key_data[9],
-                key_data[10],
-                key_data[11],
-                key_data[12],
-                key_data[13],
-                key_data[14],
-                key_data[15]
-            )
-        } else {
-            // Format as hex string for other lengths
-            key_data
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join("")
-        };
+        // Format key data as hex string without type assumptions
+        let key_str = key_data
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("");
 
         // Skip row data for now (would need more complex parsing)
         // For each row, we'd need to parse clustering keys, column data, etc.

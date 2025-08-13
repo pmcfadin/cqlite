@@ -1,7 +1,7 @@
 //! Integration test for streaming performance optimizations
 //!
 //! This binary tests the integration of all streaming performance components
-//! with real SSTable files from the test environment.
+//! with real `SSTable` files from the test environment.
 
 use std::env;
 use std::path::PathBuf;
@@ -79,7 +79,7 @@ async fn test_compression_algorithm_selection() -> Result<(), Box<dyn std::error
     ];
 
     for (name, data) in test_cases {
-        println!("    🔍 Testing with {}", name);
+        println!("    🔍 Testing with {name}");
 
         let speed_choice = Compression::select_optimal_algorithm(&data, CompressionPriority::Speed);
         let balanced_choice =
@@ -87,8 +87,7 @@ async fn test_compression_algorithm_selection() -> Result<(), Box<dyn std::error
         let ratio_choice = Compression::select_optimal_algorithm(&data, CompressionPriority::Ratio);
 
         println!(
-            "      Speed: {:?}, Balanced: {:?}, Ratio: {:?}",
-            speed_choice, balanced_choice, ratio_choice
+            "      Speed: {speed_choice:?}, Balanced: {balanced_choice:?}, Ratio: {ratio_choice:?}"
         );
 
         // Verify that algorithm selection makes sense
@@ -153,7 +152,7 @@ async fn test_streaming_reader_performance(
                         );
                     }
                     Err(e) => {
-                        println!("    ⚠️  Streaming scan failed: {}", e);
+                        println!("    ⚠️  Streaming scan failed: {e}");
                     }
                 }
 
@@ -165,7 +164,7 @@ async fn test_streaming_reader_performance(
                     stats.buffer_pool_utilization * 100.0
                 );
 
-                println!("    ✅ Streaming reader opened in {:?}", open_time);
+                println!("    ✅ Streaming reader opened in {open_time:?}");
                 break;
             }
         }
@@ -265,7 +264,7 @@ async fn test_large_file_handling(
 
                 if largest_file
                     .as_ref()
-                    .map_or(true, |(_, size)| file_size > *size)
+                    .is_none_or(|(_, size)| file_size > *size)
                 {
                     largest_file = Some((data_file, file_size));
                 }
@@ -285,7 +284,7 @@ async fn test_large_file_handling(
         let reader = StreamingSSTableReader::open(&largest_file_path, config, platform).await?;
         let open_time = start_time.elapsed();
 
-        println!("    ✅ Large file opened in {:?}", open_time);
+        println!("    ✅ Large file opened in {open_time:?}");
 
         // Test memory usage stays within bounds
         let stats = reader.get_streaming_stats().await?;
@@ -317,7 +316,7 @@ async fn test_large_file_handling(
                 println!("    ✅ Streaming scan completed: {} results", results.len());
             }
             Err(e) => {
-                println!("    ⚠️  Streaming scan failed: {}", e);
+                println!("    ⚠️  Streaming scan failed: {e}");
             }
         }
     } else {
@@ -357,10 +356,7 @@ async fn test_real_data_integration(
                 .sum::<f64>()
                 / streaming_results.len() as f64;
 
-            println!(
-                "  📊 Average streaming performance: {:.2} ops/sec",
-                avg_ops_per_sec
-            );
+            println!("  📊 Average streaming performance: {avg_ops_per_sec:.2} ops/sec");
 
             if avg_ops_per_sec > 0.0 {
                 println!("  ✅ Streaming reader shows positive performance");

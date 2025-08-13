@@ -35,7 +35,14 @@ pub struct BaselineResult {
     pub performance_ratio: f64, // measured/target
 }
 
+impl Default for PerformanceBaselineRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceBaselineRunner {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
@@ -64,7 +71,7 @@ impl PerformanceBaselineRunner {
         Ok(self.generate_validation_results())
     }
 
-    /// Validate VInt performance (building block for parsing)
+    /// Validate `VInt` performance (building block for parsing)
     fn validate_vint_performance(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         println!("🔢 Testing VInt Performance (Critical for parsing speed)");
 
@@ -92,10 +99,10 @@ impl PerformanceBaselineRunner {
         let decoding_mb_per_sec =
             (total_bytes as f64) / (decoding_time.as_secs_f64() * 1024.0 * 1024.0);
 
-        println!("  Encoding: {:.2} MB/s", encoding_mb_per_sec);
-        println!("  Decoding: {:.2} MB/s", decoding_mb_per_sec);
+        println!("  Encoding: {encoding_mb_per_sec:.2} MB/s");
+        println!("  Decoding: {decoding_mb_per_sec:.2} MB/s");
 
-        let avg_vint_performance = (encoding_mb_per_sec + decoding_mb_per_sec) / 2.0;
+        let avg_vint_performance = f64::midpoint(encoding_mb_per_sec, decoding_mb_per_sec);
 
         // Record measurement in monitoring system
         self.monitor
@@ -112,10 +119,7 @@ impl PerformanceBaselineRunner {
             performance_ratio: avg_vint_performance / 50.0,
         });
 
-        println!(
-            "  📊 Average VInt Performance: {:.2} MB/s",
-            avg_vint_performance
-        );
+        println!("  📊 Average VInt Performance: {avg_vint_performance:.2} MB/s");
         println!();
 
         Ok(())
@@ -135,7 +139,7 @@ impl PerformanceBaselineRunner {
         let mut test_count = 0;
 
         for (collection_name, test_value) in collection_tests {
-            println!("  Testing {}...", collection_name);
+            println!("  Testing {collection_name}...");
 
             let iterations = 1000;
             let start = Instant::now();
@@ -145,15 +149,15 @@ impl PerformanceBaselineRunner {
             }
 
             let elapsed = start.elapsed();
-            let ops_per_sec = iterations as f64 / elapsed.as_secs_f64();
+            let ops_per_sec = f64::from(iterations) / elapsed.as_secs_f64();
 
-            println!("    {} -> {:.0} ops/sec", collection_name, ops_per_sec);
+            println!("    {collection_name} -> {ops_per_sec:.0} ops/sec");
 
             total_ops_per_sec += ops_per_sec;
             test_count += 1;
         }
 
-        let avg_collection_ops_per_sec = total_ops_per_sec / test_count as f64;
+        let avg_collection_ops_per_sec = total_ops_per_sec / f64::from(test_count);
 
         self.results.push(BaselineResult {
             test_name: "Collection Performance".to_string(),
@@ -164,10 +168,7 @@ impl PerformanceBaselineRunner {
             performance_ratio: avg_collection_ops_per_sec / 5_000.0,
         });
 
-        println!(
-            "  📊 Average Collection Performance: {:.0} ops/sec",
-            avg_collection_ops_per_sec
-        );
+        println!("  📊 Average Collection Performance: {avg_collection_ops_per_sec:.0} ops/sec");
         println!();
 
         Ok(())
@@ -186,7 +187,7 @@ impl PerformanceBaselineRunner {
         let mut max_memory_mb: f64 = 0.0;
 
         for (record_count, name) in dataset_sizes {
-            println!("  Testing {}...", name);
+            println!("  Testing {name}...");
 
             let initial_memory = estimate_memory_usage_mb();
 
@@ -194,8 +195,7 @@ impl PerformanceBaselineRunner {
             let mut test_data = Vec::new();
             for i in 0..record_count {
                 let value = Value::Text(format!(
-                    "memory_test_value_{}_with_substantial_content_to_simulate_realistic_cassandra_data_usage_patterns",
-                    i
+                    "memory_test_value_{i}_with_substantial_content_to_simulate_realistic_cassandra_data_usage_patterns"
                 ));
                 test_data.push(value);
             }
@@ -203,7 +203,7 @@ impl PerformanceBaselineRunner {
             let peak_memory = estimate_memory_usage_mb();
             let memory_used = peak_memory - initial_memory;
 
-            println!("    {} -> {:.2} MB used", name, memory_used);
+            println!("    {name} -> {memory_used:.2} MB used");
 
             max_memory_mb = max_memory_mb.max(memory_used);
 
@@ -223,7 +223,7 @@ impl PerformanceBaselineRunner {
             performance_ratio: max_memory_mb / 128.0,
         });
 
-        println!("  📊 Peak Memory Usage: {:.2} MB", max_memory_mb);
+        println!("  📊 Peak Memory Usage: {max_memory_mb:.2} MB");
         println!();
 
         Ok(())
@@ -318,7 +318,7 @@ fn create_test_list(size: usize) -> Value {
 fn create_test_map(size: usize) -> Value {
     Value::Map(
         (0..size)
-            .map(|i| (Value::Text(format!("key_{}", i)), Value::Integer(i as i32)))
+            .map(|i| (Value::Text(format!("key_{i}")), Value::Integer(i as i32)))
             .collect(),
     )
 }
@@ -326,7 +326,7 @@ fn create_test_map(size: usize) -> Value {
 fn create_test_set(size: usize) -> Value {
     Value::Set(
         (0..size)
-            .map(|i| Value::Text(format!("item_{}", i)))
+            .map(|i| Value::Text(format!("item_{i}")))
             .collect(),
     )
 }
@@ -335,7 +335,7 @@ fn estimate_memory_usage_mb() -> f64 {
     // Simplified memory usage estimation
     // In production, this would use actual memory profiling tools
     let pid = std::process::id();
-    (pid as f64) / 1000.0 + ((pid % 100) as f64) // Simulate deterministic "random" based on PID
+    f64::from(pid) / 1000.0 + f64::from(pid % 100) // Simulate deterministic "random" based on PID
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -365,7 +365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !results.targets_met.is_empty() {
         println!("✅ Targets Met:");
         for target in &results.targets_met {
-            println!("  {}", target);
+            println!("  {target}");
         }
         println!();
     }
@@ -373,7 +373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !results.targets_missed.is_empty() {
         println!("❌ Targets Missed:");
         for target in &results.targets_missed {
-            println!("  {}", target);
+            println!("  {target}");
         }
         println!();
     }
@@ -381,7 +381,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !results.recommendations.is_empty() {
         println!("💡 Recommendations:");
         for recommendation in &results.recommendations {
-            println!("  {}", recommendation);
+            println!("  {recommendation}");
         }
         println!();
     }

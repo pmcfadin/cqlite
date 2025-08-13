@@ -1,6 +1,6 @@
 //! Format deviation detection for Cassandra 5+ SSTable validation
 
-use crate::{DeviationDetector, SSTableFileType, ValidationError, ValidationResult};
+use crate::{DeviationDetector, SSTableFileType, ValidationError};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -39,7 +39,6 @@ impl FormatDeviationDetector {
     }
 
     pub fn add_reference_pattern(&mut self, file_type: SSTableFileType, pattern: Vec<u8>) {
-        use std::collections::HashMap;
         self.reference_patterns.insert(file_type, pattern);
     }
 
@@ -54,7 +53,7 @@ impl FormatDeviationDetector {
                 || magic == crate::format_constants::STATISTICS_MAGIC;
 
             if !is_known_magic {
-                deviations.push(format!("Unknown magic number: {:#x}", magic));
+                deviations.push(format!("Unknown magic number: {magic:#x}"));
             }
         }
 
@@ -88,7 +87,7 @@ impl FormatDeviationDetector {
                 deviations.extend(self.detect_index_deviations(&data)?);
             }
             _ => {
-                deviations.push(format!("Unknown file type pattern: {:?}", file_type));
+                deviations.push(format!("Unknown file type pattern: {file_type:?}"));
             }
         }
 
@@ -126,7 +125,7 @@ impl FormatDeviationDetector {
         }
 
         // Check for unusual patterns
-        if self.has_unusual_byte_patterns(&data) {
+        if self.has_unusual_byte_patterns(data) {
             deviations.push("Unusual byte patterns detected".to_string());
         }
 
@@ -144,7 +143,7 @@ impl FormatDeviationDetector {
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             if magic != crate::format_constants::STATISTICS_MAGIC {
-                deviations.push(format!("Invalid Statistics.db magic: {:#x}", magic));
+                deviations.push(format!("Invalid Statistics.db magic: {magic:#x}"));
             }
         }
 
@@ -166,7 +165,7 @@ impl FormatDeviationDetector {
         if data.len() >= 4 {
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             if magic != crate::format_constants::BTI_FORMAT_DA_MAGIC {
-                deviations.push(format!("Invalid BTI magic: {:#x}", magic));
+                deviations.push(format!("Invalid BTI magic: {magic:#x}"));
             }
         }
 
@@ -176,11 +175,11 @@ impl FormatDeviationDetector {
             if block_size == 0 {
                 deviations.push("BTI block size is zero".to_string());
             } else if block_size > 1024 * 1024 {
-                deviations.push(format!("BTI block size too large: {}", block_size));
+                deviations.push(format!("BTI block size too large: {block_size}"));
             } else if !block_size.is_power_of_two()
                 && block_size != crate::format_constants::BTI_DEFAULT_BLOCK_SIZE
             {
-                deviations.push(format!("Non-standard BTI block size: {}", block_size));
+                deviations.push(format!("Non-standard BTI block size: {block_size}"));
             }
         }
 
@@ -278,7 +277,7 @@ impl DeviationDetector for FormatDeviationDetector {
         }
 
         if diff_count > 10 {
-            differences.push(format!("Total byte differences: {}", diff_count));
+            differences.push(format!("Total byte differences: {diff_count}"));
         }
 
         Ok(differences)
@@ -295,7 +294,7 @@ impl DeviationDetector for FormatDeviationDetector {
                 || magic == crate::format_constants::STATISTICS_MAGIC;
 
             if !is_known_magic {
-                deviations.push(format!("Unknown magic number: {:#x}", magic));
+                deviations.push(format!("Unknown magic number: {magic:#x}"));
             }
         }
 

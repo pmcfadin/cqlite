@@ -72,7 +72,7 @@ async fn run_proof_of_concept_demo(
     let db = Database::open(db_path, config).await?;
     let setup_time_ms = start.elapsed().as_millis() as u64;
 
-    println!("   ✓ Database initialized in {}ms", setup_time_ms);
+    println!("   ✓ Database initialized in {setup_time_ms}ms");
 
     // Step 1: Create tables with complex types
     let start = Instant::now();
@@ -519,10 +519,7 @@ async fn execute_complex_queries(
             }
             Err(e) => {
                 let execution_time = start.elapsed().as_millis() as u64;
-                println!(
-                    "   ✗ Query '{}' failed in {}ms: {}",
-                    query, execution_time, e
-                );
+                println!("   ✗ Query '{query}' failed in {execution_time}ms: {e}");
 
                 results.push(QueryResult {
                     query: query.to_string(),
@@ -569,17 +566,17 @@ fn print_performance_metrics(result: &ProofOfConceptResult) {
     println!("💾 Memory Usage: {} KB", result.memory_usage_kb);
 
     let total_time = result.setup_time_ms + result.insert_time_ms + result.query_time_ms;
-    println!("⚡ Total Time: {}ms", total_time);
+    println!("⚡ Total Time: {total_time}ms");
 
     if result.total_records > 0 {
         let records_per_second =
             (result.total_records as f64) / (result.insert_time_ms as f64 / 1000.0);
-        println!("📈 Insert Rate: {:.1} records/second", records_per_second);
+        println!("📈 Insert Rate: {records_per_second:.1} records/second");
     }
 
     if !result.queries_executed.is_empty() {
         let avg_query_time = result.query_time_ms as f64 / result.queries_executed.len() as f64;
-        println!("📊 Avg Query Time: {:.1}ms", avg_query_time);
+        println!("📊 Avg Query Time: {avg_query_time:.1}ms");
     }
 }
 
@@ -591,7 +588,7 @@ fn generate_proof_report(result: &ProofOfConceptResult) {
     // Complex types support
     println!("🔧 Complex Types Tested:");
     for complex_type in &result.complex_types_tested {
-        println!("   ✓ {}", complex_type);
+        println!("   ✓ {complex_type}");
     }
 
     // Query execution results
@@ -637,7 +634,7 @@ fn generate_proof_report(result: &ProofOfConceptResult) {
 
     if result.total_records > 0 && result.insert_time_ms > 0 {
         let throughput = (result.total_records as f64) / (result.insert_time_ms as f64 / 1000.0);
-        println!("   • Insert throughput: {:.1} records/second", throughput);
+        println!("   • Insert throughput: {throughput:.1} records/second");
     }
 
     // Final validation

@@ -4,6 +4,7 @@
 //! which contain the metadata needed to decompress chunks from compressed Data.db files.
 
 use crate::{Error, Result};
+use crc32fast::Hasher;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 /// CompressionInfo.db file content parsed from binary format
@@ -17,10 +18,12 @@ pub struct CompressionInfo {
     pub data_length: u64,
     /// List of compressed chunk offsets in Data.db file
     pub chunk_offsets: Vec<u64>,
+    /// CRC32 checksum of the metadata (if present)
+    pub crc32: Option<u32>,
 }
 
 impl CompressionInfo {
-    /// Parse CompressionInfo.db file from binary data
+    /// Parse CompressionInfo.db file from binary data with CRC validation
     ///
     /// Binary format (observed from hex analysis):
     /// - 2 bytes: algorithm name length (big-endian)
@@ -29,8 +32,19 @@ impl CompressionInfo {
     /// - 8 bytes: total data length
     /// - 4 bytes: number of chunks
     /// - N * 8 bytes: chunk offsets (8 bytes each)
+    /// - 4 bytes: CRC32 checksum (optional, at end of file)
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(data);
+        let mut hasher = Hasher::new();
+
+        // Calculate CRC32 of all data except the last 4 bytes (which might be the CRC itself)
+        let data_for_crc = if data.len() >= 4 {
+            &data[..data.len() - 4]
+        } else {
+            data
+        };
+        hasher.update(data_for_crc);
+        let calculated_crc = hasher.finalize();
 
         // Parse algorithm name length (2 bytes, big-endian)
         let mut len_bytes = [0u8; 2];
@@ -102,11 +116,32 @@ impl CompressionInfo {
             chunk_offsets.push(offset);
         }
 
+        // Check if there's a CRC32 at the end of the file
+        let mut crc32 = None;
+        let remaining = data.len() - cursor.position() as usize;
+        if remaining == 4 {
+            let mut crc_bytes = [0u8; 4];
+            cursor
+                .read_exact(&mut crc_bytes)
+                .map_err(|e| Error::InvalidFormat(format!("Failed to read CRC32: {}", e)))?;
+            let stored_crc = u32::from_be_bytes(crc_bytes);
+
+            // Validate CRC
+            if stored_crc != calculated_crc {
+                return Err(Error::InvalidFormat(format!(
+                    "CRC32 mismatch: stored={:08x}, calculated={:08x}",
+                    stored_crc, calculated_crc
+                )));
+            }
+            crc32 = Some(stored_crc);
+        }
+
         Ok(CompressionInfo {
             algorithm,
             chunk_length,
             data_length,
             chunk_offsets,
+            crc32,
         })
     }
 
@@ -159,6 +194,7 @@ impl CompressionInfo {
             chunk_length,
             data_length,
             chunk_offsets,
+            crc32: None,
         })
     }
 
@@ -221,7 +257,7 @@ impl CompressionInfo {
         }
     }
 
-    /// Validate the compression info structure
+    /// Validate the compression info structure with optional CRC check
     pub fn validate(&self) -> Result<()> {
         if self.algorithm.is_empty() {
             return Err(Error::InvalidFormat(
@@ -256,6 +292,24 @@ impl CompressionInfo {
         }
 
         Ok(())
+    }
+
+    /// Parse with strict CRC validation requirement
+    pub fn parse_with_crc_required(data: &[u8]) -> Result<Self> {
+        let info = Self::parse(data)?;
+        if info.crc32.is_none() {
+            return Err(Error::InvalidFormat(
+                "CRC32 checksum required but not found".to_string(),
+            ));
+        }
+        Ok(info)
+    }
+
+    /// Calculate CRC32 for given data
+    pub fn calculate_crc32(data: &[u8]) -> u32 {
+        let mut hasher = Hasher::new();
+        hasher.update(data);
+        hasher.finalize()
     }
 
     /// Create a debug representation showing the hex dump analysis
@@ -324,6 +378,80 @@ mod tests {
         assert_eq!(info.algorithm, "LZ4Compressor");
         assert_eq!(info.chunk_length, 16384);
         assert_eq!(info.chunk_offsets.len(), 1);
+        assert_eq!(info.crc32, None); // No CRC in this test data
+    }
+
+    #[test]
+    fn test_parse_compression_info_with_crc() {
+        // Data with CRC32 at the end
+        let mut data = vec![
+            0x00, 0x0d, // algorithm name length: 13
+            // "LZ4Compressor"
+            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72, 0x00,
+            0x00, 0x00, // padding
+            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // data length: 4096
+            0x00, 0x00, 0x00, 0x01, // chunk count: 1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // chunk offset: 0
+        ];
+
+        // Calculate and append CRC32
+        let crc = CompressionInfo::calculate_crc32(&data);
+        data.extend_from_slice(&crc.to_be_bytes());
+
+        let info = CompressionInfo::parse(&data).unwrap();
+        assert_eq!(info.algorithm, "LZ4Compressor");
+        assert_eq!(info.chunk_length, 16384);
+        assert_eq!(info.data_length, 4096);
+        assert_eq!(info.chunk_offsets.len(), 1);
+        assert_eq!(info.crc32, Some(crc));
+    }
+
+    #[test]
+    fn test_parse_with_invalid_crc() {
+        let mut data = vec![
+            0x00, 0x0d, // algorithm name length: 13
+            // "LZ4Compressor"
+            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72, 0x00,
+            0x00, 0x00, // padding
+            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // data length: 4096
+            0x00, 0x00, 0x00, 0x01, // chunk count: 1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // chunk offset: 0
+        ];
+
+        // Append invalid CRC32
+        data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        let result = CompressionInfo::parse(&data);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            assert!(error_msg.contains("CRC32 mismatch"));
+        }
+    }
+
+    #[test]
+    fn test_parse_with_crc_required() {
+        // Data without CRC
+        let data = vec![
+            0x00, 0x0d, // algorithm name length: 13
+            // "LZ4Compressor"
+            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72, 0x00,
+            0x00, 0x00, // padding
+            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // data length: 0
+            0x00, 0x00, 0x00, 0x01, // chunk count: 1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // chunk offset: 0
+        ];
+
+        // Should fail when CRC is required
+        let result = CompressionInfo::parse_with_crc_required(&data);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            assert!(error_msg.contains("CRC32 checksum required"));
+        }
     }
 
     #[test]
@@ -333,6 +461,7 @@ mod tests {
             chunk_length: 16384,
             data_length: 32768,
             chunk_offsets: vec![0, 8192],
+            crc32: None,
         };
 
         assert_eq!(info.chunk_for_offset(0), 0);
@@ -354,6 +483,7 @@ mod tests {
             chunk_length: 16384,
             data_length: 32768,
             chunk_offsets: vec![0, 8192],
+            crc32: Some(0x12345678),
         };
 
         assert!(valid_info.validate().is_ok());
@@ -363,6 +493,7 @@ mod tests {
             chunk_length: 0,
             data_length: 0,
             chunk_offsets: vec![],
+            crc32: None,
         };
 
         assert!(invalid_info.validate().is_err());

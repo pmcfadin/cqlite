@@ -11,8 +11,12 @@
 
 use crate::{
     error::{Error, Result},
-    parser::vint::parse_vint_length,
-    types::{TombstoneType, Value},
+    parser::{
+        types::{parse_cql_value, CqlTypeId},
+        vint::parse_vint_length,
+    },
+    schema::TableSchema,
+    types::{ComparatorType, TombstoneType, Value},
 };
 use std::collections::HashMap;
 
@@ -119,6 +123,10 @@ pub struct RowCellStateMachine {
     parsed_row: Option<ParsedRow>,
     /// Error message if parsing failed
     error_message: Option<String>,
+    /// Table schema for type-aware parsing
+    schema: Option<TableSchema>,
+    /// Comparator type for key decoding
+    comparator: Option<ComparatorType>,
 }
 
 impl RowCellStateMachine {
@@ -129,6 +137,20 @@ impl RowCellStateMachine {
             offset: 0,
             parsed_row: None,
             error_message: None,
+            schema: None,
+            comparator: None,
+        }
+    }
+
+    /// Create a new state machine with schema information
+    pub fn with_schema(schema: TableSchema, comparator: ComparatorType) -> Self {
+        Self {
+            state: State::Header,
+            offset: 0,
+            parsed_row: None,
+            error_message: None,
+            schema: Some(schema),
+            comparator: Some(comparator),
         }
     }
 
@@ -732,13 +754,35 @@ impl RowCellStateMachine {
             ));
         }
 
-        // Parse the actual value
-        // For now, treat as blob. In a full implementation, we would use schema information
-        // to determine the correct type and parse accordingly
+        // Parse the actual value using schema information if available
         let value = if value_len == 0 {
             Value::Null
         } else {
-            Value::Blob(remaining[..value_len].to_vec())
+            let value_data = &remaining[..value_len];
+            // Try to use schema information to determine the correct type
+            if let Some(ref schema) = self.schema {
+                // Look up column type in schema
+                if let Some(column) = schema.columns.iter().find(|c| c.name == column_name) {
+                    // Parse using the column's data type
+                    if let Ok(type_id) = self.data_type_to_cql_type_id(&column.data_type) {
+                        if let Ok((_, parsed_value)) = parse_cql_value(value_data, type_id) {
+                            parsed_value
+                        } else {
+                            // Fall back to blob if parsing fails
+                            Value::Blob(value_data.to_vec())
+                        }
+                    } else {
+                        // Unknown type, preserve as blob
+                        Value::Blob(value_data.to_vec())
+                    }
+                } else {
+                    // Column not found in schema, preserve as blob
+                    Value::Blob(value_data.to_vec())
+                }
+            } else {
+                // No schema available, preserve as blob
+                Value::Blob(value_data.to_vec())
+            }
         };
 
         offset += value_len;
@@ -760,6 +804,41 @@ impl RowCellStateMachine {
         self.offset = 0;
         self.parsed_row = None;
         self.error_message = None;
+    }
+
+    /// Convert data type string to CQL type ID
+    fn data_type_to_cql_type_id(&self, data_type: &str) -> Result<CqlTypeId> {
+        match data_type.to_lowercase().as_str() {
+            "ascii" => Ok(CqlTypeId::Ascii),
+            "bigint" => Ok(CqlTypeId::BigInt),
+            "blob" => Ok(CqlTypeId::Blob),
+            "boolean" => Ok(CqlTypeId::Boolean),
+            "counter" => Ok(CqlTypeId::Counter),
+            "date" => Ok(CqlTypeId::Date),
+            "decimal" => Ok(CqlTypeId::Decimal),
+            "double" => Ok(CqlTypeId::Double),
+            "float" => Ok(CqlTypeId::Float),
+            "int" => Ok(CqlTypeId::Int),
+            "inet" => Ok(CqlTypeId::Inet),
+            "smallint" => Ok(CqlTypeId::Smallint),
+            "text" | "varchar" => Ok(CqlTypeId::Varchar),
+            "time" => Ok(CqlTypeId::Time),
+            "timestamp" => Ok(CqlTypeId::Timestamp),
+            "timeuuid" => Ok(CqlTypeId::Timeuuid),
+            "tinyint" => Ok(CqlTypeId::Tinyint),
+            "uuid" => Ok(CqlTypeId::Uuid),
+            "varint" => Ok(CqlTypeId::Varint),
+            _ if data_type.starts_with("list<") => Ok(CqlTypeId::List),
+            _ if data_type.starts_with("set<") => Ok(CqlTypeId::Set),
+            _ if data_type.starts_with("map<") => Ok(CqlTypeId::Map),
+            _ if data_type.starts_with("tuple<") => Ok(CqlTypeId::Tuple),
+            _ if data_type.starts_with("frozen<") => {
+                // Parse the inner type
+                let inner = data_type.trim_start_matches("frozen<").trim_end_matches('>');
+                self.data_type_to_cql_type_id(inner)
+            }
+            _ => Err(Error::corruption(format!("Unknown data type: {}", data_type))),
+        }
     }
 }
 

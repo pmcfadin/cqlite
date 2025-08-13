@@ -149,99 +149,11 @@ impl Compression {
             CompressionAlgorithm::Lz4 => {
                 #[cfg(feature = "lz4")]
                 {
-                    use lz4_flex::{decompress, decompress_size_prepended};
+                    use lz4_flex::decompress_size_prepended;
 
-                    // Debug: Log the first 64 bytes to understand the format
-                    println!("LZ4 data analysis ({} bytes):", data.len());
-                    if data.len() >= 16 {
-                        println!("First 16 bytes: {:02x?}", &data[..16]);
-                    }
-
-                    // For Cassandra 5.0, try different approaches based on data analysis
-
-                    // Method 1: Try standard LZ4 size-prepended format
-                    if let Ok(result) = decompress_size_prepended(data) {
-                        println!(
-                            "LZ4 success: size-prepended format, {} bytes decompressed",
-                            result.len()
-                        );
-                        return Ok(result);
-                    }
-
-                    // Method 2: Try Cassandra's LZ4 format with 4-byte size prefix (big-endian)
-                    if data.len() >= 4 {
-                        let expected_size_be =
-                            u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-                        if expected_size_be > 0 && expected_size_be <= 64 * 1024 * 1024 {
-                            // Max 64MB reasonable
-                            if let Ok(result) = decompress(&data[4..], expected_size_be) {
-                                println!(
-                                    "LZ4 success: big-endian size prefix ({}), {} bytes decompressed",
-                                    expected_size_be,
-                                    result.len()
-                                );
-                                return Ok(result);
-                            }
-                        }
-
-                        // Method 3: Try little-endian size prefix
-                        let expected_size_le =
-                            u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-                        if expected_size_le > 0 && expected_size_le <= 64 * 1024 * 1024 {
-                            if let Ok(result) = decompress(&data[4..], expected_size_le) {
-                                println!(
-                                    "LZ4 success: little-endian size prefix ({}), {} bytes decompressed",
-                                    expected_size_le,
-                                    result.len()
-                                );
-                                return Ok(result);
-                            }
-                        }
-                    }
-
-                    // Method 4: Try no size prefix with various estimated sizes
-                    // This is more exploratory for Cassandra 5.0
-                    let estimated_sizes = [
-                        data.len() * 2, // 2x compressed size
-                        data.len() * 4, // 4x compressed size
-                        64 * 1024,      // 64KB
-                        256 * 1024,     // 256KB
-                        1024 * 1024,    // 1MB
-                    ];
-
-                    for &estimated_size in &estimated_sizes {
-                        if let Ok(result) = decompress(data, estimated_size) {
-                            println!(
-                                "LZ4 success: no prefix with estimated size {}, {} bytes decompressed",
-                                estimated_size,
-                                result.len()
-                            );
-                            return Ok(result);
-                        }
-                    }
-
-                    // Method 5: Try to parse as raw LZ4 block format
-                    // Cassandra 5.0 might use raw LZ4 blocks without size info
-                    println!("All LZ4 decompression attempts failed. Trying advanced methods...");
-
-                    // Try very large buffer to handle any size
-                    match decompress(data, 16 * 1024 * 1024) {
-                        // 16MB max
-                        Ok(result) => {
-                            println!(
-                                "LZ4 success: large buffer method, {} bytes decompressed",
-                                result.len()
-                            );
-                            Ok(result)
-                        }
-                        Err(e) => {
-                            println!("LZ4 final error: {}", e);
-                            Err(Error::storage(format!(
-                                "LZ4 decompression failed after all attempts: {}",
-                                e
-                            )))
-                        }
-                    }
+                    // Use proper LZ4 decompression based on CompressionInfo.db metadata
+                    decompress_size_prepended(data)
+                        .map_err(|e| Error::storage(format!("LZ4 decompression failed: {}", e)))
                 }
                 #[cfg(not(feature = "lz4"))]
                 {

@@ -86,7 +86,7 @@ impl SSTableValidator {
                     for deviation in deviations {
                         result
                             .warnings
-                            .push(format!("Format deviation: {}", deviation));
+                            .push(format!("Format deviation: {deviation}"));
                     }
                 }
                 Err(e) => {
@@ -137,7 +137,7 @@ impl SSTableValidator {
             for deviation in deviations {
                 result
                     .warnings
-                    .push(format!("Format deviation: {}", deviation));
+                    .push(format!("Format deviation: {deviation}"));
             }
         }
 
@@ -157,13 +157,13 @@ impl SSTableValidator {
         let valid_files = results.iter().filter(|r| r.is_valid).count();
         let invalid_files = total_files - valid_files;
 
-        report.push_str(&format!("Total files validated: {}\n", total_files));
-        report.push_str(&format!("Valid files: {}\n", valid_files));
-        report.push_str(&format!("Invalid files: {}\n", invalid_files));
+        report.push_str(&format!("Total files validated: {total_files}\n"));
+        report.push_str(&format!("Valid files: {valid_files}\n"));
+        report.push_str(&format!("Invalid files: {invalid_files}\n"));
 
         if total_files > 0 {
             let success_rate = (valid_files as f64 / total_files as f64) * 100.0;
-            report.push_str(&format!("Success rate: {:.1}%\n", success_rate));
+            report.push_str(&format!("Success rate: {success_rate:.1}%\n"));
         }
 
         report.push_str("\n=== File Details ===\n");
@@ -176,7 +176,7 @@ impl SSTableValidator {
             ));
 
             if let Some(ref version) = result.format_version {
-                report.push_str(&format!("Format: {}\n", version));
+                report.push_str(&format!("Format: {version}\n"));
             }
 
             report.push_str(&format!("Size: {} bytes\n", result.statistics.file_size));
@@ -188,14 +188,14 @@ impl SSTableValidator {
             if !result.errors.is_empty() {
                 report.push_str("Errors:\n");
                 for error in &result.errors {
-                    report.push_str(&format!("  - {}\n", error));
+                    report.push_str(&format!("  - {error}\n"));
                 }
             }
 
             if !result.warnings.is_empty() {
                 report.push_str("Warnings:\n");
                 for warning in &result.warnings {
-                    report.push_str(&format!("  - {}\n", warning));
+                    report.push_str(&format!("  - {warning}\n"));
                 }
             }
         }
@@ -205,7 +205,7 @@ impl SSTableValidator {
         if invalid_files == 0 {
             report.push_str("✅ All files passed validation!\n");
         } else {
-            report.push_str(&format!("❌ {} files failed validation\n", invalid_files));
+            report.push_str(&format!("❌ {invalid_files} files failed validation\n"));
         }
 
         report

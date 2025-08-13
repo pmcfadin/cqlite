@@ -69,14 +69,12 @@ impl FormatChecker {
                 if self.strict_mode {
                     result.errors.push(ValidationError::StructureViolation {
                         reason: format!(
-                            "Unsupported file type for strict compliance: {:?}",
-                            file_type
+                            "Unsupported file type for strict compliance: {file_type:?}"
                         ),
                     });
                 } else {
                     result.warnings.push(format!(
-                        "Skipping compliance check for file type: {:?}",
-                        file_type
+                        "Skipping compliance check for file type: {file_type:?}"
                     ));
                 }
             }
@@ -109,7 +107,7 @@ impl FormatChecker {
             } else {
                 result
                     .warnings
-                    .push(format!("Magic number verification failed: {}", e));
+                    .push(format!("Magic number verification failed: {e}"));
             }
         } else {
             result.format_version = Some("BigFormat 'oa'".to_string());
@@ -121,12 +119,12 @@ impl FormatChecker {
             if version != crate::format_constants::SUPPORTED_VERSION {
                 if self.strict_mode {
                     result.errors.push(ValidationError::UnsupportedVersion {
-                        version: format!("0x{:04x}", version),
+                        version: format!("0x{version:04x}"),
                     });
                 } else {
                     result
                         .warnings
-                        .push(format!("Unsupported version: 0x{:04x}", version));
+                        .push(format!("Unsupported version: 0x{version:04x}"));
                 }
             }
         }
@@ -221,7 +219,7 @@ impl FormatChecker {
             if block_size == 0 || block_size > 1024 * 1024 {
                 result
                     .warnings
-                    .push(format!("Unusual BTI block size: {}", block_size));
+                    .push(format!("Unusual BTI block size: {block_size}"));
             }
         }
 
@@ -305,8 +303,7 @@ impl FormatValidator for FormatChecker {
             }
             _ => {
                 result.warnings.push(format!(
-                    "Validation not implemented for file type: {:?}",
-                    file_type
+                    "Validation not implemented for file type: {file_type:?}"
                 ));
             }
         }

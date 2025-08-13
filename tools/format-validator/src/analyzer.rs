@@ -47,10 +47,9 @@ impl FormatAnalyzer {
             SSTableFileType::Partitions => self.analyze_partitions_file(&data, &mut result)?,
             SSTableFileType::Rows => self.analyze_rows_file(&data, &mut result)?,
             _ => {
-                result.warnings.push(format!(
-                    "Unsupported file type for analysis: {:?}",
-                    file_type
-                ));
+                result
+                    .warnings
+                    .push(format!("Unsupported file type for analysis: {file_type:?}"));
             }
         }
 
@@ -71,7 +70,7 @@ impl FormatAnalyzer {
             } else {
                 result
                     .warnings
-                    .push(format!("Unexpected magic number: {:#x}", magic));
+                    .push(format!("Unexpected magic number: {magic:#x}"));
             }
         }
         Ok(())
@@ -216,7 +215,7 @@ impl FormatAnalyzer {
         // Remove the size encoding bits from the first byte
         if size > 1 {
             let mask = (1u8 << (8 - size)) - 1;
-            value = (value & !((0xFF & !mask as i64) << ((size - 1) * 8)));
+            value &= !((0xFF & !mask as i64) << ((size - 1) * 8));
         }
 
         Some((value, size))

@@ -100,10 +100,10 @@ fn main() {
 }
 
 fn validate_file(path: &str, verbose: bool) {
-    println!("🔍 Validating SSTable file: {}", path);
+    println!("🔍 Validating SSTable file: {path}");
 
     if !Path::new(path).exists() {
-        eprintln!("❌ Error: File not found: {}", path);
+        eprintln!("❌ Error: File not found: {path}");
         return;
     }
 
@@ -120,7 +120,7 @@ fn validate_file(path: &str, verbose: bool) {
 
             // Check magic number
             let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-            println!("🔢 Magic number: 0x{:08X}", magic);
+            println!("🔢 Magic number: 0x{magic:08X}");
 
             match magic {
                 0x6F610000 => println!("✅ Cassandra 5 'oa' format detected"),
@@ -144,7 +144,7 @@ fn validate_file(path: &str, verbose: bool) {
 
                 while pos < data.len().min(100) {
                     if let Some((size, value)) = try_parse_vint(&data[pos..]) {
-                        println!("  VInt at offset {}: {} bytes → value {}", pos, size, value);
+                        println!("  VInt at offset {pos}: {size} bytes → value {value}");
                         pos += size;
                         vint_count += 1;
                         if vint_count >= 5 {
@@ -162,7 +162,7 @@ fn validate_file(path: &str, verbose: bool) {
                     if window.iter().all(|&b| b.is_ascii_graphic() || b == b' ') {
                         let text = String::from_utf8_lossy(window);
                         if !text.trim().is_empty() {
-                            println!("  Text at offset {}: '{}'", i, text);
+                            println!("  Text at offset {i}: '{text}'");
                         }
                     }
                 }
@@ -171,14 +171,14 @@ fn validate_file(path: &str, verbose: bool) {
             println!("\n✅ File validation complete");
         }
         Err(e) => {
-            eprintln!("❌ Error reading file: {}", e);
+            eprintln!("❌ Error reading file: {e}");
         }
     }
 }
 
 fn validate_directory(path: &str, pattern: &str, recursive: bool) {
-    println!("📂 Validating SSTable directory: {}", path);
-    println!("🔍 Pattern: {}", pattern);
+    println!("📂 Validating SSTable directory: {path}");
+    println!("🔍 Pattern: {pattern}");
 
     let mut total = 0;
     let mut passed = 0;
@@ -192,7 +192,7 @@ fn validate_directory(path: &str, pattern: &str, recursive: bool) {
                     let name_str = name.to_string_lossy();
                     if pattern == "*.db" && name_str.ends_with(".db") {
                         total += 1;
-                        println!("\n📄 Checking: {}", name_str);
+                        println!("\n📄 Checking: {name_str}");
 
                         // Simple validation
                         if let Ok(data) = fs::read(&path) {
@@ -213,13 +213,13 @@ fn validate_directory(path: &str, pattern: &str, recursive: bool) {
 
     if total > 0 {
         println!("\n📊 Directory Validation Summary:");
-        println!("Total files: {}", total);
+        println!("Total files: {total}");
         println!("Passed: {} ({}%)", passed, (passed * 100) / total);
     }
 }
 
 fn run_test_suite(suite: TestSuite, report: bool) {
-    println!("🧪 Running test suite: {:?}", suite);
+    println!("🧪 Running test suite: {suite:?}");
 
     match suite {
         TestSuite::Vint => {
@@ -260,9 +260,9 @@ fn test_vint_compatibility() {
         // Test encoding and decoding
         if validate_vint_roundtrip(value) {
             passed += 1;
-            println!("  ✅ VInt {}: PASS", value);
+            println!("  ✅ VInt {value}: PASS");
         } else {
-            println!("  ❌ VInt {}: FAIL", value);
+            println!("  ❌ VInt {value}: FAIL");
         }
     }
 
@@ -325,8 +325,8 @@ fn generate_report() {
 
 fn generate_test_files(output: &str, version: &str) {
     println!("🔨 Generating test SSTable files...");
-    println!("📁 Output directory: {}", output);
-    println!("🐘 Cassandra version: {}", version);
+    println!("📁 Output directory: {output}");
+    println!("🐘 Cassandra version: {version}");
 
     // Create output directory
     fs::create_dir_all(output).unwrap();
@@ -336,10 +336,7 @@ fn generate_test_files(output: &str, version: &str) {
         Ok(_) => {
             println!("✅ Docker detected");
             println!("📝 To generate test files, run:");
-            println!(
-                "   docker run -v {}:/output cassandra:{} ...",
-                output, version
-            );
+            println!("   docker run -v {output}:/output cassandra:{version} ...");
         }
         Err(_) => {
             println!("❌ Docker not found. Please install Docker to generate test files.");
