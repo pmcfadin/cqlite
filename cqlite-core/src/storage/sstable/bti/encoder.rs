@@ -2,7 +2,7 @@
 //!
 //! Converts CQL keys to byte sequences where lexicographic comparison
 //! of unsigned bytes produces the same result as typed comparison.
-//! 
+//!
 //! This implementation follows the CEP-25 specification for Cassandra 5.0
 //! byte-comparable key encoding used in trie-indexed SSTables.
 //!
@@ -16,10 +16,10 @@
 
 use super::BtiError;
 use crate::error::Result;
-use crate::types::{Value, UdtValue};
+use crate::types::{UdtValue, Value};
 
 /// CEP-25 compliant byte-comparable key encoder
-/// 
+///
 /// Implements the byte-comparable key encoding as specified in CEP-25.
 /// The encoding ensures that lexicographic comparison of the encoded bytes
 /// produces the same ordering as the typed comparison of the original values.
@@ -198,16 +198,20 @@ impl ByteComparableEncoder {
     /// Encode text/varchar with proper UTF-8 ordering and escape sequences
     fn encode_text(&mut self, text: &str) -> Result<()> {
         self.buffer.push(type_prefixes::TEXT);
-        
+
         // Encode UTF-8 bytes with proper escaping
         for &byte in text.as_bytes() {
             match byte {
-                0x00 => self.buffer.extend_from_slice(escape_sequences::ESCAPED_NULL),
-                0xFF => self.buffer.extend_from_slice(escape_sequences::ESCAPED_ESCAPE),
+                0x00 => self
+                    .buffer
+                    .extend_from_slice(escape_sequences::ESCAPED_NULL),
+                0xFF => self
+                    .buffer
+                    .extend_from_slice(escape_sequences::ESCAPED_ESCAPE),
                 _ => self.buffer.push(byte),
             }
         }
-        
+
         // Add terminator for proper ordering
         self.buffer.push(type_prefixes::TERMINATOR);
         Ok(())
@@ -240,14 +244,14 @@ impl ByteComparableEncoder {
     /// Encode integer (i32) with sign-magnitude encoding
     fn encode_int(&mut self, value: i32) -> Result<()> {
         self.buffer.push(type_prefixes::INTEGER);
-        
+
         // Use two's complement transformation for proper ordering
         let unsigned = if value >= 0 {
             (value as u32) + 0x80000000
         } else {
             (value as u32) ^ 0xFFFFFFFF
         };
-        
+
         self.buffer.extend_from_slice(&unsigned.to_be_bytes());
         Ok(())
     }
@@ -255,14 +259,14 @@ impl ByteComparableEncoder {
     /// Encode bigint (i64) with sign-magnitude encoding
     fn encode_bigint(&mut self, value: i64) -> Result<()> {
         self.buffer.push(type_prefixes::BIGINT);
-        
+
         // Use two's complement transformation for proper ordering
         let unsigned = if value >= 0 {
             (value as u64) + 0x8000000000000000
         } else {
             (value as u64) ^ 0xFFFFFFFFFFFFFFFF
         };
-        
+
         self.buffer.extend_from_slice(&unsigned.to_be_bytes());
         Ok(())
     }
@@ -278,14 +282,14 @@ impl ByteComparableEncoder {
     /// Encode timestamp (microseconds since epoch)
     fn encode_timestamp(&mut self, timestamp: i64) -> Result<()> {
         self.buffer.push(type_prefixes::TIMESTAMP);
-        
+
         // Transform for proper ordering (timestamps can be negative)
         let unsigned = if timestamp >= 0 {
             (timestamp as u64) + 0x8000000000000000
         } else {
             (timestamp as u64) ^ 0xFFFFFFFFFFFFFFFF
         };
-        
+
         self.buffer.extend_from_slice(&unsigned.to_be_bytes());
         Ok(())
     }
@@ -303,16 +307,16 @@ impl ByteComparableEncoder {
     /// Encode float32 with IEEE 754 ordering adjustment
     fn encode_float32(&mut self, value: f32) -> Result<()> {
         self.buffer.push(type_prefixes::FLOAT);
-        
+
         // Handle special values first
         if value.is_nan() {
             // NaN sorts after all other values
             self.buffer.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
             return Ok(());
         }
-        
+
         let bits = value.to_bits();
-        
+
         // Adjust for proper ordering of IEEE 754 floats
         let adjusted = if (bits & 0x80000000) == 0 {
             // Positive: add sign bit offset
@@ -321,7 +325,7 @@ impl ByteComparableEncoder {
             // Negative: flip all bits
             !bits
         };
-        
+
         self.buffer.extend_from_slice(&adjusted.to_be_bytes());
         Ok(())
     }
@@ -329,16 +333,17 @@ impl ByteComparableEncoder {
     /// Encode double (f64) with IEEE 754 ordering adjustment
     fn encode_double(&mut self, value: f64) -> Result<()> {
         self.buffer.push(type_prefixes::DOUBLE);
-        
+
         // Handle special values first
         if value.is_nan() {
             // NaN sorts after all other values
-            self.buffer.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+            self.buffer
+                .extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
             return Ok(());
         }
-        
+
         let bits = value.to_bits();
-        
+
         // Adjust for proper ordering of IEEE 754 floats
         let adjusted = if (bits & 0x8000000000000000) == 0 {
             // Positive: add sign bit offset
@@ -347,7 +352,7 @@ impl ByteComparableEncoder {
             // Negative: flip all bits
             !bits
         };
-        
+
         self.buffer.extend_from_slice(&adjusted.to_be_bytes());
         Ok(())
     }
@@ -355,16 +360,20 @@ impl ByteComparableEncoder {
     /// Encode blob (binary data) with proper escaping
     fn encode_blob(&mut self, bytes: &[u8]) -> Result<()> {
         self.buffer.push(type_prefixes::BLOB);
-        
+
         // Encode raw bytes with proper escaping
         for &byte in bytes {
             match byte {
-                0x00 => self.buffer.extend_from_slice(escape_sequences::ESCAPED_NULL),
-                0xFF => self.buffer.extend_from_slice(escape_sequences::ESCAPED_ESCAPE),
+                0x00 => self
+                    .buffer
+                    .extend_from_slice(escape_sequences::ESCAPED_NULL),
+                0xFF => self
+                    .buffer
+                    .extend_from_slice(escape_sequences::ESCAPED_ESCAPE),
                 _ => self.buffer.push(byte),
             }
         }
-        
+
         // Add terminator
         self.buffer.push(type_prefixes::TERMINATOR);
         Ok(())
@@ -373,14 +382,15 @@ impl ByteComparableEncoder {
     /// Encode list with element-by-element encoding and depth tracking
     fn encode_list_with_depth(&mut self, items: &[Value], depth: usize) -> Result<()> {
         self.buffer.push(type_prefixes::LIST);
-        
+
         // Encode length as varint if configured
         if self.config.use_varint_encoding {
             self.encode_varint(items.len() as u64)?;
         } else {
-            self.buffer.extend_from_slice(&(items.len() as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(items.len() as u32).to_be_bytes());
         }
-        
+
         // Encode each element with separator
         for (i, item) in items.iter().enumerate() {
             if i > 0 {
@@ -388,7 +398,7 @@ impl ByteComparableEncoder {
             }
             self.encode_value_to_buffer_with_depth(item, depth)?;
         }
-        
+
         // Add terminator
         self.buffer.push(type_prefixes::TERMINATOR);
         Ok(())
@@ -402,26 +412,27 @@ impl ByteComparableEncoder {
     /// Encode set (sorted for deterministic ordering) with depth tracking
     fn encode_set_with_depth(&mut self, items: &[Value], _depth: usize) -> Result<()> {
         self.buffer.push(type_prefixes::SET);
-        
+
         // For byte-comparable encoding, we need to sort the encoded items
         let mut encoded_items = Vec::new();
-        
+
         for item in items {
             let mut encoder = ByteComparableEncoder::with_config(self.config.clone());
             let encoded = encoder.encode_value(item)?;
             encoded_items.push(encoded);
         }
-        
+
         // Sort encoded items lexicographically for deterministic ordering
         encoded_items.sort();
-        
+
         // Encode length
         if self.config.use_varint_encoding {
             self.encode_varint(encoded_items.len() as u64)?;
         } else {
-            self.buffer.extend_from_slice(&(encoded_items.len() as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(encoded_items.len() as u32).to_be_bytes());
         }
-        
+
         // Add sorted encoded items with separators
         for (i, encoded_item) in encoded_items.iter().enumerate() {
             if i > 0 {
@@ -429,7 +440,7 @@ impl ByteComparableEncoder {
             }
             self.buffer.extend_from_slice(encoded_item);
         }
-        
+
         // Add terminator
         self.buffer.push(type_prefixes::TERMINATOR);
         Ok(())
@@ -443,42 +454,43 @@ impl ByteComparableEncoder {
     /// Encode map from Vec of tuples with sorted key-value pairs and depth tracking
     fn encode_map_with_depth(&mut self, map: &Vec<(Value, Value)>, _depth: usize) -> Result<()> {
         self.buffer.push(type_prefixes::MAP);
-        
+
         // Encode key-value pairs and sort by encoded keys
         let mut encoded_pairs = Vec::new();
-        
+
         for (key, value) in map {
             let mut key_encoder = ByteComparableEncoder::with_config(self.config.clone());
             let encoded_key = key_encoder.encode_value(key)?;
-            
+
             let mut value_encoder = ByteComparableEncoder::with_config(self.config.clone());
             let encoded_value = value_encoder.encode_value(value)?;
-            
+
             encoded_pairs.push((encoded_key, encoded_value));
         }
-        
+
         // Sort by encoded keys for deterministic ordering
         encoded_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        
+
         // Encode length
         if self.config.use_varint_encoding {
             self.encode_varint(encoded_pairs.len() as u64)?;
         } else {
-            self.buffer.extend_from_slice(&(encoded_pairs.len() as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(encoded_pairs.len() as u32).to_be_bytes());
         }
-        
+
         // Add sorted pairs with separators
         for (i, (encoded_key, encoded_value)) in encoded_pairs.iter().enumerate() {
             if i > 0 {
                 self.buffer.push(type_prefixes::SEPARATOR);
             }
-            
+
             // Encode key-value pair
             self.buffer.extend_from_slice(encoded_key);
             self.buffer.push(type_prefixes::SEPARATOR);
             self.buffer.extend_from_slice(encoded_value);
         }
-        
+
         // Add terminator
         self.buffer.push(type_prefixes::TERMINATOR);
         Ok(())
@@ -492,14 +504,15 @@ impl ByteComparableEncoder {
     /// Encode tuple with positional fields and depth tracking
     fn encode_tuple_with_depth(&mut self, items: &[Value], depth: usize) -> Result<()> {
         self.buffer.push(type_prefixes::TUPLE);
-        
+
         // Encode length
         if self.config.use_varint_encoding {
             self.encode_varint(items.len() as u64)?;
         } else {
-            self.buffer.extend_from_slice(&(items.len() as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(items.len() as u32).to_be_bytes());
         }
-        
+
         // Encode each field with separator (order is significant for tuples)
         for (i, item) in items.iter().enumerate() {
             if i > 0 {
@@ -507,7 +520,7 @@ impl ByteComparableEncoder {
             }
             self.encode_value_to_buffer_with_depth(item, depth)?;
         }
-        
+
         // Add terminator
         self.buffer.push(type_prefixes::TERMINATOR);
         Ok(())
@@ -516,35 +529,36 @@ impl ByteComparableEncoder {
     /// Encode UDT (User Defined Type) with field ordering and depth tracking
     fn encode_udt_with_depth(&mut self, udt: &UdtValue, depth: usize) -> Result<()> {
         self.buffer.push(type_prefixes::UDT);
-        
+
         // Encode type name and keyspace for disambiguation
         self.encode_text(&udt.keyspace)?;
         self.encode_text(&udt.type_name)?;
-        
+
         // Encode field count
         if self.config.use_varint_encoding {
             self.encode_varint(udt.fields.len() as u64)?;
         } else {
-            self.buffer.extend_from_slice(&(udt.fields.len() as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(udt.fields.len() as u32).to_be_bytes());
         }
-        
+
         // Encode fields in schema order (important for UDTs)
         for (i, field) in udt.fields.iter().enumerate() {
             if i > 0 {
                 self.buffer.push(type_prefixes::SEPARATOR);
             }
-            
+
             // Encode field name
             self.encode_text(&field.name)?;
             self.buffer.push(type_prefixes::SEPARATOR);
-            
+
             // Encode field value (null if None)
             match &field.value {
                 Some(value) => self.encode_value_to_buffer_with_depth(value, depth)?,
                 None => self.encode_null()?,
             }
         }
-        
+
         // Add terminator
         self.buffer.push(type_prefixes::TERMINATOR);
         Ok(())
@@ -727,7 +741,7 @@ mod tests {
         assert_ne!(encoded1, encoded2);
         assert!(encoded1 < encoded2);
     }
-    
+
     #[test]
     fn test_encoder_config() {
         let config = EncoderConfig {
@@ -736,46 +750,44 @@ mod tests {
             enable_prefix_compression: false,
             strict_compliance: false,
         };
-        
+
         let encoder = ByteComparableEncoder::with_config(config);
         assert!(!encoder.config().use_varint_encoding);
         assert_eq!(encoder.config().max_nesting_depth, 16);
     }
-    
+
     #[test]
     fn test_max_nesting_depth() {
         let config = EncoderConfig {
             max_nesting_depth: 2,
             ..Default::default()
         };
-        
+
         let mut encoder = ByteComparableEncoder::with_config(config);
-        
+
         // Create deeply nested structure
-        let deep_nested = Value::List(vec![
-            Value::List(vec![
-                Value::List(vec![Value::Integer(1)])
-            ])
-        ]);
-        
+        let deep_nested = Value::List(vec![Value::List(vec![Value::List(vec![Value::Integer(
+            1,
+        )])])]);
+
         // Should fail due to depth limit
         let result = encoder.encode_value(&deep_nested);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_batch_encoder() {
         let mut batch_encoder = BatchEncoder::new();
-        
+
         let values = vec![
             Value::Integer(1),
             Value::Text("hello".to_string()),
             Value::Boolean(true),
         ];
-        
+
         let encoded_batch = batch_encoder.encode_batch(&values).unwrap();
         assert_eq!(encoded_batch.len(), 3);
-        
+
         // Verify individual encodings
         let mut single_encoder = ByteComparableEncoder::new();
         for (i, value) in values.iter().enumerate() {
@@ -783,92 +795,112 @@ mod tests {
             assert_eq!(encoded_batch[i], single_encoded);
         }
     }
-    
+
     #[test]
     fn test_ordering_across_types() {
         let mut encoder = ByteComparableEncoder::new();
-        
+
         // Different types should have deterministic ordering based on type prefixes
         let null_val = encoder.encode_value(&Value::Null).unwrap();
         let bool_val = encoder.encode_value(&Value::Boolean(false)).unwrap();
         let int_val = encoder.encode_value(&Value::Integer(0)).unwrap();
         let text_val = encoder.encode_value(&Value::Text("".to_string())).unwrap();
-        
+
         // Null should come first, then booleans, then numbers, then text
         assert!(null_val < bool_val);
         assert!(bool_val < int_val);
         assert!(int_val < text_val);
     }
-    
+
     #[test]
     fn test_validation() {
         let encoder = ByteComparableEncoder::new();
-        
+
         // Test valid encodings
         assert!(encoder.validate_encoded_key(&[type_prefixes::NULL]).is_ok());
-        assert!(encoder.validate_encoded_key(&[type_prefixes::BOOLEAN_TRUE]).is_ok());
-        
+        assert!(
+            encoder
+                .validate_encoded_key(&[type_prefixes::BOOLEAN_TRUE])
+                .is_ok()
+        );
+
         // Test invalid encodings
         assert!(encoder.validate_encoded_key(&[]).is_err()); // Empty
-        assert!(encoder.validate_encoded_key(&[type_prefixes::NULL, 0x00, 0x00, 0x00]).is_err()); // Null too long
+        assert!(
+            encoder
+                .validate_encoded_key(&[type_prefixes::NULL, 0x00, 0x00, 0x00])
+                .is_err()
+        ); // Null too long
     }
-    
+
     #[test]
     fn test_performance_stats() {
         let mut encoder = ByteComparableEncoder::new();
         encoder.reserve(1024);
-        
+
         let stats = encoder.get_stats();
         assert!(stats.buffer_capacity >= 1024);
         assert_eq!(stats.buffer_size, 0);
-        
+
         // Encode something
-        encoder.encode_value(&Value::Text("test".to_string())).unwrap();
+        encoder
+            .encode_value(&Value::Text("test".to_string()))
+            .unwrap();
         let stats_after = encoder.get_stats();
         assert!(stats_after.buffer_size > 0);
     }
-    
+
     #[test]
     fn test_timestamp_encoding() {
         let mut encoder = ByteComparableEncoder::new();
-        
+
         let past = encoder.encode_value(&Value::Timestamp(-1000)).unwrap();
         let epoch = encoder.encode_value(&Value::Timestamp(0)).unwrap();
         let future = encoder.encode_value(&Value::Timestamp(1000)).unwrap();
-        
+
         // All should start with timestamp prefix
         assert_eq!(past[0], type_prefixes::TIMESTAMP);
         assert_eq!(epoch[0], type_prefixes::TIMESTAMP);
         assert_eq!(future[0], type_prefixes::TIMESTAMP);
-        
+
         // Proper temporal ordering
         assert!(past < epoch);
         assert!(epoch < future);
     }
-    
+
     #[test]
     fn test_blob_encoding() {
         let mut encoder = ByteComparableEncoder::new();
-        
-        let blob1 = encoder.encode_value(&Value::Blob(vec![0x01, 0x02])).unwrap();
-        let blob2 = encoder.encode_value(&Value::Blob(vec![0x01, 0x03])).unwrap();
-        let blob_with_null = encoder.encode_value(&Value::Blob(vec![0x01, 0x00, 0x02])).unwrap();
-        
+
+        let blob1 = encoder
+            .encode_value(&Value::Blob(vec![0x01, 0x02]))
+            .unwrap();
+        let blob2 = encoder
+            .encode_value(&Value::Blob(vec![0x01, 0x03]))
+            .unwrap();
+        let blob_with_null = encoder
+            .encode_value(&Value::Blob(vec![0x01, 0x00, 0x02]))
+            .unwrap();
+
         // Should start with blob prefix
         assert_eq!(blob1[0], type_prefixes::BLOB);
         assert_eq!(blob2[0], type_prefixes::BLOB);
-        
+
         // Proper lexicographic ordering
         assert!(blob1 < blob2);
-        
+
         // Should contain escaped null sequence
-        assert!(blob_with_null.windows(2).any(|w| w == escape_sequences::ESCAPED_NULL));
+        assert!(
+            blob_with_null
+                .windows(2)
+                .any(|w| w == escape_sequences::ESCAPED_NULL)
+        );
     }
-    
+
     #[test]
     fn test_comprehensive_ordering() {
         let mut encoder = ByteComparableEncoder::new();
-        
+
         // Test a comprehensive set of values for ordering consistency
         let values = vec![
             Value::Null,
@@ -896,15 +928,20 @@ mod tests {
             Value::Timestamp(-1000),
             Value::Timestamp(1000),
         ];
-        
-        let encoded_values: Vec<_> = values.iter()
+
+        let encoded_values: Vec<_> = values
+            .iter()
             .map(|v| encoder.encode_value(v).unwrap())
             .collect();
-        
+
         // Verify that lexicographic ordering of encoded values matches the input ordering
         for i in 0..encoded_values.len() - 1 {
-            assert!(encoded_values[i] <= encoded_values[i + 1], 
-                "Ordering violation at index {} and {}", i, i + 1);
+            assert!(
+                encoded_values[i] <= encoded_values[i + 1],
+                "Ordering violation at index {} and {}",
+                i,
+                i + 1
+            );
         }
     }
 }
