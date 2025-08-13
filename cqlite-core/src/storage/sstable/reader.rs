@@ -2420,6 +2420,238 @@ impl SSTableReader {
         })
     }
 
+    /// Parse list value using element comparator
+    fn parse_list_value(&self, value_data: &[u8], element_comparator: &ComparatorType) -> Result<Value> {
+        use crate::parser::vint::parse_vint_length;
+        
+        let mut offset = 0;
+        let mut elements = Vec::new();
+
+        // Parse element count
+        let (remaining, element_count) = parse_vint_length(&value_data[offset..])
+            .map_err(|_| Error::corruption("Failed to parse list element count"))?;
+        offset = value_data.len() - remaining.len();
+
+        // Parse each element
+        for _ in 0..element_count {
+            if offset >= value_data.len() {
+                break;
+            }
+
+            // Parse element length
+            let (remaining, element_len) = parse_vint_length(&value_data[offset..])
+                .map_err(|_| Error::corruption("Failed to parse list element length"))?;
+            offset = value_data.len() - remaining.len();
+
+            if element_len > remaining.len() {
+                return Err(Error::corruption("List element length exceeds available data"));
+            }
+
+            // Parse element value using element comparator
+            let element_data = &remaining[..element_len];
+            let element_value = self.parse_value_with_comparator(element_data, element_comparator)?;
+            elements.push(element_value);
+            offset += element_len;
+        }
+
+        Ok(Value::List(elements))
+    }
+
+    /// Parse set value using element comparator  
+    fn parse_set_value(&self, value_data: &[u8], element_comparator: &ComparatorType) -> Result<Value> {
+        // Sets are parsed similarly to lists
+        let list_value = self.parse_list_value(value_data, element_comparator)?;
+        if let Value::List(elements) = list_value {
+            Ok(Value::Set(elements))
+        } else {
+            Err(Error::corruption("Failed to parse set value"))
+        }
+    }
+
+    /// Parse map value using key and value comparators
+    fn parse_map_value(&self, value_data: &[u8], key_comparator: &ComparatorType, value_comparator: &ComparatorType) -> Result<Value> {
+        use crate::parser::vint::parse_vint_length;
+        
+        let mut offset = 0;
+        let mut entries = Vec::new();
+
+        // Parse entry count
+        let (remaining, entry_count) = parse_vint_length(&value_data[offset..])
+            .map_err(|_| Error::corruption("Failed to parse map entry count"))?;
+        offset = value_data.len() - remaining.len();
+
+        // Parse each key-value pair
+        for _ in 0..entry_count {
+            if offset >= value_data.len() {
+                break;
+            }
+
+            // Parse key length and data
+            let (remaining, key_len) = parse_vint_length(&value_data[offset..])
+                .map_err(|_| Error::corruption("Failed to parse map key length"))?;
+            offset = value_data.len() - remaining.len();
+
+            if key_len > remaining.len() {
+                return Err(Error::corruption("Map key length exceeds available data"));
+            }
+
+            let key_data = &remaining[..key_len];
+            let key_value = self.parse_value_with_comparator(key_data, key_comparator)?;
+            offset += key_len;
+
+            // Parse value length and data
+            let (remaining, value_len) = parse_vint_length(&value_data[offset..])
+                .map_err(|_| Error::corruption("Failed to parse map value length"))?;
+            offset = value_data.len() - remaining.len();
+
+            if value_len > remaining.len() {
+                return Err(Error::corruption("Map value length exceeds available data"));
+            }
+
+            let val_data = &remaining[..value_len];
+            let val_value = self.parse_value_with_comparator(val_data, value_comparator)?;
+            entries.push((key_value, val_value));
+            offset += value_len;
+        }
+
+        Ok(Value::Map(entries))
+    }
+
+    /// Parse tuple value using field comparators
+    fn parse_tuple_value(&self, value_data: &[u8], field_comparators: &[ComparatorType]) -> Result<Value> {
+        use crate::parser::vint::parse_vint_length;
+        
+        let mut offset = 0;
+        let mut fields = Vec::new();
+
+        // Parse each field
+        for (i, field_comparator) in field_comparators.iter().enumerate() {
+            if offset >= value_data.len() {
+                break;
+            }
+
+            // Parse field length
+            let (remaining, field_len) = parse_vint_length(&value_data[offset..])
+                .map_err(|_| Error::corruption(format!("Failed to parse tuple field {} length", i)))?;
+            offset = value_data.len() - remaining.len();
+
+            if field_len > remaining.len() {
+                return Err(Error::corruption(format!("Tuple field {} length exceeds available data", i)));
+            }
+
+            // Parse field value using field comparator
+            let field_data = &remaining[..field_len];
+            let field_value = self.parse_value_with_comparator(field_data, field_comparator)?;
+            fields.push(field_value);
+            offset += field_len;
+        }
+
+        Ok(Value::Tuple(fields))
+    }
+
+    /// Parse UDT value using field comparators
+    fn parse_udt_value(&self, value_data: &[u8], field_comparators: &[(String, ComparatorType)]) -> Result<Value> {
+        use crate::parser::vint::parse_vint_length;
+        use crate::types::{UdtValue, UdtField};
+        
+        let mut offset = 0;
+        let mut fields = Vec::new();
+
+        // Parse each field
+        for (field_name, field_comparator) in field_comparators.iter() {
+            if offset >= value_data.len() {
+                break;
+            }
+
+            // Parse field length
+            let (remaining, field_len) = parse_vint_length(&value_data[offset..])
+                .map_err(|_| Error::corruption(format!("Failed to parse UDT field {} length", field_name)))?;
+            offset = value_data.len() - remaining.len();
+
+            if field_len > remaining.len() {
+                return Err(Error::corruption(format!("UDT field {} length exceeds available data", field_name)));
+            }
+
+            // Parse field value using field comparator
+            let field_data = &remaining[..field_len];
+            let field_value = self.parse_value_with_comparator(field_data, field_comparator)?;
+            
+            fields.push(UdtField {
+                name: field_name.clone(),
+                value: Some(field_value),
+            });
+            offset += field_len;
+        }
+
+        Ok(Value::Udt(UdtValue {
+            keyspace: "unknown".to_string(), // Would need keyspace name from schema
+            type_name: "unknown".to_string(), // Would need UDT name from schema
+            fields,
+        }))
+    }
+
+    /// Extract column name from key context (placeholder implementation)
+    fn extract_column_name_from_context(&self, _table_id: &TableId, _key: &RowKey) -> Option<String> {
+        // TODO: Implement proper column name extraction from key context
+        // This would analyze the key structure to determine which column is being accessed
+        None
+    }
+
+
+
+
+
+    /// Get table schema from header information
+    fn get_table_schema(&self) -> Option<TableSchema> {
+        // Try to construct a basic schema from header information
+        if self.header.columns.is_empty() {
+            return None;
+        }
+
+        let mut columns = Vec::new();
+        let mut partition_keys = Vec::new();
+        let mut clustering_keys = Vec::new();
+
+        // Convert header columns to schema columns
+        for col_info in self.header.columns.iter() {
+            let column = Column {
+                name: col_info.name.clone(),
+                data_type: col_info.column_type.clone(), // Use column_type field
+                nullable: true,
+                default: None,
+            };
+
+            // Check if this is a key column based on primary key and clustering status
+            if col_info.is_primary_key && !col_info.is_clustering {
+                // This is a partition key
+                partition_keys.push(KeyColumn {
+                    name: col_info.name.clone(),
+                    data_type: col_info.column_type.clone(),
+                    position: partition_keys.len(),
+                });
+            } else if col_info.is_clustering {
+                clustering_keys.push(ClusteringColumn {
+                    name: col_info.name.clone(),
+                    data_type: col_info.column_type.clone(),
+                    position: clustering_keys.len(),
+                    order: "ASC".to_string(),
+                });
+            }
+
+            columns.push(column);
+        }
+
+        Some(TableSchema {
+            keyspace: self.header.keyspace.clone(),
+            table: self.header.table_name.clone(),
+            partition_keys,
+            clustering_keys,
+            columns,
+            comments: HashMap::new(),
+        })
+    }
+
+
     /// Extract generation number from SSTable file path with enhanced pattern matching
     fn extract_generation_from_path(path: &Path) -> u64 {
         path.file_stem()
