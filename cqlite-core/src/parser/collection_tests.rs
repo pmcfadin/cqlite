@@ -7,7 +7,7 @@ use super::types::{CqlTypeId, parse_list, parse_map, parse_set, parse_tuple};
 use super::vint::encode_vint;
 use super::*;
 use crate::types::Value;
-use std::collections::HashMap;
+// HashMap import removed - not needed in this test module
 
 /// Test comprehensive list parsing with various element types
 #[cfg(test)]

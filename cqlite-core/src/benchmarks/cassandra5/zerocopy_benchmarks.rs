@@ -18,7 +18,9 @@ use super::{
 
 /// Zero-copy deserialization benchmarking suite
 pub struct ZeroCopyBenchmarks {
+    #[allow(dead_code)]
     platform: Arc<Platform>,
+    #[allow(dead_code)]
     config: Config,
 }
 

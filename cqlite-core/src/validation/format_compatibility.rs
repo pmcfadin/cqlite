@@ -1416,7 +1416,10 @@ mod tests {
     #[test]
     fn test_compatibility_matrix() {
         let validator = FormatValidator::new(Arc::new(
-            super::ValidationFramework::new(super::ValidationConfig::default()).unwrap(),
+            crate::validation::ValidationFramework::new(
+                crate::validation::ValidationConfig::default(),
+            )
+            .unwrap(),
         ))
         .unwrap();
 
@@ -1442,7 +1445,10 @@ mod tests {
     #[test]
     fn test_migration_recommendations() {
         let validator = FormatValidator::new(Arc::new(
-            super::ValidationFramework::new(super::ValidationConfig::default()).unwrap(),
+            crate::validation::ValidationFramework::new(
+                crate::validation::ValidationConfig::default(),
+            )
+            .unwrap(),
         ))
         .unwrap();
 

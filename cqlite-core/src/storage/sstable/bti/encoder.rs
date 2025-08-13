@@ -65,14 +65,19 @@ mod type_prefixes {
     pub const BIGINT: u8 = 0x13;
     pub const FLOAT: u8 = 0x20;
     pub const DOUBLE: u8 = 0x21;
+    #[allow(dead_code)]
     pub const DECIMAL: u8 = 0x22;
+    #[allow(dead_code)]
     pub const VARINT: u8 = 0x23;
     pub const TEXT: u8 = 0x30;
     pub const BLOB: u8 = 0x31;
     pub const UUID: u8 = 0x40;
     pub const TIMESTAMP: u8 = 0x41;
+    #[allow(dead_code)]
     pub const DATE: u8 = 0x42;
+    #[allow(dead_code)]
     pub const TIME: u8 = 0x43;
+    #[allow(dead_code)]
     pub const DURATION: u8 = 0x44;
     pub const LIST: u8 = 0x50;
     pub const SET: u8 = 0x51;
@@ -80,6 +85,7 @@ mod type_prefixes {
     pub const TUPLE: u8 = 0x60;
     pub const UDT: u8 = 0x61;
     pub const FROZEN: u8 = 0x70;
+    #[allow(dead_code)]
     pub const ESCAPE: u8 = 0xFF;
     pub const SEPARATOR: u8 = 0x00;
     pub const TERMINATOR: u8 = 0x01;
@@ -87,9 +93,13 @@ mod type_prefixes {
 
 /// Escape sequences for special bytes in values
 mod escape_sequences {
+    #[allow(dead_code)]
     pub const ESCAPE_BYTE: u8 = 0xFF;
+    #[allow(dead_code)]
     pub const ESCAPED_NULL: &[u8] = &[0xFF, 0x00];
+    #[allow(dead_code)]
     pub const ESCAPED_ESCAPE: &[u8] = &[0xFF, 0xFF];
+    #[allow(dead_code)]
     pub const ESCAPED_SEPARATOR: &[u8] = &[0xFF, 0x01];
 }
 
@@ -405,6 +415,7 @@ impl ByteComparableEncoder {
     }
 
     /// Backward compatibility wrapper
+    #[allow(dead_code)]
     fn encode_list(&mut self, items: &[Value]) -> Result<()> {
         self.encode_list_with_depth(items, 1)
     }
@@ -447,6 +458,7 @@ impl ByteComparableEncoder {
     }
 
     /// Backward compatibility wrapper
+    #[allow(dead_code)]
     fn encode_set(&mut self, items: &[Value]) -> Result<()> {
         self.encode_set_with_depth(items, 1)
     }
@@ -497,6 +509,7 @@ impl ByteComparableEncoder {
     }
 
     /// Backward compatibility wrapper
+    #[allow(dead_code)]
     fn encode_map_vec(&mut self, map: &Vec<(Value, Value)>) -> Result<()> {
         self.encode_map_with_depth(map, 1)
     }

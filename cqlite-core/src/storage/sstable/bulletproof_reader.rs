@@ -18,10 +18,10 @@
 //! **TODO**: Either align this implementation with CEP-25 Big format specification
 //! or deprecate the modern format parsing in favor of spec-accurate implementations.
 
+use log::{debug, info, warn};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use log::{debug, info, warn};
 
 use super::{
     chunk_decompressor::{ChunkDecompressor, create_decompressor_from_file},
@@ -56,8 +56,10 @@ impl BulletproofReader {
             .ok_or_else(|| Error::InvalidPath("No parent directory".to_string()))?
             .to_path_buf();
 
-        info!("Opening SSTable with bulletproof reader: format={:?}, generation={}, size={}, component={:?}, base={}", 
-              info.format, info.generation, info.size, info.component, info.base_name);
+        info!(
+            "Opening SSTable with bulletproof reader: format={:?}, generation={}, size={}, component={:?}, base={}",
+            info.format, info.generation, info.size, info.component, info.base_name
+        );
 
         let mut reader = Self {
             info,
@@ -75,7 +77,10 @@ impl BulletproofReader {
         // Set up compression if the format supports it
         if self.info.format.supports_compression() {
             if let Err(e) = self.setup_compression() {
-                warn!("Compression setup failed: {}, trying without compression", e);
+                warn!(
+                    "Compression setup failed: {}, trying without compression",
+                    e
+                );
             }
         }
 
@@ -195,7 +200,11 @@ impl BulletproofReader {
     pub fn parse_sstable_data(&mut self) -> Result<Vec<SSTableEntry>> {
         let data = self.read_all_data()?;
 
-        info!("Parsing SSTable data ({} bytes) with format {:?}", data.len(), self.info.format);
+        info!(
+            "Parsing SSTable data ({} bytes) with format {:?}",
+            data.len(),
+            self.info.format
+        );
 
         match &self.info.format {
             SSTableFormat::V4x(_) | SSTableFormat::V5x(_) => self.parse_modern_format(&data),
@@ -209,13 +218,13 @@ impl BulletproofReader {
     }
 
     /// Parse modern SSTable format (4.x, 5.x) with EXPERIMENTAL 'oa' format parsing
-    /// 
+    ///
     /// ⚠️ WARNING: EXPERIMENTAL IMPLEMENTATION
-    /// This 'oa' format parser is experimental and may not fully align with 
+    /// This 'oa' format parser is experimental and may not fully align with
     /// the official Cassandra Big format specification. For production use,
     /// prefer the spec-accurate readers in row_cell_state_machine.rs which
     /// implement schema-driven parsing without heuristics.
-    /// 
+    ///
     /// TODO: Align with CEP-25 Big format specification or deprecate in favor
     /// of the spec-accurate state machine implementation.
     fn parse_modern_format(&self, data: &[u8]) -> Result<Vec<SSTableEntry>> {
@@ -230,19 +239,25 @@ impl BulletproofReader {
 
         // Parse the 'oa' format header
         let header = self.parse_oa_header(data)?;
-        debug!("Parsed 'oa' header: version={}, partition_count={}", 
-               header.format_version, header.partition_count);
+        debug!(
+            "Parsed 'oa' header: version={}, partition_count={}",
+            header.format_version, header.partition_count
+        );
 
         // Parse data blocks following the header
         let entries = self.parse_data_blocks(data, &header)?;
 
-        info!("Parsed {} entries from {} bytes using structured parsing", entries.len(), data.len());
+        info!(
+            "Parsed {} entries from {} bytes using structured parsing",
+            entries.len(),
+            data.len()
+        );
         Ok(entries)
     }
 
     /// Parse Cassandra 'oa' format header (EXPERIMENTAL)
-    /// 
-    /// ⚠️ EXPERIMENTAL: This header parsing implementation is based on 
+    ///
+    /// ⚠️ EXPERIMENTAL: This header parsing implementation is based on
     /// reverse engineering and may not match the official Cassandra Big
     /// format specification. The magic number check and field interpretations
     /// should be verified against CEP-25 specification.
@@ -257,7 +272,10 @@ impl BulletproofReader {
         // This may not match the actual Big format magic number from CEP-25
         let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         if magic != 0x6F610000 {
-            warn!("EXPERIMENTAL: Magic number mismatch: expected 0x6F610000, got 0x{:08x}", magic);
+            warn!(
+                "EXPERIMENTAL: Magic number mismatch: expected 0x6F610000, got 0x{:08x}",
+                magic
+            );
             warn!("This may indicate Big format specification differences");
         }
 
@@ -275,7 +293,10 @@ impl BulletproofReader {
         let (metadata_size, vint_bytes) = self.read_vint(&data[offset..])?;
         offset += vint_bytes;
 
-        debug!("Partition count: {}, metadata size: {}", partition_count, metadata_size);
+        debug!(
+            "Partition count: {}, metadata size: {}",
+            partition_count, metadata_size
+        );
 
         Ok(OaFormatHeader {
             magic_number: magic,
@@ -291,11 +312,17 @@ impl BulletproofReader {
         let mut entries = Vec::new();
         let mut offset = header.header_size;
 
-        debug!("Parsing {} partitions starting at offset {}", header.partition_count, offset);
+        debug!(
+            "Parsing {} partitions starting at offset {}",
+            header.partition_count, offset
+        );
 
         for partition_idx in 0..header.partition_count {
             if offset >= data.len() {
-                warn!("Reached end of data while parsing partition {}", partition_idx);
+                warn!(
+                    "Reached end of data while parsing partition {}",
+                    partition_idx
+                );
                 break;
             }
 
@@ -352,7 +379,10 @@ impl BulletproofReader {
         let (row_count, vint_bytes) = self.read_vint(&data[offset..])?;
         offset += vint_bytes;
 
-        debug!("Partition {}: key_length={}, row_count={}", partition_idx, key_length, row_count);
+        debug!(
+            "Partition {}: key_length={}, row_count={}",
+            partition_idx, key_length, row_count
+        );
 
         // Format key data as hex string without type assumptions
         let key_str = key_data
@@ -411,6 +441,7 @@ impl BulletproofReader {
     }
 
     /// Read legacy varint format for backwards compatibility
+    #[allow(dead_code)]
     fn read_varint(&self, data: &[u8]) -> Result<(u64, usize)> {
         if data.is_empty() {
             return Err(Error::InvalidFormat("Empty data for varint".to_string()));
@@ -537,7 +568,7 @@ impl BulletproofReader {
     }
 
     /// Parse modern format without mutable access using EXPERIMENTAL 'oa' format
-    /// 
+    ///
     /// ⚠️ EXPERIMENTAL: This readonly parsing is experimental and should be
     /// replaced with the spec-accurate row_cell_state_machine implementation
     /// for production use.
@@ -562,7 +593,7 @@ impl BulletproofReader {
 }
 
 /// EXPERIMENTAL Cassandra 'oa' format header structure
-/// 
+///
 /// ⚠️ WARNING: This structure is based on reverse engineering and may not
 /// accurately represent the official Cassandra Big format header as specified
 /// in CEP-25. Field interpretations and byte layouts should be verified
@@ -650,14 +681,20 @@ pub fn test_read_sstable_directory<P: AsRef<Path>>(dir_path: P) -> Result<()> {
                     match reader.read_raw_data(0, 1024) {
                         Ok(data) => {
                             debug!("Read {} bytes successfully", data.len());
-                            debug!("First 32 bytes: {:02x?}", &data[..std::cmp::min(32, data.len())]);
+                            debug!(
+                                "First 32 bytes: {:02x?}",
+                                &data[..std::cmp::min(32, data.len())]
+                            );
 
                             // Try to parse the data
                             match reader.parse_sstable_data() {
                                 Ok(entries) => {
                                     info!("Parsed {} entries", entries.len());
                                     for (i, entry) in entries.iter().take(3).enumerate() {
-                                        debug!("Entry {}: key='{:?}' ({})", i, entry.key, entry.format_info);
+                                        debug!(
+                                            "Entry {}: key='{:?}' ({})",
+                                            i, entry.key, entry.format_info
+                                        );
                                     }
                                 }
                                 Err(e) => {

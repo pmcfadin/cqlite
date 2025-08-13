@@ -12,7 +12,7 @@
 use crate::{
     error::{Error, Result},
     parser::{
-        types::{parse_cql_value, CqlTypeId},
+        types::{CqlTypeId, parse_cql_value},
         vint::parse_vint_length,
     },
     schema::TableSchema,
@@ -834,10 +834,15 @@ impl RowCellStateMachine {
             _ if data_type.starts_with("tuple<") => Ok(CqlTypeId::Tuple),
             _ if data_type.starts_with("frozen<") => {
                 // Parse the inner type
-                let inner = data_type.trim_start_matches("frozen<").trim_end_matches('>');
+                let inner = data_type
+                    .trim_start_matches("frozen<")
+                    .trim_end_matches('>');
                 self.data_type_to_cql_type_id(inner)
             }
-            _ => Err(Error::corruption(format!("Unknown data type: {}", data_type))),
+            _ => Err(Error::corruption(format!(
+                "Unknown data type: {}",
+                data_type
+            ))),
         }
     }
 }

@@ -18,7 +18,9 @@ use super::{
 
 /// Memory usage benchmarking suite for large Cassandra 5+ SSTable files
 pub struct MemoryBenchmarks {
+    #[allow(dead_code)]
     platform: Arc<Platform>,
+    #[allow(dead_code)]
     config: Config,
 }
 

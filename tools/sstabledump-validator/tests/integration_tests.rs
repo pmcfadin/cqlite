@@ -1,18 +1,18 @@
+use sstabledump_validator::SstableDumpValidator;
 use std::path::PathBuf;
 use tempfile::TempDir;
-use sstabledump_validator::SstableDumpValidator;
 
 #[tokio::test]
 async fn test_validator_initialization() {
     let validator = SstableDumpValidator::new().await;
-    
+
     // This test might fail in environments without Docker
     match validator {
         Ok(_) => println!("✅ Validator initialized successfully"),
         Err(e) if e.to_string().contains("Docker") => {
             println!("⚠️  Skipping Docker-dependent test: {}", e);
             return;
-        },
+        }
         Err(e) => panic!("Unexpected error: {}", e),
     }
 }
@@ -22,10 +22,12 @@ async fn test_identical_data_validation() {
     // Create mock identical data for testing
     let temp_dir = TempDir::new().unwrap();
     let test_sstable = temp_dir.path().join("test.db");
-    
+
     // Create a minimal test file (in real scenario this would be a real SSTable)
-    tokio::fs::write(&test_sstable, b"mock_sstable_data").await.unwrap();
-    
+    tokio::fs::write(&test_sstable, b"mock_sstable_data")
+        .await
+        .unwrap();
+
     // This test would require mock implementations for Docker-less testing
     println!("🧪 Test placeholder: identical data validation");
 }
@@ -65,7 +67,10 @@ mod test_utils {
     use super::*;
     use std::fs;
 
-    pub fn create_mock_sstable_file(path: &PathBuf, content: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn create_mock_sstable_file(
+        path: &PathBuf,
+        content: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         fs::write(path, content)?;
         Ok(())
     }
@@ -95,7 +100,9 @@ mod test_utils {
     } ]
   }
 ]
-        "#.trim().to_string()
+        "#
+        .trim()
+        .to_string()
     }
 
     pub fn create_mock_cqlite_dump() -> String {
@@ -128,6 +135,8 @@ mod test_utils {
     } ]
   }
 ]
-        "#.trim().to_string()
+        "#
+        .trim()
+        .to_string()
     }
 }
