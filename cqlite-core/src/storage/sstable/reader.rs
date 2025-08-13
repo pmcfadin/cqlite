@@ -17,11 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     Config, Error, Result, RowKey, Value,
-    parser::{
-        SSTableHeader, SSTableParser,
-        header::CassandraVersion,
-        vint::parse_vint_length,
-    },
+    parser::{SSTableHeader, SSTableParser, header::CassandraVersion, vint::parse_vint_length},
     platform::Platform,
     schema::{ClusteringColumn, Column, KeyColumn, TableSchema},
     types::{ComparatorType, TableId},
@@ -762,7 +758,10 @@ impl SSTableReader {
                     if self.header.cassandra_version != CassandraVersion::Legacy {
                         return Err(Error::corruption(format!(
                             "Decompression failed for modern format at offset={}, size={}, algorithm={:?}: {}",
-                            offset, size, compression_reader.algorithm(), e
+                            offset,
+                            size,
+                            compression_reader.algorithm(),
+                            e
                         )));
                     } else {
                         // Only allow fallback for legacy formats
@@ -1715,7 +1714,7 @@ impl SSTableReader {
 
         // FALLBACK: If no schema available, try format detection as last resort
         // This preserves compatibility but is not the preferred modern approach
-        
+
         // Strategy 1: Try Cassandra 5.0+ vint-based composite key format
         if let Ok(parsed_key) = self.parse_composite_key_v5_format(key_data) {
             return Ok(parsed_key);
@@ -1732,7 +1731,10 @@ impl SSTableReader {
         }
 
         // Strategy 4: For simple single-component keys or unknown formats, return as-is
-        println!("WARNING: Using raw key data without schema info for key of length {}", key_data.len());
+        println!(
+            "WARNING: Using raw key data without schema info for key of length {}",
+            key_data.len()
+        );
         Ok(RowKey::new(key_data.to_vec()))
     }
 
@@ -1755,12 +1757,14 @@ impl SSTableReader {
             offset = key_data.len() - remaining.len();
 
             if component_len > remaining.len() {
-                return Err(Error::corruption("Partition key component length exceeds available data"));
+                return Err(Error::corruption(
+                    "Partition key component length exceeds available data",
+                ));
             }
 
             // Extract component data
             let component_data = &remaining[..component_len];
-            
+
             // Get comparator type for this column
             let comparator = ComparatorType::from_data_type(&partition_column.data_type)
                 .unwrap_or(ComparatorType::Blob);
@@ -1768,7 +1772,7 @@ impl SSTableReader {
             // Decode component using exact comparator type
             let decoded_component = self.decode_key_component(component_data, &comparator)?;
             key_components.push(decoded_component);
-            
+
             offset += component_len;
         }
 
@@ -1780,17 +1784,21 @@ impl SSTableReader {
                 }
 
                 // Parse component length (vint)
-                let (remaining, component_len) = parse_vint_length(&key_data[offset..])
-                    .map_err(|_| Error::corruption("Failed to parse clustering key component length"))?;
+                let (remaining, component_len) =
+                    parse_vint_length(&key_data[offset..]).map_err(|_| {
+                        Error::corruption("Failed to parse clustering key component length")
+                    })?;
                 offset = key_data.len() - remaining.len();
 
                 if component_len > remaining.len() {
-                    return Err(Error::corruption("Clustering key component length exceeds available data"));
+                    return Err(Error::corruption(
+                        "Clustering key component length exceeds available data",
+                    ));
                 }
 
                 // Extract component data
                 let component_data = &remaining[..component_len];
-                
+
                 // Get comparator type for this column
                 let comparator = ComparatorType::from_data_type(&clustering_column.data_type)
                     .unwrap_or(ComparatorType::Blob);
@@ -1798,7 +1806,7 @@ impl SSTableReader {
                 // Decode component using exact comparator type
                 let decoded_component = self.decode_key_component(component_data, &comparator)?;
                 key_components.push(decoded_component);
-                
+
                 offset += component_len;
             }
         }
@@ -1813,10 +1821,14 @@ impl SSTableReader {
     }
 
     /// Decode key component using exact comparator type
-    fn decode_key_component(&self, component_data: &[u8], comparator: &ComparatorType) -> Result<Vec<u8>> {
+    fn decode_key_component(
+        &self,
+        component_data: &[u8],
+        comparator: &ComparatorType,
+    ) -> Result<Vec<u8>> {
         // For key components, we typically preserve the byte-comparable encoding
         // but can validate format based on comparator type
-        
+
         match comparator {
             ComparatorType::Uuid => {
                 if component_data.len() != 16 {
@@ -2016,7 +2028,7 @@ impl SSTableReader {
     fn parse_value_with_schema_type(&self, value_data: &[u8], data_type: &str) -> Result<Value> {
         // Convert data type string directly to ComparatorType for decoding
         let comparator = ComparatorType::from_data_type(data_type)?;
-        
+
         // Use comparator to decode the value properly
         match &comparator {
             ComparatorType::Boolean => {
@@ -2043,7 +2055,12 @@ impl SSTableReader {
             }
             ComparatorType::Int => {
                 if value_data.len() == 4 {
-                    let val = i32::from_be_bytes([value_data[0], value_data[1], value_data[2], value_data[3]]);
+                    let val = i32::from_be_bytes([
+                        value_data[0],
+                        value_data[1],
+                        value_data[2],
+                        value_data[3],
+                    ]);
                     Ok(Value::Integer(val))
                 } else {
                     Err(Error::corruption("Invalid int value length"))
@@ -2052,8 +2069,14 @@ impl SSTableReader {
             ComparatorType::BigInt => {
                 if value_data.len() == 8 {
                     let val = i64::from_be_bytes([
-                        value_data[0], value_data[1], value_data[2], value_data[3],
-                        value_data[4], value_data[5], value_data[6], value_data[7]
+                        value_data[0],
+                        value_data[1],
+                        value_data[2],
+                        value_data[3],
+                        value_data[4],
+                        value_data[5],
+                        value_data[6],
+                        value_data[7],
                     ]);
                     Ok(Value::BigInt(val))
                 } else {
@@ -2065,13 +2088,12 @@ impl SSTableReader {
                     .map_err(|_| Error::corruption("Invalid UTF-8 in text value"))?;
                 Ok(Value::Text(text))
             }
-            ComparatorType::Blob => {
-                Ok(Value::Blob(value_data.to_vec()))
-            }
+            ComparatorType::Blob => Ok(Value::Blob(value_data.to_vec())),
             ComparatorType::Uuid => {
                 if value_data.len() == 16 {
                     // Parse UUID from 16 bytes
-                    let uuid_bytes: [u8; 16] = value_data.try_into()
+                    let uuid_bytes: [u8; 16] = value_data
+                        .try_into()
                         .map_err(|_| Error::corruption("Invalid UUID byte array"))?;
                     Ok(Value::Uuid(uuid_bytes))
                 } else {
@@ -2090,9 +2112,9 @@ impl SSTableReader {
             ComparatorType::Tuple(field_comparators) => {
                 self.parse_tuple_value(value_data, field_comparators)
             }
-            ComparatorType::Udt { field_comparators, .. } => {
-                self.parse_udt_value(value_data, field_comparators)
-            }
+            ComparatorType::Udt {
+                field_comparators, ..
+            } => self.parse_udt_value(value_data, field_comparators),
             ComparatorType::Frozen(inner_comparator) => {
                 // For frozen types, parse the inner type directly
                 let inner_value = self.parse_value_with_comparator(value_data, inner_comparator)?;
@@ -2106,7 +2128,11 @@ impl SSTableReader {
     }
 
     /// Parse value directly using ComparatorType (helper method)
-    fn parse_value_with_comparator(&self, value_data: &[u8], comparator: &ComparatorType) -> Result<Value> {
+    fn parse_value_with_comparator(
+        &self,
+        value_data: &[u8],
+        comparator: &ComparatorType,
+    ) -> Result<Value> {
         // Use the same logic as parse_value_with_schema_type but with direct comparator
         match comparator {
             ComparatorType::Boolean => {
@@ -2121,9 +2147,7 @@ impl SSTableReader {
                     .map_err(|_| Error::corruption("Invalid UTF-8 in text value"))?;
                 Ok(Value::Text(text))
             }
-            ComparatorType::Blob => {
-                Ok(Value::Blob(value_data.to_vec()))
-            }
+            ComparatorType::Blob => Ok(Value::Blob(value_data.to_vec())),
             _ => {
                 // For complex types, implement as needed
                 Ok(Value::Blob(value_data.to_vec()))
@@ -2132,9 +2156,13 @@ impl SSTableReader {
     }
 
     /// Parse list value using element comparator
-    fn parse_list_value(&self, value_data: &[u8], element_comparator: &ComparatorType) -> Result<Value> {
+    fn parse_list_value(
+        &self,
+        value_data: &[u8],
+        element_comparator: &ComparatorType,
+    ) -> Result<Value> {
         use crate::parser::vint::parse_vint_length;
-        
+
         let mut offset = 0;
         let mut elements = Vec::new();
 
@@ -2155,12 +2183,15 @@ impl SSTableReader {
             offset = value_data.len() - remaining.len();
 
             if element_len > remaining.len() {
-                return Err(Error::corruption("List element length exceeds available data"));
+                return Err(Error::corruption(
+                    "List element length exceeds available data",
+                ));
             }
 
             // Parse element value using element comparator
             let element_data = &remaining[..element_len];
-            let element_value = self.parse_value_with_comparator(element_data, element_comparator)?;
+            let element_value =
+                self.parse_value_with_comparator(element_data, element_comparator)?;
             elements.push(element_value);
             offset += element_len;
         }
@@ -2169,7 +2200,11 @@ impl SSTableReader {
     }
 
     /// Parse set value using element comparator  
-    fn parse_set_value(&self, value_data: &[u8], element_comparator: &ComparatorType) -> Result<Value> {
+    fn parse_set_value(
+        &self,
+        value_data: &[u8],
+        element_comparator: &ComparatorType,
+    ) -> Result<Value> {
         // Sets are parsed similarly to lists
         let list_value = self.parse_list_value(value_data, element_comparator)?;
         if let Value::List(elements) = list_value {
@@ -2180,9 +2215,14 @@ impl SSTableReader {
     }
 
     /// Parse map value using key and value comparators
-    fn parse_map_value(&self, value_data: &[u8], key_comparator: &ComparatorType, value_comparator: &ComparatorType) -> Result<Value> {
+    fn parse_map_value(
+        &self,
+        value_data: &[u8],
+        key_comparator: &ComparatorType,
+        value_comparator: &ComparatorType,
+    ) -> Result<Value> {
         use crate::parser::vint::parse_vint_length;
-        
+
         let mut offset = 0;
         let mut entries = Vec::new();
 
@@ -2229,9 +2269,13 @@ impl SSTableReader {
     }
 
     /// Parse tuple value using field comparators
-    fn parse_tuple_value(&self, value_data: &[u8], field_comparators: &[ComparatorType]) -> Result<Value> {
+    fn parse_tuple_value(
+        &self,
+        value_data: &[u8],
+        field_comparators: &[ComparatorType],
+    ) -> Result<Value> {
         use crate::parser::vint::parse_vint_length;
-        
+
         let mut offset = 0;
         let mut fields = Vec::new();
 
@@ -2242,12 +2286,17 @@ impl SSTableReader {
             }
 
             // Parse field length
-            let (remaining, field_len) = parse_vint_length(&value_data[offset..])
-                .map_err(|_| Error::corruption(format!("Failed to parse tuple field {} length", i)))?;
+            let (remaining, field_len) =
+                parse_vint_length(&value_data[offset..]).map_err(|_| {
+                    Error::corruption(format!("Failed to parse tuple field {} length", i))
+                })?;
             offset = value_data.len() - remaining.len();
 
             if field_len > remaining.len() {
-                return Err(Error::corruption(format!("Tuple field {} length exceeds available data", i)));
+                return Err(Error::corruption(format!(
+                    "Tuple field {} length exceeds available data",
+                    i
+                )));
             }
 
             // Parse field value using field comparator
@@ -2261,10 +2310,14 @@ impl SSTableReader {
     }
 
     /// Parse UDT value using field comparators
-    fn parse_udt_value(&self, value_data: &[u8], field_comparators: &[(String, ComparatorType)]) -> Result<Value> {
+    fn parse_udt_value(
+        &self,
+        value_data: &[u8],
+        field_comparators: &[(String, ComparatorType)],
+    ) -> Result<Value> {
         use crate::parser::vint::parse_vint_length;
-        use crate::types::{UdtValue, UdtField};
-        
+        use crate::types::{UdtField, UdtValue};
+
         let mut offset = 0;
         let mut fields = Vec::new();
 
@@ -2275,18 +2328,23 @@ impl SSTableReader {
             }
 
             // Parse field length
-            let (remaining, field_len) = parse_vint_length(&value_data[offset..])
-                .map_err(|_| Error::corruption(format!("Failed to parse UDT field {} length", field_name)))?;
+            let (remaining, field_len) =
+                parse_vint_length(&value_data[offset..]).map_err(|_| {
+                    Error::corruption(format!("Failed to parse UDT field {} length", field_name))
+                })?;
             offset = value_data.len() - remaining.len();
 
             if field_len > remaining.len() {
-                return Err(Error::corruption(format!("UDT field {} length exceeds available data", field_name)));
+                return Err(Error::corruption(format!(
+                    "UDT field {} length exceeds available data",
+                    field_name
+                )));
             }
 
             // Parse field value using field comparator
             let field_data = &remaining[..field_len];
             let field_value = self.parse_value_with_comparator(field_data, field_comparator)?;
-            
+
             fields.push(UdtField {
                 name: field_name.clone(),
                 value: Some(field_value),
@@ -2302,15 +2360,15 @@ impl SSTableReader {
     }
 
     /// Extract column name from key context (placeholder implementation)
-    fn extract_column_name_from_context(&self, _table_id: &TableId, _key: &RowKey) -> Option<String> {
+    fn extract_column_name_from_context(
+        &self,
+        _table_id: &TableId,
+        _key: &RowKey,
+    ) -> Option<String> {
         // TODO: Implement proper column name extraction from key context
         // This would analyze the key structure to determine which column is being accessed
         None
     }
-
-
-
-
 
     /// Get table schema from header information
     fn get_table_schema(&self) -> Option<TableSchema> {
@@ -2361,7 +2419,6 @@ impl SSTableReader {
             comments: HashMap::new(),
         })
     }
-
 
     /// Extract generation number from SSTable file path with enhanced pattern matching
     fn extract_generation_from_path(path: &Path) -> u64 {

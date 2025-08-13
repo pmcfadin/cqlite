@@ -1,6 +1,4 @@
-use anyhow::{Result, anyhow};
-#[cfg(feature = "docker-integration")]
-use bollard::{Docker, container::{Config, CreateContainerOptions, StartContainerOptions, RemoveContainerOptions}};
+use anyhow::{anyhow, Result};
 #[cfg(feature = "docker-integration")]
 use bollard::container::{ListContainersOptions, WaitContainerOptions};
 #[cfg(feature = "docker-integration")]
@@ -8,17 +6,22 @@ use bollard::exec::{CreateExecOptions, StartExecResults};
 #[cfg(feature = "docker-integration")]
 use bollard::models::{ContainerStateStatusEnum, HostConfig};
 #[cfg(feature = "docker-integration")]
+use bollard::{
+    container::{Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions},
+    Docker,
+};
+#[cfg(feature = "docker-integration")]
+use futures_util::stream::StreamExt;
+#[cfg(feature = "docker-integration")]
 use std::collections::HashMap;
 #[cfg(feature = "docker-integration")]
 use std::path::Path;
 #[cfg(feature = "docker-integration")]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(feature = "docker-integration")]
 use tokio::fs;
 #[cfg(feature = "docker-integration")]
-use futures_util::stream::StreamExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "docker-integration")]
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "docker-integration")]
 pub struct DockerManager {
@@ -34,29 +37,35 @@ pub struct DockerManager {
 #[cfg(not(feature = "docker-integration"))]
 impl DockerManager {
     pub async fn new() -> Result<Self> {
-        Err(anyhow!("Docker integration is disabled. Enable the 'docker-integration' feature."))
+        Err(anyhow!(
+            "Docker integration is disabled. Enable the 'docker-integration' feature."
+        ))
     }
-    
+
     pub async fn setup_cassandra_container(&mut self, _version: &str) -> Result<()> {
         Err(anyhow!("Docker integration is disabled"))
     }
-    
+
     pub async fn is_cassandra_ready(&self) -> Result<bool> {
         Ok(false)
     }
-    
+
     pub async fn start_cassandra(&mut self) -> Result<()> {
         Err(anyhow!("Docker integration is disabled"))
     }
-    
-    pub async fn copy_file_to_container(&self, _local_path: &std::path::Path, _container_path: &str) -> Result<()> {
+
+    pub async fn copy_file_to_container(
+        &self,
+        _local_path: &std::path::Path,
+        _container_path: &str,
+    ) -> Result<()> {
         Err(anyhow!("Docker integration is disabled"))
     }
-    
+
     pub async fn run_sstabledump(&self, _sstable_path: &str) -> Result<String> {
         Err(anyhow!("Docker integration is disabled"))
     }
-    
+
     pub async fn generate_test_data(&self, _count: u32, _edge_cases: bool) -> Result<()> {
         Err(anyhow!("Docker integration is disabled"))
     }
@@ -67,32 +76,31 @@ impl DockerManager {
     #[cfg(feature = "docker-integration")]
     pub async fn new() -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
-        
+
         // Test Docker connection
         match docker.ping().await {
             Ok(_) => debug!("Docker connection established"),
             Err(e) => return Err(anyhow!("Failed to connect to Docker: {}", e)),
         }
-        
+
         Ok(Self {
             docker,
             cassandra_container_id: None,
         })
     }
-    
-    
+
     /// Setup Cassandra container for testing
     pub async fn setup_cassandra_container(&mut self, version: &str) -> Result<()> {
         info!("Setting up Cassandra {} container", version);
-        
+
         // Stop and remove existing container if it exists
         if let Some(container_id) = &self.cassandra_container_id {
             self.stop_and_remove_container(container_id).await?;
         }
-        
+
         let image = format!("cassandra:{}", version);
         let container_name = "cqlite-sstabledump-validator-cassandra";
-        
+
         // Create container configuration
         let config = Config {
             image: Some(image.clone()),
@@ -106,57 +114,64 @@ impl DockerManager {
             host_config: Some(HostConfig {
                 port_bindings: Some({
                     let mut bindings = HashMap::new();
-                    bindings.insert("9042/tcp".to_string(), Some(vec![
-                        bollard::models::PortBinding {
+                    bindings.insert(
+                        "9042/tcp".to_string(),
+                        Some(vec![bollard::models::PortBinding {
                             host_ip: None,
                             host_port: Some("9042".to_string()),
-                        }
-                    ]));
+                        }]),
+                    );
                     bindings
                 }),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        
+
         let options = CreateContainerOptions {
             name: container_name,
             ..Default::default()
         };
-        
+
         // Create and start container
         let container_response = self.docker.create_container(Some(options), config).await?;
         let container_id = container_response.id;
-        
+
         info!("Starting Cassandra container: {}", container_id);
-        self.docker.start_container(&container_id, None::<StartContainerOptions<String>>).await?;
-        
+        self.docker
+            .start_container(&container_id, None::<StartContainerOptions<String>>)
+            .await?;
+
         self.cassandra_container_id = Some(container_id);
-        
+
         // Wait for Cassandra to be ready
         self.wait_for_cassandra_ready().await?;
-        
+
         info!("Cassandra container is ready");
         Ok(())
     }
-    
+
     /// Check if Cassandra container is running and ready
     pub async fn is_cassandra_ready(&self) -> Result<bool> {
         if let Some(container_id) = &self.cassandra_container_id {
             // Check if container is running
-            let containers = self.docker.list_containers(Some(ListContainersOptions::<String> {
-                all: false,
-                ..Default::default()
-            })).await?;
-            
-            let container_running = containers.iter()
-                .any(|c| c.id.as_ref() == Some(container_id) && 
-                         c.state.as_ref() == Some(&"running".to_string()));
-            
+            let containers = self
+                .docker
+                .list_containers(Some(ListContainersOptions::<String> {
+                    all: false,
+                    ..Default::default()
+                }))
+                .await?;
+
+            let container_running = containers.iter().any(|c| {
+                c.id.as_ref() == Some(container_id)
+                    && c.state.as_ref() == Some(&"running".to_string())
+            });
+
             if !container_running {
                 return Ok(false);
             }
-            
+
             // Test CQL connection
             match self.test_cql_connection().await {
                 Ok(_) => Ok(true),
@@ -166,12 +181,14 @@ impl DockerManager {
             Ok(false)
         }
     }
-    
+
     /// Start existing Cassandra container
     pub async fn start_cassandra(&mut self) -> Result<()> {
         if let Some(container_id) = &self.cassandra_container_id {
             info!("Starting existing Cassandra container");
-            self.docker.start_container(container_id, None::<StartContainerOptions<String>>).await?;
+            self.docker
+                .start_container(container_id, None::<StartContainerOptions<String>>)
+                .await?;
             self.wait_for_cassandra_ready().await?;
         } else {
             // Create new container with default version
@@ -179,17 +196,26 @@ impl DockerManager {
         }
         Ok(())
     }
-    
+
     /// Copy file to container
-    pub async fn copy_file_to_container(&self, local_path: &Path, container_path: &str) -> Result<()> {
-        let container_id = self.cassandra_container_id.as_ref()
+    pub async fn copy_file_to_container(
+        &self,
+        local_path: &Path,
+        container_path: &str,
+    ) -> Result<()> {
+        let container_id = self
+            .cassandra_container_id
+            .as_ref()
             .ok_or_else(|| anyhow!("No Cassandra container available"))?;
-        
-        debug!("Copying {:?} to container path {}", local_path, container_path);
-        
+
+        debug!(
+            "Copying {:?} to container path {}",
+            local_path, container_path
+        );
+
         // Read local file
         let file_content = fs::read(local_path).await?;
-        
+
         // Create exec to write file in container
         let command = format!("cat > {}", container_path);
         let exec_config = CreateExecOptions {
@@ -199,140 +225,166 @@ impl DockerManager {
             attach_stderr: Some(true),
             ..Default::default()
         };
-        
+
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
-        
-        if let StartExecResults::Attached { mut input, .. } = self.docker.start_exec(&exec_response.id, None).await? {
+
+        if let StartExecResults::Attached { mut input, .. } =
+            self.docker.start_exec(&exec_response.id, None).await?
+        {
             input.write_all(&file_content).await?;
             input.shutdown().await?;
         }
-        
+
         debug!("File copied successfully");
         Ok(())
     }
-    
+
     /// Run sstabledump command in container
     pub async fn run_sstabledump(&self, sstable_path: &str) -> Result<String> {
-        let container_id = self.cassandra_container_id.as_ref()
+        let container_id = self
+            .cassandra_container_id
+            .as_ref()
             .ok_or_else(|| anyhow!("No Cassandra container available"))?;
-        
+
         info!("Running sstabledump on {}", sstable_path);
-        
+
         let exec_config = CreateExecOptions {
             cmd: Some(vec!["sstabledump", sstable_path]),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
         };
-        
+
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
-        
+
         let mut output = String::new();
-        if let StartExecResults::Attached { mut output_stream, .. } = self.docker.start_exec(&exec_response.id, None).await? {
+        if let StartExecResults::Attached {
+            mut output_stream, ..
+        } = self.docker.start_exec(&exec_response.id, None).await?
+        {
             output_stream.read_to_string(&mut output).await?;
         }
-        
+
         if output_str.is_empty() {
             return Err(anyhow!("sstabledump produced no output"));
         }
-        
+
         debug!("sstabledump output: {} bytes", output_str.len());
         Ok(output_str)
     }
-    
+
     /// Generate test data in the container
     pub async fn generate_test_data(&self, count: u32, edge_cases: bool) -> Result<()> {
-        let container_id = self.cassandra_container_id.as_ref()
+        let container_id = self
+            .cassandra_container_id
+            .as_ref()
             .ok_or_else(|| anyhow!("No Cassandra container available"))?;
-        
-        info!("Generating {} test data entries (edge_cases: {})", count, edge_cases);
-        
+
+        info!(
+            "Generating {} test data entries (edge_cases: {})",
+            count, edge_cases
+        );
+
         // Create test keyspace and tables
         let cql_commands = self.generate_test_cql_commands(count, edge_cases);
-        
+
         for command in cql_commands {
             self.execute_cql_command(&command).await?;
         }
-        
+
         // Force flush to ensure data is written to SSTables
         self.execute_cql_command("NODETOOL flush").await?;
-        
+
         info!("Test data generation completed");
         Ok(())
     }
-    
+
     // Private helper methods
-    
+
     async fn wait_for_cassandra_ready(&self) -> Result<()> {
         info!("Waiting for Cassandra to be ready...");
-        
+
         let max_attempts = 60; // 5 minutes
         let mut attempts = 0;
-        
+
         while attempts < max_attempts {
             if let Ok(_) = self.test_cql_connection().await {
                 return Ok(());
             }
-            
+
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             attempts += 1;
-            
-            if attempts % 12 == 0 { // Every minute
+
+            if attempts % 12 == 0 {
+                // Every minute
                 info!("Still waiting for Cassandra... ({}s)", attempts * 5);
             }
         }
-        
+
         Err(anyhow!("Cassandra failed to become ready within 5 minutes"))
     }
-    
+
     async fn test_cql_connection(&self) -> Result<()> {
-        let container_id = self.cassandra_container_id.as_ref()
+        let container_id = self
+            .cassandra_container_id
+            .as_ref()
             .ok_or_else(|| anyhow!("No container ID"))?;
-        
+
         let exec_config = CreateExecOptions {
-            cmd: Some(vec!["cqlsh", "-e", "SELECT cluster_name FROM system.local;"]),
+            cmd: Some(vec![
+                "cqlsh",
+                "-e",
+                "SELECT cluster_name FROM system.local;",
+            ]),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
         };
-        
+
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
-        
+
         let mut output = String::new();
-        if let StartExecResults::Attached { mut output_stream, .. } = self.docker.start_exec(&exec_response.id, None).await? {
+        if let StartExecResults::Attached {
+            mut output_stream, ..
+        } = self.docker.start_exec(&exec_response.id, None).await?
+        {
             output_stream.read_to_string(&mut output).await?;
         }
-        
+
         if output_str.contains("cluster_name") {
             Ok(())
         } else {
             Err(anyhow!("CQL connection test failed: {}", output_str))
         }
     }
-    
+
     async fn execute_cql_command(&self, command: &str) -> Result<String> {
-        let container_id = self.cassandra_container_id.as_ref()
+        let container_id = self
+            .cassandra_container_id
+            .as_ref()
             .ok_or_else(|| anyhow!("No container ID"))?;
-        
+
         debug!("Executing CQL: {}", command);
-        
+
         let exec_config = CreateExecOptions {
             cmd: Some(vec!["cqlsh", "-e", command]),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()
         };
-        
+
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
-        
+
         let mut output_str = String::new();
-        if let StartExecResults::Attached { mut output, .. } = self.docker.start_exec(&exec_response.id, None).await? {
+        if let StartExecResults::Attached { mut output, .. } =
+            self.docker.start_exec(&exec_response.id, None).await?
+        {
             output.read_to_string(&mut output_str).await.ok();
         }
-        
+
         Ok(output_str)
     }
-    
+
     fn generate_test_cql_commands(&self, count: u32, edge_cases: bool) -> Vec<String> {
         let mut commands = vec![
             // Create test keyspace
@@ -358,7 +410,7 @@ impl DockerManager {
                 map_col MAP<TEXT, TEXT>
             );".to_string(),
         ];
-        
+
         // Generate basic data
         for i in 0..count {
             commands.push(format!(
@@ -366,14 +418,14 @@ impl DockerManager {
                  VALUES (uuid(), 'text_{}', {}, {}, {}, '{}', {}, {});",
                 i, i, i * 1000, i % 2 == 0, "2024-01-01 12:00:00", i as f32 * 3.14, i as f64 * 2.718
             ));
-            
+
             commands.push(format!(
                 "INSERT INTO validator_test.collections (id, list_col, set_col, map_col)
                  VALUES (uuid(), ['item1_{}', 'item2_{}'], {{{}, {}, {}}}, {{'key_{}': 'value_{}'}});",
                 i, i, i, i+1, i+2, i, i
             ));
         }
-        
+
         // Add edge cases if requested
         if edge_cases {
             commands.extend(vec![
@@ -391,42 +443,46 @@ impl DockerManager {
                 "INSERT INTO validator_test.basic_types (id, int_col, bigint_col) VALUES (uuid(), -2147483648, -9223372036854775808);".to_string(),
             ]);
         }
-        
+
         commands
     }
-    
+
     async fn stop_and_remove_container(&self, container_id: &str) -> Result<()> {
         debug!("Stopping and removing container: {}", container_id);
-        
+
         // Stop container
         if let Err(e) = self.docker.stop_container(container_id, None).await {
             warn!("Failed to stop container {}: {}", container_id, e);
         }
-        
+
         // Wait for container to stop
         let wait_options = WaitContainerOptions {
             condition: "not-running",
         };
-        
+
         let mut wait_stream = self.docker.wait_container(container_id, Some(wait_options));
-        
+
         if let Some(result) = wait_stream.next().await {
             match result {
                 Ok(_) => debug!("Container stopped successfully"),
                 Err(e) => warn!("Error waiting for container to stop: {}", e),
             }
         }
-        
+
         // Remove container
         let remove_options = RemoveContainerOptions {
             force: true,
             ..Default::default()
         };
-        
-        if let Err(e) = self.docker.remove_container(container_id, Some(remove_options)).await {
+
+        if let Err(e) = self
+            .docker
+            .remove_container(container_id, Some(remove_options))
+            .await
+        {
             warn!("Failed to remove container {}: {}", container_id, e);
         }
-        
+
         Ok(())
     }
 }
@@ -445,7 +501,7 @@ impl Drop for DockerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_docker_manager_creation() {
         let result = DockerManager::new().await;
@@ -455,11 +511,11 @@ mod tests {
             // Skip test in CI if Docker is not available
             return;
         }
-        
+
         // When Docker integration is disabled, expect error
         #[cfg(not(feature = "docker-integration"))]
         assert!(result.is_err());
-        
+
         // When Docker integration is enabled, may succeed if Docker is available
         #[cfg(feature = "docker-integration")]
         {

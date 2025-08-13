@@ -1,16 +1,16 @@
 //! SSTableDump Parity Validator Binary
-//! 
+//!
 //! Command-line tool to validate that our spec-accurate readers produce
 //! identical output to Cassandra's sstabledump tool. This provides zero
 //! tolerance evidence for Issue #25 implementation.
 
+use clap::{Arg, Command};
 use cqlite_core::{
     error::Result,
     validation::sstabledump_parity::{
-        SStableDumpParityConfig, SStableDumpParityValidator, ParityStatus
+        ParityStatus, SStableDumpParityConfig, SStableDumpParityValidator,
     },
 };
-use clap::{Arg, Command};
 use std::path::PathBuf;
 use tokio;
 
@@ -24,14 +24,14 @@ async fn main() -> Result<()> {
         .long_about(
             "This tool provides zero-tolerance validation that our spec-accurate \
              SSTable readers produce identical output to Cassandra's sstabledump tool. \
-             This is critical evidence for Issue #25 proving elimination of heuristic parsing."
+             This is critical evidence for Issue #25 proving elimination of heuristic parsing.",
         )
         .arg(
             Arg::new("cassandra-tools")
                 .long("cassandra-tools")
                 .value_name("PATH")
                 .help("Path to Cassandra tools directory containing sstabledump")
-                .required(false)
+                .required(false),
         )
         .arg(
             Arg::new("test-paths")
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
                 .value_name("PATHS")
                 .help("Comma-separated paths to SSTable test directories")
                 .required(false)
-                .default_value("test-env/cassandra5/sstables")
+                .default_value("test-env/cassandra5/sstables"),
         )
         .arg(
             Arg::new("output")
@@ -47,28 +47,30 @@ async fn main() -> Result<()> {
                 .long("output")
                 .value_name("FILE")
                 .help("Output file for validation report")
-                .required(false)
+                .required(false),
         )
         .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
                 .action(clap::ArgAction::SetTrue)
-                .help("Enable verbose output comparison")
+                .help("Enable verbose output comparison"),
         )
         .arg(
             Arg::new("exact-match")
                 .long("exact-match")
                 .action(clap::ArgAction::SetTrue)
-                .help("Require exact byte-for-byte match (zero tolerance)")
+                .help("Require exact byte-for-byte match (zero tolerance)"),
         )
         .get_matches();
 
     // Parse command line arguments
-    let cassandra_tools_path = matches.get_one::<String>("cassandra-tools")
+    let cassandra_tools_path = matches
+        .get_one::<String>("cassandra-tools")
         .map(PathBuf::from);
 
-    let test_paths: Vec<PathBuf> = matches.get_one::<String>("test-paths")
+    let test_paths: Vec<PathBuf> = matches
+        .get_one::<String>("test-paths")
         .unwrap()
         .split(',')
         .map(|s| PathBuf::from(s.trim()))
@@ -128,9 +130,18 @@ async fn main() -> Result<()> {
             println!();
             println!("   📊 Results Summary:");
             println!("      - Total Files Tested: {}", result.total_files_tested);
-            println!("      - Perfect Parity Files: {}", result.perfect_parity_count);
-            println!("      - Total Discrepancies: {}", result.discrepancy_summary.total_discrepancies);
-            println!("      - Validation Time: {}ms", result.performance_metrics.total_validation_time_ms);
+            println!(
+                "      - Perfect Parity Files: {}",
+                result.perfect_parity_count
+            );
+            println!(
+                "      - Total Discrepancies: {}",
+                result.discrepancy_summary.total_discrepancies
+            );
+            println!(
+                "      - Validation Time: {}ms",
+                result.performance_metrics.total_validation_time_ms
+            );
             println!();
             println!("   🏆 This proves Issue #25 implementation:");
             println!("      ✅ Eliminates ALL heuristic parsing");
@@ -140,14 +151,26 @@ async fn main() -> Result<()> {
         }
         ParityStatus::MinorDiscrepancies => {
             println!("⚠️  Minor discrepancies found (mostly formatting)");
-            println!("   Total Discrepancies: {}", result.discrepancy_summary.total_discrepancies);
-            println!("   Files with Perfect Parity: {}", result.perfect_parity_count);
+            println!(
+                "   Total Discrepancies: {}",
+                result.discrepancy_summary.total_discrepancies
+            );
+            println!(
+                "   Files with Perfect Parity: {}",
+                result.perfect_parity_count
+            );
             println!("   Files with Discrepancies: {}", result.discrepancy_count);
         }
         ParityStatus::MajorDiscrepancies => {
             println!("❌ Major discrepancies found - REQUIRES ATTENTION");
-            println!("   Total Discrepancies: {}", result.discrepancy_summary.total_discrepancies);
-            println!("   Critical Issues: {}", result.discrepancy_summary.critical_issues.len());
+            println!(
+                "   Total Discrepancies: {}",
+                result.discrepancy_summary.total_discrepancies
+            );
+            println!(
+                "   Critical Issues: {}",
+                result.discrepancy_summary.critical_issues.len()
+            );
             println!();
             println!("   🚨 Critical Issues:");
             for issue in &result.discrepancy_summary.critical_issues {
@@ -191,6 +214,6 @@ async fn main() -> Result<()> {
 
     println!();
     println!("🏁 Validation complete with exit code: {}", exit_code);
-    
+
     std::process::exit(exit_code);
 }

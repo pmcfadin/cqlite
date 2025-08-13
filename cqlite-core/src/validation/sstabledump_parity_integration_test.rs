@@ -1,5 +1,5 @@
 //! Integration tests for SSTableDump parity validation
-//! 
+//!
 //! These tests demonstrate zero-tolerance validation that proves our
 //! spec-accurate readers produce identical output to Cassandra's sstabledump.
 
@@ -13,7 +13,7 @@ use tempfile::TempDir;
 async fn test_sstabledump_parity_validation_framework() -> Result<()> {
     // Create a temporary directory for testing
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Configure parity validator with test settings
     let config = SStableDumpParityConfig {
         cassandra_tools_path: None, // Will try to find in PATH
@@ -36,7 +36,7 @@ async fn test_sstabledump_parity_validation_framework() -> Result<()> {
     // Validate that the framework works correctly
     assert_eq!(result.total_files_tested, 0); // No test files in temp directory
     assert_eq!(result.status, ParityStatus::ValidationFailed); // Expected since no files found
-    
+
     // Validate evidence report generation
     let evidence_report = validator.generate_evidence_report(&result);
     assert!(evidence_report.contains("SSTableDump Parity Validation Report"));
@@ -84,7 +84,10 @@ fn test_discrepancy_analysis() {
 
     assert_eq!(file_result.discrepancies.len(), 2);
     assert_eq!(file_result.matching_rows, 98);
-    assert!(matches!(file_result.status, ParityStatus::MinorDiscrepancies));
+    assert!(matches!(
+        file_result.status,
+        ParityStatus::MinorDiscrepancies
+    ));
 }
 
 /// Test zero tolerance evidence generation
@@ -214,34 +217,32 @@ fn test_major_discrepancy_detection() {
         total_files_tested: 2,
         perfect_parity_count: 0,
         discrepancy_count: 2,
-        file_results: vec![
-            FileParityResult {
-                file_path: PathBuf::from("/test/problematic-Data.db"),
-                status: ParityStatus::MajorDiscrepancies,
-                total_rows: 100,
-                matching_rows: 85,
-                discrepancies: vec![
-                    RowDiscrepancy {
-                        row_key: "critical_key_1".to_string(),
-                        column_name: Some("important_column".to_string()),
-                        expected_value: "correct_value".to_string(),
-                        actual_value: "incorrect_value".to_string(),
-                        discrepancy_type: DiscrepancyType::ValueMismatch,
-                        context: "Critical data parsing error".to_string(),
-                    },
-                    RowDiscrepancy {
-                        row_key: "critical_key_2".to_string(),
-                        column_name: Some("type_column".to_string()),
-                        expected_value: "timestamp: 2023-01-01".to_string(),
-                        actual_value: "string: 2023-01-01".to_string(),
-                        discrepancy_type: DiscrepancyType::TypeMismatch,
-                        context: "Schema interpretation error".to_string(),
-                    },
-                ],
-                validation_time_ms: 400,
-                file_size_bytes: 1024000,
-            },
-        ],
+        file_results: vec![FileParityResult {
+            file_path: PathBuf::from("/test/problematic-Data.db"),
+            status: ParityStatus::MajorDiscrepancies,
+            total_rows: 100,
+            matching_rows: 85,
+            discrepancies: vec![
+                RowDiscrepancy {
+                    row_key: "critical_key_1".to_string(),
+                    column_name: Some("important_column".to_string()),
+                    expected_value: "correct_value".to_string(),
+                    actual_value: "incorrect_value".to_string(),
+                    discrepancy_type: DiscrepancyType::ValueMismatch,
+                    context: "Critical data parsing error".to_string(),
+                },
+                RowDiscrepancy {
+                    row_key: "critical_key_2".to_string(),
+                    column_name: Some("type_column".to_string()),
+                    expected_value: "timestamp: 2023-01-01".to_string(),
+                    actual_value: "string: 2023-01-01".to_string(),
+                    discrepancy_type: DiscrepancyType::TypeMismatch,
+                    context: "Schema interpretation error".to_string(),
+                },
+            ],
+            validation_time_ms: 400,
+            file_size_bytes: 1024000,
+        }],
         discrepancy_summary: DiscrepancySummary {
             total_discrepancies: 2,
             discrepancies_by_type: {
@@ -295,7 +296,7 @@ fn test_major_discrepancy_detection() {
 fn test_ci_cd_integration_demo() {
     // This demonstrates how the validation framework would be integrated
     // into a CI/CD pipeline to ensure zero tolerance for regressions
-    
+
     let config = SStableDumpParityConfig {
         cassandra_tools_path: Some(PathBuf::from("/opt/cassandra/bin")),
         test_sstable_paths: vec![

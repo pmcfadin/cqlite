@@ -114,19 +114,19 @@ mod tests {
         data.push(0x40);
         // Column count: 2 (vint)
         data.push(0x04);
-        
+
         // Column 1: name="static1", value="value1"
         data.push(0x10); // name length: 8 (vint)
         data.extend_from_slice(b"static1");
         data.push(0x0C); // value length: 6 (vint)
         data.extend_from_slice(b"value1");
-        
+
         // Column 2: name="static2", value="value2"
         data.push(0x10); // name length: 8 (vint)
         data.extend_from_slice(b"static2");
         data.push(0x0C); // value length: 6 (vint)
         data.extend_from_slice(b"value2");
-        
+
         data
     }
 
@@ -135,7 +135,7 @@ mod tests {
         let mut data = Vec::new();
         // Row count: 1 (vint)
         data.push(0x02);
-        
+
         // Row 1:
         // Clustering key length: 4 (vint)
         data.push(0x08);
@@ -145,19 +145,19 @@ mod tests {
         data.extend_from_slice(&100i64.to_be_bytes());
         // Column count: 2
         data.push(0x04);
-        
+
         // Column 1
         data.push(0x08); // name length: 4
         data.extend_from_slice(b"col1");
         data.push(0x0A); // value length: 5
         data.extend_from_slice(b"data1");
-        
+
         // Column 2
         data.push(0x08); // name length: 4
         data.extend_from_slice(b"col2");
         data.push(0x0A); // value length: 5
         data.extend_from_slice(b"data2");
-        
+
         data
     }
 
@@ -166,7 +166,7 @@ mod tests {
         let mut data = Vec::new();
         // Row count: 2 (vint)
         data.push(0x04);
-        
+
         // Row 1: Has 1 column
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row1");
@@ -176,13 +176,13 @@ mod tests {
         data.extend_from_slice(b"col1");
         data.push(0x0A); // value length: 5
         data.extend_from_slice(b"data1");
-        
+
         // Row 2: Has 0 columns (null row)
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row2");
         data.extend_from_slice(&200i64.to_be_bytes());
         data.push(0x00); // column count: 0
-        
+
         data
     }
 
@@ -206,7 +206,7 @@ mod tests {
     fn test_parse_simple_header() {
         let mut state_machine = RowCellStateMachine::new();
         let header_data = create_simple_row_header();
-        
+
         let result = state_machine.process(&header_data);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), header_data.len());
@@ -217,7 +217,7 @@ mod tests {
     fn test_parse_header_with_ttl() {
         let mut state_machine = RowCellStateMachine::new();
         let header_data = create_row_header_with_ttl();
-        
+
         let result = state_machine.process(&header_data);
         assert!(result.is_ok());
         assert_eq!(state_machine.current_state(), &State::PartitionKey);
@@ -227,7 +227,7 @@ mod tests {
     fn test_parse_header_with_deletion() {
         let mut state_machine = RowCellStateMachine::new();
         let header_data = create_row_header_with_deletion();
-        
+
         let result = state_machine.process(&header_data);
         assert!(result.is_ok());
         assert_eq!(state_machine.current_state(), &State::PartitionKey);
@@ -236,11 +236,11 @@ mod tests {
     #[test]
     fn test_parse_simple_partition_key() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // First parse header
         let header = create_simple_row_header();
         state_machine.process(&header).unwrap();
-        
+
         // Then parse partition key
         let partition_key = create_simple_partition_key();
         let result = state_machine.process(&partition_key);
@@ -250,11 +250,11 @@ mod tests {
     #[test]
     fn test_parse_composite_partition_key() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Parse header first
         let header = create_simple_row_header();
         state_machine.process(&header).unwrap();
-        
+
         // Parse composite partition key
         let partition_key = create_composite_partition_key();
         let result = state_machine.process(&partition_key);
@@ -264,23 +264,23 @@ mod tests {
     #[test]
     fn test_parse_static_row() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Setup: parse header and partition key
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
         data.extend(create_static_row());
-        
+
         // Add empty clustering rows to complete
         data.push(0x00); // 0 clustering rows
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert!(row.static_row.is_some());
         assert_eq!(row.static_row.unwrap().column_count, 2);
@@ -289,20 +289,20 @@ mod tests {
     #[test]
     fn test_parse_dense_clustering_rows() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Build complete row data
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
         data.extend(create_clustering_rows_dense());
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 1);
         assert_eq!(row.clustering_rows[0].columns.len(), 2);
@@ -311,20 +311,20 @@ mod tests {
     #[test]
     fn test_parse_sparse_clustering_rows() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Build complete row data
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
         data.extend(create_clustering_rows_sparse());
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 2);
         assert_eq!(row.clustering_rows[0].columns.len(), 1);
@@ -334,21 +334,21 @@ mod tests {
     #[test]
     fn test_complete_row_with_all_sections() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Build complete row with all sections
         let mut data = Vec::new();
         data.extend(create_row_header_with_ttl());
         data.extend(create_composite_partition_key());
         data.extend(create_static_row());
         data.extend(create_clustering_rows_dense());
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert!(row.header.ttl.is_some());
         assert_eq!(row.partition_key.component_count, 2);
@@ -359,11 +359,11 @@ mod tests {
     #[test]
     fn test_insufficient_data_error() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Try to process with insufficient data for header
         let data = vec![0x00]; // Only 1 byte, need at least 9
         let result = state_machine.process(&data);
-        
+
         assert!(result.is_ok()); // Process succeeds but state machine should have error
         assert!(state_machine.has_error());
     }
@@ -371,12 +371,12 @@ mod tests {
     #[test]
     fn test_state_machine_reset() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Process some data
         let header = create_simple_row_header();
         state_machine.process(&header).unwrap();
         assert_ne!(state_machine.current_state(), &State::Header);
-        
+
         // Reset
         state_machine.reset();
         assert_eq!(state_machine.current_state(), &State::Header);
@@ -388,29 +388,29 @@ mod tests {
         let schema = create_test_schema();
         let comparator = ComparatorType::Blob;
         let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
-        
+
         // Build row with columns matching schema
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
-        
+
         // Add clustering row with schema columns
         data.push(0x02); // 1 clustering row
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
         data.push(0x02); // 1 column
-        
+
         // Column "name" (text type in schema)
         data.push(0x08); // name length: 4
         data.extend_from_slice(b"name");
         data.push(0x0A); // value length: 5
         data.extend_from_slice(b"Alice");
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
     }
@@ -418,14 +418,14 @@ mod tests {
     #[test]
     fn test_ttl_and_deletion_coexistence() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Create header with both TTL and deletion
         let mut header_data = Vec::new();
         header_data.push(0x03); // Flags: 0x03 (has both TTL and deletion)
         header_data.extend_from_slice(&42i64.to_be_bytes());
         header_data.extend_from_slice(&3600u32.to_be_bytes()); // TTL
         header_data.extend_from_slice(&1234567890u32.to_be_bytes()); // Local deletion
-        
+
         let result = state_machine.process(&header_data);
         assert!(result.is_ok());
         assert_eq!(state_machine.current_state(), &State::PartitionKey);
@@ -434,17 +434,17 @@ mod tests {
     #[test]
     fn test_empty_clustering_rows() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Build row with no clustering rows
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
         data.push(0x00); // 0 clustering rows
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
         assert_eq!(parsed_row.unwrap().clustering_rows.len(), 0);
@@ -453,27 +453,27 @@ mod tests {
     #[test]
     fn test_multiple_component_partition_keys() {
         let mut state_machine = RowCellStateMachine::new();
-        
+
         // Create partition key with 5 components
         let mut partition_key = Vec::new();
         partition_key.push(0x0A); // 5 components (vint)
-        
+
         for i in 0..5 {
             let component = format!("part{}", i);
             partition_key.push((component.len() * 2) as u8); // length (vint)
             partition_key.extend_from_slice(component.as_bytes());
         }
-        
+
         // Build complete data
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(partition_key);
         data.push(0x00); // No clustering rows
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
         assert_eq!(parsed_row.unwrap().partition_key.component_count, 5);
@@ -490,42 +490,42 @@ mod tests {
             nullable: true,
             default: None,
         });
-        
+
         let comparator = ComparatorType::Blob;
         let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
-        
+
         // Build row data with nested collection column
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
-        
+
         // Add clustering row with nested collection
         data.push(0x02); // 1 clustering row
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
         data.push(0x02); // 1 column
-        
+
         // Column "nested_data" with complex nested structure
         data.push(0x16); // name length: 11 (nested_data)
         data.extend_from_slice(b"nested_data");
         data.push(0x14); // value length: 10 (mock binary data for list<set<text>>)
         data.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]);
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 1);
         assert!(row.clustering_rows[0].columns.contains_key("nested_data"));
-        
+
         // Should be parsed as blob since we preserve type-aware parsing for schema integration
         match &row.clustering_rows[0].columns["nested_data"] {
-            Value::Blob(_) => {}, // Expected for complex types without full parser
+            Value::Blob(_) => {} // Expected for complex types without full parser
             _ => panic!("Expected blob value for complex nested type"),
         }
     }
@@ -541,22 +541,22 @@ mod tests {
             nullable: true,
             default: None,
         });
-        
+
         let comparator = ComparatorType::Blob;
         let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
-        
+
         // Build row data with UDT column
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
-        
+
         // Add clustering row with UDT
         data.push(0x02); // 1 clustering row
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
         data.push(0x02); // 1 column
-        
+
         // Column "address" (frozen UDT)
         data.push(0x0E); // name length: 7
         data.extend_from_slice(b"address");
@@ -567,18 +567,18 @@ mod tests {
             0x00, 0x03, 0x4E, 0x59, 0x43, // city: "NYC"
             0x00, 0x02, 0x27, 0x11, // zip: 10001
         ]);
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 1);
         assert!(row.clustering_rows[0].columns.contains_key("address"));
-        
+
         // Should be parsed as blob for frozen UDT until full UDT parser is implemented
         match &row.clustering_rows[0].columns["address"] {
             Value::Blob(data) => assert_eq!(data.len(), 16),
@@ -597,22 +597,22 @@ mod tests {
             nullable: true,
             default: None,
         });
-        
+
         let comparator = ComparatorType::Blob;
         let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
-        
+
         // Build row data with tuple column
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
-        
+
         // Add clustering row with tuple
         data.push(0x02); // 1 clustering row
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
         data.push(0x02); // 1 column
-        
+
         // Column "coordinates" (tuple<double, double, text>)
         data.push(0x16); // name length: 11
         data.extend_from_slice(b"coordinates");
@@ -620,21 +620,21 @@ mod tests {
         // Mock tuple binary: (40.7128, -74.0060, "NYC")
         data.extend_from_slice(&[
             0x40, 0x44, 0x5B, 0x3F, 0xDB, 0x8B, 0x44, 0x61, // 40.7128 (double)
-            0xC0, 0x52, 0x80, 0x7E, 0xA9, 0x86, 0xB8, 0x6A, // -74.0060 (double) 
+            0xC0, 0x52, 0x80, 0x7E, 0xA9, 0x86, 0xB8, 0x6A, // -74.0060 (double)
             0x4E, 0x59, 0x43, // "NYC" (text)
         ]);
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 1);
         assert!(row.clustering_rows[0].columns.contains_key("coordinates"));
-        
+
         // Should be parsed as blob for complex tuple until full tuple parser is implemented
         match &row.clustering_rows[0].columns["coordinates"] {
             Value::Blob(data) => assert_eq!(data.len(), 14),
@@ -661,15 +661,15 @@ mod tests {
                 default: None,
             },
         ];
-        
+
         let comparator = ComparatorType::Blob;
         let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
-        
+
         // Build row data with multi-component clustering key
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
-        
+
         // Add clustering row with composite clustering key
         data.push(0x02); // 1 clustering row
         data.push(0x10); // key length: 8 (timestamp) + 4 (int) = 12, but encoded as 16 for vint
@@ -680,20 +680,20 @@ mod tests {
         ]);
         data.extend_from_slice(&100i64.to_be_bytes());
         data.push(0x02); // 1 column
-        
+
         // Simple column
         data.push(0x08); // name length: 4
         data.extend_from_slice(b"data");
         data.push(0x0A); // value length: 5
         data.extend_from_slice(b"value");
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 1);
         assert_eq!(row.clustering_rows[0].clustering_key.len(), 12); // 8 + 4 bytes
@@ -719,55 +719,58 @@ mod tests {
                 default: None,
             },
         ]);
-        
+
         let comparator = ComparatorType::Blob;
         let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
-        
+
         // Build row data with both types
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
-        
+
         // Add clustering row with both frozen and regular collections
         data.push(0x02); // 1 clustering row
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
         data.push(0x04); // 2 columns
-        
+
         // Frozen list column
         data.push(0x16); // name length: 11
         data.extend_from_slice(b"frozen_list");
         data.push(0x0C); // value length: 6
         data.extend_from_slice(&[0x00, 0x02, 0x41, 0x42, 0x43, 0x44]); // Mock frozen list data
-        
+
         // Regular list column
         data.push(0x18); // name length: 12
         data.extend_from_slice(b"regular_list");
         data.push(0x0C); // value length: 6
         data.extend_from_slice(&[0x01, 0x02, 0x45, 0x46, 0x47, 0x48]); // Mock regular list data
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 1);
         assert!(row.clustering_rows[0].columns.contains_key("frozen_list"));
         assert!(row.clustering_rows[0].columns.contains_key("regular_list"));
-        
+
         // Both should be parsed as blobs until full collection parsers are implemented
         // but the schema information is used to determine the approach
-        match (&row.clustering_rows[0].columns["frozen_list"], &row.clustering_rows[0].columns["regular_list"]) {
+        match (
+            &row.clustering_rows[0].columns["frozen_list"],
+            &row.clustering_rows[0].columns["regular_list"],
+        ) {
             (Value::Blob(frozen_data), Value::Blob(regular_data)) => {
                 assert_eq!(frozen_data.len(), 6);
                 assert_eq!(regular_data.len(), 6);
                 // Different binary representations indicate different handling
                 assert_ne!(frozen_data, regular_data);
-            },
+            }
             _ => panic!("Expected blob values for both collection types"),
         }
     }
@@ -783,22 +786,22 @@ mod tests {
             nullable: true,
             default: None,
         });
-        
+
         let comparator = ComparatorType::Blob;
         let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
-        
+
         // Build row data with complex map
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
-        
+
         // Add clustering row with complex map
         data.push(0x02); // 1 clustering row
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
         data.push(0x02); // 1 column
-        
+
         // Column "metadata" (map<text, frozen<list<int>>>)
         data.push(0x10); // name length: 8
         data.extend_from_slice(b"metadata");
@@ -808,21 +811,21 @@ mod tests {
             0x02, // 2 entries
             0x04, 0x6B, 0x65, 0x79, 0x31, // "key1"
             0x0C, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03, // [1, 2, 3]
-            0x04, 0x6B, 0x65, 0x79, 0x32, // "key2" 
+            0x04, 0x6B, 0x65, 0x79, 0x32, // "key2"
             0x0C, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, // [4, 5, 6]
         ]);
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 1);
         assert!(row.clustering_rows[0].columns.contains_key("metadata"));
-        
+
         // Should be parsed as blob for complex map until full map parser is implemented
         match &row.clustering_rows[0].columns["metadata"] {
             Value::Blob(data) => assert_eq!(data.len(), 12),
@@ -837,36 +840,36 @@ mod tests {
         let schema = create_test_schema();
         let comparator = ComparatorType::Blob;
         let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
-        
+
         // Build row data with column not in schema
         let mut data = Vec::new();
         data.extend(create_simple_row_header());
         data.extend(create_simple_partition_key());
-        
+
         // Add clustering row with unknown column
         data.push(0x02); // 1 clustering row
         data.push(0x08); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
         data.push(0x02); // 1 column
-        
+
         // Column "unknown" (not in schema)
         data.push(0x0E); // name length: 7
         data.extend_from_slice(b"unknown");
         data.push(0x0A); // value length: 5
         data.extend_from_slice(b"value");
-        
+
         let result = state_machine.process(&data);
         assert!(result.is_ok());
         assert!(state_machine.is_complete());
-        
+
         let parsed_row = state_machine.take_parsed_row();
         assert!(parsed_row.is_some());
-        
+
         let row = parsed_row.unwrap();
         assert_eq!(row.clustering_rows.len(), 1);
         assert!(row.clustering_rows[0].columns.contains_key("unknown"));
-        
+
         // Unknown columns should be preserved as blobs (graceful fallback)
         match &row.clustering_rows[0].columns["unknown"] {
             Value::Blob(data) => assert_eq!(data, b"value"),
