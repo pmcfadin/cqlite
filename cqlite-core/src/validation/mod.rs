@@ -23,6 +23,12 @@ pub mod format_compatibility;
 pub mod real_time;
 pub mod reports;
 
+// Issue #25 SSTableDump parity validation
+pub mod sstabledump_parity;
+
+#[cfg(test)]
+pub mod sstabledump_parity_integration_test;
+
 // Re-export Issue #17 framework components - fix ambiguous exports
 pub use self::core::{
     ValidationConfig, ValidationContext as CoreValidationContext, ValidationFramework,
@@ -32,6 +38,7 @@ pub use self::error_handling::*;
 pub use self::format_compatibility::*;
 pub use self::real_time::{RealtimeValidator, ValidationContext as RealTimeValidationContext};
 pub use self::reports::*;
+pub use self::sstabledump_parity::*;
 
 /// Validation result for a single test case
 #[derive(Debug, Clone, Serialize, Deserialize)]

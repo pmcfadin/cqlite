@@ -21,6 +21,7 @@ use crate::{
     Config, Error, Result, RowKey, Value,
     parser::{
         SSTableHeader, SSTableParser,
+        header::CassandraVersion,
         types::{CqlTypeId, parse_cql_value},
         vint::parse_vint_length,
     },
@@ -463,9 +464,18 @@ impl StreamingSSTableReader {
             data
         };
 
-        // Parse value
-        let (_, value) = parse_cql_value(&decompressed_data, CqlTypeId::Varchar)
-            .map_err(|e| Error::corruption(format!("Failed to parse value: {:?}", e)))?;
+        // Parse value using schema-driven approach for modern formats
+        let value = if self.header.cassandra_version != CassandraVersion::Legacy {
+            // For modern formats, use schema information if available
+            // TODO: Implement schema-driven parsing when schema is available
+            // For now, preserve data as blob to avoid type assumptions
+            Value::Blob(decompressed_data.to_vec())
+        } else {
+            // Only allow hardcoded parsing for legacy formats
+            let (_, parsed_value) = parse_cql_value(&decompressed_data, CqlTypeId::Varchar)
+                .map_err(|e| Error::corruption(format!("Failed to parse legacy value: {:?}", e)))?;
+            parsed_value
+        };
 
         Ok(Some(value))
     }

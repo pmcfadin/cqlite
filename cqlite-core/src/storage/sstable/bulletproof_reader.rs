@@ -3,10 +3,25 @@
 //! This module provides a bulletproof SSTable reader that can handle any
 //! Cassandra version (2.x, 3.x, 4.x, 5.x) with automatic format detection
 //! and proper compression handling.
+//!
+//! ⚠️  **EXPERIMENTAL WARNING for Modern Formats (4.x/5.x)**
+//!
+//! The 'oa' format parsing implementation in this module is EXPERIMENTAL and
+//! based on reverse engineering. It may not fully align with the official
+//! Cassandra Big format specification (CEP-25). For production use with modern
+//! formats, prefer the spec-accurate readers:
+//!
+//! - `row_cell_state_machine.rs` - Implements schema-driven parsing without heuristics
+//! - Follows exact Cassandra specification for BIG format row/cell parsing
+//! - Eliminates type guessing in favor of schema-aware decoding
+//!
+//! **TODO**: Either align this implementation with CEP-25 Big format specification
+//! or deprecate the modern format parsing in favor of spec-accurate implementations.
 
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use log::{debug, info, warn};
 
 use super::{
     chunk_decompressor::{ChunkDecompressor, create_decompressor_from_file},
@@ -41,12 +56,8 @@ impl BulletproofReader {
             .ok_or_else(|| Error::InvalidPath("No parent directory".to_string()))?
             .to_path_buf();
 
-        println!("🚀 Opening SSTable with bulletproof reader:");
-        println!("   Format: {:?}", info.format);
-        println!("   Generation: {}", info.generation);
-        println!("   Size: {}", info.size);
-        println!("   Component: {:?}", info.component);
-        println!("   Base: {}", info.base_name);
+        info!("Opening SSTable with bulletproof reader: format={:?}, generation={}, size={}, component={:?}, base={}", 
+              info.format, info.generation, info.size, info.component, info.base_name);
 
         let mut reader = Self {
             info,
@@ -64,10 +75,7 @@ impl BulletproofReader {
         // Set up compression if the format supports it
         if self.info.format.supports_compression() {
             if let Err(e) = self.setup_compression() {
-                println!(
-                    "⚠️  Compression setup failed: {}, trying without compression",
-                    e
-                );
+                warn!("Compression setup failed: {}, trying without compression", e);
             }
         }
 
@@ -84,14 +92,14 @@ impl BulletproofReader {
             .companion_path(SSTableComponent::CompressionInfo, &self.base_dir);
 
         if compression_info_path.exists() {
-            println!("📦 Found CompressionInfo.db, setting up decompression");
+            debug!("Found CompressionInfo.db, setting up decompression");
 
             let decompressor = create_decompressor_from_file(&compression_info_path)?;
             self.decompressor = Some(decompressor);
 
-            println!("✅ Compression setup complete");
+            debug!("Compression setup complete");
         } else {
-            println!("📄 No CompressionInfo.db found, assuming uncompressed data");
+            debug!("No CompressionInfo.db found, assuming uncompressed data");
         }
 
         Ok(())
@@ -115,7 +123,7 @@ impl BulletproofReader {
 
         self.data_reader = Some(reader);
 
-        println!("📂 Data.db file opened: {:?}", data_path);
+        debug!("Data.db file opened: {:?}", data_path);
         Ok(())
     }
 
@@ -187,11 +195,7 @@ impl BulletproofReader {
     pub fn parse_sstable_data(&mut self) -> Result<Vec<SSTableEntry>> {
         let data = self.read_all_data()?;
 
-        println!(
-            "🔍 Parsing SSTable data ({} bytes) with format {:?}",
-            data.len(),
-            self.info.format
-        );
+        info!("Parsing SSTable data ({} bytes) with format {:?}", data.len(), self.info.format);
 
         match &self.info.format {
             SSTableFormat::V4x(_) | SSTableFormat::V5x(_) => self.parse_modern_format(&data),
@@ -204,9 +208,19 @@ impl BulletproofReader {
         }
     }
 
-    /// Parse modern SSTable format (4.x, 5.x) with proper 'oa' format parsing
+    /// Parse modern SSTable format (4.x, 5.x) with EXPERIMENTAL 'oa' format parsing
+    /// 
+    /// ⚠️ WARNING: EXPERIMENTAL IMPLEMENTATION
+    /// This 'oa' format parser is experimental and may not fully align with 
+    /// the official Cassandra Big format specification. For production use,
+    /// prefer the spec-accurate readers in row_cell_state_machine.rs which
+    /// implement schema-driven parsing without heuristics.
+    /// 
+    /// TODO: Align with CEP-25 Big format specification or deprecate in favor
+    /// of the spec-accurate state machine implementation.
     fn parse_modern_format(&self, data: &[u8]) -> Result<Vec<SSTableEntry>> {
-        println!("🆕 Parsing modern SSTable format with proper 'oa' format parsing");
+        warn!("EXPERIMENTAL: Parsing modern SSTable format with custom 'oa' format parsing");
+        warn!("This implementation may not fully align with Cassandra Big format specification");
 
         if data.len() < 8 {
             return Err(Error::InvalidFormat(
@@ -216,23 +230,22 @@ impl BulletproofReader {
 
         // Parse the 'oa' format header
         let header = self.parse_oa_header(data)?;
-        println!(
-            "📋 Parsed 'oa' header: version={}, partition_count={}",
-            header.format_version, header.partition_count
-        );
+        debug!("Parsed 'oa' header: version={}, partition_count={}", 
+               header.format_version, header.partition_count);
 
         // Parse data blocks following the header
         let entries = self.parse_data_blocks(data, &header)?;
 
-        println!(
-            "✅ Parsed {} entries from {} bytes using structured parsing",
-            entries.len(),
-            data.len()
-        );
+        info!("Parsed {} entries from {} bytes using structured parsing", entries.len(), data.len());
         Ok(entries)
     }
 
-    /// Parse Cassandra 'oa' format header
+    /// Parse Cassandra 'oa' format header (EXPERIMENTAL)
+    /// 
+    /// ⚠️ EXPERIMENTAL: This header parsing implementation is based on 
+    /// reverse engineering and may not match the official Cassandra Big
+    /// format specification. The magic number check and field interpretations
+    /// should be verified against CEP-25 specification.
     fn parse_oa_header(&self, data: &[u8]) -> Result<OaFormatHeader> {
         if data.len() < 8 {
             return Err(Error::InvalidFormat(
@@ -240,18 +253,17 @@ impl BulletproofReader {
             ));
         }
 
-        // Read magic number (first 4 bytes) - should be 0x6F610000 for 'oa' format
+        // Read magic number (first 4 bytes) - EXPERIMENTAL: should be 0x6F610000 for 'oa' format
+        // This may not match the actual Big format magic number from CEP-25
         let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         if magic != 0x6F610000 {
-            println!(
-                "⚠️  Magic number mismatch: expected 0x6F610000, got 0x{:08x}",
-                magic
-            );
+            warn!("EXPERIMENTAL: Magic number mismatch: expected 0x6F610000, got 0x{:08x}", magic);
+            warn!("This may indicate Big format specification differences");
         }
 
         // Read format version (next 4 bytes)
         let format_version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        println!("📄 'oa' format version: {}", format_version);
+        debug!("'oa' format version: {}", format_version);
 
         let mut offset = 8;
 
@@ -263,10 +275,7 @@ impl BulletproofReader {
         let (metadata_size, vint_bytes) = self.read_vint(&data[offset..])?;
         offset += vint_bytes;
 
-        println!(
-            "📊 Partition count: {}, metadata size: {}",
-            partition_count, metadata_size
-        );
+        debug!("Partition count: {}, metadata size: {}", partition_count, metadata_size);
 
         Ok(OaFormatHeader {
             magic_number: magic,
@@ -282,17 +291,11 @@ impl BulletproofReader {
         let mut entries = Vec::new();
         let mut offset = header.header_size;
 
-        println!(
-            "🔧 Parsing {} partitions starting at offset {}",
-            header.partition_count, offset
-        );
+        debug!("Parsing {} partitions starting at offset {}", header.partition_count, offset);
 
         for partition_idx in 0..header.partition_count {
             if offset >= data.len() {
-                println!(
-                    "⚠️  Reached end of data while parsing partition {}",
-                    partition_idx
-                );
+                warn!("Reached end of data while parsing partition {}", partition_idx);
                 break;
             }
 
@@ -306,7 +309,7 @@ impl BulletproofReader {
                     }
                 }
                 Err(e) => {
-                    println!("⚠️  Failed to parse partition {}: {}", partition_idx, e);
+                    warn!("Failed to parse partition {}: {}", partition_idx, e);
                     // Try to advance by a reasonable amount to recover
                     offset += 16; // Skip forward and try next potential partition
                     continue;
@@ -349,10 +352,7 @@ impl BulletproofReader {
         let (row_count, vint_bytes) = self.read_vint(&data[offset..])?;
         offset += vint_bytes;
 
-        println!(
-            "🔑 Partition {}: key_length={}, row_count={}",
-            partition_idx, key_length, row_count
-        );
+        debug!("Partition {}: key_length={}, row_count={}", partition_idx, key_length, row_count);
 
         // Format key data as hex string without type assumptions
         let key_str = key_data
@@ -442,14 +442,14 @@ impl BulletproofReader {
     }
     /// Parse V3.x format
     fn parse_v3_format(&self, _data: &[u8]) -> Result<Vec<SSTableEntry>> {
-        println!("🔄 Parsing V3.x SSTable format");
+        debug!("Parsing V3.x SSTable format");
         // TODO: Implement V3.x specific parsing
         Ok(Vec::new())
     }
 
     /// Parse V2.x format
     fn parse_v2_format(&self, _data: &[u8]) -> Result<Vec<SSTableEntry>> {
-        println!("📜 Parsing V2.x SSTable format");
+        debug!("Parsing V2.x SSTable format");
         // TODO: Implement V2.x specific parsing
         Ok(Vec::new())
     }
@@ -536,7 +536,11 @@ impl BulletproofReader {
         self.parse_modern_format_readonly(&data)
     }
 
-    /// Parse modern format without mutable access using proper 'oa' format
+    /// Parse modern format without mutable access using EXPERIMENTAL 'oa' format
+    /// 
+    /// ⚠️ EXPERIMENTAL: This readonly parsing is experimental and should be
+    /// replaced with the spec-accurate row_cell_state_machine implementation
+    /// for production use.
     fn parse_modern_format_readonly(&self, data: &[u8]) -> Result<Vec<SSTableEntry>> {
         if data.len() < 8 {
             return Err(Error::InvalidFormat(
@@ -544,28 +548,35 @@ impl BulletproofReader {
             ));
         }
 
-        // Parse using the proper 'oa' format
+        // Parse using the EXPERIMENTAL 'oa' format (may not align with Big format spec)
         match self.parse_oa_header(data) {
             Ok(header) => self.parse_data_blocks(data, &header),
             Err(_) => {
                 // Fallback to basic parsing if header parsing fails
-                println!("⚠️  'oa' header parsing failed, using fallback");
+                warn!("EXPERIMENTAL: 'oa' header parsing failed, using fallback");
+                warn!("Consider using spec-accurate readers for production");
                 Ok(Vec::new())
             }
         }
     }
 }
 
-/// Cassandra 'oa' format header structure
+/// EXPERIMENTAL Cassandra 'oa' format header structure
+/// 
+/// ⚠️ WARNING: This structure is based on reverse engineering and may not
+/// accurately represent the official Cassandra Big format header as specified
+/// in CEP-25. Field interpretations and byte layouts should be verified
+/// against the official specification.
 #[derive(Debug, Clone)]
 struct OaFormatHeader {
-    /// Magic number (should be 0x6F610000)
+    /// Magic number (EXPERIMENTAL: assumed to be 0x6F610000)
+    /// TODO: Verify against CEP-25 Big format specification
     magic_number: u32,
-    /// Format version
+    /// Format version (interpretation may not match Big format spec)
     format_version: u32,
-    /// Number of partitions in this SSTable
+    /// Number of partitions in this SSTable (experimental field interpretation)
     partition_count: u64,
-    /// Size of metadata section
+    /// Size of metadata section (experimental field interpretation)
     metadata_size: u64,
     /// Total header size in bytes
     header_size: usize,
@@ -609,7 +620,7 @@ impl SSTableEntryStream {
 pub fn test_read_sstable_directory<P: AsRef<Path>>(dir_path: P) -> Result<()> {
     let dir = dir_path.as_ref();
 
-    println!("🧪 Testing bulletproof SSTable reading in: {:?}", dir);
+    info!("Testing bulletproof SSTable reading in: {:?}", dir);
 
     // Find Data.db files
     let entries = std::fs::read_dir(dir).map_err(|e| Error::Io(e))?;
@@ -624,52 +635,43 @@ pub fn test_read_sstable_directory<P: AsRef<Path>>(dir_path: P) -> Result<()> {
             .map(|s| s.ends_with("-Data.db"))
             .unwrap_or(false)
         {
-            println!("\n📂 Testing SSTable: {:?}", path);
+            debug!("Testing SSTable: {:?}", path);
 
             match BulletproofReader::open(path) {
                 Ok(mut reader) => {
-                    println!("✅ Successfully opened SSTable");
+                    info!("Successfully opened SSTable");
 
                     if let Some(compression_info) = reader.compression_info() {
-                        println!("📦 Compression: {}", compression_info.algorithm);
-                        println!("📏 Chunk size: {} bytes", compression_info.chunk_length);
+                        debug!("Compression: {}", compression_info.algorithm);
+                        debug!("Chunk size: {} bytes", compression_info.chunk_length);
                     }
 
                     // Try to read first 1KB of data
                     match reader.read_raw_data(0, 1024) {
                         Ok(data) => {
-                            println!("📄 Read {} bytes successfully", data.len());
-                            println!(
-                                "🔍 First 32 bytes: {:02x?}",
-                                &data[..std::cmp::min(32, data.len())]
-                            );
+                            debug!("Read {} bytes successfully", data.len());
+                            debug!("First 32 bytes: {:02x?}", &data[..std::cmp::min(32, data.len())]);
 
                             // Try to parse the data
                             match reader.parse_sstable_data() {
                                 Ok(entries) => {
-                                    println!("✅ Parsed {} entries", entries.len());
+                                    info!("Parsed {} entries", entries.len());
                                     for (i, entry) in entries.iter().take(3).enumerate() {
-                                        println!(
-                                            "   Entry {}: key='{:?}' ({})",
-                                            i, entry.key, entry.format_info
-                                        );
+                                        debug!("Entry {}: key='{:?}' ({})", i, entry.key, entry.format_info);
                                     }
                                 }
                                 Err(e) => {
-                                    println!(
-                                        "⚠️  Parsing failed (this is expected for now): {}",
-                                        e
-                                    );
+                                    warn!("Parsing failed (this is expected for now): {}", e);
                                 }
                             }
                         }
                         Err(e) => {
-                            println!("❌ Failed to read data: {}", e);
+                            warn!("Failed to read data: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("❌ Failed to open SSTable: {}", e);
+                    warn!("Failed to open SSTable: {}", e);
                 }
             }
         }

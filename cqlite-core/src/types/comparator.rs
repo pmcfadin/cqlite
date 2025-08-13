@@ -129,6 +129,11 @@ impl ComparatorType {
         Self::from_cql_type(&cql_type)
     }
 
+    /// Create a ComparatorType from a data type string (alias for from_type_string)
+    pub fn from_data_type(data_type: &str) -> Result<Self> {
+        Self::from_type_string(data_type)
+    }
+
     /// Compare two values using this comparator
     pub fn compare(&self, left: &Value, right: &Value) -> Result<Ordering> {
         // Handle null values first (nulls are always considered less than non-nulls)

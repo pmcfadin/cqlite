@@ -732,52 +732,14 @@ impl OptimizedSSTableReader {
             return Ok(Value::Null);
         }
 
-        // Enhanced type detection and parsing
-        let detected_type = self.detect_value_type_optimized(actual_data);
-        match detected_type {
-            Some(type_id) => {
-                let (_, value) = parse_cql_value(actual_data, type_id)
-                    .map_err(|e| Error::corruption(format!("Failed to parse detected type {:?}: {:?}", type_id, e)))?;
-                Ok(value)
-            }
-            None => {
-                // Fallback with better heuristics
-                if actual_data.len() == 1 && actual_data[0] <= 1 {
-                    Ok(Value::Boolean(actual_data[0] != 0))
-                } else if let Ok(s) = std::str::from_utf8(actual_data) {
-                    Ok(Value::Text(s.to_string()))
-                } else {
-                    Ok(Value::Blob(actual_data.to_vec()))
-                }
-            }
-        }
+        // SCHEMA-DRIVEN PARSING: NO TYPE DETECTION OR GUESSING
+        // Preserve raw data as blob until schema information is available
+        // This eliminates ALL heuristic type detection in modern paths
+        Ok(Value::Blob(actual_data.to_vec()))
     }
 
-    fn detect_value_type_optimized(&self, data: &[u8]) -> Option<CqlTypeId> {
-        // Optimized type detection for better performance
-        if data.is_empty() {
-            return None;
-        }
-
-        // Fast path for common sizes
-        match data.len() {
-            1 => Some(if data[0] <= 1 { CqlTypeId::Boolean } else { CqlTypeId::Tinyint }),
-            2 => Some(CqlTypeId::Smallint),
-            4 => Some(CqlTypeId::Int),
-            8 => Some(CqlTypeId::BigInt),
-            16 => Some(CqlTypeId::Uuid),
-            _ => {
-                // For variable-length data, check UTF-8 validity efficiently
-                if data.len() < 1024 && data.is_ascii() {
-                    Some(CqlTypeId::Varchar)
-                } else if std::str::from_utf8(data).is_ok() {
-                    Some(CqlTypeId::Varchar)
-                } else {
-                    Some(CqlTypeId::Blob)
-                }
-            }
-        }
-    }
+    // REMOVED: detect_value_type_optimized method
+    // Type detection/guessing is eliminated in favor of schema-driven parsing
 
     fn can_use_zero_copy(&self, data: &[u8]) -> bool {
         // Determine if zero-copy parsing is safe for this data

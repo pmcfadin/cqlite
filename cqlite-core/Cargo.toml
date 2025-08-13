@@ -12,7 +12,7 @@ description = "Core database engine for CQLite"
 
 [dependencies]
 # Async runtime
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time", "process"] }
 
 # Serialization
 serde = { workspace = true }
@@ -93,6 +93,10 @@ path = "src/bin/test_streaming_performance.rs"
 [[bin]]
 name = "performance_baseline_runner"
 path = "src/bin/performance_baseline_runner.rs"
+
+[[bin]]
+name = "sstabledump_parity_validator"
+path = "src/bin/sstabledump_parity_validator.rs"
 
 [features]
 default = ["lz4", "metrics"]
