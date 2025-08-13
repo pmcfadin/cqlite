@@ -6,18 +6,18 @@
 
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;
-use crate::parser::{CqlCreateTable, CqlDataType, CqlIdentifier};
-use crate::schema::{CqlType, TableSchema, KeyColumn, ClusteringColumn, Column};
-use serde_json;
+use crate::parser::{CqlCreateTable, CqlDataType};
+use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while, take_while1},
-    character::complete::{char, multispace0, multispace1},
-    combinator::{map, opt, recognize},
-    multi::{many0, separated_list0, separated_list1},
-    sequence::{delimited, preceded, separated_pair, terminated, tuple},
     IResult,
+    branch::alt,
+    bytes::complete::{tag_no_case, take_while, take_while1},
+    character::complete::char,
+    combinator::{map, opt},
+    multi::{separated_list0, separated_list1},
+    sequence::{delimited, preceded, separated_pair, tuple},
 };
+use serde_json;
 use std::collections::HashMap;
 
 /// CQL keyword parser - case insensitive
@@ -39,15 +39,11 @@ fn ws1(input: &str) -> IResult<&str, &str> {
 fn identifier(input: &str) -> IResult<&str, String> {
     let (input, name) = alt((
         // Quoted identifier
-        delimited(
-            char('"'),
-            take_while1(|c: char| c != '"'),
-            char('"'),
-        ),
+        delimited(char('"'), take_while1(|c: char| c != '"'), char('"')),
         // Unquoted identifier
         take_while1(|c: char| c.is_alphanumeric() || c == '_'),
     ))(input)?;
-    
+
     Ok((input, name.to_string()))
 }
 
@@ -55,7 +51,7 @@ fn identifier(input: &str) -> IResult<&str, String> {
 fn qualified_table_name(input: &str) -> IResult<&str, (Option<String>, String)> {
     let (input, first) = identifier(input)?;
     let (input, second) = opt(preceded(char('.'), identifier))(input)?;
-    
+
     match second {
         Some(table) => Ok((input, (Some(first), table))),
         None => Ok((input, (None, first))),
@@ -97,35 +93,27 @@ fn cql_type(input: &str) -> IResult<&str, String> {
                 tuple((
                     keyword("tuple"),
                     char('<'),
-                    separated_list1(
-                        tuple((ws, char(','), ws)),
-                        parse_type_inner,
-                    ),
+                    separated_list1(tuple((ws, char(','), ws)), parse_type_inner),
                     char('>'),
                 )),
                 |(_, _, types, _)| format!("tuple<{}>", types.join(", ")),
             ),
             // Frozen type
             map(
-                tuple((
-                    keyword("frozen"),
-                    char('<'),
-                    parse_type_inner,
-                    char('>'),
-                )),
+                tuple((keyword("frozen"), char('<'), parse_type_inner, char('>'))),
                 |(_, _, inner, _)| format!("frozen<{}>", inner),
             ),
             // Simple types and UDTs
             map(identifier, |name| name),
         ))(input)?;
-        
+
         Ok((input, base))
     }
-    
+
     let (input, _) = ws(input)?;
     let (input, type_name) = parse_type_inner(input)?;
     let (input, _) = ws(input)?;
-    
+
     Ok((input, type_name))
 }
 
@@ -136,20 +124,16 @@ fn column_definition(input: &str) -> IResult<&str, (String, String)> {
     let (input, _) = ws1(input)?;
     let (input, data_type) = cql_type(input)?;
     let (input, _) = ws(input)?;
-    
+
     // Check for inline PRIMARY KEY
-    let (input, is_primary) = opt(tuple((
-        keyword("primary"),
-        ws1,
-        keyword("key"),
-    )))(input)?;
-    
+    let (input, is_primary) = opt(tuple((keyword("primary"), ws1, keyword("key"))))(input)?;
+
     let final_type = if is_primary.is_some() {
         format!("{} PRIMARY KEY", data_type)
     } else {
         data_type
     };
-    
+
     Ok((input, (name, final_type)))
 }
 
@@ -162,7 +146,7 @@ fn primary_key_spec(input: &str) -> IResult<&str, (Vec<String>, Vec<String>)> {
     let (input, _) = ws(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws(input)?;
-    
+
     // Parse partition key (can be composite)
     let (input, partition_keys) = alt((
         // Composite partition key: ((col1, col2), clustering...)
@@ -170,10 +154,7 @@ fn primary_key_spec(input: &str) -> IResult<&str, (Vec<String>, Vec<String>)> {
             tuple((
                 char('('),
                 ws,
-                separated_list1(
-                    tuple((ws, char(','), ws)),
-                    identifier,
-                ),
+                separated_list1(tuple((ws, char(','), ws)), identifier),
                 ws,
                 char(')'),
             )),
@@ -182,21 +163,18 @@ fn primary_key_spec(input: &str) -> IResult<&str, (Vec<String>, Vec<String>)> {
         // Single partition key: (col1, clustering...)
         map(identifier, |key| vec![key]),
     ))(input)?;
-    
+
     let (input, _) = ws(input)?;
-    
+
     // Parse clustering keys (optional)
     let (input, clustering_keys) = opt(preceded(
         tuple((char(','), ws)),
-        separated_list1(
-            tuple((ws, char(','), ws)),
-            identifier,
-        ),
+        separated_list1(tuple((ws, char(','), ws)), identifier),
     ))(input)?;
-    
+
     let (input, _) = ws(input)?;
     let (input, _) = char(')')(input)?;
-    
+
     Ok((input, (partition_keys, clustering_keys.unwrap_or_default())))
 }
 
@@ -205,7 +183,7 @@ fn table_options(input: &str) -> IResult<&str, HashMap<String, String>> {
     let (input, _) = ws(input)?;
     let (input, _) = keyword("with")(input)?;
     let (input, _) = ws1(input)?;
-    
+
     // Parse option = value pairs
     let option_pair = map(
         separated_pair(
@@ -220,12 +198,9 @@ fn table_options(input: &str) -> IResult<&str, HashMap<String, String>> {
         ),
         |(key, value)| (key, value.to_string()),
     );
-    
-    let (input, options) = separated_list0(
-        tuple((ws, keyword("and"), ws)),
-        option_pair,
-    )(input)?;
-    
+
+    let (input, options) = separated_list0(tuple((ws, keyword("and"), ws)), option_pair)(input)?;
+
     Ok((input, options.into_iter().collect()))
 }
 
@@ -236,7 +211,7 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
     let (input, _) = ws1(input)?;
     let (input, _) = keyword("table")(input)?;
     let (input, _) = ws1(input)?;
-    
+
     // Optional IF NOT EXISTS
     let (input, _) = opt(tuple((
         keyword("if"),
@@ -246,30 +221,35 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
         keyword("exists"),
         ws1,
     )))(input)?;
-    
+
     // Table name (qualified or unqualified)
     let (input, (keyspace, table_name)) = qualified_table_name(input)?;
-    
+
     let (input, _) = ws(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws(input)?;
-    
+
     // Parse column definitions and constraints
     let mut columns = Vec::new();
     let mut partition_keys = Vec::new();
     let mut clustering_keys = Vec::new();
     let mut primary_key_found = false;
-    
+
     let (input, items) = separated_list1(
         tuple((ws, char(','), ws)),
         alt((
             // Primary key constraint
-            map(primary_key_spec, |keys| ("PRIMARY_KEY".to_string(), serde_json::to_string(&keys).unwrap_or_default())),
+            map(primary_key_spec, |keys| {
+                (
+                    "PRIMARY_KEY".to_string(),
+                    serde_json::to_string(&keys).unwrap_or_default(),
+                )
+            }),
             // Column definition
             column_definition,
         )),
     )(input)?;
-    
+
     // Process parsed items
     for (name, value) in items {
         if name == "PRIMARY_KEY" {
@@ -283,13 +263,13 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
         }
         columns.push((name, value));
     }
-    
+
     let (input, _) = ws(input)?;
     let (input, _) = char(')')(input)?;
-    
+
     // Parse optional WITH clause
     let (input, _options) = opt(table_options)(input)?;
-    
+
     // If no primary key was found in constraints, look for inline PRIMARY KEY or use first column
     if !primary_key_found && !columns.is_empty() {
         // Check if any column has "PRIMARY KEY" in its type (inline definition)
@@ -301,71 +281,87 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
                 break;
             }
         }
-        
+
         // If still no primary key found, assume first column is partition key
         if !found_inline {
             partition_keys.push(columns[0].0.clone());
         }
     }
-    
+
     // Build schema
     let schema = TableSchema {
         keyspace: keyspace.unwrap_or_else(|| "default".to_string()),
         table: table_name,
-        partition_keys: partition_keys.into_iter().enumerate().map(|(pos, name)| {
-            let data_type = columns.iter()
-                .find(|(col_name, _)| col_name == &name)
-                .map(|(_, dt)| dt.clone())
-                .unwrap_or_else(|| "text".to_string());
-            
-            KeyColumn {
-                name,
-                data_type,
-                position: pos,
-            }
-        }).collect(),
-        clustering_keys: clustering_keys.into_iter().enumerate().map(|(pos, name)| {
-            let data_type = columns.iter()
-                .find(|(col_name, _)| col_name == &name)
-                .map(|(_, dt)| dt.clone())
-                .unwrap_or_else(|| "text".to_string());
-            
-            ClusteringColumn {
-                name,
-                data_type,
-                position: pos,
-                order: "ASC".to_string(),
-            }
-        }).collect(),
-        columns: columns.into_iter().map(|(name, data_type_with_constraints)| {
-            // Remove PRIMARY KEY constraint from data type
-            let data_type = if data_type_with_constraints.to_lowercase().contains("primary key") {
-                data_type_with_constraints
+        partition_keys: partition_keys
+            .into_iter()
+            .enumerate()
+            .map(|(pos, name)| {
+                let data_type = columns
+                    .iter()
+                    .find(|(col_name, _)| col_name == &name)
+                    .map(|(_, dt)| dt.clone())
+                    .unwrap_or_else(|| "text".to_string());
+
+                KeyColumn {
+                    name,
+                    data_type,
+                    position: pos,
+                }
+            })
+            .collect(),
+        clustering_keys: clustering_keys
+            .into_iter()
+            .enumerate()
+            .map(|(pos, name)| {
+                let data_type = columns
+                    .iter()
+                    .find(|(col_name, _)| col_name == &name)
+                    .map(|(_, dt)| dt.clone())
+                    .unwrap_or_else(|| "text".to_string());
+
+                ClusteringColumn {
+                    name,
+                    data_type,
+                    position: pos,
+                    order: "ASC".to_string(),
+                }
+            })
+            .collect(),
+        columns: columns
+            .into_iter()
+            .map(|(name, data_type_with_constraints)| {
+                // Remove PRIMARY KEY constraint from data type
+                let data_type = if data_type_with_constraints
                     .to_lowercase()
-                    .replace("primary key", "")
-                    .trim()
-                    .to_string()
-            } else {
-                data_type_with_constraints
-            };
-            
-            Column {
-                name,
-                data_type,
-                nullable: true,
-                default: None,
-            }
-        }).collect(),
+                    .contains("primary key")
+                {
+                    data_type_with_constraints
+                        .to_lowercase()
+                        .replace("primary key", "")
+                        .trim()
+                        .to_string()
+                } else {
+                    data_type_with_constraints
+                };
+
+                Column {
+                    name,
+                    data_type,
+                    nullable: true,
+                    default: None,
+                }
+            })
+            .collect(),
         comments: HashMap::new(),
     };
-    
+
     Ok((input, schema))
 }
 
 /// Convert CQL type string to internal CqlTypeId
 pub fn cql_type_to_type_id(cql_type: &str) -> Result<CqlTypeId> {
     let type_lower = cql_type.trim().to_lowercase();
-    
+
     // Handle collection types
     if type_lower.starts_with("list<") {
         return Ok(CqlTypeId::List);
@@ -388,7 +384,7 @@ pub fn cql_type_to_type_id(cql_type: &str) -> Result<CqlTypeId> {
             }
         }
     }
-    
+
     // Handle primitive types
     match type_lower.as_str() {
         "ascii" => Ok(CqlTypeId::Ascii),
@@ -441,8 +437,10 @@ pub fn extract_table_name(cql: &str) -> Result<(Option<String>, String)> {
                     return extract_simple_table_name(after_table);
                 }
             }
-            
-            Err(Error::schema("Failed to extract table name from CQL".to_string()))
+
+            Err(Error::schema(
+                "Failed to extract table name from CQL".to_string(),
+            ))
         }
     }
 }
@@ -451,13 +449,13 @@ pub fn extract_table_name(cql: &str) -> Result<(Option<String>, String)> {
 fn extract_simple_table_name(input: &str) -> Result<(Option<String>, String)> {
     let trimmed = input.trim();
     let words: Vec<&str> = trimmed.split_whitespace().collect();
-    
+
     if words.is_empty() {
         return Err(Error::schema("No table name found".to_string()));
     }
-    
+
     let table_name = words[0];
-    
+
     // Handle qualified names
     if let Some(dot_pos) = table_name.find('.') {
         let keyspace = &table_name[..dot_pos];
@@ -479,12 +477,12 @@ pub fn table_name_matches(
     if schema_table != target_table {
         return false;
     }
-    
+
     // If target has no keyspace, match any keyspace
     if target_keyspace.is_none() {
         return true;
     }
-    
+
     // If both have keyspaces, they must match
     schema_keyspace == target_keyspace
 }
@@ -497,40 +495,38 @@ pub fn parse_cql_schema(cql: &str) -> Result<TableSchema> {
             schema.validate()?;
             Ok(schema)
         }
-        Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
-            Err(Error::schema(format!("Failed to parse CQL schema: {:?}", e)))
-        }
-        Err(nom::Err::Incomplete(_)) => {
-            Err(Error::schema("Incomplete CQL schema".to_string()))
-        }
+        Err(nom::Err::Error(e) | nom::Err::Failure(e)) => Err(Error::schema(format!(
+            "Failed to parse CQL schema: {:?}",
+            e
+        ))),
+        Err(nom::Err::Incomplete(_)) => Err(Error::schema("Incomplete CQL schema".to_string())),
     }
 }
 
 /// Parse CQL schema using the visitor pattern (preferred method for new code)
-/// 
+///
 /// This function demonstrates how to use the visitor pattern for AST-based parsing.
-/// It provides better error handling, validation, and is more maintainable than 
+/// It provides better error handling, validation, and is more maintainable than
 /// the legacy nom-based parser.
 pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
     // Note: This is a demonstration function. In a complete implementation,
     // you would first parse the CQL into an AST using a parser (nom or ANTLR),
     // then use the visitor pattern to convert it to TableSchema.
-    // 
+    //
     // For now, this uses the existing nom parser for demonstration purposes.
-    
-    use crate::parser::visitor::SchemaBuilderVisitor;
+
+    use crate::parser::CqlStatement;
     use crate::parser::traits::CqlVisitor;
-    use crate::parser::{CqlStatement, CqlCreateTable, CqlTable, CqlIdentifier, CqlColumnDef, CqlDataType, CqlPrimaryKey, CqlTableOptions};
-    use std::collections::HashMap;
-    
+    use crate::parser::visitor::SchemaBuilderVisitor;
+
     // Parse using the existing nom parser to get the TableSchema
     let schema = parse_cql_schema(cql)?;
-    
+
     // Demonstrate the visitor pattern by reconstructing the AST and then using the visitor
     // (In real usage, you would have the AST from a parser)
     let ast = table_schema_to_ast(&schema)?;
     let statement = CqlStatement::CreateTable(ast);
-    
+
     // Use the visitor to convert AST back to TableSchema
     let mut visitor = SchemaBuilderVisitor;
     visitor.visit_statement(&statement)
@@ -539,17 +535,21 @@ pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
 /// Helper function to convert TableSchema to AST for demonstration
 /// (In real usage, the AST would come directly from a parser)
 fn table_schema_to_ast(schema: &TableSchema) -> Result<CqlCreateTable> {
-    use crate::parser::{CqlCreateTable, CqlTable, CqlIdentifier, CqlColumnDef, CqlDataType, CqlPrimaryKey, CqlTableOptions};
-    
+    use crate::parser::{
+        CqlColumnDef, CqlCreateTable, CqlIdentifier, CqlPrimaryKey, CqlTable, CqlTableOptions,
+    };
+
     // Convert table reference
     let table = if schema.keyspace == "default" {
         CqlTable::new(&schema.table)
     } else {
         CqlTable::with_keyspace(&schema.keyspace, &schema.table)
     };
-    
+
     // Convert columns
-    let columns: Result<Vec<CqlColumnDef>> = schema.columns.iter()
+    let columns: Result<Vec<CqlColumnDef>> = schema
+        .columns
+        .iter()
         .map(|col| {
             Ok(CqlColumnDef {
                 name: CqlIdentifier::new(&col.name),
@@ -558,18 +558,22 @@ fn table_schema_to_ast(schema: &TableSchema) -> Result<CqlCreateTable> {
             })
         })
         .collect();
-    
+
     let columns = columns?;
-    
+
     // Convert primary key
-    let partition_key: Vec<CqlIdentifier> = schema.partition_keys.iter()
+    let partition_key: Vec<CqlIdentifier> = schema
+        .partition_keys
+        .iter()
         .map(|pk| CqlIdentifier::new(&pk.name))
         .collect();
-    
-    let clustering_key: Vec<CqlIdentifier> = schema.clustering_keys.iter()
+
+    let clustering_key: Vec<CqlIdentifier> = schema
+        .clustering_keys
+        .iter()
         .map(|ck| CqlIdentifier::new(&ck.name))
         .collect();
-    
+
     Ok(CqlCreateTable {
         if_not_exists: false,
         table,
@@ -587,22 +591,22 @@ fn table_schema_to_ast(schema: &TableSchema) -> Result<CqlCreateTable> {
 /// Convert string type to CqlDataType (simplified version)
 fn string_to_cql_data_type(type_str: &str) -> Result<CqlDataType> {
     use crate::parser::{CqlDataType, CqlIdentifier};
-    
+
     let type_lower = type_str.trim().to_lowercase();
-    
+
     // Handle collection types
     if type_lower.starts_with("list<") && type_lower.ends_with('>') {
         let inner_type_str = &type_lower[5..type_lower.len() - 1];
         let inner_type = string_to_cql_data_type(inner_type_str)?;
         return Ok(CqlDataType::List(Box::new(inner_type)));
     }
-    
+
     if type_lower.starts_with("set<") && type_lower.ends_with('>') {
         let inner_type_str = &type_lower[4..type_lower.len() - 1];
         let inner_type = string_to_cql_data_type(inner_type_str)?;
         return Ok(CqlDataType::Set(Box::new(inner_type)));
     }
-    
+
     if type_lower.starts_with("map<") && type_lower.ends_with('>') {
         let inner = &type_lower[4..type_lower.len() - 1];
         if let Some(comma_pos) = inner.find(',') {
@@ -613,13 +617,13 @@ fn string_to_cql_data_type(type_str: &str) -> Result<CqlDataType> {
             return Ok(CqlDataType::Map(Box::new(key_type), Box::new(value_type)));
         }
     }
-    
+
     if type_lower.starts_with("frozen<") && type_lower.ends_with('>') {
         let inner_type_str = &type_lower[7..type_lower.len() - 1];
         let inner_type = string_to_cql_data_type(inner_type_str)?;
         return Ok(CqlDataType::Frozen(Box::new(inner_type)));
     }
-    
+
     // Handle primitive types
     match type_lower.as_str() {
         "boolean" | "bool" => Ok(CqlDataType::Boolean),
@@ -697,11 +701,15 @@ mod tests {
 
         let schema = parse_cql_schema(cql).unwrap();
         assert_eq!(schema.columns.len(), 4);
-        
+
         let tags_col = schema.columns.iter().find(|c| c.name == "tags").unwrap();
         assert_eq!(tags_col.data_type, "set<text>");
-        
-        let metadata_col = schema.columns.iter().find(|c| c.name == "metadata").unwrap();
+
+        let metadata_col = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "metadata")
+            .unwrap();
         assert_eq!(metadata_col.data_type, "map<text, text>");
     }
 
@@ -718,7 +726,10 @@ mod tests {
         assert_eq!(cql_type_to_type_id("text").unwrap(), CqlTypeId::Varchar);
         assert_eq!(cql_type_to_type_id("bigint").unwrap(), CqlTypeId::BigInt);
         assert_eq!(cql_type_to_type_id("list<text>").unwrap(), CqlTypeId::List);
-        assert_eq!(cql_type_to_type_id("frozen<set<uuid>>").unwrap(), CqlTypeId::Set);
+        assert_eq!(
+            cql_type_to_type_id("frozen<set<uuid>>").unwrap(),
+            CqlTypeId::Set
+        );
     }
 
     #[test]
@@ -770,7 +781,7 @@ mod tests {
         let schema = parse_cql_schema(cql).unwrap();
         assert_eq!(schema.partition_keys.len(), 1);
         assert_eq!(schema.clustering_keys.len(), 1);
-        
+
         assert_eq!(schema.partition_keys[0].name, "partition_key");
         assert_eq!(schema.clustering_keys[0].name, "clustering_key");
     }
@@ -787,14 +798,26 @@ mod tests {
         "#;
 
         let schema = parse_cql_schema(cql).unwrap();
-        
-        let frozen_set = schema.columns.iter().find(|c| c.name == "frozen_set").unwrap();
+
+        let frozen_set = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "frozen_set")
+            .unwrap();
         assert_eq!(frozen_set.data_type, "frozen<set<text>>");
-        
-        let frozen_map = schema.columns.iter().find(|c| c.name == "frozen_map").unwrap();
+
+        let frozen_map = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "frozen_map")
+            .unwrap();
         assert_eq!(frozen_map.data_type, "frozen<map<text, bigint>>");
-        
-        let nested = schema.columns.iter().find(|c| c.name == "nested_frozen").unwrap();
+
+        let nested = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "nested_frozen")
+            .unwrap();
         assert_eq!(nested.data_type, "frozen<list<frozen<set<uuid>>>>");
     }
 
@@ -809,11 +832,15 @@ mod tests {
         "#;
 
         let schema = parse_cql_schema(cql).unwrap();
-        
+
         let address_col = schema.columns.iter().find(|c| c.name == "address").unwrap();
         assert_eq!(address_col.data_type, "address_type");
-        
-        let prefs_col = schema.columns.iter().find(|c| c.name == "preferences").unwrap();
+
+        let prefs_col = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "preferences")
+            .unwrap();
         assert_eq!(prefs_col.data_type, "frozen<user_prefs>");
     }
 
@@ -828,11 +855,19 @@ mod tests {
         "#;
 
         let schema = parse_cql_schema(cql).unwrap();
-        
-        let coords = schema.columns.iter().find(|c| c.name == "coordinates").unwrap();
+
+        let coords = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "coordinates")
+            .unwrap();
         assert_eq!(coords.data_type, "tuple<double, double>");
-        
-        let person = schema.columns.iter().find(|c| c.name == "person_info").unwrap();
+
+        let person = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "person_info")
+            .unwrap();
         assert_eq!(person.data_type, "tuple<text, int, boolean>");
     }
 
@@ -862,7 +897,7 @@ mod tests {
 
         let schema = parse_cql_schema(cql).unwrap();
         assert_eq!(schema.table, "CaseSensitive");
-        
+
         let space_col = schema.columns.iter().find(|c| c.name == "Name With Spaces");
         assert!(space_col.is_some());
     }

@@ -298,9 +298,9 @@ impl PerformanceBenchmarkRunner {
             fs::create_dir_all(&self.config.output_directory)
                 .await
                 .map_err(|e| {
-                    cqlite_core::error::Error::io_error(format!(
-                        "Failed to create output directory: {}",
-                        e
+                    cqlite_core::error::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to create output directory: {}", e),
                     ))
                 })?;
         }
@@ -795,7 +795,10 @@ impl PerformanceBenchmarkRunner {
         ));
 
         fs::write(report_path, report).await.map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("Failed to write report: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to write report: {}", e),
+            ))
         })?;
 
         println!("📄 Performance report generated");
@@ -810,11 +813,17 @@ impl PerformanceBenchmarkRunner {
         ));
 
         let json_content = serde_json::to_string_pretty(results).map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("Failed to serialize results: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to serialize results: {}", e),
+            ))
         })?;
 
         fs::write(json_path, json_content).await.map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("Failed to write JSON: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to write JSON: {}", e),
+            ))
         })?;
 
         println!("📊 Results exported to JSON");

@@ -209,7 +209,7 @@ impl BloomFilter {
     }
 
     /// Load bloom filter from a file/reader
-    pub async fn load<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+    pub async fn load<R: tokio::io::AsyncRead + Unpin>(_reader: &mut R) -> Result<Self> {
         // For now, return a default bloom filter as a placeholder
         // In a real implementation, this would deserialize the bloom filter from the reader
         Self::new(1000, 0.01) // Default parameters

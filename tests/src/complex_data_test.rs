@@ -1,19 +1,17 @@
 //! Complex data type testing for SSTable operations
 //! Tests serialization and deserialization of various Cassandra data types
 
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
-    platform::Platform,
-    storage::sstable::{
-        reader::SSTableReader,
-        writer::SSTableWriter,
-    },
-    types::TableId,
     Config, Result, RowKey, Value,
+    storage::sstable::{reader::SSTableReader, writer::SSTableWriter},
+    types::TableId,
 };
 
 use tempfile::TempDir;
@@ -56,11 +54,15 @@ impl ComplexDataTestSuite {
         match self.test_basic_data_types().await {
             Ok(_) => {
                 results.tests_passed += 1;
-                results.test_details.insert("basic_data_types".to_string(), "PASSED".to_string());
+                results
+                    .test_details
+                    .insert("basic_data_types".to_string(), "PASSED".to_string());
             }
             Err(e) => {
                 results.tests_failed += 1;
-                results.test_details.insert("basic_data_types".to_string(), format!("FAILED: {}", e));
+                results
+                    .test_details
+                    .insert("basic_data_types".to_string(), format!("FAILED: {}", e));
             }
         }
 
@@ -69,11 +71,15 @@ impl ComplexDataTestSuite {
         match self.test_unicode_data().await {
             Ok(_) => {
                 results.tests_passed += 1;
-                results.test_details.insert("unicode_data".to_string(), "PASSED".to_string());
+                results
+                    .test_details
+                    .insert("unicode_data".to_string(), "PASSED".to_string());
             }
             Err(e) => {
                 results.tests_failed += 1;
-                results.test_details.insert("unicode_data".to_string(), format!("FAILED: {}", e));
+                results
+                    .test_details
+                    .insert("unicode_data".to_string(), format!("FAILED: {}", e));
             }
         }
 
@@ -82,11 +88,15 @@ impl ComplexDataTestSuite {
         match self.test_binary_data().await {
             Ok(_) => {
                 results.tests_passed += 1;
-                results.test_details.insert("binary_data".to_string(), "PASSED".to_string());
+                results
+                    .test_details
+                    .insert("binary_data".to_string(), "PASSED".to_string());
             }
             Err(e) => {
                 results.tests_failed += 1;
-                results.test_details.insert("binary_data".to_string(), format!("FAILED: {}", e));
+                results
+                    .test_details
+                    .insert("binary_data".to_string(), format!("FAILED: {}", e));
             }
         }
 
@@ -95,11 +105,15 @@ impl ComplexDataTestSuite {
         match self.test_large_values().await {
             Ok(_) => {
                 results.tests_passed += 1;
-                results.test_details.insert("large_values".to_string(), "PASSED".to_string());
+                results
+                    .test_details
+                    .insert("large_values".to_string(), "PASSED".to_string());
             }
             Err(e) => {
                 results.tests_failed += 1;
-                results.test_details.insert("large_values".to_string(), format!("FAILED: {}", e));
+                results
+                    .test_details
+                    .insert("large_values".to_string(), format!("FAILED: {}", e));
             }
         }
 
@@ -108,11 +122,15 @@ impl ComplexDataTestSuite {
         match self.test_edge_cases().await {
             Ok(_) => {
                 results.tests_passed += 1;
-                results.test_details.insert("edge_cases".to_string(), "PASSED".to_string());
+                results
+                    .test_details
+                    .insert("edge_cases".to_string(), "PASSED".to_string());
             }
             Err(e) => {
                 results.tests_failed += 1;
-                results.test_details.insert("edge_cases".to_string(), format!("FAILED: {}", e));
+                results
+                    .test_details
+                    .insert("edge_cases".to_string(), format!("FAILED: {}", e));
             }
         }
 
@@ -121,11 +139,15 @@ impl ComplexDataTestSuite {
         match self.test_timestamp_precision().await {
             Ok(_) => {
                 results.tests_passed += 1;
-                results.test_details.insert("timestamp_precision".to_string(), "PASSED".to_string());
+                results
+                    .test_details
+                    .insert("timestamp_precision".to_string(), "PASSED".to_string());
             }
             Err(e) => {
                 results.tests_failed += 1;
-                results.test_details.insert("timestamp_precision".to_string(), format!("FAILED: {}", e));
+                results
+                    .test_details
+                    .insert("timestamp_precision".to_string(), format!("FAILED: {}", e));
             }
         }
 
@@ -135,10 +157,11 @@ impl ComplexDataTestSuite {
     /// Test basic data types
     async fn test_basic_data_types(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("basic_types.sst");
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
 
         let table_id = TableId::new("basic_types_test");
-        
+
         // Test all basic types
         let test_data = vec![
             ("null_value", Value::Null),
@@ -160,18 +183,29 @@ impl ComplexDataTestSuite {
             ("text_empty", Value::Text("".to_string())),
             ("blob_simple", Value::Blob(vec![1, 2, 3, 4, 5])),
             ("blob_empty", Value::Blob(vec![])),
-            ("timestamp", Value::Timestamp(
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64
-            )),
-            ("uuid", Value::Uuid(vec![
-                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
-                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0
-            ])),
+            (
+                "timestamp",
+                Value::Timestamp(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_micros() as i64,
+                ),
+            ),
+            (
+                "uuid",
+                Value::Uuid([
+                    0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a,
+                    0xbc, 0xde, 0xf0,
+                ]),
+            ),
         ];
 
         // Write all test data
         for (key, value) in &test_data {
-            writer.add_entry(&table_id, RowKey::from(*key), value.clone()).await?;
+            writer
+                .add_entry(&table_id, RowKey::from(*key), value.clone())
+                .await?;
         }
 
         writer.finish().await?;
@@ -191,7 +225,8 @@ impl ComplexDataTestSuite {
                 }
                 None => {
                     return Err(cqlite_core::error::Error::storage(format!(
-                        "Could not read value for key '{}'", key
+                        "Could not read value for key '{}'",
+                        key
                     )));
                 }
             }
@@ -204,7 +239,8 @@ impl ComplexDataTestSuite {
     /// Test Unicode and special characters
     async fn test_unicode_data(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("unicode_test.sst");
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
 
         let table_id = TableId::new("unicode_test");
 
@@ -217,13 +253,18 @@ impl ComplexDataTestSuite {
             ("japanese", Value::Text("こんにちは世界".to_string())),
             ("korean", Value::Text("안녕하세요 세계".to_string())),
             ("mixed", Value::Text("Hello 世界 🌍 مرحبا שלום".to_string())),
-            ("special_chars", Value::Text("!@#$%^&*()[]{}|\\:;\"'<>,.?/~`".to_string())),
+            (
+                "special_chars",
+                Value::Text("!@#$%^&*()[]{}|\\:;\"'<>,.?/~`".to_string()),
+            ),
             ("control_chars", Value::Text("\t\n\r".to_string())),
             ("zero_width", Value::Text("a\u{200B}b\u{FEFF}c".to_string())), // Zero-width chars
         ];
 
         for (key, value) in &unicode_test_data {
-            writer.add_entry(&table_id, RowKey::from(*key), value.clone()).await?;
+            writer
+                .add_entry(&table_id, RowKey::from(*key), value.clone())
+                .await?;
         }
 
         writer.finish().await?;
@@ -243,7 +284,8 @@ impl ComplexDataTestSuite {
                 }
                 None => {
                     return Err(cqlite_core::error::Error::storage(format!(
-                        "Could not read Unicode value for key '{}'", key
+                        "Could not read Unicode value for key '{}'",
+                        key
                     )));
                 }
             }
@@ -256,24 +298,43 @@ impl ComplexDataTestSuite {
     /// Test binary data with various patterns
     async fn test_binary_data(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("binary_test.sst");
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
 
         let table_id = TableId::new("binary_test");
 
         let binary_test_data = vec![
             ("all_zeros", Value::Blob(vec![0; 100])),
             ("all_ones", Value::Blob(vec![255; 100])),
-            ("alternating", Value::Blob((0..100).map(|i| if i % 2 == 0 { 0x55 } else { 0xAA }).collect())),
-            ("sequential", Value::Blob((0..256).map(|i| i as u8).collect())),
-            ("random_pattern", Value::Blob(vec![
-                0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-                0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10
-            ])),
-            ("large_binary", Value::Blob((0..10000).map(|i| (i % 256) as u8).collect())),
+            (
+                "alternating",
+                Value::Blob(
+                    (0..100)
+                        .map(|i| if i % 2 == 0 { 0x55 } else { 0xAA })
+                        .collect(),
+                ),
+            ),
+            (
+                "sequential",
+                Value::Blob((0..256).map(|i| i as u8).collect()),
+            ),
+            (
+                "random_pattern",
+                Value::Blob(vec![
+                    0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0xFE, 0xDC, 0xBA, 0x98, 0x76,
+                    0x54, 0x32, 0x10,
+                ]),
+            ),
+            (
+                "large_binary",
+                Value::Blob((0..10000).map(|i| (i % 256) as u8).collect()),
+            ),
         ];
 
         for (key, value) in &binary_test_data {
-            writer.add_entry(&table_id, RowKey::from(*key), value.clone()).await?;
+            writer
+                .add_entry(&table_id, RowKey::from(*key), value.clone())
+                .await?;
         }
 
         writer.finish().await?;
@@ -286,13 +347,15 @@ impl ComplexDataTestSuite {
                 Some(actual_value) => {
                     if actual_value != *expected_value {
                         return Err(cqlite_core::error::Error::storage(format!(
-                            "Binary test failed for key '{}'", key
+                            "Binary test failed for key '{}'",
+                            key
                         )));
                     }
                 }
                 None => {
                     return Err(cqlite_core::error::Error::storage(format!(
-                        "Could not read binary value for key '{}'", key
+                        "Could not read binary value for key '{}'",
+                        key
                     )));
                 }
             }
@@ -305,7 +368,8 @@ impl ComplexDataTestSuite {
     /// Test large values
     async fn test_large_values(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("large_values_test.sst");
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
 
         let table_id = TableId::new("large_values_test");
 
@@ -314,17 +378,22 @@ impl ComplexDataTestSuite {
 
         for size in sizes {
             let key = RowKey::from(format!("large_{}", size));
-            
+
             // Create large text value with pattern
             let pattern = format!("This is a test pattern for size {} bytes. ", size);
             let repetitions = size / pattern.len() + 1;
             let large_text = pattern.repeat(repetitions);
             let truncated_text = large_text.chars().take(size).collect::<String>();
-            
+
             let value = Value::Text(truncated_text.clone());
-            writer.add_entry(&table_id, key.clone(), value.clone()).await?;
-            
-            println!("✍️ Wrote large value of size: {} bytes", truncated_text.len());
+            writer
+                .add_entry(&table_id, key.clone(), value.clone())
+                .await?;
+
+            println!(
+                "✍️ Wrote large value of size: {} bytes",
+                truncated_text.len()
+            );
         }
 
         writer.finish().await?;
@@ -334,24 +403,27 @@ impl ComplexDataTestSuite {
 
         for size in &[1024, 10240, 102400, 1048576] {
             let key = RowKey::from(format!("large_{}", size));
-            
+
             match reader.get(&table_id, &key).await? {
                 Some(Value::Text(text)) => {
                     if text.len() != *size {
                         return Err(cqlite_core::error::Error::storage(format!(
-                            "Large value size mismatch: expected {}, got {}", size, text.len()
+                            "Large value size mismatch: expected {}, got {}",
+                            size,
+                            text.len()
                         )));
                     }
                     println!("✅ Verified large value of size: {} bytes", text.len());
                 }
                 Some(_) => {
                     return Err(cqlite_core::error::Error::storage(
-                        "Large value type mismatch".to_string()
+                        "Large value type mismatch".to_string(),
                     ));
                 }
                 None => {
                     return Err(cqlite_core::error::Error::storage(format!(
-                        "Could not read large value of size {}", size
+                        "Could not read large value of size {}",
+                        size
                     )));
                 }
             }
@@ -364,7 +436,8 @@ impl ComplexDataTestSuite {
     /// Test edge cases
     async fn test_edge_cases(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("edge_cases_test.sst");
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
 
         let table_id = TableId::new("edge_cases_test");
 
@@ -376,14 +449,12 @@ impl ComplexDataTestSuite {
             ("min_positive_float", Value::Float(f64::MIN_POSITIVE)),
             ("max_float", Value::Float(f64::MAX)),
             ("min_float", Value::Float(f64::MIN)),
-            
             // String edge cases
             ("single_char", Value::Text("a".to_string())),
             ("newline_only", Value::Text("\n".to_string())),
             ("tab_only", Value::Text("\t".to_string())),
             ("space_only", Value::Text(" ".to_string())),
             ("null_char", Value::Text("\0".to_string())),
-            
             // Binary edge cases
             ("single_byte", Value::Blob(vec![42])),
             ("null_byte", Value::Blob(vec![0])),
@@ -391,7 +462,9 @@ impl ComplexDataTestSuite {
         ];
 
         for (key, value) in &edge_cases {
-            writer.add_entry(&table_id, RowKey::from(*key), value.clone()).await?;
+            writer
+                .add_entry(&table_id, RowKey::from(*key), value.clone())
+                .await?;
         }
 
         writer.finish().await?;
@@ -403,12 +476,14 @@ impl ComplexDataTestSuite {
             match reader.get(&table_id, &RowKey::from(*key)).await? {
                 Some(actual_value) => {
                     // Special case for NaN comparison
-                    if let (Value::Float(expected), Value::Float(actual)) = (expected_value, &actual_value) {
+                    if let (Value::Float(expected), Value::Float(actual)) =
+                        (expected_value, &actual_value)
+                    {
                         if expected.is_nan() && actual.is_nan() {
                             continue; // Both NaN, consider equal
                         }
                     }
-                    
+
                     if actual_value != *expected_value {
                         return Err(cqlite_core::error::Error::storage(format!(
                             "Edge case test failed for key '{}': expected {:?}, got {:?}",
@@ -418,7 +493,8 @@ impl ComplexDataTestSuite {
                 }
                 None => {
                     return Err(cqlite_core::error::Error::storage(format!(
-                        "Could not read edge case value for key '{}'", key
+                        "Could not read edge case value for key '{}'",
+                        key
                     )));
                 }
             }
@@ -431,13 +507,17 @@ impl ComplexDataTestSuite {
     /// Test timestamp precision
     async fn test_timestamp_precision(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("timestamp_test.sst");
-        let mut writer = SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
+        let mut writer =
+            SSTableWriter::create(&test_path, &self.config, self.platform.clone()).await?;
 
         let table_id = TableId::new("timestamp_test");
 
         // Test various timestamp values
-        let base_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
-        
+        let base_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
         let timestamp_tests = vec![
             ("current_time", base_time),
             ("epoch", 0),
@@ -448,8 +528,10 @@ impl ComplexDataTestSuite {
         ];
 
         for (key, timestamp) in &timestamp_tests {
-            let value = Value::Timestamp(*timestamp);
-            writer.add_entry(&table_id, RowKey::from(*key), value).await?;
+            let value = Value::Timestamp(*timestamp as i64);
+            writer
+                .add_entry(&table_id, RowKey::from(*key), value)
+                .await?;
         }
 
         writer.finish().await?;
@@ -460,7 +542,7 @@ impl ComplexDataTestSuite {
         for (key, expected_timestamp) in &timestamp_tests {
             match reader.get(&table_id, &RowKey::from(*key)).await? {
                 Some(Value::Timestamp(actual_timestamp)) => {
-                    if actual_timestamp != *expected_timestamp {
+                    if actual_timestamp != (*expected_timestamp as i64) {
                         return Err(cqlite_core::error::Error::storage(format!(
                             "Timestamp precision test failed for key '{}': expected {}, got {}",
                             key, expected_timestamp, actual_timestamp
@@ -469,12 +551,13 @@ impl ComplexDataTestSuite {
                 }
                 Some(_) => {
                     return Err(cqlite_core::error::Error::storage(
-                        "Timestamp type mismatch".to_string()
+                        "Timestamp type mismatch".to_string(),
                     ));
                 }
                 None => {
                     return Err(cqlite_core::error::Error::storage(format!(
-                        "Could not read timestamp value for key '{}'", key
+                        "Could not read timestamp value for key '{}'",
+                        key
                     )));
                 }
             }
@@ -505,15 +588,17 @@ impl ComplexDataTestResults {
         println!("=================================");
         println!("Tests passed: {}", self.tests_passed);
         println!("Tests failed: {}", self.tests_failed);
-        println!("Success rate: {:.1}%", 
-            self.tests_passed as f64 / (self.tests_passed + self.tests_failed) as f64 * 100.0);
-        
+        println!(
+            "Success rate: {:.1}%",
+            self.tests_passed as f64 / (self.tests_passed + self.tests_failed) as f64 * 100.0
+        );
+
         println!("\nDetailed Results:");
         for (test_name, result) in &self.test_details {
             let status_icon = if result == "PASSED" { "✅" } else { "❌" };
             println!("  {} {}: {}", status_icon, test_name, result);
         }
-        
+
         if self.tests_failed == 0 {
             println!("\n🎉 All complex data type tests passed!");
         } else {
@@ -534,14 +619,14 @@ pub async fn run_complex_data_tests() -> Result<()> {
 
     let test_suite = ComplexDataTestSuite::new().await?;
     let results = test_suite.run_tests().await?;
-    
+
     results.print_summary();
-    
+
     if results.all_passed() {
         Ok(())
     } else {
         Err(cqlite_core::error::Error::storage(
-            "Complex data type tests failed".to_string()
+            "Complex data type tests failed".to_string(),
         ))
     }
 }

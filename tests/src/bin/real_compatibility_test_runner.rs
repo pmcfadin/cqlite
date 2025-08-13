@@ -4,12 +4,12 @@
 //! SSTable files to validate CQLite parser functionality.
 
 use clap::{Arg, Command};
+use cqlite_tests::real_sstable_compatibility_test::{
+    RealCompatibilityConfig, RealSSTableCompatibilityTester,
+};
 use serde_json::json;
 use std::path::PathBuf;
 use std::process;
-use tests::real_sstable_compatibility_test::{
-    RealCompatibilityConfig, RealSSTableCompatibilityTester,
-};
 
 fn main() {
     let matches = Command::new("CQLite Real SSTable Compatibility Tester")

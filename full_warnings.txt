@@ -1,0 +1,2570 @@
+    Blocking waiting for file lock on build directory
+    Checking cqlite-core v0.1.0 (/Users/patrick/local_projects/cqlite/cqlite-core)
+warning: unused variable: `value`
+   --> tools/cqlite-validator/src/main.rs:367:28
+    |
+367 | fn validate_vint_roundtrip(value: i64) -> bool {
+    |                            ^^^^^ help: if this is intentional, prefix it with an underscore: `_value`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: `cqlite-validator` (bin "cqlite-validator" test) generated 1 warning
+error[E0433]: failed to resolve: could not find `ValidationFramework` in `super`
+    --> cqlite-core/src/validation/format_compatibility.rs:1141:41
+     |
+1141 |         let framework = Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap());
+     |                                         ^^^^^^^^^^^^^^^^^^^ could not find `ValidationFramework` in `super`
+     |
+help: consider importing this struct through its public re-export
+     |
+1137 +     use crate::validation::ValidationFramework;
+     |
+help: if you import `ValidationFramework`, refer to it directly
+     |
+1141 -         let framework = Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap());
+1141 +         let framework = Arc::new(ValidationFramework::new(super::ValidationConfig::default()).unwrap());
+     |
+
+error[E0433]: failed to resolve: could not find `ValidationConfig` in `super`
+    --> cqlite-core/src/validation/format_compatibility.rs:1141:73
+     |
+1141 |         let framework = Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap());
+     |                                                                         ^^^^^^^^^^^^^^^^ could not find `ValidationConfig` in `super`
+     |
+help: consider importing this struct through its public re-export
+     |
+1137 +     use crate::validation::ValidationConfig;
+     |
+help: if you import `ValidationConfig`, refer to it directly
+     |
+1141 -         let framework = Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap());
+1141 +         let framework = Arc::new(super::ValidationFramework::new(ValidationConfig::default()).unwrap());
+     |
+
+error[E0433]: failed to resolve: could not find `ValidationFramework` in `super`
+    --> cqlite-core/src/validation/format_compatibility.rs:1148:62
+     |
+1148 | ...   let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |                                                            ^^^^^^^^^^^^^^^^^^^ could not find `ValidationFramework` in `super`
+     |
+help: consider importing this struct through its public re-export
+     |
+1137 +     use crate::validation::ValidationFramework;
+     |
+help: if you import `ValidationFramework`, refer to it directly
+     |
+1148 -         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+1148 +         let validator = FormatValidator::new(Arc::new(ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |
+
+error[E0433]: failed to resolve: could not find `ValidationConfig` in `super`
+    --> cqlite-core/src/validation/format_compatibility.rs:1148:94
+     |
+1148 | ...er::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |                                        ^^^^^^^^^^^^^^^^ could not find `ValidationConfig` in `super`
+     |
+help: consider importing this struct through its public re-export
+     |
+1137 +     use crate::validation::ValidationConfig;
+     |
+help: if you import `ValidationConfig`, refer to it directly
+     |
+1148 -         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+1148 +         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(ValidationConfig::default()).unwrap())).unwrap();
+     |
+
+error[E0433]: failed to resolve: could not find `ValidationFramework` in `super`
+    --> cqlite-core/src/validation/format_compatibility.rs:1177:62
+     |
+1177 | ...   let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |                                                            ^^^^^^^^^^^^^^^^^^^ could not find `ValidationFramework` in `super`
+     |
+help: consider importing this struct through its public re-export
+     |
+1137 +     use crate::validation::ValidationFramework;
+     |
+help: if you import `ValidationFramework`, refer to it directly
+     |
+1177 -         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+1177 +         let validator = FormatValidator::new(Arc::new(ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |
+
+error[E0433]: failed to resolve: could not find `ValidationConfig` in `super`
+    --> cqlite-core/src/validation/format_compatibility.rs:1177:94
+     |
+1177 | ...er::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |                                        ^^^^^^^^^^^^^^^^ could not find `ValidationConfig` in `super`
+     |
+help: consider importing this struct through its public re-export
+     |
+1137 +     use crate::validation::ValidationConfig;
+     |
+help: if you import `ValidationConfig`, refer to it directly
+     |
+1177 -         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+1177 +         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(ValidationConfig::default()).unwrap())).unwrap();
+     |
+
+error[E0433]: failed to resolve: could not find `ValidationFramework` in `super`
+    --> cqlite-core/src/validation/format_compatibility.rs:1202:62
+     |
+1202 | ...   let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |                                                            ^^^^^^^^^^^^^^^^^^^ could not find `ValidationFramework` in `super`
+     |
+help: consider importing this struct through its public re-export
+     |
+1137 +     use crate::validation::ValidationFramework;
+     |
+help: if you import `ValidationFramework`, refer to it directly
+     |
+1202 -         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+1202 +         let validator = FormatValidator::new(Arc::new(ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |
+
+error[E0433]: failed to resolve: could not find `ValidationConfig` in `super`
+    --> cqlite-core/src/validation/format_compatibility.rs:1202:94
+     |
+1202 | ...er::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+     |                                        ^^^^^^^^^^^^^^^^ could not find `ValidationConfig` in `super`
+     |
+help: consider importing this struct through its public re-export
+     |
+1137 +     use crate::validation::ValidationConfig;
+     |
+help: if you import `ValidationConfig`, refer to it directly
+     |
+1202 -         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(super::ValidationConfig::default()).unwrap())).unwrap();
+1202 +         let validator = FormatValidator::new(Arc::new(super::ValidationFramework::new(ValidationConfig::default()).unwrap())).unwrap();
+     |
+
+error: unused import: `std::collections::HashMap`
+  --> cqlite-core/src/parser/collection_tests.rs:10:5
+   |
+10 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: requested on the command line with `-D unused-imports`
+
+error: unused import: `UdtFieldDef`
+  --> cqlite-core/src/parser/udt_tests.rs:10:56
+   |
+10 |     use crate::types::{UdtValue, UdtField, UdtTypeDef, UdtFieldDef, Value};
+   |                                                        ^^^^^^^^^^^
+
+error: unused imports: `DataType` and `Value`
+  --> cqlite-core/src/query/select_integration_tests.rs:12:17
+   |
+12 |         types::{DataType, TableId, Value},
+   |                 ^^^^^^^^           ^^^^^
+
+error: unused imports: `Config` and `Database`
+   --> cqlite-core/src/query/select_integration_tests.rs:518:17
+    |
+518 |     use crate::{Config, Database};
+    |                 ^^^^^^  ^^^^^^^^
+
+error: unused import: `tempfile::TempDir`
+   --> cqlite-core/src/query/select_integration_tests.rs:520:9
+    |
+520 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+error: unused import: `tempfile::TempDir`
+   --> cqlite-core/src/schema/discovery.rs:805:9
+    |
+805 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+error: unused import: `tempfile::TempDir`
+    --> cqlite-core/src/schema/registry.rs:1055:9
+     |
+1055 |     use tempfile::TempDir;
+     |         ^^^^^^^^^^^^^^^^^
+
+error: unused import: `std::time::UNIX_EPOCH`
+   --> cqlite-core/src/schema/json_exporter.rs:734:9
+    |
+734 |     use std::time::UNIX_EPOCH;
+    |         ^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `std::collections::HashMap`
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:257:9
+    |
+257 |     use std::collections::HashMap;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `std::io::Cursor`
+   --> cqlite-core/src/storage/sstable/chunk_decompressor.rs:327:9
+    |
+327 |     use std::io::Cursor;
+    |         ^^^^^^^^^^^^^^^
+
+error: unused import: `super::*`
+   --> cqlite-core/src/storage/sstable/statistics_reader.rs:334:9
+    |
+334 |     use super::*;
+    |         ^^^^^^^^
+
+error: unused import: `crate::Config`
+   --> cqlite-core/src/storage/sstable/statistics_reader.rs:335:9
+    |
+335 |     use crate::Config;
+    |         ^^^^^^^^^^^^^
+
+error: unused import: `tempfile::NamedTempFile`
+   --> cqlite-core/src/storage/sstable/streaming_reader.rs:763:9
+    |
+763 |     use tempfile::NamedTempFile;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `tempfile::TempDir`
+   --> cqlite-core/src/benchmarks/cassandra5/compression_benchmarks.rs:472:9
+    |
+472 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+error: unused import: `tempfile::TempDir`
+   --> cqlite-core/src/benchmarks/cassandra5/mod.rs:475:9
+    |
+475 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+error: unused import: `tempfile::TempDir`
+   --> cqlite-core/src/validation/data_integrity.rs:846:9
+    |
+846 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+error: unused import: `tempfile::TempDir`
+    --> cqlite-core/src/validation/error_handling.rs:1390:9
+     |
+1390 |     use tempfile::TempDir;
+     |         ^^^^^^^^^^^^^^^^^
+
+error: unused import: `crate::storage::sstable::SSTableManager`
+  --> cqlite-core/src/memory_safety_tests.rs:14:5
+   |
+14 | use crate::storage::sstable::SSTableManager;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0609]: no field `enable_regression_tests` on type `ValidationConfig`
+   --> cqlite-core/src/validation/mod.rs:131:24
+    |
+131 |         if self.config.enable_regression_tests {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `enable_performance_tests` on type `ValidationConfig`
+   --> cqlite-core/src/validation/mod.rs:138:24
+    |
+138 |         if self.config.enable_performance_tests {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+138 -         if self.config.enable_performance_tests {
+138 +         if self.config.enable_performance_benchmarks {
+    |
+
+error[E0609]: no field `enable_edge_case_tests` on type `ValidationConfig`
+   --> cqlite-core/src/validation/mod.rs:142:24
+    |
+142 |         if self.config.enable_edge_case_tests {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `cqlsh_reference_path` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:279:60
+    |
+279 |     let reference_data = if let Some(cqlsh_path) = &config.cqlsh_reference_path {
+    |                                                            ^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `accuracy_threshold` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:300:40
+    |
+300 |     if result.accuracy_score >= config.accuracy_threshold {
+    |                                        ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `accuracy_threshold` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:302:47
+    |
+302 |     } else if result.accuracy_score >= config.accuracy_threshold * 0.8 {
+    |                                               ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `performance_threshold_ms` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/performance.rs:144:28
+    |
+144 |     if elapsed_ms > config.performance_threshold_ms {
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `performance_threshold_ms` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/performance.rs:147:112
+    |
+147 |             result.warnings.push(format!("Performance above config threshold: {}ms > {}ms", elapsed_ms, config.performance_threshold_ms));
+    |                                                                                                                ^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_executor.rs:801:50
+    |
+801 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ------------------ ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/select_executor.rs:801:31
+    |
+801 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+801 -         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+801 +         let schema = Arc::new(SchemaManager::new(storage.clone()).await.unwrap());
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_executor.rs:801:31
+    |
+801 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_executor.rs:801:76
+    |
+801 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                                                                            ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_optimizer.rs:650:50
+    |
+650 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ------------------ ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/select_optimizer.rs:650:31
+    |
+650 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+650 -         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+650 +         let schema = Arc::new(SchemaManager::new(storage.clone()).await.unwrap());
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_optimizer.rs:650:31
+    |
+650 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_optimizer.rs:650:76
+    |
+650 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                                                                            ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0609]: no field `enable_regression_tests` on type `core::ValidationConfig`
+   --> cqlite-core/src/validation/mod.rs:131:24
+    |
+131 |         if self.config.enable_regression_tests {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `enable_performance_tests` on type `core::ValidationConfig`
+   --> cqlite-core/src/validation/mod.rs:138:24
+    |
+138 |         if self.config.enable_performance_tests {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+138 -         if self.config.enable_performance_tests {
+138 +         if self.config.enable_performance_benchmarks {
+    |
+
+error[E0609]: no field `enable_edge_case_tests` on type `core::ValidationConfig`
+   --> cqlite-core/src/validation/mod.rs:142:24
+    |
+142 |         if self.config.enable_edge_case_tests {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `cqlsh_reference_path` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:279:60
+    |
+279 |     let reference_data = if let Some(cqlsh_path) = &config.cqlsh_reference_path {
+    |                                                            ^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `accuracy_threshold` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:300:40
+    |
+300 |     if result.accuracy_score >= config.accuracy_threshold {
+    |                                        ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `accuracy_threshold` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:302:47
+    |
+302 |     } else if result.accuracy_score >= config.accuracy_threshold * 0.8 {
+    |                                               ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `performance_threshold_ms` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/performance.rs:144:28
+    |
+144 |     if elapsed_ms > config.performance_threshold_ms {
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `performance_threshold_ms` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/performance.rs:147:112
+    |
+147 |             result.warnings.push(format!("Performance above config threshold: {}ms > {}ms", elapsed_ms, config.performance_threshold_ms));
+    |                                                                                                                ^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:151:30
+    |
+151 |     for test_path in &config.test_data_paths {
+    |                              ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:347:30
+    |
+347 |     for test_path in &config.test_data_paths {
+    |                              ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `output_formats` on type `&ValidationConfig`
+  --> cqlite-core/src/validation/compatibility.rs:98:27
+   |
+98 |     for format in &config.output_formats {
+   |                           ^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/compatibility.rs:122:30
+    |
+122 |     for test_path in &config.test_data_paths {
+    |                              ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/compatibility.rs:149:33
+    |
+149 |     let test_data_path = config.test_data_paths.first()
+    |                                 ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&ValidationConfig`
+   --> cqlite-core/src/validation/compatibility.rs:197:33
+    |
+197 |     let test_data_path = config.test_data_paths.first()
+    |                                 ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `performance_threshold_ms` on type `&ValidationConfig`
+  --> cqlite-core/src/validation/performance.rs:86:48
+   |
+86 |             target_performance_ms: Some(config.performance_threshold_ms),
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `accuracy_threshold` on type `ValidationConfig`
+   --> cqlite-core/src/validation/mod.rs:400:68
+    |
+400 |         self.failed == 0 && self.avg_accuracy_score >= self.config.accuracy_threshold
+    |                                                                    ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0614]: type `schema::CqlType` cannot be dereferenced
+   --> cqlite-core/src/parser/collection_validation_tests.rs:227:24
+    |
+227 |             assert_eq!(**element_type, CqlType::Int);
+    |                        ^^^^^^^^^^^^^^ can't be dereferenced
+
+error[E0599]: no method named `parse_list_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+  --> cqlite-core/src/parser/collection_udt_tests.rs:34:44
+   |
+34 |     let (remaining, parsed_value) = parser.parse_list_v5(&data).unwrap();
+   |                                            ^^^^^^^^^^^^^ method not found in `ComplexTypeParser`
+   |
+  ::: cqlite-core/src/parser/complex_types.rs:27:1
+   |
+27 | pub struct ComplexTypeParser {
+   | ---------------------------- method `parse_list_v5` not found for this struct
+
+error[E0599]: no method named `parse_set_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+  --> cqlite-core/src/parser/collection_udt_tests.rs:63:44
+   |
+63 |     let (remaining, parsed_value) = parser.parse_set_v5(&data).unwrap();
+   |                                            ^^^^^^^^^^^^
+   |
+  ::: cqlite-core/src/parser/complex_types.rs:27:1
+   |
+27 | pub struct ComplexTypeParser {
+   | ---------------------------- method `parse_set_v5` not found for this struct
+   |
+help: there is a method `parse_type` with a similar name
+   |
+63 -     let (remaining, parsed_value) = parser.parse_set_v5(&data).unwrap();
+63 +     let (remaining, parsed_value) = parser.parse_type(&data).unwrap();
+   |
+
+error[E0599]: no method named `parse_map_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+  --> cqlite-core/src/parser/collection_udt_tests.rs:98:44
+   |
+98 |     let (remaining, parsed_value) = parser.parse_map_v5(&data).unwrap();
+   |                                            ^^^^^^^^^^^^
+   |
+  ::: cqlite-core/src/parser/complex_types.rs:27:1
+   |
+27 | pub struct ComplexTypeParser {
+   | ---------------------------- method `parse_map_v5` not found for this struct
+   |
+help: there is a method `parse_type` with a similar name
+   |
+98 -     let (remaining, parsed_value) = parser.parse_map_v5(&data).unwrap();
+98 +     let (remaining, parsed_value) = parser.parse_type(&data).unwrap();
+   |
+
+error[E0599]: no method named `parse_frozen_list` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:129:44
+    |
+129 |     let (remaining, parsed_value) = parser.parse_frozen_list(&data).unwrap();
+    |                                            ^^^^^^^^^^^^^^^^^ method not found in `ComplexTypeParser`
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- method `parse_frozen_list` not found for this struct
+
+error[E0599]: no function or associated item named `with_test_udts` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:148:41
+    |
+148 |     let mut parser = ComplexTypeParser::with_test_udts();
+    |                                         ^^^^^^^^^^^^^^ function or associated item not found in `ComplexTypeParser`
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- function or associated item `with_test_udts` not found for this struct
+    |
+note: if you're trying to build a new `complex_types::ComplexTypeParser`, consider using `complex_types::ComplexTypeParser::new` which returns `complex_types::ComplexTypeParser`
+   --> cqlite-core/src/parser/complex_types.rs:104:5
+    |
+104 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `with_test_udts` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:202:37
+    |
+202 |     let parser = ComplexTypeParser::with_test_udts();
+    |                                     ^^^^^^^^^^^^^^ function or associated item not found in `ComplexTypeParser`
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- function or associated item `with_test_udts` not found for this struct
+    |
+note: if you're trying to build a new `complex_types::ComplexTypeParser`, consider using `complex_types::ComplexTypeParser::new` which returns `complex_types::ComplexTypeParser`
+   --> cqlite-core/src/parser/complex_types.rs:104:5
+    |
+104 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `parse_list_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:232:29
+    |
+232 |     let (_, value) = parser.parse_list_v5(&data).unwrap();
+    |                             ^^^^^^^^^^^^^ method not found in `ComplexTypeParser`
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- method `parse_list_v5` not found for this struct
+
+error[E0599]: no method named `parse_set_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:236:29
+    |
+236 |     let (_, value) = parser.parse_set_v5(&data).unwrap();
+    |                             ^^^^^^^^^^^^
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- method `parse_set_v5` not found for this struct
+    |
+help: there is a method `parse_type` with a similar name
+    |
+236 -     let (_, value) = parser.parse_set_v5(&data).unwrap();
+236 +     let (_, value) = parser.parse_type(&data).unwrap();
+    |
+
+error[E0599]: no method named `parse_map_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:240:29
+    |
+240 |     let (_, value) = parser.parse_map_v5(&data).unwrap();
+    |                             ^^^^^^^^^^^^
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- method `parse_map_v5` not found for this struct
+    |
+help: there is a method `parse_type` with a similar name
+    |
+240 -     let (_, value) = parser.parse_map_v5(&data).unwrap();
+240 +     let (_, value) = parser.parse_type(&data).unwrap();
+    |
+
+error[E0425]: cannot find function `serialize_list_v5` in this scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:259:22
+    |
+259 |     let serialized = serialize_list_v5(&original_list).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0599]: no method named `parse_list_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:260:30
+    |
+260 |     let (_, parsed) = parser.parse_list_v5(&serialized).unwrap();
+    |                              ^^^^^^^^^^^^^ method not found in `ComplexTypeParser`
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- method `parse_list_v5` not found for this struct
+
+error[E0425]: cannot find function `serialize_set_v5` in this scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:270:22
+    |
+270 |     let serialized = serialize_set_v5(&original_set).unwrap();
+    |                      ^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0599]: no method named `parse_set_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:271:30
+    |
+271 |     let (_, parsed) = parser.parse_set_v5(&serialized).unwrap();
+    |                              ^^^^^^^^^^^^
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- method `parse_set_v5` not found for this struct
+    |
+help: there is a method `parse_type` with a similar name
+    |
+271 -     let (_, parsed) = parser.parse_set_v5(&serialized).unwrap();
+271 +     let (_, parsed) = parser.parse_type(&serialized).unwrap();
+    |
+
+error[E0425]: cannot find function `serialize_map_v5` in this scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:280:22
+    |
+280 |     let serialized = serialize_map_v5(&original_map).unwrap();
+    |                      ^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0599]: no method named `parse_map_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:281:30
+    |
+281 |     let (_, parsed) = parser.parse_map_v5(&serialized).unwrap();
+    |                              ^^^^^^^^^^^^
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- method `parse_map_v5` not found for this struct
+    |
+help: there is a method `parse_type` with a similar name
+    |
+281 -     let (_, parsed) = parser.parse_map_v5(&serialized).unwrap();
+281 +     let (_, parsed) = parser.parse_type(&serialized).unwrap();
+    |
+
+error[E0599]: no method named `parse_list_v5` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:301:44
+    |
+301 |     let (remaining, parsed_value) = parser.parse_list_v5(&data).unwrap();
+    |                                            ^^^^^^^^^^^^^ method not found in `ComplexTypeParser`
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- method `parse_list_v5` not found for this struct
+
+error[E0599]: no function or associated item named `with_test_udts` found for struct `complex_types::ComplexTypeParser` in the current scope
+   --> cqlite-core/src/parser/collection_udt_tests.rs:336:37
+    |
+336 |     let parser = ComplexTypeParser::with_test_udts();
+    |                                     ^^^^^^^^^^^^^^ function or associated item not found in `ComplexTypeParser`
+    |
+   ::: cqlite-core/src/parser/complex_types.rs:27:1
+    |
+27  | pub struct ComplexTypeParser {
+    | ---------------------------- function or associated item `with_test_udts` not found for this struct
+    |
+note: if you're trying to build a new `complex_types::ComplexTypeParser`, consider using `complex_types::ComplexTypeParser::new` which returns `complex_types::ComplexTypeParser`
+   --> cqlite-core/src/parser/complex_types.rs:104:5
+    |
+104 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+error[E0609]: no field `section_count` on type `statistics::StatisticsHeader`
+   --> cqlite-core/src/parser/statistics.rs:691:27
+    |
+691 |         assert_eq!(header.section_count, 5);
+    |                           ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `version`, `statistics_kind`, `data_length`, `metadata1`, `metadata2` ... and 3 others
+
+error[E0609]: no field `file_size` on type `statistics::StatisticsHeader`
+   --> cqlite-core/src/parser/statistics.rs:692:27
+    |
+692 |         assert_eq!(header.file_size, 4096);
+    |                           ^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `version`, `statistics_kind`, `data_length`, `metadata1`, `metadata2` ... and 3 others
+
+error[E0308]: mismatched types
+   --> cqlite-core/src/parser/statistics.rs:710:27
+    |
+710 |                 table_id: [1; 16],
+    |                           ^^^^^^^ expected `Option<[u8; 16]>`, found `[{integer}; 16]`
+    |
+    = note: expected enum `std::option::Option<[u8; 16]>`
+              found array `[{integer}; 16]`
+help: try wrapping the expression in `Some`
+    |
+710 |                 table_id: Some([1; 16]),
+    |                           +++++       +
+
+error[E0560]: struct `statistics::StatisticsHeader` has no field named `section_count`
+   --> cqlite-core/src/parser/statistics.rs:711:17
+    |
+711 |                 section_count: 3,
+    |                 ^^^^^^^^^^^^^ `statistics::StatisticsHeader` does not have this field
+    |
+    = note: available fields are: `statistics_kind`, `data_length`, `metadata1`, `metadata2`, `metadata3`
+
+error[E0560]: struct `statistics::StatisticsHeader` has no field named `file_size`
+   --> cqlite-core/src/parser/statistics.rs:712:17
+    |
+712 |                 file_size: 1024,
+    |                 ^^^^^^^^^ `statistics::StatisticsHeader` does not have this field
+    |
+    = note: available fields are: `statistics_kind`, `data_length`, `metadata1`, `metadata2`, `metadata3`
+
+error[E0063]: missing field `compressed_size` in initializer of `statistics::TableStatistics`
+   --> cqlite-core/src/parser/statistics.rs:733:26
+    |
+733 |             table_stats: TableStatistics {
+    |                          ^^^^^^^^^^^^^^^ missing `compressed_size`
+
+error[E0609]: no field `section_count` on type `statistics::StatisticsHeader`
+   --> cqlite-core/src/parser/statistics_test.rs:139:27
+    |
+139 |         assert_eq!(header.section_count, 3);
+    |                           ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `version`, `statistics_kind`, `data_length`, `metadata1`, `metadata2` ... and 3 others
+
+error[E0609]: no field `file_size` on type `statistics::StatisticsHeader`
+   --> cqlite-core/src/parser/statistics_test.rs:140:27
+    |
+140 |         assert_eq!(header.file_size, 8192);
+    |                           ^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `version`, `statistics_kind`, `data_length`, `metadata1`, `metadata2` ... and 3 others
+
+error[E0063]: missing field `keyspace` in initializer of `types::UdtValue`
+   --> cqlite-core/src/parser/udt_tests.rs:424:36
+    |
+424 |         let empty_udt = Value::Udt(UdtValue {
+    |                                    ^^^^^^^^ missing `keyspace`
+
+error[E0599]: no method named `into_identifiers` found for struct `parser::visitor::IdentifierCollector` in the current scope
+   --> cqlite-core/src/parser/mod.rs:282:37
+    |
+282 |         let identifiers = collector.into_identifiers();
+    |                                     ^^^^^^^^^^^^^^^^
+    |
+   ::: cqlite-core/src/parser/visitor.rs:380:1
+    |
+380 | pub struct IdentifierCollector {
+    | ------------------------------ method `into_identifiers` not found for this struct
+    |
+help: there is a method `visit_identifier` with a similar name, but with different arguments
+   --> cqlite-core/src/parser/traits.rs:180:5
+    |
+180 |     fn visit_identifier(&mut self, identifier: &CqlIdentifier) -> Result<T>;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:477:47
+    |
+477 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/engine.rs:477:13
+    |
+477 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+477 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+477 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:477:13
+    |
+477 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:478:18
+    |
+478 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:503:47
+    |
+503 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/engine.rs:503:13
+    |
+503 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+503 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+503 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:503:13
+    |
+503 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:504:18
+    |
+504 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:536:47
+    |
+536 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/engine.rs:536:13
+    |
+536 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+536 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+536 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:536:13
+    |
+536 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:537:18
+    |
+537 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:574:47
+    |
+574 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/engine.rs:574:13
+    |
+574 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+574 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+574 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:574:13
+    |
+574 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:575:18
+    |
+575 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:605:47
+    |
+605 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/engine.rs:605:13
+    |
+605 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+605 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+605 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:605:13
+    |
+605 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/engine.rs:606:18
+    |
+606 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:749:47
+    |
+749 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/executor.rs:749:13
+    |
+749 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+749 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+749 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:749:13
+    |
+749 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:750:18
+    |
+750 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0609]: no field `config` on type `executor::QueryExecutor`
+   --> cqlite-core/src/query/executor.rs:756:22
+    |
+756 |             executor.config.query.query_parallelism,
+    |                      ^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+756 |             executor._config.query.query_parallelism,
+    |                      +
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:772:47
+    |
+772 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/executor.rs:772:13
+    |
+772 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+772 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+772 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:772:13
+    |
+772 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:773:18
+    |
+773 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:801:47
+    |
+801 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/executor.rs:801:13
+    |
+801 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+801 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+801 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:801:13
+    |
+801 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/executor.rs:802:18
+    |
+802 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:727:47
+    |
+727 |             crate::schema::SchemaManager::new(storage, &config)
+    |             --------------------------------- ^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/planner.rs:727:13
+    |
+727 |             crate::schema::SchemaManager::new(storage, &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^          ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+727 -             crate::schema::SchemaManager::new(storage, &config)
+727 +             crate::schema::SchemaManager::new(storage)
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:727:13
+    |
+727 |             crate::schema::SchemaManager::new(storage, &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:728:18
+    |
+728 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:747:47
+    |
+747 |             crate::schema::SchemaManager::new(storage, &config)
+    |             --------------------------------- ^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/planner.rs:747:13
+    |
+747 |             crate::schema::SchemaManager::new(storage, &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^          ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+747 -             crate::schema::SchemaManager::new(storage, &config)
+747 +             crate::schema::SchemaManager::new(storage)
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:747:13
+    |
+747 |             crate::schema::SchemaManager::new(storage, &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:748:18
+    |
+748 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:785:47
+    |
+785 |             crate::schema::SchemaManager::new(storage, &config)
+    |             --------------------------------- ^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/planner.rs:785:13
+    |
+785 |             crate::schema::SchemaManager::new(storage, &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^          ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+785 -             crate::schema::SchemaManager::new(storage, &config)
+785 +             crate::schema::SchemaManager::new(storage)
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:785:13
+    |
+785 |             crate::schema::SchemaManager::new(storage, &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/planner.rs:786:18
+    |
+786 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/prepared.rs:393:47
+    |
+393 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/prepared.rs:393:13
+    |
+393 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+393 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+393 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/prepared.rs:393:13
+    |
+393 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/prepared.rs:394:18
+    |
+394 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/prepared.rs:484:47
+    |
+484 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             --------------------------------- ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |             |
+    |             required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/prepared.rs:484:13
+    |
+484 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+484 -             crate::schema::SchemaManager::new(storage.clone(), &config)
+484 +             crate::schema::SchemaManager::new(storage.clone())
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/prepared.rs:484:13
+    |
+484 |             crate::schema::SchemaManager::new(storage.clone(), &config)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/prepared.rs:485:18
+    |
+485 |                 .await
+    |                  ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_integration_tests.rs:360:50
+    |
+360 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ------------------ ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/select_integration_tests.rs:360:31
+    |
+360 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+360 -         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+360 +         let schema = Arc::new(SchemaManager::new(storage.clone()).await.unwrap());
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_integration_tests.rs:360:31
+    |
+360 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/select_integration_tests.rs:360:76
+    |
+360 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                                                                            ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/mod.rs:254:50
+    |
+254 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ------------------ ^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> cqlite-core/src/query/mod.rs:254:31
+    |
+254 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ^^^^^^^^^^^^^^^^^^                  ------- unexpected argument #2 of type `&config::Config`
+    |
+note: associated function defined here
+   --> cqlite-core/src/schema/mod.rs:719:18
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                  ^^^
+help: remove the extra argument
+    |
+254 -         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+254 +         let schema = Arc::new(SchemaManager::new(storage.clone()).await.unwrap());
+    |
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/mod.rs:254:31
+    |
+254 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+error[E0277]: the trait bound `std::sync::Arc<storage::StorageEngine>: AsRef<std::path::Path>` is not satisfied
+   --> cqlite-core/src/query/mod.rs:254:76
+    |
+254 |         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+    |                                                                            ^^^^^ the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+    |
+    = help: the trait `AsRef<std::path::Path>` is not implemented for `std::sync::Arc<storage::StorageEngine>`
+            but trait `AsRef<storage::StorageEngine>` is implemented for it
+    = help: for that trait implementation, expected `storage::StorageEngine`, found `std::path::Path`
+note: required by a bound in `schema::SchemaManager::new`
+   --> cqlite-core/src/schema/mod.rs:719:25
+    |
+719 |     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    |                         ^^^^^^^^^^^ required by this bound in `SchemaManager::new`
+
+For more information about this error, try `rustc --explain E0609`.
+error: could not compile `cqlite-core` (lib) due to 16 previous errors
+warning: build failed, waiting for other jobs to finish...
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:277:56
+    |
+277 |         let encoded_neg = encoder.encode_value(&Value::Int(-100)).unwrap();
+    |                                                        ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:278:57
+    |
+278 |         let encoded_zero = encoder.encode_value(&Value::Int(0)).unwrap();
+    |                                                         ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:279:56
+    |
+279 |         let encoded_pos = encoder.encode_value(&Value::Int(100)).unwrap();
+    |                                                        ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:304:58
+    |
+304 |         let encoded1 = encoder.encode_value(&Value::Uuid(uuid1)).unwrap();
+    |                                              ----------- ^^^^^ expected `[u8; 16]`, found `Uuid`
+    |                                              |
+    |                                              arguments to this enum variant are incorrect
+    |
+note: tuple variant defined here
+   --> cqlite-core/src/types.rs:27:5
+    |
+27  |     Uuid([u8; 16]),
+    |     ^^^^
+
+error[E0308]: mismatched types
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:305:58
+    |
+305 |         let encoded2 = encoder.encode_value(&Value::Uuid(uuid2)).unwrap();
+    |                                              ----------- ^^^^^ expected `[u8; 16]`, found `Uuid`
+    |                                              |
+    |                                              arguments to this enum variant are incorrect
+    |
+note: tuple variant defined here
+   --> cqlite-core/src/types.rs:27:5
+    |
+27  |     Uuid([u8; 16]),
+    |     ^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:316:20
+    |
+316 |             Value::Int(1),
+    |                    ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:320:20
+    |
+320 |             Value::Int(2),
+    |                    ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:324:20
+    |
+324 |             Value::Int(1),
+    |                    ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:340:45
+    |
+340 |         let list1 = Value::List(vec![Value::Int(1), Value::Int(2)]);
+    |                                             ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:340:60
+    |
+340 |         let list1 = Value::List(vec![Value::Int(1), Value::Int(2)]);
+    |                                                            ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:341:45
+    |
+341 |         let list2 = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    |                                             ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:341:60
+    |
+341 |         let list2 = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    |                                                            ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `Int` found for enum `types::Value` in the current scope
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:341:75
+    |
+341 |         let list2 = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    |                                                                           ^^^ variant or associated item not found in `Value`
+    |
+   ::: cqlite-core/src/types.rs:9:1
+    |
+9   | pub enum Value {
+    | -------------- variant or associated item `Int` not found for this enum
+    |
+note: if you're trying to build a new `types::Value` consider using one of the following associated functions:
+      types::Value::row_tombstone
+      types::Value::cell_tombstone
+      types::Value::ttl_tombstone
+      types::Value::range_tombstone
+      types::Value::range_tombstone_with_ttl
+   --> cqlite-core/src/types.rs:372:5
+    |
+372 |     pub fn row_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn cell_tombstone(deletion_time: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+405 |     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+416 |     pub fn range_tombstone_with_ttl(deletion_time: i64, start_key: RowKey, end_key: RowKey, ttl: i64) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:354:58
+    |
+354 |         let neg_inf = encoder.encode_value(&Value::Float(f32::NEG_INFINITY)).unwrap();
+    |                                             ------------ ^^^^^^^^^^^^^^^^^ expected `f64`, found `f32`
+    |                                             |
+    |                                             arguments to this enum variant are incorrect
+    |
+note: tuple variant defined here
+   --> cqlite-core/src/types.rs:19:5
+    |
+19  |     Float(f64),
+    |     ^^^^^
+help: you can convert an `f32` to an `f64`
+    |
+354 |         let neg_inf = encoder.encode_value(&Value::Float(f32::NEG_INFINITY.into())).unwrap();
+    |                                                                           +++++++
+
+error[E0308]: mismatched types
+   --> cqlite-core/src/storage/sstable/bti/encoder.rs:358:58
+    |
+358 |         let pos_inf = encoder.encode_value(&Value::Float(f32::INFINITY)).unwrap();
+    |                                             ------------ ^^^^^^^^^^^^^ expected `f64`, found `f32`
+    |                                             |
+    |                                             arguments to this enum variant are incorrect
+    |
+note: tuple variant defined here
+   --> cqlite-core/src/types.rs:19:5
+    |
+19  |     Float(f64),
+    |     ^^^^^
+help: you can convert an `f32` to an `f64`
+    |
+358 |         let pos_inf = encoder.encode_value(&Value::Float(f32::INFINITY.into())).unwrap();
+    |                                                                       +++++++
+
+error[E0308]: mismatched types
+   --> cqlite-core/src/storage/sstable/bti/parser.rs:370:62
+    |
+370 |         let root_offset = PartitionsParser::parse_bti_header(&mut cursor).unwrap();
+    |                           ---------------------------------- ^^^^^^^^^^^ expected `&mut File`, found `&mut Cursor<Vec<u8>>`
+    |                           |
+    |                           arguments to this function are incorrect
+    |
+    = note: expected mutable reference `&mut std::fs::File`
+               found mutable reference `&mut std::io::Cursor<Vec<u8>>`
+note: associated function defined here
+   --> cqlite-core/src/storage/sstable/bti/parser.rs:44:8
+    |
+44  |     fn parse_bti_header(file: &mut File) -> Result<u64> {
+    |        ^^^^^^^^^^^^^^^^ ---------------
+
+error[E0308]: mismatched types
+   --> cqlite-core/src/storage/sstable/bti/parser.rs:383:57
+    |
+383 |         let result = PartitionsParser::parse_bti_header(&mut cursor);
+    |                      ---------------------------------- ^^^^^^^^^^^ expected `&mut File`, found `&mut Cursor<Vec<u8>>`
+    |                      |
+    |                      arguments to this function are incorrect
+    |
+    = note: expected mutable reference `&mut std::fs::File`
+               found mutable reference `&mut std::io::Cursor<Vec<u8>>`
+note: associated function defined here
+   --> cqlite-core/src/storage/sstable/bti/parser.rs:44:8
+    |
+44  |     fn parse_bti_header(file: &mut File) -> Result<u64> {
+    |        ^^^^^^^^^^^^^^^^ ---------------
+
+error[E0599]: no method named `read_varint` found for struct `bulletproof_reader::BulletproofReader` in the current scope
+   --> cqlite-core/src/storage/sstable/bulletproof_reader.rs:645:42
+    |
+19  | pub struct BulletproofReader {
+    | ---------------------------- method `read_varint` not found for this struct
+...
+645 |         let (value, bytes_read) = reader.read_varint(&data).unwrap();
+    |                                          ^^^^^^^^^^^ method not found in `BulletproofReader`
+
+error[E0599]: no method named `read_varint` found for struct `bulletproof_reader::BulletproofReader` in the current scope
+   --> cqlite-core/src/storage/sstable/bulletproof_reader.rs:651:42
+    |
+19  | pub struct BulletproofReader {
+    | ---------------------------- method `read_varint` not found for this struct
+...
+651 |         let (value, bytes_read) = reader.read_varint(&data).unwrap();
+    |                                          ^^^^^^^^^^^ method not found in `BulletproofReader`
+
+error[E0609]: no field `test_data_paths` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:151:30
+    |
+151 |     for test_path in &config.test_data_paths {
+    |                              ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/accuracy.rs:347:30
+    |
+347 |     for test_path in &config.test_data_paths {
+    |                              ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `output_formats` on type `&core::ValidationConfig`
+  --> cqlite-core/src/validation/compatibility.rs:98:27
+   |
+98 |     for format in &config.output_formats {
+   |                           ^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/compatibility.rs:122:30
+    |
+122 |     for test_path in &config.test_data_paths {
+    |                              ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/compatibility.rs:149:33
+    |
+149 |     let test_data_path = config.test_data_paths.first()
+    |                                 ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `test_data_paths` on type `&core::ValidationConfig`
+   --> cqlite-core/src/validation/compatibility.rs:197:33
+    |
+197 |     let test_data_path = config.test_data_paths.first()
+    |                                 ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0609]: no field `performance_threshold_ms` on type `&core::ValidationConfig`
+  --> cqlite-core/src/validation/performance.rs:86:48
+   |
+86 |             target_performance_ms: Some(config.performance_threshold_ms),
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error[E0308]: mismatched types
+    --> cqlite-core/src/validation/error_handling.rs:1427:62
+     |
+1427 |         assert!(handler.is_expected_error(&corruption_error, ErrorScenarioType::CorruptedData));
+     |                         -----------------                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&ErrorScenarioType`, found `ErrorScenarioType`
+     |                         |
+     |                         arguments to this method are incorrect
+     |
+note: method defined here
+    --> cqlite-core/src/validation/error_handling.rs:881:8
+     |
+881  |     fn is_expected_error(&self, error: &Error, expected_type: &ErrorScenarioType) -> bool {
+     |        ^^^^^^^^^^^^^^^^^                       ---------------------------------
+help: consider borrowing here
+     |
+1427 |         assert!(handler.is_expected_error(&corruption_error, &ErrorScenarioType::CorruptedData));
+     |                                                              +
+
+error[E0308]: mismatched types
+    --> cqlite-core/src/validation/error_handling.rs:1430:54
+     |
+1430 |         assert!(handler.is_expected_error(&io_error, ErrorScenarioType::IoError));
+     |                         -----------------            ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&ErrorScenarioType`, found `ErrorScenarioType`
+     |                         |
+     |                         arguments to this method are incorrect
+     |
+note: method defined here
+    --> cqlite-core/src/validation/error_handling.rs:881:8
+     |
+881  |     fn is_expected_error(&self, error: &Error, expected_type: &ErrorScenarioType) -> bool {
+     |        ^^^^^^^^^^^^^^^^^                       ---------------------------------
+help: consider borrowing here
+     |
+1430 |         assert!(handler.is_expected_error(&io_error, &ErrorScenarioType::IoError));
+     |                                                      +
+
+error[E0609]: no field `accuracy_threshold` on type `core::ValidationConfig`
+   --> cqlite-core/src/validation/mod.rs:400:68
+    |
+400 |         self.failed == 0 && self.avg_accuracy_score >= self.config.accuracy_threshold
+    |                                                                    ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `enable_comprehensive_validation`, `enable_performance_benchmarks`, `enable_realtime_monitoring`, `max_validation_timeout`, `test_data_directories` ... and 2 others
+
+error: unused variable: `parser`
+   --> cqlite-core/src/parser/collection_udt_tests.rs:320:9
+    |
+320 |     let parser = ComplexTypeParser::new();
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_parser`
+    |
+    = note: requested on the command line with `-D unused-variables`
+
+error: unused variable: `has_collection_types`
+   --> cqlite-core/src/parser/statistics_test.rs:108:13
+    |
+108 |         let has_collection_types = stats.column_stats.iter().any(|c| {
+    |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_collection_types`
+
+error: unused variable: `person_def`
+   --> cqlite-core/src/parser/udt_tests.rs:319:13
+    |
+319 |         let person_def = registry.get_udt("system", "person").unwrap();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_person_def`
+
+error: unused variable: `registry`
+   --> cqlite-core/src/parser/udt_tests.rs:350:13
+    |
+350 |         let registry = UdtRegistry::with_cassandra5_defaults();
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_registry`
+
+error: unused variable: `registry`
+   --> cqlite-core/src/parser/udt_tests.rs:382:13
+    |
+382 |         let registry = UdtRegistry::with_cassandra5_defaults();
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_registry`
+
+error: variable does not need to be mutable
+   --> cqlite-core/src/parser/udt_tests.rs:456:13
+    |
+456 |         let mut registry = UdtRegistry::with_cassandra5_defaults();
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: requested on the command line with `-D unused-mut`
+
+error: variable does not need to be mutable
+   --> cqlite-core/src/storage/sstable/compression.rs:609:13
+    |
+609 |         let mut reader = CompressionReader::with_block_size(CompressionAlgorithm::None, 32768);
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+error: unused variable: `users_dir_pattern`
+  --> cqlite-core/src/storage/sstable/directory_integration_tests.rs:97:13
+   |
+97 |         let users_dir_pattern = format!("{}/users-*", REAL_DATA_PATH);
+   |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_users_dir_pattern`
+
+error: unused variable: `parent`
+   --> cqlite-core/src/storage/sstable/statistics_reader.rs:352:21
+    |
+352 |         if let Some(parent) = data_path.parent() {
+    |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_parent`
+
+error: unused variable: `temp_dir`
+   --> cqlite-core/src/storage/schema_discovery.rs:707:13
+    |
+707 |         let temp_dir = TempDir::new().unwrap();
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_temp_dir`
+
+error: variable does not need to be mutable
+   --> cqlite-core/src/storage/mod.rs:419:13
+    |
+419 |         let mut storage = StorageEngine::open(temp_dir.path(), &config, platform)
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning[E0133]: call to unsafe function `std::alloc::GlobalAlloc::alloc` is unsafe and requires unsafe block
+  --> cqlite-core/src/memory_safety_tests.rs:62:19
+   |
+62 |         let ptr = System.alloc(layout);
+   |                   ^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+  --> cqlite-core/src/memory_safety_tests.rs:61:5
+   |
+61 |     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(unsafe_op_in_unsafe_fn)]` on by default
+
+warning[E0133]: call to unsafe function `std::alloc::GlobalAlloc::dealloc` is unsafe and requires unsafe block
+  --> cqlite-core/src/memory_safety_tests.rs:77:9
+   |
+77 |         System.dealloc(ptr, layout);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+  --> cqlite-core/src/memory_safety_tests.rs:76:5
+   |
+76 |     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0061, E0063, E0133, E0277, E0308, E0425, E0433, E0560, E0599...
+For more information about an error, try `rustc --explain E0061`.
+warning: `cqlite-core` (lib test) generated 2 warnings
+error: could not compile `cqlite-core` (lib test) due to 171 previous errors; 2 warnings emitted

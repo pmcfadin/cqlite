@@ -5,8 +5,8 @@
 
 use crate::{
     error::{Error, Result},
-    parser::statistics::{SSTableStatistics, StatisticsAnalyzer, StatisticsSummary},
     parser::enhanced_statistics_parser::parse_statistics_with_fallback,
+    parser::statistics::{SSTableStatistics, StatisticsAnalyzer, StatisticsSummary},
     platform::Platform,
 };
 use std::path::{Path, PathBuf};
@@ -21,6 +21,7 @@ pub struct StatisticsReader {
     /// Parsed statistics data
     statistics: SSTableStatistics,
     /// Platform abstraction for file operations
+    #[allow(dead_code)]
     platform: Arc<Platform>,
 }
 
@@ -126,7 +127,10 @@ impl StatisticsReader {
     }
 
     /// Get column statistics by name
-    pub fn column_stats(&self, column_name: &str) -> Option<&crate::parser::statistics::ColumnStatistics> {
+    pub fn column_stats(
+        &self,
+        column_name: &str,
+    ) -> Option<&crate::parser::statistics::ColumnStatistics> {
         self.statistics
             .column_stats
             .iter()
@@ -166,18 +170,45 @@ impl StatisticsReader {
         // Overview section
         report.push_str("## Overview\n");
         report.push_str(&format!("- **Total Rows**: {}\n", summary.total_rows));
-        report.push_str(&format!("- **Live Data**: {:.2}%\n", summary.live_data_percentage));
-        report.push_str(&format!("- **Compression Efficiency**: {:.2}%\n", summary.compression_efficiency));
-        report.push_str(&format!("- **Time Range**: {:.1} days\n", summary.timestamp_range_days));
-        report.push_str(&format!("- **Largest Partition**: {:.2} MB\n", summary.largest_partition_mb));
-        report.push_str(&format!("- **Health Score**: {:.1}/100\n\n", summary.health_score));
+        report.push_str(&format!(
+            "- **Live Data**: {:.2}%\n",
+            summary.live_data_percentage
+        ));
+        report.push_str(&format!(
+            "- **Compression Efficiency**: {:.2}%\n",
+            summary.compression_efficiency
+        ));
+        report.push_str(&format!(
+            "- **Time Range**: {:.1} days\n",
+            summary.timestamp_range_days
+        ));
+        report.push_str(&format!(
+            "- **Largest Partition**: {:.2} MB\n",
+            summary.largest_partition_mb
+        ));
+        report.push_str(&format!(
+            "- **Health Score**: {:.1}/100\n\n",
+            summary.health_score
+        ));
 
         // Row statistics
         report.push_str("## Row Statistics\n");
-        report.push_str(&format!("- Total rows: {}\n", self.statistics.row_stats.total_rows));
-        report.push_str(&format!("- Live rows: {}\n", self.statistics.row_stats.live_rows));
-        report.push_str(&format!("- Tombstones: {}\n", self.statistics.row_stats.tombstone_count));
-        report.push_str(&format!("- Partitions: {}\n", self.statistics.row_stats.partition_count));
+        report.push_str(&format!(
+            "- Total rows: {}\n",
+            self.statistics.row_stats.total_rows
+        ));
+        report.push_str(&format!(
+            "- Live rows: {}\n",
+            self.statistics.row_stats.live_rows
+        ));
+        report.push_str(&format!(
+            "- Tombstones: {}\n",
+            self.statistics.row_stats.tombstone_count
+        ));
+        report.push_str(&format!(
+            "- Partitions: {}\n",
+            self.statistics.row_stats.partition_count
+        ));
         report.push_str(&format!(
             "- Average rows per partition: {:.1}\n\n",
             self.statistics.row_stats.avg_rows_per_partition
@@ -185,18 +216,31 @@ impl StatisticsReader {
 
         // Timestamp information
         if self.statistics.timestamp_stats.min_timestamp != 0 {
-            let min_time = chrono::DateTime::from_timestamp_micros(self.statistics.timestamp_stats.min_timestamp);
-            let max_time = chrono::DateTime::from_timestamp_micros(self.statistics.timestamp_stats.max_timestamp);
-            
+            let min_time = chrono::DateTime::from_timestamp_micros(
+                self.statistics.timestamp_stats.min_timestamp,
+            );
+            let max_time = chrono::DateTime::from_timestamp_micros(
+                self.statistics.timestamp_stats.max_timestamp,
+            );
+
             report.push_str("## Timestamp Range\n");
             if let (Some(min), Some(max)) = (min_time, max_time) {
-                report.push_str(&format!("- From: {}\n", min.format("%Y-%m-%d %H:%M:%S UTC")));
+                report.push_str(&format!(
+                    "- From: {}\n",
+                    min.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
                 report.push_str(&format!("- To: {}\n", max.format("%Y-%m-%d %H:%M:%S UTC")));
             } else {
-                report.push_str(&format!("- Min timestamp: {}\n", self.statistics.timestamp_stats.min_timestamp));
-                report.push_str(&format!("- Max timestamp: {}\n", self.statistics.timestamp_stats.max_timestamp));
+                report.push_str(&format!(
+                    "- Min timestamp: {}\n",
+                    self.statistics.timestamp_stats.min_timestamp
+                ));
+                report.push_str(&format!(
+                    "- Max timestamp: {}\n",
+                    self.statistics.timestamp_stats.max_timestamp
+                ));
             }
-            
+
             if self.has_ttl_data() {
                 report.push_str(&format!(
                     "- Rows with TTL: {}\n",
@@ -208,7 +252,10 @@ impl StatisticsReader {
 
         // Compression statistics
         report.push_str("## Compression\n");
-        report.push_str(&format!("- Algorithm: {}\n", self.statistics.compression_stats.algorithm));
+        report.push_str(&format!(
+            "- Algorithm: {}\n",
+            self.statistics.compression_stats.algorithm
+        ));
         report.push_str(&format!(
             "- Original size: {:.2} MB\n",
             self.statistics.compression_stats.original_size as f64 / 1_048_576.0
@@ -217,7 +264,10 @@ impl StatisticsReader {
             "- Compressed size: {:.2} MB\n",
             self.statistics.compression_stats.compressed_size as f64 / 1_048_576.0
         ));
-        report.push_str(&format!("- Ratio: {:.2}%\n", self.statistics.compression_stats.ratio * 100.0));
+        report.push_str(&format!(
+            "- Ratio: {:.2}%\n",
+            self.statistics.compression_stats.ratio * 100.0
+        ));
         report.push_str(&format!(
             "- Speed: {:.1} MB/s (compress), {:.1} MB/s (decompress)\n\n",
             self.statistics.compression_stats.compression_speed,
@@ -300,7 +350,7 @@ pub async fn find_statistics_file(data_db_path: &Path) -> Option<PathBuf> {
                 // Replace "Data.db" with "Statistics.db"
                 let stats_name = stem_str.replace("-Data", "-Statistics") + ".db";
                 let stats_path = parent.join(stats_name);
-                
+
                 if tokio::fs::metadata(&stats_path).await.is_ok() {
                     return Some(stats_path);
                 }
@@ -313,7 +363,7 @@ pub async fn find_statistics_file(data_db_path: &Path) -> Option<PathBuf> {
 /// Utility function to check if a Statistics.db file exists for an SSTable directory
 pub async fn check_statistics_availability(sstable_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut stats_files = Vec::new();
-    
+
     let mut dir_entries = tokio::fs::read_dir(sstable_dir).await?;
     while let Some(entry) = dir_entries.next_entry().await? {
         let path = entry.path();
@@ -325,7 +375,7 @@ pub async fn check_statistics_availability(sstable_dir: &Path) -> Result<Vec<Pat
             }
         }
     }
-    
+
     Ok(stats_files)
 }
 
@@ -344,11 +394,11 @@ mod tests {
     #[tokio::test]
     async fn test_find_statistics_file() {
         use std::path::PathBuf;
-        
+
         let data_path = PathBuf::from("/path/to/sstables/users-123abc-Data.db");
         // find_statistics_file would look for users-123abc-Statistics.db
         // This is a unit test for the path manipulation logic
-        
+
         if let Some(parent) = data_path.parent() {
             if let Some(stem) = data_path.file_stem() {
                 if let Some(stem_str) = stem.to_str() {

@@ -3,7 +3,7 @@
 //! Executable for running comprehensive M3 complex type performance validation.
 //! This binary can be used in CI/CD pipelines and for development validation.
 
-use clap::{App, Arg, ArgMatches};
+use clap::{Arg, ArgMatches, Command};
 use std::process;
 use std::time::Instant;
 
@@ -12,11 +12,11 @@ mod m3_performance_validator {
     include!("../m3_performance_validator.rs");
 }
 
-use m3_performance_validator::{M3PerformanceValidator, ValidationConfig};
 use cqlite_core::parser::PerformanceTargets;
+use m3_performance_validator::{M3PerformanceValidator, ValidationConfig};
 
 fn main() {
-    let matches = App::new("M3 Performance Validator")
+    let matches = Command::new("M3 Performance Validator")
         .version("1.0.0")
         .author("CQLite Team")
         .about("Validates M3 complex type performance targets")
@@ -108,7 +108,7 @@ fn main() {
     // Setup logging
     if !matches.is_present("quiet") {
         env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Info)
+            // Remove log filter - using println! instead
             .init();
     }
 
@@ -147,9 +147,12 @@ fn main() {
     }
 
     let total_time = start_time.elapsed();
-    
+
     if !matches.is_present("quiet") {
-        println!("🏁 Total execution time: {:.2} seconds", total_time.as_secs_f64());
+        println!(
+            "🏁 Total execution time: {:.2} seconds",
+            total_time.as_secs_f64()
+        );
     }
 
     // Exit with appropriate code
@@ -193,10 +196,10 @@ fn parse_config(matches: &ArgMatches) -> Result<ValidationConfig, String> {
 
     let custom_targets = if matches.is_present("strict") {
         Some(PerformanceTargets {
-            max_complex_slowdown_ratio: 1.5, // Stricter: 1.5x instead of 2x
-            max_memory_increase_ratio: 1.3,  // Stricter: 1.3x instead of 1.5x
+            max_complex_slowdown_ratio: 1.5,   // Stricter: 1.5x instead of 2x
+            max_memory_increase_ratio: 1.3,    // Stricter: 1.3x instead of 1.5x
             min_complex_throughput_mbs: 120.0, // Stricter: 120 MB/s instead of 100
-            max_additional_latency_ms: 5.0,  // Stricter: 5ms instead of 10ms
+            max_additional_latency_ms: 5.0,    // Stricter: 5ms instead of 10ms
         })
     } else {
         Some(PerformanceTargets {
@@ -224,25 +227,65 @@ fn print_banner(config: &ValidationConfig) {
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
     println!("🎯 VALIDATION CONFIGURATION:");
-    println!("   • SIMD Optimizations: {}", if config.enable_simd { "✅ Enabled" } else { "❌ Disabled" });
-    println!("   • Regression Tests: {}", if config.run_regression_tests { "✅ Enabled" } else { "❌ Disabled" });
-    println!("   • Update Baselines: {}", if config.update_baselines { "✅ Yes" } else { "❌ No" });
-    println!("   • Generate Reports: {}", if config.generate_reports { "✅ Yes" } else { "❌ No" });
+    println!(
+        "   • SIMD Optimizations: {}",
+        if config.enable_simd {
+            "✅ Enabled"
+        } else {
+            "❌ Disabled"
+        }
+    );
+    println!(
+        "   • Regression Tests: {}",
+        if config.run_regression_tests {
+            "✅ Enabled"
+        } else {
+            "❌ Disabled"
+        }
+    );
+    println!(
+        "   • Update Baselines: {}",
+        if config.update_baselines {
+            "✅ Yes"
+        } else {
+            "❌ No"
+        }
+    );
+    println!(
+        "   • Generate Reports: {}",
+        if config.generate_reports {
+            "✅ Yes"
+        } else {
+            "❌ No"
+        }
+    );
     println!("   • Output Directory: {}", config.output_dir);
-    
+
     if let Some(ref targets) = config.custom_targets {
         println!("\n🎯 PERFORMANCE TARGETS:");
-        println!("   • Minimum Throughput: {:.1} MB/s", targets.min_complex_throughput_mbs);
-        println!("   • Maximum Memory Ratio: {:.1}x", targets.max_memory_increase_ratio);
-        println!("   • Maximum Latency: {:.1} ms", targets.max_additional_latency_ms);
-        println!("   • Maximum Slowdown: {:.1}x", targets.max_complex_slowdown_ratio);
+        println!(
+            "   • Minimum Throughput: {:.1} MB/s",
+            targets.min_complex_throughput_mbs
+        );
+        println!(
+            "   • Maximum Memory Ratio: {:.1}x",
+            targets.max_memory_increase_ratio
+        );
+        println!(
+            "   • Maximum Latency: {:.1} ms",
+            targets.max_additional_latency_ms
+        );
+        println!(
+            "   • Maximum Slowdown: {:.1}x",
+            targets.max_complex_slowdown_ratio
+        );
     }
     println!();
 }
 
 fn output_json_results(results: &m3_performance_validator::ValidationResults) {
     use serde_json::json;
-    
+
     let json_output = json!({
         "status": if results.passed { "PASSED" } else { "FAILED" },
         "passed": results.passed,
@@ -282,15 +325,18 @@ fn output_json_results(results: &m3_performance_validator::ValidationResults) {
 
 fn print_quiet_summary(results: &m3_performance_validator::ValidationResults) {
     let status = if results.passed { "PASSED" } else { "FAILED" };
-    let pass_rate = (results.performance_summary.passed_tests as f64 / results.performance_summary.total_tests as f64) * 100.0;
-    
-    println!("M3 Validation: {} ({}/{} tests, {:.1}% pass rate)", 
-        status, 
+    let pass_rate = (results.performance_summary.passed_tests as f64
+        / results.performance_summary.total_tests as f64)
+        * 100.0;
+
+    println!(
+        "M3 Validation: {} ({}/{} tests, {:.1}% pass rate)",
+        status,
         results.performance_summary.passed_tests,
         results.performance_summary.total_tests,
         pass_rate
     );
-    
+
     if !results.passed {
         println!("Failed tests:");
         for test in &results.test_results {
@@ -307,28 +353,53 @@ mod tests {
 
     #[test]
     fn test_config_parsing() {
-        let matches = App::new("test")
-            .arg(Arg::with_name("throughput-target").long("throughput-target").takes_value(true))
-            .arg(Arg::with_name("memory-ratio").long("memory-ratio").takes_value(true))
-            .arg(Arg::with_name("latency-limit").long("latency-limit").takes_value(true))
-            .arg(Arg::with_name("slowdown-ratio").long("slowdown-ratio").takes_value(true))
-            .arg(Arg::with_name("output-dir").long("output-dir").takes_value(true))
+        let matches = Command::new("test")
+            .arg(
+                Arg::with_name("throughput-target")
+                    .long("throughput-target")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("memory-ratio")
+                    .long("memory-ratio")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("latency-limit")
+                    .long("latency-limit")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("slowdown-ratio")
+                    .long("slowdown-ratio")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("output-dir")
+                    .long("output-dir")
+                    .takes_value(true),
+            )
             .get_matches_from(vec![
                 "test",
-                "--throughput-target", "150",
-                "--memory-ratio", "1.3",
-                "--latency-limit", "5",
-                "--slowdown-ratio", "1.8",
-                "--output-dir", "test_output"
+                "--throughput-target",
+                "150",
+                "--memory-ratio",
+                "1.3",
+                "--latency-limit",
+                "5",
+                "--slowdown-ratio",
+                "1.8",
+                "--output-dir",
+                "test_output",
             ]);
 
         let config = parse_config(&matches).unwrap();
-        
+
         assert!(config.enable_simd); // Default
         assert!(config.run_regression_tests); // Default
         assert!(!config.update_baselines); // Default
         assert_eq!(config.output_dir, "test_output");
-        
+
         let targets = config.custom_targets.unwrap();
         assert_eq!(targets.min_complex_throughput_mbs, 150.0);
         assert_eq!(targets.max_memory_increase_ratio, 1.3);
@@ -338,18 +409,43 @@ mod tests {
 
     #[test]
     fn test_strict_mode() {
-        let matches = App::new("test")
+        let matches = Command::new("test")
             .arg(Arg::with_name("strict").long("strict"))
-            .arg(Arg::with_name("throughput-target").long("throughput-target").takes_value(true).default_value("100"))
-            .arg(Arg::with_name("memory-ratio").long("memory-ratio").takes_value(true).default_value("1.5"))
-            .arg(Arg::with_name("latency-limit").long("latency-limit").takes_value(true).default_value("10"))
-            .arg(Arg::with_name("slowdown-ratio").long("slowdown-ratio").takes_value(true).default_value("2.0"))
-            .arg(Arg::with_name("output-dir").long("output-dir").takes_value(true).default_value("test"))
+            .arg(
+                Arg::with_name("throughput-target")
+                    .long("throughput-target")
+                    .takes_value(true)
+                    .default_value("100"),
+            )
+            .arg(
+                Arg::with_name("memory-ratio")
+                    .long("memory-ratio")
+                    .takes_value(true)
+                    .default_value("1.5"),
+            )
+            .arg(
+                Arg::with_name("latency-limit")
+                    .long("latency-limit")
+                    .takes_value(true)
+                    .default_value("10"),
+            )
+            .arg(
+                Arg::with_name("slowdown-ratio")
+                    .long("slowdown-ratio")
+                    .takes_value(true)
+                    .default_value("2.0"),
+            )
+            .arg(
+                Arg::with_name("output-dir")
+                    .long("output-dir")
+                    .takes_value(true)
+                    .default_value("test"),
+            )
             .get_matches_from(vec!["test", "--strict"]);
 
         let config = parse_config(&matches).unwrap();
         let targets = config.custom_targets.unwrap();
-        
+
         // Strict mode should override individual targets
         assert_eq!(targets.max_complex_slowdown_ratio, 1.5);
         assert_eq!(targets.max_memory_increase_ratio, 1.3);

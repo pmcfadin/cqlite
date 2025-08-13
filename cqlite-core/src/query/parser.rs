@@ -13,17 +13,12 @@ use std::collections::HashMap;
 
 /// CQL query parser
 #[derive(Debug)]
-pub struct QueryParser {
-    /// Configuration
-    config: Config,
-}
+pub struct QueryParser {}
 
 impl QueryParser {
     /// Create a new query parser
-    pub fn new(config: &Config) -> Self {
-        Self {
-            config: config.clone(),
-        }
+    pub fn new(_config: &Config) -> Self {
+        Self {}
     }
 
     /// Parse a CQL query string

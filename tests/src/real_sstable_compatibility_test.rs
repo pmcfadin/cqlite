@@ -3,11 +3,13 @@
 //! This module tests CQLite parser against actual Cassandra 5 SSTable files
 //! generated in the test environment to ensure 100% compatibility.
 
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
+
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::header::{parse_sstable_header, SSTABLE_MAGIC};
+use cqlite_core::parser::header::{SSTABLE_MAGIC, parse_sstable_header};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::types::Value;
+use cqlite_core::{Value, types::*};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -81,26 +83,26 @@ pub struct RealSSTableCompatibilityTester {
 
 impl RealSSTableCompatibilityTester {
     /// Create new tester instance
-    pub fn new(config: RealCompatibilityConfig) -> Self {
-        let parser = SSTableParser::new();
-        Self {
+    pub fn new(config: RealCompatibilityConfig) -> Result<Self> {
+        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+        Ok(Self {
             config,
             parser,
             results: Vec::new(),
-        }
+        })
     }
 
     /// Run comprehensive compatibility tests against real SSTable files
     pub fn run_comprehensive_tests(&mut self) -> Result<()> {
         println!("🔍 Testing CQLite Parser Against Real Cassandra 5 SSTable Files");
-        println!("=".repeat(65));
+        println!("{}", "=".repeat(65));
 
         // Find all SSTable directories
         let test_path = &self.config.test_path;
         if !test_path.exists() {
-            return Err(Error::io_error(format!(
-                "Test data path does not exist: {}",
-                test_path.display()
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Test data path does not exist: {}", test_path.display()),
             )));
         }
 
@@ -490,7 +492,7 @@ impl RealSSTableCompatibilityTester {
     /// Generate comprehensive compatibility report
     fn generate_compatibility_report(&self) {
         println!("\n📊 REAL CASSANDRA 5 SSTABLE COMPATIBILITY REPORT");
-        println!("=".repeat(60));
+        println!("{}", "=".repeat(60));
 
         let total_tests = self.results.len();
         let passed_tests = self.results.iter().filter(|r| r.test_passed).count();
@@ -654,7 +656,7 @@ impl RealSSTableCompatibilityTester {
 /// Run the real SSTable compatibility test suite
 pub fn run_real_sstable_compatibility_tests() -> Result<()> {
     let config = RealCompatibilityConfig::default();
-    let mut tester = RealSSTableCompatibilityTester::new(config);
+    let mut tester = RealSSTableCompatibilityTester::new(config)?;
     tester.run_comprehensive_tests()
 }
 

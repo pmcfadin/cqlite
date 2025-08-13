@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{types::TableId, Config, Result, RowKey, Value};
+use crate::{Config, Result, RowKey, Value, types::TableId};
 
 /// Entry in the MemTable with metadata
 #[derive(Debug, Clone)]
@@ -52,7 +52,8 @@ pub struct MemTable {
     /// Global sequence number counter
     sequence: AtomicU64,
     /// Configuration
-    config: Config,
+    #[allow(dead_code)]
+    _config: Config,
 }
 
 impl MemTable {
@@ -62,7 +63,7 @@ impl MemTable {
             data: BTreeMap::new(),
             size: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
-            config: config.clone(),
+            _config: config.clone(),
         })
     }
 
@@ -292,11 +293,14 @@ impl MemTable {
                 .iter()
                 .map(|v| self.estimate_value_size(&Some(v.clone())))
                 .sum(),
-            Some(Value::Udt(udt)) => udt.fields
+            Some(Value::Udt(udt)) => udt
+                .fields
                 .iter()
                 .map(|f| self.estimate_value_size(&f.value))
                 .sum(),
-            Some(Value::Frozen(boxed_val)) => self.estimate_value_size(&Some((**boxed_val).clone())),
+            Some(Value::Frozen(boxed_val)) => {
+                self.estimate_value_size(&Some((**boxed_val).clone()))
+            }
             Some(Value::Tombstone(_)) => 16, // timestamp + type + optional TTL
         }
     }

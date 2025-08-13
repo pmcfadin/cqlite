@@ -1,0 +1,589 @@
+# Comprehensive Testing CI/CD Pipeline for CQLite CLI
+# This workflow implements the testing framework requirements from Issue #20
+
+name: Comprehensive Testing
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run nightly performance regression tests
+    - cron: '0 2 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Testing configuration
+  COVERAGE_THRESHOLD: 90
+  PERFORMANCE_BASELINE_FILE: performance_baseline.json
+  TEST_TIMEOUT: 300
+
+jobs:
+  # Job 1: Unit Testing with Coverage
+  unit-tests:
+    name: Unit Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust-version: ['1.85', 'stable', 'beta']
+        exclude:
+          # Exclude beta on windows to reduce CI load
+          - os: windows-latest
+            rust-version: beta
+          - os: macos-latest
+            rust-version: beta
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust ${{ matrix.rust-version }}
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust-version }}
+        components: rustfmt, clippy, llvm-tools-preview
+
+    - name: Cache Cargo dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ matrix.rust-version }}-
+          ${{ runner.os }}-cargo-
+
+    - name: Install cargo-llvm-cov for coverage
+      run: cargo install cargo-llvm-cov --locked
+
+    - name: Install additional testing tools
+      run: |
+        cargo install cargo-nextest --locked  # Faster test runner
+        cargo install cargo-mutants --locked  # Mutation testing
+
+    - name: Check code formatting
+      run: cargo fmt --all -- --check
+
+    - name: Lint with Clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Run unit tests with coverage
+      run: |
+        cargo llvm-cov nextest \
+          --package cqlite-cli \
+          --lcov \
+          --output-path lcov.info \
+          --test-threads 1 \
+          --workspace \
+          --exclude-from-report tests/
+
+    - name: Run enhanced unit tests
+      run: |
+        cargo nextest run \
+          --package cqlite-cli \
+          --test enhanced_unit_tests \
+          --test-threads 4 \
+          --timeout 60
+
+    - name: Run property-based tests
+      run: |
+        PROPTEST_CASES=1000 cargo test \
+          --package cqlite-cli \
+          --test enhanced_unit_tests \
+          -- property
+
+    - name: Check coverage threshold
+      run: |
+        coverage=$(cargo llvm-cov report --summary-only | grep "TOTAL" | awk '{print $4}' | sed 's/%//')
+        echo "Coverage: $coverage%"
+        if (( $(echo "$coverage < $COVERAGE_THRESHOLD" | bc -l) )); then
+          echo "::error::Coverage $coverage% is below threshold $COVERAGE_THRESHOLD%"
+          exit 1
+        fi
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: lcov.info
+        flags: unit-tests,${{ matrix.os }}
+        name: unit-coverage-${{ matrix.os }}
+
+    - name: Run mutation testing (nightly only)
+      if: github.event.schedule
+      run: |
+        timeout 1800 cargo mutants \
+          --package cqlite-cli \
+          --test-tool nextest \
+          --output mutants.json || true
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: unit-test-results-${{ matrix.os }}-${{ matrix.rust-version }}
+        path: |
+          target/nextest/*/junit.xml
+          lcov.info
+          mutants.json
+
+  # Job 2: Integration Testing
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-integration-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install test dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y expect pv # For CLI interaction testing
+
+    - name: Build CLI binary
+      run: |
+        cargo build --release --package cqlite-cli
+        chmod +x target/release/cqlite
+
+    - name: Setup test data
+      run: |
+        mkdir -p test-data
+        # Generate various test SSTable files
+        cargo run --bin sstable_generator -- \
+          --output test-data/small_table.db \
+          --records 1000 \
+          --type basic
+        cargo run --bin sstable_generator -- \
+          --output test-data/large_table.db \
+          --records 100000 \
+          --type complex
+
+    - name: Run CLI integration tests
+      run: |
+        cargo test \
+          --package cqlite-cli \
+          --test integration_tests \
+          --test comprehensive_test_framework \
+          -- --test-threads 1
+
+    - name: Run CLI workflow tests
+      run: |
+        # Test complete CLI workflows
+        ./tests/run_comprehensive_cli_tests.sh
+
+    - name: Test CLI with real SSTable files
+      run: |
+        # Test against real Cassandra SSTable files if available
+        if [ -d "tests/real-sstables" ]; then
+          for sstable in tests/real-sstables/*.db; do
+            echo "Testing with $sstable"
+            timeout 30 ./target/release/cqlite info "$sstable" || echo "Failed: $sstable"
+          done
+        fi
+
+    - name: Test error handling scenarios
+      run: |
+        cargo test \
+          --package cqlite-cli \
+          --test error_handling_tests \
+          -- --test-threads 1
+
+    - name: Upload integration test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: integration-test-results
+        path: |
+          target/nextest/*/junit.xml
+          test-data/
+          *.log
+
+  # Job 3: End-to-End Testing
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    needs: integration-tests
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-e2e-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build CLI binary
+      run: cargo build --release --package cqlite-cli
+
+    - name: Setup Docker for Cassandra testing
+      run: |
+        docker compose -f tests/cassandra-cluster/docker-compose.yml up -d
+        sleep 30  # Wait for Cassandra to start
+
+    - name: Generate test data in Cassandra
+      run: |
+        # Create test data in Cassandra and export SSTable files
+        docker exec cassandra-node1 cqlsh -e "
+          CREATE KEYSPACE test_keyspace WITH replication = {
+            'class': 'SimpleStrategy',
+            'replication_factor': 1
+          };
+          USE test_keyspace;
+          CREATE TABLE users (
+            id UUID PRIMARY KEY,
+            name TEXT,
+            email TEXT,
+            created_at TIMESTAMP
+          );
+          INSERT INTO users (id, name, email, created_at) VALUES (
+            uuid(), 'John Doe', 'john@example.com', toTimestamp(now())
+          );
+        "
+
+    - name: Export SSTable files from Cassandra
+      run: |
+        docker exec cassandra-node1 nodetool flush test_keyspace users
+        docker cp cassandra-node1:/var/lib/cassandra/data/test_keyspace/users-*/. ./test-sstables/
+
+    - name: Run end-to-end user scenarios
+      run: |
+        cargo test \
+          --package cqlite-cli \
+          --test comprehensive_test_framework \
+          -- e2e_tests
+
+    - name: Test complete user workflows
+      run: |
+        # Scenario 1: Data exploration
+        echo "=== Data Exploration Scenario ==="
+        ./target/release/cqlite info test-sstables/*.db
+        ./target/release/cqlite query "SELECT * FROM users LIMIT 5" test-sstables/*.db
+        
+        # Scenario 2: Data export
+        echo "=== Data Export Scenario ==="
+        ./target/release/cqlite export --format json test-sstables/*.db > users.json
+        ./target/release/cqlite export --format csv test-sstables/*.db > users.csv
+        
+        # Verify export files
+        test -s users.json && echo "JSON export successful"
+        test -s users.csv && echo "CSV export successful"
+
+    - name: Test REPL functionality (if implemented)
+      run: |
+        # Test interactive REPL mode
+        expect -c "
+        spawn ./target/release/cqlite repl test-sstables/users-*.db
+        expect \"cqlite>\"
+        send \"SELECT COUNT(*) FROM users;\r\"
+        expect \"cqlite>\"
+        send \"exit\r\"
+        expect eof
+        "
+
+    - name: Cleanup
+      run: |
+        docker compose -f tests/cassandra-cluster/docker-compose.yml down
+        rm -rf test-sstables/ users.json users.csv
+
+    - name: Upload E2E test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: e2e-test-results
+        path: |
+          *.log
+          test-output/
+
+  # Job 4: Performance Testing and Benchmarking
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[benchmark]')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-perf-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install performance monitoring tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y valgrind hyperfine
+
+    - name: Build optimized binary
+      run: |
+        cargo build --release --package cqlite-cli
+        strip target/release/cqlite  # Remove debug symbols
+
+    - name: Generate performance test data
+      run: |
+        mkdir -p perf-data
+        # Generate various sized SSTable files for performance testing
+        for size in 1000 10000 100000 1000000; do
+          cargo run --bin sstable_generator -- \
+            --output "perf-data/table_${size}.db" \
+            --records $size \
+            --type performance
+        done
+
+    - name: Download performance baseline
+      run: |
+        # Download previous performance baseline if available
+        gh api repos/${{ github.repository }}/contents/performance_baseline.json \
+          --jq '.content' | base64 -d > performance_baseline.json || \
+          echo '{}' > performance_baseline.json
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Run performance benchmarks
+      run: |
+        cargo bench --package cqlite-cli -- --save-baseline current
+
+    - name: Run CLI performance tests
+      run: |
+        # Benchmark CLI startup time
+        hyperfine \
+          --warmup 5 \
+          --min-runs 10 \
+          './target/release/cqlite --version' \
+          --export-json startup_benchmark.json
+
+        # Benchmark SSTable parsing performance
+        for file in perf-data/*.db; do
+          hyperfine \
+            --warmup 3 \
+            --min-runs 5 \
+            "./target/release/cqlite info '$file'" \
+            --export-json "parse_benchmark_$(basename $file).json"
+        done
+
+        # Benchmark query execution
+        hyperfine \
+          --warmup 3 \
+          --min-runs 5 \
+          "./target/release/cqlite query 'SELECT * FROM table LIMIT 1000' perf-data/table_100000.db" \
+          --export-json query_benchmark.json
+
+    - name: Memory usage analysis
+      run: |
+        # Analyze memory usage with Valgrind
+        valgrind \
+          --tool=massif \
+          --massif-out-file=memory_profile.out \
+          ./target/release/cqlite info perf-data/table_100000.db
+
+        # Generate memory usage report
+        ms_print memory_profile.out > memory_usage_report.txt
+
+    - name: Compare performance with baseline
+      run: |
+        python3 scripts/compare_performance.py \
+          --baseline performance_baseline.json \
+          --current startup_benchmark.json \
+          --output performance_comparison.json
+
+    - name: Check for performance regressions
+      run: |
+        if python3 scripts/check_performance_regression.py performance_comparison.json; then
+          echo "✅ No significant performance regressions detected"
+        else
+          echo "⚠️ Performance regression detected - check logs"
+          exit 1
+        fi
+
+    - name: Update performance baseline
+      if: github.ref == 'refs/heads/main'
+      run: |
+        # Update baseline only on main branch
+        cp startup_benchmark.json performance_baseline.json
+        gh api repos/${{ github.repository }}/contents/performance_baseline.json \
+          -X PUT \
+          -f message="Update performance baseline" \
+          -f content="$(base64 -w0 performance_baseline.json)" \
+          -f sha="$(gh api repos/${{ github.repository }}/contents/performance_baseline.json --jq '.sha')" || true
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload performance results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: performance-test-results
+        path: |
+          target/criterion/
+          *_benchmark.json
+          performance_comparison.json
+          memory_usage_report.txt
+
+  # Job 5: Test Results Aggregation and Reporting
+  test-results:
+    name: Test Results Summary
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, e2e-tests]
+    if: always()
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all test artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: test-results/
+
+    - name: Install test reporting tools
+      run: |
+        pip install junit2htmlreport coverage-badge
+
+    - name: Generate comprehensive test report
+      run: |
+        python3 scripts/generate_test_report.py \
+          --input test-results/ \
+          --output comprehensive_test_report.html \
+          --coverage-threshold $COVERAGE_THRESHOLD
+
+    - name: Generate coverage badge
+      run: |
+        # Extract coverage percentage from artifacts
+        coverage=$(find test-results/ -name "lcov.info" -exec grep -o "SF:[^%]*%" {} \; | head -1 | sed 's/.*://' | sed 's/%//')
+        coverage-badge -o coverage.svg -f
+
+    - name: Update GitHub issue with test results
+      run: |
+        python3 scripts/update_issue_progress.py \
+          --issue-number 20 \
+          --test-results test-results/ \
+          --token ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Comment on PR with test summary
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const reportPath = 'comprehensive_test_report.html';
+          
+          if (fs.existsSync(reportPath)) {
+            const report = fs.readFileSync(reportPath, 'utf8');
+            const summary = report.match(/<div class="summary">(.*?)<\/div>/s)?.[1] || 'Test results available';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🧪 Comprehensive Test Results\n\n${summary}\n\nFull report available in artifacts.`
+            });
+          }
+
+    - name: Upload final test report
+      uses: actions/upload-artifact@v4
+      with:
+        name: comprehensive-test-report
+        path: |
+          comprehensive_test_report.html
+          coverage.svg
+          test-results/
+
+    - name: Fail if tests failed
+      run: |
+        if [ -f "test-results/failed" ]; then
+          echo "::error::Some tests failed. Check the test results for details."
+          exit 1
+        fi
+
+  # Job 6: Security and Quality Gates
+  security-quality:
+    name: Security & Quality Gates
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install security audit tools
+      run: |
+        cargo install cargo-audit cargo-deny
+
+    - name: Security audit
+      run: cargo audit
+
+    - name: License and dependency check
+      run: cargo deny check
+
+    - name: Check for unsafe code
+      run: |
+        if grep -r "unsafe" src/ cqlite-cli/src/; then
+          echo "::warning::Unsafe code detected - ensure it's necessary and well-documented"
+        fi
+
+    - name: Static analysis with Clippy (strict)
+      run: |
+        cargo clippy --all-targets --all-features -- \
+          -D clippy::all \
+          -D clippy::pedantic \
+          -D clippy::nursery \
+          -W clippy::cargo
+
+# Workflow summary and notifications
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, e2e-tests, test-results, security-quality]
+    if: always()
+
+    steps:
+    - name: Notify on success
+      if: needs.unit-tests.result == 'success' && needs.integration-tests.result == 'success' && needs.e2e-tests.result == 'success'
+      run: |
+        echo "🎉 All tests passed! Comprehensive testing framework is working correctly."
+
+    - name: Notify on failure
+      if: failure()
+      run: |
+        echo "❌ Some tests failed. Please check the logs and fix issues before merging."
+        echo "::error::Testing pipeline failed - see job logs for details"

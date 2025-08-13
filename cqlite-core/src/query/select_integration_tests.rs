@@ -6,11 +6,11 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        query::{parse_select, SelectExecutor, SelectOptimizer, SelectStatement},
+        Config, Database,
+        query::{SelectExecutor, SelectOptimizer, SelectStatement, parse_select},
         schema::SchemaManager,
         storage::StorageEngine,
         types::{DataType, TableId, Value},
-        Config, Database,
     };
     use std::sync::Arc;
     use tempfile::TempDir;

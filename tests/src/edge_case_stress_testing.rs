@@ -3,9 +3,11 @@
 //! Comprehensive stress tests for large data volumes, memory constraints,
 //! and performance edge cases that could break Cassandra compatibility.
 
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
+
 use cqlite_core::parser::types::*;
 use cqlite_core::parser::vint::*;
-use cqlite_core::{error::Result, Value};
+use cqlite_core::{Value, error::Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -45,14 +47,14 @@ enum StressTestType {
 }
 
 #[derive(Debug, Clone)]
-struct StressTestConfig {
-    max_memory_mb: u64,
-    max_duration_seconds: u64,
-    thread_count: usize,
-    iteration_count: usize,
-    enable_gc_stress: bool,
-    enable_timeout_tests: bool,
-    performance_baseline_ops_per_sec: f64,
+pub struct StressTestConfig {
+    pub max_memory_mb: u64,
+    pub max_duration_seconds: u64,
+    pub thread_count: usize,
+    pub iteration_count: usize,
+    pub enable_gc_stress: bool,
+    pub enable_timeout_tests: bool,
+    pub performance_baseline_ops_per_sec: f64,
 }
 
 impl Default for StressTestConfig {
@@ -245,7 +247,7 @@ impl StressTestFramework {
                         return Err(format!(
                             "List serialization failed at chunk {}: {:?}",
                             chunk, e
-                        ))
+                        ));
                     }
                 }
 
@@ -355,7 +357,7 @@ impl StressTestFramework {
                         return Err(format!(
                             "String serialization failed for size {}: {:?}",
                             size, e
-                        ))
+                        ));
                     }
                 }
             }
@@ -422,7 +424,13 @@ impl StressTestFramework {
 
                 // Periodically test serialization of current map
                 if batch % 10 == 0 {
-                    let map_value = Value::Map(huge_map.clone());
+                    // Convert HashMap to Vec<(Value, Value)>
+                    let map_vec: Vec<(Value, Value)> = huge_map
+                        .clone()
+                        .into_iter()
+                        .map(|(k, v)| (Value::Text(k), v))
+                        .collect();
+                    let map_value = Value::Map(map_vec);
                     match serialize_cql_value(&map_value) {
                         Ok(serialized) => {
                             total_data_processed += serialized.len() as u64;
@@ -431,7 +439,7 @@ impl StressTestFramework {
                             return Err(format!(
                                 "Map serialization failed at batch {}: {:?}",
                                 batch, e
-                            ))
+                            ));
                         }
                     }
 
@@ -621,7 +629,7 @@ impl StressTestFramework {
                         return Err(format!(
                             "Blob serialization failed for size {}: {:?}",
                             size, e
-                        ))
+                        ));
                     }
                 }
             }
@@ -951,7 +959,7 @@ impl StressTestFramework {
             let final_success = *success_count.lock().unwrap();
             let final_errors = *error_count.lock().unwrap();
 
-            Ok((final_success, final_errors))
+            Ok::<(usize, usize), &str>((final_success, final_errors))
         });
 
         let duration = start_time.elapsed();

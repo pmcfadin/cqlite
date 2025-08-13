@@ -2,30 +2,38 @@
 
 pub mod bloom;
 pub mod bti;
+pub mod bulletproof_reader;
+pub mod chunk_decompressor;
 pub mod compression;
 pub mod compression_info;
-pub mod chunk_decompressor;
-pub mod format_detector;
-pub mod bulletproof_reader;
 pub mod directory;
 pub mod directory_integration_tests;
+pub mod format_detector;
 pub mod index;
 pub mod performance_benchmarks;
 pub mod reader;
+pub use reader::SSTableReader;
+pub mod row_cell_state_machine;
 pub mod statistics_reader;
 pub mod streaming_reader;
 pub mod tombstone_merger;
 pub mod validation;
 pub mod writer;
 
+// Test modules
+#[cfg(test)]
+mod oa_format_compliance_test;
+#[cfg(test)]
+mod row_cell_state_machine_test;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
-use crate::{types::TableId, Config, Result, RowKey, Value};
-use self::tombstone_merger::{TombstoneMerger, EntryMetadata, GenerationValue};
+use crate::{Config, Result, RowKey, Value, types::TableId};
 
 /// SSTable file identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -153,13 +161,13 @@ impl SSTableManager {
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         let readers = self.readers.read().await;
         let mut all_values = Vec::new();
-        
+
         // Collect values from all SSTables
-        for (sstable_id, reader) in readers.iter() {
+        for (_sstable_id, reader) in readers.iter() {
             if let Some(value) = reader.get(table_id, key).await? {
                 let generation = reader.generation;
                 let write_time = reader.extract_write_time_from_entry(key, &value);
-                
+
                 let gen_value = GenerationValue {
                     value,
                     metadata: EntryMetadata {
@@ -171,7 +179,7 @@ impl SSTableManager {
                 all_values.push(gen_value);
             }
         }
-        
+
         // Use tombstone merger to resolve conflicts across generations
         let merger = TombstoneMerger::new();
         merger.merge_generations(all_values)
@@ -191,11 +199,11 @@ impl SSTableManager {
         // Collect results from all SSTables, grouping by key
         for reader in readers.values() {
             let results = reader.scan(table_id, start_key, end_key, None).await?;
-            
+
             for (row_key, value) in results {
                 let generation = reader.generation;
                 let write_time = reader.extract_write_time_from_entry(&row_key, &value);
-                
+
                 let gen_value = GenerationValue {
                     value,
                     metadata: EntryMetadata {
@@ -204,15 +212,18 @@ impl SSTableManager {
                         ttl: None,
                     },
                 };
-                
-                key_values.entry(row_key).or_insert_with(Vec::new).push(gen_value);
+
+                key_values
+                    .entry(row_key)
+                    .or_insert_with(Vec::new)
+                    .push(gen_value);
             }
         }
 
         // Merge values for each key using tombstone merger
         let merger = TombstoneMerger::new();
         let mut final_results = Vec::new();
-        
+
         for (row_key, values) in key_values {
             if let Some(merged_value) = merger.merge_generations(values)? {
                 final_results.push((row_key, merged_value));

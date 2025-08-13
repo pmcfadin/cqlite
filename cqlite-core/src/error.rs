@@ -73,6 +73,14 @@ pub enum Error {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// Query errors
+    #[error("Query error: {0}")]
+    Query(String),
+
+    /// Table errors
+    #[error("Table error: {0}")]
+    Table(String),
+
     /// Resource already exists
     #[error("Already exists: {0}")]
     AlreadyExists(String),
@@ -268,6 +276,10 @@ impl Error {
             Error::Index(_) => true,
             Error::Compaction(_) => true,
 
+            // New error types
+            Error::Query(_) => false,
+            Error::Table(_) => false,
+
             #[cfg(target_arch = "wasm32")]
             Error::Wasm(_) => false,
 
@@ -303,6 +315,10 @@ impl Error {
             Error::Transaction(_) => ErrorCategory::Transaction,
             Error::Index(_) => ErrorCategory::Storage,
             Error::Compaction(_) => ErrorCategory::Storage,
+
+            // New error types
+            Error::Query(_) => ErrorCategory::Query,
+            Error::Table(_) => ErrorCategory::Schema,
 
             #[cfg(target_arch = "wasm32")]
             Error::Wasm(_) => ErrorCategory::Platform,
@@ -388,9 +404,9 @@ impl From<serde_json::Error> for Error {
 }
 
 /// Convert from nom errors
-impl<I> From<nom::Err<nom::error::Error<I>>> for Error 
-where 
-    I: std::fmt::Debug 
+impl<I> From<nom::Err<nom::error::Error<I>>> for Error
+where
+    I: std::fmt::Debug,
 {
     fn from(err: nom::Err<nom::error::Error<I>>) -> Self {
         Error::SqlParse(format!("Parse error: {:?}", err))

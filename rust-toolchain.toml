@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]
+
+# Pin to specific stable version for reproducible builds
+# Update quarterly or when needed for new features
+profile = "default"

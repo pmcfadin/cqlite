@@ -8,7 +8,7 @@
 //! - Parallel execution planning
 
 use super::select_ast::*;
-use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
+use crate::{Error, Result, TableId, Value, schema::SchemaManager, storage::StorageEngine};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,8 +16,10 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct SelectOptimizer {
     /// Schema manager for metadata
+    #[allow(dead_code)]
     schema: Arc<SchemaManager>,
     /// Storage engine for statistics
+    #[allow(dead_code)]
     storage: Arc<StorageEngine>,
 }
 
@@ -299,7 +301,7 @@ impl SelectOptimizer {
     }
 
     /// Get table statistics for cost estimation
-    async fn get_table_statistics(&self, table_id: &TableId) -> Result<TableStatistics> {
+    async fn get_table_statistics(&self, _table_id: &TableId) -> Result<TableStatistics> {
         // TODO: Implement real statistics gathering from storage engine
         Ok(TableStatistics {
             row_count: 1_000_000, // Default estimate
@@ -592,7 +594,7 @@ impl SelectOptimizer {
         let rows_per_partition = stats.row_count / num_partitions as u64;
 
         let mut partitions = Vec::new();
-        for i in 0..num_partitions {
+        for _i in 0..num_partitions {
             partitions.push(PartitionBounds {
                 start_key: None, // TODO: Implement real key ranges
                 end_key: None,
@@ -609,16 +611,22 @@ impl SelectOptimizer {
 struct TableStatistics {
     row_count: u64,
     size_bytes: u64,
+    #[allow(dead_code)]
     average_row_size: u64,
+    #[allow(dead_code)]
     column_statistics: HashMap<String, ColumnStatistics>,
 }
 
 /// Column-level statistics
 #[derive(Debug, Clone)]
 struct ColumnStatistics {
+    #[allow(dead_code)]
     distinct_values: u64,
+    #[allow(dead_code)]
     null_count: u64,
+    #[allow(dead_code)]
     min_value: Option<Value>,
+    #[allow(dead_code)]
     max_value: Option<Value>,
 }
 
@@ -639,20 +647,21 @@ impl ExecutionStep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::{Config, platform::Platform, schema::SchemaManager, storage::StorageEngine};
+    use tempfile::TempDir;
 
     async fn create_test_optimizer() -> SelectOptimizer {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
-        let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(temp_dir.path(), &config, platform.clone())
+                .await
+                .unwrap(),
+        );
         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
-        
-        SelectOptimizer {
-            schema,
-            storage,
-        }
+
+        SelectOptimizer { schema, storage }
     }
 
     #[tokio::test]

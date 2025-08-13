@@ -1,9 +1,9 @@
 //! End-to-end test of the complete parser pipeline
-//! 
+//!
 //! This demonstrates the full pipeline: CQL → Parser → AST → Visitor → TableSchema
 
 use cqlite_core::parser::*;
-use cqlite_core::schema::{TableSchema, KeyColumn, ClusteringColumn, Column};
+use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔄 Parser Pipeline End-to-End Test");
@@ -11,28 +11,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a sample AST programmatically (simulating what a parser would produce)
     let create_table_ast = create_sample_ast();
-    
+
     // Step 1: Show the AST structure
     println!("📝 Step 1: AST Structure Created");
     println!("--------------------------------");
     print_ast_details(&create_table_ast);
-    
+
     // Step 2: Use visitor pattern to convert AST to TableSchema
     println!("\n🔄 Step 2: Visitor Pattern Conversion");
     println!("------------------------------------");
     let table_schema = convert_ast_to_schema(&create_table_ast)?;
     print_schema_details(&table_schema);
-    
+
     // Step 3: Demonstrate the complete pipeline with different visitors
     println!("\n🎯 Step 3: Multiple Visitor Demonstrations");
     println!("-----------------------------------------");
     demonstrate_visitors(&create_table_ast)?;
-    
+
     // Step 4: Show parser factory integration
     println!("\n🏭 Step 4: Parser Factory Integration");
     println!("------------------------------------");
     demonstrate_parser_factory()?;
-    
+
     println!("\n✅ Pipeline Test Complete!");
     println!("========================");
     println!("The parser abstraction successfully:");
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✓ Converts AST to domain objects (TableSchema)");
     println!("  ✓ Supports multiple parser backends");
     println!("  ✓ Maintains clean separation of concerns");
-    
+
     Ok(())
 }
 
@@ -79,7 +79,7 @@ fn create_sample_ast() -> CqlCreateTable {
                 name: CqlIdentifier::new("settings"),
                 data_type: CqlDataType::Map(
                     Box::new(CqlDataType::Text),
-                    Box::new(CqlDataType::Text)
+                    Box::new(CqlDataType::Text),
                 ),
                 is_static: false,
             },
@@ -99,19 +99,25 @@ fn print_ast_details(ast: &CqlCreateTable) {
     }
     println!("IF NOT EXISTS: {}", ast.if_not_exists);
     println!("Columns: {}", ast.columns.len());
-    
+
     for col in &ast.columns {
         println!("  - {} : {:?}", col.name.name(), col.data_type);
     }
-    
+
     println!("Primary Key:");
-    println!("  Partition: {:?}", 
-        ast.primary_key.partition_key.iter()
+    println!(
+        "  Partition: {:?}",
+        ast.primary_key
+            .partition_key
+            .iter()
             .map(|k| k.name())
             .collect::<Vec<_>>()
     );
-    println!("  Clustering: {:?}", 
-        ast.primary_key.clustering_key.iter()
+    println!(
+        "  Clustering: {:?}",
+        ast.primary_key
+            .clustering_key
+            .iter()
             .map(|k| k.name())
             .collect::<Vec<_>>()
     );
@@ -130,12 +136,17 @@ fn print_schema_details(schema: &TableSchema) {
     println!("  Table: {}", schema.table);
     println!("  Partition Keys: {} keys", schema.partition_keys.len());
     for pk in &schema.partition_keys {
-        println!("    - {} ({}) at position {}", pk.name, pk.data_type, pk.position);
+        println!(
+            "    - {} ({}) at position {}",
+            pk.name, pk.data_type, pk.position
+        );
     }
     println!("  Clustering Keys: {} keys", schema.clustering_keys.len());
     for ck in &schema.clustering_keys {
-        println!("    - {} ({}) {} at position {}", 
-            ck.name, ck.data_type, ck.order, ck.position);
+        println!(
+            "    - {} ({}) {} at position {}",
+            ck.name, ck.data_type, ck.order, ck.position
+        );
     }
     println!("  Regular Columns: {} columns", schema.columns.len());
     for col in &schema.columns {
@@ -145,33 +156,34 @@ fn print_schema_details(schema: &TableSchema) {
 
 fn demonstrate_visitors(ast: &CqlCreateTable) -> Result<(), Box<dyn std::error::Error>> {
     let statement = CqlStatement::CreateTable(ast.clone());
-    
+
     // 1. Identifier Collector
     let mut id_collector = IdentifierCollector::new();
     id_collector.visit_statement(&statement)?;
     let identifiers = id_collector.into_identifiers();
-    
+
     println!("IdentifierCollector Results:");
-    println!("  Found {} identifiers: {:?}", 
+    println!(
+        "  Found {} identifiers: {:?}",
         identifiers.len(),
         identifiers.iter().map(|id| id.name()).collect::<Vec<_>>()
     );
-    
+
     // 2. Type Collector
     let mut type_collector = TypeCollectorVisitor::new();
     type_collector.visit_statement(&statement)?;
     let types = type_collector.into_types();
-    
+
     println!("\nTypeCollectorVisitor Results:");
     println!("  Found {} unique data types:", types.len());
     for dt in &types {
         println!("    - {:?}", dt);
     }
-    
+
     // 3. Validation Visitor
     let mut validator = ValidationVisitor::new();
     let validation_result = validator.visit_statement(&statement);
-    
+
     println!("\nValidationVisitor Results:");
     match validation_result {
         Ok(warnings) => {
@@ -189,7 +201,7 @@ fn demonstrate_visitors(ast: &CqlCreateTable) -> Result<(), Box<dyn std::error::
             println!("  ✗ Validation failed: {}", e);
         }
     }
-    
+
     Ok(())
 }
 
@@ -197,7 +209,7 @@ fn demonstrate_parser_factory() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-        
+
     runtime.block_on(async {
         // Create different parsers using the factory
         let configs = vec![
@@ -205,7 +217,7 @@ fn demonstrate_parser_factory() -> Result<(), Box<dyn std::error::Error>> {
             ("Fast", ParserConfig::fast()),
             ("Strict", ParserConfig::strict()),
         ];
-        
+
         for (name, config) in configs {
             match create_parser(config) {
                 Ok(parser) => {
@@ -213,7 +225,7 @@ fn demonstrate_parser_factory() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{} Parser:", name);
                     println!("  Backend: {}", info.name);
                     println!("  Features: {:?}", info.features);
-                    
+
                     // Test validation capability
                     let valid = parser.validate_syntax("CREATE TABLE test (id UUID PRIMARY KEY)");
                     println!("  Syntax validation: {}", if valid { "✓" } else { "✗" });
@@ -223,9 +235,9 @@ fn demonstrate_parser_factory() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        
+
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
-    
+
     Ok(())
 }

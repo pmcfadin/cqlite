@@ -27,9 +27,12 @@ impl TestDataValidator {
 
         // Check if base path exists
         if !self.test_data_path.exists() {
-            return Err(Error::io_error(format!(
-                "Test data path does not exist: {}. Run 'cd test-env/cassandra5 && ./manage.sh all' to generate test data.",
-                self.test_data_path.display()
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "Test data path does not exist: {}. Run 'cd test-env/cassandra5 && ./manage.sh all' to generate test data.",
+                    self.test_data_path.display()
+                ),
             )));
         }
 
@@ -45,10 +48,18 @@ impl TestDataValidator {
         }
 
         // Check for expected table types
-        status.has_collections_table = status.tables.contains_key("collections_table-462afd10673711f0b2cf19d64e7cbecb");
-        status.has_all_types_table = status.tables.contains_key("all_types-46200090673711f0b2cf19d64e7cbecb");
-        status.has_time_series_table = status.tables.contains_key("time_series-464cb5e0673711f0b2cf19d64e7cbecb");
-        status.has_large_table = status.tables.contains_key("large_table-465df3f0673711f0b2cf19d64e7cbecb");
+        status.has_collections_table = status
+            .tables
+            .contains_key("collections_table-462afd10673711f0b2cf19d64e7cbecb");
+        status.has_all_types_table = status
+            .tables
+            .contains_key("all_types-46200090673711f0b2cf19d64e7cbecb");
+        status.has_time_series_table = status
+            .tables
+            .contains_key("time_series-464cb5e0673711f0b2cf19d64e7cbecb");
+        status.has_large_table = status
+            .tables
+            .contains_key("large_table-465df3f0673711f0b2cf19d64e7cbecb");
 
         // Calculate completeness score
         status.completeness_score = self.calculate_completeness_score(&status);
@@ -58,11 +69,11 @@ impl TestDataValidator {
 
     fn analyze_table_directory(&self, table_path: &Path) -> Result<TableInfo> {
         let mut info = TableInfo::default();
-        
+
         if let Ok(entries) = fs::read_dir(table_path) {
             for entry in entries.flatten() {
                 let file_name = entry.file_name().to_string_lossy().to_string();
-                
+
                 if file_name.contains("Data.db") {
                     info.has_data_file = true;
                     if let Ok(metadata) = fs::metadata(&entry.path()) {
@@ -90,10 +101,18 @@ impl TestDataValidator {
         let mut score = 0.0;
         let total_checks = 4.0;
 
-        if status.has_collections_table { score += 1.0; }
-        if status.has_all_types_table { score += 1.0; }
-        if status.has_time_series_table { score += 1.0; }
-        if status.has_large_table { score += 1.0; }
+        if status.has_collections_table {
+            score += 1.0;
+        }
+        if status.has_all_types_table {
+            score += 1.0;
+        }
+        if status.has_time_series_table {
+            score += 1.0;
+        }
+        if status.has_large_table {
+            score += 1.0;
+        }
 
         score / total_checks
     }
@@ -146,7 +165,8 @@ impl TestTimer {
     }
 
     pub fn elapsed_since_checkpoint(&self, label: &str) -> Option<Duration> {
-        self.checkpoints.iter()
+        self.checkpoints
+            .iter()
             .find(|(l, _)| l == label)
             .map(|(_, time)| time.elapsed())
     }
@@ -235,7 +255,12 @@ impl SSTableFileFinder {
         Ok(())
     }
 
-    fn find_files_in_directory(&self, dir: &Path, pattern: &str, results: &mut Vec<PathBuf>) -> Result<()> {
+    fn find_files_in_directory(
+        &self,
+        dir: &Path,
+        pattern: &str,
+        results: &mut Vec<PathBuf>,
+    ) -> Result<()> {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let file_name = entry.file_name().to_string_lossy().to_string();
@@ -282,13 +307,9 @@ impl TestResultAggregator {
         let passed_tests = self.results.iter().filter(|r| r.passed).count();
         let failed_tests = total_tests - passed_tests;
 
-        let total_execution_time: Duration = self.results.iter()
-            .map(|r| r.execution_time)
-            .sum();
+        let total_execution_time: Duration = self.results.iter().map(|r| r.execution_time).sum();
 
-        let total_bytes_processed: usize = self.results.iter()
-            .map(|r| r.bytes_processed)
-            .sum();
+        let total_bytes_processed: usize = self.results.iter().map(|r| r.bytes_processed).sum();
 
         let average_score: f64 = if total_tests > 0 {
             self.results.iter().map(|r| r.score).sum::<f64>() / total_tests as f64
@@ -314,7 +335,8 @@ impl TestResultAggregator {
     pub fn get_results_by_category(&self) -> HashMap<String, Vec<&TestOutcome>> {
         let mut categorized = HashMap::new();
         for result in &self.results {
-            categorized.entry(result.category.clone())
+            categorized
+                .entry(result.category.clone())
                 .or_insert_with(Vec::new)
                 .push(result);
         }
@@ -393,12 +415,12 @@ impl PerformanceMeasurer {
     {
         let start_time = Instant::now();
         let memory_before = MemoryMonitor::new().current_usage();
-        
+
         let result = operation();
-        
+
         let execution_time = start_time.elapsed();
         let memory_after = MemoryMonitor::new().current_usage();
-        
+
         self.measurements.push(PerformanceMeasurement {
             name: name.to_string(),
             execution_time,
@@ -418,10 +440,8 @@ impl PerformanceMeasurer {
             return Duration::from_secs(0);
         }
 
-        let total: Duration = self.measurements.iter()
-            .map(|m| m.execution_time)
-            .sum();
-        
+        let total: Duration = self.measurements.iter().map(|m| m.execution_time).sum();
+
         total / self.measurements.len() as u32
     }
 }
@@ -521,7 +541,7 @@ mod tests {
     #[test]
     fn test_result_aggregator() {
         let mut aggregator = TestResultAggregator::new();
-        
+
         aggregator.add_result(TestOutcome {
             name: "test1".to_string(),
             category: "unit".to_string(),
@@ -541,7 +561,7 @@ mod tests {
     #[test]
     fn test_performance_measurer() {
         let mut measurer = PerformanceMeasurer::new();
-        
+
         let result = measurer.measure_operation("test_op", || {
             std::thread::sleep(Duration::from_millis(1));
             42

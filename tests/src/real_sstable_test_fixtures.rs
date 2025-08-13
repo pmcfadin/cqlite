@@ -3,13 +3,18 @@
 //! This module creates and manages real Cassandra 5+ SSTable files for testing
 //! CQLite's compatibility and parsing accuracy.
 
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
+
 use cqlite_core::{
+    Value,
     error::Result,
-    parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats},
+    parser::header::{
+        CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
+        parse_sstable_header, serialize_sstable_header,
+    },
     parser::types::{parse_cql_value, serialize_cql_value},
     parser::{CqlTypeId, SSTableParser},
     types::DataType,
-    Value,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -59,13 +64,13 @@ pub struct SSTableTestFixtureGenerator {
 }
 
 impl SSTableTestFixtureGenerator {
-    pub fn new(config: SSTableTestFixtureConfig, output_dir: PathBuf) -> Self {
-        let parser = SSTableParser::with_options(true, false); // Validate checksums, strict mode
-        Self {
+    pub fn new(config: SSTableTestFixtureConfig, output_dir: PathBuf) -> Result<Self> {
+        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?; // Using default config
+        Ok(Self {
             config,
             output_dir,
             parser,
-        }
+        })
     }
 
     /// Generate all configured test fixtures
@@ -73,7 +78,10 @@ impl SSTableTestFixtureGenerator {
         println!("🏗️  Generating SSTable test fixtures...");
 
         fs::create_dir_all(&self.output_dir).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to create output dir: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create output dir: {}", e),
+            ))
         })?;
 
         let mut fixtures = Vec::new();
@@ -199,6 +207,7 @@ impl SSTableTestFixtureGenerator {
 
         // Create SSTable header
         let header = SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0Release,
             version: 1,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -317,6 +326,7 @@ impl SSTableTestFixtureGenerator {
 
         // Create SSTable header
         let header = SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0Release,
             version: 1,
             table_id: [2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -425,6 +435,7 @@ impl SSTableTestFixtureGenerator {
 
         // Create SSTable header
         let header = SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0Release,
             version: 1,
             table_id: [3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -507,7 +518,10 @@ impl SSTableTestFixtureGenerator {
 
         // Create empty file as placeholder
         fs::write(&file_path, b"").map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to write UDT fixture: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to write UDT fixture: {}", e),
+            ))
         })?;
 
         Ok(SSTableTestFixture {
@@ -547,7 +561,7 @@ impl SSTableTestFixtureGenerator {
             ]),
         );
         row.insert("boolean_col".to_string(), Value::Boolean(index % 2 == 0));
-        row.insert("int_col".to_string(), Value::Integer(index as i64));
+        row.insert("int_col".to_string(), Value::Integer(index as i32));
         row.insert(
             "bigint_col".to_string(),
             Value::BigInt((index as i64) * 1000000),
@@ -581,7 +595,7 @@ impl SSTableTestFixtureGenerator {
         );
         row.insert(
             "timestamp_col".to_string(),
-            Value::Timestamp(1640995200000000 + (index as u64) * 1000),
+            Value::Timestamp(1640995200000000 + (index as i64) * 1000),
         );
         row.insert(
             "uuid_col".to_string(),
@@ -643,21 +657,26 @@ impl SSTableTestFixtureGenerator {
 
         // Int set (represented as list for now)
         let int_set = Value::List(vec![
-            Value::Integer(index as i64),
-            Value::Integer((index * 2) as i64),
-            Value::Integer((index * 3) as i64),
+            Value::Integer(index as i32),
+            Value::Integer((index * 2) as i32),
+            Value::Integer((index * 3) as i32),
         ]);
         row.insert("int_set".to_string(), int_set);
 
         // Text to int map
         let mut map_data = HashMap::new();
-        map_data.insert(format!("key_{}", index), Value::Integer(index as i64));
+        map_data.insert(format!("key_{}", index), Value::Integer(index as i32));
         map_data.insert(
             format!("count_{}", index),
-            Value::Integer((index * 10) as i64),
+            Value::Integer((index * 10) as i32),
         );
-        map_data.insert("unicode_键".to_string(), Value::Integer(42));
-        row.insert("text_to_int_map".to_string(), Value::Map(map_data));
+        map_data.insert("unicode_键".to_string(), Value::Integer(42i32));
+        // Convert HashMap to Vec<(Value, Value)>
+        let map_vec: Vec<(Value, Value)> = map_data
+            .into_iter()
+            .map(|(k, v)| (Value::Text(k), v))
+            .collect();
+        row.insert("text_to_int_map".to_string(), Value::Map(map_vec));
 
         // Nested list
         let nested_list = Value::List(vec![
@@ -736,11 +755,12 @@ impl SSTableTestFixtureGenerator {
                 "scientific": {:.2e}
             }}
         }}"#,
-            index,
-            index,
-            index,
-            index as f64 * 3.14159,
-            index as f64 * 1e6
+            index,                  // record_id
+            index,                  // nested data value
+            index,                  // array element
+            index,                  // integer value
+            index as f64 * 3.14159, // float value
+            index as f64 * 1e6      // scientific value
         );
         row.insert("json_data".to_string(), Value::Text(json_data));
 
@@ -773,7 +793,7 @@ impl SSTableTestFixtureGenerator {
         let mut file_content = Vec::new();
 
         // Serialize header
-        let header_bytes = self.parser.serialize_header(header)?;
+        let header_bytes = serialize_sstable_header(header)?;
         file_content.extend(&(header_bytes.len() as u32).to_be_bytes());
         file_content.extend(header_bytes);
 
@@ -781,15 +801,21 @@ impl SSTableTestFixtureGenerator {
         file_content.extend(&(data.len() as u32).to_be_bytes());
         file_content.extend(data);
 
+        // Store length before moving
+        let file_size = file_content.len();
+
         // Write to file
         fs::write(file_path, file_content).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to write SSTable file: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to write SSTable file: {}", e),
+            ))
         })?;
 
         println!(
             "    ✅ Written SSTable: {} ({} bytes)",
             file_path.display(),
-            file_content.len()
+            file_size
         );
         Ok(())
     }
@@ -801,10 +827,10 @@ pub struct SSTableTestFixtureValidator {
 }
 
 impl SSTableTestFixtureValidator {
-    pub fn new() -> Self {
-        Self {
-            parser: SSTableParser::with_options(true, false),
-        }
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?,
+        })
     }
 
     /// Validate a test fixture
@@ -832,7 +858,10 @@ impl SSTableTestFixtureValidator {
 
         // Read and parse header
         let file_content = fs::read(&fixture.file_path).map_err(|e| {
-            cqlite_core::error::CqliteError::Io(format!("Failed to read SSTable file: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to read SSTable file: {}", e),
+            ))
         })?;
 
         if file_content.len() < 8 {
@@ -860,8 +889,8 @@ impl SSTableTestFixtureValidator {
         }
 
         // Parse header
-        match self.parser.parse_header(&file_content[4..4 + header_len]) {
-            Ok((header, _)) => {
+        match parse_sstable_header(&file_content[4..4 + header_len]) {
+            Ok((_, header)) => {
                 // Validate schema
                 if header.columns.len() != fixture.expected_schema.len() {
                     validation_result.issues.push(format!(
@@ -942,7 +971,11 @@ mod tests {
         };
 
         let generator = SSTableTestFixtureGenerator::new(config, temp_dir.path().to_path_buf());
-        let fixture = generator.generate_simple_types_fixture().await.unwrap();
+        let fixture = generator
+            .unwrap()
+            .generate_simple_types_fixture()
+            .await
+            .unwrap();
 
         assert_eq!(fixture.name, "simple_types_sstable");
         assert!(fixture.file_path.exists());
@@ -960,9 +993,13 @@ mod tests {
         };
 
         let generator = SSTableTestFixtureGenerator::new(config, temp_dir.path().to_path_buf());
-        let fixture = generator.generate_simple_types_fixture().await.unwrap();
+        let fixture = generator
+            .unwrap()
+            .generate_simple_types_fixture()
+            .await
+            .unwrap();
 
-        let validator = SSTableTestFixtureValidator::new();
+        let validator = SSTableTestFixtureValidator::new().unwrap();
         let validation_result = validator.validate_fixture(&fixture).await.unwrap();
 
         assert_eq!(validation_result.fixture_name, "simple_types_sstable");

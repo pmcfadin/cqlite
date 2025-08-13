@@ -64,9 +64,9 @@ pub enum CqlSelectItem {
     /// Wildcard (*)
     Wildcard,
     /// Expression with optional alias
-    Expression { 
-        expression: CqlExpression, 
-        alias: Option<CqlIdentifier> 
+    Expression {
+        expression: CqlExpression,
+        alias: Option<CqlIdentifier>,
     },
     /// Function call
     Function {
@@ -255,14 +255,14 @@ pub enum CqlAlterTableOp {
     /// DROP column
     DropColumn(CqlIdentifier),
     /// ALTER column type
-    AlterColumn { 
-        column: CqlIdentifier, 
-        new_type: CqlDataType 
+    AlterColumn {
+        column: CqlIdentifier,
+        new_type: CqlDataType,
     },
     /// RENAME column
-    RenameColumn { 
-        old_name: CqlIdentifier, 
-        new_name: CqlIdentifier 
+    RenameColumn {
+        old_name: CqlIdentifier,
+        new_name: CqlIdentifier,
     },
     /// WITH options
     WithOptions(CqlTableOptions),
@@ -423,7 +423,7 @@ pub enum CqlBinaryOperator {
     // Logical
     And,
     Or,
-    
+
     // Comparison
     Eq,
     Ne,
@@ -431,14 +431,14 @@ pub enum CqlBinaryOperator {
     Le,
     Gt,
     Ge,
-    
+
     // Arithmetic
     Add,
     Sub,
     Mul,
     Div,
     Mod,
-    
+
     // String
     Like,
 }
@@ -524,17 +524,17 @@ pub enum CqlDataType {
     Inet,
     Duration,
     Counter,
-    
+
     /// Collection types
     List(Box<CqlDataType>),
     Set(Box<CqlDataType>),
     Map(Box<CqlDataType>, Box<CqlDataType>),
-    
+
     /// Complex types
     Tuple(Vec<CqlDataType>),
     Udt(CqlIdentifier),
     Frozen(Box<CqlDataType>),
-    
+
     /// Custom type
     Custom(String),
 }
@@ -631,7 +631,7 @@ impl CqlIdentifier {
             quoted: false,
         }
     }
-    
+
     /// Create a new quoted identifier
     pub fn quoted(name: impl Into<String>) -> Self {
         Self {
@@ -639,41 +639,44 @@ impl CqlIdentifier {
             quoted: true,
         }
     }
-    
+
     /// Get the identifier name as a string
     pub fn as_str(&self) -> &str {
         &self.name
     }
-    
+
     /// Get the identifier name (alias for as_str)
     pub fn name(&self) -> &str {
         &self.name
     }
-    
+
     /// Check if the identifier is quoted
     pub fn is_quoted(&self) -> bool {
         self.quoted
     }
-    
+
     /// Check if this identifier needs quoting
     pub fn needs_quoting(&self) -> bool {
         self.quoted || !self.is_valid_unquoted()
     }
-    
+
     /// Check if the name is valid as an unquoted identifier
     fn is_valid_unquoted(&self) -> bool {
         if self.name.is_empty() {
             return false;
         }
-        
+
         // First character must be letter or underscore
         let first = self.name.chars().next().unwrap();
         if !first.is_ascii_alphabetic() && first != '_' {
             return false;
         }
-        
+
         // Remaining characters must be alphanumeric or underscore
-        self.name.chars().skip(1).all(|c| c.is_ascii_alphanumeric() || c == '_')
+        self.name
+            .chars()
+            .skip(1)
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 }
 
@@ -685,7 +688,7 @@ impl CqlTable {
             name: CqlIdentifier::new(name),
         }
     }
-    
+
     /// Create a new table reference with keyspace
     pub fn with_keyspace(keyspace: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
@@ -693,7 +696,7 @@ impl CqlTable {
             name: CqlIdentifier::new(name),
         }
     }
-    
+
     /// Get the full table name (keyspace.table or just table)
     pub fn full_name(&self) -> String {
         match &self.keyspace {
@@ -701,12 +704,12 @@ impl CqlTable {
             None => self.name.as_str().to_string(),
         }
     }
-    
+
     /// Get the table name
     pub fn name(&self) -> &CqlIdentifier {
         &self.name
     }
-    
+
     /// Get keyspace (returns Option<&CqlIdentifier>)
     pub fn keyspace(&self) -> Option<&CqlIdentifier> {
         self.keyspace.as_ref()
@@ -736,10 +739,9 @@ impl From<CqlDataType> for CqlType {
             CqlDataType::Duration => CqlType::Duration,
             CqlDataType::List(inner) => CqlType::List(Box::new((*inner).into())),
             CqlDataType::Set(inner) => CqlType::Set(Box::new((*inner).into())),
-            CqlDataType::Map(key, value) => CqlType::Map(
-                Box::new((*key).into()),
-                Box::new((*value).into()),
-            ),
+            CqlDataType::Map(key, value) => {
+                CqlType::Map(Box::new((*key).into()), Box::new((*value).into()))
+            }
             CqlDataType::Tuple(types) => {
                 CqlType::Tuple(types.into_iter().map(|t| t.into()).collect())
             }
@@ -775,10 +777,9 @@ impl From<CqlType> for CqlDataType {
             CqlType::Duration => CqlDataType::Duration,
             CqlType::List(inner) => CqlDataType::List(Box::new((*inner).into())),
             CqlType::Set(inner) => CqlDataType::Set(Box::new((*inner).into())),
-            CqlType::Map(key, value) => CqlDataType::Map(
-                Box::new((*key).into()),
-                Box::new((*value).into()),
-            ),
+            CqlType::Map(key, value) => {
+                CqlDataType::Map(Box::new((*key).into()), Box::new((*value).into()))
+            }
             CqlType::Tuple(types) => {
                 CqlDataType::Tuple(types.into_iter().map(|t| t.into()).collect())
             }
@@ -792,44 +793,44 @@ impl From<CqlType> for CqlDataType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_identifier_creation() {
         let id1 = CqlIdentifier::new("test");
         assert_eq!(id1.name, "test");
         assert!(!id1.quoted);
         assert!(!id1.needs_quoting());
-        
+
         let id2 = CqlIdentifier::quoted("test");
         assert_eq!(id2.name, "test");
         assert!(id2.quoted);
         assert!(id2.needs_quoting());
     }
-    
+
     #[test]
     fn test_identifier_validation() {
         assert!(CqlIdentifier::new("valid_name").is_valid_unquoted());
         assert!(CqlIdentifier::new("_valid").is_valid_unquoted());
         assert!(CqlIdentifier::new("valid123").is_valid_unquoted());
-        
+
         assert!(!CqlIdentifier::new("123invalid").is_valid_unquoted());
         assert!(!CqlIdentifier::new("invalid-name").is_valid_unquoted());
         assert!(!CqlIdentifier::new("").is_valid_unquoted());
     }
-    
+
     #[test]
     fn test_table_creation() {
         let table1 = CqlTable::new("users");
         assert_eq!(table1.name.as_str(), "users");
         assert!(table1.keyspace.is_none());
         assert_eq!(table1.full_name(), "users");
-        
+
         let table2 = CqlTable::with_keyspace("test", "users");
         assert_eq!(table2.keyspace.as_ref().unwrap().as_str(), "test");
         assert_eq!(table2.name.as_str(), "users");
         assert_eq!(table2.full_name(), "test.users");
     }
-    
+
     #[test]
     fn test_data_type_conversion() {
         let cql_type = CqlType::List(Box::new(CqlType::Text));

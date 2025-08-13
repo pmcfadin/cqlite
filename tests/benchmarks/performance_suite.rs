@@ -11,8 +11,8 @@
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::memtable::MemTable;
 use cqlite_core::storage::sstable::SSTableManager;
-use cqlite_core::{types::TableId, Config, RowKey, StorageEngine, Value};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use cqlite_core::{Config, RowKey, StorageEngine, Value, types::TableId};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

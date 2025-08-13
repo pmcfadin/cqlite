@@ -1,22 +1,44 @@
 //! Schema definition and parsing for CQLite
 //!
-//! This module handles schema definitions that describe the structure of 
+//! This module handles schema definitions that describe the structure of
 //! Cassandra tables for schema-aware SSTable reading. It supports both
 //! JSON-based schema definitions and CQL CREATE TABLE statement parsing.
 
 pub mod cql_parser;
+pub mod discovery;
+pub mod json_exporter;
+pub mod registry;
 
 // Re-export CQL parsing functions
 pub use cql_parser::{
-    parse_cql_schema, parse_cql_schema_with_visitor, extract_table_name, table_name_matches, 
-    cql_type_to_type_id, parse_create_table
+    cql_type_to_type_id, extract_table_name, parse_cql_schema, parse_cql_schema_with_visitor,
+    parse_create_table, table_name_matches,
 };
 
+// Re-export discovery and registry components
+pub use discovery::{
+    ColumnDefinition, DiscoveryMethod, IndexDefinition, SchemaDiscoveryConfig,
+    SchemaDiscoveryEngine, SchemaInfo, SchemaMetadata, TableOptions, TypeInfo, UDTDefinition,
+    ValidationError, ValidationResults, ValidationStatus, ValidationWarning,
+};
+
+pub use registry::{
+    RegistryStatistics, SchemaChange, SchemaChangeType, SchemaQuery, SchemaRegistry,
+    SchemaRegistryConfig, SchemaSource, SchemaValidationStatus, SchemaValidator, SchemaVersion,
+    ValidationReport,
+};
+
+pub use json_exporter::{
+    JsonClusteringKey, JsonColumn, JsonExportConfig, JsonExporter, JsonFormat, JsonIndex,
+    JsonMetadata, JsonPerformanceMetrics, JsonPrimaryKey, JsonSchema, JsonTable, JsonTableOptions,
+    JsonUDT, JsonValidationResults,
+};
+
+use crate::Config;
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;
 use crate::storage::StorageEngine;
-use crate::Config;
-use crate::types::{UdtTypeDef, UdtFieldDef};
+use crate::types::{ComparatorType, UdtTypeDef};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -149,7 +171,7 @@ impl UdtRegistry {
             udts: HashMap::new(),
         }
     }
-    
+
     /// Create a new UDT registry with enhanced Cassandra 5.0 defaults
     pub fn with_cassandra5_defaults() -> Self {
         let mut registry = Self::new();
@@ -159,7 +181,10 @@ impl UdtRegistry {
 
     /// Register a UDT type definition
     pub fn register_udt(&mut self, udt_def: UdtTypeDef) {
-        let keyspace_udts = self.udts.entry(udt_def.keyspace.clone()).or_insert_with(HashMap::new);
+        let keyspace_udts = self
+            .udts
+            .entry(udt_def.keyspace.clone())
+            .or_insert_with(HashMap::new);
         keyspace_udts.insert(udt_def.name.clone(), udt_def);
     }
 
@@ -175,14 +200,16 @@ impl UdtRegistry {
 
     /// List all registered UDT names in a keyspace
     pub fn list_udt_names(&self, keyspace: &str) -> Vec<&str> {
-        self.udts.get(keyspace)
+        self.udts
+            .get(keyspace)
             .map(|udts| udts.keys().map(|s| s.as_str()).collect())
             .unwrap_or_else(Vec::new)
     }
 
     /// Check if a UDT is registered
     pub fn contains_udt(&self, keyspace: &str, name: &str) -> bool {
-        self.udts.get(keyspace)
+        self.udts
+            .get(keyspace)
             .map(|udts| udts.contains_key(name))
             .unwrap_or(false)
     }
@@ -201,21 +228,25 @@ impl UdtRegistry {
     pub fn total_udts(&self) -> usize {
         self.udts.values().map(|udts| udts.len()).sum()
     }
-    
+
     /// Load enhanced Cassandra 5.0 system UDTs with complex nested structures
     fn load_cassandra5_system_udts(&mut self) {
         // Enhanced address UDT for Cassandra 5.0 compatibility
         let address_udt = UdtTypeDef::new("system".to_string(), "address".to_string())
             .with_field("street".to_string(), CqlType::Text, true)
             .with_field("street2".to_string(), CqlType::Text, true)
-            .with_field("city".to_string(), CqlType::Text, true) 
+            .with_field("city".to_string(), CqlType::Text, true)
             .with_field("state".to_string(), CqlType::Text, true)
             .with_field("zip_code".to_string(), CqlType::Text, true)
             .with_field("country".to_string(), CqlType::Text, true)
-            .with_field("coordinates".to_string(), CqlType::Tuple(vec![CqlType::Double, CqlType::Double]), true);
-        
+            .with_field(
+                "coordinates".to_string(),
+                CqlType::Tuple(vec![CqlType::Double, CqlType::Double]),
+                true,
+            );
+
         self.register_udt(address_udt);
-        
+
         // Enhanced person UDT with collections and nested types
         let person_udt = UdtTypeDef::new("system".to_string(), "person".to_string())
             .with_field("id".to_string(), CqlType::Uuid, false)
@@ -224,83 +255,119 @@ impl UdtRegistry {
             .with_field("middle_name".to_string(), CqlType::Text, true)
             .with_field("age".to_string(), CqlType::Int, true)
             .with_field("email".to_string(), CqlType::Text, true)
-            .with_field("phone_numbers".to_string(), CqlType::Set(Box::new(CqlType::Text)), true)
-            .with_field("addresses".to_string(), CqlType::List(Box::new(CqlType::Udt("address".to_string(), vec![]))), true)
-            .with_field("metadata".to_string(), CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)), true);
-            
+            .with_field(
+                "phone_numbers".to_string(),
+                CqlType::Set(Box::new(CqlType::Text)),
+                true,
+            )
+            .with_field(
+                "addresses".to_string(),
+                CqlType::List(Box::new(CqlType::Udt("address".to_string(), vec![]))),
+                true,
+            )
+            .with_field(
+                "metadata".to_string(),
+                CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)),
+                true,
+            );
+
         self.register_udt(person_udt);
-        
+
         // Contact info UDT for complex nested scenarios
         let contact_info_udt = UdtTypeDef::new("system".to_string(), "contact_info".to_string())
-            .with_field("person".to_string(), CqlType::Udt("person".to_string(), vec![]), false)
-            .with_field("primary_address".to_string(), CqlType::Udt("address".to_string(), vec![]), true)
-            .with_field("emergency_contacts".to_string(), CqlType::List(Box::new(CqlType::Udt("person".to_string(), vec![]))), true)
+            .with_field(
+                "person".to_string(),
+                CqlType::Udt("person".to_string(), vec![]),
+                false,
+            )
+            .with_field(
+                "primary_address".to_string(),
+                CqlType::Udt("address".to_string(), vec![]),
+                true,
+            )
+            .with_field(
+                "emergency_contacts".to_string(),
+                CqlType::List(Box::new(CqlType::Udt("person".to_string(), vec![]))),
+                true,
+            )
             .with_field("last_updated".to_string(), CqlType::Timestamp, true);
-            
+
         self.register_udt(contact_info_udt);
     }
-    
+
     /// Resolve UDT with full dependency chain
-    pub fn resolve_udt_with_dependencies(&self, keyspace: &str, name: &str) -> crate::Result<&UdtTypeDef> {
-        let udt = self.get_udt(keyspace, name)
-            .ok_or_else(|| crate::Error::schema(format!("UDT '{}' not found in keyspace '{}'", name, keyspace)))?;
-        
+    pub fn resolve_udt_with_dependencies(
+        &self,
+        keyspace: &str,
+        name: &str,
+    ) -> crate::Result<&UdtTypeDef> {
+        let udt = self.get_udt(keyspace, name).ok_or_else(|| {
+            crate::Error::schema(format!(
+                "UDT '{}' not found in keyspace '{}'",
+                name, keyspace
+            ))
+        })?;
+
         // Validate all field dependencies exist
         for field in &udt.fields {
             self.validate_field_type_dependencies(&field.field_type, keyspace)?;
         }
-        
+
         Ok(udt)
     }
-    
+
     /// Validate that all UDT field type dependencies exist in the registry
-    fn validate_field_type_dependencies(&self, field_type: &CqlType, keyspace: &str) -> crate::Result<()> {
+    fn validate_field_type_dependencies(
+        &self,
+        field_type: &CqlType,
+        keyspace: &str,
+    ) -> crate::Result<()> {
         match field_type {
             CqlType::Udt(udt_name, _) => {
                 if !self.contains_udt(keyspace, udt_name) {
                     return Err(crate::Error::schema(format!(
-                        "UDT dependency '{}' not found in keyspace '{}'", 
+                        "UDT dependency '{}' not found in keyspace '{}'",
                         udt_name, keyspace
                     )));
                 }
-            },
+            }
             CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
                 self.validate_field_type_dependencies(inner, keyspace)?;
-            },
+            }
             CqlType::Map(key_type, value_type) => {
                 self.validate_field_type_dependencies(key_type, keyspace)?;
                 self.validate_field_type_dependencies(value_type, keyspace)?;
-            },
+            }
             CqlType::Tuple(field_types) => {
                 for tuple_field_type in field_types {
                     self.validate_field_type_dependencies(tuple_field_type, keyspace)?;
                 }
-            },
+            }
             _ => {} // Primitive types don't need validation
         }
         Ok(())
     }
-    
+
     /// Get all UDTs that depend on a given UDT (for cascade operations)
     pub fn get_dependent_udts(&self, keyspace: &str, udt_name: &str) -> Vec<&UdtTypeDef> {
         let mut dependents = Vec::new();
-        
+
         if let Some(keyspace_udts) = self.udts.get(keyspace) {
             for udt in keyspace_udts.values() {
                 if udt.name == udt_name {
                     continue; // Skip self
                 }
-                
+
                 // Check if this UDT depends on the target UDT
                 if self.udt_depends_on(udt, udt_name) {
                     dependents.push(udt);
                 }
             }
         }
-        
+
         dependents
     }
-    
+
     /// Check if a UDT depends on another UDT (recursively)
     fn udt_depends_on(&self, udt: &UdtTypeDef, target_udt: &str) -> bool {
         for field in &udt.fields {
@@ -310,44 +377,44 @@ impl UdtRegistry {
         }
         false
     }
-    
+
     /// Check if a field type depends on a UDT
     fn field_type_depends_on(&self, field_type: &CqlType, target_udt: &str) -> bool {
         match field_type {
             CqlType::Udt(udt_name, _) => udt_name == target_udt,
             CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
                 self.field_type_depends_on(inner, target_udt)
-            },
+            }
             CqlType::Map(key_type, value_type) => {
-                self.field_type_depends_on(key_type, target_udt) || 
-                self.field_type_depends_on(value_type, target_udt)
-            },
-            CqlType::Tuple(field_types) => {
-                field_types.iter().any(|ft| self.field_type_depends_on(ft, target_udt))
-            },
-            _ => false
+                self.field_type_depends_on(key_type, target_udt)
+                    || self.field_type_depends_on(value_type, target_udt)
+            }
+            CqlType::Tuple(field_types) => field_types
+                .iter()
+                .any(|ft| self.field_type_depends_on(ft, target_udt)),
+            _ => false,
         }
     }
-    
+
     /// Register UDT with dependency validation
     pub fn register_udt_with_validation(&mut self, udt_def: UdtTypeDef) -> crate::Result<()> {
         // Validate dependencies exist
         for field in &udt_def.fields {
             self.validate_field_type_dependencies(&field.field_type, &udt_def.keyspace)?;
         }
-        
+
         // Check for circular dependencies
         if self.would_create_circular_dependency(&udt_def) {
             return Err(crate::Error::schema(format!(
-                "Registering UDT '{}' would create circular dependency", 
+                "Registering UDT '{}' would create circular dependency",
                 udt_def.name
             )));
         }
-        
+
         self.register_udt(udt_def);
         Ok(())
     }
-    
+
     /// Check if registering a UDT would create circular dependencies
     fn would_create_circular_dependency(&self, udt_def: &UdtTypeDef) -> bool {
         // This is complex - for now, just check direct self-reference
@@ -358,30 +425,34 @@ impl UdtRegistry {
         }
         false
     }
-    
+
     /// Export UDT definitions for debugging
     pub fn export_definitions(&self, keyspace: &str) -> Vec<String> {
         let mut definitions = Vec::new();
-        
+
         if let Some(keyspace_udts) = self.udts.get(keyspace) {
             for udt in keyspace_udts.values() {
                 let mut def = format!("CREATE TYPE {}.{} (\n", keyspace, udt.name);
-                
+
                 for (i, field) in udt.fields.iter().enumerate() {
                     if i > 0 {
                         def.push_str(",\n");
                     }
-                    def.push_str(&format!("  {} {}", field.name, self.format_cql_type(&field.field_type)));
+                    def.push_str(&format!(
+                        "  {} {}",
+                        field.name,
+                        self.format_cql_type(&field.field_type)
+                    ));
                 }
-                
+
                 def.push_str("\n);");
                 definitions.push(def);
             }
         }
-        
+
         definitions
     }
-    
+
     /// Format CQL type for CREATE TYPE statements
     fn format_cql_type(&self, cql_type: &CqlType) -> String {
         match cql_type {
@@ -405,12 +476,17 @@ impl UdtRegistry {
             CqlType::Decimal => "decimal".to_string(),
             CqlType::List(inner) => format!("list<{}>", self.format_cql_type(inner)),
             CqlType::Set(inner) => format!("set<{}>", self.format_cql_type(inner)),
-            CqlType::Map(key, value) => format!("map<{}, {}>", self.format_cql_type(key), self.format_cql_type(value)),
+            CqlType::Map(key, value) => format!(
+                "map<{}, {}>",
+                self.format_cql_type(key),
+                self.format_cql_type(value)
+            ),
             CqlType::Udt(name, _) => name.clone(),
             CqlType::Tuple(types) => {
-                let type_strs: Vec<String> = types.iter().map(|t| self.format_cql_type(t)).collect();
+                let type_strs: Vec<String> =
+                    types.iter().map(|t| self.format_cql_type(t)).collect();
                 format!("tuple<{}>", type_strs.join(", "))
-            },
+            }
             CqlType::Frozen(inner) => format!("frozen<{}>", self.format_cql_type(inner)),
             CqlType::Custom(name) => name.clone(),
         }
@@ -470,7 +546,7 @@ impl TableSchema {
         for (i, &pos) in positions.iter().enumerate() {
             if pos != i {
                 return Err(Error::schema(format!(
-                    "Partition key positions must be contiguous starting from 0, found gap at position {}", 
+                    "Partition key positions must be contiguous starting from 0, found gap at position {}",
                     i
                 )));
             }
@@ -483,7 +559,7 @@ impl TableSchema {
             for (i, &pos) in positions.iter().enumerate() {
                 if pos != i {
                     return Err(Error::schema(format!(
-                        "Clustering key positions must be contiguous starting from 0, found gap at position {}", 
+                        "Clustering key positions must be contiguous starting from 0, found gap at position {}",
                         i
                     )));
                 }
@@ -552,6 +628,135 @@ impl TableSchema {
         keys.sort_by_key(|k| k.position);
         keys
     }
+
+    /// Get ComparatorType for a specific column
+    pub fn get_column_comparator(&self, column_name: &str) -> Result<ComparatorType> {
+        let column = self
+            .get_column(column_name)
+            .ok_or_else(|| Error::Schema(format!("Column '{}' not found", column_name)))?;
+
+        let cql_type = CqlType::parse(&column.data_type)?;
+        ComparatorType::from_cql_type(&cql_type)
+    }
+
+    /// Get ComparatorTypes for all columns
+    pub fn get_all_comparators(&self) -> Result<HashMap<String, ComparatorType>> {
+        let mut comparators = HashMap::new();
+
+        for column in &self.columns {
+            let cql_type = CqlType::parse(&column.data_type)?;
+            let comparator = ComparatorType::from_cql_type(&cql_type)?;
+            comparators.insert(column.name.clone(), comparator);
+        }
+
+        Ok(comparators)
+    }
+
+    /// Get ComparatorTypes for partition key columns in order
+    pub fn get_partition_key_comparators(&self) -> Result<Vec<ComparatorType>> {
+        let mut comparators = Vec::new();
+        let ordered_keys = self.ordered_partition_keys();
+
+        for key_column in ordered_keys {
+            let cql_type = CqlType::parse(&key_column.data_type)?;
+            let comparator = ComparatorType::from_cql_type(&cql_type)?;
+            comparators.push(comparator);
+        }
+
+        Ok(comparators)
+    }
+
+    /// Get ComparatorTypes for clustering key columns in order
+    pub fn get_clustering_key_comparators(&self) -> Result<Vec<ComparatorType>> {
+        let mut comparators = Vec::new();
+        let ordered_keys = self.ordered_clustering_keys();
+
+        for key_column in ordered_keys {
+            let cql_type = CqlType::parse(&key_column.data_type)?;
+            let comparator = ComparatorType::from_cql_type(&cql_type)?;
+            comparators.push(comparator);
+        }
+
+        Ok(comparators)
+    }
+
+    /// Check if a column type is compatible with an expected type
+    pub fn is_column_type_compatible(
+        &self,
+        column_name: &str,
+        expected_type: &str,
+    ) -> Result<bool> {
+        let column_comparator = self.get_column_comparator(column_name)?;
+        let expected_cql_type = CqlType::parse(expected_type)?;
+        let expected_comparator = ComparatorType::from_cql_type(&expected_cql_type)?;
+
+        Ok(self.comparators_are_compatible(&column_comparator, &expected_comparator))
+    }
+
+    /// Check if two ComparatorTypes are compatible (helper method)
+    fn comparators_are_compatible(&self, left: &ComparatorType, right: &ComparatorType) -> bool {
+        match (left, right) {
+            // Exact matches
+            (ComparatorType::Boolean, ComparatorType::Boolean) => true,
+            (ComparatorType::TinyInt, ComparatorType::TinyInt) => true,
+            (ComparatorType::SmallInt, ComparatorType::SmallInt) => true,
+            (ComparatorType::Int, ComparatorType::Int) => true,
+            (ComparatorType::BigInt, ComparatorType::BigInt) => true,
+            (ComparatorType::Float32, ComparatorType::Float32) => true,
+            (ComparatorType::Float, ComparatorType::Float) => true,
+            (ComparatorType::Text, ComparatorType::Text) => true,
+            (ComparatorType::Blob, ComparatorType::Blob) => true,
+            (ComparatorType::Timestamp, ComparatorType::Timestamp) => true,
+            (ComparatorType::Uuid, ComparatorType::Uuid) => true,
+            (ComparatorType::Json, ComparatorType::Json) => true,
+
+            // Collection types
+            (ComparatorType::List(l_elem), ComparatorType::List(r_elem)) => {
+                self.comparators_are_compatible(l_elem, r_elem)
+            }
+            (ComparatorType::Set(l_elem), ComparatorType::Set(r_elem)) => {
+                self.comparators_are_compatible(l_elem, r_elem)
+            }
+            (ComparatorType::Map(l_key, l_val), ComparatorType::Map(r_key, r_val)) => {
+                self.comparators_are_compatible(l_key, r_key)
+                    && self.comparators_are_compatible(l_val, r_val)
+            }
+
+            // Tuple types
+            (ComparatorType::Tuple(l_fields), ComparatorType::Tuple(r_fields)) => {
+                l_fields.len() == r_fields.len()
+                    && l_fields
+                        .iter()
+                        .zip(r_fields.iter())
+                        .all(|(l, r)| self.comparators_are_compatible(l, r))
+            }
+
+            // UDT types
+            (
+                ComparatorType::Udt {
+                    type_name: l_name,
+                    keyspace: l_ks,
+                    ..
+                },
+                ComparatorType::Udt {
+                    type_name: r_name,
+                    keyspace: r_ks,
+                    ..
+                },
+            ) => l_name == r_name && l_ks == r_ks,
+
+            // Frozen types
+            (ComparatorType::Frozen(l_inner), ComparatorType::Frozen(r_inner)) => {
+                self.comparators_are_compatible(l_inner, r_inner)
+            }
+
+            // Custom types
+            (ComparatorType::Custom(l_name), ComparatorType::Custom(r_name)) => l_name == r_name,
+
+            // No other combinations are compatible
+            _ => false,
+        }
+    }
 }
 
 impl CqlType {
@@ -605,8 +810,11 @@ impl CqlType {
         }
 
         // Handle UDT types - format: udt_name or keyspace.udt_name
-        if type_str.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') && 
-           !type_str.chars().all(|c| c.is_ascii_lowercase()) {
+        if type_str
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+            && !type_str.chars().all(|c| c.is_ascii_lowercase())
+        {
             // This might be a UDT name - store as custom type for now
             // Full validation requires UDT registry context
             return Ok(CqlType::Custom(format!("udt:{}", type_str)));
@@ -686,6 +894,7 @@ fn default_order() -> String {
 /// Schema management service for handling table schemas and UDT definitions
 #[derive(Debug)]
 pub struct SchemaManager {
+    #[allow(dead_code)]
     storage: Arc<StorageEngine>,
     schemas: HashMap<String, TableSchema>,
     /// UDT registry for managing User Defined Types
@@ -693,17 +902,31 @@ pub struct SchemaManager {
 }
 
 impl SchemaManager {
-    /// Create a new schema manager
-    pub async fn new(storage: Arc<StorageEngine>, _config: &Config) -> Result<Self> {
+    /// Create a new schema manager from a path
+    pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        // Create temporary storage engine (not actually used in this context)
+        let config = Config::default();
+        let platform = Arc::new(crate::platform::Platform::new(&config).await?);
+        let storage = Arc::new(StorageEngine::open(path.as_ref(), &config, platform).await?);
+
+        Ok(Self {
+            storage,
+            schemas: HashMap::new(),
+            udt_registry: UdtRegistry::new(),
+        })
+    }
+
+    /// Create a new schema manager with storage
+    pub async fn new_with_storage(storage: Arc<StorageEngine>, _config: &Config) -> Result<Self> {
         let mut manager = Self {
             storage,
             schemas: HashMap::new(),
             udt_registry: UdtRegistry::new(),
         };
-        
+
         // Load built-in UDT definitions for Cassandra 5.0 compatibility
         manager.load_default_udts();
-        
+
         Ok(manager)
     }
 
@@ -712,45 +935,64 @@ impl SchemaManager {
         // Common address UDT used in many Cassandra schemas
         let address_udt = UdtTypeDef::new("test_keyspace".to_string(), "address".to_string())
             .with_field("street".to_string(), CqlType::Text, true)
-            .with_field("city".to_string(), CqlType::Text, true) 
+            .with_field("city".to_string(), CqlType::Text, true)
             .with_field("state".to_string(), CqlType::Text, true)
             .with_field("zip_code".to_string(), CqlType::Text, true)
             .with_field("country".to_string(), CqlType::Text, true);
-        
+
         self.udt_registry.register_udt(address_udt);
-        
+
         // Enhanced person UDT with nested address
         let person_udt = UdtTypeDef::new("test_keyspace".to_string(), "person".to_string())
             .with_field("name".to_string(), CqlType::Text, true)
             .with_field("age".to_string(), CqlType::Int, true)
             .with_field("email".to_string(), CqlType::Text, true)
-            .with_field("addresses".to_string(), CqlType::List(Box::new(CqlType::Udt("address".to_string(), vec![
-                ("street".to_string(), CqlType::Text),
-                ("city".to_string(), CqlType::Text),
-                ("state".to_string(), CqlType::Text),
-                ("zip_code".to_string(), CqlType::Text),
-                ("country".to_string(), CqlType::Text),
-            ]))), true)
-            .with_field("contact_info".to_string(), CqlType::Map(
-                Box::new(CqlType::Text), 
-                Box::new(CqlType::Text)
-            ), true);
-            
+            .with_field(
+                "addresses".to_string(),
+                CqlType::List(Box::new(CqlType::Udt(
+                    "address".to_string(),
+                    vec![
+                        ("street".to_string(), CqlType::Text),
+                        ("city".to_string(), CqlType::Text),
+                        ("state".to_string(), CqlType::Text),
+                        ("zip_code".to_string(), CqlType::Text),
+                        ("country".to_string(), CqlType::Text),
+                    ],
+                ))),
+                true,
+            )
+            .with_field(
+                "contact_info".to_string(),
+                CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)),
+                true,
+            );
+
         self.udt_registry.register_udt(person_udt);
-        
+
         // Company UDT with nested person and address relationships
         let company_udt = UdtTypeDef::new("test_keyspace".to_string(), "company".to_string())
             .with_field("name".to_string(), CqlType::Text, false)
-            .with_field("headquarters".to_string(), CqlType::Udt("address".to_string(), vec![
-                ("street".to_string(), CqlType::Text),
-                ("city".to_string(), CqlType::Text),
-                ("state".to_string(), CqlType::Text),
-                ("zip_code".to_string(), CqlType::Text),
-                ("country".to_string(), CqlType::Text),
-            ]), true)
-            .with_field("employees".to_string(), CqlType::Set(Box::new(CqlType::Udt("person".to_string(), vec![]))), true)
+            .with_field(
+                "headquarters".to_string(),
+                CqlType::Udt(
+                    "address".to_string(),
+                    vec![
+                        ("street".to_string(), CqlType::Text),
+                        ("city".to_string(), CqlType::Text),
+                        ("state".to_string(), CqlType::Text),
+                        ("zip_code".to_string(), CqlType::Text),
+                        ("country".to_string(), CqlType::Text),
+                    ],
+                ),
+                true,
+            )
+            .with_field(
+                "employees".to_string(),
+                CqlType::Set(Box::new(CqlType::Udt("person".to_string(), vec![]))),
+                true,
+            )
             .with_field("founded_year".to_string(), CqlType::Int, true);
-            
+
         self.udt_registry.register_udt(company_udt);
     }
 
@@ -805,7 +1047,11 @@ impl SchemaManager {
     }
 
     /// Find schema by table name with optional keyspace matching
-    pub fn find_schema_by_table(&self, keyspace: &Option<String>, table: &str) -> Option<&TableSchema> {
+    pub fn find_schema_by_table(
+        &self,
+        keyspace: &Option<String>,
+        table: &str,
+    ) -> Option<&TableSchema> {
         // First try exact match if keyspace provided
         if let Some(ks) = keyspace {
             let key = format!("{}.{}", ks, table);
@@ -837,6 +1083,19 @@ impl SchemaManager {
     /// Convert CQL type string to internal type ID
     pub fn cql_type_to_internal(&self, cql_type: &str) -> Result<CqlTypeId> {
         cql_parser::cql_type_to_type_id(cql_type)
+    }
+
+    /// Get table schema by name (async for compatibility)
+    pub async fn get_table_schema(&self, table_name: &str) -> Result<TableSchema> {
+        // Try to find schema by table name
+        if let Some(schema) = self.find_schema_by_table(&None, table_name) {
+            Ok(schema.clone())
+        } else {
+            Err(Error::Schema(format!(
+                "Table schema not found: {}",
+                table_name
+            )))
+        }
     }
 }
 

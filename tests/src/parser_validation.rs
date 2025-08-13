@@ -7,9 +7,15 @@
 //! - CQL data type parsing validation
 //! - BTI index parsing integration tests
 
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
+
 use cqlite_core::{
     error::Error,
-    parser::{header, types, vint, CqlTypeId, SSTableParser},
+    parser::{
+        CqlTypeId, SSTableParser,
+        header::{self, parse_sstable_header, serialize_sstable_header},
+        types, vint,
+    },
     types::Value,
 };
 use std::fs;
@@ -34,7 +40,8 @@ impl ParserValidationSuite {
         let test_data_path = current_dir.join(TEST_ENV_PATH);
 
         Self {
-            parser: SSTableParser::new(),
+            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
+                .unwrap(),
             test_data_path,
             temp_dir: None,
         }
@@ -126,6 +133,7 @@ impl ParserValidationSuite {
         use std::collections::HashMap;
 
         let header = SSTableHeader {
+            cassandra_version: cqlite_core::parser::header::CassandraVersion::V5_0Release,
             version: SUPPORTED_VERSION,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -173,8 +181,7 @@ impl ParserValidationSuite {
             },
         };
 
-        self.parser
-            .serialize_header(&header)
+        cqlite_core::parser::header::serialize_sstable_header(&header)
             .expect("Failed to serialize test header")
     }
 }
@@ -305,7 +312,7 @@ mod header_validation_tests {
         // Parse the header
         let (header, parsed_bytes) = suite
             .parser
-            .parse_header(&test_header_bytes)
+            .parse_sstable_header(&test_header_bytes)
             .expect("Failed to parse test header");
 
         assert_eq!(
@@ -334,9 +341,8 @@ mod header_validation_tests {
         assert_eq!(header.columns[0].key_position, Some(0));
 
         // Test serialization roundtrip
-        let reserialized = suite
-            .parser
-            .serialize_header(&header)
+        let reserialized = suite.parser;
+        cqlite_core::parser::header::serialize_sstable_header(&header)
             .expect("Failed to reserialize header");
         assert_eq!(
             reserialized, test_header_bytes,
@@ -616,7 +622,7 @@ mod integration_tests {
             }
 
             // Try to parse the header
-            match suite.parser.parse_header(&data) {
+            match parse_sstable_header(&data) {
                 Ok((header, parsed_bytes)) => {
                     println!("✅ Successfully parsed header:");
                     println!("   📋 Keyspace: {}", header.keyspace);
@@ -641,7 +647,7 @@ mod integration_tests {
                     );
 
                     // Test header re-serialization
-                    match suite.parser.serialize_header(&header) {
+                    match serialize_sstable_header(&header) {
                         Ok(serialized) => {
                             println!(
                                 "✅ Header serialization successful: {} bytes",
@@ -649,7 +655,7 @@ mod integration_tests {
                             );
 
                             // Parse the serialized header
-                            match suite.parser.parse_header(&serialized) {
+                            match parse_sstable_header(&serialized) {
                                 Ok((reparsed_header, _)) => {
                                     assert_eq!(reparsed_header.keyspace, header.keyspace);
                                     assert_eq!(reparsed_header.table_name, header.table_name);
@@ -765,7 +771,7 @@ mod performance_tests {
         let start = Instant::now();
 
         for _ in 0..iterations {
-            let result = suite.parser.parse_header(&test_header_bytes);
+            let result = parse_sstable_header(&test_header_bytes);
             assert!(result.is_ok(), "Header parsing should succeed");
         }
 

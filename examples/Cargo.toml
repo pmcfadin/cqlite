@@ -1,0 +1,37 @@
+[package]
+name = "cqlite-examples"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cqlite-core = { path = "../cqlite-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+tempfile = { workspace = true }
+
+[[bin]]
+name = "proof_of_concept_demo"
+path = "proof-of-concept/src/bin/proof_of_concept_demo.rs"
+
+[[bin]]
+name = "proof_validation"
+path = "proof-of-concept/src/bin/proof_validation.rs"
+
+[[bin]]
+name = "simple_demo"
+path = "proof-of-concept/src/bin/simple_demo.rs"
+
+[[bin]]
+name = "sstable_generator"
+path = "proof-of-concept/src/bin/sstable_generator.rs"
+
+[[bin]]
+name = "vint_demo"
+path = "proof-of-concept/src/bin/vint_demo.rs"

@@ -4,12 +4,15 @@
 //! compatibility with Cassandra 5+ SSTable format and data structures.
 
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::header::{ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats};
+use cqlite_core::parser::header::{
+    CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
+    parse_sstable_header, serialize_sstable_header,
+};
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::platform::Platform;
-use cqlite_core::{types::TableId, Config, RowKey, StorageEngine, Value};
+use cqlite_core::{Config, RowKey, Value, storage::StorageEngine, types::TableId};
+use cqlite_core::{platform::Platform, schema::SchemaManager};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -63,13 +66,14 @@ pub struct CompatibilityTestFramework {
 impl CompatibilityTestFramework {
     /// Create a new test framework instance
     pub fn new(config: CompatibilityTestConfig) -> Result<Self> {
-        let temp_dir = TempDir::new()
-            .map_err(|e| Error::io_error(format!("Failed to create temp directory: {}", e)))?;
+        let temp_dir = TempDir::new().map_err(|e| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create temp directory: {}", e),
+            ))
+        })?;
 
-        let parser = SSTableParser::with_options(
-            config.validate_checksums,
-            false, // Don't allow unknown types for strict compatibility
-        );
+        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
 
         Ok(Self {
             config,
@@ -118,10 +122,12 @@ impl CompatibilityTestFramework {
         let header = self.create_mock_sstable_header();
 
         // Test serialization
-        let serialized = self.parser.serialize_header(&header)?;
+        let serialized = serialize_sstable_header(&header)?;
 
         // Test deserialization
-        let (parsed_header, bytes_read) = self.parser.parse_header(&serialized)?;
+        let (remaining, parsed_header) = parse_sstable_header(&serialized)
+            .map_err(|e| Error::InvalidFormat(format!("Failed to parse header: {:?}", e)))?;
+        let bytes_read = serialized.len() - remaining.len();
 
         // Validate round-trip consistency
         let passed = self.validate_header_roundtrip(&header, &parsed_header);
@@ -239,7 +245,7 @@ impl CompatibilityTestFramework {
         map.insert("key2".to_string(), Value::Integer(42));
         map.insert("key3".to_string(), Value::Boolean(true));
 
-        let map_value = Value::Map(map);
+        let map_value = Value::Map(map.into_iter().map(|(k, v)| (Value::Text(k), v)).collect());
 
         if let Ok(serialized) = serialize_cql_value(&map_value) {
             total_bytes += serialized.len();
@@ -620,6 +626,7 @@ impl CompatibilityTestFramework {
         };
 
         SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0Release,
             version: 1,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "test_keyspace".to_string(),

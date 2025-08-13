@@ -1,16 +1,16 @@
 //! CQL Schema Validation Test Runner
 //!
 //! Comprehensive test runner for CQL parser validation, integration tests,
-//! and performance benchmarks. Coordinates all validation agents and 
+//! and performance benchmarks. Coordinates all validation agents and
 //! generates consolidated reports.
 
+use clap::{Arg, ArgMatches, Command};
+use cqlite_tests::cql_integration_tests::{CqlIntegrationTestSuite, IntegrationTestResult};
 use cqlite_tests::cql_parser_validation_suite::{CqlParserValidationSuite, ValidationReport};
-use cqlite_tests::cql_integration_tests::{CqlIntegrationTestSuite, IntegrationTestReport};
-use cqlite_tests::cql_performance_benchmarks::{CqlPerformanceBenchmarkSuite, BenchmarkReport};
+use cqlite_tests::cql_performance_benchmarks::{BenchmarkReport, CqlPerformanceBenchmarkSuite};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use clap::{App, Arg, ArgMatches};
 
 /// Main test runner orchestrating all CQL validation tests
 #[derive(Debug)]
@@ -46,7 +46,7 @@ pub struct TestRunnerConfig {
 #[derive(Debug)]
 pub struct ConsolidatedTestResults {
     pub validation_report: Option<ValidationReport>,
-    pub integration_report: Option<IntegrationTestReport>,
+    pub integration_report: Option<ValidationReport>,
     pub benchmark_report: Option<BenchmarkReport>,
     pub total_execution_time_ms: u64,
     pub overall_success: bool,
@@ -77,13 +77,15 @@ impl CqlValidationTestRunner {
     }
 
     /// Run all configured test suites
-    pub async fn run_all_tests(&mut self) -> Result<ConsolidatedTestResults, Box<dyn std::error::Error>> {
+    pub async fn run_all_tests(
+        &mut self,
+    ) -> Result<ConsolidatedTestResults, Box<dyn std::error::Error>> {
         println!("🚀 Starting CQL Schema Validation Test Runner");
-        println!("=" .repeat(60));
-        
+        println!("=".repeat(60));
+
         // Create output directory
         fs::create_dir_all(&self.config.output_dir)?;
-        
+
         let mut results = ConsolidatedTestResults {
             validation_report: None,
             integration_report: None,
@@ -91,18 +93,18 @@ impl CqlValidationTestRunner {
             total_execution_time_ms: 0,
             overall_success: true,
         };
-        
+
         // Run validation suite
         if self.config.run_validation_suite {
             println!("\n🧪 Phase 1: Running CQL Parser Validation Suite");
-            println!("-" .repeat(40));
-            
+            println!("-".repeat(40));
+
             match self.run_validation_suite().await {
                 Ok(report) => {
                     let success = report.failed_tests == 0;
                     results.overall_success &= success;
                     results.validation_report = Some(report);
-                    
+
                     if success {
                         println!("✅ Validation suite completed successfully");
                     } else {
@@ -115,18 +117,18 @@ impl CqlValidationTestRunner {
                 }
             }
         }
-        
+
         // Run integration tests
         if self.config.run_integration_tests {
             println!("\n🔗 Phase 2: Running CQL Integration Tests");
-            println!("-" .repeat(40));
-            
+            println!("-".repeat(40));
+
             match self.run_integration_tests().await {
                 Ok(report) => {
                     let success = report.failed_tests == 0;
                     results.overall_success &= success;
                     results.integration_report = Some(report);
-                    
+
                     if success {
                         println!("✅ Integration tests completed successfully");
                     } else {
@@ -139,18 +141,18 @@ impl CqlValidationTestRunner {
                 }
             }
         }
-        
+
         // Run performance benchmarks
         if self.config.run_performance_benchmarks {
             println!("\n⚡ Phase 3: Running CQL Performance Benchmarks");
-            println!("-" .repeat(40));
-            
+            println!("-".repeat(40));
+
             match self.run_performance_benchmarks().await {
                 Ok(report) => {
                     let success = report.failed_benchmarks == 0;
                     results.overall_success &= success;
                     results.benchmark_report = Some(report);
-                    
+
                     if success {
                         println!("✅ Performance benchmarks completed successfully");
                     } else {
@@ -163,98 +165,111 @@ impl CqlValidationTestRunner {
                 }
             }
         }
-        
+
         results.total_execution_time_ms = self.start_time.elapsed().as_millis() as u64;
-        
+
         // Generate reports
         self.generate_reports(&results).await?;
-        
+
         // Print final summary
         self.print_final_summary(&results);
-        
+
         Ok(results)
     }
 
     /// Run the validation suite
     async fn run_validation_suite(&self) -> Result<ValidationReport, Box<dyn std::error::Error>> {
         let mut suite = CqlParserValidationSuite::new();
-        
+
         let report = suite.run_all_tests()?;
-        
+
         if self.config.verbose {
             report.print_report();
         }
-        
+
         Ok(report)
     }
 
     /// Run integration tests
-    async fn run_integration_tests(&self) -> Result<IntegrationTestReport, Box<dyn std::error::Error>> {
+    async fn run_integration_tests(
+        &self,
+    ) -> Result<IntegrationTestReport, Box<dyn std::error::Error>> {
         let mut suite = CqlIntegrationTestSuite::new().await?;
-        
+
         let report = suite.run_all_tests().await?;
-        
+
         if self.config.verbose {
             report.print_report();
         }
-        
+
         Ok(report)
     }
 
     /// Run performance benchmarks
-    async fn run_performance_benchmarks(&self) -> Result<BenchmarkReport, Box<dyn std::error::Error>> {
+    async fn run_performance_benchmarks(
+        &self,
+    ) -> Result<BenchmarkReport, Box<dyn std::error::Error>> {
         let mut suite = CqlPerformanceBenchmarkSuite::new();
-        
+
         let report = suite.run_all_benchmarks()?;
-        
+
         if self.config.verbose {
             report.print_report();
         }
-        
+
         Ok(report)
     }
 
     /// Generate all reports (JSON, HTML, etc.)
-    async fn generate_reports(&self, results: &ConsolidatedTestResults) -> Result<(), Box<dyn std::error::Error>> {
+    async fn generate_reports(
+        &self,
+        results: &ConsolidatedTestResults,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n📊 Generating Test Reports");
-        println!("-" .repeat(30));
-        
+        println!("-".repeat(30));
+
         // Generate JSON reports
         if let Some(validation_report) = &results.validation_report {
             let json_path = Path::new(&self.config.output_dir).join("validation_report.json");
             validation_report.save_to_file(&json_path)?;
             println!("📄 Validation report saved to: {}", json_path.display());
         }
-        
+
         if let Some(integration_report) = &results.integration_report {
             let json_path = Path::new(&self.config.output_dir).join("integration_report.json");
             let json = serde_json::to_string_pretty(integration_report)?;
             fs::write(&json_path, json)?;
             println!("📄 Integration report saved to: {}", json_path.display());
         }
-        
+
         if let Some(benchmark_report) = &results.benchmark_report {
             let json_path = Path::new(&self.config.output_dir).join("benchmark_report.json");
             benchmark_report.save_to_file(&json_path)?;
             println!("📄 Benchmark report saved to: {}", json_path.display());
         }
-        
+
         // Generate consolidated report
         let consolidated_path = Path::new(&self.config.output_dir).join("consolidated_report.json");
         let consolidated_json = serde_json::to_string_pretty(&ConsolidatedReportData {
-            validation_summary: results.validation_report.as_ref().map(|r| ValidationSummary {
-                total_tests: r.total_tests,
-                passed_tests: r.passed_tests,
-                failed_tests: r.failed_tests,
-                execution_time_ms: r.total_execution_time_ms,
-            }),
-            integration_summary: results.integration_report.as_ref().map(|r| IntegrationSummary {
-                total_tests: r.total_tests,
-                passed_tests: r.passed_tests,
-                failed_tests: r.failed_tests,
-                execution_time_ms: r.total_execution_time_ms,
-                schemas_validated: r.total_schemas_validated,
-            }),
+            validation_summary: results
+                .validation_report
+                .as_ref()
+                .map(|r| ValidationSummary {
+                    total_tests: r.total_tests,
+                    passed_tests: r.passed_tests,
+                    failed_tests: r.failed_tests,
+                    execution_time_ms: r.total_execution_time_ms,
+                }),
+            integration_summary: results
+                .integration_report
+                .as_ref()
+                .map(|r| IntegrationSummary {
+                    total_tests: r.total_tests,
+                    passed_tests: r.passed_tests,
+                    failed_tests: r.failed_tests,
+                    execution_time_ms: r.total_execution_time_ms,
+                    schemas_validated: r.total_schemas_validated,
+                }),
             benchmark_summary: results.benchmark_report.as_ref().map(|r| BenchmarkSummary {
                 total_benchmarks: r.total_benchmarks,
                 passed_benchmarks: r.passed_benchmarks,
@@ -268,18 +283,24 @@ impl CqlValidationTestRunner {
             timestamp: chrono::Utc::now().to_rfc3339(),
         })?;
         fs::write(&consolidated_path, consolidated_json)?;
-        println!("📄 Consolidated report saved to: {}", consolidated_path.display());
-        
+        println!(
+            "📄 Consolidated report saved to: {}",
+            consolidated_path.display()
+        );
+
         // Generate HTML report if requested
         if self.config.generate_html {
             self.generate_html_report(results).await?;
         }
-        
+
         Ok(())
     }
 
     /// Generate HTML report
-    async fn generate_html_report(&self, results: &ConsolidatedTestResults) -> Result<(), Box<dyn std::error::Error>> {
+    async fn generate_html_report(
+        &self,
+        results: &ConsolidatedTestResults,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let html_content = self.generate_html_content(results);
         let html_path = Path::new(&self.config.output_dir).join("test_report.html");
         fs::write(&html_path, html_content)?;
@@ -290,7 +311,7 @@ impl CqlValidationTestRunner {
     /// Generate HTML content for the report
     fn generate_html_content(&self, results: &ConsolidatedTestResults) -> String {
         let mut html = String::new();
-        
+
         html.push_str(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -322,95 +343,122 @@ impl CqlValidationTestRunner {
         <div class="header">
             <h1>🧪 CQL Schema Validation Test Report</h1>
             <p>Generated on "#);
-        
-        html.push_str(&chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string());
+
+        html.push_str(
+            &chrono::Utc::now()
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string(),
+        );
         html.push_str("</p>\n        </div>\n\n        <div class=\"summary\">\n");
-        
+
         // Overall summary
-        let overall_class = if results.overall_success { "success" } else { "failure" };
-        html.push_str(&format!(r#"            <div class="summary-box {}">
+        let overall_class = if results.overall_success {
+            "success"
+        } else {
+            "failure"
+        };
+        html.push_str(&format!(
+            r#"            <div class="summary-box {}">
                 <div class="metric">{}</div>
                 <div class="metric-label">Overall Status</div>
             </div>
             <div class="summary-box">
                 <div class="metric">{:.2}s</div>
                 <div class="metric-label">Total Execution Time</div>
-            </div>"#, 
+            </div>"#,
             overall_class,
-            if results.overall_success { "✅ PASSED" } else { "❌ FAILED" },
+            if results.overall_success {
+                "✅ PASSED"
+            } else {
+                "❌ FAILED"
+            },
             results.total_execution_time_ms as f64 / 1000.0
         ));
-        
+
         // Add summaries for each test type
         if let Some(validation_report) = &results.validation_report {
-            let validation_class = if validation_report.failed_tests == 0 { "success" } else { "failure" };
-            html.push_str(&format!(r#"            <div class="summary-box {}">
+            let validation_class = if validation_report.failed_tests == 0 {
+                "success"
+            } else {
+                "failure"
+            };
+            html.push_str(&format!(
+                r#"            <div class="summary-box {}">
                 <div class="metric">{}/{}</div>
                 <div class="metric-label">Validation Tests Passed</div>
-            </div>"#, 
-                validation_class,
-                validation_report.passed_tests,
-                validation_report.total_tests
+            </div>"#,
+                validation_class, validation_report.passed_tests, validation_report.total_tests
             ));
         }
-        
+
         if let Some(integration_report) = &results.integration_report {
-            let integration_class = if integration_report.failed_tests == 0 { "success" } else { "failure" };
-            html.push_str(&format!(r#"            <div class="summary-box {}">
+            let integration_class = if integration_report.failed_tests == 0 {
+                "success"
+            } else {
+                "failure"
+            };
+            html.push_str(&format!(
+                r#"            <div class="summary-box {}">
                 <div class="metric">{}/{}</div>
                 <div class="metric-label">Integration Tests Passed</div>
-            </div>"#, 
-                integration_class,
-                integration_report.passed_tests,
-                integration_report.total_tests
+            </div>"#,
+                integration_class, integration_report.passed_tests, integration_report.total_tests
             ));
         }
-        
+
         if let Some(benchmark_report) = &results.benchmark_report {
-            let benchmark_class = if benchmark_report.failed_benchmarks == 0 { "success" } else { "failure" };
-            html.push_str(&format!(r#"            <div class="summary-box {}">
+            let benchmark_class = if benchmark_report.failed_benchmarks == 0 {
+                "success"
+            } else {
+                "failure"
+            };
+            html.push_str(&format!(
+                r#"            <div class="summary-box {}">
                 <div class="metric">{}/{}</div>
                 <div class="metric-label">Benchmarks Passed</div>
             </div>
             <div class="summary-box">
                 <div class="metric">{:.1} MB</div>
                 <div class="metric-label">Peak Memory Usage</div>
-            </div>"#, 
+            </div>"#,
                 benchmark_class,
                 benchmark_report.passed_benchmarks,
                 benchmark_report.total_benchmarks,
                 benchmark_report.peak_memory_usage_kb as f64 / 1024.0
             ));
         }
-        
+
         html.push_str("        </div>\n\n");
-        
+
         // Detailed sections for each test type
         if let Some(validation_report) = &results.validation_report {
             html.push_str(&self.generate_validation_section(validation_report));
         }
-        
+
         if let Some(integration_report) = &results.integration_report {
             html.push_str(&self.generate_integration_section(integration_report));
         }
-        
+
         if let Some(benchmark_report) = &results.benchmark_report {
             html.push_str(&self.generate_benchmark_section(benchmark_report));
         }
-        
-        html.push_str(r#"        <div class="footer">
+
+        html.push_str(
+            r#"        <div class="footer">
             <p>Report generated by CQL Schema Validation Test Runner</p>
         </div>
     </div>
 </body>
-</html>"#);
-        
+</html>"#,
+        );
+
         html
     }
 
     /// Generate validation section for HTML report
     fn generate_validation_section(&self, report: &ValidationReport) -> String {
-        let mut html = String::from(r#"        <div class="section">
+        let mut html = String::from(
+            r#"        <div class="section">
             <h2>🧪 Validation Test Results</h2>
             <table>
                 <thead>
@@ -422,17 +470,23 @@ impl CqlValidationTestRunner {
                         <th>Error Message</th>
                     </tr>
                 </thead>
-                <tbody>"#);
-        
+                <tbody>"#,
+        );
+
         let mut sorted_results: Vec<_> = report.test_results.values().collect();
         sorted_results.sort_by_key(|r| &r.test_name);
-        
+
         for result in sorted_results {
             let status_class = if result.passed { "pass" } else { "fail" };
-            let status_text = if result.passed { "✅ PASS" } else { "❌ FAIL" };
+            let status_text = if result.passed {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
             let error_msg = result.error_message.as_deref().unwrap_or("");
-            
-            html.push_str(&format!(r#"                    <tr>
+
+            html.push_str(&format!(
+                r#"                    <tr>
                         <td>{}</td>
                         <td class="{}">{}</td>
                         <td>{}ms</td>
@@ -447,14 +501,15 @@ impl CqlValidationTestRunner {
                 error_msg
             ));
         }
-        
+
         html.push_str("                </tbody>\n            </table>\n        </div>\n\n");
         html
     }
 
     /// Generate integration section for HTML report
     fn generate_integration_section(&self, report: &IntegrationTestReport) -> String {
-        let mut html = String::from(r#"        <div class="section">
+        let mut html = String::from(
+            r#"        <div class="section">
             <h2>🔗 Integration Test Results</h2>
             <table>
                 <thead>
@@ -467,17 +522,23 @@ impl CqlValidationTestRunner {
                         <th>Error Message</th>
                     </tr>
                 </thead>
-                <tbody>"#);
-        
+                <tbody>"#,
+        );
+
         let mut sorted_results: Vec<_> = report.test_results.values().collect();
         sorted_results.sort_by_key(|r| &r.test_name);
-        
+
         for result in sorted_results {
             let status_class = if result.passed { "pass" } else { "fail" };
-            let status_text = if result.passed { "✅ PASS" } else { "❌ FAIL" };
+            let status_text = if result.passed {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
             let error_msg = result.error_message.as_deref().unwrap_or("");
-            
-            html.push_str(&format!(r#"                    <tr>
+
+            html.push_str(&format!(
+                r#"                    <tr>
                         <td>{}</td>
                         <td class="{}">{}</td>
                         <td>{}ms</td>
@@ -494,14 +555,15 @@ impl CqlValidationTestRunner {
                 error_msg
             ));
         }
-        
+
         html.push_str("                </tbody>\n            </table>\n        </div>\n\n");
         html
     }
 
     /// Generate benchmark section for HTML report
     fn generate_benchmark_section(&self, report: &BenchmarkReport) -> String {
-        let mut html = String::from(r#"        <div class="section">
+        let mut html = String::from(
+            r#"        <div class="section">
             <h2>⚡ Performance Benchmark Results</h2>
             <table>
                 <thead>
@@ -515,17 +577,27 @@ impl CqlValidationTestRunner {
                         <th>Error Message</th>
                     </tr>
                 </thead>
-                <tbody>"#);
-        
+                <tbody>"#,
+        );
+
         let mut sorted_results: Vec<_> = report.benchmark_results.values().collect();
         sorted_results.sort_by_key(|r| &r.benchmark_name);
-        
+
         for result in sorted_results {
-            let status_class = if result.passed_performance_targets { "pass" } else { "fail" };
-            let status_text = if result.passed_performance_targets { "✅ PASS" } else { "❌ FAIL" };
+            let status_class = if result.passed_performance_targets {
+                "pass"
+            } else {
+                "fail"
+            };
+            let status_text = if result.passed_performance_targets {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
             let error_msg = result.error_message.as_deref().unwrap_or("");
-            
-            html.push_str(&format!(r#"                    <tr>
+
+            html.push_str(&format!(
+                r#"                    <tr>
                         <td>{}</td>
                         <td class="{}">{}</td>
                         <td>{}</td>
@@ -544,7 +616,7 @@ impl CqlValidationTestRunner {
                 error_msg
             ));
         }
-        
+
         html.push_str("                </tbody>\n            </table>\n        </div>\n\n");
         html
     }
@@ -552,26 +624,35 @@ impl CqlValidationTestRunner {
     /// Print final summary to console
     fn print_final_summary(&self, results: &ConsolidatedTestResults) {
         println!("\n🎯 Final Test Summary");
-        println!("=" .repeat(60));
-        println!("Total Execution Time: {:.2}s", results.total_execution_time_ms as f64 / 1000.0);
-        
+        println!("=".repeat(60));
+        println!(
+            "Total Execution Time: {:.2}s",
+            results.total_execution_time_ms as f64 / 1000.0
+        );
+
         if let Some(validation_report) = &results.validation_report {
-            println!("Validation Tests: {}/{} passed", 
-                    validation_report.passed_tests, validation_report.total_tests);
+            println!(
+                "Validation Tests: {}/{} passed",
+                validation_report.passed_tests, validation_report.total_tests
+            );
         }
-        
+
         if let Some(integration_report) = &results.integration_report {
-            println!("Integration Tests: {}/{} passed", 
-                    integration_report.passed_tests, integration_report.total_tests);
+            println!(
+                "Integration Tests: {}/{} passed",
+                integration_report.passed_tests, integration_report.total_tests
+            );
         }
-        
+
         if let Some(benchmark_report) = &results.benchmark_report {
-            println!("Performance Benchmarks: {}/{} passed", 
-                    benchmark_report.passed_benchmarks, benchmark_report.total_benchmarks);
+            println!(
+                "Performance Benchmarks: {}/{} passed",
+                benchmark_report.passed_benchmarks, benchmark_report.total_benchmarks
+            );
         }
-        
-        println!("=" .repeat(60));
-        
+
+        println!("=".repeat(60));
+
         if results.overall_success {
             println!("🎉 ALL TESTS PASSED! CQL schema validation is working correctly.");
         } else {
@@ -620,60 +701,79 @@ struct BenchmarkSummary {
 }
 
 /// Parse command line arguments
-fn parse_args() -> ArgMatches<'static> {
-    App::new("CQL Validation Test Runner")
+fn parse_args() -> ArgMatches {
+    Command::new("CQL Validation Test Runner")
         .version("1.0")
         .about("Comprehensive test runner for CQL schema validation")
-        .arg(Arg::with_name("validation")
-            .long("validation")
-            .help("Run validation suite tests")
-            .takes_value(false))
-        .arg(Arg::with_name("integration")
-            .long("integration")
-            .help("Run integration tests")
-            .takes_value(false))
-        .arg(Arg::with_name("benchmarks")
-            .long("benchmarks")
-            .help("Run performance benchmarks")
-            .takes_value(false))
-        .arg(Arg::with_name("output")
-            .short("o")
-            .long("output")
-            .value_name("DIR")
-            .help("Output directory for reports")
-            .takes_value(true))
-        .arg(Arg::with_name("verbose")
-            .short("v")
-            .long("verbose")
-            .help("Verbose output")
-            .takes_value(false))
-        .arg(Arg::with_name("html")
-            .long("html")
-            .help("Generate HTML reports")
-            .takes_value(false))
-        .arg(Arg::with_name("timeout")
-            .long("timeout")
-            .value_name("SECONDS")
-            .help("Test timeout in seconds")
-            .takes_value(true))
+        .arg(
+            Arg::new("validation")
+                .long("validation")
+                .help("Run validation suite tests")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("integration")
+                .long("integration")
+                .help("Run integration tests")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("benchmarks")
+                .long("benchmarks")
+                .help("Run performance benchmarks")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("output")
+                .short("o")
+                .long("output")
+                .value_name("DIR")
+                .help("Output directory for reports")
+                .action(clap::ArgAction::Set),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short("v")
+                .long("verbose")
+                .help("Verbose output")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("html")
+                .long("html")
+                .help("Generate HTML reports")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("timeout")
+                .long("timeout")
+                .value_name("SECONDS")
+                .help("Test timeout in seconds")
+                .action(clap::ArgAction::Set),
+        )
         .get_matches()
 }
 
 /// Create test runner configuration from command line arguments
 fn create_config_from_args(matches: &ArgMatches) -> TestRunnerConfig {
-    let run_all = !matches.is_present("validation") && 
-                  !matches.is_present("integration") && 
-                  !matches.is_present("benchmarks");
-    
+    let run_all = !matches.get_flag("validation")
+        && !matches.get_flag("integration")
+        && !matches.get_flag("benchmarks");
+
     TestRunnerConfig {
-        run_validation_suite: run_all || matches.is_present("validation"),
-        run_integration_tests: run_all || matches.is_present("integration"),
-        run_performance_benchmarks: run_all || matches.is_present("benchmarks"),
-        output_dir: matches.value_of("output").unwrap_or("target/test_reports").to_string(),
-        verbose: matches.is_present("verbose"),
-        generate_html: matches.is_present("html"),
+        run_validation_suite: run_all || matches.get_flag("validation"),
+        run_integration_tests: run_all || matches.get_flag("integration"),
+        run_performance_benchmarks: run_all || matches.get_flag("benchmarks"),
+        output_dir: matches
+            .get_one::<String>("output")
+            .map(|s| s.as_str())
+            .unwrap_or("target/test_reports")
+            .to_string(),
+        verbose: matches.get_flag("verbose"),
+        generate_html: matches.get_flag("html"),
         benchmark_iterations: None,
-        timeout_seconds: matches.value_of("timeout")
+        timeout_seconds: matches
+            .get_one::<String>("timeout")
             .and_then(|s| s.parse().ok())
             .unwrap_or(300),
     }
@@ -684,11 +784,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let matches = parse_args();
     let config = create_config_from_args(&matches);
-    
+
     // Create and run test runner
     let mut runner = CqlValidationTestRunner::new(config);
     let results = runner.run_all_tests().await?;
-    
+
     // Exit with appropriate code
     if results.overall_success {
         std::process::exit(0);

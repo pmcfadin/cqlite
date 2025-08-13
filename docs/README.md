@@ -4,6 +4,8 @@
 
 Welcome to the CQLite documentation hub. This directory contains all technical documentation, user guides, and project reports organized for easy navigation and maintenance.
 
+> **📋 [Complete Documentation Index](DOCUMENTATION_INDEX.md)** - Comprehensive catalog of all project documentation with organization details and cleanup history.
+
 ---
 
 ## 🗂️ Documentation Structure

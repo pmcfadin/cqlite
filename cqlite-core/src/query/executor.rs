@@ -9,11 +9,11 @@
 //! - Index utilization
 
 use super::{
-    planner::{ExecutionStep, ParallelizationInfo, QueryPlan, StepType},
     ComparisonOperator, Condition,
+    planner::{ExecutionStep, ParallelizationInfo, QueryPlan, StepType},
 };
 use crate::{
-    schema::SchemaManager, storage::StorageEngine, Config, Error, Result, RowKey, TableId, Value,
+    Config, Error, Result, RowKey, TableId, Value, schema::SchemaManager, storage::StorageEngine,
 };
 use crossbeam::channel;
 use std::collections::HashMap;
@@ -28,12 +28,12 @@ pub use super::result::{QueryResult, QueryRow};
 pub struct QueryExecutor {
     /// Storage engine reference
     storage: Arc<StorageEngine>,
-    /// Schema manager reference
-    schema: Arc<SchemaManager>,
-    /// Configuration
-    config: Config,
-    /// Thread pool for parallel execution
-    thread_pool: tokio::runtime::Handle,
+    /// Schema manager reference (unused currently but kept for future use)
+    _schema: Arc<SchemaManager>,
+    /// Configuration (unused currently but kept for future use)
+    _config: Config,
+    /// Thread pool for parallel execution (unused currently but kept for future use)
+    _thread_pool: tokio::runtime::Handle,
 }
 
 impl QueryExecutor {
@@ -41,9 +41,9 @@ impl QueryExecutor {
     pub fn new(storage: Arc<StorageEngine>, schema: Arc<SchemaManager>, config: &Config) -> Self {
         Self {
             storage,
-            schema,
-            config: config.clone(),
-            thread_pool: tokio::runtime::Handle::current(),
+            _schema: schema,
+            _config: config.clone(),
+            _thread_pool: tokio::runtime::Handle::current(),
         }
     }
 

@@ -7,14 +7,14 @@
 use super::vint::{encode_vint, parse_vint, parse_vint_length};
 use crate::{
     error::{Error, Result},
-    types::{Value, UdtValue, UdtField, UdtTypeDef, TombstoneInfo, TombstoneType, RowKey},
     schema::{CqlType, UdtRegistry},
+    types::{RowKey, TombstoneInfo, TombstoneType, UdtField, UdtTypeDef, UdtValue, Value},
 };
 use nom::{
+    IResult,
     bytes::complete::take,
     combinator::{map, map_res},
-    number::complete::{be_f32, be_f64, be_i32, be_i64, be_u16, be_u32, be_u8},
-    IResult,
+    number::complete::{be_f32, be_f64, be_i32, be_i64, be_u8, be_u16, be_u32},
 };
 
 /// CQL type identifiers as they appear in the binary format
@@ -128,7 +128,6 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
         }
     }
 }
-
 
 /// Parse a boolean value (1 byte: 0x00 = false, 0x01 = true)
 pub fn parse_boolean(input: &[u8]) -> IResult<&[u8], Value> {
@@ -262,13 +261,16 @@ pub fn parse_list_enhanced(input: &[u8]) -> IResult<&[u8], Value> {
 /// Legacy list parser for backward compatibility
 pub fn parse_list(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, count) = parse_vint_length(input)?;
-    
+
     // Validate count to prevent memory exhaustion attacks
     const MAX_COLLECTION_SIZE: usize = 1_000_000;
     if count > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
     }
-    
+
     if count == 0 {
         return Ok((input, Value::List(Vec::new())));
     }
@@ -299,13 +301,16 @@ pub fn parse_set_enhanced(input: &[u8]) -> IResult<&[u8], Value> {
 /// Legacy set parser for backward compatibility
 pub fn parse_set(input: &[u8]) -> IResult<&[u8], Value> {
     let (remaining, list_value) = parse_list(input)?;
-    
+
     if let Value::List(elements) = list_value {
         // Convert to Set - in Cassandra, sets maintain insertion order but enforce uniqueness
         // We preserve the order as read from the SSTable for compatibility
         Ok((remaining, Value::Set(elements)))
     } else {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )))
     }
 }
 
@@ -321,17 +326,20 @@ pub fn parse_map_enhanced(input: &[u8]) -> IResult<&[u8], Value> {
 /// Legacy map parser for backward compatibility
 pub fn parse_map(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, count) = parse_vint_length(input)?;
-    
+
     // Validate count to prevent memory exhaustion
     const MAX_COLLECTION_SIZE: usize = 1_000_000;
     if count > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
     }
-    
+
     if count == 0 {
         return Ok((input, Value::Map(Vec::new())));
     }
-    
+
     let (input, key_type) = parse_cql_type_id(input)?;
     let (input, value_type) = parse_cql_type_id(input)?;
 
@@ -355,17 +363,20 @@ pub fn parse_udt_enhanced(input: &[u8]) -> IResult<&[u8], Value> {
 }
 
 /// Parse UDT with enhanced registry support
-pub fn parse_udt_enhanced_with_registry<'a>(input: &'a [u8], registry: &UdtRegistry) -> IResult<&'a [u8], Value> {
+pub fn parse_udt_enhanced_with_registry<'a>(
+    input: &'a [u8],
+    registry: &UdtRegistry,
+) -> IResult<&'a [u8], Value> {
     // First, try to parse the embedded schema to get the type name
     let original_input = input;
-    
+
     // Parse UDT type name length and name
     let (input, type_name_length) = parse_vint_length(input)?;
     let (input, type_name_bytes) = take(type_name_length)(input)?;
     let type_name = String::from_utf8(type_name_bytes.to_vec()).map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
     })?;
-    
+
     // Try to use registry first
     if let Some(udt_def) = try_find_udt_in_any_keyspace(registry, &type_name) {
         // Use registry-based parsing for better accuracy
@@ -397,7 +408,10 @@ pub fn parse_udt(input: &[u8]) -> IResult<&[u8], Value> {
         let (new_remaining, field_name_length) = parse_vint_length(remaining)?;
         let (new_remaining, field_name_bytes) = take(field_name_length)(new_remaining)?;
         let field_name = String::from_utf8(field_name_bytes.to_vec()).map_err(|_| {
-            nom::Err::Error(nom::error::Error::new(new_remaining, nom::error::ErrorKind::Verify))
+            nom::Err::Error(nom::error::Error::new(
+                new_remaining,
+                nom::error::ErrorKind::Verify,
+            ))
         })?;
 
         // Parse field type ID
@@ -419,7 +433,9 @@ pub fn parse_udt(input: &[u8]) -> IResult<&[u8], Value> {
             None
         } else if length == 0 {
             // Empty field
-            Some(create_empty_value(field_type_id).map_err(|e| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?)
+            Some(create_empty_value(field_type_id).map_err(|_e| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?)
         } else {
             // Field with data
             let (new_remaining, field_data) = take(length as usize)(remaining)?;
@@ -443,7 +459,10 @@ pub fn parse_udt(input: &[u8]) -> IResult<&[u8], Value> {
 }
 
 /// Parse UDT value with schema context (preferred method for production)
-pub fn parse_udt_with_schema<'a>(input: &'a [u8], udt_def: &UdtTypeDef) -> IResult<&'a [u8], Value> {
+pub fn parse_udt_with_schema<'a>(
+    input: &'a [u8],
+    udt_def: &UdtTypeDef,
+) -> IResult<&'a [u8], Value> {
     let mut fields = Vec::with_capacity(udt_def.fields.len());
     let mut remaining = input;
 
@@ -458,18 +477,22 @@ pub fn parse_udt_with_schema<'a>(input: &'a [u8], udt_def: &UdtTypeDef) -> IResu
             None
         } else if length == 0 {
             // Empty field - create appropriate empty value
-            Some(create_empty_value_for_cql_type(&field_def.field_type).map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?)
+            Some(
+                create_empty_value_for_cql_type(&field_def.field_type).map_err(|_| {
+                    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+                })?,
+            )
         } else {
             // Field with data
             let (new_remaining, field_data) = take(length as usize)(remaining)?;
             remaining = new_remaining;
-            
+
             // Parse field data according to its CQL type
-            Some(parse_cql_value_for_type(field_data, &field_def.field_type).map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?)
+            Some(
+                parse_cql_value_for_type(field_data, &field_def.field_type).map_err(|_| {
+                    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+                })?,
+            )
         };
 
         fields.push(UdtField {
@@ -489,16 +512,14 @@ pub fn parse_udt_with_schema<'a>(input: &'a [u8], udt_def: &UdtTypeDef) -> IResu
 
 /// Parse UDT value by looking up schema from registry with enhanced dependency resolution
 pub fn parse_udt_with_registry<'a>(
-    input: &'a [u8], 
-    type_name: &str, 
-    keyspace: &str, 
-    registry: &UdtRegistry
+    input: &'a [u8],
+    type_name: &str,
+    keyspace: &str,
+    registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
     // Try to resolve UDT with full dependency validation
     match registry.resolve_udt_with_dependencies(keyspace, type_name) {
-        Ok(udt_def) => {
-            parse_udt_with_schema_and_registry(input, udt_def, registry)
-        },
+        Ok(udt_def) => parse_udt_with_schema_and_registry(input, udt_def, registry),
         Err(_) => {
             // Fallback: try other keyspaces (for compatibility)
             if let Some(udt_def) = try_find_udt_in_any_keyspace(registry, type_name) {
@@ -512,16 +533,19 @@ pub fn parse_udt_with_registry<'a>(
 }
 
 /// Find UDT in any available keyspace (fallback for missing keyspace info)
-fn try_find_udt_in_any_keyspace<'a>(registry: &'a UdtRegistry, type_name: &str) -> Option<&'a UdtTypeDef> {
+fn try_find_udt_in_any_keyspace<'a>(
+    registry: &'a UdtRegistry,
+    type_name: &str,
+) -> Option<&'a UdtTypeDef> {
     // Try common keyspaces in order
     let common_keyspaces = ["system", "test_keyspace", "default", "cassandra"];
-    
+
     for keyspace in &common_keyspaces {
         if let Some(udt_def) = registry.get_udt(keyspace, type_name) {
             return Some(udt_def);
         }
     }
-    
+
     None
 }
 
@@ -545,7 +569,10 @@ fn create_empty_value_for_cql_type(cql_type: &CqlType) -> Result<Value> {
         CqlType::Set(_) => Ok(Value::Set(Vec::new())),
         CqlType::Map(_, _) => Ok(Value::Map(Vec::new())),
         CqlType::Tuple(_) => Ok(Value::Tuple(Vec::new())),
-        CqlType::Udt(name, _) => Ok(Value::Udt(UdtValue::new(name.clone(), "unknown".to_string()))),
+        CqlType::Udt(name, _) => Ok(Value::Udt(UdtValue::new(
+            name.clone(),
+            "unknown".to_string(),
+        ))),
         CqlType::Frozen(inner) => create_empty_value_for_cql_type(inner),
         _ => Ok(Value::Null),
     }
@@ -561,9 +588,9 @@ fn parse_cql_value_for_type(input: &[u8], cql_type: &CqlType) -> Result<Value> {
 
 /// Parse UDT with schema and registry support for nested UDTs
 pub fn parse_udt_with_schema_and_registry<'a>(
-    input: &'a [u8], 
-    udt_def: &UdtTypeDef, 
-    registry: &UdtRegistry
+    input: &'a [u8],
+    udt_def: &UdtTypeDef,
+    registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
     let mut fields = Vec::with_capacity(udt_def.fields.len());
     let mut remaining = input;
@@ -579,18 +606,28 @@ pub fn parse_udt_with_schema_and_registry<'a>(
             None
         } else if length == 0 {
             // Empty field - create appropriate empty value
-            Some(create_empty_value_for_cql_type(&field_def.field_type).map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?)
+            Some(
+                create_empty_value_for_cql_type(&field_def.field_type).map_err(|_| {
+                    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+                })?,
+            )
         } else {
             // Field with data
             let (new_remaining, field_data) = take(length as usize)(remaining)?;
             remaining = new_remaining;
-            
+
             // Parse field data with registry support for nested UDTs
-            Some(parse_cql_value_for_type_with_registry(field_data, &field_def.field_type, &udt_def.keyspace, registry).map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?)
+            Some(
+                parse_cql_value_for_type_with_registry(
+                    field_data,
+                    &field_def.field_type,
+                    &udt_def.keyspace,
+                    registry,
+                )
+                .map_err(|_| {
+                    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+                })?,
+            )
         };
 
         fields.push(UdtField {
@@ -610,46 +647,56 @@ pub fn parse_udt_with_schema_and_registry<'a>(
 
 /// Parse CQL value for a specific CQL type with registry support for nested UDTs
 fn parse_cql_value_for_type_with_registry(
-    input: &[u8], 
-    cql_type: &CqlType, 
+    input: &[u8],
+    cql_type: &CqlType,
     keyspace: &str,
-    registry: &UdtRegistry
+    registry: &UdtRegistry,
 ) -> Result<Value> {
     match cql_type {
         CqlType::Udt(udt_name, _) => {
             // Parse nested UDT using registry
-            let (_, value) = parse_udt_with_registry(input, udt_name, keyspace, registry)
-                .map_err(|_| Error::corruption(format!("Failed to parse nested UDT '{}'", udt_name)))?;
+            let (_, value) =
+                parse_udt_with_registry(input, udt_name, keyspace, registry).map_err(|_| {
+                    Error::corruption(format!("Failed to parse nested UDT '{}'", udt_name))
+                })?;
             Ok(value)
-        },
+        }
         CqlType::List(element_type) => {
             // Parse list with potential UDT elements
             let (_, value) = parse_list_with_element_type(input, element_type, keyspace, registry)
-                .map_err(|_| Error::corruption("Failed to parse list with UDT elements".to_string()))?;
+                .map_err(|_| {
+                    Error::corruption("Failed to parse list with UDT elements".to_string())
+                })?;
             Ok(value)
-        },
+        }
         CqlType::Set(element_type) => {
             // Parse set with potential UDT elements
             let (_, value) = parse_set_with_element_type(input, element_type, keyspace, registry)
-                .map_err(|_| Error::corruption("Failed to parse set with UDT elements".to_string()))?;
+                .map_err(|_| {
+                Error::corruption("Failed to parse set with UDT elements".to_string())
+            })?;
             Ok(value)
-        },
+        }
         CqlType::Map(key_type, value_type) => {
             // Parse map with potential UDT keys/values
             let (_, value) = parse_map_with_types(input, key_type, value_type, keyspace, registry)
-                .map_err(|_| Error::corruption("Failed to parse map with UDT elements".to_string()))?;
+                .map_err(|_| {
+                    Error::corruption("Failed to parse map with UDT elements".to_string())
+                })?;
             Ok(value)
-        },
+        }
         CqlType::Frozen(inner_type) => {
             // Parse frozen type (recursive)
-            let inner_value = parse_cql_value_for_type_with_registry(input, inner_type, keyspace, registry)?;
+            let inner_value =
+                parse_cql_value_for_type_with_registry(input, inner_type, keyspace, registry)?;
             Ok(Value::Frozen(Box::new(inner_value)))
-        },
+        }
         _ => {
             // For primitive types, use the standard parser
             let type_id = cql_type_to_type_id(cql_type);
-            let (_, value) = parse_cql_value(input, type_id)
-                .map_err(|_| Error::corruption("Failed to parse primitive CQL value".to_string()))?;
+            let (_, value) = parse_cql_value(input, type_id).map_err(|_| {
+                Error::corruption("Failed to parse primitive CQL value".to_string())
+            })?;
             Ok(value)
         }
     }
@@ -660,16 +707,19 @@ fn parse_list_with_element_type<'a>(
     input: &'a [u8],
     element_type: &CqlType,
     keyspace: &str,
-    registry: &UdtRegistry
+    registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
     let (input, count) = parse_vint_length(input)?;
-    
+
     // Validate count to prevent memory exhaustion attacks
     const MAX_COLLECTION_SIZE: usize = 1_000_000;
     if count > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
     }
-    
+
     if count == 0 {
         return Ok((input, Value::List(Vec::new())));
     }
@@ -681,18 +731,26 @@ fn parse_list_with_element_type<'a>(
         // Parse element length
         let (new_remaining, element_length) = be_i32(remaining)?;
         remaining = new_remaining;
-        
+
         if element_length > 0 {
             let (new_remaining, element_data) = take(element_length as usize)(remaining)?;
             remaining = new_remaining;
-            
-            let element_value = parse_cql_value_for_type_with_registry(element_data, element_type, keyspace, registry)
-                .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
+
+            let element_value = parse_cql_value_for_type_with_registry(
+                element_data,
+                element_type,
+                keyspace,
+                registry,
+            )
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?;
             elements.push(element_value);
         } else if element_length == 0 {
             // Empty element
-            let empty_value = create_empty_value_for_cql_type(element_type)
-                .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
+            let empty_value = create_empty_value_for_cql_type(element_type).map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?;
             elements.push(empty_value);
         } else {
             // Null element - skip for lists (null elements typically not allowed)
@@ -708,15 +766,19 @@ fn parse_set_with_element_type<'a>(
     input: &'a [u8],
     element_type: &CqlType,
     keyspace: &str,
-    registry: &UdtRegistry
+    registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
-    let (remaining, list_value) = parse_list_with_element_type(input, element_type, keyspace, registry)?;
-    
+    let (remaining, list_value) =
+        parse_list_with_element_type(input, element_type, keyspace, registry)?;
+
     if let Value::List(elements) = list_value {
         // Convert to Set - in Cassandra, sets maintain insertion order but enforce uniqueness
         Ok((remaining, Value::Set(elements)))
     } else {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )))
     }
 }
 
@@ -726,16 +788,19 @@ fn parse_map_with_types<'a>(
     key_type: &CqlType,
     value_type: &CqlType,
     keyspace: &str,
-    registry: &UdtRegistry
+    registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
     let (input, count) = parse_vint_length(input)?;
-    
+
     // Validate count to prevent memory exhaustion
     const MAX_COLLECTION_SIZE: usize = 1_000_000;
     if count > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
     }
-    
+
     if count == 0 {
         return Ok((input, Value::Map(Vec::new())));
     }
@@ -747,29 +812,34 @@ fn parse_map_with_types<'a>(
         // Parse key
         let (new_remaining, key_length) = be_i32(remaining)?;
         remaining = new_remaining;
-        
+
         let key = if key_length > 0 {
             let (new_remaining, key_data) = take(key_length as usize)(remaining)?;
             remaining = new_remaining;
-            parse_cql_value_for_type_with_registry(key_data, key_type, keyspace, registry)
-                .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
+            parse_cql_value_for_type_with_registry(key_data, key_type, keyspace, registry).map_err(
+                |_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)),
+            )?
         } else {
-            create_empty_value_for_cql_type(key_type)
-                .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
+            create_empty_value_for_cql_type(key_type).map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
         };
-        
+
         // Parse value
         let (new_remaining, value_length) = be_i32(remaining)?;
         remaining = new_remaining;
-        
+
         let value = if value_length > 0 {
             let (new_remaining, value_data) = take(value_length as usize)(remaining)?;
             remaining = new_remaining;
             parse_cql_value_for_type_with_registry(value_data, value_type, keyspace, registry)
-                .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
+                .map_err(|_| {
+                    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+                })?
         } else {
-            create_empty_value_for_cql_type(value_type)
-                .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
+            create_empty_value_for_cql_type(value_type).map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
         };
 
         map.push((key, value));
@@ -817,9 +887,9 @@ pub fn parse_frozen_udt<'a>(input: &'a [u8], udt_def: &UdtTypeDef) -> IResult<&'
 
 /// Parse FROZEN<UDT> with registry support for nested dependencies
 pub fn parse_frozen_udt_with_registry<'a>(
-    input: &'a [u8], 
-    udt_def: &UdtTypeDef, 
-    registry: &UdtRegistry
+    input: &'a [u8],
+    udt_def: &UdtTypeDef,
+    registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
     let (remaining, udt_value) = parse_udt_with_schema_and_registry(input, udt_def, registry)?;
     Ok((remaining, Value::Frozen(Box::new(udt_value))))
@@ -865,18 +935,23 @@ pub fn parse_tuple(input: &[u8]) -> IResult<&[u8], Value> {
 pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
     // Parse deletion timestamp (microseconds since epoch)
     let (input, deletion_time) = be_i64(input)?;
-    
+
     // Parse tombstone type byte
     let (input, tombstone_type_byte) = be_u8(input)?;
-    
+
     let tombstone_type = match tombstone_type_byte {
         0 => TombstoneType::RowTombstone,
         1 => TombstoneType::CellTombstone,
         2 => TombstoneType::RangeTombstone,
         3 => TombstoneType::TtlExpiration,
-        _ => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))),
+        _ => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
     };
-    
+
     // Parse optional TTL for TTL-based tombstones
     let (input, ttl) = if tombstone_type == TombstoneType::TtlExpiration {
         let (input, ttl_value) = be_i64(input)?;
@@ -884,7 +959,7 @@ pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
     } else {
         (input, None)
     };
-    
+
     // Parse optional clustering key range for range tombstones
     let (input, range_start, range_end) = if tombstone_type == TombstoneType::RangeTombstone {
         let (input, has_range) = be_u8(input)?;
@@ -900,7 +975,7 @@ pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
     } else {
         (input, None, None)
     };
-    
+
     let tombstone_info = TombstoneInfo {
         deletion_time,
         tombstone_type,
@@ -908,7 +983,7 @@ pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
         range_start: range_start.map(|data| RowKey::new(data)),
         range_end: range_end.map(|data| RowKey::new(data)),
     };
-    
+
     Ok((input, Value::Tombstone(tombstone_info)))
 }
 
@@ -916,13 +991,16 @@ pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
 pub fn parse_list_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
     // Enhanced Cassandra 5+ format with proper cell metadata handling
     let (input, count) = parse_vint_length(input)?;
-    
+
     // Validate count to prevent memory exhaustion attacks
     const MAX_COLLECTION_SIZE: usize = 1_000_000;
     if count > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
     }
-    
+
     if count == 0 {
         return Ok((input, Value::List(Vec::new())));
     }
@@ -938,11 +1016,18 @@ pub fn parse_list_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
         for _ in 0..count {
             let (new_remaining, element_type_id) = parse_cql_type_id(remaining)?;
             let (new_remaining, element_length) = parse_vint_length(new_remaining)?;
-            
+
             if element_length > 0 {
                 let (new_remaining, element_data) = take(element_length)(new_remaining)?;
-                let element_value = parse_cql_value_with_cell_metadata(element_data, element_type_id)
-                    .map_err(|e| nom::Err::Error(nom::error::Error::new(element_data, nom::error::ErrorKind::Verify)))?;
+                let element_value =
+                    parse_cql_value_with_cell_metadata(element_data, element_type_id).map_err(
+                        |_e| {
+                            nom::Err::Error(nom::error::Error::new(
+                                element_data,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        },
+                    )?;
                 elements.push(element_value);
                 remaining = new_remaining;
             } else {
@@ -958,11 +1043,18 @@ pub fn parse_list_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
 
         for _ in 0..count {
             let (new_remaining, element_length) = parse_vint_length(remaining)?;
-            
+
             if element_length > 0 {
                 let (new_remaining, element_data) = take(element_length)(new_remaining)?;
-                let element_value = parse_cql_value_with_cell_metadata(element_data, element_type_id)
-                    .map_err(|e| nom::Err::Error(nom::error::Error::new(element_data, nom::error::ErrorKind::Verify)))?;
+                let element_value =
+                    parse_cql_value_with_cell_metadata(element_data, element_type_id).map_err(
+                        |_e| {
+                            nom::Err::Error(nom::error::Error::new(
+                                element_data,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        },
+                    )?;
                 elements.push(element_value);
                 remaining = new_remaining;
             } else {
@@ -986,12 +1078,12 @@ fn parse_cql_value_with_cell_metadata(input: &[u8], type_id: CqlTypeId) -> Resul
     let mut offset = 0;
     if input.len() > 1 && (input[0] & 0x80) != 0 {
         offset += 1; // Skip cell flags
-        
+
         // Skip timestamp if present (8 bytes)
         if offset + 8 <= input.len() {
             offset += 8;
         }
-        
+
         // Skip TTL if present (4 bytes)
         if offset < input.len() && (input[0] & 0x40) != 0 && offset + 4 <= input.len() {
             offset += 4;
@@ -1008,16 +1100,19 @@ fn parse_cql_value_with_cell_metadata(input: &[u8], type_id: CqlTypeId) -> Resul
     Ok(value)
 }
 
-/// Parse Set with Cassandra 5+ format 
+/// Parse Set with Cassandra 5+ format
 pub fn parse_set_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
     // Sets use same binary format as lists in Cassandra 5+
     let (remaining, list_value) = parse_list_v5_format(input)?;
-    
+
     if let Value::List(elements) = list_value {
         // Convert to Set - maintain insertion order for compatibility
         Ok((remaining, Value::Set(elements)))
     } else {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )))
     }
 }
 
@@ -1025,17 +1120,20 @@ pub fn parse_set_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
 pub fn parse_map_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
     // Cassandra 5+ format: [count:vint][key_type:u8][value_type:u8][pairs...]
     let (input, count) = parse_vint_length(input)?;
-    
+
     // Validate count to prevent memory exhaustion
     const MAX_COLLECTION_SIZE: usize = 1_000_000;
     if count > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
     }
-    
+
     if count == 0 {
         return Ok((input, Value::Map(Vec::new())));
     }
-    
+
     let (input, key_type_id) = parse_cql_type_id(input)?;
     let (input, value_type_id) = parse_cql_type_id(input)?;
 
@@ -1047,7 +1145,7 @@ pub fn parse_map_v5_format(input: &[u8]) -> IResult<&[u8], Value> {
         let (new_remaining, key_length) = parse_vint_length(remaining)?;
         let (new_remaining, key_data) = take(key_length)(new_remaining)?;
         let (_, key) = parse_cql_value(key_data, key_type_id)?;
-        
+
         // Parse value with length prefix
         let (new_remaining, value_length) = parse_vint_length(new_remaining)?;
         let (new_remaining, value_data) = take(value_length)(new_remaining)?;
@@ -1162,7 +1260,7 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 for (key, value) in map {
                     let key_bytes = serialize_cql_value(key)?;
                     let value_bytes = serialize_cql_value(value)?;
-                    
+
                     result.extend_from_slice(&key_bytes[1..]); // Skip type byte
                     result.extend_from_slice(&value_bytes[1..]); // Skip type byte
                 }
@@ -1183,11 +1281,11 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
         Value::Set(set) => {
             result.push(CqlTypeId::Set as u8);
             result.extend_from_slice(&encode_vint(set.len() as i64));
-            
+
             if let Some(first) = set.first() {
                 let element_type = map_value_to_cql_type(first);
                 result.push(element_type as u8);
-                
+
                 for element in set {
                     let element_bytes = serialize_cql_value(element)?;
                     result.extend_from_slice(&element_bytes[1..]); // Skip type byte
@@ -1197,13 +1295,13 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
         Value::Tuple(tuple) => {
             result.push(CqlTypeId::Tuple as u8);
             result.extend_from_slice(&encode_vint(tuple.len() as i64));
-            
+
             // Serialize type information for each field
             for element in tuple {
                 let element_type = map_value_to_cql_type(element);
                 result.push(element_type as u8);
             }
-            
+
             // Serialize field values
             for element in tuple {
                 let element_bytes = serialize_cql_value(element)?;
@@ -1212,19 +1310,19 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
         }
         Value::Udt(udt) => {
             result.push(CqlTypeId::Udt as u8);
-            
+
             // Serialize type name
             result.extend_from_slice(&encode_vint(udt.type_name.len() as i64));
             result.extend_from_slice(udt.type_name.as_bytes());
-            
+
             // Serialize field count
             result.extend_from_slice(&encode_vint(udt.fields.len() as i64));
-            
+
             // Serialize field definitions
             for field in &udt.fields {
                 result.extend_from_slice(&encode_vint(field.name.len() as i64));
                 result.extend_from_slice(field.name.as_bytes());
-                
+
                 // Serialize field type (inferred from value or use blob as fallback)
                 let field_type = match &field.value {
                     Some(value) => map_value_to_cql_type(value),
@@ -1232,7 +1330,7 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 };
                 result.push(field_type as u8);
             }
-            
+
             // Serialize field values
             for field in &udt.fields {
                 match &field.value {
@@ -1258,7 +1356,7 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
         Value::Tombstone(info) => {
             result.push(CqlTypeId::Tombstone as u8);
             result.extend_from_slice(&info.deletion_time.to_be_bytes());
-            
+
             let tombstone_type_byte = match info.tombstone_type {
                 TombstoneType::RowTombstone => 0u8,
                 TombstoneType::CellTombstone => 1u8,
@@ -1266,12 +1364,12 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 TombstoneType::TtlExpiration => 3u8,
             };
             result.push(tombstone_type_byte);
-            
+
             // Add TTL if present
             if let Some(ttl) = info.ttl {
                 result.extend_from_slice(&ttl.to_be_bytes());
             }
-            
+
             // Add range information for range tombstones
             if info.tombstone_type == TombstoneType::RangeTombstone {
                 if let (Some(start), Some(end)) = (&info.range_start, &info.range_end) {
@@ -1390,15 +1488,24 @@ mod tests {
             type_name: "Person".to_string(),
             keyspace: "test".to_string(),
             fields: vec![
-                UdtField { name: "name".to_string(), value: Some(Value::Text("John".to_string())) },
-                UdtField { name: "age".to_string(), value: Some(Value::Integer(30)) },
-                UdtField { name: "email".to_string(), value: None }, // Null field
+                UdtField {
+                    name: "name".to_string(),
+                    value: Some(Value::Text("John".to_string())),
+                },
+                UdtField {
+                    name: "age".to_string(),
+                    value: Some(Value::Integer(30)),
+                },
+                UdtField {
+                    name: "email".to_string(),
+                    value: None,
+                }, // Null field
             ],
         };
 
         let serialized = serialize_cql_value(&Value::Udt(udt)).unwrap();
         assert!(!serialized.is_empty());
-        
+
         // Should start with UDT type ID
         assert_eq!(serialized[0], CqlTypeId::Udt as u8);
     }
@@ -1414,7 +1521,7 @@ mod tests {
 
         let serialized = serialize_cql_value(&Value::Tuple(tuple)).unwrap();
         assert!(!serialized.is_empty());
-        
+
         // Should start with Tuple type ID
         assert_eq!(serialized[0], CqlTypeId::Tuple as u8);
     }
@@ -1424,7 +1531,7 @@ mod tests {
         // Test row tombstone parsing
         let row_tombstone = Value::row_tombstone(1000);
         let serialized = serialize_cql_value(&row_tombstone).unwrap();
-        
+
         // Parse it back
         let (remaining, parsed_value) = parse_tombstone(&serialized[1..]).unwrap(); // Skip type ID
         assert!(remaining.is_empty());
@@ -1433,7 +1540,7 @@ mod tests {
         // Test TTL tombstone parsing
         let ttl_tombstone = Value::ttl_tombstone(2000, 1000);
         let serialized_ttl = serialize_cql_value(&ttl_tombstone).unwrap();
-        
+
         let (remaining, parsed_ttl) = parse_tombstone(&serialized_ttl[1..]).unwrap(); // Skip type ID
         assert!(remaining.is_empty());
         assert_eq!(parsed_ttl, ttl_tombstone);
@@ -1445,15 +1552,21 @@ mod tests {
         let tombstone = Value::cell_tombstone(5000);
         let serialized = serialize_cql_value(&tombstone).unwrap();
         assert!(!serialized.is_empty());
-        
+
         // Should start with Tombstone type ID
         assert_eq!(serialized[0], CqlTypeId::Tombstone as u8);
-        
+
         // Should contain deletion time
         let deletion_time_bytes = &serialized[1..9];
         let deletion_time = i64::from_be_bytes([
-            deletion_time_bytes[0], deletion_time_bytes[1], deletion_time_bytes[2], deletion_time_bytes[3],
-            deletion_time_bytes[4], deletion_time_bytes[5], deletion_time_bytes[6], deletion_time_bytes[7],
+            deletion_time_bytes[0],
+            deletion_time_bytes[1],
+            deletion_time_bytes[2],
+            deletion_time_bytes[3],
+            deletion_time_bytes[4],
+            deletion_time_bytes[5],
+            deletion_time_bytes[6],
+            deletion_time_bytes[7],
         ]);
         assert_eq!(deletion_time, 5000);
     }

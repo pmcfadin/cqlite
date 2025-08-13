@@ -8,10 +8,10 @@ use std::process;
 use cqlite_core::Result;
 
 // Import our test modules
-use integration_tests::{
-    format_verifier::{verify_sstable_format, SSTableFormatVerifier},
-    sstable_benchmark::{run_comprehensive_benchmark, BenchmarkConfig, SSTableBenchmark},
-    sstable_validator::{run_validation, SSTableValidator},
+use cqlite_tests::{
+    format_verifier::{SSTableFormatVerifier, verify_sstable_format},
+    sstable_benchmark::{BenchmarkConfig, SSTableBenchmark, run_comprehensive_benchmark},
+    sstable_validator::{SSTableValidator, run_validation},
 };
 
 #[tokio::main]
@@ -29,7 +29,7 @@ async fn run_tests() -> Result<()> {
     println!();
 
     let args: Vec<String> = env::args().collect();
-    
+
     match args.get(1).map(|s| s.as_str()) {
         Some("validate") => {
             println!("🔍 Running validation tests...");
@@ -138,29 +138,35 @@ async fn run_comprehensive_tests() -> Result<()> {
 
 async fn run_format_verification_tests() -> Result<()> {
     println!("Creating test SSTable files for format verification...");
-    
+
     let validator = SSTableValidator::new().await?;
-    
+
     // Create test files with different configurations
     let test_configs = vec![
         ("basic", BenchmarkConfig::default()),
-        ("no_compression", BenchmarkConfig {
-            enable_compression: false,
-            ..Default::default()
-        }),
-        ("large_values", BenchmarkConfig {
-            value_size: 4096,
-            entry_count: 1000,
-            ..Default::default()
-        }),
+        (
+            "no_compression",
+            BenchmarkConfig {
+                enable_compression: false,
+                ..Default::default()
+            },
+        ),
+        (
+            "large_values",
+            BenchmarkConfig {
+                value_size: 4096,
+                entry_count: 1000,
+                ..Default::default()
+            },
+        ),
     ];
 
     for (name, config) in test_configs {
         println!("📝 Testing {} configuration...", name);
-        
+
         let benchmark = SSTableBenchmark::new().await?;
         let _result = benchmark.run_benchmark(config).await?;
-        
+
         // The benchmark creates SSTable files which we can verify
         println!("✅ {} configuration test completed", name);
     }
@@ -170,9 +176,9 @@ async fn run_format_verification_tests() -> Result<()> {
 
 async fn run_performance_tests() -> Result<()> {
     println!("Running performance benchmarks with conservative settings...");
-    
+
     let benchmark = SSTableBenchmark::new().await?;
-    
+
     // Run a smaller benchmark for CI/testing
     let config = BenchmarkConfig {
         entry_count: 5_000,
@@ -180,51 +186,51 @@ async fn run_performance_tests() -> Result<()> {
         random_read_count: 500,
         ..Default::default()
     };
-    
+
     let result = benchmark.run_benchmark(config).await?;
     benchmark.print_results(&result);
-    
+
     // Verify performance meets minimum thresholds
     if result.write_performance.entries_per_second < 100.0 {
-        return Err(cqlite_core::error::Error::storage(
-            format!("Write performance too low: {:.0} entries/sec", 
-                result.write_performance.entries_per_second)
-        ));
+        return Err(cqlite_core::error::Error::storage(format!(
+            "Write performance too low: {:.0} entries/sec",
+            result.write_performance.entries_per_second
+        )));
     }
-    
+
     if result.read_performance.random_ops_per_sec < 50.0 {
-        return Err(cqlite_core::error::Error::storage(
-            format!("Read performance too low: {:.0} ops/sec", 
-                result.read_performance.random_ops_per_sec)
-        ));
+        return Err(cqlite_core::error::Error::storage(format!(
+            "Read performance too low: {:.0} ops/sec",
+            result.read_performance.random_ops_per_sec
+        )));
     }
-    
+
     Ok(())
 }
 
 async fn run_edge_case_tests() -> Result<()> {
     println!("Testing edge cases and error conditions...");
-    
+
     let validator = SSTableValidator::new().await?;
-    
+
     // Test edge cases
     let edge_cases = vec![
         "empty_values",
-        "large_keys", 
+        "large_keys",
         "many_small_entries",
         "unicode_data",
         "binary_data",
     ];
-    
+
     for case in edge_cases {
         println!("🧪 Testing {}...", case);
-        
+
         match case {
             "empty_values" => {
                 // Test handled in validator
             }
             "large_keys" => {
-                // Test handled in validator  
+                // Test handled in validator
             }
             "many_small_entries" => {
                 // Test with many small entries
@@ -244,10 +250,10 @@ async fn run_edge_case_tests() -> Result<()> {
             }
             _ => {}
         }
-        
+
         println!("✅ {} test completed", case);
     }
-    
+
     Ok(())
 }
 
@@ -286,62 +292,72 @@ fn print_help(program_name: &str) {
 /// Create test data for validation
 pub async fn create_test_data() -> Result<()> {
     println!("📝 Creating comprehensive test data...");
-    
+
     let validator = SSTableValidator::new().await?;
     let benchmark = SSTableBenchmark::new().await?;
-    
+
     // Create different types of test files
     let test_scenarios = vec![
-        ("small_compressed", BenchmarkConfig {
-            entry_count: 100,
-            value_size: 64,
-            enable_compression: true,
-            ..Default::default()
-        }),
-        ("large_uncompressed", BenchmarkConfig {
-            entry_count: 1000,
-            value_size: 2048,
-            enable_compression: false,
-            ..Default::default()
-        }),
-        ("many_small", BenchmarkConfig {
-            entry_count: 10000,
-            value_size: 16,
-            enable_compression: true,
-            ..Default::default()
-        }),
+        (
+            "small_compressed",
+            BenchmarkConfig {
+                entry_count: 100,
+                value_size: 64,
+                enable_compression: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "large_uncompressed",
+            BenchmarkConfig {
+                entry_count: 1000,
+                value_size: 2048,
+                enable_compression: false,
+                ..Default::default()
+            },
+        ),
+        (
+            "many_small",
+            BenchmarkConfig {
+                entry_count: 10000,
+                value_size: 16,
+                enable_compression: true,
+                ..Default::default()
+            },
+        ),
     ];
-    
+
     for (name, config) in test_scenarios {
         println!("Creating {} test file...", name);
         let _result = benchmark.run_benchmark(config).await?;
         println!("✅ {} test file created", name);
     }
-    
+
     Ok(())
 }
 
 /// Validate existing SSTable file
 pub async fn validate_file(file_path: &Path) -> Result<()> {
     println!("🔍 Validating SSTable file: {}", file_path.display());
-    
+
     // Check if file exists
     if !file_path.exists() {
-        return Err(cqlite_core::error::Error::storage(
-            format!("File does not exist: {}", file_path.display())
-        ));
+        return Err(cqlite_core::error::Error::storage(format!(
+            "File does not exist: {}",
+            file_path.display()
+        )));
     }
-    
+
     // Run format verification
     let format_result = SSTableFormatVerifier::verify_format(file_path)?;
     SSTableFormatVerifier::print_format_analysis(&format_result);
-    
+
     if !format_result.is_valid {
         return Err(cqlite_core::error::Error::storage(
-            "File format validation failed".to_string()
+            "File format validation failed".to_string(),
         ));
     }
-    
+
     println!("✅ File validation completed successfully");
     Ok(())
 }

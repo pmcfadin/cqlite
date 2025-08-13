@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::{types::TableId, Result, RowKey};
+use crate::{Result, RowKey, types::TableId};
 
 /// Index entry for fast key lookups
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,7 +198,7 @@ impl Index {
     }
 
     /// Load index from a file/reader
-    pub async fn load<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+    pub async fn load<R: tokio::io::AsyncRead + Unpin>(_reader: &mut R) -> Result<Self> {
         // For now, return an empty index as a placeholder
         // In a real implementation, this would deserialize the index from the reader
         Ok(Self::new())

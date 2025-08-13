@@ -8,16 +8,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
 
-use crate::{
-    platform::Platform,
-    types::TableId,
-    Config, Result, RowKey,
-};
+use crate::{Config, Result, RowKey, platform::Platform, types::TableId};
 
 use super::{
     reader::SSTableReader,
     // optimized_reader::OptimizedSSTableReader, // TODO: Re-enable when optimized_reader module is available
-    streaming_reader::{StreamingSSTableReader, StreamingStats},
+    streaming_reader::StreamingSSTableReader,
 };
 
 /// Performance benchmark results
@@ -78,7 +74,7 @@ impl PerformanceBenchmarks {
     pub async fn new(test_data_dir: &Path) -> Result<Self> {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        
+
         Ok(Self {
             test_data_dir: test_data_dir.to_path_buf(),
             platform,
@@ -89,57 +85,71 @@ impl PerformanceBenchmarks {
     /// Run comprehensive benchmarks on all available test files
     pub async fn run_comprehensive_benchmarks(&self) -> Result<Vec<BenchmarkResults>> {
         let mut results = Vec::new();
-        
+
         // Discover test SSTable files
         let test_files = self.discover_test_files().await?;
-        
+
         println!("🚀 Running comprehensive SSTable performance benchmarks");
         println!("📁 Test data directory: {}", self.test_data_dir.display());
         println!("📊 Found {} test files", test_files.len());
-        
+
         for (table_name, file_path) in test_files {
             println!("\n📋 Benchmarking table: {}", table_name);
             println!("📄 File: {}", file_path.display());
-            
+
             let file_size = fs::metadata(&file_path).await?.len();
             println!("📏 File size: {:.2} MB", file_size as f64 / 1024.0 / 1024.0);
-            
+
             // Benchmark standard reader
-            if let Ok(standard_result) = self.benchmark_standard_reader(&file_path, &table_name).await {
+            if let Ok(standard_result) = self
+                .benchmark_standard_reader(&file_path, &table_name)
+                .await
+            {
                 results.push(standard_result);
             }
-            
+
             // Benchmark optimized reader
-            if let Ok(optimized_result) = self.benchmark_optimized_reader(&file_path, &table_name).await {
+            if let Ok(optimized_result) = self
+                .benchmark_optimized_reader(&file_path, &table_name)
+                .await
+            {
                 results.push(optimized_result);
             }
-            
+
             // Benchmark streaming reader
-            if let Ok(streaming_result) = self.benchmark_streaming_reader(&file_path, &table_name).await {
+            if let Ok(streaming_result) = self
+                .benchmark_streaming_reader(&file_path, &table_name)
+                .await
+            {
                 results.push(streaming_result);
             }
         }
-        
+
         // Print summary
         self.print_benchmark_summary(&results);
-        
+
         Ok(results)
     }
 
     /// Benchmark standard SSTable reader
-    pub async fn benchmark_standard_reader(&self, file_path: &Path, table_name: &str) -> Result<BenchmarkResults> {
+    pub async fn benchmark_standard_reader(
+        &self,
+        file_path: &Path,
+        table_name: &str,
+    ) -> Result<BenchmarkResults> {
         println!("  🔍 Testing standard reader...");
-        
+
         let start_time = Instant::now();
-        let reader = SSTableReader::open(file_path, &self.config, Arc::clone(&self.platform)).await?;
-        
+        let reader =
+            SSTableReader::open(file_path, &self.config, Arc::clone(&self.platform)).await?;
+
         let table_id = TableId::new(table_name.to_string());
-        
+
         // Perform various read operations
         let mut ops_count = 0;
         let mut error_count = 0;
         let memory_start = get_memory_usage();
-        
+
         // Test sequential scan
         match reader.scan(&table_id, None, None, Some(100)).await {
             Ok(results) => {
@@ -151,7 +161,7 @@ impl PerformanceBenchmarks {
                 println!("    ❌ Sequential scan failed");
             }
         }
-        
+
         // Test random access (if we have results from scan)
         if ops_count > 0 {
             // Simulate some random key accesses
@@ -163,13 +173,13 @@ impl PerformanceBenchmarks {
                 }
             }
         }
-        
+
         let memory_end = get_memory_usage();
         let total_duration = start_time.elapsed();
         let file_size = fs::metadata(file_path).await?.len();
-        
+
         let stats = reader.stats().await?;
-        
+
         Ok(BenchmarkResults {
             reader_type: format!("Standard ({})", table_name),
             file_size,
@@ -191,26 +201,41 @@ impl PerformanceBenchmarks {
     }
 
     /// Benchmark optimized SSTable reader (TODO: Re-enable when OptimizedSSTableReader is available)
-    pub async fn benchmark_optimized_reader(&self, _file_path: &Path, _table_name: &str) -> Result<BenchmarkResults> {
+    pub async fn benchmark_optimized_reader(
+        &self,
+        _file_path: &Path,
+        _table_name: &str,
+    ) -> Result<BenchmarkResults> {
         // TODO: Re-enable when OptimizedSSTableReader is available
-        Err(crate::Error::not_found("OptimizedSSTableReader not available".to_string()))
+        Err(crate::Error::not_found(
+            "OptimizedSSTableReader not available".to_string(),
+        ))
     }
 
     /// Benchmark streaming SSTable reader
-    pub async fn benchmark_streaming_reader(&self, file_path: &Path, table_name: &str) -> Result<BenchmarkResults> {
+    pub async fn benchmark_streaming_reader(
+        &self,
+        file_path: &Path,
+        table_name: &str,
+    ) -> Result<BenchmarkResults> {
         println!("  🌊 Testing streaming reader...");
-        
+
         let start_time = Instant::now();
-        let reader = StreamingSSTableReader::open(file_path, &self.config, Arc::clone(&self.platform)).await?;
-        
+        let reader =
+            StreamingSSTableReader::open(file_path, &self.config, Arc::clone(&self.platform))
+                .await?;
+
         let table_id = TableId::new(table_name.to_string());
-        
+
         let mut ops_count = 0;
         let mut error_count = 0;
-        let memory_start = get_memory_usage();
-        
+        let _memory_start = get_memory_usage();
+
         // Test streaming scan
-        match reader.scan_streaming(&table_id, None, None, Some(100)).await {
+        match reader
+            .scan_streaming(&table_id, None, None, Some(100))
+            .await
+        {
             Ok(results) => {
                 ops_count += results.len();
                 println!("    ✅ Streaming scan: {} results", results.len());
@@ -220,7 +245,7 @@ impl PerformanceBenchmarks {
                 println!("    ❌ Streaming scan failed");
             }
         }
-        
+
         // Test streaming get operations
         for i in 0..10 {
             let test_key = RowKey::from(format!("test_key_{}", i));
@@ -229,13 +254,13 @@ impl PerformanceBenchmarks {
                 Err(_) => error_count += 1,
             }
         }
-        
-        let memory_end = get_memory_usage();
+
+        let _memory_end = get_memory_usage();
         let total_duration = start_time.elapsed();
         let file_size = fs::metadata(file_path).await?.len();
-        
+
         let streaming_stats = reader.get_streaming_stats().await?;
-        
+
         Ok(BenchmarkResults {
             reader_type: format!("Streaming ({})", table_name),
             file_size,
@@ -244,7 +269,8 @@ impl PerformanceBenchmarks {
             memory_stats: MemoryStats {
                 peak_memory_mb: streaming_stats.total_memory_mb,
                 average_memory_mb: streaming_stats.total_memory_mb,
-                efficiency_ratio: file_size as f64 / (streaming_stats.total_memory_mb * 1024.0 * 1024.0),
+                efficiency_ratio: file_size as f64
+                    / (streaming_stats.total_memory_mb * 1024.0 * 1024.0),
             },
             io_stats: IoStats {
                 bytes_read: file_size,
@@ -259,13 +285,13 @@ impl PerformanceBenchmarks {
     /// Discover available test SSTable files
     async fn discover_test_files(&self) -> Result<Vec<(String, PathBuf)>> {
         let mut test_files = Vec::new();
-        
+
         // Look for SSTable directories
         let sstables_dir = self.test_data_dir.join("sstables");
         if !sstables_dir.exists() {
             return Ok(test_files);
         }
-        
+
         let mut dir_entries = fs::read_dir(&sstables_dir).await?;
         while let Some(entry) = dir_entries.next_entry().await? {
             let path = entry.path();
@@ -281,7 +307,7 @@ impl PerformanceBenchmarks {
                 }
             }
         }
-        
+
         Ok(test_files)
     }
 
@@ -289,28 +315,60 @@ impl PerformanceBenchmarks {
     fn print_benchmark_summary(&self, results: &[BenchmarkResults]) {
         println!("\n📊 BENCHMARK SUMMARY");
         println!("═══════════════════════════════════════════════════════════════");
-        
+
         for result in results {
             println!("\n📋 {}", result.reader_type);
-            println!("   📏 File size: {:.2} MB", result.file_size as f64 / 1024.0 / 1024.0);
-            println!("   ⏱️  Duration: {:.2}ms", result.total_duration.as_millis());
+            println!(
+                "   📏 File size: {:.2} MB",
+                result.file_size as f64 / 1024.0 / 1024.0
+            );
+            println!(
+                "   ⏱️  Duration: {:.2}ms",
+                result.total_duration.as_millis()
+            );
             println!("   🚀 Ops/sec: {:.2}", result.ops_per_second);
-            println!("   💾 Peak memory: {:.2} MB", result.memory_stats.peak_memory_mb);
-            println!("   📈 Efficiency: {:.2}", result.memory_stats.efficiency_ratio);
-            println!("   📡 Cache hit rate: {:.2}%", result.io_stats.cache_hit_rate * 100.0);
+            println!(
+                "   💾 Peak memory: {:.2} MB",
+                result.memory_stats.peak_memory_mb
+            );
+            println!(
+                "   📈 Efficiency: {:.2}",
+                result.memory_stats.efficiency_ratio
+            );
+            println!(
+                "   📡 Cache hit rate: {:.2}%",
+                result.io_stats.cache_hit_rate * 100.0
+            );
             if result.error_count > 0 {
                 println!("   ❌ Errors: {}", result.error_count);
             }
         }
-        
+
         // Find best performers
         if !results.is_empty() {
-            let fastest = results.iter().max_by(|a, b| a.ops_per_second.partial_cmp(&b.ops_per_second).unwrap()).unwrap();
-            let most_efficient = results.iter().max_by(|a, b| a.memory_stats.efficiency_ratio.partial_cmp(&b.memory_stats.efficiency_ratio).unwrap()).unwrap();
-            
+            let fastest = results
+                .iter()
+                .max_by(|a, b| a.ops_per_second.partial_cmp(&b.ops_per_second).unwrap())
+                .unwrap();
+            let most_efficient = results
+                .iter()
+                .max_by(|a, b| {
+                    a.memory_stats
+                        .efficiency_ratio
+                        .partial_cmp(&b.memory_stats.efficiency_ratio)
+                        .unwrap()
+                })
+                .unwrap();
+
             println!("\n🏆 PERFORMANCE WINNERS");
-            println!("   🚀 Fastest: {} ({:.2} ops/sec)", fastest.reader_type, fastest.ops_per_second);
-            println!("   💾 Most efficient: {} (ratio: {:.2})", most_efficient.reader_type, most_efficient.memory_stats.efficiency_ratio);
+            println!(
+                "   🚀 Fastest: {} ({:.2} ops/sec)",
+                fastest.reader_type, fastest.ops_per_second
+            );
+            println!(
+                "   💾 Most efficient: {} (ratio: {:.2})",
+                most_efficient.reader_type, most_efficient.memory_stats.efficiency_ratio
+            );
         }
     }
 }
@@ -370,7 +428,7 @@ mod tests {
     async fn test_memory_monitor() {
         let mut monitor = MemoryMonitor::new();
         monitor.sample();
-        
+
         assert!(monitor.peak_memory() >= 0.0);
         assert!(monitor.average_memory() >= 0.0);
     }

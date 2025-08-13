@@ -4,7 +4,7 @@
 //! interpretation of structures, magic numbers, and data layouts.
 
 use clap::{Arg, Command};
-use colored::*;
+use colored::Colorize;
 use format_validator::{
     format_constants::*,
     utils::{format_hex_dump, read_file_safe},
@@ -76,7 +76,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let magic_scan = matches.get_flag("magic-scan");
     let vint_scan = matches.get_flag("vint-scan");
 
-    println!("{}", "Cassandra 5+ SSTable Hex Analyzer".bright_cyan().bold());
+    println!(
+        "{}",
+        "Cassandra 5+ SSTable Hex Analyzer".bright_cyan().bold()
+    );
     println!("{}", "=".repeat(50).bright_cyan());
     println!();
 
@@ -84,7 +87,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = read_file_safe(file_path, 100 * 1024 * 1024)?; // 100MB limit
     let file_type = SSTableFileType::from_path(file_path);
 
-    println!("📁 {}: {} ({} bytes)", "File".bright_yellow(), file_path.display(), data.len());
+    println!(
+        "📁 {}: {} ({} bytes)",
+        "File".bright_yellow(),
+        file_path.display(),
+        data.len()
+    );
     println!("📋 {}: {:?}", "Detected Type".bright_yellow(), file_type);
     println!();
 
@@ -121,7 +129,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", hex_dump);
 
     if analyze_all && data.len() > 4096 {
-        println!("{}", format!("... (showing first 4KB of {} total bytes)", data.len()).bright_black());
+        println!(
+            "{}",
+            format!("... (showing first 4KB of {} total bytes)", data.len()).bright_black()
+        );
     }
 
     Ok(())
@@ -138,7 +149,11 @@ fn perform_format_analysis(data: &[u8], file_type: SSTableFileType) -> Result<()
         SSTableFileType::Partitions => analyze_bti_partitions_file(data)?,
         SSTableFileType::Rows => analyze_bti_rows_file(data)?,
         _ => {
-            println!("⚠️  {}: Format analysis not implemented for {:?}", "Warning".bright_yellow(), file_type);
+            println!(
+                "⚠️  {}: Format analysis not implemented for {:?}",
+                "Warning".bright_yellow(),
+                file_type
+            );
         }
     }
 
@@ -147,7 +162,10 @@ fn perform_format_analysis(data: &[u8], file_type: SSTableFileType) -> Result<()
 
 fn analyze_data_file(data: &[u8]) -> Result<(), ValidationError> {
     if data.len() < 6 {
-        return Err(ValidationError::FileTruncated { expected: 6, found: data.len() });
+        return Err(ValidationError::FileTruncated {
+            expected: 6,
+            found: data.len(),
+        });
     }
 
     // Check magic number
@@ -161,7 +179,12 @@ fn analyze_data_file(data: &[u8]) -> Result<(), ValidationError> {
         _ => println!("   ❌ Unknown magic number"),
     }
 
-    println!("📊 {}: {:#06x} ({})", "Version".bright_blue(), version, version);
+    println!(
+        "📊 {}: {:#06x} ({})",
+        "Version".bright_blue(),
+        version,
+        version
+    );
     if version == SUPPORTED_VERSION {
         println!("   ✅ Supported version");
     } else {
@@ -180,24 +203,52 @@ fn analyze_data_file(data: &[u8]) -> Result<(), ValidationError> {
 
 fn analyze_flags(flags: u32) {
     println!("   Basic Flags (0-7):");
-    if flags & 0x01 != 0 { println!("     🗜️  Has compression"); }
-    if flags & 0x02 != 0 { println!("     📊 Has static columns"); }
-    if flags & 0x04 != 0 { println!("     📋 Has regular columns"); }
-    if flags & 0x08 != 0 { println!("     🔗 Has complex columns"); }
-    if flags & 0x10 != 0 { println!("     🗑️  Has partition-level deletion"); }
-    if flags & 0x20 != 0 { println!("     ⏱️  Has TTL data"); }
+    if flags & 0x01 != 0 {
+        println!("     🗜️  Has compression");
+    }
+    if flags & 0x02 != 0 {
+        println!("     📊 Has static columns");
+    }
+    if flags & 0x04 != 0 {
+        println!("     📋 Has regular columns");
+    }
+    if flags & 0x08 != 0 {
+        println!("     🔗 Has complex columns");
+    }
+    if flags & 0x10 != 0 {
+        println!("     🗑️  Has partition-level deletion");
+    }
+    if flags & 0x20 != 0 {
+        println!("     ⏱️  Has TTL data");
+    }
 
     println!("   Feature Flags (8-15):");
-    if flags & 0x0100 != 0 { println!("     🔑 Key range support enabled"); }
-    if flags & 0x0200 != 0 { println!("     ⏰ Long deletion time format"); }
-    if flags & 0x0400 != 0 { println!("     🎯 Token space coverage present"); }
-    if flags & 0x0800 != 0 { println!("     📈 Enhanced min/max timestamps"); }
+    if flags & 0x0100 != 0 {
+        println!("     🔑 Key range support enabled");
+    }
+    if flags & 0x0200 != 0 {
+        println!("     ⏰ Long deletion time format");
+    }
+    if flags & 0x0400 != 0 {
+        println!("     🎯 Token space coverage present");
+    }
+    if flags & 0x0800 != 0 {
+        println!("     📈 Enhanced min/max timestamps");
+    }
 
     println!("   Compression Flags (16-23):");
-    if flags & 0x010000 != 0 { println!("     🚀 LZ4 compression"); }
-    if flags & 0x020000 != 0 { println!("     ⚡ Snappy compression"); }
-    if flags & 0x040000 != 0 { println!("     📦 Deflate compression"); }
-    if flags & 0x080000 != 0 { println!("     🔧 Custom compression"); }
+    if flags & 0x010000 != 0 {
+        println!("     🚀 LZ4 compression");
+    }
+    if flags & 0x020000 != 0 {
+        println!("     ⚡ Snappy compression");
+    }
+    if flags & 0x040000 != 0 {
+        println!("     📦 Deflate compression");
+    }
+    if flags & 0x080000 != 0 {
+        println!("     🔧 Custom compression");
+    }
 }
 
 fn analyze_index_file(data: &[u8]) -> Result<(), ValidationError> {
@@ -207,12 +258,15 @@ fn analyze_index_file(data: &[u8]) -> Result<(), ValidationError> {
 
 fn analyze_statistics_file(data: &[u8]) -> Result<(), ValidationError> {
     if data.len() < 4 {
-        return Err(ValidationError::FileTruncated { expected: 4, found: data.len() });
+        return Err(ValidationError::FileTruncated {
+            expected: 4,
+            found: data.len(),
+        });
     }
 
     let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     println!("🔮 {}: {:#010x}", "Magic Number".bright_blue(), magic);
-    
+
     if magic == STATISTICS_MAGIC {
         println!("   ✅ Valid Statistics.db magic");
     } else {
@@ -224,14 +278,16 @@ fn analyze_statistics_file(data: &[u8]) -> Result<(), ValidationError> {
 
 fn analyze_bti_partitions_file(data: &[u8]) -> Result<(), ValidationError> {
     if data.len() < 16 {
-        return Err(ValidationError::FileTruncated { expected: 16, found: data.len() });
+        return Err(ValidationError::FileTruncated {
+            expected: 16,
+            found: data.len(),
+        });
     }
 
     let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     let version = u16::from_be_bytes([data[4], data[5]]);
     let root_offset = u64::from_be_bytes([
-        data[6], data[7], data[8], data[9],
-        data[10], data[11], data[12], data[13]
+        data[6], data[7], data[8], data[9], data[10], data[11], data[12], data[13],
     ]);
     let flags = u32::from_be_bytes([data[14], data[15], data[16], data[17]]);
 
@@ -264,13 +320,14 @@ fn scan_magic_numbers(data: &[u8]) -> Result<(), ValidationError> {
     let mut found_count = 0;
 
     for i in 0..data.len().saturating_sub(3) {
-        let magic = u32::from_be_bytes([data[i], data[i+1], data[i+2], data[i+3]]);
-        
+        let magic = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+
         for (known_magic, name) in &known_magics {
             if magic == *known_magic {
-                println!("✨ {}: {} at offset {:#010x}", 
-                    "Found".bright_green(), 
-                    name.bright_white(), 
+                println!(
+                    "✨ {}: {} at offset {:#010x}",
+                    "Found".bright_green(),
+                    name.bright_white(),
                     i
                 );
                 found_count += 1;
@@ -297,10 +354,11 @@ fn scan_vints(data: &[u8]) -> Result<(), ValidationError> {
     while i < data.len() {
         if let Ok((value, length)) = decode_vint(&data[i..]) {
             if length > 0 && length <= MAX_VINT_SIZE {
-                println!("🔢 {}: {} (length: {}) at offset {:#010x}", 
-                    "VInt".bright_cyan(), 
-                    value, 
-                    length, 
+                println!(
+                    "🔢 {}: {} (length: {}) at offset {:#010x}",
+                    "VInt".bright_cyan(),
+                    value,
+                    length,
                     i
                 );
                 found_count += 1;
@@ -326,25 +384,29 @@ fn decode_vint(bytes: &[u8]) -> Result<(i64, usize), ValidationError> {
     if bytes.is_empty() {
         return Err(ValidationError::InvalidVInt {
             offset: 0,
-            reason: "Empty input".to_string()
+            reason: "Empty input".to_string(),
         });
     }
 
     let first_byte = bytes[0];
     let leading_zeros = first_byte.leading_zeros() as usize;
-    let length = if leading_zeros >= 8 { 1 } else { leading_zeros + 1 };
+    let length = if leading_zeros >= 8 {
+        1
+    } else {
+        leading_zeros + 1
+    };
 
     if length > MAX_VINT_SIZE {
         return Err(ValidationError::InvalidVInt {
             offset: 0,
-            reason: format!("VInt too long: {}", length)
+            reason: format!("VInt too long: {}", length),
         });
     }
 
     if bytes.len() < length {
         return Err(ValidationError::InvalidVInt {
             offset: 0,
-            reason: "Truncated VInt".to_string()
+            reason: "Truncated VInt".to_string(),
         });
     }
 

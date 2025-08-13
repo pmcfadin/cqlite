@@ -5,25 +5,35 @@ members = [
     "cqlite-wasm",
     "cqlite-cli",
     "tests",
-    "proof-of-concept",
-    "test-env/cassandra5/validation",
-    "testing-framework",
+    "examples",
+    "tools/*",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["CQLite Team"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cqlite/cqlite"
 keywords = ["database", "embedded", "sstable", "wasm"]
 categories = ["database-implementations", "embedded", "wasm"]
-rust-version = "1.70"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unused_imports = "deny"
+unused_variables = "deny"
+dead_code = "warn"  # Allow dead code during development
+unused_mut = "deny"
+unused_assignments = "deny"
+unreachable_code = "deny"
+unused_must_use = "deny"
+warnings = "warn"  # Allow warnings during Rust 2024 migration
+private_interfaces = "allow"  # Allow private interfaces during development
 
 [workspace.dependencies]
-# Core dependencies
-tokio = { version = "1.0", features = ["full"] }
+# Core dependencies - avoid "full" features, enable per-crate
+tokio = { version = "1.0", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"
@@ -42,8 +52,11 @@ console = "0.15"
 ratatui = "0.24"
 crossterm = "0.27"
 
-# Storage and compression
+# Storage and compression - define versions, feature-gate in individual crates
 lz4_flex = "0.11"
+snap = "1.1"
+flate2 = "1.0"
+zstd = "0.13"
 crc32fast = "1.3"
 
 # Collections and data structures
@@ -56,13 +69,14 @@ bytes = "1.4"
 memmap2 = "0.9"
 
 # Development and testing
-criterion = "0.5"
+criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.0"
 tempfile = "3.8"
 once_cell = "1.19"
 assert_cmd = "2.0"
 predicates = "3.0"
 tokio-test = "0.4"
+rand = "0.8"
 
 # Configuration parsing
 toml = "0.8"
@@ -116,6 +130,14 @@ rpath = false
 lto = false
 debug-assertions = true
 codegen-units = 256
-panic = "unwind"
 incremental = true
 overflow-checks = true
+
+# Clippy configuration for strict code quality
+[workspace.lints.clippy]
+# Set clippy group lints with lower priority to avoid conflicts
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+missing_docs_in_private_items = "warn"

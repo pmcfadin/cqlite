@@ -1,0 +1,414 @@
+name: Issue Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      issue_number:
+        description: 'Issue number to validate'
+        required: false
+        type: number
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to validate'
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  checks: write
+
+jobs:
+  pre-commit-validation:
+    name: Pre-Commit Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Install Pre-Commit Tools
+      run: |
+        pip install pre-commit
+        cargo install cargo-sort --locked
+        cargo install cargo-machete --locked
+
+    - name: Pre-Commit Checks
+      run: |
+        cat > .pre-commit-config.yaml << 'EOF'
+        repos:
+          - repo: local
+            hooks:
+              - id: rust-formatting
+                name: Rust Formatting
+                entry: cargo fmt --all --
+                language: system
+                types: [rust]
+                pass_filenames: false
+              
+              - id: rust-clippy
+                name: Rust Clippy
+                entry: cargo clippy --all-targets --all-features -- -D warnings
+                language: system
+                types: [rust]
+                pass_filenames: false
+              
+              - id: cargo-sort
+                name: Cargo.toml Sorting
+                entry: cargo sort --workspace --check
+                language: system
+                files: Cargo.toml
+                pass_filenames: false
+              
+              - id: unused-dependencies
+                name: Unused Dependencies
+                entry: cargo machete
+                language: system
+                pass_filenames: false
+              
+              - id: trailing-whitespace
+                name: Trailing Whitespace
+                entry: sed -i 's/[[:space:]]*$//'
+                language: system
+                types: [text]
+              
+              - id: end-of-file-fixer
+                name: End of File Fixer
+                entry: sed -i -e '$a\'
+                language: system
+                types: [text]
+        EOF
+        
+        pre-commit run --all-files --show-diff-on-failure
+
+    - name: Commit Message Validation
+      if: github.event_name == 'pull_request'
+      run: |
+        # Get all commit messages in PR
+        git log --format='%s' origin/${{ github.base_ref }}..HEAD > commit_messages.txt
+        
+        # Validate commit format
+        while read -r message; do
+          if ! echo "$message" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\(.+\))?: .{1,50}'; then
+            echo "❌ Invalid commit message format: $message"
+            echo "Expected format: type(scope)?: description (max 50 chars)"
+            exit 1
+          fi
+        done < commit_messages.txt
+        
+        echo "✅ All commit messages follow conventional format"
+
+  requirement-checklist:
+    name: Requirement Checklist Verification
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Parse PR Body for Requirements
+      uses: actions/github-script@v7
+      id: parse-requirements
+      with:
+        script: |
+          const pr = await github.rest.pulls.get({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: context.issue.number
+          });
+          
+          const body = pr.data.body || '';
+          const issueMatch = body.match(/(?:Fixes|Closes|Resolves) #(\d+)/i);
+          const issueNumber = issueMatch ? issueMatch[1] : null;
+          
+          // Extract checklist items
+          const checklistItems = body.match(/- \[[ x]\] .+/g) || [];
+          const checkedItems = checklistItems.filter(item => item.includes('[x]'));
+          
+          core.setOutput('issue_number', issueNumber);
+          core.setOutput('total_items', checklistItems.length);
+          core.setOutput('checked_items', checkedItems.length);
+          
+          return {
+            issueNumber,
+            totalItems: checklistItems.length,
+            checkedItems: checkedItems.length,
+            completion: checklistItems.length > 0 ? (checkedItems.length / checklistItems.length * 100).toFixed(1) : 0
+          };
+
+    - name: Validate Against Issue Requirements
+      if: steps.parse-requirements.outputs.issue_number
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const issueNumber = ${{ steps.parse-requirements.outputs.issue_number }};
+          
+          // Get issue details
+          const issue = await github.rest.issues.get({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: issueNumber
+          });
+          
+          // Check if issue has P0 or P1 label
+          const labels = issue.data.labels.map(l => l.name);
+          const priority = labels.find(l => l.match(/^P[0-2]$/));
+          
+          // Extract requirements from issue
+          const issueBody = issue.data.body || '';
+          const acceptanceCriteria = issueBody.match(/## Acceptance Criteria[\s\S]*?(?=##|$)/);
+          
+          if (acceptanceCriteria) {
+            const criteria = acceptanceCriteria[0].match(/- \[[ x]\] .+/g) || [];
+            console.log(`Found ${criteria.length} acceptance criteria in issue #${issueNumber}`);
+            
+            // Create validation report
+            const report = {
+              issue: issueNumber,
+              priority: priority || 'unspecified',
+              criteriaCount: criteria.length,
+              prCompletion: ${{ steps.parse-requirements.outputs.completion }}
+            };
+            
+            // Add check annotation
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Requirement Validation',
+              head_sha: context.sha,
+              status: 'completed',
+              conclusion: report.prCompletion >= 80 ? 'success' : 'failure',
+              output: {
+                title: `Issue #${issueNumber} Requirements`,
+                summary: `
+                  **Priority:** ${report.priority}
+                  **Acceptance Criteria:** ${report.criteriaCount}
+                  **PR Completion:** ${report.prCompletion}%
+                  
+                  ${report.prCompletion < 80 ? '⚠️ PR checklist completion is below 80%' : '✅ PR checklist meets completion threshold'}
+                `
+              }
+            });
+          }
+
+  automated-testing:
+    name: Automated Testing Validation
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        test_suite: [unit, integration, stress]
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Unit Test Suite
+      if: matrix.test_suite == 'unit'
+      run: |
+        # Run with different feature combinations
+        cargo test --lib --no-default-features
+        cargo test --lib --all-features
+        cargo test --lib # default features
+        
+        # Generate coverage report
+        cargo install cargo-tarpaulin --locked
+        cargo tarpaulin --lib --out Xml --output-dir coverage
+        
+        echo "✅ Unit tests completed"
+
+    - name: Integration Test Suite
+      if: matrix.test_suite == 'integration'
+      run: |
+        # Setup test environment
+        mkdir -p test-data
+        
+        # Run integration tests
+        cargo test --test '*' --all-features -- --test-threads=1
+        
+        # Run example programs
+        cargo run --example basic_usage
+        cargo run --example advanced_queries
+        
+        echo "✅ Integration tests completed"
+
+    - name: Stress Test Suite
+      if: matrix.test_suite == 'stress'
+      run: |
+        # Build stress test binary
+        cargo build --release --bin stress_test || echo "No stress test binary"
+        
+        # Run property-based tests
+        cargo test --features quickcheck -- --ignored
+        
+        # Memory leak detection (Linux only)
+        if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+          sudo apt-get update && sudo apt-get install -y valgrind
+          cargo build --release
+          valgrind --leak-check=full --error-exitcode=1 ./target/release/cqlite_test || true
+        fi
+        
+        echo "✅ Stress tests completed"
+
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.os }}-${{ matrix.test_suite }}
+        path: |
+          coverage/
+          test-results/
+          *.log
+
+  cross-platform-validation:
+    name: Cross-Platform Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Cross
+      run: |
+        cargo install cross --locked
+
+    - name: Test Target Compatibility
+      run: |
+        # Test common targets
+        targets=(
+          "x86_64-unknown-linux-gnu"
+          "x86_64-unknown-linux-musl"
+          "x86_64-pc-windows-gnu"
+          "x86_64-apple-darwin"
+          "aarch64-unknown-linux-gnu"
+          "aarch64-apple-darwin"
+          "wasm32-unknown-unknown"
+          "wasm32-wasi"
+        )
+        
+        for target in "${targets[@]}"; do
+          echo "::group::Testing $target"
+          cross build --target "$target" || echo "⚠️ $target build failed"
+          echo "::endgroup::"
+        done
+
+    - name: Architecture-Specific Tests
+      run: |
+        # 32-bit compatibility
+        cross test --target i686-unknown-linux-gnu
+        
+        # ARM compatibility
+        cross build --target armv7-unknown-linux-gnueabihf
+        
+        # WebAssembly validation
+        cargo install wasm-pack --locked
+        wasm-pack test --node -- --features wasm
+
+  validation-summary:
+    name: Issue Validation Summary
+    runs-on: ubuntu-latest
+    needs: [pre-commit-validation, requirement-checklist, automated-testing, cross-platform-validation]
+    if: always()
+    
+    steps:
+    - name: Generate Validation Report
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const results = {
+            preCommit: '${{ needs.pre-commit-validation.result }}',
+            requirements: '${{ needs.requirement-checklist.result }}',
+            testing: '${{ needs.automated-testing.result }}',
+            crossPlatform: '${{ needs.cross-platform-validation.result }}'
+          };
+          
+          const allPassed = Object.values(results).every(r => r === 'success' || r === 'skipped');
+          
+          const summary = `## 🔍 Issue Validation Report
+          
+          | Validation | Status | Description |
+          |------------|--------|-------------|
+          | Pre-Commit | ${results.preCommit === 'success' ? '✅' : '❌'} | Code style, formatting, commit messages |
+          | Requirements | ${results.requirements === 'success' ? '✅' : results.requirements === 'skipped' ? '⏭️' : '❌'} | Issue checklist completion |
+          | Testing | ${results.testing === 'success' ? '✅' : '❌'} | Unit, integration, stress tests |
+          | Cross-Platform | ${results.crossPlatform === 'success' ? '✅' : '❌'} | Multi-platform compatibility |
+          
+          **Validation Result:** ${allPassed ? 'All validations passed! ✅' : 'Some validations failed ❌'}
+          
+          ### Next Steps
+          ${allPassed ? 
+            '- ✅ Ready for code review\n- ✅ Can be merged after approval' : 
+            '- ❌ Fix failing validations\n- ❌ Update PR to pass all checks'}
+          `;
+          
+          // Create validation check
+          await github.rest.checks.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            name: 'Issue Validation',
+            head_sha: context.sha,
+            status: 'completed',
+            conclusion: allPassed ? 'success' : 'failure',
+            output: {
+              title: 'Issue Validation Complete',
+              summary: summary
+            }
+          });
+          
+          // Comment on PR
+          if (context.eventName === 'pull_request') {
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+          }
+
+    - name: Auto-merge if Validated
+      if: |
+        needs.pre-commit-validation.result == 'success' &&
+        needs.requirement-checklist.result == 'success' &&
+        needs.automated-testing.result == 'success' &&
+        needs.cross-platform-validation.result == 'success' &&
+        github.event.pull_request.draft == false
+      uses: actions/github-script@v7
+      with:
+        script: |
+          // Check if PR has required approvals
+          const reviews = await github.rest.pulls.listReviews({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: context.issue.number
+          });
+          
+          const approvals = reviews.data.filter(r => r.state === 'APPROVED').length;
+          
+          if (approvals >= 1) {
+            // Enable auto-merge
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              merge_method: 'squash'
+            });
+            
+            console.log('✅ PR auto-merged after validation');
+          } else {
+            console.log('⏳ Waiting for code review approval');
+          }

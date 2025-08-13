@@ -3,11 +3,11 @@
 //! Command-line tool for running comprehensive Cassandra 5+ compatibility tests.
 
 use clap::{Arg, Command};
-use std::process;
-use tests::{
-    run_compatibility_validation, run_performance_validation, run_quick_compatibility_check,
-    IntegrationTestConfig, IntegrationTestRunner,
+use cqlite_tests::{
+    IntegrationTestConfig, IntegrationTestRunner, run_compatibility_validation,
+    run_performance_validation, run_quick_compatibility_check,
 };
+use std::process;
 use tokio;
 
 #[tokio::main]

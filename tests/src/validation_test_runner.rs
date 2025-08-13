@@ -4,8 +4,10 @@
 //! ensuring that test fixtures, CLI commands, and compatibility features work correctly.
 
 use crate::{
-    CLIIntegrationTestSuite, CLITestConfig, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
-    SSTableTestFixtureValidator,
+    CLIIntegrationTestSuite, CLITestConfig,
+    real_sstable_test_fixtures::{
+        SSTableTestFixtureConfig, SSTableTestFixtureGenerator, SSTableTestFixtureValidator,
+    },
 };
 use serde_json;
 use std::collections::HashMap;
@@ -175,13 +177,13 @@ impl ValidationTestRunner {
         let fixtures_dir = self.test_output_dir.join("fixtures");
         fs::create_dir_all(&fixtures_dir)?;
 
-        let generator = SSTableTestFixtureGenerator::new(fixture_config, fixtures_dir);
+        let generator = SSTableTestFixtureGenerator::new(fixture_config, fixtures_dir)?;
         let fixtures = generator.generate_all_fixtures().await?;
 
         println!("  📝 Generated {} fixtures for validation", fixtures.len());
 
         // Validate each fixture
-        let validator = SSTableTestFixtureValidator::new();
+        let validator = SSTableTestFixtureValidator::new()?;
         for fixture in fixtures {
             let validation_start = Instant::now();
             results.total_validations += 1;

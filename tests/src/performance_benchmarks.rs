@@ -4,12 +4,14 @@
 //! Cassandra-scale workloads with acceptable performance characteristics.
 
 use cqlite_core::error::Result;
-use cqlite_core::parser::header::SSTableHeader;
+use cqlite_core::parser::header::{
+    CassandraVersion, SSTableHeader, parse_sstable_header, serialize_sstable_header,
+};
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::platform::Platform;
-use cqlite_core::{types::TableId, Config, RowKey, StorageEngine, Value};
-use criterion::{black_box, BenchmarkId, Criterion};
+use cqlite_core::{Config, RowKey, Value, storage::StorageEngine, types::TableId};
+use cqlite_core::{platform::Platform, schema::SchemaManager};
+use criterion::{BenchmarkId, Criterion, black_box};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,6 +68,16 @@ impl PerformanceBenchmarks {
         }
     }
 
+    /// Get the benchmark results
+    pub fn get_results(&self) -> &Vec<BenchmarkResult> {
+        &self.results
+    }
+
+    /// Get the benchmark results (mutable)
+    pub fn get_results_mut(&mut self) -> &mut Vec<BenchmarkResult> {
+        &mut self.results
+    }
+
     /// Run all performance benchmarks
     pub async fn run_all_benchmarks(&mut self) -> Result<()> {
         println!("🚀 Running Cassandra 5+ Performance Benchmarks");
@@ -106,8 +118,8 @@ impl PerformanceBenchmarks {
         let mut successful_parses = 0;
 
         for _ in 0..iterations {
-            let parser = SSTableParser::new();
-            match parser.parse_header(&serialized) {
+            let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+            match parse_sstable_header(&serialized) {
                 Ok(_) => successful_parses += 1,
                 Err(_) => {}
             }
@@ -274,7 +286,12 @@ impl PerformanceBenchmarks {
         for i in 0..1000 {
             large_map.insert(format!("key_{:04}", i), Value::Integer(i));
         }
-        let large_map_value = Value::Map(large_map);
+        let large_map_value = Value::Map(
+            large_map
+                .into_iter()
+                .map(|(k, v)| (Value::Text(k), v))
+                .collect(),
+        );
 
         let collections = vec![large_list_value, large_map_value];
         let iterations = 1_000;
@@ -324,7 +341,10 @@ impl PerformanceBenchmarks {
         println!("  Benchmarking storage operations...");
 
         let temp_dir = TempDir::new().map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("TempDir creation failed: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("TempDir creation failed: {}", e),
+            ))
         })?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
@@ -397,7 +417,10 @@ impl PerformanceBenchmarks {
         println!("  Benchmarking concurrent operations...");
 
         let temp_dir = TempDir::new().map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("TempDir creation failed: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("TempDir creation failed: {}", e),
+            ))
         })?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
@@ -467,7 +490,10 @@ impl PerformanceBenchmarks {
         println!("  Benchmarking large dataset operations...");
 
         let temp_dir = TempDir::new().map_err(|e| {
-            cqlite_core::error::Error::io_error(format!("TempDir creation failed: {}", e))
+            cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("TempDir creation failed: {}", e),
+            ))
         })?;
         let config = Config::performance_optimized();
         let platform = Arc::new(Platform::new(&config).await?);
@@ -483,7 +509,10 @@ impl PerformanceBenchmarks {
         for batch in 0..(dataset_size / batch_size) {
             for i in 0..batch_size {
                 let key = RowKey::from(format!("large_key_{:08}_{:04}", batch, i));
-                let value = Value::Text(format!("Large dataset value {} batch {} with substantial content to test realistic scenarios", i, batch));
+                let value = Value::Text(format!(
+                    "Large dataset value {} batch {} with substantial content to test realistic scenarios",
+                    i, batch
+                ));
 
                 if engine.put(&table_id, key, value).await.is_ok() {
                     total_operations += 1;
@@ -752,6 +781,7 @@ impl PerformanceBenchmarks {
             .collect();
 
         SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0Release,
             version: 1,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "benchmark_keyspace".to_string(),
@@ -803,7 +833,10 @@ impl PerformanceBenchmarks {
                 let mut map = HashMap::new();
                 map.insert("key1".to_string(), Value::Text("value1".to_string()));
                 map.insert("key2".to_string(), Value::Integer(42));
-                map
+                // Convert HashMap to Vec<(Value, Value)>
+                let map_vec: Vec<(Value, Value)> =
+                    map.into_iter().map(|(k, v)| (Value::Text(k), v)).collect();
+                map_vec
             }),
         ]
     }

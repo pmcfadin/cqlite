@@ -7,13 +7,18 @@ pub mod memtable;
 pub mod sstable;
 pub mod wal;
 
+// REPL data access components
+pub mod repl_data_api;
+pub mod schema_discovery;
+pub mod sstable_data_manager;
+
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::platform::Platform;
 use crate::storage::batch_writer::{BatchWriter, BatchWriterBuilder};
-use crate::{types::TableId, Config, Result, RowKey, Value};
+use crate::{Config, Result, RowKey, Value, types::TableId};
 
 /// Main storage engine that coordinates all storage components
 #[derive(Debug)]
@@ -34,7 +39,8 @@ pub struct StorageEngine {
     manifest: Arc<manifest::Manifest>,
 
     /// Platform abstraction
-    platform: Arc<Platform>,
+    #[allow(dead_code)]
+    _platform: Arc<Platform>,
 
     /// Storage configuration
     config: Config,
@@ -86,7 +92,7 @@ impl StorageEngine {
             wal,
             compaction,
             manifest,
-            platform,
+            _platform: platform,
             config: config.clone(),
             batch_writer,
         })

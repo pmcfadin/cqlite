@@ -1,19 +1,23 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use cqlite_core::{Database, Config as CoreConfig};
+use cqlite_core::{Config as CoreConfig, Database};
 use std::path::PathBuf;
 use tracing::info;
 
 mod cli;
 mod commands;
 mod config;
-mod data_parser;
-mod formatter; // New cqlsh-compatible formatter
-mod interactive;
+
+use cli::InfoOutputFormat;
+// mod data_parser;
+// mod formatter; // New cqlsh-compatible formatter
+// mod interactive;
 // mod pagination;
-mod query_executor;
+// mod query_executor;
+// mod repl; // Core REPL engine
+// mod repl_data_integration; // REPL data integration
 // mod table_scanner;
-mod tui;
+// mod tui;
 
 #[derive(Parser)]
 #[command(name = "cqlite")]
@@ -114,8 +118,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: BenchCommands,
     },
-    /// Read SSTable directory or file with schema
-    Read {
+    /// Read and display SSTable contents with intelligent formatting
+    #[command(name = "read-sstable")]
+    ReadSstable {
         /// SSTable directory path (e.g., users-46436710673711f0b2cf19d64e7cbecb) or legacy file path
         sstable_path: PathBuf,
         /// Schema file path (JSON or CQL format - auto-detected by extension)
@@ -142,6 +147,72 @@ pub enum Commands {
         /// Maximum memory usage in MB (default: 100)
         #[arg(long, default_value = "100")]
         max_memory_mb: usize,
+        /// Enable interactive mode with query-like filtering
+        #[arg(long)]
+        interactive: bool,
+        /// Show progress indicators for large files
+        #[arg(long)]
+        progress: bool,
+        /// Export results to file (supports JSON, CSV, YAML)
+        #[arg(long)]
+        export: Option<PathBuf>,
+    },
+    /// Validate SSTable format and integrity
+    #[command(name = "validate-sstable")]
+    ValidateSstable {
+        /// SSTable directory path or file to validate
+        sstable_path: PathBuf,
+        /// Schema file path for enhanced validation (optional)
+        #[arg(long)]
+        schema: Option<PathBuf>,
+        /// Perform deep validation (slower but more thorough)
+        #[arg(long)]
+        deep: bool,
+        /// Fix recoverable issues during validation
+        #[arg(long)]
+        fix: bool,
+        /// Output validation report to file
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+    /// Analyze SSTable structure and provide detailed statistics
+    #[command(name = "analyze-sstable")]
+    AnalyzeSstable {
+        /// SSTable directory path or file to analyze
+        sstable_path: PathBuf,
+        /// Schema file path for enhanced analysis (optional)
+        #[arg(long)]
+        schema: Option<PathBuf>,
+        /// Include detailed statistics about data distribution
+        #[arg(long)]
+        detailed: bool,
+        /// Generate schema from SSTable structure
+        #[arg(long)]
+        infer_schema: bool,
+        /// Output analysis report to file
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+    /// Performance benchmark SSTable operations
+    #[command(name = "benchmark-sstable")]
+    BenchmarkSstable {
+        /// SSTable directory path or file to benchmark
+        sstable_path: PathBuf,
+        /// Schema file path (optional)
+        #[arg(long)]
+        schema: Option<PathBuf>,
+        /// Number of benchmark iterations (default: 10)
+        #[arg(long, default_value = "10")]
+        iterations: u32,
+        /// Benchmark operations to run (read, scan, query, all)
+        #[arg(long, default_value = "all")]
+        operations: String,
+        /// Output benchmark results to file
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Enable memory profiling
+        #[arg(long)]
+        memory_profile: bool,
     },
     /// Show SSTable directory or file information
     Info {
@@ -150,6 +221,15 @@ pub enum Commands {
         /// Show component details
         #[arg(long)]
         detailed: bool,
+        /// Output format (text, json, csv)
+        #[arg(long, value_enum, default_value = "text")]
+        format: InfoOutputFormat,
+        /// Validate file integrity
+        #[arg(long)]
+        validate: bool,
+        /// Schema file path for enhanced metadata (optional)
+        #[arg(long)]
+        schema: Option<PathBuf>,
     },
     /// Execute CQL SELECT query against SSTable data (live data, no mocking!)
     Select {
@@ -183,7 +263,6 @@ pub enum Commands {
         max_memory_mb: usize,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
@@ -297,12 +376,9 @@ async fn main() -> Result<()> {
     let database = initialize_database(&db_path, &config).await?;
 
     match cli.command {
-        Some(Commands::Repl { tui }) => {
-            if tui {
-                tui::start_tui_mode(&db_path, &config, database).await
-            } else {
-                interactive::start_repl_mode(&db_path, &config, database).await
-            }
+        Some(Commands::Repl { tui: _ }) => {
+            println!("REPL mode temporarily disabled during compilation fixes");
+            Ok(())
         }
         Some(Commands::Query {
             query,
@@ -339,7 +415,7 @@ async fn main() -> Result<()> {
             println!("❌ Benchmark commands temporarily disabled during compilation fixes");
             Ok(())
         }
-        Some(Commands::Read {
+        Some(Commands::ReadSstable {
             sstable_path,
             schema,
             limit,
@@ -349,23 +425,120 @@ async fn main() -> Result<()> {
             buffer_size: _,
             parallel: _,
             max_memory_mb: _,
-        }) => commands::read_sstable(&sstable_path, &schema, limit, skip, generation, cli.format, cli.auto_detect, cli.cassandra_version).await,
-        Some(Commands::Info { sstable_path, detailed }) => commands::sstable_info(&sstable_path, detailed, cli.auto_detect, cli.cassandra_version).await,
-        Some(Commands::Select { 
-            sstable_path, 
-            schema, 
-            query, 
-            format, 
-            auto_detect, 
+            interactive,
+            progress,
+            export,
+        }) => {
+            commands::read_sstable_enhanced(
+                &sstable_path,
+                &schema,
+                limit,
+                skip,
+                generation,
+                cli.format,
+                cli.auto_detect,
+                cli.cassandra_version,
+                interactive,
+                progress,
+                export,
+            )
+            .await
+        }
+        Some(Commands::ValidateSstable {
+            sstable_path,
+            schema,
+            deep,
+            fix,
+            report,
+        }) => {
+            commands::validate_sstable(
+                &sstable_path,
+                schema.as_deref(),
+                deep,
+                fix,
+                report.as_deref(),
+            )
+            .await
+        }
+        Some(Commands::AnalyzeSstable {
+            sstable_path,
+            schema,
+            detailed,
+            infer_schema,
+            report,
+        }) => {
+            commands::analyze_sstable(
+                &sstable_path,
+                schema.as_deref(),
+                detailed,
+                infer_schema,
+                report.as_deref(),
+            )
+            .await
+        }
+        Some(Commands::BenchmarkSstable {
+            sstable_path,
+            schema,
+            iterations,
+            operations,
+            report,
+            memory_profile,
+        }) => {
+            commands::benchmark_sstable(
+                &sstable_path,
+                schema.as_deref(),
+                iterations,
+                &operations,
+                report.as_deref(),
+                memory_profile,
+            )
+            .await
+        }
+        Some(Commands::Info {
+            sstable_path,
+            detailed,
+            format,
+            validate,
+            schema,
+        }) => {
+            commands::info::execute_info_command(
+                &sstable_path,
+                detailed,
+                format,
+                validate,
+                schema.as_deref(),
+                cli.auto_detect,
+                cli.cassandra_version,
+            )
+            .await
+        }
+        Some(Commands::Select {
+            sstable_path,
+            schema,
+            query,
+            format,
+            auto_detect,
             cassandra_version,
             page_size: _,
             buffer_size: _,
             parallel: _,
             max_memory_mb: _,
-        }) => commands::execute_select_query(&sstable_path, &schema, &query, format, auto_detect, cassandra_version).await,
+        }) => {
+            commands::execute_select_query(
+                &sstable_path,
+                &schema,
+                &query,
+                format,
+                auto_detect,
+                cassandra_version,
+            )
+            .await
+        }
         None => {
-            // Default to interactive REPL mode
-            interactive::start_repl_mode(&db_path, &config, database).await
+            // Default to help message for now
+            println!("CQLite CLI v{}", env!("CARGO_PKG_VERSION"));
+            println!("Use --help for available commands");
+            Ok(())
         }
     }
 }
@@ -379,40 +552,43 @@ async fn initialize_database(db_path: &PathBuf, config: &config::Config) -> Resu
 
     // Convert CLI config to core config
     let core_config = create_core_config(config)?;
-    
+
     info!("Initializing database at: {}", db_path.display());
-    
+
     // Open the database with the core configuration
-    let database = Database::open(db_path, core_config).await
+    let database = Database::open(db_path, core_config)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize database: {}", e))?;
-    
+
     info!("Database initialized successfully");
-    
+
     Ok(database)
 }
 
 /// Convert CLI configuration to core database configuration
 fn create_core_config(cli_config: &config::Config) -> Result<CoreConfig> {
     let mut core_config = CoreConfig::default();
-    
+
     // Apply CLI configuration settings to core config
     if let Some(memory_limit_mb) = cli_config.performance.memory_limit_mb {
         core_config.memory.max_memory = memory_limit_mb * 1024 * 1024; // Convert MB to bytes
     }
-    
+
     // Set cache size from CLI config
     core_config.memory.block_cache.max_size = cli_config.performance.cache_size_mb * 1024 * 1024; // Convert MB to bytes
-    
+
     // Set query timeout
-    core_config.query.max_execution_time = std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
-    
+    core_config.query.max_execution_time =
+        std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
+
     // Enable optimizations for better performance
     core_config.query.enable_optimization = true;
     core_config.storage.enable_bloom_filters = true;
-    
+
     // Validate the configuration
-    core_config.validate()
+    core_config
+        .validate()
         .map_err(|e| anyhow::anyhow!("Invalid database configuration: {}", e))?;
-    
+
     Ok(core_config)
 }

@@ -15,8 +15,10 @@ use crate::{Error, Result, TableId, Value};
 #[derive(Debug)]
 pub struct SelectParser {
     /// Input SQL text
+    #[allow(dead_code)]
     input: String,
     /// Current position in input
+    #[allow(dead_code)]
     position: usize,
     /// Current token being parsed
     current_token: Option<Token>,

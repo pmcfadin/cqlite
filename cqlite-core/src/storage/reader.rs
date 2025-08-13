@@ -586,7 +586,8 @@ impl SchemaAwareSSTableReader {
             CqlType::Frozen(inner_type) => {
                 // Frozen types have the same binary format as their inner type
                 // but are immutable once created
-                let (inner_value, consumed) = self.parse_column_value_exact(data, &format!("{:?}", inner_type))?;
+                let type_string = self.cql_type_to_string(&inner_type);
+                let (inner_value, consumed) = self.parse_column_value_exact(data, &type_string)?;
                 Ok((Value::Frozen(Box::new(inner_value)), consumed))
             }
             
@@ -913,6 +914,41 @@ impl SchemaAwareSSTableReader {
         }
         
         Ok((Value::Map(map_entries), pos))
+    }
+
+    /// Convert CqlType to proper string representation
+    /// Follows Cassandra CQL type format instead of using Debug
+    fn cql_type_to_string(&self, cql_type: &CqlType) -> String {
+        match cql_type {
+            CqlType::Boolean => "boolean".to_string(),
+            CqlType::TinyInt => "tinyint".to_string(),
+            CqlType::SmallInt => "smallint".to_string(),
+            CqlType::Int => "int".to_string(),
+            CqlType::BigInt => "bigint".to_string(),
+            CqlType::Float => "float".to_string(),
+            CqlType::Double => "double".to_string(),
+            CqlType::Text | CqlType::Varchar => "text".to_string(),
+            CqlType::Ascii => "ascii".to_string(),
+            CqlType::Blob => "blob".to_string(),
+            CqlType::Timestamp => "timestamp".to_string(),
+            CqlType::Date => "date".to_string(),
+            CqlType::Time => "time".to_string(),
+            CqlType::Uuid => "uuid".to_string(),
+            CqlType::TimeUuid => "timeuuid".to_string(),
+            CqlType::Inet => "inet".to_string(),
+            CqlType::Duration => "duration".to_string(),
+            CqlType::Decimal => "decimal".to_string(),
+            CqlType::List(inner) => format!("list<{}>", self.cql_type_to_string(inner)),
+            CqlType::Set(inner) => format!("set<{}>", self.cql_type_to_string(inner)),
+            CqlType::Map(key, value) => format!("map<{}, {}>", self.cql_type_to_string(key), self.cql_type_to_string(value)),
+            CqlType::Udt(name, _) => name.clone(),
+            CqlType::Tuple(types) => {
+                let type_strs: Vec<String> = types.iter().map(|t| self.cql_type_to_string(t)).collect();
+                format!("tuple<{}>", type_strs.join(", "))
+            },
+            CqlType::Frozen(inner) => format!("frozen<{}>", self.cql_type_to_string(inner)),
+            CqlType::Custom(name) => name.clone(),
+        }
     }
 }
 

@@ -10,16 +10,13 @@ use crate::schema::CqlType;
 use crate::storage::sstable::bloom::BloomFilter;
 use crate::storage::sstable::compression::{Compression, CompressionStats};
 use crate::storage::sstable::index::IndexEntry;
-use crate::{platform::Platform, types::TableId, Config, Result, RowKey, Value};
+use crate::{Config, Result, RowKey, Value, platform::Platform, types::TableId};
 
 /// Cassandra 5+ compatible SSTable format version ('oa' format)
 const CASSANDRA_FORMAT_VERSION: &[u8] = b"oa";
 
 /// Magic bytes for Cassandra SSTable file identification  
 const CASSANDRA_MAGIC: [u8; 4] = [0x5A, 0x5A, 0x5A, 0x5A];
-
-/// Default block size for data compression
-const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
 
 /// CRC32 polynomial for checksumming
 const CRC32_POLYNOMIAL: u32 = 0xEDB88320;
@@ -33,6 +30,7 @@ pub struct SSTableWriter {
     config: Config,
 
     /// Platform abstraction
+    #[allow(dead_code)]
     platform: Arc<Platform>,
 
     /// Current offset in the file
@@ -374,7 +372,7 @@ impl SSTableWriter {
             CqlType::Tuple(_) => DataType::LIST, // Map to closest existing
             CqlType::Udt(_, _) => DataType::JSON, // Map to closest existing
             CqlType::Frozen(_) => DataType::BLOB, // Map to closest existing
-            _ => DataType::TEXT, // Default fallback
+            _ => DataType::TEXT,                 // Default fallback
         };
         data.push(data_type_id);
 
@@ -426,23 +424,6 @@ impl SSTableWriter {
                 // TODO: Implement proper Cassandra serialization for complex types
                 bincode::serialize(value).map_err(|e| Error::serialization(e.to_string()))
             }
-        }
-    }
-
-    /// Legacy value serialization (kept for backward compatibility)
-    fn serialize_value_optimized(&self, value: &Value) -> Result<Vec<u8>> {
-        match value {
-            Value::Null => Ok(vec![]),
-            Value::Boolean(b) => Ok(vec![if *b { 1 } else { 0 }]),
-            Value::Integer(i) => Ok(i.to_le_bytes().to_vec()),
-            Value::BigInt(i) => Ok(i.to_le_bytes().to_vec()),
-            Value::Float(f) => Ok(f.to_le_bytes().to_vec()),
-            Value::Text(s) => Ok(s.as_bytes().to_vec()),
-            Value::Blob(b) => Ok(b.clone()),
-            Value::Timestamp(ts) => Ok(ts.to_le_bytes().to_vec()),
-            Value::Uuid(uuid) => Ok(uuid.to_vec()),
-            // For complex types, fall back to bincode
-            _ => bincode::serialize(value).map_err(|e| Error::serialization(e.to_string())),
         }
     }
 

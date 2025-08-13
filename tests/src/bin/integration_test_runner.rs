@@ -7,11 +7,11 @@
 //! - Edge case testing
 
 use clap::{Arg, Command};
-use std::time::Instant;
-use tests::{
+use cqlite_tests::{
     CLIIntegrationTestSuite, CLITestConfig, ComprehensiveIntegrationTestSuite,
     IntegrationTestConfig, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
 };
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

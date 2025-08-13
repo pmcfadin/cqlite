@@ -1,0 +1,180 @@
+tools/format-validator/src/lib.rs:6:1: error[E0583]: file not found for module `analyzer`
+tools/format-validator/src/lib.rs:7:1: error[E0583]: file not found for module `checker`
+tools/format-validator/src/lib.rs:8:1: error[E0583]: file not found for module `detector`
+tools/format-validator/src/lib.rs:9:1: error[E0583]: file not found for module `validator`
+tests/src/bin/../m3_performance_validator.rs:2:1: error[E0753]: expected outer doc comment
+tests/src/bin/../m3_performance_validator.rs:3:1: error[E0753]: expected outer doc comment
+tests/src/bin/../m3_performance_validator.rs:4:1: error[E0753]: expected outer doc comment
+tests/src/bin/../m3_performance_validator.rs:5:1: error[E0753]: expected outer doc comment
+tools/format-validator/src/lib.rs:60:5: error[E0277]: the trait bound `ValidationError: Clone` is not satisfied: the trait `Clone` is not implemented for `ValidationError`
+tests/src/bin/performance_validator.rs:233:17: error[E0560]: struct `cqlite_tests::PerformanceTargets` has no field named `max_parse_time_1gb_seconds`: `cqlite_tests::PerformanceTargets` does not have this field
+tests/src/bin/performance_validator.rs:234:17: error[E0560]: struct `cqlite_tests::PerformanceTargets` has no field named `max_memory_usage_mb`: unknown field
+tests/src/bin/performance_validator.rs:235:17: error[E0560]: struct `cqlite_tests::PerformanceTargets` has no field named `max_lookup_latency_ms`: unknown field
+tests/src/bin/performance_validator.rs:236:17: error[E0560]: struct `cqlite_tests::PerformanceTargets` has no field named `min_write_throughput_ops_sec`: `cqlite_tests::PerformanceTargets` does not have this field
+tests/src/bin/performance_validator.rs:237:17: error[E0560]: struct `cqlite_tests::PerformanceTargets` has no field named `min_read_throughput_ops_sec`: unknown field
+tests/src/bin/m3_performance_validation.rs:6:12: error[E0432]: unresolved import `clap::App`: no `App` in the root
+tests/src/bin/issue_17_real_test.rs:6:55: error[E0432]: unresolved import `cqlite_core::storage::sstable::SSTableReader`: no `SSTableReader` in `storage::sstable`
+tests/src/bin/cql_validation_test_runner.rs:12:12: error[E0432]: unresolved import `clap::App`: no `App` in the root
+tests/src/bin/m3_performance_validation.rs:111:27: error[E0433]: failed to resolve: use of unresolved module or unlinked crate `log`: use of unresolved module or unlinked crate `log`
+cqlite-cli/tests/integration_sstable_tests.rs:473:9: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+cqlite-cli/tests/integration_sstable_tests.rs:485:9: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+tests/src/bin/cql_validation_test_runner.rs:48:36: error[E0412]: cannot find type `IntegrationTestReport` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:81:23: error[E0425]: cannot find function `repeat` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:97:27: error[E0425]: cannot find function `repeat` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:121:27: error[E0425]: cannot find function `repeat` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:145:27: error[E0425]: cannot find function `repeat` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:191:53: error[E0412]: cannot find type `IntegrationTestReport` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:192:25: error[E0433]: failed to resolve: use of undeclared type `CqlIntegrationTestSuite`: use of undeclared type `CqlIntegrationTestSuite`
+tests/src/bin/cql_validation_test_runner.rs:219:23: error[E0425]: cannot find function `repeat` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:455:53: error[E0412]: cannot find type `IntegrationTestReport` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:554:23: error[E0425]: cannot find function `repeat` in this scope: not found in this scope
+tests/src/bin/cql_validation_test_runner.rs:572:23: error[E0425]: cannot find function `repeat` in this scope: not found in this scope
+cqlite-cli/tests/integration_sstable_tests.rs:499:9: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+tests/src/bin/performance_validator.rs:232:34: error[E0308]: mismatched types: expected `PerformanceTargets`, found `cqlite_tests::PerformanceTargets`
+cqlite-cli/tests/integration_sstable_tests.rs:510:9: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+tests/src/bin/cql_validation_test_runner.rs:622:20: error[E0107]: struct takes 0 lifetime arguments but 1 lifetime argument was supplied: expected 0 lifetime arguments
+cqlite-cli/tests/comprehensive_test_framework.rs:782:7: error[E0659]: `test_case` is ambiguous: ambiguous name
+cqlite-cli/tests/unit_tests.rs:100:22: error[E0432]: unresolved imports `cqlite_cli::Cli`, `cqlite_cli::Commands`, `cqlite_cli::AdminCommands`, `cqlite_cli::SchemaCommands`, `cqlite_cli::BenchCommands`: no `Cli` in the root, no `Commands` in the root, no `AdminCommands` in the root, no `SchemaCommands` in the root, no `BenchCommands` in the root
+cqlite-cli/tests/integration_tests.rs:379:36: error[E0425]: cannot find function `create_temp_database` in this scope: not found in this scope
+cqlite-cli/tests/integration_tests.rs:382:22: error[E0425]: cannot find function `run_cli_command` in this scope: not found in this scope
+cqlite-cli/tests/integration_tests.rs:403:36: error[E0425]: cannot find function `create_temp_database` in this scope: not found in this scope
+cqlite-cli/tests/integration_tests.rs:411:17: error[E0425]: cannot find function `run_cli_command` in this scope: not found in this scope
+cqlite-cli/tests/integration_sstable_tests.rs:614:13: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+cqlite-cli/tests/integration_sstable_tests.rs:632:13: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+cqlite-cli/tests/integration_sstable_tests.rs:683:17: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+cqlite-cli/tests/integration_sstable_tests.rs:741:9: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+cqlite-cli/tests/integration_sstable_tests.rs:791:13: error[E0599]: no method named `timeout` found for mutable reference `&mut std::process::Command` in the current scope: method not found in `&mut Command`
+cqlite-wasm/src/lib.rs:161:1: error[E0277]: the trait bound `wasm_bindgen::JsValue: OptionFromWasmAbi` is not satisfied: the trait `OptionFromWasmAbi` is not implemented for `wasm_bindgen::JsValue`
+cqlite-wasm/src/lib.rs:424:1: error[E0277]: the trait bound `wasm_bindgen::JsValue: OptionFromWasmAbi` is not satisfied: the trait `OptionFromWasmAbi` is not implemented for `wasm_bindgen::JsValue`
+cqlite-cli/tests/integration_tests.rs:404:13: error[E0282]: type annotations needed for `Arc<_>`
+cqlite-wasm/src/lib.rs:186:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/../m3_performance_validator.rs:146:36: error[E0308]: mismatched types: expected `Error`, found `String`
+cqlite-wasm/src/lib.rs:204:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+cqlite-cli/src/test_infrastructure/assertions.rs:205:21: error[E0433]: failed to resolve: use of unresolved module or unlinked crate `regex`: use of unresolved module or unlinked crate `regex`
+cqlite-wasm/src/lib.rs:206:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+cqlite-wasm/src/lib.rs:224:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/../m3_performance_validator.rs:357:36: error[E0308]: mismatched types: expected `Error`, found `String`
+cqlite-wasm/src/lib.rs:241:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/../m3_performance_validator.rs:364:36: error[E0308]: mismatched types: expected `Error`, found `String`
+tests/src/bin/../m3_performance_validator.rs:371:36: error[E0308]: mismatched types: expected `Error`, found `String`
+tests/src/bin/cql_validation_test_runner.rs:626:19: error[E0599]: no function or associated item named `with_name` found for struct `Arg` in the current scope: function or associated item not found in `Arg`
+cqlite-wasm/src/lib.rs:243:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+tests/src/bin/cql_validation_test_runner.rs:630:19: error[E0599]: no function or associated item named `with_name` found for struct `Arg` in the current scope: function or associated item not found in `Arg`
+cqlite-wasm/src/lib.rs:264:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:634:19: error[E0599]: no function or associated item named `with_name` found for struct `Arg` in the current scope: function or associated item not found in `Arg`
+cqlite-wasm/src/lib.rs:266:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+cqlite-wasm/src/lib.rs:287:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:638:19: error[E0599]: no function or associated item named `with_name` found for struct `Arg` in the current scope: function or associated item not found in `Arg`
+tests/src/bin/m3_performance_validation.rs:24:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:289:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+tests/src/bin/cql_validation_test_runner.rs:644:19: error[E0599]: no function or associated item named `with_name` found for struct `Arg` in the current scope: function or associated item not found in `Arg`
+tests/src/bin/cql_validation_test_runner.rs:649:19: error[E0599]: no function or associated item named `with_name` found for struct `Arg` in the current scope: function or associated item not found in `Arg`
+cqlite-wasm/src/lib.rs:304:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/m3_performance_validation.rs:32:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:306:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+tests/src/bin/cql_validation_test_runner.rs:653:19: error[E0599]: no function or associated item named `with_name` found for struct `Arg` in the current scope: function or associated item not found in `Arg`
+tests/src/bin/m3_performance_validation.rs:37:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:320:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/m3_performance_validation.rs:42:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:333:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:663:28: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+cqlite-cli/tests/unit_tests.rs:277:28: error[E0277]: the trait bound `cqlite_cli::OutputFormat: FromStr` is not satisfied: the trait `FromStr` is not implemented for `cqlite_cli::OutputFormat`
+cqlite-cli/tests/unit_tests.rs:277:9: error[E0369]: binary operation `==` cannot be applied to type `cqlite_cli::OutputFormat`: cqlite_cli::OutputFormat, cqlite_cli::OutputFormat
+tests/src/bin/m3_performance_validation.rs:47:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-cli/tests/unit_tests.rs:278:27: error[E0277]: the trait bound `cqlite_cli::OutputFormat: FromStr` is not satisfied: the trait `FromStr` is not implemented for `cqlite_cli::OutputFormat`
+cqlite-cli/tests/unit_tests.rs:278:9: error[E0369]: binary operation `==` cannot be applied to type `cqlite_cli::OutputFormat`: cqlite_cli::OutputFormat, cqlite_cli::OutputFormat
+cqlite-wasm/src/lib.rs:343:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+cqlite-cli/tests/unit_tests.rs:279:26: error[E0277]: the trait bound `cqlite_cli::OutputFormat: FromStr` is not satisfied: the trait `FromStr` is not implemented for `cqlite_cli::OutputFormat`
+cqlite-cli/tests/unit_tests.rs:279:9: error[E0369]: binary operation `==` cannot be applied to type `cqlite_cli::OutputFormat`: cqlite_cli::OutputFormat, cqlite_cli::OutputFormat
+tests/src/bin/m3_performance_validation.rs:52:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-cli/tests/unit_tests.rs:280:27: error[E0277]: the trait bound `cqlite_cli::OutputFormat: FromStr` is not satisfied: the trait `FromStr` is not implemented for `cqlite_cli::OutputFormat`
+cqlite-cli/tests/unit_tests.rs:280:9: error[E0369]: binary operation `==` cannot be applied to type `cqlite_cli::OutputFormat`: cqlite_cli::OutputFormat, cqlite_cli::OutputFormat
+cqlite-wasm/src/lib.rs:345:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+cqlite-cli/tests/unit_tests.rs:283:28: error[E0277]: the trait bound `cqlite_cli::OutputFormat: FromStr` is not satisfied: the trait `FromStr` is not implemented for `cqlite_cli::OutputFormat`
+cqlite-cli/tests/unit_tests.rs:283:9: error[E0369]: binary operation `==` cannot be applied to type `cqlite_cli::OutputFormat`: cqlite_cli::OutputFormat, cqlite_cli::OutputFormat
+tests/src/bin/cql_validation_test_runner.rs:664:28: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+cqlite-cli/tests/unit_tests.rs:284:27: error[E0277]: the trait bound `cqlite_cli::OutputFormat: FromStr` is not satisfied: the trait `FromStr` is not implemented for `cqlite_cli::OutputFormat`
+cqlite-cli/tests/unit_tests.rs:284:9: error[E0369]: binary operation `==` cannot be applied to type `cqlite_cli::OutputFormat`: cqlite_cli::OutputFormat, cqlite_cli::OutputFormat
+tests/src/bin/m3_performance_validation.rs:57:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:355:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+cqlite-cli/tests/unit_tests.rs:287:32: error[E0277]: the trait bound `cqlite_cli::OutputFormat: FromStr` is not satisfied: the trait `FromStr` is not implemented for `cqlite_cli::OutputFormat`
+cqlite-wasm/src/lib.rs:357:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+tests/src/bin/m3_performance_validation.rs:65:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:366:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:665:28: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+tests/src/bin/m3_performance_validation.rs:73:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:375:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:668:50: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+tests/src/bin/m3_performance_validation.rs:81:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:384:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/m3_performance_validation.rs:89:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:393:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:669:51: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+cqlite-wasm/src/lib.rs:402:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/m3_performance_validation.rs:95:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:411:14: error[E0277]: `Result<WasmTransaction, wasm_bindgen::JsValue>` is not a future: `Result<WasmTransaction, wasm_bindgen::JsValue>` is not a future
+tests/src/bin/m3_performance_validation.rs:100:18: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-wasm/src/lib.rs:438:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:670:56: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+cqlite-wasm/src/lib.rs:440:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+tests/src/bin/m3_performance_validation.rs:171:10: error[E0599]: no method named `value_of` found for reference `&ArgMatches` in the current scope: method not found in `&ArgMatches`
+cqlite-wasm/src/lib.rs:459:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+cqlite-wasm/src/lib.rs:461:38: error[E0277]: the trait bound `wasm_bindgen::JsValue: Serialize` is not satisfied: the trait `Serialize` is not implemented for `wasm_bindgen::JsValue`
+tests/src/bin/cql_validation_test_runner.rs:671:29: error[E0599]: no method named `value_of` found for reference `&ArgMatches` in the current scope: method not found in `&ArgMatches`
+tests/src/bin/m3_performance_validation.rs:177:10: error[E0599]: no method named `value_of` found for reference `&ArgMatches` in the current scope: method not found in `&ArgMatches`
+cqlite-wasm/src/lib.rs:470:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:672:26: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+cqlite-wasm/src/lib.rs:479:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/m3_performance_validation.rs:183:10: error[E0599]: no method named `value_of` found for reference `&ArgMatches` in the current scope: method not found in `&ArgMatches`
+cqlite-wasm/src/lib.rs:497:47: error[E0599]: `wasm_bindgen::JsValue` doesn't implement `std::fmt::Display`: `wasm_bindgen::JsValue` cannot be formatted with the default formatter
+tests/src/bin/cql_validation_test_runner.rs:673:32: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+cqlite-wasm/src/database.rs:25:1: error[E0277]: the trait bound `wasm_bindgen::JsValue: OptionFromWasmAbi` is not satisfied: the trait `OptionFromWasmAbi` is not implemented for `wasm_bindgen::JsValue`
+tests/src/bin/m3_performance_validation.rs:189:10: error[E0599]: no method named `value_of` found for reference `&ArgMatches` in the current scope: method not found in `&ArgMatches`
+tests/src/bin/cql_validation_test_runner.rs:675:34: error[E0599]: no method named `value_of` found for reference `&ArgMatches` in the current scope: method not found in `&ArgMatches`
+tests/src/bin/m3_performance_validation.rs:194:37: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+tests/src/bin/m3_performance_validation.rs:211:31: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+tests/src/bin/m3_performance_validation.rs:212:40: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+tests/src/bin/m3_performance_validation.rs:213:35: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+tests/src/bin/m3_performance_validation.rs:215:29: error[E0599]: no method named `value_of` found for reference `&ArgMatches` in the current scope: method not found in `&ArgMatches`
+tests/src/bin/m3_performance_validation.rs:216:36: error[E0599]: no method named `is_present` found for reference `&ArgMatches` in the current scope
+tests/src/bin/m3_performance_validation.rs:311:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:312:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:313:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:314:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:315:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:342:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:343:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:344:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:345:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:346:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+tests/src/bin/m3_performance_validation.rs:347:23: error[E0599]: no function or associated item named `with_name` found for struct `clap::Arg` in the current scope: function or associated item not found in `clap::Arg`
+cqlite-cli/src/test_infrastructure/container.rs:113:44: error[E0599]: no method named `lock` found for reference `&TestDatabase` in the current scope: method not found in `&TestDatabase`
+cqlite-cli/src/test_infrastructure/integration.rs:110:55: error[E0599]: no method named `clone` found for struct `container::TestContainer` in the current scope: method not found in `TestContainer`
+cqlite-cli/src/test_infrastructure/integration.rs:406:69: error[E0382]: borrow of moved value: `results`: value borrowed here after move
+cqlite-cli/src/test_infrastructure/performance.rs:128:55: error[E0599]: no method named `clone` found for struct `container::TestContainer` in the current scope: method not found in `TestContainer`
+cqlite-cli/src/test_infrastructure/container.rs:20:5: error[E0277]: `(dyn Fn() -> Result<(), Box<(dyn StdError + Send + Sync + 'static)>> + Send + Sync + 'static)` doesn't implement `Debug`: `(dyn Fn() -> Result<(), Box<(dyn StdError + Send + Sync + 'static)>> + Send + Sync + 'static)` cannot be formatted using `{:?}` because it doesn't implement `Debug`
+cqlite-cli/src/test_infrastructure/container.rs:179:37: error[E0599]: no method named `clone` found for struct `Database` in the current scope
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:86:14: error[E0599]: no method named `stdout_contains` found for enum `Result` in the current scope: method not found in `Result<CommandAssertion, Box<dyn Error + Send + Sync>>`
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:94:14: error[E0599]: no method named `stdout_contains` found for enum `Result` in the current scope: method not found in `Result<CommandAssertion, Box<dyn Error + Send + Sync>>`
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:195:36: error[E0277]: the trait bound `Vec<u8>: std::convert::From<&std::string::String>` is not satisfied: the trait `std::convert::From<&std::string::String>` is not implemented for `Vec<u8>`
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:210:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:216:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:222:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:229:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:236:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:237:21: error[E0597]: `expected` does not live long enough: borrowed value does not live long enough
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:237:21: error[E0310]: the parameter type `S` may not live long enough: the parameter type `S` must be valid for the static lifetime..., ...so that the type `S` will meet its required lifetime bounds
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:243:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:244:21: error[E0597]: `expected` does not live long enough: borrowed value does not live long enough
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:244:21: error[E0310]: the parameter type `S` may not live long enough: the parameter type `S` must be valid for the static lifetime..., ...so that the type `S` will meet its required lifetime bounds
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:250:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:257:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/cli_helpers.rs:264:9: error[E0596]: cannot borrow `self.cmd` as mutable, as `self` is not declared as mutable: cannot borrow as mutable
+cqlite-cli/src/test_infrastructure/integration.rs:495:53: error[E0382]: use of moved value: `name`: value used here after move
+cqlite-cli/src/test_infrastructure/performance.rs:559:51: error[E0382]: use of moved value: `name`: value used here after move
+cqlite-cli/src/test_infrastructure/assertions.rs:503:17: error[E0382]: use of moved value: `assertion`: value used here after move
+cqlite-cli/src/test_infrastructure/assertions.rs:516:17: error[E0382]: use of moved value: `assertion`: value used here after move
+cqlite-cli/src/test_infrastructure/assertions.rs:517:17: error[E0382]: use of moved value: `assertion`: value used here after move
+cqlite-cli/src/test_infrastructure/assertions.rs:526:17: error[E0382]: use of moved value: `assertion`: value used here after move
+cqlite-cli/src/test_infrastructure/assertions.rs:527:17: error[E0382]: use of moved value: `assertion`: value used here after move
+cqlite-cli/src/test_infrastructure/assertions.rs:528:17: error[E0382]: use of moved value: `assertion`: value used here after move

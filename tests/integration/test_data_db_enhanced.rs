@@ -111,7 +111,10 @@ async fn test_enhanced_data_parsing(
     let path = Path::new(data_path);
     
     if !path.exists() {
-        return Err(Error::io_error(format!("Test file not found: {}", data_path)));
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Test file not found: {}", data_path)
+        )));
     }
 
     println!("  📖 Opening SSTable reader...");

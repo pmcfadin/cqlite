@@ -16,10 +16,10 @@ use super::{
     select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
 };
 use crate::{
-    schema::SchemaManager,
-    storage::{sstable::reader::SSTableReader, StorageEngine},
-    types::{RowKey, Value},
     Error, Result, TableId,
+    schema::SchemaManager,
+    storage::StorageEngine,
+    types::{RowKey, Value},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub struct SelectExecutor {
     /// Schema manager for metadata
-    schema: Arc<SchemaManager>,
+    _schema: Arc<SchemaManager>,
     /// Storage engine for SSTable access
     storage: Arc<StorageEngine>,
 }
@@ -50,9 +50,9 @@ pub struct ExecutionContext {
 /// Streaming query result iterator
 pub struct QueryResultStream {
     /// Receiver for query results
-    receiver: mpsc::Receiver<Result<QueryRow>>,
+    _receiver: mpsc::Receiver<Result<QueryRow>>,
     /// Execution context
-    context: ExecutionContext,
+    _context: ExecutionContext,
 }
 
 /// Aggregation state for GROUP BY operations
@@ -79,7 +79,10 @@ enum AggregateValue {
 impl SelectExecutor {
     /// Create a new SELECT executor
     pub fn new(schema: Arc<SchemaManager>, storage: Arc<StorageEngine>) -> Self {
-        Self { schema, storage }
+        Self {
+            _schema: schema,
+            storage,
+        }
     }
 
     /// Execute an optimized query plan
@@ -207,101 +210,6 @@ impl SelectExecutor {
         }
 
         Ok(results)
-    }
-
-    /// Check bloom filters for predicate matching
-    async fn passes_bloom_filters(
-        &self,
-        _reader: &SSTableReader,
-        predicates: &[SSTablePredicate],
-    ) -> Result<bool> {
-        for predicate in predicates {
-            match &predicate.operation {
-                super::select_optimizer::SSTableFilterOp::Equal => {
-                    // TODO: Implement actual bloom filter test
-                    // For now, assume all predicates pass bloom filter test
-                    if predicate.values.is_empty() {
-                        return Ok(false);
-                    }
-                }
-                super::select_optimizer::SSTableFilterOp::In => {
-                    // TODO: Implement actual bloom filter test
-                    // For now, assume all predicates pass bloom filter test
-                    if predicate.values.is_empty() {
-                        return Ok(false);
-                    }
-                }
-                _ => {
-                    // Other operations can't use bloom filters
-                }
-            }
-        }
-        Ok(true)
-    }
-
-    /// Parse SSTable row data into QueryRow
-    async fn parse_sstable_row(
-        &self,
-        _row_data: &[u8],
-        projection: &[String],
-        _table: &TableId,
-    ) -> Result<Option<QueryRow>> {
-        // TODO: Implement proper SSTable row parsing
-        // For now, create a simple row with mock data
-        let mut values = HashMap::new();
-        
-        // Add some mock columns based on projection
-        if projection.is_empty() || projection.contains(&"*".to_string()) {
-            values.insert("id".to_string(), Value::Text("mock-id".to_string()));
-            values.insert("name".to_string(), Value::Text("mock-name".to_string()));
-        } else {
-            for col in projection {
-                if col != "*" {
-                    values.insert(col.clone(), Value::Text(format!("mock-{}", col)));
-                }
-            }
-        }
-
-        Ok(Some(QueryRow {
-            values,
-            key: RowKey::new(vec![]), // Empty key for now - should be parsed from SSTable
-            metadata: Default::default(),
-        }))
-    }
-
-    /// Parse column value from binary data
-    async fn parse_column_value(
-        &self,
-        data: &[u8],
-        data_type: &crate::types::DataType,
-    ) -> Result<(Value, usize)> {
-        // Use the existing parser from the parser module
-        let config = crate::parser::config::ParserConfig::default();
-        let parser = crate::parser::SSTableParser::new(config)?;
-        let type_id = self.datatype_to_cql_type_id(data_type);
-        // TODO: Implement parse_value method for SSTableParser
-        return Err(Error::invalid_operation("SSTableParser parse_value not yet implemented".to_string()));
-    }
-
-    /// Convert DataType to CQL type ID
-    fn datatype_to_cql_type_id(
-        &self,
-        data_type: &crate::types::DataType,
-    ) -> crate::parser::types::CqlTypeId {
-        use crate::parser::types::CqlTypeId;
-        use crate::types::DataType;
-
-        match data_type {
-            DataType::Integer => CqlTypeId::Int,
-            DataType::BigInt => CqlTypeId::BigInt,
-            DataType::Text => CqlTypeId::Varchar,
-            DataType::Boolean => CqlTypeId::Boolean,
-            DataType::Float => CqlTypeId::Double,
-            DataType::Timestamp => CqlTypeId::Timestamp,
-            DataType::Uuid => CqlTypeId::Uuid,
-            DataType::Blob => CqlTypeId::Blob,
-            _ => CqlTypeId::Varchar, // Default fallback
-        }
     }
 
     /// Evaluate SSTable predicates against a row
@@ -664,24 +572,25 @@ impl SelectExecutor {
             };
 
             // Find or create group
-            let group_index = if let Some(index) = agg_state.groups.iter().position(|(k, _)| k == &group_key) {
-                index
-            } else {
-                let initial_aggregates = agg_plan
-                    .aggregates
-                    .iter()
-                    .map(|agg_comp| match agg_comp.function {
-                        AggregateType::Count => AggregateValue::Count(0),
-                        AggregateType::Sum => AggregateValue::Sum(0.0),
-                        AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
-                        AggregateType::Min => AggregateValue::Min(Value::Null),
-                        AggregateType::Max => AggregateValue::Max(Value::Null),
-                    })
-                    .collect();
-                agg_state.groups.push((group_key, initial_aggregates));
-                agg_state.groups.len() - 1
-            };
-            
+            let group_index =
+                if let Some(index) = agg_state.groups.iter().position(|(k, _)| k == &group_key) {
+                    index
+                } else {
+                    let initial_aggregates = agg_plan
+                        .aggregates
+                        .iter()
+                        .map(|agg_comp| match agg_comp.function {
+                            AggregateType::Count => AggregateValue::Count(0),
+                            AggregateType::Sum => AggregateValue::Sum(0.0),
+                            AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
+                            AggregateType::Min => AggregateValue::Min(Value::Null),
+                            AggregateType::Max => AggregateValue::Max(Value::Null),
+                        })
+                        .collect();
+                    agg_state.groups.push((group_key, initial_aggregates));
+                    agg_state.groups.len() - 1
+                };
+
             let group_aggregates = &mut agg_state.groups[group_index].1;
 
             // Update each aggregate
@@ -693,21 +602,21 @@ impl SelectExecutor {
                     .unwrap_or(Value::Null);
 
                 match &mut group_aggregates[i] {
-                    AggregateValue::Count(ref mut count) => {
+                    AggregateValue::Count(count) => {
                         *count += 1;
                     }
-                    AggregateValue::Sum(ref mut sum) => {
+                    AggregateValue::Sum(sum) => {
                         if let Some(num_val) = column_value.as_f64() {
                             *sum += num_val;
                         }
                     }
-                    AggregateValue::Avg { ref mut sum, ref mut count } => {
+                    AggregateValue::Avg { sum, count } => {
                         if let Some(num_val) = column_value.as_f64() {
                             *sum += num_val;
                             *count += 1;
                         }
                     }
-                    AggregateValue::Min(ref mut min_val) => {
+                    AggregateValue::Min(min_val) => {
                         if min_val.is_null()
                             || (!column_value.is_null()
                                 && self.compare_values(&column_value, &*min_val).unwrap_or(0) < 0)
@@ -715,7 +624,7 @@ impl SelectExecutor {
                             *min_val = column_value;
                         }
                     }
-                    AggregateValue::Max(ref mut max_val) => {
+                    AggregateValue::Max(max_val) => {
                         if max_val.is_null()
                             || (!column_value.is_null()
                                 && self.compare_values(&column_value, &*max_val).unwrap_or(0) > 0)
@@ -766,9 +675,9 @@ impl SelectExecutor {
                 row_values.insert(agg_comp.alias.clone(), result_value);
             }
 
-            result_rows.push(QueryRow { 
-                values: row_values, 
-                key: RowKey::new(vec![]), 
+            result_rows.push(QueryRow {
+                values: row_values,
+                key: RowKey::new(vec![]),
                 metadata: Default::default(),
             });
         }
@@ -820,7 +729,7 @@ impl SelectExecutor {
 
             projected_rows.push(QueryRow {
                 values: projected_values,
-                key: RowKey::new(vec![]), 
+                key: RowKey::new(vec![]),
                 metadata: Default::default(),
             });
         }
@@ -881,20 +790,21 @@ impl SelectExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::{Config, platform::Platform};
+    use tempfile::TempDir;
 
     async fn create_test_executor() -> SelectExecutor {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
-        let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(temp_dir.path(), &config, platform.clone())
+                .await
+                .unwrap(),
+        );
         let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
-        
-        SelectExecutor {
-            schema,
-            storage,
-        }
+
+        SelectExecutor { schema, storage }
     }
 
     #[tokio::test]

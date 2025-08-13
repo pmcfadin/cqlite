@@ -3,6 +3,8 @@
 //! This module provides validation against actual Cassandra 5+ SSTable files
 //! to ensure 100% format compatibility for complex types.
 
+use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
+
 use cqlite_core::parser::header::SSTableHeader;
 use cqlite_core::parser::types::*;
 use cqlite_core::schema::{CqlType, TableSchema};
@@ -182,35 +184,41 @@ impl RealCassandraDataValidator {
     fn initialize(&mut self) -> Result<()> {
         // Load schemas
         self.load_schemas()?;
-        
+
         // Discover SSTable files
         self.discover_sstable_files()?;
-        
+
         self.results.total_files = self.sstable_files.len();
-        
-        println!("🔍 Discovered {} SSTable files for validation", self.results.total_files);
+
+        println!(
+            "🔍 Discovered {} SSTable files for validation",
+            self.results.total_files
+        );
         println!("📋 Loaded {} table schemas", self.schemas.len());
-        
+
         Ok(())
     }
 
     /// Load table schemas from schema directory
     fn load_schemas(&mut self) -> Result<()> {
         if !self.config.schema_dir.exists() {
-            println!("⚠️  Schema directory not found: {}", self.config.schema_dir.display());
+            println!(
+                "⚠️  Schema directory not found: {}",
+                self.config.schema_dir.display()
+            );
             return Ok(());
         }
 
         for entry in fs::read_dir(&self.config.schema_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
                 match TableSchema::from_file(&path) {
                     Ok(schema) => {
                         let table_key = format!("{}.{}", schema.keyspace, schema.table);
                         self.schemas.insert(table_key, schema);
-                        
+
                         if self.config.verbose_logging {
                             println!("📄 Loaded schema: {}", path.display());
                         }
@@ -228,19 +236,26 @@ impl RealCassandraDataValidator {
     /// Discover SSTable files in the configured directory
     fn discover_sstable_files(&mut self) -> Result<()> {
         if !self.config.sstable_dir.exists() {
-            return Err(Error::io(format!(
-                "SSTable directory does not exist: {}",
-                self.config.sstable_dir.display()
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "SSTable directory does not exist: {}",
+                    self.config.sstable_dir.display()
+                ),
             )));
         }
 
-        self.find_sstable_files_recursive(&self.config.sstable_dir)?;
-        
+        let sstable_dir = self.config.sstable_dir.clone();
+        self.find_sstable_files_recursive(&sstable_dir)?;
+
         // Filter by target tables if specified
         if !self.config.target_tables.is_empty() {
             self.sstable_files.retain(|path| {
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    self.config.target_tables.iter().any(|target| filename.contains(target))
+                    self.config
+                        .target_tables
+                        .iter()
+                        .any(|target| filename.contains(target))
                 } else {
                     false
                 }
@@ -255,7 +270,7 @@ impl RealCassandraDataValidator {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_dir() {
                 self.find_sstable_files_recursive(&path)?;
             } else if self.is_sstable_file(&path) {
@@ -264,8 +279,11 @@ impl RealCassandraDataValidator {
                     if metadata.len() <= self.config.max_file_size {
                         self.sstable_files.push(path);
                     } else if self.config.verbose_logging {
-                        println!("📁 Skipping large file: {} ({} bytes)", 
-                            path.display(), metadata.len());
+                        println!(
+                            "📁 Skipping large file: {} ({} bytes)",
+                            path.display(),
+                            metadata.len()
+                        );
                     }
                 }
             }
@@ -277,9 +295,9 @@ impl RealCassandraDataValidator {
     fn is_sstable_file(&self, path: &Path) -> bool {
         if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
             // Common SSTable file patterns
-            filename.ends_with("-Data.db") || 
-            filename.ends_with(".sstable") ||
-            filename.contains("na-") && filename.ends_with("-big-Data.db")
+            filename.ends_with("-Data.db")
+                || filename.ends_with(".sstable")
+                || filename.contains("na-") && filename.ends_with("-big-Data.db")
         } else {
             false
         }
@@ -294,43 +312,64 @@ impl RealCassandraDataValidator {
         let overall_start = Instant::now();
 
         for (index, sstable_path) in self.sstable_files.clone().into_iter().enumerate() {
-            println!("📄 [{}/{}] Validating: {}", 
-                index + 1, self.results.total_files, 
-                sstable_path.file_name().unwrap().to_string_lossy());
+            println!(
+                "📄 [{}/{}] Validating: {}",
+                index + 1,
+                self.results.total_files,
+                sstable_path.file_name().unwrap().to_string_lossy()
+            );
 
             let file_start = Instant::now();
-            
+
             match self.validate_single_file(&sstable_path).await {
                 Ok(file_result) => {
                     if file_result.validation_success {
                         self.results.valid_files += 1;
                         if self.config.verbose_logging {
-                            println!("  ✅ Valid ({} records, {:.2}ms)", 
-                                file_result.records_processed, file_result.processing_time_ms);
+                            println!(
+                                "  ✅ Valid ({} records, {:.2}ms)",
+                                file_result.records_processed, file_result.processing_time_ms
+                            );
                         }
                     } else {
                         self.results.invalid_files += 1;
-                        println!("  ❌ Invalid ({} errors)", file_result.validation_errors.len());
-                        
+                        println!(
+                            "  ❌ Invalid ({} errors)",
+                            file_result.validation_errors.len()
+                        );
+
                         // Print first few errors
                         for (i, error) in file_result.validation_errors.iter().take(3).enumerate() {
-                            println!("    {}. {}: {}", i + 1, error.error_type, error.error_message);
+                            println!(
+                                "    {}. {}: {}",
+                                i + 1,
+                                error.error_type,
+                                error.error_message
+                            );
                         }
                     }
 
                     // Update statistics
                     self.update_statistics_from_file(&file_result);
-                    
-                    let filename = sstable_path.file_name().unwrap().to_string_lossy().to_string();
+
+                    let filename = sstable_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
                     self.results.file_results.insert(filename, file_result);
                 }
                 Err(e) => {
                     self.results.invalid_files += 1;
                     println!("  ❌ Failed to validate: {}", e);
-                    
+
                     // Create error result
                     let error_result = FileValidationResult {
-                        filename: sstable_path.file_name().unwrap().to_string_lossy().to_string(),
+                        filename: sstable_path
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .to_string(),
                         file_size: fs::metadata(&sstable_path).map(|m| m.len()).unwrap_or(0),
                         validation_success: false,
                         records_processed: 0,
@@ -346,8 +385,12 @@ impl RealCassandraDataValidator {
                         processing_time_ms: file_start.elapsed().as_millis() as u64,
                         schema_match: false,
                     };
-                    
-                    let filename = sstable_path.file_name().unwrap().to_string_lossy().to_string();
+
+                    let filename = sstable_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
                     self.results.file_results.insert(filename, error_result);
                 }
             }
@@ -355,7 +398,7 @@ impl RealCassandraDataValidator {
 
         let total_time = overall_start.elapsed();
         self.finalize_results(total_time);
-        
+
         println!();
         println!("✅ Validation Complete!");
         self.print_summary();
@@ -367,9 +410,13 @@ impl RealCassandraDataValidator {
     async fn validate_single_file(&mut self, sstable_path: &Path) -> Result<FileValidationResult> {
         let start_time = Instant::now();
         let file_size = fs::metadata(sstable_path)?.len();
-        
+
         let mut file_result = FileValidationResult {
-            filename: sstable_path.file_name().unwrap().to_string_lossy().to_string(),
+            filename: sstable_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
             file_size,
             validation_success: false,
             records_processed: 0,
@@ -385,12 +432,20 @@ impl RealCassandraDataValidator {
 
         // Read and validate SSTable header
         let sstable_data = fs::read(sstable_path)?;
-        
-        match self.validate_sstable_format(&sstable_data, &mut file_result).await {
+
+        match self
+            .validate_sstable_format(&sstable_data, &mut file_result)
+            .await
+        {
             Ok(_) => {
                 // Validate complex types in data
-                self.validate_complex_types_in_data(&sstable_data, table_schema.as_ref(), &mut file_result).await?;
-                
+                self.validate_complex_types_in_data(
+                    &sstable_data,
+                    table_schema.as_deref(),
+                    &mut file_result,
+                )
+                .await?;
+
                 file_result.validation_success = file_result.validation_errors.is_empty();
             }
             Err(e) => {
@@ -410,7 +465,11 @@ impl RealCassandraDataValidator {
     }
 
     /// Validate SSTable format and header
-    async fn validate_sstable_format(&self, _data: &[u8], _file_result: &mut FileValidationResult) -> Result<()> {
+    async fn validate_sstable_format(
+        &self,
+        _data: &[u8],
+        _file_result: &mut FileValidationResult,
+    ) -> Result<()> {
         // TODO: Implement actual SSTable format validation
         // This would parse the SSTable header and validate format version
         Ok(())
@@ -418,10 +477,10 @@ impl RealCassandraDataValidator {
 
     /// Validate complex types found in SSTable data
     async fn validate_complex_types_in_data(
-        &self, 
-        _data: &[u8], 
-        _schema: Option<&TableSchema>, 
-        _file_result: &mut FileValidationResult
+        &self,
+        _data: &[u8],
+        _schema: Option<&TableSchema>,
+        _file_result: &mut FileValidationResult,
     ) -> Result<()> {
         // TODO: Implement actual complex type validation
         // This would:
@@ -436,7 +495,7 @@ impl RealCassandraDataValidator {
     fn identify_table_schema(&self, filename: &str) -> Option<&TableSchema> {
         // Try to extract keyspace and table from filename
         // Common patterns: keyspace-table-generation-version-Data.db
-        
+
         for (table_key, schema) in &self.schemas {
             if filename.contains(&schema.table) || filename.contains(table_key) {
                 return Some(schema);
@@ -448,12 +507,18 @@ impl RealCassandraDataValidator {
     /// Update statistics from file validation result
     fn update_statistics_from_file(&mut self, file_result: &FileValidationResult) {
         self.results.type_statistics.total_complex_values += file_result.complex_types_found.len();
-        
+
         for type_name in &file_result.complex_types_found {
-            *self.results.type_statistics.type_distribution.entry(type_name.clone()).or_insert(0) += 1;
-            
+            *self
+                .results
+                .type_statistics
+                .type_distribution
+                .entry(type_name.clone())
+                .or_insert(0) += 1;
+
             // Categorize type
-            if type_name.contains("list") || type_name.contains("set") || type_name.contains("map") {
+            if type_name.contains("list") || type_name.contains("set") || type_name.contains("map")
+            {
                 self.results.type_statistics.collections_found += 1;
             } else if type_name.contains("udt") {
                 self.results.type_statistics.udts_found += 1;
@@ -468,22 +533,27 @@ impl RealCassandraDataValidator {
     /// Finalize validation results and calculate metrics
     fn finalize_results(&mut self, total_duration: std::time::Duration) {
         self.results.success = self.results.invalid_files == 0;
-        
+
         // Calculate performance metrics
-        self.results.performance_metrics.total_processing_time_ms = total_duration.as_millis() as u64;
-        
+        self.results.performance_metrics.total_processing_time_ms =
+            total_duration.as_millis() as u64;
+
         if self.results.total_files > 0 {
-            self.results.performance_metrics.avg_file_processing_time_ms = 
-                self.results.performance_metrics.total_processing_time_ms as f64 / self.results.total_files as f64;
+            self.results.performance_metrics.avg_file_processing_time_ms =
+                self.results.performance_metrics.total_processing_time_ms as f64
+                    / self.results.total_files as f64;
         }
 
         // Calculate records per second
-        let total_records: usize = self.results.file_results.values()
+        let total_records: usize = self
+            .results
+            .file_results
+            .values()
             .map(|r| r.records_processed)
             .sum();
-        
+
         if total_duration.as_secs_f64() > 0.0 {
-            self.results.performance_metrics.records_per_second = 
+            self.results.performance_metrics.records_per_second =
                 total_records as f64 / total_duration.as_secs_f64();
         }
 
@@ -499,22 +569,32 @@ impl RealCassandraDataValidator {
             0.0
         };
 
-        self.results.compatibility_assessment.format_version_compatibility = success_rate * 100.0;
-        self.results.compatibility_assessment.type_system_compatibility = success_rate * 100.0;
-        self.results.compatibility_assessment.serialization_compatibility = success_rate * 100.0;
-        self.results.compatibility_assessment.overall_compatibility_score = success_rate * 100.0;
+        self.results
+            .compatibility_assessment
+            .format_version_compatibility = success_rate * 100.0;
+        self.results
+            .compatibility_assessment
+            .type_system_compatibility = success_rate * 100.0;
+        self.results
+            .compatibility_assessment
+            .serialization_compatibility = success_rate * 100.0;
+        self.results
+            .compatibility_assessment
+            .overall_compatibility_score = success_rate * 100.0;
 
         // Add recommendations based on results
         if success_rate < 1.0 {
-            self.results.compatibility_assessment.recommendations.push(
-                "Review failed validations for compatibility issues".to_string()
-            );
+            self.results
+                .compatibility_assessment
+                .recommendations
+                .push("Review failed validations for compatibility issues".to_string());
         }
 
         if self.results.type_statistics.total_complex_values == 0 {
-            self.results.compatibility_assessment.warnings.push(
-                "No complex types found in test data - coverage may be limited".to_string()
-            );
+            self.results
+                .compatibility_assessment
+                .warnings
+                .push("No complex types found in test data - coverage may be limited".to_string());
         }
     }
 
@@ -525,40 +605,76 @@ impl RealCassandraDataValidator {
         println!("📁 Total Files: {}", self.results.total_files);
         println!("✅ Valid Files: {}", self.results.valid_files);
         println!("❌ Invalid Files: {}", self.results.invalid_files);
-        println!("📈 Success Rate: {:.1}%", 
-            (self.results.valid_files as f64 / self.results.total_files as f64) * 100.0);
+        println!(
+            "📈 Success Rate: {:.1}%",
+            (self.results.valid_files as f64 / self.results.total_files as f64) * 100.0
+        );
         println!();
 
         println!("🔢 COMPLEX TYPE STATISTICS");
         println!("──────────────────────────");
-        println!("Collections: {}", self.results.type_statistics.collections_found);
+        println!(
+            "Collections: {}",
+            self.results.type_statistics.collections_found
+        );
         println!("UDTs: {}", self.results.type_statistics.udts_found);
         println!("Tuples: {}", self.results.type_statistics.tuples_found);
-        println!("Frozen Types: {}", self.results.type_statistics.frozen_types_found);
+        println!(
+            "Frozen Types: {}",
+            self.results.type_statistics.frozen_types_found
+        );
         println!();
 
         println!("⚡ PERFORMANCE METRICS");
         println!("─────────────────────");
-        println!("Total Time: {:.2}s", self.results.performance_metrics.total_processing_time_ms as f64 / 1000.0);
-        println!("Avg File Time: {:.2}ms", self.results.performance_metrics.avg_file_processing_time_ms);
-        println!("Records/sec: {:.1}", self.results.performance_metrics.records_per_second);
+        println!(
+            "Total Time: {:.2}s",
+            self.results.performance_metrics.total_processing_time_ms as f64 / 1000.0
+        );
+        println!(
+            "Avg File Time: {:.2}ms",
+            self.results.performance_metrics.avg_file_processing_time_ms
+        );
+        println!(
+            "Records/sec: {:.1}",
+            self.results.performance_metrics.records_per_second
+        );
         println!();
 
         println!("🎯 COMPATIBILITY ASSESSMENT");
         println!("───────────────────────────");
-        println!("Overall Score: {:.1}%", self.results.compatibility_assessment.overall_compatibility_score);
-        println!("Format Compat: {:.1}%", self.results.compatibility_assessment.format_version_compatibility);
-        println!("Type Compat: {:.1}%", self.results.compatibility_assessment.type_system_compatibility);
+        println!(
+            "Overall Score: {:.1}%",
+            self.results
+                .compatibility_assessment
+                .overall_compatibility_score
+        );
+        println!(
+            "Format Compat: {:.1}%",
+            self.results
+                .compatibility_assessment
+                .format_version_compatibility
+        );
+        println!(
+            "Type Compat: {:.1}%",
+            self.results
+                .compatibility_assessment
+                .type_system_compatibility
+        );
     }
 
     /// Generate detailed validation report
     pub fn generate_report(&self, output_path: &Path) -> Result<()> {
         let report_json = serde_json::to_string_pretty(&self.results)
             .map_err(|e| Error::serialization(format!("Failed to serialize report: {}", e)))?;
-        
-        fs::write(output_path, report_json)
-            .map_err(|e| Error::io(format!("Failed to write report: {}", e)))?;
-        
+
+        fs::write(output_path, report_json).map_err(|e| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to write report: {}", e),
+            ))
+        })?;
+
         println!("📄 Validation report written to: {}", output_path.display());
         Ok(())
     }
@@ -585,16 +701,17 @@ mod tests {
 
     #[test]
     fn test_sstable_file_detection() {
-        let validator = RealCassandraDataValidator::new(RealDataValidationConfig::default()).unwrap_or_else(|_| {
-            // Fallback for test environment without real data
-            let temp_dir = TempDir::new().unwrap();
-            let config = RealDataValidationConfig {
-                sstable_dir: temp_dir.path().to_path_buf(),
-                schema_dir: temp_dir.path().to_path_buf(),
-                ..Default::default()
-            };
-            RealCassandraDataValidator::new(config).unwrap()
-        });
+        let validator = RealCassandraDataValidator::new(RealDataValidationConfig::default())
+            .unwrap_or_else(|_| {
+                // Fallback for test environment without real data
+                let temp_dir = TempDir::new().unwrap();
+                let config = RealDataValidationConfig {
+                    sstable_dir: temp_dir.path().to_path_buf(),
+                    schema_dir: temp_dir.path().to_path_buf(),
+                    ..Default::default()
+                };
+                RealCassandraDataValidator::new(config).unwrap()
+            });
 
         // Test SSTable file pattern detection
         assert!(validator.is_sstable_file(Path::new("keyspace-table-na-1-big-Data.db")));

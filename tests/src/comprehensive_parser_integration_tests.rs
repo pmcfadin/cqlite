@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Comprehensive Parser Integration Tests for CQLite
 //!
 //! This module provides comprehensive integration tests for the updated CQLite parser,
@@ -6,14 +7,14 @@
 
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::header::{
-    parse_magic_and_version, parse_magic_and_version_legacy, serialize_sstable_header,
+    parse_magic_and_version, parse_magic_and_version_legacy, serialize_sstable_header, parse_sstable_header,
     CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
     SUPPORTED_MAGIC_NUMBERS, SUPPORTED_VERSION,
 };
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value, CqlTypeId};
 use cqlite_core::parser::vint::{encode_vint, parse_vint, parse_vint_length};
 use cqlite_core::parser::SSTableParser;
-use cqlite_core::types::Value;
+use cqlite_core::{Value, types::*};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -43,9 +44,12 @@ impl ParserIntegrationTestSuite {
     /// Create a new parser integration test suite
     pub fn new() -> Result<Self> {
         let temp_dir = TempDir::new()
-            .map_err(|e| Error::io_error(format!("Failed to create temp directory: {}", e)))?;
+            .map_err(|e| Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to create temp directory: {}", e)
+        )))?;
 
-        let parser = SSTableParser::new();
+        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
 
         Ok(Self {
             parser,
@@ -95,7 +99,7 @@ impl ParserIntegrationTestSuite {
             (CassandraVersion::Legacy, 0x6F61_0000, "Legacy 'oa' format"),
             (CassandraVersion::V5_0_Alpha, 0xAD01_0000, "Cassandra 5.0 Alpha"),
             (CassandraVersion::V5_0_Beta, 0xA007_0000, "Cassandra 5.0 Beta"),
-            (CassandraVersion::V5_0_Release, 0x4316_0000, "Cassandra 5.0 Release"),
+            (CassandraVersion::V5_0Release, 0x4316_0000, "Cassandra 5.0 Release"),
         ];
 
         let mut passed_tests = 0;
@@ -171,7 +175,7 @@ impl ParserIntegrationTestSuite {
             CassandraVersion::Legacy,
             CassandraVersion::V5_0_Alpha,
             CassandraVersion::V5_0_Beta,
-            CassandraVersion::V5_0_Release,
+            CassandraVersion::V5_0Release,
         ] {
             // Create a complete header for this version
             let header = self.create_test_header_for_version(version);
@@ -253,7 +257,7 @@ impl ParserIntegrationTestSuite {
             CassandraVersion::Legacy,
             CassandraVersion::V5_0_Alpha,
             CassandraVersion::V5_0_Beta,
-            CassandraVersion::V5_0_Release,
+            CassandraVersion::V5_0Release,
         ];
 
         let mut passed_tests = 0;
@@ -270,8 +274,9 @@ impl ParserIntegrationTestSuite {
                     total_bytes += serialized.len();
                     
                     // Parse the header back
-                    match self.parser.parse_header(&serialized) {
-                        Ok((parsed_header, bytes_read)) => {
+                    match parse_sstable_header(&serialized) {
+                        Ok((remaining, parsed_header)) => {
+                            let bytes_read = serialized.len() - remaining.len();
                             // Validate all header fields
                             let validation_passed = self.validate_header_completeness(
                                 &original_header, &parsed_header
@@ -358,8 +363,8 @@ impl ParserIntegrationTestSuite {
             Ok(serialized) => {
                 total_bytes += serialized.len();
                 
-                match self.parser.parse_header(&serialized) {
-                    Ok((parsed, _)) => {
+                match parse_sstable_header(&serialized) {
+                    Ok((_, parsed)) => {
                         if parsed.cassandra_version == CassandraVersion::Legacy {
                             passed_tests += 1;
                             println!("  ✅ Legacy format with new parser: PASS");
@@ -835,7 +840,7 @@ impl ParserIntegrationTestSuite {
             CassandraVersion::Legacy,
             CassandraVersion::V5_0_Alpha,
             CassandraVersion::V5_0_Beta,
-            CassandraVersion::V5_0_Release,
+            CassandraVersion::V5_0Release,
         ] {
             let test_header = self.create_test_header_for_version(*version);
             let serialized = serialize_sstable_header(&test_header)?;
@@ -1200,7 +1205,10 @@ impl ParserIntegrationTestSuite {
         
         let file_path = self.temp_dir.path().join("test_sstable.db");
         fs::write(&file_path, &serialized)
-            .map_err(|e| Error::io_error(format!("Failed to write test file: {}", e)))?;
+            .map_err(|e| Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to write test file: {}", e)
+        )))?;
         
         Ok(file_path)
     }
@@ -1227,7 +1235,10 @@ impl ParserIntegrationTestSuite {
         
         let file_path = self.temp_dir.path().join("test_schema.json");
         fs::write(&file_path, schema_json)
-            .map_err(|e| Error::io_error(format!("Failed to write schema file: {}", e)))?;
+            .map_err(|e| Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to write schema file: {}", e)
+        )))?;
         
         Ok(file_path)
     }
@@ -1342,7 +1353,7 @@ mod tests {
             CassandraVersion::Legacy,
             CassandraVersion::V5_0_Alpha,
             CassandraVersion::V5_0_Beta,
-            CassandraVersion::V5_0_Release,
+            CassandraVersion::V5_0Release,
         ] {
             let header = suite.create_test_header_for_version(*version);
             assert_eq!(header.cassandra_version, *version);

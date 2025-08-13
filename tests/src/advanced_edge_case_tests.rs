@@ -1,3 +1,4 @@
+use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 //! Advanced Edge Case Testing for CQLite SSTable Implementation
 //!
 //! This module provides comprehensive edge case testing that goes beyond basic

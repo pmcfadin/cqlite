@@ -274,11 +274,11 @@ impl IntegrationTestRunner {
         let mut benchmarks = PerformanceBenchmarks::new(config);
         benchmarks.run_all_benchmarks().await?;
 
-        let total_benchmarks = benchmarks.results.len();
+        let total_benchmarks = benchmarks.get_results().len();
 
         // Calculate performance score based on throughput
         let avg_ops_per_sec: f64 = benchmarks
-            .results
+            .get_results()
             .iter()
             .filter(|r| r.operations_per_second > 0.0)
             .map(|r| r.operations_per_second)

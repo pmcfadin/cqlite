@@ -5,15 +5,16 @@
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
-use tempfile::{TempDir, NamedTempFile};
-use serde_json::{json, Value};
+use tempfile::{NamedTempFile, TempDir};
+use wait_timeout::ChildExt;
 
 /// Test configuration for SSTable integration tests
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SSTableTestConfig {
     pub test_data_dir: PathBuf,
     pub temp_dir: TempDir,
@@ -40,6 +41,43 @@ fn get_cli_command() -> Command {
     Command::cargo_bin("cqlite").unwrap()
 }
 
+/// Helper function to run a command with timeout
+fn run_command_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+
+    match child.wait_timeout(timeout)? {
+        Some(status) => {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+
+            if let Some(ref mut stdout_handle) = child.stdout {
+                std::io::Read::read_to_end(stdout_handle, &mut stdout)?;
+            }
+            if let Some(ref mut stderr_handle) = child.stderr {
+                std::io::Read::read_to_end(stderr_handle, &mut stderr)?;
+            }
+
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+        None => {
+            // Timeout occurred, kill the child process
+            let _ = child.kill();
+            child.wait()?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Command timed out",
+            ))
+        }
+    }
+}
+
 /// Create test schema files for different data types
 fn create_test_schemas(config: &SSTableTestConfig) -> std::io::Result<Vec<(String, PathBuf)>> {
     let mut schemas = Vec::new();
@@ -56,14 +94,17 @@ fn create_test_schemas(config: &SSTableTestConfig) -> std::io::Result<Vec<(Strin
             "created_at": {"type": "TIMESTAMP", "kind": "Regular"}
         }
     });
-    
+
     let users_schema_path = config.temp_dir.path().join("users_schema.json");
-    fs::write(&users_schema_path, serde_json::to_string_pretty(&users_schema)?)?;
+    fs::write(
+        &users_schema_path,
+        serde_json::to_string_pretty(&users_schema)?,
+    )?;
     schemas.push(("users".to_string(), users_schema_path));
 
     // Complex data types schema (JSON format)
     let complex_schema = json!({
-        "keyspace": "test_keyspace", 
+        "keyspace": "test_keyspace",
         "table": "all_types",
         "columns": {
             "id": {"type": "UUID", "kind": "PartitionKey"},
@@ -81,9 +122,12 @@ fn create_test_schemas(config: &SSTableTestConfig) -> std::io::Result<Vec<(Strin
             "map_col": {"type": "MAP<TEXT,INT>", "kind": "Regular"}
         }
     });
-    
+
     let complex_schema_path = config.temp_dir.path().join("all_types_schema.json");
-    fs::write(&complex_schema_path, serde_json::to_string_pretty(&complex_schema)?)?;
+    fs::write(
+        &complex_schema_path,
+        serde_json::to_string_pretty(&complex_schema)?,
+    )?;
     schemas.push(("all_types".to_string(), complex_schema_path));
 
     // CQL DDL format schema for compatibility testing
@@ -100,7 +144,7 @@ CREATE TABLE test_keyspace.products (
   AND compaction = {'class': 'SizeTieredCompactionStrategy'}
   AND compression = {'sstable_compression': 'LZ4Compressor'};
 "#;
-    
+
     let cql_schema_path = config.temp_dir.path().join("products_schema.cql");
     fs::write(&cql_schema_path, cql_schema)?;
     schemas.push(("products".to_string(), cql_schema_path));
@@ -122,7 +166,7 @@ fn test_cli_help_and_version() {
         .stdout(predicate::str::contains("info"))
         .stdout(predicate::str::contains("select"));
 
-    // Test version command  
+    // Test version command
     let mut cmd = get_cli_command();
     cmd.arg("--version");
     cmd.assert()
@@ -134,7 +178,7 @@ fn test_cli_help_and_version() {
 #[test]
 fn test_sstable_info_command() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
-    
+
     // Skip test if test data directory doesn't exist
     if !config.test_data_dir.exists() {
         println!("Skipping SSTable info test - test data not available");
@@ -150,43 +194,50 @@ fn test_sstable_info_command() -> Result<(), Box<dyn std::error::Error>> {
 
     for dir_entry in test_dirs {
         let sstable_dir = dir_entry.path();
-        
+
         println!("Testing info command with: {}", sstable_dir.display());
-        
+
         // Test basic info command
         let mut cmd = get_cli_command();
         cmd.arg("info")
-           .arg(&sstable_dir)
-           .timeout(config.timeout);
-           
+            .arg(&sstable_dir)
+            .arg("--timeout")
+            .arg(config.timeout.as_secs().to_string());
+
         let output = cmd.output()?;
-        
+
         // Verify command executed successfully
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             println!("Command failed for {}: {}", sstable_dir.display(), stderr);
             continue; // Continue with next directory instead of failing
         }
-        
+
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         // Verify output contains expected information
-        assert!(stdout.contains("SSTable Directory Information") || stdout.contains("SSTable Information"));
+        assert!(
+            stdout.contains("SSTable Directory Information")
+                || stdout.contains("SSTable Information")
+        );
         assert!(stdout.contains("Directory:") || stdout.contains("File:"));
 
         // Test detailed info command
         let mut cmd = get_cli_command();
         cmd.arg("info")
-           .arg(&sstable_dir)
-           .arg("--detailed")
-           .timeout(config.timeout);
-           
+            .arg(&sstable_dir)
+            .arg("--detailed")
+            .arg("--timeout")
+            .arg(config.timeout.as_secs().to_string());
+
         let detailed_output = cmd.output()?;
-        
+
         if detailed_output.status.success() {
             let detailed_stdout = String::from_utf8_lossy(&detailed_output.stdout);
             // Detailed output should contain component information
-            assert!(detailed_stdout.contains("Components:") || detailed_stdout.contains("Generation"));
+            assert!(
+                detailed_stdout.contains("Components:") || detailed_stdout.contains("Generation")
+            );
         }
     }
 
@@ -198,7 +249,7 @@ fn test_sstable_info_command() -> Result<(), Box<dyn std::error::Error>> {
 fn test_sstable_read_command() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
     let schemas = create_test_schemas(&config)?;
-    
+
     // Skip test if test data directory doesn't exist
     if !config.test_data_dir.exists() {
         println!("Skipping SSTable read test - test data not available");
@@ -210,17 +261,26 @@ fn test_sstable_read_command() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             let path = entry.path();
-            path.is_dir() && (
-                path.file_name().unwrap().to_str().unwrap().contains("users") ||
-                path.file_name().unwrap().to_str().unwrap().contains("all_types")
-            )
+            path.is_dir()
+                && (path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("users")
+                    || path
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .contains("all_types"))
         })
         .collect();
 
     for dir_entry in test_dirs {
         let sstable_dir = dir_entry.path();
         let dir_name = sstable_dir.file_name().unwrap().to_str().unwrap();
-        
+
         // Find matching schema
         let schema_info = if dir_name.contains("users") {
             schemas.iter().find(|(name, _)| name == "users")
@@ -231,63 +291,72 @@ fn test_sstable_read_command() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if let Some((_, schema_path)) = schema_info {
-            println!("Testing read command with: {} and schema: {}", 
-                sstable_dir.display(), schema_path.display());
-            
+            println!(
+                "Testing read command with: {} and schema: {}",
+                sstable_dir.display(),
+                schema_path.display()
+            );
+
             // Test read command with limit
             let mut cmd = get_cli_command();
             cmd.arg("read")
-               .arg(&sstable_dir)
-               .arg("--schema")
-               .arg(schema_path)
-               .arg("--limit")
-               .arg("5")
-               .timeout(config.timeout);
-               
+                .arg(&sstable_dir)
+                .arg("--schema")
+                .arg(schema_path)
+                .arg("--limit")
+                .arg("5")
+                .arg("--timeout")
+                .arg(config.timeout.as_secs().to_string());
+
             let output = cmd.output()?;
-            
+
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                println!("Read command failed for {}: {}", sstable_dir.display(), stderr);
+                println!(
+                    "Read command failed for {}: {}",
+                    sstable_dir.display(),
+                    stderr
+                );
                 continue;
             }
-            
+
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             // Verify output contains table data or appropriate messages
             assert!(
-                stdout.contains("Live Table Data") || 
-                stdout.contains("No data to display") ||
-                stdout.contains("Reading live SSTable data")
+                stdout.contains("Live Table Data")
+                    || stdout.contains("No data to display")
+                    || stdout.contains("Reading live SSTable data")
             );
 
             // Test different output formats
             for format in &["json", "csv"] {
                 let mut cmd = get_cli_command();
                 cmd.arg("read")
-                   .arg(&sstable_dir)
-                   .arg("--schema")
-                   .arg(schema_path)
-                   .arg("--format")
-                   .arg(format)
-                   .arg("--limit")
-                   .arg("3")
-                   .timeout(config.timeout);
-                   
+                    .arg(&sstable_dir)
+                    .arg("--schema")
+                    .arg(schema_path)
+                    .arg("--format")
+                    .arg(format)
+                    .arg("--limit")
+                    .arg("3")
+                    .arg("--timeout")
+                    .arg(config.timeout.as_secs().to_string());
+
                 let format_output = cmd.output()?;
-                
+
                 if format_output.status.success() {
                     let format_stdout = String::from_utf8_lossy(&format_output.stdout);
-                    
+
                     match *format {
                         "json" => {
                             // Should contain JSON array or valid JSON structure
                             assert!(format_stdout.contains("[") || format_stdout.contains("{}"));
-                        },
+                        }
                         "csv" => {
                             // Should contain CSV headers or data
                             assert!(format_stdout.contains(",") || format_stdout.contains("NULL"));
-                        },
+                        }
                         _ => {}
                     }
                 }
@@ -303,7 +372,7 @@ fn test_sstable_read_command() -> Result<(), Box<dyn std::error::Error>> {
 fn test_sstable_select_command() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
     let schemas = create_test_schemas(&config)?;
-    
+
     // Skip test if test data directory doesn't exist
     if !config.test_data_dir.exists() {
         println!("Skipping SSTable select test - test data not available");
@@ -315,65 +384,73 @@ fn test_sstable_select_command() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             let path = entry.path();
-            path.is_dir() && path.file_name().unwrap().to_str().unwrap().contains("users")
+            path.is_dir()
+                && path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("users")
         })
         .take(1) // Test with one directory
         .collect();
 
     for dir_entry in test_dirs {
         let sstable_dir = dir_entry.path();
-        
+
         if let Some((_, schema_path)) = schemas.iter().find(|(name, _)| name == "users") {
             println!("Testing select command with: {}", sstable_dir.display());
-            
+
             // Test basic SELECT query
             let queries = vec![
                 "SELECT * FROM users LIMIT 5",
-                "SELECT user_id, email FROM users LIMIT 3", 
+                "SELECT user_id, email FROM users LIMIT 3",
                 "SELECT COUNT(*) FROM users",
             ];
 
             for query in queries {
                 let mut cmd = get_cli_command();
                 cmd.arg("select")
-                   .arg(&sstable_dir)
-                   .arg("--schema")
-                   .arg(schema_path)
-                   .arg(query)
-                   .timeout(config.timeout);
-                   
+                    .arg(&sstable_dir)
+                    .arg("--schema")
+                    .arg(schema_path)
+                    .arg(query)
+                    .arg("--timeout")
+                    .arg(config.timeout.as_secs().to_string());
+
                 let output = cmd.output()?;
-                
+
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     println!("Select query '{}' failed: {}", query, stderr);
                     continue;
                 }
-                
+
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                
+
                 // Verify output contains query results or appropriate messages
                 assert!(
-                    stdout.contains("Query Summary") ||
-                    stdout.contains("rows returned") ||
-                    stdout.contains("LIVE SSTable file") ||
-                    stdout.contains("No data")
+                    stdout.contains("Query Summary")
+                        || stdout.contains("rows returned")
+                        || stdout.contains("LIVE SSTable file")
+                        || stdout.contains("No data")
                 );
             }
 
             // Test SELECT with different output formats
             let mut cmd = get_cli_command();
             cmd.arg("select")
-               .arg(&sstable_dir)
-               .arg("--schema")
-               .arg(schema_path)
-               .arg("SELECT * FROM users LIMIT 2")
-               .arg("--format")
-               .arg("json")
-               .timeout(config.timeout);
-               
+                .arg(&sstable_dir)
+                .arg("--schema")
+                .arg(schema_path)
+                .arg("SELECT * FROM users LIMIT 2")
+                .arg("--format")
+                .arg("json")
+                .arg("--timeout")
+                .arg(config.timeout.as_secs().to_string());
+
             let json_output = cmd.output()?;
-            
+
             if json_output.status.success() {
                 let json_stdout = String::from_utf8_lossy(&json_output.stdout);
                 // Should contain JSON output
@@ -389,7 +466,7 @@ fn test_sstable_select_command() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_version_detection() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
-    
+
     // Skip test if test data directory doesn't exist
     if !config.test_data_dir.exists() {
         println!("Skipping version detection test - test data not available");
@@ -405,25 +482,26 @@ fn test_version_detection() -> Result<(), Box<dyn std::error::Error>> {
 
     for dir_entry in test_dirs {
         let sstable_dir = dir_entry.path();
-        
+
         println!("Testing version detection with: {}", sstable_dir.display());
-        
+
         // Test auto-detection
         let mut cmd = get_cli_command();
         cmd.arg("info")
-           .arg(&sstable_dir)
-           .arg("--auto-detect")
-           .timeout(config.timeout);
-           
+            .arg(&sstable_dir)
+            .arg("--auto-detect")
+            .arg("--timeout")
+            .arg(config.timeout.as_secs().to_string());
+
         let output = cmd.output()?;
-        
+
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             // Should contain version information
             assert!(
-                stdout.contains("Detected version") ||
-                stdout.contains("version") ||
-                stdout.contains("format")
+                stdout.contains("Detected version")
+                    || stdout.contains("version")
+                    || stdout.contains("format")
             );
         }
 
@@ -431,20 +509,21 @@ fn test_version_detection() -> Result<(), Box<dyn std::error::Error>> {
         for version in &config.cassandra_versions {
             let mut cmd = get_cli_command();
             cmd.arg("info")
-               .arg(&sstable_dir)
-               .arg("--cassandra-version")
-               .arg(version)
-               .timeout(config.timeout);
-               
+                .arg(&sstable_dir)
+                .arg("--cassandra-version")
+                .arg(version)
+                .arg("--timeout")
+                .arg(config.timeout.as_secs().to_string());
+
             let version_output = cmd.output()?;
-            
+
             if version_output.status.success() {
                 let version_stdout = String::from_utf8_lossy(&version_output.stdout);
                 // Should handle the specified version
                 assert!(
-                    version_stdout.contains("Cassandra compatibility") ||
-                    version_stdout.contains(version) ||
-                    version_stdout.contains("Directory Information")
+                    version_stdout.contains("Cassandra compatibility")
+                        || version_stdout.contains(version)
+                        || version_stdout.contains("Directory Information")
                 );
             }
         }
@@ -457,50 +536,48 @@ fn test_version_detection() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
-    
+
     // Test with non-existent file
     let mut cmd = get_cli_command();
     cmd.arg("info")
-       .arg("/non/existent/path")
-       .timeout(config.timeout);
-       
+        .arg("/non/existent/path")
+        .timeout(config.timeout);
+
     let output = cmd.output()?;
     assert!(!output.status.success());
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("No such file") || stderr.contains("not found") || stderr.len() > 0);
 
     // Test read command without schema
     let mut cmd = get_cli_command();
-    cmd.arg("read")
-       .arg("/tmp")
-       .timeout(config.timeout);
-       
+    cmd.arg("read").arg("/tmp").timeout(config.timeout);
+
     let output = cmd.output()?;
     assert!(!output.status.success());
 
     // Test with invalid schema file
     let invalid_schema = config.temp_dir.path().join("invalid.json");
     fs::write(&invalid_schema, "{ invalid json }")?;
-    
+
     let mut cmd = get_cli_command();
     cmd.arg("read")
-       .arg("/tmp")
-       .arg("--schema")
-       .arg(&invalid_schema)
-       .timeout(config.timeout);
-       
+        .arg("/tmp")
+        .arg("--schema")
+        .arg(&invalid_schema)
+        .timeout(config.timeout);
+
     let output = cmd.output()?;
     assert!(!output.status.success());
 
     // Test with invalid Cassandra version
     let mut cmd = get_cli_command();
     cmd.arg("info")
-       .arg("/tmp")
-       .arg("--cassandra-version")
-       .arg("99.99")
-       .timeout(config.timeout);
-       
+        .arg("/tmp")
+        .arg("--cassandra-version")
+        .arg("99.99")
+        .timeout(config.timeout);
+
     let output = cmd.output()?;
     assert!(!output.status.success());
 
@@ -512,7 +589,7 @@ fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
 fn test_schema_format_detection() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
     let schemas = create_test_schemas(&config)?;
-    
+
     // Skip test if test data directory doesn't exist
     if !config.test_data_dir.exists() {
         println!("Skipping schema format test - test data not available");
@@ -530,15 +607,16 @@ fn test_schema_format_detection() -> Result<(), Box<dyn std::error::Error>> {
         if let Some((_, json_schema_path)) = schemas.iter().find(|(name, _)| name == "users") {
             let mut cmd = get_cli_command();
             cmd.arg("read")
-               .arg(&sstable_dir)
-               .arg("--schema")
-               .arg(json_schema_path)
-               .arg("--limit")
-               .arg("1")
-               .timeout(config.timeout);
-               
+                .arg(&sstable_dir)
+                .arg("--schema")
+                .arg(json_schema_path)
+                .arg("--limit")
+                .arg("1")
+                .arg("--timeout")
+                .arg(config.timeout.as_secs().to_string());
+
             let output = cmd.output()?;
-            
+
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 assert!(stdout.contains("Schema loaded") || stdout.contains("Live Table Data"));
@@ -549,23 +627,24 @@ fn test_schema_format_detection() -> Result<(), Box<dyn std::error::Error>> {
         if let Some((_, cql_schema_path)) = schemas.iter().find(|(name, _)| name == "products") {
             let mut cmd = get_cli_command();
             cmd.arg("read")
-               .arg(&sstable_dir)
-               .arg("--schema")
-               .arg(cql_schema_path)
-               .arg("--limit")
-               .arg("1")
-               .timeout(config.timeout);
-               
+                .arg(&sstable_dir)
+                .arg("--schema")
+                .arg(cql_schema_path)
+                .arg("--limit")
+                .arg("1")
+                .arg("--timeout")
+                .arg(config.timeout.as_secs().to_string());
+
             let output = cmd.output()?;
-            
+
             // CQL schema might not match the test data, but should handle format correctly
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 // Should give a meaningful error about schema mismatch, not format parsing
                 assert!(
-                    stderr.contains("schema") || 
-                    stderr.contains("table") ||
-                    stderr.contains("column")
+                    stderr.contains("schema")
+                        || stderr.contains("table")
+                        || stderr.contains("column")
                 );
             }
         }
@@ -578,7 +657,7 @@ fn test_schema_format_detection() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
-    
+
     // Skip test if test data directory doesn't exist
     if !config.test_data_dir.exists() {
         println!("Skipping performance test - test data not available");
@@ -593,22 +672,25 @@ fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
 
     for dir_entry in test_dirs {
         let sstable_dir = dir_entry.path();
-        
-        println!("Running performance benchmark with: {}", sstable_dir.display());
-        
+
+        println!(
+            "Running performance benchmark with: {}",
+            sstable_dir.display()
+        );
+
         // Benchmark info command
         let start = std::time::Instant::now();
         let mut cmd = get_cli_command();
         cmd.arg("info")
-           .arg(&sstable_dir)
-           .timeout(Duration::from_secs(60)); // Longer timeout for performance test
-           
+            .arg(&sstable_dir)
+            .timeout(Duration::from_secs(60)); // Longer timeout for performance test
+
         let output = cmd.output()?;
         let info_duration = start.elapsed();
-        
+
         if output.status.success() {
             println!("Info command took: {:?}", info_duration);
-            
+
             // Performance should be reasonable (less than 30 seconds for most files)
             assert!(info_duration < Duration::from_secs(30));
         }
@@ -617,16 +699,16 @@ fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
         let start = std::time::Instant::now();
         let mut cmd = get_cli_command();
         cmd.arg("info")
-           .arg(&sstable_dir)
-           .arg("--detailed")
-           .timeout(Duration::from_secs(60));
-           
+            .arg(&sstable_dir)
+            .arg("--detailed")
+            .timeout(Duration::from_secs(60));
+
         let detailed_output = cmd.output()?;
         let detailed_duration = start.elapsed();
-        
+
         if detailed_output.status.success() {
             println!("Detailed info command took: {:?}", detailed_duration);
-            
+
             // Detailed analysis may take longer but should still be reasonable
             assert!(detailed_duration < Duration::from_secs(60));
         }
@@ -636,11 +718,11 @@ fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Integration test with multiple data types and complex queries
-#[test] 
+#[test]
 fn test_complex_data_types() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
     let schemas = create_test_schemas(&config)?;
-    
+
     // Skip test if test data directory doesn't exist
     if !config.test_data_dir.exists() {
         println!("Skipping complex data types test - test data not available");
@@ -652,46 +734,50 @@ fn test_complex_data_types() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|entry| entry.ok())
         .find(|entry| {
             let path = entry.path();
-            path.is_dir() && path.file_name().unwrap().to_str().unwrap().contains("all_types")
+            path.is_dir()
+                && path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("all_types")
         })
         .map(|entry| entry.path());
 
     if let Some(sstable_dir) = test_dir {
         if let Some((_, schema_path)) = schemas.iter().find(|(name, _)| name == "all_types") {
             println!("Testing complex data types with: {}", sstable_dir.display());
-            
+
             // Test reading data with complex types
             let mut cmd = get_cli_command();
             cmd.arg("read")
-               .arg(&sstable_dir)
-               .arg("--schema")
-               .arg(schema_path)
-               .arg("--format")
-               .arg("json")
-               .arg("--limit")
-               .arg("3")
-               .timeout(Duration::from_secs(45));
-               
+                .arg(&sstable_dir)
+                .arg("--schema")
+                .arg(schema_path)
+                .arg("--format")
+                .arg("json")
+                .arg("--limit")
+                .arg("3")
+                .timeout(Duration::from_secs(45));
+
             let output = cmd.output()?;
-            
+
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                
+
                 // Should handle complex data types appropriately
                 assert!(
-                    stdout.contains("[") || 
-                    stdout.contains("{}") || 
-                    stdout.contains("No data")
+                    stdout.contains("[") || stdout.contains("{}") || stdout.contains("No data")
                 );
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 println!("Complex types test failed: {}", stderr);
-                
+
                 // Should provide meaningful error messages for unsupported types
                 assert!(
-                    stderr.contains("type") || 
-                    stderr.contains("parsing") ||
-                    stderr.contains("schema")
+                    stderr.contains("type")
+                        || stderr.contains("parsing")
+                        || stderr.contains("schema")
                 );
             }
         }
@@ -704,11 +790,11 @@ fn test_complex_data_types() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_corrupted_file_handling() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
-    
+
     // Create a corrupted "SSTable" file
     let corrupted_file = config.temp_dir.path().join("corrupted-data.db");
     fs::write(&corrupted_file, b"This is not a valid SSTable file")?;
-    
+
     // Create a valid schema for the test
     let schema = json!({
         "keyspace": "test",
@@ -718,29 +804,29 @@ fn test_corrupted_file_handling() -> Result<(), Box<dyn std::error::Error>> {
             "data": {"type": "TEXT", "kind": "Regular"}
         }
     });
-    
+
     let schema_path = config.temp_dir.path().join("corrupted_schema.json");
     fs::write(&schema_path, serde_json::to_string_pretty(&schema)?)?;
-    
+
     // Test CLI with corrupted file
     let mut cmd = get_cli_command();
     cmd.arg("read")
-       .arg(&corrupted_file)
-       .arg("--schema")
-       .arg(&schema_path)
-       .timeout(config.timeout);
-       
+        .arg(&corrupted_file)
+        .arg("--schema")
+        .arg(&schema_path)
+        .timeout(config.timeout);
+
     let output = cmd.output()?;
-    
+
     // Should fail gracefully with meaningful error
     assert!(!output.status.success());
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Failed to open SSTable") || 
-        stderr.contains("corruption") ||
-        stderr.contains("invalid") ||
-        stderr.contains("magic number")
+        stderr.contains("Failed to open SSTable")
+            || stderr.contains("corruption")
+            || stderr.contains("invalid")
+            || stderr.contains("magic number")
     );
 
     Ok(())
@@ -750,7 +836,7 @@ fn test_corrupted_file_handling() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_resource_management() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
-    
+
     // Skip test if test data directory doesn't exist
     if !config.test_data_dir.exists() {
         println!("Skipping resource management test - test data not available");
@@ -770,24 +856,27 @@ fn test_resource_management() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(dir_entry) = largest_dir {
         let sstable_dir = dir_entry.path();
-        
-        println!("Testing resource management with: {}", sstable_dir.display());
-        
+
+        println!(
+            "Testing resource management with: {}",
+            sstable_dir.display()
+        );
+
         // Test info command - should not consume excessive memory
         let mut cmd = get_cli_command();
         cmd.arg("info")
-           .arg(&sstable_dir)
-           .arg("--detailed")
-           .timeout(Duration::from_secs(120)); // Longer timeout for large files
-           
+            .arg(&sstable_dir)
+            .arg("--detailed")
+            .timeout(Duration::from_secs(120)); // Longer timeout for large files
+
         let output = cmd.output()?;
-        
+
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             // Should complete successfully even with large files
             assert!(stdout.contains("SSTable Directory Information"));
-            
+
             // Check that output is reasonable (not truncated due to memory issues)
             assert!(stdout.len() > 100); // Should have substantial output
             assert!(stdout.len() < 1_000_000); // But not excessive
@@ -805,33 +894,41 @@ mod integration_tests {
     pub fn run_comprehensive_cli_tests() -> Result<(), Box<dyn std::error::Error>> {
         println!("🧪 Running Comprehensive CQLite SSTable CLI Integration Tests");
         println!("{}", "=".repeat(65));
-        
+
         let config = SSTableTestConfig::new()?;
-        
+
         if !config.test_data_dir.exists() {
-            println!("⚠️  Test data directory not found: {}", config.test_data_dir.display());
+            println!(
+                "⚠️  Test data directory not found: {}",
+                config.test_data_dir.display()
+            );
             println!("   Run the following to generate test data:");
-            println!("   cd test-env/cassandra5 && ./manage.sh start && ./scripts/extract-sstables.sh");
+            println!(
+                "   cd test-env/cassandra5 && ./manage.sh start && ./scripts/extract-sstables.sh"
+            );
             return Ok(());
         }
-        
-        println!("✅ Test data directory found: {}", config.test_data_dir.display());
-        
+
+        println!(
+            "✅ Test data directory found: {}",
+            config.test_data_dir.display()
+        );
+
         // Run a subset of tests programmatically
         println!("\n📋 Running basic CLI functionality tests...");
         test_cli_help_and_version();
-        
+
         println!("📋 Running SSTable info command tests...");
         test_sstable_info_command()?;
-        
+
         println!("📋 Running error handling tests...");
         test_error_handling()?;
-        
+
         println!("📋 Running version detection tests...");
         test_version_detection()?;
-        
+
         println!("\n🎉 All CLI integration tests completed successfully!");
-        
+
         Ok(())
     }
 }
@@ -839,10 +936,10 @@ mod integration_tests {
 /// Helper function to validate test environment
 pub fn validate_test_environment() -> Result<(), Box<dyn std::error::Error>> {
     let config = SSTableTestConfig::new()?;
-    
+
     println!("🔍 Validating CQLite CLI Test Environment");
     println!("{}", "=".repeat(45));
-    
+
     // Check if CLI binary exists
     match get_cli_command().arg("--version").output() {
         Ok(output) if output.status.success() => {
@@ -855,31 +952,37 @@ pub fn validate_test_environment() -> Result<(), Box<dyn std::error::Error>> {
             return Err("CLI binary not available".into());
         }
     }
-    
+
     // Check test data availability
     if config.test_data_dir.exists() {
         let test_files: Vec<_> = fs::read_dir(&config.test_data_dir)?
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().is_dir())
             .collect();
-            
-        println!("✅ Test data directory found with {} SSTable directories", test_files.len());
-        
+
+        println!(
+            "✅ Test data directory found with {} SSTable directories",
+            test_files.len()
+        );
+
         for file in test_files.iter().take(3) {
             println!("   - {}", file.file_name().to_string_lossy());
         }
-        
+
         if test_files.len() > 3 {
             println!("   ... and {} more", test_files.len() - 3);
         }
     } else {
-        println!("⚠️  Test data directory not found: {}", config.test_data_dir.display());
+        println!(
+            "⚠️  Test data directory not found: {}",
+            config.test_data_dir.display()
+        );
         println!("   This is optional - tests will be skipped if data is not available");
         println!("   To generate test data:");
         println!("   cd test-env/cassandra5 && ./manage.sh start && ./scripts/extract-sstables.sh");
     }
-    
+
     println!("\n🚀 Environment validation complete - ready for testing!");
-    
+
     Ok(())
 }

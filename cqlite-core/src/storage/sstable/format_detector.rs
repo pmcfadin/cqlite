@@ -4,9 +4,9 @@
 //! across all Cassandra versions (2.x, 3.x, 4.x, 5.x) with automatic
 //! format-specific parser selection.
 
-use std::path::Path;
-use std::collections::HashMap;
 use crate::{Error, Result};
+use std::collections::HashMap;
+use std::path::Path;
 
 /// SSTable format versions supported by CQLite
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,34 +79,35 @@ impl FormatDetector {
     /// Create a new format detector with all known versions
     pub fn new() -> Self {
         let mut format_map = HashMap::new();
-        
+
         // Cassandra 2.x formats
         format_map.insert("ic".to_string(), SSTableFormat::V2x("ic".to_string()));
         format_map.insert("jb".to_string(), SSTableFormat::V2x("jb".to_string()));
-        
+
         // Cassandra 3.x formats
         format_map.insert("ma".to_string(), SSTableFormat::V3x("ma".to_string()));
         format_map.insert("mb".to_string(), SSTableFormat::V3x("mb".to_string()));
         format_map.insert("mc".to_string(), SSTableFormat::V3x("mc".to_string()));
         format_map.insert("md".to_string(), SSTableFormat::V3x("md".to_string()));
         format_map.insert("me".to_string(), SSTableFormat::V3x("me".to_string()));
-        
+
         // Cassandra 4.x formats
         format_map.insert("na".to_string(), SSTableFormat::V4x("na".to_string()));
         format_map.insert("nb".to_string(), SSTableFormat::V4x("nb".to_string()));
-        
+
         // Cassandra 5.x formats
         format_map.insert("oa".to_string(), SSTableFormat::V5x("oa".to_string()));
-        
+
         Self { format_map }
     }
 
     /// Detect SSTable format from file path
-    /// 
+    ///
     /// SSTable files follow pattern: {version}-{generation}-{size}-{component}.db
     /// Example: nb-1-big-Data.db
     pub fn detect_from_path(&self, path: &Path) -> Result<SSTableFormat> {
-        let filename = path.file_name()
+        let filename = path
+            .file_name()
             .and_then(|f| f.to_str())
             .ok_or_else(|| Error::InvalidPath(format!("Invalid SSTable filename: {:?}", path)))?;
 
@@ -114,7 +115,8 @@ impl FormatDetector {
         let parts: Vec<&str> = filename.split('-').collect();
         if parts.len() < 4 {
             return Err(Error::InvalidFormat(format!(
-                "Invalid SSTable filename format: {}", filename
+                "Invalid SSTable filename format: {}",
+                filename
             )));
         }
 
@@ -124,23 +126,25 @@ impl FormatDetector {
 
     /// Detect format from version string
     pub fn detect_from_version(&self, version: &str) -> Result<SSTableFormat> {
-        self.format_map.get(version)
+        self.format_map
+            .get(version)
             .cloned()
             .or_else(|| Some(SSTableFormat::Unknown(version.to_string())))
-            .ok_or_else(|| Error::UnsupportedFormat(format!("Unknown SSTable version: {}", version)))
+            .ok_or_else(|| {
+                Error::UnsupportedFormat(format!("Unknown SSTable version: {}", version))
+            })
     }
 
     /// Detect format from multiple SSTable files in a directory
     pub fn detect_from_directory(&self, dir: &Path) -> Result<SSTableFormat> {
         use std::fs;
-        
-        let entries = fs::read_dir(dir)
-            .map_err(|e| Error::Io(e))?;
+
+        let entries = fs::read_dir(dir).map_err(|e| Error::Io(e))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| Error::Io(e))?;
             let path = entry.path();
-            
+
             if path.extension().and_then(|s| s.to_str()) == Some("db") {
                 if let Ok(format) = self.detect_from_path(&path) {
                     return Ok(format);
@@ -148,7 +152,9 @@ impl FormatDetector {
             }
         }
 
-        Err(Error::InvalidFormat("No valid SSTable files found in directory".to_string()))
+        Err(Error::InvalidFormat(
+            "No valid SSTable files found in directory".to_string(),
+        ))
     }
 
     /// Get all supported format versions
@@ -235,26 +241,31 @@ impl SSTableInfo {
     pub fn from_path(path: &Path) -> Result<Self> {
         let detector = FormatDetector::new();
         let format = detector.detect_from_path(path)?;
-        
-        let filename = path.file_name()
+
+        let filename = path
+            .file_name()
             .and_then(|f| f.to_str())
             .ok_or_else(|| Error::InvalidPath(format!("Invalid SSTable filename: {:?}", path)))?;
 
         let parts: Vec<&str> = filename.split('-').collect();
         if parts.len() < 4 {
             return Err(Error::InvalidFormat(format!(
-                "Invalid SSTable filename format: {}", filename
+                "Invalid SSTable filename format: {}",
+                filename
             )));
         }
 
-        let generation = parts[1].parse::<u64>()
-            .map_err(|_| Error::InvalidFormat(format!("Invalid generation number: {}", parts[1])))?;
+        let generation = parts[1].parse::<u64>().map_err(|_| {
+            Error::InvalidFormat(format!("Invalid generation number: {}", parts[1]))
+        })?;
 
         let size = parts[2].to_string();
-        
+
         let component_suffix = parts[3..].join("-");
         let component = SSTableComponent::from_filename(&format!("-{}", component_suffix))
-            .ok_or_else(|| Error::InvalidFormat(format!("Unknown component: {}", component_suffix)))?;
+            .ok_or_else(|| {
+                Error::InvalidFormat(format!("Unknown component: {}", component_suffix))
+            })?;
 
         let base_name = format!("{}-{}-{}", parts[0], parts[1], parts[2]);
 
@@ -268,7 +279,11 @@ impl SSTableInfo {
     }
 
     /// Get path to companion component file
-    pub fn companion_path(&self, component: SSTableComponent, base_dir: &Path) -> std::path::PathBuf {
+    pub fn companion_path(
+        &self,
+        component: SSTableComponent,
+        base_dir: &Path,
+    ) -> std::path::PathBuf {
         base_dir.join(format!("{}-{}", self.base_name, component.suffix()))
     }
 }
@@ -281,18 +296,27 @@ mod tests {
     #[test]
     fn test_format_detection() {
         let detector = FormatDetector::new();
-        
+
         // Test various format versions
-        assert_eq!(detector.detect_from_version("nb").unwrap(), SSTableFormat::V4x("nb".to_string()));
-        assert_eq!(detector.detect_from_version("ma").unwrap(), SSTableFormat::V3x("ma".to_string()));
-        assert_eq!(detector.detect_from_version("oa").unwrap(), SSTableFormat::V5x("oa".to_string()));
+        assert_eq!(
+            detector.detect_from_version("nb").unwrap(),
+            SSTableFormat::V4x("nb".to_string())
+        );
+        assert_eq!(
+            detector.detect_from_version("ma").unwrap(),
+            SSTableFormat::V3x("ma".to_string())
+        );
+        assert_eq!(
+            detector.detect_from_version("oa").unwrap(),
+            SSTableFormat::V5x("oa".to_string())
+        );
     }
 
     #[test]
     fn test_path_parsing() {
         let detector = FormatDetector::new();
         let path = PathBuf::from("nb-1-big-Data.db");
-        
+
         let format = detector.detect_from_path(&path).unwrap();
         assert_eq!(format, SSTableFormat::V4x("nb".to_string()));
     }
@@ -301,7 +325,7 @@ mod tests {
     fn test_sstable_info_parsing() {
         let path = PathBuf::from("nb-1-big-Data.db");
         let info = SSTableInfo::from_path(&path).unwrap();
-        
+
         assert_eq!(info.format, SSTableFormat::V4x("nb".to_string()));
         assert_eq!(info.generation, 1);
         assert_eq!(info.size, "big");
@@ -311,9 +335,18 @@ mod tests {
 
     #[test]
     fn test_component_detection() {
-        assert_eq!(SSTableComponent::from_filename("nb-1-big-Data.db"), Some(SSTableComponent::Data));
-        assert_eq!(SSTableComponent::from_filename("nb-1-big-CompressionInfo.db"), Some(SSTableComponent::CompressionInfo));
-        assert_eq!(SSTableComponent::from_filename("nb-1-big-TOC.txt"), Some(SSTableComponent::TOC));
+        assert_eq!(
+            SSTableComponent::from_filename("nb-1-big-Data.db"),
+            Some(SSTableComponent::Data)
+        );
+        assert_eq!(
+            SSTableComponent::from_filename("nb-1-big-CompressionInfo.db"),
+            Some(SSTableComponent::CompressionInfo)
+        );
+        assert_eq!(
+            SSTableComponent::from_filename("nb-1-big-TOC.txt"),
+            Some(SSTableComponent::TOC)
+        );
     }
 
     #[test]

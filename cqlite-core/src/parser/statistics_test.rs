@@ -6,9 +6,9 @@
 #[cfg(test)]
 mod tests {
     use super::super::statistics::*;
+    use crate::Config;
     use crate::platform::Platform;
     use crate::storage::sstable::statistics_reader::StatisticsReader;
-    use crate::Config;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -25,33 +25,36 @@ mod tests {
             let path = Path::new(test_file);
             if path.exists() {
                 println!("Testing Statistics.db file: {}", test_file);
-                
+
                 let config = Config::default();
                 let platform = Arc::new(Platform::new(&config).await.unwrap());
-                
+
                 match StatisticsReader::open(path, platform).await {
                     Ok(stats_reader) => {
                         let stats = stats_reader.statistics();
-                        
+
                         // Validate basic structure
                         assert!(stats.row_stats.total_rows > 0, "Should have row count data");
-                        assert!(stats.table_stats.disk_size > 0, "Should have disk size data");
-                        
+                        assert!(
+                            stats.table_stats.disk_size > 0,
+                            "Should have disk size data"
+                        );
+
                         // Test analysis
                         let analysis = stats_reader.analyze();
                         assert!(analysis.health_score >= 0.0 && analysis.health_score <= 100.0);
-                        
+
                         // Test report generation
                         let report = stats_reader.generate_report(true);
                         assert!(report.contains("SSTable Statistics Report"));
-                        
+
                         // Test compact summary
                         let summary = stats_reader.compact_summary();
                         assert!(!summary.is_empty());
-                        
+
                         println!("  ✅ Successfully parsed and analyzed");
                         println!("  📊 {}", summary);
-                        
+
                         // Validate specific data based on test file
                         if test_file.contains("users") {
                             validate_users_table_stats(stats);
@@ -74,27 +77,36 @@ mod tests {
 
     fn validate_users_table_stats(stats: &SSTableStatistics) {
         // Users table should have reasonable statistics
-        assert!(stats.row_stats.total_rows > 0, "Users table should have rows");
-        
+        assert!(
+            stats.row_stats.total_rows > 0,
+            "Users table should have rows"
+        );
+
         // Check column statistics if available
         let id_column = stats.column_stats.iter().find(|c| c.name == "id");
         if let Some(id_col) = id_column {
             assert_eq!(id_col.column_type, "uuid", "ID column should be UUID type");
             assert!(id_col.value_count > 0, "ID column should have values");
         }
-        
+
         // Timestamp range should be reasonable
-        assert!(stats.timestamp_stats.min_timestamp > 0, "Should have valid timestamps");
+        assert!(
+            stats.timestamp_stats.min_timestamp > 0,
+            "Should have valid timestamps"
+        );
         assert!(stats.timestamp_stats.max_timestamp >= stats.timestamp_stats.min_timestamp);
     }
 
     fn validate_all_types_table_stats(stats: &SSTableStatistics) {
         // All types table should demonstrate various data types
-        assert!(stats.row_stats.total_rows > 0, "All types table should have rows");
-        
+        assert!(
+            stats.row_stats.total_rows > 0,
+            "All types table should have rows"
+        );
+
         // Should have multiple columns with different types
         if !stats.column_stats.is_empty() {
-            let column_types: std::collections::HashSet<_> = 
+            let column_types: std::collections::HashSet<_> =
                 stats.column_stats.iter().map(|c| &c.column_type).collect();
             assert!(column_types.len() > 1, "Should have multiple column types");
         }
@@ -102,19 +114,28 @@ mod tests {
 
     fn validate_collections_table_stats(stats: &SSTableStatistics) {
         // Collections table should have collection type columns
-        assert!(stats.row_stats.total_rows > 0, "Collections table should have rows");
-        
+        assert!(
+            stats.row_stats.total_rows > 0,
+            "Collections table should have rows"
+        );
+
         // Look for collection type columns
         let has_collection_types = stats.column_stats.iter().any(|c| {
-            c.column_type.contains("list") || 
-            c.column_type.contains("set") || 
-            c.column_type.contains("map")
+            c.column_type.contains("list")
+                || c.column_type.contains("set")
+                || c.column_type.contains("map")
         });
-        
+
         if !stats.column_stats.is_empty() {
             // We expect collection types but the exact format depends on Cassandra version
-            println!("  📋 Column types found: {:?}", 
-                stats.column_stats.iter().map(|c| &c.column_type).collect::<Vec<_>>());
+            println!(
+                "  📋 Column types found: {:?}",
+                stats
+                    .column_stats
+                    .iter()
+                    .map(|c| &c.column_type)
+                    .collect::<Vec<_>>()
+            );
         }
     }
 
@@ -124,9 +145,8 @@ mod tests {
         let test_header = vec![
             0x00, 0x00, 0x00, 0x01, // version = 1
             // table_id (16 bytes) - using a test UUID
-            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-            0x00, 0x00, 0x00, 0x03, // section_count = 3
+            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88, 0x00, 0x00, 0x00, 0x03, // section_count = 3
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, // file_size = 8192
             0xAB, 0xCD, 0xEF, 0x12, // checksum
         ];
@@ -149,7 +169,7 @@ mod tests {
         let test_data = vec![
             // total_rows (VInt: 1000)
             0x7D, 0x00, // VInt encoding of 1000
-            // live_rows (VInt: 900)  
+            // live_rows (VInt: 900)
             0x84, 0x64, // VInt encoding of 900
             // tombstone_count (VInt: 100)
             0x64, // VInt encoding of 100
@@ -163,7 +183,10 @@ mod tests {
 
         // Note: This test demonstrates the parsing structure but may need
         // adjustment based on the actual VInt encoding used by Cassandra
-        println!("Row statistics test data prepared: {} bytes", test_data.len());
+        println!(
+            "Row statistics test data prepared: {} bytes",
+            test_data.len()
+        );
     }
 
     /// Test timestamp statistics parsing
@@ -171,12 +194,9 @@ mod tests {
     fn test_timestamp_statistics_parsing() {
         let test_data = vec![
             // min_timestamp (i64)
-            0x00, 0x00, 0x01, 0x7F, 0x00, 0x00, 0x00, 0x00,
-            // max_timestamp (i64)
-            0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x00, 0x00,
-            // min_deletion_time (i64)
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // max_deletion_time (i64)
+            0x00, 0x00, 0x01, 0x7F, 0x00, 0x00, 0x00, 0x00, // max_timestamp (i64)
+            0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x00, 0x00, // min_deletion_time (i64)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // max_deletion_time (i64)
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             // has_ttl (u8: 0 = no TTL data)
             0x00,
@@ -198,7 +218,7 @@ mod tests {
     fn test_column_statistics_structure() {
         // This test validates the column statistics parsing structure
         // without requiring complete binary data
-        
+
         let test_column = crate::parser::statistics::ColumnStatistics {
             name: "test_column".to_string(),
             column_type: "text".to_string(),
@@ -236,9 +256,11 @@ mod tests {
 
         // Check that analysis provides useful insights
         if analysis.health_score < 80.0 {
-            assert!(!analysis.query_performance_hints.is_empty() || 
-                   !analysis.storage_recommendations.is_empty(),
-                   "Low health score should provide actionable insights");
+            assert!(
+                !analysis.query_performance_hints.is_empty()
+                    || !analysis.storage_recommendations.is_empty(),
+                "Low health score should provide actionable insights"
+            );
         }
     }
 

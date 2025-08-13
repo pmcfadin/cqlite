@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Pre-commit hook for dead code detection and code quality enforcement
+# Installation: ln -s ../../.github/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+set -e
+
+echo "🔍 Running pre-commit code quality checks..."
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to check for dead code in a directory
+check_dead_code() {
+    local dir=$1
+    local name=$2
+    
+    echo -e "${BLUE}Checking dead code in $name...${NC}"
+    
+    if [ -d "$dir" ]; then
+        cd "$dir"
+        
+        # Check for dead code
+        if ! RUSTFLAGS="-D dead-code" cargo check --all-targets --all-features --quiet 2>/dev/null; then
+            echo -e "${RED}❌ Dead code found in $name${NC}"
+            echo "Run: RUSTFLAGS=\"-D dead-code\" cargo check --all-targets --all-features"
+            cd ..
+            return 1
+        fi
+        
+        # Check for unused imports
+        if ! RUSTFLAGS="-D unused-imports" cargo check --all-targets --all-features --quiet 2>/dev/null; then
+            echo -e "${RED}❌ Unused imports found in $name${NC}"
+            echo "Run: RUSTFLAGS=\"-D unused-imports\" cargo check --all-targets --all-features"
+            cd ..
+            return 1
+        fi
+        
+        # Check for unused variables
+        if ! RUSTFLAGS="-D unused-variables" cargo check --all-targets --all-features --quiet 2>/dev/null; then
+            echo -e "${RED}❌ Unused variables found in $name${NC}"
+            echo "Run: RUSTFLAGS=\"-D unused-variables\" cargo check --all-targets --all-features"
+            cd ..
+            return 1
+        fi
+        
+        cd ..
+        echo -e "${GREEN}✅ $name passed dead code checks${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠️  Directory $dir not found, skipping${NC}"
+        return 0
+    fi
+}
+
+# Function to run clippy with strict lints
+run_clippy() {
+    local dir=$1
+    local name=$2
+    
+    echo -e "${BLUE}Running clippy on $name...${NC}"
+    
+    if [ -d "$dir" ]; then
+        cd "$dir"
+        
+        if ! cargo clippy --all-targets --all-features -- \
+            -D warnings \
+            -D clippy::all \
+            -D clippy::pedantic \
+            -D clippy::nursery \
+            -D clippy::cargo \
+            -D unused-imports \
+            -D unused-variables \
+            -D dead-code \
+            -D unused-mut \
+            -D unused-assignments \
+            -D unreachable-code \
+            -D unused-must-use \
+            -W clippy::missing-docs-in-private-items \
+            --quiet 2>/dev/null; then
+            echo -e "${RED}❌ Clippy found issues in $name${NC}"
+            cd ..
+            return 1
+        fi
+        
+        cd ..
+        echo -e "${GREEN}✅ $name passed clippy checks${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠️  Directory $dir not found, skipping${NC}"
+        return 0
+    fi
+}
+
+# Function to check formatting
+check_formatting() {
+    local dir=$1
+    local name=$2
+    
+    echo -e "${BLUE}Checking formatting in $name...${NC}"
+    
+    if [ -d "$dir" ]; then
+        cd "$dir"
+        
+        if ! cargo fmt --all -- --check; then
+            echo -e "${RED}❌ Formatting issues found in $name${NC}"
+            echo "Run: cargo fmt --all"
+            cd ..
+            return 1
+        fi
+        
+        cd ..
+        echo -e "${GREEN}✅ $name is properly formatted${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠️  Directory $dir not found, skipping${NC}"
+        return 0
+    fi
+}
+
+# Store original directory
+ORIGINAL_DIR=$(pwd)
+
+# Track failures
+FAILED=0
+
+# Check all workspace members
+WORKSPACE_MEMBERS=("cqlite-core" "cqlite-cli" "testing-framework" "tests")
+
+echo -e "${BLUE}=== Dead Code Detection ===${NC}"
+for member in "${WORKSPACE_MEMBERS[@]}"; do
+    if ! check_dead_code "$member" "$member"; then
+        FAILED=1
+    fi
+done
+
+echo -e "\n${BLUE}=== Clippy Analysis ===${NC}"
+for member in "${WORKSPACE_MEMBERS[@]}"; do
+    if ! run_clippy "$member" "$member"; then
+        FAILED=1
+    fi
+done
+
+echo -e "\n${BLUE}=== Format Checking ===${NC}"
+for member in "${WORKSPACE_MEMBERS[@]}"; do
+    if ! check_formatting "$member" "$member"; then
+        FAILED=1
+    fi
+done
+
+# Return to original directory
+cd "$ORIGINAL_DIR"
+
+# Final result
+echo -e "\n${BLUE}=== Pre-commit Summary ===${NC}"
+if [ $FAILED -eq 0 ]; then
+    echo -e "${GREEN}✅ All pre-commit checks passed!${NC}"
+    echo -e "${GREEN}🚀 Ready to commit${NC}"
+    exit 0
+else
+    echo -e "${RED}❌ Pre-commit checks failed${NC}"
+    echo -e "${RED}📋 Please fix the issues above before committing${NC}"
+    echo ""
+    echo -e "${YELLOW}Quick fixes:${NC}"
+    echo -e "${YELLOW}- Run 'cargo fmt --all' to fix formatting${NC}"
+    echo -e "${YELLOW}- Remove unused imports, variables, and functions${NC}"
+    echo -e "${YELLOW}- Address clippy warnings and suggestions${NC}"
+    exit 1
+fi

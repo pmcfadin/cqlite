@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::error::Error;
 use crate::storage::sstable::SSTableId;
-use crate::{types::TableId, Config, Result};
+use crate::{Config, Result, types::TableId};
 
 /// Manifest entry types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +84,8 @@ pub struct Manifest {
     state: Arc<RwLock<ManifestState>>,
 
     /// Configuration
-    config: Config,
+    #[allow(dead_code)]
+    _config: Config,
 
     /// Sequence number for ordering
     sequence: Arc<RwLock<u64>>,
@@ -115,7 +116,7 @@ impl Manifest {
         Ok(Self {
             manifest_path,
             state: Arc::new(RwLock::new(state)),
-            config: config.clone(),
+            _config: config.clone(),
             sequence: Arc::new(RwLock::new(0)),
         })
     }
@@ -296,7 +297,7 @@ impl Manifest {
     /// Checkpoint the manifest
     pub async fn checkpoint(&self) -> Result<()> {
         let state = self.state.read().await;
-        let timestamp = self.current_timestamp();
+        let _timestamp = self.current_timestamp();
 
         // Create checkpoint file
         let checkpoint_path = self.manifest_path.with_extension("checkpoint");

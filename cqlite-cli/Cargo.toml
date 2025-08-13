@@ -65,11 +65,38 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+criterion = { workspace = true }
+once_cell = { workspace = true }
+tokio-test = { workspace = true }
+rand = { workspace = true }
 
-# Additional testing dependencies
+# CLI testing dependencies
 assert_cmd = "2.0"
 predicates = "3.0"
 serial_test = "3.0"
+
+# Test infrastructure dependencies
+test-log = "0.2"
+wait-timeout = "0.2"
+rustc_version = "0.4"
+
+# Enhanced testing framework dependencies
+rstest = "0.18"                 # Parameterized tests
+mockall = "0.11"                # Mocking framework
+test-case = "3.0"               # Test case generation
+wiremock = "0.5"                # HTTP mocking
+insta = "1.34"                  # Snapshot testing
+fake = "2.8"                    # Fake data generation
+quickcheck = "1.0"              # Property-based testing
+quickcheck_macros = "1.0"       # QuickCheck macros
+# golden_tests = "1.2"            # Golden file testing (dependency not found)
+trycmd = "0.14"                 # Command line testing
+escargot = "0.5"                # Cargo subprocess management
+
+# Coverage and reporting
+# tarpaulin = "0.27"              # Code coverage - commented out due to availability issues
+cargo-llvm-cov = "0.5"          # LLVM coverage
+trybuild = "1.0"                # Compile-fail testing
 
 [features]
 default = ["interactive", "tui"]
