@@ -459,9 +459,9 @@ impl ParserBenchmarks {
                 parameters: HashMap::new(),
             },
             stats: header::SSTableStats {
-                row_count: 1000000,
-                min_timestamp: 1000000,
-                max_timestamp: 2000000,
+                row_count: 1_000_000,
+                min_timestamp: 1_000_000,
+                max_timestamp: 2_000_000,
                 max_deletion_time: 0,
                 compression_ratio: 0.75,
                 row_size_histogram: vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
@@ -502,8 +502,8 @@ impl ParserBenchmarks {
             (types::CqlTypeId::Boolean, crate::Value::Boolean(false)),
             (types::CqlTypeId::Int, crate::Value::Integer(42)),
             (types::CqlTypeId::Int, crate::Value::Integer(-42)),
-            (types::CqlTypeId::BigInt, crate::Value::BigInt(1000000)),
-            (types::CqlTypeId::BigInt, crate::Value::BigInt(-1000000)),
+            (types::CqlTypeId::BigInt, crate::Value::BigInt(1_000_000)),
+            (types::CqlTypeId::BigInt, crate::Value::BigInt(-1_000_000)),
             (types::CqlTypeId::Float, crate::Value::Float(3.14159)),
             (types::CqlTypeId::Float, crate::Value::Float(-2.71828)),
             (
