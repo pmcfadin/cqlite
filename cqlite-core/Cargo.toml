@@ -107,6 +107,8 @@ snappy = ["dep:snap"]
 gzip = ["dep:flate2"]  
 zstd_compression = ["dep:zstd"]
 all-compression = ["lz4", "snappy", "gzip", "zstd_compression"]
+deflate = []
+zstd = []
 
 # Other features
 metrics = []

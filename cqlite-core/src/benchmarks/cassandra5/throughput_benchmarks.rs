@@ -18,7 +18,9 @@ use super::{
 
 /// Throughput benchmarking suite comparing against native Cassandra tools
 pub struct ThroughputBenchmarks {
+    #[allow(dead_code)]
     platform: Arc<Platform>,
+    #[allow(dead_code)]
     config: Config,
 }
 

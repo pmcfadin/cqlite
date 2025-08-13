@@ -21,7 +21,9 @@ use super::{
 
 /// Compression performance benchmarking suite for Cassandra 5+
 pub struct CompressionBenchmarks {
+    #[allow(dead_code)]
     platform: Arc<Platform>,
+    #[allow(dead_code)]
     config: Config,
 }
 

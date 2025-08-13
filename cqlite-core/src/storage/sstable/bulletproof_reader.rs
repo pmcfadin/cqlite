@@ -411,6 +411,7 @@ impl BulletproofReader {
     }
 
     /// Read legacy varint format for backwards compatibility
+    #[allow(dead_code)]
     fn read_varint(&self, data: &[u8]) -> Result<(u64, usize)> {
         if data.is_empty() {
             return Err(Error::InvalidFormat("Empty data for varint".to_string()));
