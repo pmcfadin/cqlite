@@ -258,7 +258,7 @@ impl DockerManager {
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
 
         let mut output_str = String::new();
-        if let StartExecResults::Attached { mut output, .. } = 
+        if let StartExecResults::Attached { mut output, .. } =
             self.docker.start_exec(&exec_response.id, None).await?
         {
             use futures_util::StreamExt;
@@ -353,7 +353,7 @@ impl DockerManager {
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
 
         let mut output_str = String::new();
-        if let StartExecResults::Attached { mut output, .. } = 
+        if let StartExecResults::Attached { mut output, .. } =
             self.docker.start_exec(&exec_response.id, None).await?
         {
             use futures_util::StreamExt;
@@ -394,7 +394,7 @@ impl DockerManager {
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
 
         let mut output_str = String::new();
-        if let StartExecResults::Attached { mut output, .. } = 
+        if let StartExecResults::Attached { mut output, .. } =
             self.docker.start_exec(&exec_response.id, None).await?
         {
             use futures_util::StreamExt;
