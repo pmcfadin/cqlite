@@ -20,6 +20,8 @@ pub struct CompressionInfo {
     pub chunk_offsets: Vec<u64>,
     /// CRC32 checksum of the metadata (if present)
     pub crc32: Option<u32>,
+    /// Per-chunk CRC32 checksums for validation
+    pub chunk_crcs: Vec<u32>,
 }
 
 impl CompressionInfo {
@@ -116,6 +118,24 @@ impl CompressionInfo {
             chunk_offsets.push(offset);
         }
 
+        // Parse per-chunk CRC32 values (if present)
+        let mut chunk_crcs = Vec::with_capacity(chunk_count);
+        let remaining_before_crcs = data.len() - cursor.position() as usize;
+        
+        // Check if we have enough space for chunk CRCs plus optional metadata CRC
+        let expected_crc_bytes = chunk_count * 4;
+        if remaining_before_crcs >= expected_crc_bytes + 4 {
+            // We have per-chunk CRCs
+            for i in 0..chunk_count {
+                let mut crc_bytes = [0u8; 4];
+                cursor.read_exact(&mut crc_bytes).map_err(|e| {
+                    Error::InvalidFormat(format!("Failed to read chunk CRC {}: {}", i, e))
+                })?;
+                let chunk_crc = u32::from_be_bytes(crc_bytes);
+                chunk_crcs.push(chunk_crc);
+            }
+        }
+
         // Check if there's a CRC32 at the end of the file
         let mut crc32 = None;
         let remaining = data.len() - cursor.position() as usize;
@@ -142,6 +162,7 @@ impl CompressionInfo {
             data_length,
             chunk_offsets,
             crc32,
+            chunk_crcs,
         })
     }
 
@@ -195,6 +216,7 @@ impl CompressionInfo {
             data_length,
             chunk_offsets,
             crc32: None,
+            chunk_crcs: vec![],
         })
     }
 
@@ -310,6 +332,37 @@ impl CompressionInfo {
         let mut hasher = Hasher::new();
         hasher.update(data);
         hasher.finalize()
+    }
+
+    /// Validate CRC32 for a specific chunk
+    pub fn validate_chunk_crc(&self, chunk_index: usize, chunk_data: &[u8]) -> Result<()> {
+        // If we don't have per-chunk CRCs, skip validation (legacy format)
+        if self.chunk_crcs.is_empty() {
+            return Ok(());
+        }
+
+        // Check if we have a CRC for this chunk
+        if chunk_index >= self.chunk_crcs.len() {
+            return Err(Error::InvalidFormat(format!(
+                "No CRC available for chunk {}",
+                chunk_index
+            )));
+        }
+
+        let expected_crc = self.chunk_crcs[chunk_index];
+        let actual_crc = Self::calculate_crc32(chunk_data);
+
+        if expected_crc != actual_crc {
+            // Get the chunk offset for better error reporting
+            let chunk_offset = self.chunk_offsets.get(chunk_index).unwrap_or(&0);
+            
+            return Err(Error::InvalidFormat(format!(
+                "CRC32 mismatch for chunk {} at offset 0x{:x}: stored=0x{:08x}, calculated=0x{:08x}",
+                chunk_index, chunk_offset, expected_crc, actual_crc
+            )));
+        }
+
+        Ok(())
     }
 
     /// Create a debug representation showing the hex dump analysis
@@ -462,6 +515,7 @@ mod tests {
             data_length: 32768,
             chunk_offsets: vec![0, 8192],
             crc32: None,
+            chunk_crcs: vec![],
         };
 
         assert_eq!(info.chunk_for_offset(0), 0);
@@ -484,6 +538,7 @@ mod tests {
             data_length: 32768,
             chunk_offsets: vec![0, 8192],
             crc32: Some(0x12345678),
+            chunk_crcs: vec![],
         };
 
         assert!(valid_info.validate().is_ok());
@@ -494,6 +549,7 @@ mod tests {
             data_length: 0,
             chunk_offsets: vec![],
             crc32: None,
+            chunk_crcs: vec![],
         };
 
         assert!(invalid_info.validate().is_err());
