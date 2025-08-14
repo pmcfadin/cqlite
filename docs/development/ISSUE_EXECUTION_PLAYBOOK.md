@@ -52,6 +52,15 @@ PR
 - Title: “Schema‑driven parsing architecture – Issue #28”
 - Include: brief design note for `SchemaRegistry`, test results/artifacts, and coverage summary
 
+Comments
+- Status: Initial implementation landed (SchemaRegistry, schema‑aware row/cell state machine). Comparator threading is partial.
+- Remaining work:
+  - Thread partition/clustering comparators end‑to‑end (remove default Blob comparator) and use them for multi‑component key decode and ordering.
+  - Eliminate any remaining modern‑path type guessing; make value decoding strictly schema/comparator‑driven.
+  - Add unit tests for multi‑component keys and nested collections/UDTs/frozen; add integration parity tests for representative tables.
+- Acceptance criteria focus: parsing is schema/comparator‑driven only, no guessing; zero‑diff parity on representative datasets.
+- Testing framework: Docker‑based validator + sstabledump parity workflow and BTI suite are in place to enforce zero‑diff; wire these tests to this issue’s datasets.
+
 ---
 
 ### #34 — Compression metadata/CRC validation across algorithms (P0, critical)
@@ -88,6 +97,15 @@ PR
 - Title: “Compression metadata/CRC validation (all algorithms) – Issue #34”
 - Include: matrix results, example corruption failure, link to CI run
 
+Comments
+- Status: Algorithm support exists (LZ4/Snappy/Deflate/Zstd) with strict decompression paths and CompressionInfo detection.
+- Remaining work:
+  - Enforce per‑chunk CRC from `CompressionInfo.db` on every chunk; on mismatch, fail with deterministic error (include file, chunk offset, expected/actual CRC).
+  - Build four‑compressor × three‑chunk‑size dataset matrix; add negative CRC‑corruption tests for each.
+  - Implement checksum validation where applicable (e.g., Statistics/BIG) instead of skipping.
+- Acceptance criteria focus: no decompression guessing; CI matrix for compressors/sizes added and gating merges.
+- Testing framework: dataset generation + validator scripts exist; extend the CI parity workflow to run this matrix in zero‑tolerance mode and fail fast.
+
 ---
 
 ### #35 — Index/Summary/Statistics parsing and validation (P0, critical)
@@ -121,6 +139,15 @@ Acceptance criteria
 PR
 - Title: “Index/Summary/Statistics: spec readers + validation – Issue #35”
 - Include: dataset descriptions, parity artifacts, and a few lookup proof cases
+
+Comments
+- Status: Spec readers implemented for Index.db, Summary.db, and Statistics.db; structures include promoted index and token ranges.
+- Remaining work:
+  - Integrate spec readers into the live read path for partition lookup/iteration (incl. promoted index handling) and validate offsets/key digests.
+  - Implement checksum validation and expose min/max timestamps and token coverage; cross‑check vs sstabledump JSON.
+  - Prepare wide‑partition datasets to exercise promoted index; add parity tests and sampled lookup proofs.
+- Acceptance criteria focus: readers are complete, used in the lookup path, and pass parity; CI includes index/summary/statistics parity gating.
+- Testing framework: validator + Docker harness are ready; add datasets and wire parity checks into CI to block merges on discrepancies.
 
 ---
 
