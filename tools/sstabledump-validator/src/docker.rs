@@ -389,7 +389,7 @@ impl DockerManager {
         let mut commands = vec![
             // Create test keyspace
             "CREATE KEYSPACE IF NOT EXISTS validator_test WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};".to_string(),
-            
+
             // Create basic test table
             "CREATE TABLE IF NOT EXISTS validator_test.basic_types (
                 id UUID PRIMARY KEY,
@@ -401,7 +401,7 @@ impl DockerManager {
                 float_col FLOAT,
                 double_col DOUBLE
             );".to_string(),
-            
+
             // Create collection test table
             "CREATE TABLE IF NOT EXISTS validator_test.collections (
                 id UUID PRIMARY KEY,
@@ -431,13 +431,13 @@ impl DockerManager {
             commands.extend(vec![
                 // Null values
                 "INSERT INTO validator_test.basic_types (id, text_col) VALUES (uuid(), null);".to_string(),
-                
+
                 // Empty collections
                 "INSERT INTO validator_test.collections (id, list_col, set_col, map_col) VALUES (uuid(), [], {}, {});".to_string(),
-                
+
                 // Large text value
                 format!("INSERT INTO validator_test.basic_types (id, text_col) VALUES (uuid(), '{}');", "x".repeat(1000)),
-                
+
                 // Maximum/minimum values
                 "INSERT INTO validator_test.basic_types (id, int_col, bigint_col) VALUES (uuid(), 2147483647, 9223372036854775807);".to_string(),
                 "INSERT INTO validator_test.basic_types (id, int_col, bigint_col) VALUES (uuid(), -2147483648, -9223372036854775808);".to_string(),
