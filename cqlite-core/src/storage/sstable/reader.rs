@@ -558,9 +558,12 @@ impl SSTableReader {
     // Missing function implementations
 
     /// Enhanced header parsing with version detection
-    async fn parse_header_with_version_detection(header_buffer: &[u8], path: &Path) -> Result<SSTableHeader> {
-        use crate::parser::header::{parse_sstable_header, CassandraVersion};
-        
+    async fn parse_header_with_version_detection(
+        header_buffer: &[u8],
+        path: &Path,
+    ) -> Result<SSTableHeader> {
+        use crate::parser::header::{CassandraVersion, parse_sstable_header};
+
         if header_buffer.len() < 8 {
             return Err(Error::corruption("Header buffer too small for parsing"));
         }
@@ -568,14 +571,22 @@ impl SSTableReader {
         // Try to parse using the existing header parser first
         match parse_sstable_header(header_buffer) {
             Ok((_, header)) => {
-                println!("✅ Successfully parsed header with version detection for {:?}", path);
+                println!(
+                    "✅ Successfully parsed header with version detection for {:?}",
+                    path
+                );
                 Ok(header)
             }
             Err(_) => {
                 // Fallback: Try to detect magic number manually and create a basic header
                 let magic_bytes = &header_buffer[0..4];
-                let magic = u32::from_be_bytes([magic_bytes[0], magic_bytes[1], magic_bytes[2], magic_bytes[3]]);
-                
+                let magic = u32::from_be_bytes([
+                    magic_bytes[0],
+                    magic_bytes[1],
+                    magic_bytes[2],
+                    magic_bytes[3],
+                ]);
+
                 let version = if header_buffer.len() >= 6 {
                     u16::from_be_bytes([header_buffer[4], header_buffer[5]])
                 } else {
@@ -583,23 +594,27 @@ impl SSTableReader {
                 };
 
                 // Detect Cassandra version from magic number
-                let cassandra_version = CassandraVersion::from_magic_number(magic)
-                    .unwrap_or(CassandraVersion::Legacy);
+                let cassandra_version =
+                    CassandraVersion::from_magic_number(magic).unwrap_or(CassandraVersion::Legacy);
 
-                println!("🔍 Detected Cassandra version: {:?} (magic: 0x{:08x}) for {:?}", 
-                    cassandra_version, magic, path);
+                println!(
+                    "🔍 Detected Cassandra version: {:?} (magic: 0x{:08x}) for {:?}",
+                    cassandra_version, magic, path
+                );
 
                 // Create fallback header
                 Ok(crate::parser::header::SSTableHeader {
                     cassandra_version,
                     version,
                     table_id: [0; 16],
-                    keyspace: path.parent()
+                    keyspace: path
+                        .parent()
                         .and_then(|p| p.file_name())
                         .and_then(|n| n.to_str())
                         .map(|s| s.split('-').next().unwrap_or("unknown").to_string())
                         .unwrap_or_else(|| "unknown".to_string()),
-                    table_name: path.file_stem()
+                    table_name: path
+                        .file_stem()
                         .and_then(|n| n.to_str())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "unknown".to_string()),
@@ -626,50 +641,58 @@ impl SSTableReader {
 
     /// Extract generation number from SSTable file path
     fn extract_generation_from_path(path: &Path) -> u64 {
-        let filename = path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Common Cassandra SSTable filename patterns:
         // nb-1-big-Data.db -> generation 1
-        // mc-1-big-Data.db -> generation 1  
+        // mc-1-big-Data.db -> generation 1
         // la-123-big-Data.db -> generation 123
         // keyspace-table-nb-456-big-Data.db -> generation 456
 
         // Try to find generation number in different patterns
         let parts: Vec<&str> = filename.split('-').collect();
-        
+
         // Pattern 1: nb-{generation}-big-Data.db
         if parts.len() >= 3 && (parts[0] == "nb" || parts[0] == "mc" || parts[0] == "la") {
             if let Ok(generation) = parts[1].parse::<u64>() {
-                println!("📁 Extracted generation {} from pattern 1: {}", generation, filename);
+                println!(
+                    "📁 Extracted generation {} from pattern 1: {}",
+                    generation, filename
+                );
                 return generation;
             }
         }
-        
+
         // Pattern 2: keyspace-table-nb-{generation}-big-Data.db
         if parts.len() >= 5 {
-            for i in 0..parts.len()-2 {
-                if (parts[i] == "nb" || parts[i] == "mc" || parts[i] == "la") && i+1 < parts.len() {
-                    if let Ok(generation) = parts[i+1].parse::<u64>() {
-                        println!("📁 Extracted generation {} from pattern 2: {}", generation, filename);
+            for i in 0..parts.len() - 2 {
+                if (parts[i] == "nb" || parts[i] == "mc" || parts[i] == "la") && i + 1 < parts.len()
+                {
+                    if let Ok(generation) = parts[i + 1].parse::<u64>() {
+                        println!(
+                            "📁 Extracted generation {} from pattern 2: {}",
+                            generation, filename
+                        );
                         return generation;
                     }
                 }
             }
         }
-        
+
         // Pattern 3: Look for any numeric part that could be generation
         for part in &parts {
             if let Ok(generation) = part.parse::<u64>() {
                 // Skip obviously wrong numbers (like version numbers)
                 if generation > 0 && generation < 1_000_000 {
-                    println!("📁 Extracted generation {} from numeric part: {}", generation, filename);
+                    println!(
+                        "📁 Extracted generation {} from numeric part: {}",
+                        generation, filename
+                    );
                     return generation;
                 }
             }
         }
-        
+
         // Default generation if parsing fails
         println!("📁 Using default generation 0 for: {}", filename);
         0
@@ -686,7 +709,7 @@ impl SSTableReader {
             }
             crate::parser::header::CassandraVersion::V5_0Bti => {
                 // BTI format has different header structure
-                Self::find_data_start_bti_format(header_buffer)  
+                Self::find_data_start_bti_format(header_buffer)
             }
             crate::parser::header::CassandraVersion::Legacy => {
                 // Legacy format has simpler, more predictable headers
@@ -705,34 +728,42 @@ impl SSTableReader {
     fn find_data_start_nb_format(header_buffer: &[u8]) -> Result<usize> {
         // For nb format, look for compressed data patterns or block headers
         // The header typically ends where compressed blocks begin
-        
+
         // Strategy 1: Look for compression signatures (LZ4, Snappy, etc.)
         for i in 64..header_buffer.len().min(2048) {
             if i + 8 < header_buffer.len() {
                 // Check for LZ4 signature
-                if header_buffer[i..i+4] == [0x04, 0x22, 0x4D, 0x18] {
+                if header_buffer[i..i + 4] == [0x04, 0x22, 0x4D, 0x18] {
                     println!("🔍 Found LZ4 signature at offset {}", i);
                     return Ok(i);
                 }
-                
+
                 // Check for typical block size patterns (large values that could be block sizes)
                 let potential_size = u32::from_be_bytes([
-                    header_buffer[i], header_buffer[i+1], 
-                    header_buffer[i+2], header_buffer[i+3]
+                    header_buffer[i],
+                    header_buffer[i + 1],
+                    header_buffer[i + 2],
+                    header_buffer[i + 3],
                 ]);
-                
+
                 // Reasonable block sizes for Cassandra (1KB to 64MB)
                 if potential_size >= 1024 && potential_size <= 64 * 1024 * 1024 {
                     // This might be a block size header
-                    println!("🔍 Found potential block header at offset {} (size: {})", i, potential_size);
+                    println!(
+                        "🔍 Found potential block header at offset {} (size: {})",
+                        i, potential_size
+                    );
                     return Ok(i);
                 }
             }
         }
-        
+
         // Fallback: Use fixed size for nb format
         let fallback_size = 1024.min(header_buffer.len());
-        println!("🔍 Using fallback header size {} for nb format", fallback_size);
+        println!(
+            "🔍 Using fallback header size {} for nb format",
+            fallback_size
+        );
         Ok(fallback_size)
     }
 
@@ -740,9 +771,12 @@ impl SSTableReader {
     fn find_data_start_bti_format(header_buffer: &[u8]) -> Result<usize> {
         // BTI format has different markers and structure
         // Look for BTI-specific patterns
-        
+
         let fallback_size = 1024.min(header_buffer.len());
-        println!("🔍 Using estimated header size {} for BTI format", fallback_size);
+        println!(
+            "🔍 Using estimated header size {} for BTI format",
+            fallback_size
+        );
         Ok(fallback_size)
     }
 
@@ -750,7 +784,10 @@ impl SSTableReader {
     fn find_data_start_legacy_format(header_buffer: &[u8]) -> Result<usize> {
         // Legacy format is more predictable - usually 512 bytes or less
         let fallback_size = 512.min(header_buffer.len());
-        println!("🔍 Using standard header size {} for legacy format", fallback_size);
+        println!(
+            "🔍 Using standard header size {} for legacy format",
+            fallback_size
+        );
         Ok(fallback_size)
     }
 
@@ -758,24 +795,27 @@ impl SSTableReader {
     fn estimate_header_size_heuristic(header_buffer: &[u8]) -> Result<usize> {
         // Use heuristics to estimate where header ends and data begins
         // Look for patterns that indicate start of data section
-        
+
         for i in (64..header_buffer.len().min(1024)).step_by(64) {
             if i + 16 < header_buffer.len() {
                 // Check if this position has characteristics of data vs. header
-                let slice = &header_buffer[i..i+16];
-                
+                let slice = &header_buffer[i..i + 16];
+
                 // Data sections often have more entropy than headers
                 let non_zero_bytes = slice.iter().filter(|&&b| b != 0).count();
                 let entropy_score = non_zero_bytes as f32 / 16.0;
-                
+
                 // If we find a region with high entropy, it might be start of data
                 if entropy_score > 0.7 {
-                    println!("🔍 Detected potential data start at offset {} (entropy: {:.2})", i, entropy_score);
+                    println!(
+                        "🔍 Detected potential data start at offset {} (entropy: {:.2})",
+                        i, entropy_score
+                    );
                     return Ok(i);
                 }
             }
         }
-        
+
         // Conservative fallback
         let fallback_size = 768.min(header_buffer.len());
         println!("🔍 Using heuristic header size {}", fallback_size);
