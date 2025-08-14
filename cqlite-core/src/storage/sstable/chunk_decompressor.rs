@@ -5,6 +5,7 @@
 
 use super::compression_info::CompressionInfo;
 use crate::{Error, Result};
+use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -16,17 +17,20 @@ pub struct ChunkDecompressor {
     chunk_cache: HashMap<usize, Vec<u8>>,
     /// Maximum number of chunks to cache
     max_cached_chunks: usize,
+    /// Cassandra version for format detection
+    cassandra_version: CassandraVersion,
 }
 
 impl ChunkDecompressor {
-    /// Create a new chunk decompressor with compression metadata
-    pub fn new(compression_info: CompressionInfo) -> Result<Self> {
+    /// Create a new chunk decompressor with compression metadata and format detection
+    pub fn new(compression_info: CompressionInfo, cassandra_version: CassandraVersion) -> Result<Self> {
         compression_info.validate()?;
 
         Ok(Self {
             compression_info,
             chunk_cache: HashMap::new(),
             max_cached_chunks: 16, // Cache up to 16 chunks (16 * 16KB = 256KB max memory)
+            cassandra_version,
         })
     }
 
@@ -145,178 +149,105 @@ impl ChunkDecompressor {
             chunk_index, compressed_offset, compressed_size
         );
 
+        // For modern formats, enforce strict CRC validation
+        // Legacy formats skip CRC validation for compatibility
+        if self.cassandra_version != CassandraVersion::Legacy {
+            self.compression_info.validate_chunk_crc(chunk_index, &compressed_data)?;
+        }
+
         // Decompress based on algorithm
-        match self.compression_info.algorithm.as_str() {
+        let decompressed = match self.compression_info.algorithm.as_str() {
             "LZ4Compressor" => self.decompress_lz4_chunk(&compressed_data, chunk_index),
             "SnappyCompressor" => self.decompress_snappy_chunk(&compressed_data, chunk_index),
             "DeflateCompressor" => self.decompress_deflate_chunk(&compressed_data, chunk_index),
+            "ZstdCompressor" => self.decompress_zstd_chunk(&compressed_data, chunk_index),
             algorithm => Err(Error::UnsupportedFormat(format!(
                 "Unknown compression algorithm: {}",
                 algorithm
             ))),
+        }?;
+
+        // Validate decompressed data size matches expected chunk length
+        // (for all chunks except possibly the last one)
+        if chunk_index < self.compression_info.chunk_offsets.len() - 1 {
+            let expected_size = self.compression_info.chunk_length as usize;
+            if decompressed.len() != expected_size {
+                return Err(Error::InvalidFormat(format!(
+                    "Decompressed chunk {} size mismatch: expected {}, got {}",
+                    chunk_index, expected_size, decompressed.len()
+                )));
+            }
         }
+
+        Ok(decompressed)
     }
 
-    /// Decompress LZ4 chunk with multiple fallback strategies
+    /// Decompress LZ4 chunk - strict mode for modern formats
     fn decompress_lz4_chunk(&self, compressed_data: &[u8], chunk_index: usize) -> Result<Vec<u8>> {
-        println!(
-            "🔧 Attempting LZ4 decompression for chunk {} ({} bytes)",
-            chunk_index,
-            compressed_data.len()
-        );
-
         if compressed_data.is_empty() {
-            return Err(Error::InvalidFormat("Empty compressed chunk".to_string()));
+            return Err(Error::InvalidFormat(format!(
+                "Empty compressed data for chunk {}",
+                chunk_index
+            )));
         }
 
-        // Debug: show first bytes
-        let debug_len = std::cmp::min(32, compressed_data.len());
-        println!(
-            "📊 First {} bytes: {:02x?}",
-            debug_len,
-            &compressed_data[..debug_len]
-        );
-
-        // Strategy 1: Try size-prepended format (standard LZ4)
-        if let Ok(decompressed) = lz4_flex::decompress_size_prepended(compressed_data) {
-            println!(
-                "✅ LZ4 size-prepended decompression succeeded: {} bytes",
-                decompressed.len()
-            );
-            return Ok(decompressed);
-        }
-
-        // Strategy 2: Try with expected chunk size
-        let expected_size = self.compression_info.chunk_length as usize;
-        if let Ok(decompressed) = lz4_flex::decompress(compressed_data, expected_size) {
-            println!(
-                "✅ LZ4 fixed-size decompression succeeded: {} bytes",
-                decompressed.len()
-            );
-            return Ok(decompressed);
-        }
-
-        // Strategy 3: Try reading size from first 4 bytes (big-endian)
-        if compressed_data.len() >= 8 {
-            let size_be = u32::from_be_bytes([
-                compressed_data[0],
-                compressed_data[1],
-                compressed_data[2],
-                compressed_data[3],
-            ]) as usize;
-
-            if size_be > 0 && size_be <= 10 * 1024 * 1024 {
-                // Reasonable size limit
-                if let Ok(decompressed) = lz4_flex::decompress(&compressed_data[4..], size_be) {
-                    println!(
-                        "✅ LZ4 big-endian size decompression succeeded: {} bytes",
-                        decompressed.len()
-                    );
-                    return Ok(decompressed);
+        // For modern formats, use strict decompression based on CompressionInfo metadata
+        // Try standard LZ4 format with size prepended
+        match lz4_flex::decompress_size_prepended(compressed_data) {
+            Ok(decompressed) => Ok(decompressed),
+            Err(e) => {
+                // Try with expected chunk size from metadata
+                let expected_size = self.compression_info.chunk_length as usize;
+                match lz4_flex::decompress(compressed_data, expected_size) {
+                    Ok(decompressed) => Ok(decompressed),
+                    Err(_) => Err(Error::InvalidFormat(format!(
+                        "LZ4 decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
+                        chunk_index,
+                        self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                        e
+                    )))
                 }
             }
         }
-
-        // Strategy 4: Try reading size from first 4 bytes (little-endian)
-        if compressed_data.len() >= 8 {
-            let size_le = u32::from_le_bytes([
-                compressed_data[0],
-                compressed_data[1],
-                compressed_data[2],
-                compressed_data[3],
-            ]) as usize;
-
-            if size_le > 0 && size_le <= 10 * 1024 * 1024 {
-                // Reasonable size limit
-                if let Ok(decompressed) = lz4_flex::decompress(&compressed_data[4..], size_le) {
-                    println!(
-                        "✅ LZ4 little-endian size decompression succeeded: {} bytes",
-                        decompressed.len()
-                    );
-                    return Ok(decompressed);
-                }
-            }
-        }
-
-        // Strategy 5: Try with various common sizes
-        for &size in &[4096, 8192, 16384, 32768, 65536] {
-            if let Ok(decompressed) = lz4_flex::decompress(compressed_data, size) {
-                println!(
-                    "✅ LZ4 size {} decompression succeeded: {} bytes",
-                    size,
-                    decompressed.len()
-                );
-                return Ok(decompressed);
-            }
-        }
-
-        // Strategy 6: Check for uncompressed data (Cassandra sometimes stores small chunks uncompressed)
-        if compressed_data.len() <= self.compression_info.chunk_length as usize {
-            println!("⚠️  Chunk appears to be uncompressed, returning raw data");
-            return Ok(compressed_data.to_vec());
-        }
-
-        Err(Error::InvalidFormat(format!(
-            "LZ4 decompression failed for chunk {} with {} bytes. First 16 bytes: {:02x?}",
-            chunk_index,
-            compressed_data.len(),
-            &compressed_data[..std::cmp::min(16, compressed_data.len())]
-        )))
     }
 
-    /// Decompress Snappy chunk
+    /// Decompress Snappy chunk - strict mode for modern formats
     fn decompress_snappy_chunk(
         &self,
         compressed_data: &[u8],
         chunk_index: usize,
     ) -> Result<Vec<u8>> {
-        println!(
-            "🔧 Attempting Snappy decompression for chunk {} ({} bytes)",
-            chunk_index,
-            compressed_data.len()
-        );
-
-        // Try standard Snappy decompression
         #[cfg(feature = "snappy")]
         {
             use snap::raw::Decoder;
             let mut decoder = Decoder::new();
 
             match decoder.decompress_vec(compressed_data) {
-                Ok(decompressed) => {
-                    println!(
-                        "✅ Snappy decompression succeeded: {} bytes",
-                        decompressed.len()
-                    );
-                    return Ok(decompressed);
-                }
-                Err(e) => {
-                    println!("❌ Snappy decompression failed: {}", e);
-                }
+                Ok(decompressed) => Ok(decompressed),
+                Err(e) => Err(Error::InvalidFormat(format!(
+                    "Snappy decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
+                    chunk_index,
+                    self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                    e
+                )))
             }
         }
 
         #[cfg(not(feature = "snappy"))]
         {
-            println!("❌ Snappy support not compiled in");
+            let _ = (compressed_data, chunk_index); // Suppress unused warnings
+            Err(Error::UnsupportedFormat(
+                "Snappy support not compiled in".to_string()
+            ))
         }
-
-        // Fallback to raw data
-        Ok(compressed_data.to_vec())
     }
 
-    /// Decompress Deflate chunk
+    /// Decompress Deflate chunk - strict mode for modern formats
     fn decompress_deflate_chunk(
         &self,
         compressed_data: &[u8],
         chunk_index: usize,
     ) -> Result<Vec<u8>> {
-        println!(
-            "🔧 Attempting Deflate decompression for chunk {} ({} bytes)",
-            chunk_index,
-            compressed_data.len()
-        );
-
         #[cfg(feature = "deflate")]
         {
             use flate2::read::DeflateDecoder;
@@ -326,26 +257,51 @@ impl ChunkDecompressor {
             let mut decompressed = Vec::new();
 
             match decoder.read_to_end(&mut decompressed) {
-                Ok(_) => {
-                    println!(
-                        "✅ Deflate decompression succeeded: {} bytes",
-                        decompressed.len()
-                    );
-                    return Ok(decompressed);
-                }
-                Err(e) => {
-                    println!("❌ Deflate decompression failed: {}", e);
-                }
+                Ok(_) => Ok(decompressed),
+                Err(e) => Err(Error::InvalidFormat(format!(
+                    "Deflate decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
+                    chunk_index,
+                    self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                    e
+                )))
             }
         }
 
         #[cfg(not(feature = "deflate"))]
         {
-            println!("❌ Deflate support not compiled in");
+            let _ = (compressed_data, chunk_index); // Suppress unused warnings
+            Err(Error::UnsupportedFormat(
+                "Deflate support not compiled in".to_string()
+            ))
+        }
+    }
+
+    /// Decompress Zstd chunk - strict mode for modern formats
+    fn decompress_zstd_chunk(
+        &self,
+        compressed_data: &[u8],
+        chunk_index: usize,
+    ) -> Result<Vec<u8>> {
+        #[cfg(feature = "zstd")]
+        {
+            match zstd::decode_all(&compressed_data[..]) {
+                Ok(decompressed) => Ok(decompressed),
+                Err(e) => Err(Error::InvalidFormat(format!(
+                    "Zstd decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
+                    chunk_index,
+                    self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                    e
+                )))
+            }
         }
 
-        // Fallback to raw data
-        Ok(compressed_data.to_vec())
+        #[cfg(not(feature = "zstd"))]
+        {
+            let _ = (compressed_data, chunk_index); // Suppress unused warnings
+            Err(Error::UnsupportedFormat(
+                "Zstd support not compiled in".to_string()
+            ))
+        }
     }
 
     /// Clear the chunk cache to free memory
@@ -384,13 +340,12 @@ pub fn create_decompressor_from_file(
     println!("   Data Length: {} bytes", compression_info.data_length);
     println!("   Chunk Count: {}", compression_info.chunk_offsets.len());
 
-    ChunkDecompressor::new(compression_info)
+    ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn test_chunk_decompressor_creation() {
@@ -399,9 +354,11 @@ mod tests {
             chunk_length: 16384,
             data_length: 32768,
             chunk_offsets: vec![0, 8192, 16384],
+            crc32: None,
+            chunk_crcs: vec![],
         };
 
-        let decompressor = ChunkDecompressor::new(compression_info).unwrap();
+        let decompressor = ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
         assert_eq!(decompressor.compression_info.algorithm, "LZ4Compressor");
         assert_eq!(decompressor.compression_info.chunk_length, 16384);
         assert_eq!(decompressor.compression_info.chunk_offsets.len(), 3);
@@ -414,9 +371,11 @@ mod tests {
             chunk_length: 16384,
             data_length: 16384,
             chunk_offsets: vec![0],
+            crc32: None,
+            chunk_crcs: vec![],
         };
 
-        let mut decompressor = ChunkDecompressor::new(compression_info).unwrap();
+        let mut decompressor = ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
 
         let (cached, max) = decompressor.cache_stats();
         assert_eq!(cached, 0);
