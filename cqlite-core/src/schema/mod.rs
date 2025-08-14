@@ -24,9 +24,9 @@ pub use discovery::{
 };
 
 pub use registry::{
-    ParsingContext, RegistryStatistics, SchemaChange, SchemaChangeType, SchemaQuery, SchemaRegistry,
-    SchemaRegistryConfig, SchemaSource, SchemaValidationStatus, SchemaValidator, SchemaVersion,
-    ValidationReport,
+    ParsingContext, RegistryStatistics, SchemaChange, SchemaChangeType, SchemaQuery,
+    SchemaRegistry, SchemaRegistryConfig, SchemaSource, SchemaValidationStatus, SchemaValidator,
+    SchemaVersion, ValidationReport,
 };
 
 pub use parser::SchemaParser;

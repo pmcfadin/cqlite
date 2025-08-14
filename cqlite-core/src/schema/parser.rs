@@ -4,9 +4,9 @@
 //! behavior. All parsing operations require explicit schema context.
 
 use crate::{
-    schema::{registry::ParsingContext, CqlType},
-    types::{ComparatorType, Value},
     Error, Result,
+    schema::{CqlType, registry::ParsingContext},
+    types::{ComparatorType, Value},
 };
 use std::collections::HashMap;
 
@@ -66,7 +66,7 @@ impl SchemaParser {
             if offset >= data.len() {
                 break; // Partial clustering keys are valid
             }
-            
+
             let key_column = &self.context.schema.clustering_keys[idx];
             let (value, consumed) = self.parse_value_with_comparator(
                 &data[offset..],
@@ -138,7 +138,9 @@ impl SchemaParser {
             CqlType::Uuid | CqlType::TimeUuid => self.parse_uuid(data),
             CqlType::List(elem_type) => self.parse_list(data, elem_type, comparator),
             CqlType::Set(elem_type) => self.parse_set(data, elem_type, comparator),
-            CqlType::Map(key_type, val_type) => self.parse_map(data, key_type, val_type, comparator),
+            CqlType::Map(key_type, val_type) => {
+                self.parse_map(data, key_type, val_type, comparator)
+            }
             CqlType::Tuple(field_types) => self.parse_tuple(data, field_types, comparator),
             CqlType::Udt(type_name, fields) => self.parse_udt(data, type_name, fields, comparator),
             CqlType::Frozen(inner_type) => self.parse_frozen(data, inner_type, comparator),
@@ -214,11 +216,15 @@ impl SchemaParser {
     fn parse_text(&self, data: &[u8]) -> Result<(Value, usize)> {
         // Text is typically length-prefixed
         if data.len() < 4 {
-            return Err(Error::schema("Insufficient data for text length".to_string()));
+            return Err(Error::schema(
+                "Insufficient data for text length".to_string(),
+            ));
         }
         let len = i32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
         if data.len() < 4 + len {
-            return Err(Error::schema("Insufficient data for text content".to_string()));
+            return Err(Error::schema(
+                "Insufficient data for text content".to_string(),
+            ));
         }
         let text = String::from_utf8(data[4..4 + len].to_vec())
             .map_err(|e| Error::schema(format!("Invalid UTF-8: {}", e)))?;
@@ -228,11 +234,15 @@ impl SchemaParser {
     fn parse_blob(&self, data: &[u8]) -> Result<(Value, usize)> {
         // Blob is typically length-prefixed
         if data.len() < 4 {
-            return Err(Error::schema("Insufficient data for blob length".to_string()));
+            return Err(Error::schema(
+                "Insufficient data for blob length".to_string(),
+            ));
         }
         let len = i32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
         if data.len() < 4 + len {
-            return Err(Error::schema("Insufficient data for blob content".to_string()));
+            return Err(Error::schema(
+                "Insufficient data for blob content".to_string(),
+            ));
         }
         Ok((Value::Blob(data[4..4 + len].to_vec()), 4 + len))
     }
@@ -251,7 +261,8 @@ impl SchemaParser {
         if data.len() < 16 {
             return Err(Error::schema("Insufficient data for UUID".to_string()));
         }
-        let uuid_bytes: [u8; 16] = data[0..16].try_into()
+        let uuid_bytes: [u8; 16] = data[0..16]
+            .try_into()
             .map_err(|_| Error::schema("Invalid UUID bytes".to_string()))?;
         Ok((Value::Uuid(uuid_bytes), 16))
     }
@@ -263,7 +274,7 @@ impl SchemaParser {
         _comparator: &ComparatorType,
     ) -> Result<(Value, usize)> {
         let mut offset = 0;
-        
+
         // Parse collection size
         if data.len() < 4 {
             return Err(Error::schema("Insufficient data for list size".to_string()));
@@ -273,9 +284,10 @@ impl SchemaParser {
 
         let mut elements = Vec::with_capacity(count);
         let elem_comparator = ComparatorType::from_cql_type(elem_type)?;
-        
+
         for _ in 0..count {
-            let (value, consumed) = self.parse_typed_value(&data[offset..], elem_type, &elem_comparator)?;
+            let (value, consumed) =
+                self.parse_typed_value(&data[offset..], elem_type, &elem_comparator)?;
             elements.push(value);
             offset += consumed;
         }
@@ -290,7 +302,7 @@ impl SchemaParser {
         _comparator: &ComparatorType,
     ) -> Result<(Value, usize)> {
         let mut offset = 0;
-        
+
         // Parse collection size
         if data.len() < 4 {
             return Err(Error::schema("Insufficient data for set size".to_string()));
@@ -300,9 +312,10 @@ impl SchemaParser {
 
         let mut elements = Vec::with_capacity(count);
         let elem_comparator = ComparatorType::from_cql_type(elem_type)?;
-        
+
         for _ in 0..count {
-            let (value, consumed) = self.parse_typed_value(&data[offset..], elem_type, &elem_comparator)?;
+            let (value, consumed) =
+                self.parse_typed_value(&data[offset..], elem_type, &elem_comparator)?;
             elements.push(value);
             offset += consumed;
         }
@@ -318,7 +331,7 @@ impl SchemaParser {
         _comparator: &ComparatorType,
     ) -> Result<(Value, usize)> {
         let mut offset = 0;
-        
+
         // Parse collection size
         if data.len() < 4 {
             return Err(Error::schema("Insufficient data for map size".to_string()));
@@ -329,14 +342,16 @@ impl SchemaParser {
         let mut map = Vec::with_capacity(count);
         let key_comparator = ComparatorType::from_cql_type(key_type)?;
         let val_comparator = ComparatorType::from_cql_type(val_type)?;
-        
+
         for _ in 0..count {
-            let (key, key_consumed) = self.parse_typed_value(&data[offset..], key_type, &key_comparator)?;
+            let (key, key_consumed) =
+                self.parse_typed_value(&data[offset..], key_type, &key_comparator)?;
             offset += key_consumed;
-            
-            let (value, val_consumed) = self.parse_typed_value(&data[offset..], val_type, &val_comparator)?;
+
+            let (value, val_consumed) =
+                self.parse_typed_value(&data[offset..], val_type, &val_comparator)?;
             offset += val_consumed;
-            
+
             map.push((key, value));
         }
 
@@ -354,7 +369,8 @@ impl SchemaParser {
 
         for field_type in field_types {
             let field_comparator = ComparatorType::from_cql_type(field_type)?;
-            let (value, consumed) = self.parse_typed_value(&data[offset..], field_type, &field_comparator)?;
+            let (value, consumed) =
+                self.parse_typed_value(&data[offset..], field_type, &field_comparator)?;
             values.push(value);
             offset += consumed;
         }
@@ -374,7 +390,7 @@ impl SchemaParser {
 
         for (field_name, field_type) in fields {
             let field_comparator = ComparatorType::from_cql_type(field_type)?;
-            
+
             // Check for null field (length = -1)
             if data.len() >= offset + 4 {
                 let field_len = i32::from_be_bytes([
@@ -383,7 +399,7 @@ impl SchemaParser {
                     data[offset + 2],
                     data[offset + 3],
                 ]);
-                
+
                 if field_len < 0 {
                     // Null field
                     field_values.push(crate::types::UdtField {
@@ -394,8 +410,9 @@ impl SchemaParser {
                     continue;
                 }
             }
-            
-            let (value, consumed) = self.parse_typed_value(&data[offset..], field_type, &field_comparator)?;
+
+            let (value, consumed) =
+                self.parse_typed_value(&data[offset..], field_type, &field_comparator)?;
             field_values.push(crate::types::UdtField {
                 name: field_name.clone(),
                 value: Some(value),
@@ -421,7 +438,8 @@ impl SchemaParser {
     ) -> Result<(Value, usize)> {
         // Frozen types are serialized the same as their inner type
         let inner_comparator = ComparatorType::from_cql_type(inner_type)?;
-        let (inner_value, consumed) = self.parse_typed_value(data, inner_type, &inner_comparator)?;
+        let (inner_value, consumed) =
+            self.parse_typed_value(data, inner_type, &inner_comparator)?;
         Ok((Value::Frozen(Box::new(inner_value)), consumed))
     }
 
@@ -445,7 +463,7 @@ impl SchemaParser {
                     data[offset + 2],
                     data[offset + 3],
                 ]);
-                
+
                 if value_len < 0 {
                     row.insert(column.name.clone(), Value::Null);
                     offset += 4;
@@ -455,7 +473,7 @@ impl SchemaParser {
 
             let value = self.parse_column_value(&column.name, &data[offset..])?;
             row.insert(column.name.clone(), value);
-            
+
             // Calculate consumed bytes (this would need to be tracked in parse_column_value)
             // For now, we'll need to enhance parse_column_value to return consumed bytes
         }

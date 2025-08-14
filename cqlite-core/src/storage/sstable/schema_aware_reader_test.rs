@@ -4,36 +4,29 @@
 mod tests {
     use super::super::schema_aware_reader::*;
     use crate::{
-        schema::{
-            registry::SchemaRegistry,
-            TableSchema, KeyColumn, ClusteringColumn, Column,
-        },
         Config,
         platform::Platform,
+        schema::{ClusteringColumn, Column, KeyColumn, TableSchema, registry::SchemaRegistry},
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use std::collections::HashMap;
 
     fn create_test_schema() -> TableSchema {
         TableSchema {
             keyspace: "test_ks".to_string(),
             table: "test_table".to_string(),
-            partition_keys: vec![
-                KeyColumn {
-                    name: "id".to_string(),
-                    data_type: "uuid".to_string(),
-                    position: 0,
-                }
-            ],
-            clustering_keys: vec![
-                ClusteringColumn {
-                    name: "timestamp".to_string(),
-                    data_type: "timestamp".to_string(),
-                    position: 0,
-                    order: "ASC".to_string(),
-                }
-            ],
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "timestamp".to_string(),
+                data_type: "timestamp".to_string(),
+                position: 0,
+                order: "ASC".to_string(),
+            }],
             columns: vec![
                 Column {
                     name: "id".to_string(),
@@ -68,7 +61,7 @@ mod tests {
     fn test_invalid_schema_validation() {
         let mut schema = create_test_schema();
         schema.partition_keys.clear(); // Remove partition keys
-        
+
         assert!(SchemaAwareReader::validate_schema_completeness(&schema).is_err());
     }
 
@@ -76,10 +69,10 @@ mod tests {
     fn test_parsing_context_creation() {
         let schema = create_test_schema();
         let registry = Arc::new(SchemaRegistry::new());
-        
+
         let result = SchemaAwareReader::create_parsing_context(&schema, &registry);
         assert!(result.is_ok());
-        
+
         let context = result.unwrap();
         assert_eq!(context.schema.keyspace, "test_ks");
         assert_eq!(context.schema.table, "test_table");
@@ -98,7 +91,7 @@ mod tests {
             data_type: "text".to_string(),
             position: 2, // Non-contiguous - should be 1
         });
-        
+
         assert!(SchemaAwareReader::validate_schema_completeness(&schema).is_err());
     }
 
@@ -111,7 +104,7 @@ mod tests {
             position: 2, // Non-contiguous - should be 1
             order: "ASC".to_string(),
         });
-        
+
         assert!(SchemaAwareReader::validate_schema_completeness(&schema).is_err());
     }
 
@@ -119,7 +112,7 @@ mod tests {
     fn test_invalid_column_types() {
         let mut schema = create_test_schema();
         schema.columns[0].data_type = "invalid_type".to_string();
-        
+
         // Invalid types should be treated as custom types, so this should actually pass
         assert!(SchemaAwareReader::validate_schema_completeness(&schema).is_ok());
     }
@@ -136,16 +129,16 @@ mod tests {
     #[test]
     fn test_error_types() {
         use super::super::schema_aware_reader::SchemaAwareReaderError;
-        
+
         let err = SchemaAwareReaderError::SchemaValidation("test".to_string());
         assert!(err.to_string().contains("Schema validation failed"));
-        
+
         let err = SchemaAwareReaderError::IncompleteContext("test".to_string());
         assert!(err.to_string().contains("Parsing context incomplete"));
-        
+
         let err = SchemaAwareReaderError::KeyValidation("test".to_string());
         assert!(err.to_string().contains("Key validation failed"));
-        
+
         let err = SchemaAwareReaderError::ValueParsing {
             column: "test_col".to_string(),
             reason: "test_reason".to_string(),
@@ -160,13 +153,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
-        
+
         // Create a simple test file for the SSTable reader
         std::fs::write(temp_dir.path().join("test.sst"), b"dummy_data").unwrap();
-        
+
         let schema = create_test_schema();
         let registry = Arc::new(SchemaRegistry::new());
-        
+
         // This would normally fail without a proper SSTable file, but demonstrates the API
         let result = SchemaAwareReader::new(
             &temp_dir.path().join("test.sst"),
@@ -174,8 +167,9 @@ mod tests {
             registry,
             &config,
             platform,
-        ).await;
-        
+        )
+        .await;
+
         // We expect this to fail since we don't have a real SSTable file
         assert!(result.is_err());
     }

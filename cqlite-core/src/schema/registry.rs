@@ -698,16 +698,12 @@ impl SchemaRegistry {
     }
 
     /// Get the complete schema context for parsing operations
-    pub async fn get_parsing_context(
-        &self,
-        keyspace: &str,
-        table: &str,
-    ) -> Result<ParsingContext> {
+    pub async fn get_parsing_context(&self, keyspace: &str, table: &str) -> Result<ParsingContext> {
         let schema = self.get_schema(keyspace, table).await?;
         let partition_comparators = self.get_partition_key_comparator(keyspace, table).await?;
         let clustering_comparators = self.get_clustering_key_comparator(keyspace, table).await?;
         let column_comparators = self.get_table_comparators(keyspace, table).await?;
-        
+
         Ok(ParsingContext {
             schema,
             partition_comparators,
@@ -1292,17 +1288,27 @@ impl ParsingContext {
     pub fn get_column_comparator(&self, column_name: &str) -> Option<&ComparatorType> {
         self.column_comparators.get(column_name)
     }
-    
+
     /// Check if schema-driven parsing is fully configured
     pub fn is_complete(&self) -> bool {
         !self.partition_comparators.is_empty() || !self.schema.partition_keys.is_empty()
     }
-    
+
     /// Get all key columns (partition + clustering) names in order
     pub fn get_all_key_column_names(&self) -> Vec<String> {
         let mut names = Vec::new();
-        names.extend(self.schema.ordered_partition_keys().iter().map(|k| k.name.clone()));
-        names.extend(self.schema.ordered_clustering_keys().iter().map(|k| k.name.clone()));
+        names.extend(
+            self.schema
+                .ordered_partition_keys()
+                .iter()
+                .map(|k| k.name.clone()),
+        );
+        names.extend(
+            self.schema
+                .ordered_clustering_keys()
+                .iter()
+                .map(|k| k.name.clone()),
+        );
         names
     }
 }

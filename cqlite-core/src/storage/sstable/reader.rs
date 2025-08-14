@@ -1718,11 +1718,12 @@ impl SSTableReader {
         // Process multiple rows in the block
         while offset < data.len() {
             // Create state machine with schema information if available
-            let mut state_machine = if let Some(schema) = self.get_table_schema() {
-                // TODO: Remove default Blob comparator - use SchemaAwareReader instead
-                // LEGACY: Default bytes comparator (DEPRECATED - use SchemaAwareReader)
-                let comparator = ComparatorType::Blob; // This should come from schema registry
-                RowCellStateMachine::with_schema(schema, comparator)
+            let mut state_machine = if let Some(_schema) = self.get_table_schema() {
+                // DEPRECATED: This path should use SchemaAwareReader with proper comparators
+                // Blob fallback is no longer allowed in modern parsing paths
+                return Err(Error::Schema(
+                    "Modern parsing requires SchemaAwareReader with proper comparators - blob fallback disabled".to_string()
+                ));
             } else {
                 RowCellStateMachine::new()
             };
@@ -1983,7 +1984,7 @@ impl SSTableReader {
         // TODO: Remove this fallback chain - use SchemaAwareReader instead
         // LEGACY FALLBACK: Multi-strategy format detection (DEPRECATED)
         // This type guessing behavior should be replaced with SchemaAwareReader
-        
+
         // COMMENTED OUT: Strategy 1: Try Cassandra 5.0+ vint-based composite key format
         // if let Ok(parsed_key) = self.parse_composite_key_v5_format(key_data) {
         //     return Ok(parsed_key);
@@ -2034,13 +2035,12 @@ impl SSTableReader {
             // Extract component data
             let component_data = &remaining[..component_len];
 
-            // TODO: Remove fallback to Blob comparator - use SchemaAwareReader instead
-            // Get comparator type for this column
+            // DEPRECATED: This should use SchemaAwareReader with proper comparators
             let comparator = ComparatorType::from_data_type(&partition_column.data_type)
-                .unwrap_or_else(|_| {
-                    // LEGACY: Fallback to Blob comparator (DEPRECATED - use SchemaAwareReader)
-                    ComparatorType::Blob
-                });
+                .map_err(|e| Error::Schema(format!(
+                    "Invalid partition key type '{}' - use SchemaAwareReader: {}", 
+                    partition_column.data_type, e
+                )))?;
 
             // Decode component using exact comparator type
             let decoded_component = self.decode_key_component(component_data, &comparator)?;
@@ -2072,13 +2072,12 @@ impl SSTableReader {
                 // Extract component data
                 let component_data = &remaining[..component_len];
 
-                // TODO: Remove fallback to Blob comparator - use SchemaAwareReader instead
-                // Get comparator type for this column
+                // DEPRECATED: This should use SchemaAwareReader with proper comparators
                 let comparator = ComparatorType::from_data_type(&clustering_column.data_type)
-                    .unwrap_or_else(|_| {
-                        // LEGACY: Fallback to Blob comparator (DEPRECATED - use SchemaAwareReader)
-                        ComparatorType::Blob
-                    });
+                    .map_err(|e| Error::Schema(format!(
+                        "Invalid clustering key type '{}' - use SchemaAwareReader: {}", 
+                        clustering_column.data_type, e
+                    )))?;
 
                 // Decode component using exact comparator type
                 let decoded_component = self.decode_key_component(component_data, &comparator)?;
