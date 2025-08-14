@@ -2,6 +2,34 @@
 //!
 //! This module creates test datasets specifically designed to force the creation
 //! of promoted index entries, allowing validation of Index.db parsing for wide partitions.
+//!
+//! ## Promoted Index Creation Thresholds
+//!
+//! Cassandra 5+ creates promoted index entries for wide partitions based on these criteria:
+//!
+//! - **Partition Size Threshold**: Partitions exceeding 64KB (~65,536 bytes) trigger promoted index creation
+//! - **Clustering Key Count**: High clustering key counts contribute to partition size
+//! - **Row Size Impact**: Larger individual rows accelerate threshold crossing
+//!
+//! ### Configuration Guidelines
+//!
+//! To guarantee promoted index creation, ensure:
+//! ```
+//! clustering_keys_per_partition * row_size_bytes >= 64KB (65,536 bytes)
+//! ```
+//!
+//! **Examples:**
+//! - 1,000 clustering keys × 100 bytes/row = 100KB ✅ (promotes)
+//! - 10,000 clustering keys × 10 bytes/row = 100KB ✅ (promotes) 
+//! - 100 clustering keys × 100 bytes/row = 10KB ❌ (no promotion)
+//!
+//! **Default Configuration:**
+//! - `clustering_keys_per_partition: 10,000` 
+//! - `row_size_bytes: 1,024` (1KB)
+//! - **Result**: 10,000 × 1,024 = ~10MB per partition → **Guaranteed promoted index**
+//!
+//! The validation framework verifies that generated partitions actually trigger
+//! promoted index creation by analyzing the resulting Index.db files.
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};

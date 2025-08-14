@@ -411,7 +411,7 @@ impl Issue35ValidationHarness {
         None
     }
 
-    /// Validate a single offset points to valid data in Data.db
+    /// Validate a single offset points to valid data in Data.db with row header signature validation
     async fn validate_single_offset(
         &self,
         data_file: &Path,
@@ -433,13 +433,53 @@ impl Issue35ValidationHarness {
             return Ok(false); // Data would extend beyond file
         }
 
-        // Seek to offset and try to read header
+        // Seek to offset and read row header for signature validation
         file.seek(SeekFrom::Start(offset)).await?;
-        let mut header_bytes = vec![0u8; 16.min(expected_size as usize)];
+        let mut header_bytes = vec![0u8; 32.min(expected_size as usize)]; // Read more for signature validation
         let bytes_read = file.read(&mut header_bytes).await?;
 
-        // Basic validation: we should be able to read some data
-        Ok(bytes_read > 0)
+        if bytes_read < 8 {
+            return Ok(false); // Not enough data for a valid row header
+        }
+
+        // Validate row header signature - Cassandra 5+ SSTable row headers typically start with:
+        // - Length fields (4-8 bytes)
+        // - Timestamp data (8 bytes)  
+        // - Row flags (1-2 bytes)
+        // We validate basic structure patterns common to valid row headers
+        
+        // Check for reasonable row header patterns:
+        // 1. First 4 bytes should represent a reasonable size (not too large)
+        let potential_size = u32::from_be_bytes([
+            header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]
+        ]);
+        
+        // Size should be reasonable (not larger than the remaining data)
+        if potential_size as u64 > expected_size as u64 || potential_size == 0 {
+            return Ok(false);
+        }
+
+        // 2. Check for valid timestamp-like patterns in bytes 4-12
+        // Cassandra timestamps are typically microseconds since epoch
+        if bytes_read >= 12 {
+            let timestamp_bytes = &header_bytes[4..12];
+            // Validate it's not all zeros or all 0xFF (common invalid patterns)
+            let all_zero = timestamp_bytes.iter().all(|&b| b == 0);
+            let all_ff = timestamp_bytes.iter().all(|&b| b == 0xFF);
+            
+            if all_zero || all_ff {
+                return Ok(false); // Likely invalid timestamp
+            }
+        }
+
+        // 3. Basic structural validation: ensure we have non-zero data
+        let non_zero_count = header_bytes.iter().filter(|&&b| b != 0).count();
+        if non_zero_count < 4 {
+            return Ok(false); // Too much zero padding, likely invalid
+        }
+
+        // If all validations pass, this appears to be a valid row header
+        Ok(true)
     }
 
     /// Validate Summary.db files in a directory
