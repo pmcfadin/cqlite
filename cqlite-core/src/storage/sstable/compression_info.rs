@@ -121,7 +121,7 @@ impl CompressionInfo {
         // Parse per-chunk CRC32 values (if present)
         let mut chunk_crcs = Vec::with_capacity(chunk_count);
         let remaining_before_crcs = data.len() - cursor.position() as usize;
-        
+
         // Check if we have enough space for chunk CRCs plus optional metadata CRC
         let expected_crc_bytes = chunk_count * 4;
         if remaining_before_crcs >= expected_crc_bytes + 4 {
@@ -355,7 +355,7 @@ impl CompressionInfo {
         if expected_crc != actual_crc {
             // Get the chunk offset for better error reporting
             let chunk_offset = self.chunk_offsets.get(chunk_index).unwrap_or(&0);
-            
+
             return Err(Error::InvalidFormat(format!(
                 "CRC32 mismatch for chunk {} at offset 0x{:x}: stored=0x{:08x}, calculated=0x{:08x}",
                 chunk_index, chunk_offset, expected_crc, actual_crc

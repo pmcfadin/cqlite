@@ -9,11 +9,11 @@ use crate::{
     platform::Platform,
 };
 use nom::{
+    IResult,
     bytes::complete::take,
     multi::count,
-    number::complete::{be_u16, be_u32, be_u64, be_u8},
+    number::complete::{be_u8, be_u16, be_u32, be_u64},
     sequence::tuple,
-    IResult,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -160,17 +160,19 @@ impl IndexReader {
         let mut issues = Vec::new();
 
         // Check for overlapping offsets
-        let mut offsets: Vec<_> = self.index_data.partition_entries
+        let mut offsets: Vec<_> = self
+            .index_data
+            .partition_entries
             .iter()
             .map(|e| (e.data_offset, e.data_size))
             .collect();
-        
+
         offsets.sort_by_key(|&(offset, _)| offset);
-        
+
         for i in 1..offsets.len() {
             let (prev_offset, prev_size) = offsets[i - 1];
             let (curr_offset, _) = offsets[i];
-            
+
             if prev_offset + prev_size as u64 > curr_offset {
                 issues.push(format!(
                     "Overlapping partitions: offset {} + size {} overlaps with offset {}",
@@ -199,10 +201,8 @@ pub struct IndexStatistics {
 /// Parse Index.db file data
 fn parse_index_data(input: &[u8]) -> IResult<&[u8], IndexData> {
     let (input, header) = parse_index_header(input)?;
-    let (input, partition_entries) = count(
-        parse_partition_index_entry,
-        header.entry_count as usize,
-    )(input)?;
+    let (input, partition_entries) =
+        count(parse_partition_index_entry, header.entry_count as usize)(input)?;
 
     // Build lookup table
     let mut key_lookup = HashMap::new();
@@ -241,11 +241,11 @@ fn parse_partition_index_entry(input: &[u8]) -> IResult<&[u8], PartitionIndexEnt
     // Parse key digest length and data
     let (input, digest_len) = be_u16(input)?;
     let (input, key_digest) = take(digest_len)(input)?;
-    
+
     // Parse data offset and size
     let (input, data_offset) = be_u64(input)?;
     let (input, data_size) = be_u32(input)?;
-    
+
     // Check for promoted index marker
     let (input, has_promoted) = be_u8(input)?;
     let (input, promoted_index) = if has_promoted != 0 {
@@ -285,7 +285,7 @@ fn parse_promoted_index_entry(input: &[u8]) -> IResult<&[u8], PromotedIndexEntry
     // Parse clustering key length and data
     let (input, key_len) = be_u16(input)?;
     let (input, clustering_key) = take(key_len)(input)?;
-    
+
     // Parse offset and size within partition
     let (input, partition_offset) = be_u32(input)?;
     let (input, section_size) = be_u32(input)?;
@@ -314,7 +314,7 @@ mod tests {
         ];
 
         let (_, header) = parse_index_header(&data).unwrap();
-        
+
         assert_eq!(header.version, 1);
         assert_eq!(header.entry_count, 10);
         assert_eq!(header.data_size, 1024);
@@ -332,7 +332,7 @@ mod tests {
         ];
 
         let (_, entry) = parse_partition_index_entry(&data).unwrap();
-        
+
         assert_eq!(entry.key_digest, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(entry.data_offset, 4096);
         assert_eq!(entry.data_size, 512);

@@ -200,6 +200,10 @@ pub use cql_test_data_fixtures::{
     TypeTestCase,
 };
 
+// Issue #35 specific validation modules
+pub mod issue_35_validation_tests;
+pub mod wide_partition_test_generator;
+
 #[cfg(test)]
 mod tests {
     use super::*;

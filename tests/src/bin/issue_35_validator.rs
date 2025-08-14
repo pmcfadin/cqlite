@@ -18,26 +18,26 @@ async fn main() -> Result<()> {
             Arg::new("data-dir")
                 .long("data-dir")
                 .value_name("DIR")
-                .help("Specific data directory to validate")
+                .help("Specific data directory to validate"),
         )
         .arg(
             Arg::new("component")
                 .long("component")
                 .value_name("COMPONENT")
-                .help("Specific component to validate (index, summary, statistics)")
+                .help("Specific component to validate (index, summary, statistics)"),
         )
         .arg(
             Arg::new("verbose")
                 .long("verbose")
                 .short('v')
                 .help("Enable verbose output")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("zero-tolerance")
                 .long("zero-tolerance")
                 .help("Require zero-diff compliance (fail on any differences)")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .get_matches();
 
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
 
     // Create and run validation harness
     let mut harness = Issue35ValidationHarness::new().await?;
-    
+
     if verbose {
         println!("Running comprehensive validation...");
     }

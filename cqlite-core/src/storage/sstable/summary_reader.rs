@@ -9,11 +9,11 @@ use crate::{
     platform::Platform,
 };
 use nom::{
+    IResult,
     bytes::complete::take,
     multi::count,
-    number::complete::{be_u16, be_u32, be_u64, be_i64},
+    number::complete::{be_i64, be_u16, be_u32, be_u64},
     sequence::tuple,
-    IResult,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -192,11 +192,14 @@ impl SummaryReader {
         for i in 1..self.summary_data.entries.len() {
             let prev_token = self.summary_data.entries[i - 1].token;
             let curr_token = self.summary_data.entries[i].token;
-            
+
             if prev_token > curr_token {
                 issues.push(format!(
                     "Entries not sorted by token: entry {} has token {}, entry {} has token {}",
-                    i - 1, prev_token, i, curr_token
+                    i - 1,
+                    prev_token,
+                    i,
+                    curr_token
                 ));
             }
         }
@@ -213,7 +216,7 @@ impl SummaryReader {
                     first.token, header.min_token
                 ));
             }
-            
+
             if last.token > header.max_token {
                 issues.push(format!(
                     "Last entry token {} is greater than header max_token {}",
@@ -288,7 +291,7 @@ fn parse_summary_entry(input: &[u8]) -> IResult<&[u8], SummaryEntry> {
     // Parse partition key length and data
     let (input, key_len) = be_u16(input)?;
     let (input, partition_key) = take(key_len)(input)?;
-    
+
     // Parse token, index offset, and position
     let (input, token) = be_i64(input)?;
     let (input, index_offset) = be_u64(input)?;
@@ -313,7 +316,7 @@ fn build_token_ranges(entries: &[SummaryEntry], _sampling_rate: u32) -> Vec<Toke
 
     let mut ranges = Vec::new();
     let chunk_size = (entries.len() / 10).max(1); // Aim for ~10 ranges
-    
+
     for (i, chunk) in entries.chunks(chunk_size).enumerate() {
         if let (Some(first), Some(_last)) = (chunk.first(), chunk.last()) {
             ranges.push(TokenRange {
@@ -345,14 +348,15 @@ mod tests {
             0x00, 0x00, 0x00, 0x01, // version = 1
             0x00, 0x00, 0x00, 0x64, // entry_count = 100
             0x00, 0x00, 0x00, 0x0A, // sampling_rate = 10
-            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // min_token = -9223372036854775808
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, // min_token = -9223372036854775808
             0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // max_token = 9223372036854775807
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // data_size = 4096
             0x12, 0x34, 0x56, 0x78, // checksum
         ];
 
         let (_, header) = parse_summary_header(&data).unwrap();
-        
+
         assert_eq!(header.version, 1);
         assert_eq!(header.entry_count, 100);
         assert_eq!(header.sampling_rate, 10);
@@ -373,7 +377,7 @@ mod tests {
         ];
 
         let (_, entry) = parse_summary_entry(&data).unwrap();
-        
+
         assert_eq!(entry.partition_key, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(entry.token, 305419896);
         assert_eq!(entry.index_offset, 4096);
@@ -404,7 +408,7 @@ mod tests {
         ];
 
         let ranges = build_token_ranges(&entries, 10);
-        
+
         assert!(!ranges.is_empty());
         assert_eq!(ranges[0].start_token, -1000);
         assert_eq!(ranges[0].first_entry_index, 0);

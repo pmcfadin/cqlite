@@ -17,7 +17,7 @@ use tokio::io::AsyncReadExt;
 /// Calculate CRC32 checksum for data validation
 fn crc32_checksum(data: &[u8]) -> u32 {
     let mut crc = 0xffffffffu32;
-    
+
     for &byte in data {
         crc ^= byte as u32;
         for _ in 0..8 {
@@ -28,7 +28,7 @@ fn crc32_checksum(data: &[u8]) -> u32 {
             }
         }
     }
-    
+
     !crc
 }
 
@@ -108,21 +108,25 @@ impl StatisticsReader {
         file.read_to_end(&mut buffer).await?;
 
         if buffer.len() < 4 {
-            return Err(Error::corruption("Statistics file too small for checksum validation".to_string()));
+            return Err(Error::corruption(
+                "Statistics file too small for checksum validation".to_string(),
+            ));
         }
 
         // Extract the stored checksum from header
         let stored_checksum = self.statistics.header.checksum;
-        
+
         // Calculate CRC32 checksum of the data section (excluding the checksum field itself)
         let data_section = if buffer.len() >= 32 {
-            &buffer[28..buffer.len()-4] // Skip header to checksum field, then skip checksum
+            &buffer[28..buffer.len() - 4] // Skip header to checksum field, then skip checksum
         } else {
-            return Err(Error::corruption("Invalid Statistics file format for checksum validation".to_string()));
+            return Err(Error::corruption(
+                "Invalid Statistics file format for checksum validation".to_string(),
+            ));
         };
-        
+
         let calculated_checksum = crc32_checksum(data_section);
-        
+
         Ok(calculated_checksum == stored_checksum)
     }
 
