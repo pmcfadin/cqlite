@@ -4,7 +4,7 @@ use bollard::container::{ListContainersOptions, WaitContainerOptions};
 #[cfg(feature = "docker-integration")]
 use bollard::exec::{CreateExecOptions, StartExecResults};
 #[cfg(feature = "docker-integration")]
-use bollard::models::{ContainerStateStatusEnum, HostConfig};
+use bollard::models::HostConfig;
 #[cfg(feature = "docker-integration")]
 use bollard::{
     container::{Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions},
@@ -21,7 +21,7 @@ use tokio::fs;
 #[cfg(feature = "docker-integration")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "docker-integration")]
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "docker-integration")]
 pub struct DockerManager {
@@ -257,12 +257,21 @@ impl DockerManager {
 
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
 
-        let mut output = String::new();
-        if let StartExecResults::Attached {
-            mut output_stream, ..
-        } = self.docker.start_exec(&exec_response.id, None).await?
+        let mut output_str = String::new();
+        if let StartExecResults::Attached { mut output, .. } = 
+            self.docker.start_exec(&exec_response.id, None).await?
         {
-            output_stream.read_to_string(&mut output).await?;
+            use futures_util::StreamExt;
+            while let Some(chunk) = output.next().await {
+                match chunk {
+                    Ok(log_output) => {
+                        output_str.push_str(&log_output.to_string());
+                    }
+                    Err(e) => {
+                        warn!("Error reading sstabledump output: {}", e);
+                    }
+                }
+            }
         }
 
         if output_str.is_empty() {
@@ -275,7 +284,7 @@ impl DockerManager {
 
     /// Generate test data in the container
     pub async fn generate_test_data(&self, count: u32, edge_cases: bool) -> Result<()> {
-        let container_id = self
+        let _container_id = self
             .cassandra_container_id
             .as_ref()
             .ok_or_else(|| anyhow!("No Cassandra container available"))?;
@@ -343,12 +352,21 @@ impl DockerManager {
 
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
 
-        let mut output = String::new();
-        if let StartExecResults::Attached {
-            mut output_stream, ..
-        } = self.docker.start_exec(&exec_response.id, None).await?
+        let mut output_str = String::new();
+        if let StartExecResults::Attached { mut output, .. } = 
+            self.docker.start_exec(&exec_response.id, None).await?
         {
-            output_stream.read_to_string(&mut output).await?;
+            use futures_util::StreamExt;
+            while let Some(chunk) = output.next().await {
+                match chunk {
+                    Ok(log_output) => {
+                        output_str.push_str(&log_output.to_string());
+                    }
+                    Err(_e) => {
+                        // Ignore errors in test output
+                    }
+                }
+            }
         }
 
         if output_str.contains("cluster_name") {
@@ -376,10 +394,20 @@ impl DockerManager {
         let exec_response = self.docker.create_exec(container_id, exec_config).await?;
 
         let mut output_str = String::new();
-        if let StartExecResults::Attached { mut output, .. } =
+        if let StartExecResults::Attached { mut output, .. } = 
             self.docker.start_exec(&exec_response.id, None).await?
         {
-            output.read_to_string(&mut output_str).await.ok();
+            use futures_util::StreamExt;
+            while let Some(chunk) = output.next().await {
+                match chunk {
+                    Ok(log_output) => {
+                        output_str.push_str(&log_output.to_string());
+                    }
+                    Err(_e) => {
+                        // Ignore errors in command output
+                    }
+                }
+            }
         }
 
         Ok(output_str)
