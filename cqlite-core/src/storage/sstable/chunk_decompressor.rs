@@ -4,8 +4,8 @@
 //! using CompressionInfo.db metadata to decompress chunks on-demand.
 
 use super::compression_info::CompressionInfo;
-use crate::{Error, Result};
 use crate::parser::header::CassandraVersion;
+use crate::{Error, Result};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -23,7 +23,10 @@ pub struct ChunkDecompressor {
 
 impl ChunkDecompressor {
     /// Create a new chunk decompressor with compression metadata and format detection
-    pub fn new(compression_info: CompressionInfo, cassandra_version: CassandraVersion) -> Result<Self> {
+    pub fn new(
+        compression_info: CompressionInfo,
+        cassandra_version: CassandraVersion,
+    ) -> Result<Self> {
         compression_info.validate()?;
 
         Ok(Self {
@@ -152,7 +155,8 @@ impl ChunkDecompressor {
         // For modern formats, enforce strict CRC validation
         // Legacy formats skip CRC validation for compatibility
         if self.cassandra_version != CassandraVersion::Legacy {
-            self.compression_info.validate_chunk_crc(chunk_index, &compressed_data)?;
+            self.compression_info
+                .validate_chunk_crc(chunk_index, &compressed_data)?;
         }
 
         // Decompress based on algorithm
@@ -174,7 +178,9 @@ impl ChunkDecompressor {
             if decompressed.len() != expected_size {
                 return Err(Error::InvalidFormat(format!(
                     "Decompressed chunk {} size mismatch: expected {}, got {}",
-                    chunk_index, expected_size, decompressed.len()
+                    chunk_index,
+                    expected_size,
+                    decompressed.len()
                 )));
             }
         }
@@ -203,9 +209,12 @@ impl ChunkDecompressor {
                     Err(_) => Err(Error::InvalidFormat(format!(
                         "LZ4 decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
                         chunk_index,
-                        self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                        self.compression_info
+                            .chunk_offsets
+                            .get(chunk_index)
+                            .unwrap_or(&0),
                         e
-                    )))
+                    ))),
                 }
             }
         }
@@ -227,9 +236,12 @@ impl ChunkDecompressor {
                 Err(e) => Err(Error::InvalidFormat(format!(
                     "Snappy decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
                     chunk_index,
-                    self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                    self.compression_info
+                        .chunk_offsets
+                        .get(chunk_index)
+                        .unwrap_or(&0),
                     e
-                )))
+                ))),
             }
         }
 
@@ -237,7 +249,7 @@ impl ChunkDecompressor {
         {
             let _ = (compressed_data, chunk_index); // Suppress unused warnings
             Err(Error::UnsupportedFormat(
-                "Snappy support not compiled in".to_string()
+                "Snappy support not compiled in".to_string(),
             ))
         }
     }
@@ -261,9 +273,12 @@ impl ChunkDecompressor {
                 Err(e) => Err(Error::InvalidFormat(format!(
                     "Deflate decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
                     chunk_index,
-                    self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                    self.compression_info
+                        .chunk_offsets
+                        .get(chunk_index)
+                        .unwrap_or(&0),
                     e
-                )))
+                ))),
             }
         }
 
@@ -271,17 +286,13 @@ impl ChunkDecompressor {
         {
             let _ = (compressed_data, chunk_index); // Suppress unused warnings
             Err(Error::UnsupportedFormat(
-                "Deflate support not compiled in".to_string()
+                "Deflate support not compiled in".to_string(),
             ))
         }
     }
 
     /// Decompress Zstd chunk - strict mode for modern formats
-    fn decompress_zstd_chunk(
-        &self,
-        compressed_data: &[u8],
-        chunk_index: usize,
-    ) -> Result<Vec<u8>> {
+    fn decompress_zstd_chunk(&self, compressed_data: &[u8], chunk_index: usize) -> Result<Vec<u8>> {
         #[cfg(feature = "zstd")]
         {
             match zstd::decode_all(&compressed_data[..]) {
@@ -289,9 +300,12 @@ impl ChunkDecompressor {
                 Err(e) => Err(Error::InvalidFormat(format!(
                     "Zstd decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
                     chunk_index,
-                    self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                    self.compression_info
+                        .chunk_offsets
+                        .get(chunk_index)
+                        .unwrap_or(&0),
                     e
-                )))
+                ))),
             }
         }
 
@@ -299,7 +313,7 @@ impl ChunkDecompressor {
         {
             let _ = (compressed_data, chunk_index); // Suppress unused warnings
             Err(Error::UnsupportedFormat(
-                "Zstd support not compiled in".to_string()
+                "Zstd support not compiled in".to_string(),
             ))
         }
     }
@@ -358,7 +372,8 @@ mod tests {
             chunk_crcs: vec![],
         };
 
-        let decompressor = ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
+        let decompressor =
+            ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
         assert_eq!(decompressor.compression_info.algorithm, "LZ4Compressor");
         assert_eq!(decompressor.compression_info.chunk_length, 16384);
         assert_eq!(decompressor.compression_info.chunk_offsets.len(), 3);
@@ -375,7 +390,8 @@ mod tests {
             chunk_crcs: vec![],
         };
 
-        let mut decompressor = ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
+        let mut decompressor =
+            ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
 
         let (cached, max) = decompressor.cache_stats();
         assert_eq!(cached, 0);

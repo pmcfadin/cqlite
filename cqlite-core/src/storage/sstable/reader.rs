@@ -555,6 +555,233 @@ impl SSTableReader {
         Ok(result)
     }
 
+    // Missing function implementations
+
+    /// Enhanced header parsing with version detection
+    async fn parse_header_with_version_detection(header_buffer: &[u8], path: &Path) -> Result<SSTableHeader> {
+        use crate::parser::header::{parse_sstable_header, CassandraVersion};
+        
+        if header_buffer.len() < 8 {
+            return Err(Error::corruption("Header buffer too small for parsing"));
+        }
+
+        // Try to parse using the existing header parser first
+        match parse_sstable_header(header_buffer) {
+            Ok((_, header)) => {
+                println!("✅ Successfully parsed header with version detection for {:?}", path);
+                Ok(header)
+            }
+            Err(_) => {
+                // Fallback: Try to detect magic number manually and create a basic header
+                let magic_bytes = &header_buffer[0..4];
+                let magic = u32::from_be_bytes([magic_bytes[0], magic_bytes[1], magic_bytes[2], magic_bytes[3]]);
+                
+                let version = if header_buffer.len() >= 6 {
+                    u16::from_be_bytes([header_buffer[4], header_buffer[5]])
+                } else {
+                    crate::parser::header::SUPPORTED_VERSION
+                };
+
+                // Detect Cassandra version from magic number
+                let cassandra_version = CassandraVersion::from_magic_number(magic)
+                    .unwrap_or(CassandraVersion::Legacy);
+
+                println!("🔍 Detected Cassandra version: {:?} (magic: 0x{:08x}) for {:?}", 
+                    cassandra_version, magic, path);
+
+                // Create fallback header
+                Ok(crate::parser::header::SSTableHeader {
+                    cassandra_version,
+                    version,
+                    table_id: [0; 16],
+                    keyspace: path.parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.split('-').next().unwrap_or("unknown").to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    table_name: path.file_stem()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    generation: Self::extract_generation_from_path(path),
+                    compression: crate::parser::header::CompressionInfo {
+                        algorithm: "NONE".to_string(),
+                        chunk_size: 0,
+                        parameters: std::collections::HashMap::new(),
+                    },
+                    stats: crate::parser::header::SSTableStats {
+                        row_count: 0,
+                        min_timestamp: 0,
+                        max_timestamp: 0,
+                        max_deletion_time: 0,
+                        compression_ratio: 1.0,
+                        row_size_histogram: vec![],
+                    },
+                    columns: vec![],
+                    properties: std::collections::HashMap::new(),
+                })
+            }
+        }
+    }
+
+    /// Extract generation number from SSTable file path
+    fn extract_generation_from_path(path: &Path) -> u64 {
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        // Common Cassandra SSTable filename patterns:
+        // nb-1-big-Data.db -> generation 1
+        // mc-1-big-Data.db -> generation 1  
+        // la-123-big-Data.db -> generation 123
+        // keyspace-table-nb-456-big-Data.db -> generation 456
+
+        // Try to find generation number in different patterns
+        let parts: Vec<&str> = filename.split('-').collect();
+        
+        // Pattern 1: nb-{generation}-big-Data.db
+        if parts.len() >= 3 && (parts[0] == "nb" || parts[0] == "mc" || parts[0] == "la") {
+            if let Ok(generation) = parts[1].parse::<u64>() {
+                println!("📁 Extracted generation {} from pattern 1: {}", generation, filename);
+                return generation;
+            }
+        }
+        
+        // Pattern 2: keyspace-table-nb-{generation}-big-Data.db
+        if parts.len() >= 5 {
+            for i in 0..parts.len()-2 {
+                if (parts[i] == "nb" || parts[i] == "mc" || parts[i] == "la") && i+1 < parts.len() {
+                    if let Ok(generation) = parts[i+1].parse::<u64>() {
+                        println!("📁 Extracted generation {} from pattern 2: {}", generation, filename);
+                        return generation;
+                    }
+                }
+            }
+        }
+        
+        // Pattern 3: Look for any numeric part that could be generation
+        for part in &parts {
+            if let Ok(generation) = part.parse::<u64>() {
+                // Skip obviously wrong numbers (like version numbers)
+                if generation > 0 && generation < 1_000_000 {
+                    println!("📁 Extracted generation {} from numeric part: {}", generation, filename);
+                    return generation;
+                }
+            }
+        }
+        
+        // Default generation if parsing fails
+        println!("📁 Using default generation 0 for: {}", filename);
+        0
+    }
+
+    /// Calculate actual header size based on header content and buffer
+    fn calculate_actual_header_size(header: &SSTableHeader, header_buffer: &[u8]) -> Result<usize> {
+        // For different Cassandra versions, header sizes vary significantly
+        match header.cassandra_version {
+            crate::parser::header::CassandraVersion::V5_0NewBig => {
+                // For nb format, headers are typically larger and more complex
+                // Try to find where the actual data begins by looking for patterns
+                Self::find_data_start_nb_format(header_buffer)
+            }
+            crate::parser::header::CassandraVersion::V5_0Bti => {
+                // BTI format has different header structure
+                Self::find_data_start_bti_format(header_buffer)  
+            }
+            crate::parser::header::CassandraVersion::Legacy => {
+                // Legacy format has simpler, more predictable headers
+                Self::find_data_start_legacy_format(header_buffer)
+            }
+            _ => {
+                // For other versions, use a reasonable default based on buffer analysis
+                Self::estimate_header_size_heuristic(header_buffer)
+            }
+        }
+    }
+
+    // Private helper methods
+
+    /// Find data start for nb format files
+    fn find_data_start_nb_format(header_buffer: &[u8]) -> Result<usize> {
+        // For nb format, look for compressed data patterns or block headers
+        // The header typically ends where compressed blocks begin
+        
+        // Strategy 1: Look for compression signatures (LZ4, Snappy, etc.)
+        for i in 64..header_buffer.len().min(2048) {
+            if i + 8 < header_buffer.len() {
+                // Check for LZ4 signature
+                if header_buffer[i..i+4] == [0x04, 0x22, 0x4D, 0x18] {
+                    println!("🔍 Found LZ4 signature at offset {}", i);
+                    return Ok(i);
+                }
+                
+                // Check for typical block size patterns (large values that could be block sizes)
+                let potential_size = u32::from_be_bytes([
+                    header_buffer[i], header_buffer[i+1], 
+                    header_buffer[i+2], header_buffer[i+3]
+                ]);
+                
+                // Reasonable block sizes for Cassandra (1KB to 64MB)
+                if potential_size >= 1024 && potential_size <= 64 * 1024 * 1024 {
+                    // This might be a block size header
+                    println!("🔍 Found potential block header at offset {} (size: {})", i, potential_size);
+                    return Ok(i);
+                }
+            }
+        }
+        
+        // Fallback: Use fixed size for nb format
+        let fallback_size = 1024.min(header_buffer.len());
+        println!("🔍 Using fallback header size {} for nb format", fallback_size);
+        Ok(fallback_size)
+    }
+
+    /// Find data start for BTI format files  
+    fn find_data_start_bti_format(header_buffer: &[u8]) -> Result<usize> {
+        // BTI format has different markers and structure
+        // Look for BTI-specific patterns
+        
+        let fallback_size = 1024.min(header_buffer.len());
+        println!("🔍 Using estimated header size {} for BTI format", fallback_size);
+        Ok(fallback_size)
+    }
+
+    /// Find data start for legacy format files
+    fn find_data_start_legacy_format(header_buffer: &[u8]) -> Result<usize> {
+        // Legacy format is more predictable - usually 512 bytes or less
+        let fallback_size = 512.min(header_buffer.len());
+        println!("🔍 Using standard header size {} for legacy format", fallback_size);
+        Ok(fallback_size)
+    }
+
+    /// Estimate header size using heuristics when version is unknown
+    fn estimate_header_size_heuristic(header_buffer: &[u8]) -> Result<usize> {
+        // Use heuristics to estimate where header ends and data begins
+        // Look for patterns that indicate start of data section
+        
+        for i in (64..header_buffer.len().min(1024)).step_by(64) {
+            if i + 16 < header_buffer.len() {
+                // Check if this position has characteristics of data vs. header
+                let slice = &header_buffer[i..i+16];
+                
+                // Data sections often have more entropy than headers
+                let non_zero_bytes = slice.iter().filter(|&&b| b != 0).count();
+                let entropy_score = non_zero_bytes as f32 / 16.0;
+                
+                // If we find a region with high entropy, it might be start of data
+                if entropy_score > 0.7 {
+                    println!("🔍 Detected potential data start at offset {} (entropy: {:.2})", i, entropy_score);
+                    return Ok(i);
+                }
+            }
+        }
+        
+        // Conservative fallback
+        let fallback_size = 768.min(header_buffer.len());
+        println!("🔍 Using heuristic header size {}", fallback_size);
+        Ok(fallback_size)
+    }
+
     // Private helper methods
 
     /// Enhanced compression format detection and initialization
@@ -2418,466 +2645,6 @@ impl SSTableReader {
             columns,
             comments: HashMap::new(),
         })
-    }
-
-    /// Parse list value using element comparator
-    fn parse_list_value(&self, value_data: &[u8], element_comparator: &ComparatorType) -> Result<Value> {
-        use crate::parser::vint::parse_vint_length;
-        
-        let mut offset = 0;
-        let mut elements = Vec::new();
-
-        // Parse element count
-        let (remaining, element_count) = parse_vint_length(&value_data[offset..])
-            .map_err(|_| Error::corruption("Failed to parse list element count"))?;
-        offset = value_data.len() - remaining.len();
-
-        // Parse each element
-        for _ in 0..element_count {
-            if offset >= value_data.len() {
-                break;
-            }
-
-            // Parse element length
-            let (remaining, element_len) = parse_vint_length(&value_data[offset..])
-                .map_err(|_| Error::corruption("Failed to parse list element length"))?;
-            offset = value_data.len() - remaining.len();
-
-            if element_len > remaining.len() {
-                return Err(Error::corruption("List element length exceeds available data"));
-            }
-
-            // Parse element value using element comparator
-            let element_data = &remaining[..element_len];
-            let element_value = self.parse_value_with_comparator(element_data, element_comparator)?;
-            elements.push(element_value);
-            offset += element_len;
-        }
-
-        Ok(Value::List(elements))
-    }
-
-    /// Parse set value using element comparator  
-    fn parse_set_value(&self, value_data: &[u8], element_comparator: &ComparatorType) -> Result<Value> {
-        // Sets are parsed similarly to lists
-        let list_value = self.parse_list_value(value_data, element_comparator)?;
-        if let Value::List(elements) = list_value {
-            Ok(Value::Set(elements))
-        } else {
-            Err(Error::corruption("Failed to parse set value"))
-        }
-    }
-
-    /// Parse map value using key and value comparators
-    fn parse_map_value(&self, value_data: &[u8], key_comparator: &ComparatorType, value_comparator: &ComparatorType) -> Result<Value> {
-        use crate::parser::vint::parse_vint_length;
-        
-        let mut offset = 0;
-        let mut entries = Vec::new();
-
-        // Parse entry count
-        let (remaining, entry_count) = parse_vint_length(&value_data[offset..])
-            .map_err(|_| Error::corruption("Failed to parse map entry count"))?;
-        offset = value_data.len() - remaining.len();
-
-        // Parse each key-value pair
-        for _ in 0..entry_count {
-            if offset >= value_data.len() {
-                break;
-            }
-
-            // Parse key length and data
-            let (remaining, key_len) = parse_vint_length(&value_data[offset..])
-                .map_err(|_| Error::corruption("Failed to parse map key length"))?;
-            offset = value_data.len() - remaining.len();
-
-            if key_len > remaining.len() {
-                return Err(Error::corruption("Map key length exceeds available data"));
-            }
-
-            let key_data = &remaining[..key_len];
-            let key_value = self.parse_value_with_comparator(key_data, key_comparator)?;
-            offset += key_len;
-
-            // Parse value length and data
-            let (remaining, value_len) = parse_vint_length(&value_data[offset..])
-                .map_err(|_| Error::corruption("Failed to parse map value length"))?;
-            offset = value_data.len() - remaining.len();
-
-            if value_len > remaining.len() {
-                return Err(Error::corruption("Map value length exceeds available data"));
-            }
-
-            let val_data = &remaining[..value_len];
-            let val_value = self.parse_value_with_comparator(val_data, value_comparator)?;
-            entries.push((key_value, val_value));
-            offset += value_len;
-        }
-
-        Ok(Value::Map(entries))
-    }
-
-    /// Parse tuple value using field comparators
-    fn parse_tuple_value(&self, value_data: &[u8], field_comparators: &[ComparatorType]) -> Result<Value> {
-        use crate::parser::vint::parse_vint_length;
-        
-        let mut offset = 0;
-        let mut fields = Vec::new();
-
-        // Parse each field
-        for (i, field_comparator) in field_comparators.iter().enumerate() {
-            if offset >= value_data.len() {
-                break;
-            }
-
-            // Parse field length
-            let (remaining, field_len) = parse_vint_length(&value_data[offset..])
-                .map_err(|_| Error::corruption(format!("Failed to parse tuple field {} length", i)))?;
-            offset = value_data.len() - remaining.len();
-
-            if field_len > remaining.len() {
-                return Err(Error::corruption(format!("Tuple field {} length exceeds available data", i)));
-            }
-
-            // Parse field value using field comparator
-            let field_data = &remaining[..field_len];
-            let field_value = self.parse_value_with_comparator(field_data, field_comparator)?;
-            fields.push(field_value);
-            offset += field_len;
-        }
-
-        Ok(Value::Tuple(fields))
-    }
-
-    /// Parse UDT value using field comparators
-    fn parse_udt_value(&self, value_data: &[u8], field_comparators: &[(String, ComparatorType)]) -> Result<Value> {
-        use crate::parser::vint::parse_vint_length;
-        use crate::types::{UdtValue, UdtField};
-        
-        let mut offset = 0;
-        let mut fields = Vec::new();
-
-        // Parse each field
-        for (field_name, field_comparator) in field_comparators.iter() {
-            if offset >= value_data.len() {
-                break;
-            }
-
-            // Parse field length
-            let (remaining, field_len) = parse_vint_length(&value_data[offset..])
-                .map_err(|_| Error::corruption(format!("Failed to parse UDT field {} length", field_name)))?;
-            offset = value_data.len() - remaining.len();
-
-            if field_len > remaining.len() {
-                return Err(Error::corruption(format!("UDT field {} length exceeds available data", field_name)));
-            }
-
-            // Parse field value using field comparator
-            let field_data = &remaining[..field_len];
-            let field_value = self.parse_value_with_comparator(field_data, field_comparator)?;
-            
-            fields.push(UdtField {
-                name: field_name.clone(),
-                value: Some(field_value),
-            });
-            offset += field_len;
-        }
-
-        Ok(Value::Udt(UdtValue {
-            keyspace: "unknown".to_string(), // Would need keyspace name from schema
-            type_name: "unknown".to_string(), // Would need UDT name from schema
-            fields,
-        }))
-    }
-
-    /// Extract column name from key context (placeholder implementation)
-    fn extract_column_name_from_context(&self, _table_id: &TableId, _key: &RowKey) -> Option<String> {
-        // TODO: Implement proper column name extraction from key context
-        // This would analyze the key structure to determine which column is being accessed
-        None
-    }
-
-
-
-
-
-    /// Get table schema from header information
-    fn get_table_schema(&self) -> Option<TableSchema> {
-        // Try to construct a basic schema from header information
-        if self.header.columns.is_empty() {
-            return None;
-        }
-
-        let mut columns = Vec::new();
-        let mut partition_keys = Vec::new();
-        let mut clustering_keys = Vec::new();
-
-        // Convert header columns to schema columns
-        for col_info in self.header.columns.iter() {
-            let column = Column {
-                name: col_info.name.clone(),
-                data_type: col_info.column_type.clone(), // Use column_type field
-                nullable: true,
-                default: None,
-            };
-
-            // Check if this is a key column based on primary key and clustering status
-            if col_info.is_primary_key && !col_info.is_clustering {
-                // This is a partition key
-                partition_keys.push(KeyColumn {
-                    name: col_info.name.clone(),
-                    data_type: col_info.column_type.clone(),
-                    position: partition_keys.len(),
-                });
-            } else if col_info.is_clustering {
-                clustering_keys.push(ClusteringColumn {
-                    name: col_info.name.clone(),
-                    data_type: col_info.column_type.clone(),
-                    position: clustering_keys.len(),
-                    order: "ASC".to_string(),
-                });
-            }
-
-            columns.push(column);
-        }
-
-        Some(TableSchema {
-            keyspace: self.header.keyspace.clone(),
-            table: self.header.table_name.clone(),
-            partition_keys,
-            clustering_keys,
-            columns,
-            comments: HashMap::new(),
-        })
-    }
-
-
-    /// Extract generation number from SSTable file path with enhanced pattern matching
-    fn extract_generation_from_path(path: &Path) -> u64 {
-        path.file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|name| {
-                // Try multiple patterns:
-                // 1. Cassandra 5.x pattern: "nb-{generation}-{format}-{component}"
-                if name.contains("-") {
-                    let parts: Vec<&str> = name.split('-').collect();
-                    if parts.len() >= 2 {
-                        if let Ok(generation) = parts[1].parse::<u64>() {
-                            return Some(generation);
-                        }
-                    }
-                }
-
-                // 2. Legacy pattern: "sstable_{generation}_{timestamp}"
-                if name.starts_with("sstable_") {
-                    let parts: Vec<&str> = name.split('_').collect();
-                    if parts.len() >= 2 {
-                        if let Ok(generation) = parts[1].parse::<u64>() {
-                            return Some(generation);
-                        }
-                    }
-                }
-
-                // 3. Extract from timestamp if available
-                if let Some(timestamp_start) = name.rfind('_') {
-                    let timestamp_part = &name[timestamp_start + 1..];
-                    if let Ok(timestamp) = timestamp_part.parse::<u64>() {
-                        // Use last 16 bits of timestamp as generation
-                        return Some(timestamp & 0xFFFF);
-                    }
-                }
-
-                None
-            })
-            .unwrap_or(0) // Default to generation 0
-    }
-
-    /// Parse header with comprehensive Cassandra version detection
-    async fn parse_header_with_version_detection(
-        header_buffer: &[u8],
-        path: &Path,
-    ) -> Result<crate::parser::header::SSTableHeader> {
-        use crate::parser::header::{parse_magic_and_version, parse_sstable_header};
-
-        if header_buffer.len() < 6 {
-            return Err(Error::corruption("Header buffer too small"));
-        }
-
-        // First, try to detect the Cassandra version from magic number
-        let (cassandra_version, actual_header_start) = match parse_magic_and_version(header_buffer)
-        {
-            Ok((remaining, (version, _))) => {
-                let header_start = header_buffer.len() - remaining.len();
-                println!("Detected Cassandra version: {:?} for {:?}", version, path);
-                (version, header_start)
-            }
-            Err(_) => {
-                eprintln!(
-                    "Could not detect Cassandra version from magic number for {:?}, trying heuristics",
-                    path
-                );
-                // Try heuristic detection based on file patterns
-                Self::detect_version_from_filename(path)
-            }
-        };
-
-        // Try to parse the full header if we have enough data
-        let header_slice = &header_buffer[actual_header_start..];
-        match parse_sstable_header(header_slice) {
-            Ok((_, header)) => {
-                println!(
-                    "Successfully parsed header for {:?}: keyspace={}, table={}",
-                    path, header.keyspace, header.table_name
-                );
-                Ok(header)
-            }
-            Err(e) => {
-                eprintln!(
-                    "Failed to parse full header for {:?}: {:?}, creating minimal header",
-                    path, e
-                );
-                Self::create_minimal_header_from_version_and_path(cassandra_version, path)
-            }
-        }
-    }
-
-    /// Detect version from filename patterns when magic number parsing fails
-    fn detect_version_from_filename(path: &Path) -> (CassandraVersion, usize) {
-        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-        let version = if filename.contains("-big-") {
-            CassandraVersion::V5_0NewBig
-        } else if filename.contains("-da-") || filename.contains("Partitions") {
-            CassandraVersion::V5_0Bti
-        } else if filename.starts_with("nb-") {
-            CassandraVersion::V5_0NewBig
-        } else {
-            CassandraVersion::Legacy
-        };
-
-        println!(
-            "Detected version from filename pattern: {:?} for {:?}",
-            version, path
-        );
-        (version, 0) // Start from beginning since we couldn't parse magic
-    }
-
-    /// Create minimal header when full parsing fails
-    fn create_minimal_header_from_version_and_path(
-        cassandra_version: CassandraVersion,
-        path: &Path,
-    ) -> Result<crate::parser::header::SSTableHeader> {
-        use crate::parser::header::{CompressionInfo, SSTableHeader, SSTableStats};
-
-        // Extract keyspace and table from path
-        let (keyspace, table_name) = Self::extract_keyspace_table_from_path(path);
-        let generation = Self::extract_generation_from_path(path);
-
-        Ok(SSTableHeader {
-            cassandra_version,
-            version: crate::parser::header::SUPPORTED_VERSION,
-            table_id: Self::generate_table_id_from_path(path),
-            keyspace,
-            table_name,
-            generation,
-            compression: CompressionInfo {
-                algorithm: "NONE".to_string(),
-                chunk_size: 0,
-                parameters: std::collections::HashMap::new(),
-            },
-            stats: SSTableStats {
-                row_count: 0,
-                min_timestamp: 0,
-                max_timestamp: 0,
-                max_deletion_time: 0,
-                compression_ratio: 1.0,
-                row_size_histogram: vec![],
-            },
-            columns: vec![],
-            properties: std::collections::HashMap::new(),
-        })
-    }
-
-    /// Extract keyspace and table name from file path
-    fn extract_keyspace_table_from_path(path: &Path) -> (String, String) {
-        // Path structure: .../keyspace/table-uuid/sstable_files
-        let path_components: Vec<&str> = path
-            .components()
-            .filter_map(|c| c.as_os_str().to_str())
-            .collect();
-
-        let mut keyspace = "unknown".to_string();
-        let mut table_name = "unknown".to_string();
-
-        // Look for keyspace (parent of table directory)
-        if path_components.len() >= 2 {
-            let table_dir = path_components[path_components.len() - 2];
-            if let Some(hyphen_pos) = table_dir.rfind('-') {
-                table_name = table_dir[..hyphen_pos].to_string();
-            } else {
-                table_name = table_dir.to_string();
-            }
-
-            if path_components.len() >= 3 {
-                keyspace = path_components[path_components.len() - 3].to_string();
-            }
-        }
-
-        // Fallback: extract from filename
-        if table_name == "unknown" {
-            if let Some(filename) = path.file_stem().and_then(|n| n.to_str()) {
-                if filename.contains("-") {
-                    let parts: Vec<&str> = filename.split('-').collect();
-                    if parts.len() >= 3 {
-                        table_name = parts[0].to_string();
-                    }
-                }
-            }
-        }
-
-        println!(
-            "Extracted keyspace='{}', table='{}' from path {:?}",
-            keyspace, table_name, path
-        );
-        (keyspace, table_name)
-    }
-
-    /// Generate table ID from path (deterministic)
-    fn generate_table_id_from_path(path: &Path) -> [u8; 16] {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        path.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        let mut table_id = [0u8; 16];
-        table_id[0..8].copy_from_slice(&hash.to_be_bytes());
-        table_id[8..16].copy_from_slice(&hash.to_le_bytes());
-
-        table_id
-    }
-
-    /// Calculate actual header size from parsed header
-    fn calculate_actual_header_size(
-        header: &crate::parser::header::SSTableHeader,
-        _header_buffer: &[u8],
-    ) -> Result<usize> {
-        // For Cassandra 5.x formats, the header size varies by version
-        match header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0NewBig => {
-                // 'nb' format has a fixed header structure
-                Ok(2048) // 2KB header for 'nb' format
-            }
-            crate::parser::header::CassandraVersion::V5_0Bti => {
-                // BTI format has variable header size
-                Ok(1024) // Default 1KB, could be calculated more precisely
-            }
-            _ => {
-                // Legacy and other formats
-                Ok(512) // Conservative default
-            }
-        }
     }
 }
 
