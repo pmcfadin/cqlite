@@ -155,6 +155,16 @@ impl ChunkDecompressor {
         // For modern formats, enforce strict CRC validation
         // Legacy formats skip CRC validation for compatibility
         if self.cassandra_version != CassandraVersion::Legacy {
+            // Modern formats require strict CRC validation for all chunks
+            if self.compression_info.chunk_crcs.is_empty() {
+                return Err(Error::InvalidFormat(format!(
+                    "Modern format requires per-chunk CRCs but none found in CompressionInfo.db for chunk {} at offset 0x{:x}",
+                    chunk_index,
+                    compressed_offset
+                )));
+            }
+            
+            // Validate CRC for the compressed chunk data
             self.compression_info
                 .validate_chunk_crc(chunk_index, &compressed_data)?;
         }
@@ -198,23 +208,45 @@ impl ChunkDecompressor {
         }
 
         // For modern formats, use strict decompression based on CompressionInfo metadata
-        // Try standard LZ4 format with size prepended
-        match lz4_flex::decompress_size_prepended(compressed_data) {
-            Ok(decompressed) => Ok(decompressed),
-            Err(e) => {
-                // Try with expected chunk size from metadata
-                let expected_size = self.compression_info.chunk_length as usize;
-                match lz4_flex::decompress(compressed_data, expected_size) {
-                    Ok(decompressed) => Ok(decompressed),
-                    Err(_) => Err(Error::InvalidFormat(format!(
-                        "LZ4 decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
-                        chunk_index,
-                        self.compression_info
-                            .chunk_offsets
-                            .get(chunk_index)
-                            .unwrap_or(&0),
-                        e
-                    ))),
+        // Remove all decompression guessing - use metadata-driven approach only
+        if self.cassandra_version != crate::parser::header::CassandraVersion::Legacy {
+            // Modern format: strict metadata-driven decompression
+            let expected_size = self.compression_info.chunk_length as usize;
+            match lz4_flex::decompress(compressed_data, expected_size) {
+                Ok(decompressed) => {
+                    if decompressed.len() != expected_size {
+                        return Err(Error::InvalidFormat(format!(
+                            "LZ4 decompressed size mismatch for chunk {} at offset 0x{:x}: expected {}, got {}. No fallback allowed for modern formats.",
+                            chunk_index,
+                            self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                            expected_size,
+                            decompressed.len()
+                        )));
+                    }
+                    Ok(decompressed)
+                },
+                Err(e) => Err(Error::InvalidFormat(format!(
+                    "LZ4 decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
+                    chunk_index,
+                    self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                    e
+                ))),
+            }
+        } else {
+            // Legacy format: try multiple approaches for compatibility
+            match lz4_flex::decompress_size_prepended(compressed_data) {
+                Ok(decompressed) => Ok(decompressed),
+                Err(e) => {
+                    let expected_size = self.compression_info.chunk_length as usize;
+                    match lz4_flex::decompress(compressed_data, expected_size) {
+                        Ok(decompressed) => Ok(decompressed),
+                        Err(_) => Err(Error::InvalidFormat(format!(
+                            "LZ4 decompression failed for legacy chunk {} at offset 0x{:x}: {}",
+                            chunk_index,
+                            self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                            e
+                        ))),
+                    }
                 }
             }
         }
