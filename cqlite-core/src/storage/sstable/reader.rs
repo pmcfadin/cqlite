@@ -1719,8 +1719,9 @@ impl SSTableReader {
         while offset < data.len() {
             // Create state machine with schema information if available
             let mut state_machine = if let Some(schema) = self.get_table_schema() {
-                // TODO: Get comparator from schema registry (for now use default)
-                let comparator = ComparatorType::Blob; // Default bytes comparator
+                // TODO: Remove default Blob comparator - use SchemaAwareReader instead
+                // LEGACY: Default bytes comparator (DEPRECATED - use SchemaAwareReader)
+                let comparator = ComparatorType::Blob; // This should come from schema registry
                 RowCellStateMachine::with_schema(schema, comparator)
             } else {
                 RowCellStateMachine::new()
@@ -1979,27 +1980,28 @@ impl SSTableReader {
             return self.parse_key_with_schema(key_data, &schema);
         }
 
-        // FALLBACK: If no schema available, try format detection as last resort
-        // This preserves compatibility but is not the preferred modern approach
+        // TODO: Remove this fallback chain - use SchemaAwareReader instead
+        // LEGACY FALLBACK: Multi-strategy format detection (DEPRECATED)
+        // This type guessing behavior should be replaced with SchemaAwareReader
+        
+        // COMMENTED OUT: Strategy 1: Try Cassandra 5.0+ vint-based composite key format
+        // if let Ok(parsed_key) = self.parse_composite_key_v5_format(key_data) {
+        //     return Ok(parsed_key);
+        // }
 
-        // Strategy 1: Try Cassandra 5.0+ vint-based composite key format
-        if let Ok(parsed_key) = self.parse_composite_key_v5_format(key_data) {
-            return Ok(parsed_key);
-        }
+        // COMMENTED OUT: Strategy 2: Try legacy u16-length prefixed format
+        // if let Ok(parsed_key) = self.parse_composite_key_legacy_format(key_data) {
+        //     return Ok(parsed_key);
+        // }
 
-        // Strategy 2: Try legacy u16-length prefixed format
-        if let Ok(parsed_key) = self.parse_composite_key_legacy_format(key_data) {
-            return Ok(parsed_key);
-        }
+        // COMMENTED OUT: Strategy 3: Try simple clustering key format
+        // if let Ok(parsed_key) = self.parse_clustering_key_format(key_data) {
+        //     return Ok(parsed_key);
+        // }
 
-        // Strategy 3: Try simple clustering key format
-        if let Ok(parsed_key) = self.parse_clustering_key_format(key_data) {
-            return Ok(parsed_key);
-        }
-
-        // Strategy 4: For simple single-component keys or unknown formats, return as-is
+        // FALLBACK: Return raw key data (no type guessing)
         println!(
-            "WARNING: Using raw key data without schema info for key of length {}",
+            "WARNING: No schema available - returning raw key data for key of length {} (use SchemaAwareReader)",
             key_data.len()
         );
         Ok(RowKey::new(key_data.to_vec()))
@@ -2032,9 +2034,13 @@ impl SSTableReader {
             // Extract component data
             let component_data = &remaining[..component_len];
 
+            // TODO: Remove fallback to Blob comparator - use SchemaAwareReader instead
             // Get comparator type for this column
             let comparator = ComparatorType::from_data_type(&partition_column.data_type)
-                .unwrap_or(ComparatorType::Blob);
+                .unwrap_or_else(|_| {
+                    // LEGACY: Fallback to Blob comparator (DEPRECATED - use SchemaAwareReader)
+                    ComparatorType::Blob
+                });
 
             // Decode component using exact comparator type
             let decoded_component = self.decode_key_component(component_data, &comparator)?;
@@ -2066,9 +2072,13 @@ impl SSTableReader {
                 // Extract component data
                 let component_data = &remaining[..component_len];
 
+                // TODO: Remove fallback to Blob comparator - use SchemaAwareReader instead
                 // Get comparator type for this column
                 let comparator = ComparatorType::from_data_type(&clustering_column.data_type)
-                    .unwrap_or(ComparatorType::Blob);
+                    .unwrap_or_else(|_| {
+                        // LEGACY: Fallback to Blob comparator (DEPRECATED - use SchemaAwareReader)
+                        ComparatorType::Blob
+                    });
 
                 // Decode component using exact comparator type
                 let decoded_component = self.decode_key_component(component_data, &comparator)?;
@@ -2287,7 +2297,8 @@ impl SSTableReader {
             }
         }
 
-        // If no schema available, preserve as blob WITHOUT any type detection
+        // TODO: Remove blob fallback - use SchemaAwareReader instead
+        // LEGACY: Fallback to blob when no schema (DEPRECATED - use SchemaAwareReader)
         Ok(Value::Blob(value_data.to_vec()))
     }
 
@@ -2619,9 +2630,11 @@ impl SSTableReader {
             offset += field_len;
         }
 
+        // TODO: Remove generic column fabrication - use SchemaAwareReader instead
+        // LEGACY: Generic UDT fabrication (DEPRECATED)
         Ok(Value::Udt(UdtValue {
-            keyspace: "unknown".to_string(), // Would need keyspace name from schema
-            type_name: "unknown".to_string(), // Would need UDT name from schema
+            keyspace: "unknown".to_string(), // DEPRECATED: Would need keyspace name from schema
+            type_name: "unknown".to_string(), // DEPRECATED: Would need UDT name from schema
             fields,
         }))
     }

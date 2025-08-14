@@ -7,6 +7,7 @@
 pub mod cql_parser;
 pub mod discovery;
 pub mod json_exporter;
+pub mod parser;
 pub mod registry;
 
 // Re-export CQL parsing functions
@@ -23,10 +24,12 @@ pub use discovery::{
 };
 
 pub use registry::{
-    RegistryStatistics, SchemaChange, SchemaChangeType, SchemaQuery, SchemaRegistry,
+    ParsingContext, RegistryStatistics, SchemaChange, SchemaChangeType, SchemaQuery, SchemaRegistry,
     SchemaRegistryConfig, SchemaSource, SchemaValidationStatus, SchemaValidator, SchemaVersion,
     ValidationReport,
 };
+
+pub use parser::SchemaParser;
 
 pub use json_exporter::{
     JsonClusteringKey, JsonColumn, JsonExportConfig, JsonExporter, JsonFormat, JsonIndex,

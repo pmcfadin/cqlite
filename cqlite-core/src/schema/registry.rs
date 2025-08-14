@@ -697,6 +697,25 @@ impl SchemaRegistry {
         Ok(comparators)
     }
 
+    /// Get the complete schema context for parsing operations
+    pub async fn get_parsing_context(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Result<ParsingContext> {
+        let schema = self.get_schema(keyspace, table).await?;
+        let partition_comparators = self.get_partition_key_comparator(keyspace, table).await?;
+        let clustering_comparators = self.get_clustering_key_comparator(keyspace, table).await?;
+        let column_comparators = self.get_table_comparators(keyspace, table).await?;
+        
+        Ok(ParsingContext {
+            schema,
+            partition_comparators,
+            clustering_comparators,
+            column_comparators,
+        })
+    }
+
     /// Get ComparatorType for clustering key columns (for clustering comparison)
     pub async fn get_clustering_key_comparator(
         &self,
@@ -1253,6 +1272,39 @@ pub struct RegistryStatistics {
     pub manually_registered_schemas: usize,
     /// Cache hit rate
     pub cache_hit_rate: f64,
+}
+
+/// Schema-driven parsing context containing all necessary type information
+#[derive(Debug, Clone)]
+pub struct ParsingContext {
+    /// The complete table schema
+    pub schema: TableSchema,
+    /// Comparators for partition key components
+    pub partition_comparators: Vec<ComparatorType>,
+    /// Comparators for clustering key components
+    pub clustering_comparators: Vec<ComparatorType>,
+    /// Comparators for all columns by name
+    pub column_comparators: HashMap<String, ComparatorType>,
+}
+
+impl ParsingContext {
+    /// Get comparator for a specific column
+    pub fn get_column_comparator(&self, column_name: &str) -> Option<&ComparatorType> {
+        self.column_comparators.get(column_name)
+    }
+    
+    /// Check if schema-driven parsing is fully configured
+    pub fn is_complete(&self) -> bool {
+        !self.partition_comparators.is_empty() || !self.schema.partition_keys.is_empty()
+    }
+    
+    /// Get all key columns (partition + clustering) names in order
+    pub fn get_all_key_column_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        names.extend(self.schema.ordered_partition_keys().iter().map(|k| k.name.clone()));
+        names.extend(self.schema.ordered_clustering_keys().iter().map(|k| k.name.clone()));
+        names
+    }
 }
 
 /// Schema validator for comprehensive validation

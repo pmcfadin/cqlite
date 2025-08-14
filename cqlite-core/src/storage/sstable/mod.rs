@@ -15,6 +15,8 @@ pub mod performance_benchmarks;
 pub mod reader;
 pub mod summary_reader;
 pub use reader::SSTableReader;
+pub mod schema_aware_reader;
+pub use schema_aware_reader::SchemaAwareReader;
 pub mod row_cell_state_machine;
 pub mod statistics_reader;
 pub mod streaming_reader;
@@ -27,6 +29,8 @@ pub mod writer;
 mod oa_format_compliance_test;
 #[cfg(test)]
 mod row_cell_state_machine_test;
+#[cfg(test)]
+mod schema_aware_reader_test;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
