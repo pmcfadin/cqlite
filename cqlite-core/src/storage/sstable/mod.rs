@@ -10,6 +10,8 @@ pub mod directory;
 pub mod directory_integration_tests;
 pub mod format_detector;
 pub mod index;
+pub mod index_reader;
+pub mod summary_reader;
 pub mod performance_benchmarks;
 pub mod reader;
 pub use reader::SSTableReader;
