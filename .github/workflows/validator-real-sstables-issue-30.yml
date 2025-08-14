@@ -5,6 +5,10 @@ on:
     branches: [ main, develop, feature/issue-30-* ]
   pull_request:
     branches: [ main, develop ]
+    paths:
+      - 'tools/sstabledump-validator/**'
+      - 'test-data/scripts/run-sstabledump-validator.sh'
+      - '.github/workflows/validator-real-sstables-issue-30.yml'
 
 jobs:
   validator-real-sstables-issue-30:
@@ -72,14 +76,9 @@ jobs:
         ZERO_TOLERANCE: true
         VERBOSE: false
         DATASET_DIRS: ${{ github.workspace }}/tests/data/sstables
+        CONTAINER_NAME: ${{ job.services.cassandra.id }}
       run: |
-        # Override container name for CI environment
-        export CONTAINER_NAME=$(docker ps -q --filter "ancestor=cassandra:5.0")
-        
-        # Modify script to use the service container
-        sed -i "s/cqlite-cassandra-5-0/\$CONTAINER_NAME/g" test-data/scripts/run-sstabledump-validator.sh
-        
-        # Run the validator integration script
+        # Run the validator integration script with CI container name
         ./test-data/scripts/run-sstabledump-validator.sh
 
     - name: Upload validation results

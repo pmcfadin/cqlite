@@ -77,6 +77,36 @@ VERBOSE=true ./test-data/scripts/run-sstabledump-validator.sh
 ZERO_TOLERANCE=false ./test-data/scripts/run-sstabledump-validator.sh
 ```
 
+### Custom Dataset Configuration (for Issue #36)
+
+The script supports parametrization for custom datasets via environment variables:
+
+```bash
+# Custom dataset directories (comma-separated)
+export DATASET_DIRS="/path/to/big/collections,/path/to/bti/collections"
+
+# Custom dataset names (comma-separated, matching order of DATASET_DIRS)
+export DATASET_LIST="big_collection_1,big_collection_2,bti_collection_1,bti_collection_2"
+
+# Custom container name (useful for CI environments)
+export CONTAINER_NAME="my-cassandra-container"
+
+# Run with custom configuration
+./test-data/scripts/run-sstabledump-validator.sh
+```
+
+**Example for Issue #36 BTI Integration:**
+```bash
+# Issue #36 can add BTI datasets without modifying the script
+export DATASET_DIRS="$PROJECT_ROOT/tests/data/sstables,$PROJECT_ROOT/tests/data/bti-sstables"
+export DATASET_LIST="all_types-285fca806e5411f0a72add2bbbd2f55e,bti_partition_test,bti_complex_types"
+export ZERO_TOLERANCE=true
+
+./test-data/scripts/run-sstabledump-validator.sh
+```
+
+This design allows Issue #36 to inject BTI datasets without script modifications.
+
 ### Docker Stack Management
 ```bash
 # Start Cassandra 5.0

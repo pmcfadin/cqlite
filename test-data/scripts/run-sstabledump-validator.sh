@@ -27,6 +27,7 @@ RESULTS_DIR="$PROJECT_ROOT/validation-results-$(date +%Y%m%d-%H%M%S)"
 CASSANDRA_VERSION="${CASSANDRA_VERSION:-5.0}"
 ZERO_TOLERANCE="${ZERO_TOLERANCE:-true}"
 VERBOSE="${VERBOSE:-false}"
+CONTAINER_NAME="${CONTAINER_NAME:-$CONTAINER_NAME}"
 
 # Parametrization for future datasets (used later by #36)
 DATASET_DIRS="${DATASET_DIRS:-$TEST_DATA_DIR}"
@@ -101,7 +102,7 @@ start_docker_infrastructure() {
     local attempt=0
     
     while [ $attempt -lt $max_attempts ]; do
-        if docker exec cqlite-cassandra-5-0 cqlsh -e "SELECT cluster_name FROM system.local;" &>/dev/null; then
+        if docker exec $CONTAINER_NAME cqlsh -e "SELECT cluster_name FROM system.local;" &>/dev/null; then
             echo -e "${GREEN}✓ Cassandra is ready${NC}"
             break
         fi
@@ -124,7 +125,7 @@ create_big_smoke_test() {
     mkdir -p "$smoke_dir"
     
     # Create a simple BIG table in the container
-    docker exec cqlite-cassandra-5-0 cqlsh -e "
+    docker exec $CONTAINER_NAME cqlsh -e "
         CREATE KEYSPACE IF NOT EXISTS smoke_test 
         WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};
         
@@ -151,13 +152,13 @@ create_big_smoke_test() {
     }
     
     # Force flush to ensure data is written to SSTables
-    docker exec cqlite-cassandra-5-0 nodetool flush smoke_test big_smoke_test || {
+    docker exec $CONTAINER_NAME nodetool flush smoke_test big_smoke_test || {
         echo -e "${RED}Error: Failed to flush smoke test data${NC}"
         exit 1
     }
     
     # Find and copy the Data.db file
-    local data_file=$(docker exec cqlite-cassandra-5-0 find /var/lib/cassandra/data/smoke_test/big_smoke_test* -name "*-Data.db" | head -1)
+    local data_file=$(docker exec $CONTAINER_NAME find /var/lib/cassandra/data/smoke_test/big_smoke_test* -name "*-Data.db" | head -1)
     
     if [ -z "$data_file" ]; then
         echo -e "${RED}Error: No Data.db file found for smoke test${NC}"
@@ -165,7 +166,7 @@ create_big_smoke_test() {
     fi
     
     # Copy the SSTable file to our test directory
-    docker cp "cqlite-cassandra-5-0:$data_file" "$smoke_dir/smoke-test-Data.db"
+    docker cp "$CONTAINER_NAME:$data_file" "$smoke_dir/smoke-test-Data.db"
     
     echo -e "${GREEN}✓ BIG smoke test data created at $smoke_dir${NC}"
     
