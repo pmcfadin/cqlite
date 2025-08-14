@@ -5,6 +5,7 @@
 
 use super::compression_info::CompressionInfo;
 use crate::{Error, Result};
+use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -16,17 +17,20 @@ pub struct ChunkDecompressor {
     chunk_cache: HashMap<usize, Vec<u8>>,
     /// Maximum number of chunks to cache
     max_cached_chunks: usize,
+    /// Cassandra version for format detection
+    cassandra_version: CassandraVersion,
 }
 
 impl ChunkDecompressor {
-    /// Create a new chunk decompressor with compression metadata
-    pub fn new(compression_info: CompressionInfo) -> Result<Self> {
+    /// Create a new chunk decompressor with compression metadata and format detection
+    pub fn new(compression_info: CompressionInfo, cassandra_version: CassandraVersion) -> Result<Self> {
         compression_info.validate()?;
 
         Ok(Self {
             compression_info,
             chunk_cache: HashMap::new(),
             max_cached_chunks: 16, // Cache up to 16 chunks (16 * 16KB = 256KB max memory)
+            cassandra_version,
         })
     }
 
@@ -145,8 +149,11 @@ impl ChunkDecompressor {
             chunk_index, compressed_offset, compressed_size
         );
 
-        // Validate compressed chunk CRC if available
-        self.compression_info.validate_chunk_crc(chunk_index, &compressed_data)?;
+        // For modern formats, enforce strict CRC validation
+        // Legacy formats skip CRC validation for compatibility
+        if self.cassandra_version != CassandraVersion::Legacy {
+            self.compression_info.validate_chunk_crc(chunk_index, &compressed_data)?;
+        }
 
         // Decompress based on algorithm
         let decompressed = match self.compression_info.algorithm.as_str() {
@@ -228,6 +235,7 @@ impl ChunkDecompressor {
 
         #[cfg(not(feature = "snappy"))]
         {
+            let _ = (compressed_data, chunk_index); // Suppress unused warnings
             Err(Error::UnsupportedFormat(
                 "Snappy support not compiled in".to_string()
             ))
@@ -261,6 +269,7 @@ impl ChunkDecompressor {
 
         #[cfg(not(feature = "deflate"))]
         {
+            let _ = (compressed_data, chunk_index); // Suppress unused warnings
             Err(Error::UnsupportedFormat(
                 "Deflate support not compiled in".to_string()
             ))
@@ -288,6 +297,7 @@ impl ChunkDecompressor {
 
         #[cfg(not(feature = "zstd"))]
         {
+            let _ = (compressed_data, chunk_index); // Suppress unused warnings
             Err(Error::UnsupportedFormat(
                 "Zstd support not compiled in".to_string()
             ))
@@ -330,13 +340,12 @@ pub fn create_decompressor_from_file(
     println!("   Data Length: {} bytes", compression_info.data_length);
     println!("   Chunk Count: {}", compression_info.chunk_offsets.len());
 
-    ChunkDecompressor::new(compression_info)
+    ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn test_chunk_decompressor_creation() {
@@ -349,7 +358,7 @@ mod tests {
             chunk_crcs: vec![],
         };
 
-        let decompressor = ChunkDecompressor::new(compression_info).unwrap();
+        let decompressor = ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
         assert_eq!(decompressor.compression_info.algorithm, "LZ4Compressor");
         assert_eq!(decompressor.compression_info.chunk_length, 16384);
         assert_eq!(decompressor.compression_info.chunk_offsets.len(), 3);
@@ -366,7 +375,7 @@ mod tests {
             chunk_crcs: vec![],
         };
 
-        let mut decompressor = ChunkDecompressor::new(compression_info).unwrap();
+        let mut decompressor = ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
 
         let (cached, max) = decompressor.cache_stats();
         assert_eq!(cached, 0);
