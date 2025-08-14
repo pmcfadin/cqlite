@@ -129,7 +129,7 @@ PR
 Objective
 - Validate BTI (Cassandra 5.0) end‑to‑end: Partitions.db trie traversal, Rows.db decoding, and byte‑comparable keys, with parity vs sstabledump.
 
-What to do
+What to do - Use sub-agents to accomplish these tasks
 1) Datasets (BTI)
    - Multi‑component partition keys, multiple clustering keys, wide partitions
    - Complex types (nested collections, UDTs), range tombstones
@@ -142,6 +142,7 @@ What to do
 References
 - CEP‑25 (Trie‑indexed SSTable format)
 - Cassandra `bytecomparable` utilities (5.0)
+- Pre-existing testing suites and scripts in the project
 
 Validation
 - Zero‑diff vs sstabledump for values and metadata (writeTime, TTL, tombstones)
@@ -193,9 +194,10 @@ PR
 Objective
 - Wire the existing sstabledump validator into Docker infrastructure and run against real SSTables across versions.
 
-What to do
+What to do - Assign sub-agents to accomplish these tasks
 1) Docker
    - Bring up the 5.0 cluster stack; reuse multi‑version stacks where needed.
+   - Use the existing docker testing infrastucture at test-data/ and tests/ Research all existing systems and do not create new ones. 
 2) Data
    - Use the existing eight SSTable collections; generate additional sets as needed.
 3) Validator runs

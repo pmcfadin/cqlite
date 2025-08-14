@@ -82,21 +82,76 @@ pub struct BtiEntry {
     pub length: Option<u32>,
 }
 
-/// BTI validation test suite
+/// Comprehensive BTI validation test suite for Issue #36
+/// 
+/// Validates BTI (Cassandra 5.0) end-to-end functionality:
+/// - Partitions.db trie traversal
+/// - Rows.db decoding 
+/// - Byte-comparable keys with round-trip validation
+/// - Parity vs sstabledump
+/// - Complex scenarios: multi-component keys, nested collections, UDTs, wide partitions
+/// - Range tombstones and metadata validation
 pub struct BtiValidationSuite {
     parser: SSTableParser,
     test_data_path: PathBuf,
+    sstabledump_validator: Option<crate::validation::sstabledump_parity::SStableDumpParityValidator>,
+    config: BtiValidationConfig,
+}
+
+/// BTI validation configuration
+#[derive(Debug, Clone)]
+pub struct BtiValidationConfig {
+    /// Enable comprehensive parity validation
+    pub enable_sstabledump_parity: bool,
+    /// Test complex data types and scenarios
+    pub test_complex_scenarios: bool,
+    /// Generate synthetic BTI test data
+    pub generate_test_data: bool,
+    /// Maximum test data size (MB)
+    pub max_test_data_size_mb: usize,
+    /// Enable performance benchmarking
+    pub enable_performance_tests: bool,
+}
+
+impl Default for BtiValidationConfig {
+    fn default() -> Self {
+        Self {
+            enable_sstabledump_parity: true,
+            test_complex_scenarios: true,
+            generate_test_data: true,
+            max_test_data_size_mb: 100,
+            enable_performance_tests: true,
+        }
+    }
 }
 
 impl BtiValidationSuite {
     pub fn new() -> Self {
+        Self::new_with_config(BtiValidationConfig::default())
+    }
+
+    pub fn new_with_config(config: BtiValidationConfig) -> Self {
         let current_dir = std::env::current_dir().expect("Failed to get current directory");
         let test_data_path = current_dir.join("test-env/cassandra5");
+
+        // Initialize sstabledump validator if enabled
+        let sstabledump_validator = if config.enable_sstabledump_parity {
+            use crate::validation::sstabledump_parity::{SStableDumpParityValidator, SStableDumpParityConfig};
+            let parity_config = SStableDumpParityConfig {
+                test_sstable_paths: vec![test_data_path.clone()],
+                ..Default::default()
+            };
+            SStableDumpParityValidator::new(parity_config).ok()
+        } else {
+            None
+        };
 
         Self {
             parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
                 .unwrap(),
             test_data_path,
+            sstabledump_validator,
+            config,
         }
     }
 
@@ -274,6 +329,82 @@ impl BtiValidationSuite {
         result.extend_from_slice(&encode_vint(0)); // No parameters
 
         result
+    }
+
+    /// Generate comprehensive BTI test datasets for issue #36 requirements
+    pub fn generate_comprehensive_test_datasets(&self) -> Result<Vec<BtiTestDataset>, Box<dyn std::error::Error>> {
+        let mut datasets = Vec::new();
+        
+        // Dataset 1: Multi-component partition keys with complex types
+        datasets.push(BtiTestDataset {
+            name: "multi_component_partition_keys".to_string(),
+            description: "Multi-component partition keys with various data types".to_string(),
+            partition_keys: vec![
+                vec![
+                    BtiTestValue::Text("user_123".to_string()),
+                    BtiTestValue::Integer(2023),
+                    BtiTestValue::UUID("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                ],
+                vec![
+                    BtiTestValue::Text("tenant_456".to_string()),
+                    BtiTestValue::BigInt(1640995200000000i64),
+                    BtiTestValue::Boolean(true),
+                ],
+            ],
+            clustering_keys: vec![
+                vec![
+                    BtiTestValue::Timestamp(1640995200000000i64),
+                    BtiTestValue::Text("event_type_A".to_string()),
+                ],
+            ],
+            has_wide_partitions: true,
+            has_range_tombstones: true,
+            expected_trie_depth: 3,
+        });
+        
+        // Dataset 2: Nested collections and UDTs
+        datasets.push(BtiTestDataset {
+            name: "nested_collections_udts".to_string(),
+            description: "Complex nested collections and user-defined types".to_string(),
+            partition_keys: vec![
+                vec![
+                    BtiTestValue::Text("complex_key".to_string()),
+                    BtiTestValue::NestedCollection(NestedCollectionType::MapOfLists),
+                ],
+            ],
+            clustering_keys: vec![
+                vec![
+                    BtiTestValue::UDT("address".to_string(), vec![
+                        ("street".to_string(), BtiTestValue::Text("123 Main St".to_string())),
+                        ("city".to_string(), BtiTestValue::Text("Boston".to_string())),
+                        ("zipcode".to_string(), BtiTestValue::Integer(02101)),
+                    ]),
+                ],
+            ],
+            has_wide_partitions: false,
+            has_range_tombstones: false,
+            expected_trie_depth: 4,
+        });
+        
+        // Dataset 3: Wide partitions with many clustering keys
+        datasets.push(BtiTestDataset {
+            name: "wide_partitions".to_string(),
+            description: "Wide partitions with thousands of clustering keys".to_string(),
+            partition_keys: vec![
+                vec![BtiTestValue::Text("wide_partition".to_string())],
+            ],
+            clustering_keys: (0..10000).map(|i| {
+                vec![
+                    BtiTestValue::Integer(i),
+                    BtiTestValue::Timestamp(1640995200000000i64 + i as i64),
+                ]
+            }).collect(),
+            has_wide_partitions: true,
+            has_range_tombstones: true,
+            expected_trie_depth: 2,
+        });
+        
+        Ok(datasets)
     }
 
     /// Generate test BTI node for validation
