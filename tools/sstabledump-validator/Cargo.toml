@@ -36,5 +36,5 @@ name = "sstabledump-validator"
 path = "src/main.rs"
 
 [features]
-default = ["docker-integration"]
+default = []
 docker-integration = ["bollard", "futures-util"]

@@ -1,0 +1,1 @@
+multi_component_keys,wide_partitions,complex_types,range_tombstones,nested_collections
