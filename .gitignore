@@ -103,6 +103,7 @@ local.toml
 .claude/settings.local.json
 .mcp.json
 claude-flow.config.json
+.claude-flow/metrics/
 .swarm/
 .hive-mind/
 memory/claude-flow-data.json
