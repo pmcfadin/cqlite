@@ -51,37 +51,42 @@ validate_bti_dataset() {
         fi
     done
     
-    # Run validation using the Issue #30 validator infrastructure
-    echo "   Running sstabledump validator..."
+    # Use existing Issue #30 harness for consistency
+    echo "   Running sstabledump validator via Issue #30 harness..."
     
-    # Set environment for BTI validation
+    # Set environment for BTI validation using existing harness
     export DATASET_DIRS="$dataset_path"
     export DATASET_LIST="$dataset_name"
     export ZERO_TOLERANCE="$ZERO_TOLERANCE"
     export VALIDATION_MODE="bti"
     
-    # Build validator if needed
-    if [ ! -f "$VALIDATOR_DIR/target/release/sstabledump-validator" ]; then
-        echo "   Building sstabledump validator..."
-        cd "$VALIDATOR_DIR"
-        cargo build --release
-        cd - > /dev/null
-    fi
-    
-    # Run BTI-specific validation
+    # Run BTI validation using existing harness from Issue #30
     local validation_result=0
-    if cd "$VALIDATOR_DIR" && ./target/release/sstabledump-validator validate "$dataset_path" \
-        --zero-tolerance \
-        --format bti \
-        --detailed \
-        --output-format json \
-        --output-file "../../$RESULTS_DIR/${dataset_name}_validation_result.json"; then
-        echo "   ✅ BTI validation passed for $dataset_name"
-        cd - > /dev/null
+    if [ -f "test-data/scripts/run-sstabledump-validator.sh" ]; then
+        echo "   Using Issue #30 harness: test-data/scripts/run-sstabledump-validator.sh"
+        if ./test-data/scripts/run-sstabledump-validator.sh; then
+            echo "   ✅ BTI validation passed for $dataset_name"
+        else
+            echo "   ❌ BTI validation failed for $dataset_name"
+            validation_result=1
+        fi
     else
-        echo "   ❌ BTI validation failed for $dataset_name"
-        validation_result=1
-        cd - > /dev/null
+        echo "   ⚠️  Issue #30 harness not found, running validator directly..."
+        # Fallback to direct validation if harness is not available
+        if [ -f "$VALIDATOR_DIR/target/release/sstabledump-validator" ]; then
+            if cd "$VALIDATOR_DIR" && ./target/release/sstabledump-validator validate "$dataset_path" \
+                --zero-tolerance --detailed; then
+                echo "   ✅ BTI validation passed for $dataset_name"
+                cd - > /dev/null
+            else
+                echo "   ❌ BTI validation failed for $dataset_name"
+                validation_result=1
+                cd - > /dev/null
+            fi
+        else
+            echo "   ❌ No validator found - please build sstabledump-validator first"
+            validation_result=1
+        fi
     fi
     
     return $validation_result
@@ -196,7 +201,7 @@ This report validates the comprehensive BTI validation suite implementation agai
 
 **Total Datasets**: $total_datasets
 **Validation Failures**: $validation_failures
-**Success Rate**: $(echo "scale=2; (($total_datasets - $validation_failures) * 100) / $total_datasets" | bc -l)%
+**Success Rate**: $(awk "BEGIN {printf \"%.2f\", (($total_datasets - $validation_failures) * 100) / $total_datasets}")%
 
 ## BTI-Specific Validations
 
@@ -239,7 +244,7 @@ echo ""
 echo "🎯 BTI Validation Results:"
 echo "   Total datasets validated: $total_datasets"
 echo "   Failed validations: $validation_failures"
-echo "   Success rate: $(echo "scale=1; (($total_datasets - $validation_failures) * 100) / $total_datasets" | bc -l)%"
+echo "   Success rate: $(awk "BEGIN {printf \"%.1f\", (($total_datasets - $validation_failures) * 100) / $total_datasets}")%"
 echo ""
 
 if [ $validation_failures -eq 0 ]; then

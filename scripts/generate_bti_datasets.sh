@@ -70,16 +70,35 @@ create_bti_dataset() {
         
         echo "📦 Copying BTI SSTables for $scenario..."
         
-        # Copy all related files
+        # Copy all related files and track what was copied
+        local copied_files=0
         for suffix in Data.db Index.db CompressionInfo.db Statistics.db Summary.db TOC.txt Digest.crc32 Partitions.db Rows.db; do
             local src_file="$sstable_dir/$sstable_prefix-$suffix"
             if docker exec "$CONTAINER_NAME" test -f "$src_file"; then
                 docker cp "$CONTAINER_NAME:$src_file" "$BTI_OUTPUT_DIR/$scenario/"
                 echo "   ✓ Copied $suffix"
+                copied_files=$((copied_files + 1))
             fi
         done
         
-        echo "   ✅ BTI dataset '$scenario' created successfully"
+        # Assert that required BTI files exist
+        echo "   🔍 Validating BTI dataset presence..."
+        local required_bti_files=("Partitions.db" "Rows.db" "Data.db")
+        local missing_files=()
+        
+        for required_file in "${required_bti_files[@]}"; do
+            if [ ! -f "$BTI_OUTPUT_DIR/$scenario"/*-"$required_file" ]; then
+                missing_files+=("$required_file")
+            fi
+        done
+        
+        if [ ${#missing_files[@]} -eq 0 ]; then
+            echo "   ✅ BTI dataset '$scenario' created successfully with all required files"
+        else
+            echo "   ❌ BTI dataset '$scenario' is incomplete - missing required files: ${missing_files[*]}"
+            echo "   💡 Note: BTI format requires Partitions.db and Rows.db files for Issue #36 validation"
+            return 1
+        fi
     else
         echo "   ❌ No SSTables found for scenario '$scenario'"
         return 1
