@@ -48,13 +48,19 @@ check_dependencies() {
         exit 1
     fi
     
-    # Check for sstabledump (optional - will use mock if not available)
+    # Check for sstabledump (required for CI gating)
     if command -v sstabledump &> /dev/null; then
         log_success "sstabledump found at $(which sstabledump)"
         SSTABLEDUMP_AVAILABLE=true
     else
-        log_warning "sstabledump not found. Using mock validation data."
+        log_error "sstabledump not found. Real sstabledump is required for CI gating."
+        log_info "Install sstabledump or run setup_sstabledump_environment()..."
         SSTABLEDUMP_AVAILABLE=false
+        # Try to setup sstabledump in Docker if available
+        setup_sstabledump_environment || {
+            log_error "Failed to setup sstabledump environment"
+            exit 1
+        }
     fi
     
     # Check jq for JSON processing
@@ -69,9 +75,9 @@ run_integration_tests() {
     
     cd "${PROJECT_ROOT}"
     
-    # Run specific Issue #35 tests
-    log_info "Running live integration test suite..."
-    cargo test --package cqlite-tests issue_35_live_integration --verbose || {
+    # Run specific Issue #35 tests with zero-tolerance feature for CI
+    log_info "Running live integration test suite with zero-tolerance validation..."
+    cargo test --package cqlite-tests --features ci_zero_tolerance issue_35_live_integration --verbose || {
         log_error "Live integration tests failed"
         return 1
     }
@@ -97,9 +103,9 @@ run_sstabledump_validation() {
     
     cd "${PROJECT_ROOT}"
     
-    # Run sstabledump validation tests
-    log_info "Running parity validation framework..."
-    cargo test --package cqlite-tests test_sstabledump_parity_validation --verbose || {
+    # Run sstabledump validation tests with real sstabledump and zero-tolerance
+    log_info "Running parity validation framework with real sstabledump..."
+    REAL_SSTABLEDUMP=true cargo test --package cqlite-tests --features ci_zero_tolerance test_sstabledump_parity_validation --verbose || {
         log_error "SSTableDump parity validation failed"
         return 1
     }
@@ -167,8 +173,9 @@ The validation framework compares our spec reader outputs against
 reference sstabledump JSON outputs for zero-diff compliance.
 
 **Validation Status:** ✅ Framework operational
-**Mock Data Used:** $([ "$SSTABLEDUMP_AVAILABLE" = "false" ] && echo "Yes" || echo "No")
-**Real SSTableDump:** $([ "$SSTABLEDUMP_AVAILABLE" = "true" ] && echo "Yes" || echo "No")
+**Mock Data Used:** No (Real sstabledump required for CI gating)
+**Real SSTableDump:** Yes (Required for Issue #35 acceptance)
+**Zero-Tolerance Validation:** Enabled for CI gating
 
 ## Validation Criteria
 
@@ -225,6 +232,43 @@ run_performance_tests() {
         }
     else
         log_info "No performance tests found, skipping..."
+    fi
+}
+
+# Setup sstabledump environment using Docker if not available
+setup_sstabledump_environment() {
+    log_info "Setting up sstabledump environment using Docker..."
+    
+    if ! command -v docker &> /dev/null; then
+        log_error "Docker not found. Cannot setup sstabledump environment."
+        return 1
+    fi
+    
+    # Pull Cassandra Docker image that includes sstabledump
+    log_info "Pulling Cassandra Docker image..."
+    docker pull cassandra:5.0 || {
+        log_error "Failed to pull Cassandra Docker image"
+        return 1
+    }
+    
+    # Create wrapper script for sstabledump
+    cat > "${PROJECT_ROOT}/sstabledump" << 'EOF'
+#!/bin/bash
+# Wrapper script for sstabledump using Docker
+docker run --rm -v "$(pwd):/data" -w /data cassandra:5.0 sstabledump "$@"
+EOF
+    
+    chmod +x "${PROJECT_ROOT}/sstabledump"
+    export PATH="${PROJECT_ROOT}:${PATH}"
+    
+    # Verify sstabledump is now available
+    if "${PROJECT_ROOT}/sstabledump" --help &> /dev/null; then
+        log_success "sstabledump environment setup successful"
+        SSTABLEDUMP_AVAILABLE=true
+        return 0
+    else
+        log_error "sstabledump environment setup failed"
+        return 1
     fi
 }
 

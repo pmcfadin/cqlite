@@ -3,7 +3,7 @@
 //! This test suite validates the implementation of Index.db, Summary.db, and Statistics.db
 //! readers against sstabledump output to ensure zero-diff parity as required by Issue #35.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::fs;
 
 use cqlite_core::{
-    Config,
+    Config, Result,
     platform::Platform,
     storage::sstable::{
         index_reader::{IndexReader, IndexStatistics},

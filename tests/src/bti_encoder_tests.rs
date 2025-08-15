@@ -96,7 +96,7 @@ mod bti_encoder_tests {
             "你好",  // UTF-8 Chinese characters
             "a\0b",  // Embedded null
             "a\x01b", // Control character
-            "a\xFFb", // High byte value
+            "a\u{00FF}b", // High byte value
         ];
 
         let mut encoded_strings = Vec::new();
