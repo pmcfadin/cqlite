@@ -213,8 +213,10 @@ pub use cql_test_data_fixtures::{
     TypeTestCase,
 };
 
-// Issue #35 specific validation modules
+// Issue #35 specific validation modules  
 pub mod issue_35_validation_tests;
+pub mod issue_35_live_integration_tests;
+pub mod issue_35_sstabledump_validation;
 pub mod wide_partition_test_generator;
 
 #[cfg(test)]

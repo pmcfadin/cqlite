@@ -27,6 +27,9 @@ use super::{
     bloom::BloomFilter,
     compression::{Compression, CompressionAlgorithm, CompressionInfo, CompressionReader},
     index::SSTableIndex,
+    index_reader::IndexReader,
+    summary_reader::SummaryReader,
+    statistics_reader::StatisticsReader,
     row_cell_state_machine::{ParsedRow, RowCellStateMachine},
     tombstone_merger::{GenerationValue, TombstoneMerger},
 };
@@ -208,6 +211,12 @@ pub struct SSTableReader {
     tombstone_merger: TombstoneMerger,
     /// SSTable generation number (for multi-generation merging)
     pub generation: u64,
+    /// Index.db reader for partition lookup and promoted index handling
+    index_reader: Option<IndexReader>,
+    /// Summary.db reader for token-range iteration and sampling
+    summary_reader: Option<SummaryReader>,
+    /// Statistics.db reader for min/max timestamps and metadata
+    statistics_reader: Option<StatisticsReader>,
 }
 
 impl SSTableReader {
@@ -292,6 +301,11 @@ impl SSTableReader {
 
         let reader_config = SSTableReaderConfig::default();
 
+        // Load spec readers for enhanced metadata and lookups
+        let index_reader = Self::load_index_reader(path, &platform).await;
+        let summary_reader = Self::load_summary_reader(path, &platform).await;
+        let statistics_reader = Self::load_statistics_reader(path, &platform).await;
+
         let stats = SSTableReaderStats {
             file_size,
             entry_count: header.stats.row_count,
@@ -321,6 +335,9 @@ impl SSTableReader {
             stats,
             tombstone_merger: TombstoneMerger::new(),
             generation,
+            index_reader,
+            summary_reader,
+            statistics_reader,
         })
     }
 
@@ -2720,6 +2737,163 @@ pub async fn open_sstable_reader(
     platform: Arc<Platform>,
 ) -> Result<SSTableReader> {
     SSTableReader::open(path, config, platform).await
+}
+
+impl SSTableReader {
+    /// Load Index.db reader for partition lookup and promoted index handling
+    async fn load_index_reader(
+        path: &Path, 
+        platform: &Arc<Platform>
+    ) -> Option<IndexReader> {
+        let index_path = path.with_extension("db").with_file_name(
+            format!("{}-Index.db", path.file_stem()?.to_str()?)
+        );
+        
+        match IndexReader::open(&index_path, platform.clone()).await {
+            Ok(reader) => {
+                log::debug!("Loaded Index.db reader for {}", index_path.display());
+                Some(reader)
+            }
+            Err(e) => {
+                log::debug!("Failed to load Index.db reader: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Load Summary.db reader for token-range iteration
+    async fn load_summary_reader(
+        path: &Path,
+        platform: &Arc<Platform>
+    ) -> Option<SummaryReader> {
+        let summary_path = path.with_extension("db").with_file_name(
+            format!("{}-Summary.db", path.file_stem()?.to_str()?)
+        );
+        
+        match SummaryReader::open(&summary_path, platform.clone()).await {
+            Ok(reader) => {
+                log::debug!("Loaded Summary.db reader for {}", summary_path.display());
+                Some(reader)
+            }
+            Err(e) => {
+                log::debug!("Failed to load Summary.db reader: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Load Statistics.db reader for min/max timestamps and metadata
+    async fn load_statistics_reader(
+        path: &Path,
+        platform: &Arc<Platform>
+    ) -> Option<StatisticsReader> {
+        let statistics_path = path.with_extension("db").with_file_name(
+            format!("{}-Statistics.db", path.file_stem()?.to_str()?)
+        );
+        
+        match StatisticsReader::open(&statistics_path, platform.clone()).await {
+            Ok(reader) => {
+                log::debug!("Loaded Statistics.db reader for {}", statistics_path.display());
+                Some(reader)
+            }
+            Err(e) => {
+                log::debug!("Failed to load Statistics.db reader: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Enhanced partition lookup using Index.db reader with promoted index support
+    pub async fn lookup_partition_with_index(&self, partition_key: &[u8]) -> Result<Option<(u64, u32)>> {
+        if let Some(index_reader) = &self.index_reader {
+            // Use spec-compliant Index.db reader for partition lookup
+            if let Some(entry) = index_reader.lookup_partition(partition_key) {
+                log::debug!("Found partition via Index.db: offset={}, size={}", entry.data_offset, entry.data_size);
+                return Ok(Some((entry.data_offset, entry.data_size)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Enhanced token range iteration using Summary.db reader
+    pub async fn iterate_token_range(&self, start_token: i64, end_token: i64) -> Result<Vec<(RowKey, Value)>> {
+        if let Some(summary_reader) = &self.summary_reader {
+            // Use Summary.db reader for efficient token range queries
+            let token_entries = summary_reader.find_entries_in_range(start_token, end_token);
+            let mut results = Vec::new();
+            
+            for entry in token_entries {
+                // Use the index offset to read data at that position
+                // For now, read a reasonable chunk size and parse it
+                let chunk_size = 4096; // 4KB default chunk
+                if let Some(data) = self.read_value_at_offset(entry.index_offset, chunk_size).await? {
+                    // Create a synthetic key-value pair
+                    let key = RowKey::from(format!("token_{}", entry.token));
+                    results.push((key, data));
+                }
+            }
+            
+            log::debug!("Token range iteration found {} entries", results.len());
+            return Ok(results);
+        }
+        
+        // Fallback to existing scan method
+        self.sequential_scan(&TableId::from("default"), None, None, None).await
+    }
+
+    /// Get min/max timestamps from Statistics.db reader
+    pub async fn get_timestamp_range(&self) -> Result<Option<(i64, i64)>> {
+        if let Some(statistics_reader) = &self.statistics_reader {
+            let (min_ts, max_ts) = statistics_reader.timestamp_range();
+            log::debug!("Retrieved timestamp range from Statistics.db: {} to {}", min_ts, max_ts);
+            return Ok(Some((min_ts, max_ts)));
+        }
+        Ok(None)
+    }
+
+    /// Get token coverage from Statistics.db reader  
+    pub async fn get_token_coverage(&self) -> Result<Option<(i64, i64)>> {
+        if let Some(summary_reader) = &self.summary_reader {
+            // Get token range from Summary.db instead of Statistics.db
+            let summary_data = summary_reader.get_entries();
+            if !summary_data.is_empty() {
+                let min_token = summary_data.first().unwrap().token;
+                let max_token = summary_data.last().unwrap().token;
+                log::debug!("Retrieved token coverage from Summary.db: {} to {}", min_token, max_token);
+                return Ok(Some((min_token, max_token)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Enhanced get method using spec readers for efficient lookup
+    pub async fn get_with_spec_readers(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // Step 1: Use bloom filter for existence check
+        if let Some(bloom_filter) = &self.bloom_filter {
+            if !bloom_filter.might_contain(key.as_bytes()) {
+                log::debug!("Bloom filter indicates key does not exist");
+                return Ok(None);
+            }
+        }
+
+        // Step 2: Use Index.db reader for precise partition lookup
+        if let Some((offset, size)) = self.lookup_partition_with_index(key.as_bytes()).await? {
+            log::debug!("Using Index.db lookup: offset={}, size={}", offset, size);
+            return self.read_value_at_offset(offset, size).await;
+        }
+
+        // Step 3: Fallback to existing methods
+        log::debug!("Falling back to legacy lookup methods");
+        self.get(table_id, key).await
+    }
+
+    /// Parse partition data from Index.db offset (placeholder implementation)
+    fn parse_partition_data(&self, _data: &[u8]) -> Result<Vec<(RowKey, Value)>> {
+        // TODO: Implement proper partition data parsing using schema-driven approach
+        // This would parse the actual partition data and extract key-value pairs
+        // For now, return empty result
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
