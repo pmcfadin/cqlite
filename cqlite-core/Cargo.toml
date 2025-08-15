@@ -104,11 +104,9 @@ default = ["lz4", "metrics"]
 # Compression features - properly feature-gated
 lz4 = ["dep:lz4_flex"]
 snappy = ["dep:snap"]
-gzip = ["dep:flate2"]  
-zstd_compression = ["dep:zstd"]
-all-compression = ["lz4", "snappy", "gzip", "zstd_compression"]
-deflate = []
-zstd = []
+deflate = ["dep:flate2"]  
+zstd = ["dep:zstd"]
+all-compression = ["lz4", "snappy", "deflate", "zstd"]
 
 # Other features
 metrics = []
