@@ -183,12 +183,10 @@ impl ChunkDecompressor {
                 };
                 return Err(Error::InvalidFormat(format!(
                     "Modern format requires per-chunk CRCs but none found in CompressionInfo.db for chunk {} at offset 0x{:x}{}",
-                    chunk_index,
-                    compressed_offset,
-                    file_info
+                    chunk_index, compressed_offset, file_info
                 )));
             }
-            
+
             // Validate CRC for the compressed chunk data
             self.compression_info
                 .validate_chunk_crc(chunk_index, &compressed_data)?;
@@ -233,8 +231,7 @@ impl ChunkDecompressor {
         if compressed_data.is_empty() {
             return Err(Error::InvalidFormat(format!(
                 "Empty compressed data for chunk {}{}",
-                chunk_index,
-                file_info
+                chunk_index, file_info
             )));
         }
 
@@ -249,18 +246,24 @@ impl ChunkDecompressor {
                         return Err(Error::InvalidFormat(format!(
                             "LZ4 decompressed size mismatch for chunk {} at offset 0x{:x}: expected {}, got {}. No fallback allowed for modern formats{}",
                             chunk_index,
-                            self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                            self.compression_info
+                                .chunk_offsets
+                                .get(chunk_index)
+                                .unwrap_or(&0),
                             expected_size,
                             decompressed.len(),
                             file_info
                         )));
                     }
                     Ok(decompressed)
-                },
+                }
                 Err(e) => Err(Error::InvalidFormat(format!(
                     "LZ4 decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats{}",
                     chunk_index,
-                    self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                    self.compression_info
+                        .chunk_offsets
+                        .get(chunk_index)
+                        .unwrap_or(&0),
                     e,
                     file_info
                 ))),
@@ -276,7 +279,10 @@ impl ChunkDecompressor {
                         Err(_) => Err(Error::InvalidFormat(format!(
                             "LZ4 decompression failed for legacy chunk {} at offset 0x{:x}: {}{}",
                             chunk_index,
-                            self.compression_info.chunk_offsets.get(chunk_index).unwrap_or(&0),
+                            self.compression_info
+                                .chunk_offsets
+                                .get(chunk_index)
+                                .unwrap_or(&0),
                             e,
                             file_info
                         ))),
@@ -412,7 +418,19 @@ pub fn create_decompressor_from_file(
     let compression_data = std::fs::read(compression_info_path).map_err(|e| Error::Io(e))?;
 
     let compression_info = CompressionInfo::parse(&compression_data)
-        .or_else(|_| CompressionInfo::parse_alternative_format(&compression_data))?;
+        .or_else(|parse_err| {
+            #[cfg(feature = "legacy-heuristics")]
+            {
+                CompressionInfo::parse_alternative_format(&compression_data)
+            }
+            #[cfg(not(feature = "legacy-heuristics"))]
+            {
+                Err(crate::error::Error::InvalidFormat(format!(
+                    "Failed to parse CompressionInfo.db in standard format. Enable legacy-heuristics feature for fallback support. Original error: {}",
+                    parse_err
+                )))
+            }
+        })?;
 
     println!("📋 Loaded compression info:");
     println!("   Algorithm: {}", compression_info.algorithm);

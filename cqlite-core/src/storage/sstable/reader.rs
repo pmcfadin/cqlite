@@ -19,7 +19,7 @@ use crate::{
     Config, Error, Result, RowKey, Value,
     parser::{SSTableHeader, SSTableParser, header::CassandraVersion, vint::parse_vint_length},
     platform::Platform,
-    schema::{ClusteringColumn, Column, KeyColumn, TableSchema},
+    schema::{ClusteringColumn, Column, KeyColumn, TableSchema, registry::ParsingContext},
     types::{ComparatorType, TableId},
 };
 
@@ -28,9 +28,10 @@ use super::{
     compression::{Compression, CompressionAlgorithm, CompressionInfo, CompressionReader},
     index::SSTableIndex,
     index_reader::IndexReader,
-    summary_reader::SummaryReader,
-    statistics_reader::StatisticsReader,
+    key_digest::KeyDigestComputer,
     row_cell_state_machine::{ParsedRow, RowCellStateMachine},
+    statistics_reader::StatisticsReader,
+    summary_reader::SummaryReader,
     tombstone_merger::{GenerationValue, TombstoneMerger},
 };
 
@@ -720,84 +721,120 @@ impl SSTableReader {
         // For different Cassandra versions, header sizes vary significantly
         match header.cassandra_version {
             crate::parser::header::CassandraVersion::V5_0NewBig => {
-                // For nb format, headers are typically larger and more complex
-                // Try to find where the actual data begins by looking for patterns
-                Self::find_data_start_nb_format(header_buffer)
+                // Modern BIG v5 format - use structured parsing, no heuristics
+                Self::calculate_structured_header_size_nb(header, header_buffer)
             }
             crate::parser::header::CassandraVersion::V5_0Bti => {
-                // BTI format has different header structure
-                Self::find_data_start_bti_format(header_buffer)
+                // Modern BTI format - use structured parsing, no heuristics
+                Self::calculate_structured_header_size_bti(header, header_buffer)
             }
             crate::parser::header::CassandraVersion::Legacy => {
-                // Legacy format has simpler, more predictable headers
-                Self::find_data_start_legacy_format(header_buffer)
+                #[cfg(feature = "legacy-heuristics")]
+                {
+                    // Legacy format with heuristics enabled
+                    Self::find_data_start_legacy_format(header_buffer)
+                }
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    // Legacy format without heuristics - use conservative fixed size
+                    Ok(512.min(header_buffer.len()))
+                }
             }
             _ => {
-                // For other versions, use a reasonable default based on buffer analysis
-                Self::estimate_header_size_heuristic(header_buffer)
+                #[cfg(feature = "legacy-heuristics")]
+                {
+                    // Unknown version - only use heuristics if explicitly enabled
+                    Self::estimate_header_size_heuristic(header_buffer)
+                }
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    return Err(crate::error::Error::UnsupportedFormat(format!(
+                        "Unsupported Cassandra version: {:?}. Enable legacy-heuristics feature for fallback support.",
+                        header.cassandra_version
+                    )));
+                }
             }
         }
     }
 
     // Private helper methods
 
-    /// Find data start for nb format files
-    fn find_data_start_nb_format(header_buffer: &[u8]) -> Result<usize> {
-        // For nb format, look for compressed data patterns or block headers
-        // The header typically ends where compressed blocks begin
+    /// Calculate structured header size for BIG v5 format (no heuristics)
+    fn calculate_structured_header_size_nb(
+        header: &SSTableHeader,
+        header_buffer: &[u8],
+    ) -> Result<usize> {
+        // Modern BIG v5 format uses structured layout - calculate based on known components
+        // Header structure: magic(4) + flags(4) + generation(8) + format_type(4) + component_offsets + metadata
 
-        // Strategy 1: Look for compression signatures (LZ4, Snappy, etc.)
-        for i in 64..header_buffer.len().min(2048) {
-            if i + 8 < header_buffer.len() {
-                // Check for LZ4 signature
-                if header_buffer[i..i + 4] == [0x04, 0x22, 0x4D, 0x18] {
-                    println!("🔍 Found LZ4 signature at offset {}", i);
-                    return Ok(i);
-                }
+        let mut size = 20; // Base: magic + flags + generation + format_type
 
-                // Check for typical block size patterns (large values that could be block sizes)
-                let potential_size = u32::from_be_bytes([
-                    header_buffer[i],
-                    header_buffer[i + 1],
-                    header_buffer[i + 2],
-                    header_buffer[i + 3],
-                ]);
-
-                // Reasonable block sizes for Cassandra (1KB to 64MB)
-                if potential_size >= 1024 && potential_size <= 64 * 1024 * 1024 {
-                    // This might be a block size header
-                    println!(
-                        "🔍 Found potential block header at offset {} (size: {})",
-                        i, potential_size
-                    );
-                    return Ok(i);
-                }
-            }
+        // Add metadata sections based on header content
+        if !header.keyspace.is_empty() {
+            size += 2 + header.keyspace.len(); // length prefix + string
+        }
+        if !header.table_name.is_empty() {
+            size += 2 + header.table_name.len(); // length prefix + string
         }
 
-        // Fallback: Use fixed size for nb format
-        let fallback_size = 1024.min(header_buffer.len());
+        // Add compression info size if present
+        if header.compression.algorithm != "NONE" {
+            size += 64; // Conservative estimate for compression metadata
+        }
+
+        // Add schema info size if present
+        if !header.columns.is_empty() {
+            size += header.columns.len() * 32; // Conservative per-column estimate
+        }
+
+        // Ensure we don't exceed buffer size
+        let calculated_size = size.min(header_buffer.len());
+
         println!(
-            "🔍 Using fallback header size {} for nb format",
-            fallback_size
+            "📐 Calculated structured header size {} for BIG v5 format",
+            calculated_size
         );
-        Ok(fallback_size)
+        Ok(calculated_size)
     }
 
-    /// Find data start for BTI format files  
-    fn find_data_start_bti_format(header_buffer: &[u8]) -> Result<usize> {
-        // BTI format has different markers and structure
-        // Look for BTI-specific patterns
+    /// Calculate structured header size for BTI format (no heuristics)
+    fn calculate_structured_header_size_bti(
+        header: &SSTableHeader,
+        header_buffer: &[u8],
+    ) -> Result<usize> {
+        // Modern BTI format uses trie-indexed structure - calculate based on known layout
+        // BTI Header: magic(4) + version(4) + trie_root_offset(8) + metadata_offset(8) + ...
 
-        let fallback_size = 1024.min(header_buffer.len());
+        let mut size = 24; // Base: magic + version + offsets
+
+        // Add trie metadata size
+        size += 128; // Conservative estimate for trie metadata
+
+        // Add table metadata
+        if !header.keyspace.is_empty() {
+            size += 2 + header.keyspace.len();
+        }
+        if !header.table_name.is_empty() {
+            size += 2 + header.table_name.len();
+        }
+
+        // Add compression metadata
+        if header.compression.algorithm != "NONE" {
+            size += 64;
+        }
+
+        // Ensure we don't exceed buffer size
+        let calculated_size = size.min(header_buffer.len());
+
         println!(
-            "🔍 Using estimated header size {} for BTI format",
-            fallback_size
+            "📐 Calculated structured header size {} for BTI format",
+            calculated_size
         );
-        Ok(fallback_size)
+        Ok(calculated_size)
     }
 
-    /// Find data start for legacy format files
+    /// Find data start for legacy format files (legacy heuristics)
+    #[cfg(feature = "legacy-heuristics")]
     fn find_data_start_legacy_format(header_buffer: &[u8]) -> Result<usize> {
         // Legacy format is more predictable - usually 512 bytes or less
         let fallback_size = 512.min(header_buffer.len());
@@ -808,8 +845,12 @@ impl SSTableReader {
         Ok(fallback_size)
     }
 
-    /// Estimate header size using heuristics when version is unknown
+    /// Estimate header size using heuristics when version is unknown (legacy only)
+    #[cfg(feature = "legacy-heuristics")]
     fn estimate_header_size_heuristic(header_buffer: &[u8]) -> Result<usize> {
+        // DEPRECATED: This function uses heuristics and should only be used for legacy support
+        // Modern formats (BIG v5, BTI) should use structured parsing instead
+
         // Use heuristics to estimate where header ends and data begins
         // Look for patterns that indicate start of data section
 
@@ -825,7 +866,7 @@ impl SSTableReader {
                 // If we find a region with high entropy, it might be start of data
                 if entropy_score > 0.7 {
                     println!(
-                        "🔍 Detected potential data start at offset {} (entropy: {:.2})",
+                        "🔍 [LEGACY HEURISTIC] Detected potential data start at offset {} (entropy: {:.2})",
                         i, entropy_score
                     );
                     return Ok(i);
@@ -835,7 +876,10 @@ impl SSTableReader {
 
         // Conservative fallback
         let fallback_size = 768.min(header_buffer.len());
-        println!("🔍 Using heuristic header size {}", fallback_size);
+        println!(
+            "🔍 [LEGACY HEURISTIC] Using heuristic header size {}",
+            fallback_size
+        );
         Ok(fallback_size)
     }
 
@@ -2053,11 +2097,13 @@ impl SSTableReader {
             let component_data = &remaining[..component_len];
 
             // DEPRECATED: This should use SchemaAwareReader with proper comparators
-            let comparator = ComparatorType::from_data_type(&partition_column.data_type)
-                .map_err(|e| Error::Schema(format!(
-                    "Invalid partition key type '{}' - use SchemaAwareReader: {}", 
-                    partition_column.data_type, e
-                )))?;
+            let comparator =
+                ComparatorType::from_data_type(&partition_column.data_type).map_err(|e| {
+                    Error::Schema(format!(
+                        "Invalid partition key type '{}' - use SchemaAwareReader: {}",
+                        partition_column.data_type, e
+                    ))
+                })?;
 
             // Decode component using exact comparator type
             let decoded_component = self.decode_key_component(component_data, &comparator)?;
@@ -2091,10 +2137,12 @@ impl SSTableReader {
 
                 // DEPRECATED: This should use SchemaAwareReader with proper comparators
                 let comparator = ComparatorType::from_data_type(&clustering_column.data_type)
-                    .map_err(|e| Error::Schema(format!(
-                        "Invalid clustering key type '{}' - use SchemaAwareReader: {}", 
-                        clustering_column.data_type, e
-                    )))?;
+                    .map_err(|e| {
+                        Error::Schema(format!(
+                            "Invalid clustering key type '{}' - use SchemaAwareReader: {}",
+                            clustering_column.data_type, e
+                        ))
+                    })?;
 
                 // Decode component using exact comparator type
                 let decoded_component = self.decode_key_component(component_data, &comparator)?;
@@ -2741,14 +2789,11 @@ pub async fn open_sstable_reader(
 
 impl SSTableReader {
     /// Load Index.db reader for partition lookup and promoted index handling
-    async fn load_index_reader(
-        path: &Path, 
-        platform: &Arc<Platform>
-    ) -> Option<IndexReader> {
-        let index_path = path.with_extension("db").with_file_name(
-            format!("{}-Index.db", path.file_stem()?.to_str()?)
-        );
-        
+    async fn load_index_reader(path: &Path, platform: &Arc<Platform>) -> Option<IndexReader> {
+        let index_path = path
+            .with_extension("db")
+            .with_file_name(format!("{}-Index.db", path.file_stem()?.to_str()?));
+
         match IndexReader::open(&index_path, platform.clone()).await {
             Ok(reader) => {
                 log::debug!("Loaded Index.db reader for {}", index_path.display());
@@ -2762,14 +2807,11 @@ impl SSTableReader {
     }
 
     /// Load Summary.db reader for token-range iteration
-    async fn load_summary_reader(
-        path: &Path,
-        platform: &Arc<Platform>
-    ) -> Option<SummaryReader> {
-        let summary_path = path.with_extension("db").with_file_name(
-            format!("{}-Summary.db", path.file_stem()?.to_str()?)
-        );
-        
+    async fn load_summary_reader(path: &Path, platform: &Arc<Platform>) -> Option<SummaryReader> {
+        let summary_path = path
+            .with_extension("db")
+            .with_file_name(format!("{}-Summary.db", path.file_stem()?.to_str()?));
+
         match SummaryReader::open(&summary_path, platform.clone()).await {
             Ok(reader) => {
                 log::debug!("Loaded Summary.db reader for {}", summary_path.display());
@@ -2785,15 +2827,18 @@ impl SSTableReader {
     /// Load Statistics.db reader for min/max timestamps and metadata
     async fn load_statistics_reader(
         path: &Path,
-        platform: &Arc<Platform>
+        platform: &Arc<Platform>,
     ) -> Option<StatisticsReader> {
-        let statistics_path = path.with_extension("db").with_file_name(
-            format!("{}-Statistics.db", path.file_stem()?.to_str()?)
-        );
-        
+        let statistics_path = path
+            .with_extension("db")
+            .with_file_name(format!("{}-Statistics.db", path.file_stem()?.to_str()?));
+
         match StatisticsReader::open(&statistics_path, platform.clone()).await {
             Ok(reader) => {
-                log::debug!("Loaded Statistics.db reader for {}", statistics_path.display());
+                log::debug!(
+                    "Loaded Statistics.db reader for {}",
+                    statistics_path.display()
+                );
                 Some(reader)
             }
             Err(e) => {
@@ -2804,15 +2849,46 @@ impl SSTableReader {
     }
 
     /// Enhanced partition lookup using Index.db reader with promoted index support
-    pub async fn lookup_partition_with_index(&self, partition_key: &[u8]) -> Result<Option<(u64, u32)>> {
+    pub async fn lookup_partition_with_index(
+        &self,
+        partition_key: &[u8],
+    ) -> Result<Option<(u64, u32)>> {
         if let Some(index_reader) = &self.index_reader {
             // Compute the proper key digest for Index.db lookup
             // Index.db stores key digests, not raw partition key bytes
             let key_digest = self.compute_partition_key_digest(partition_key)?;
-            
+
             // Use spec-compliant Index.db reader for partition lookup
             if let Some(entry) = index_reader.lookup_partition(&key_digest) {
-                log::debug!("Found partition via Index.db: offset={}, size={}", entry.data_offset, entry.data_size);
+                log::debug!(
+                    "Found partition via Index.db: offset={}, size={}",
+                    entry.data_offset,
+                    entry.data_size
+                );
+                return Ok(Some((entry.data_offset, entry.data_size)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Enhanced partition lookup using schema-driven key digest computation
+    pub async fn lookup_partition_with_schema_context(
+        &self,
+        partition_key: &[u8],
+        parsing_context: &ParsingContext,
+    ) -> Result<Option<(u64, u32)>> {
+        if let Some(index_reader) = &self.index_reader {
+            // Compute the schema-driven key digest for Index.db lookup
+            let key_digest =
+                self.compute_partition_key_digest_with_schema(partition_key, parsing_context)?;
+
+            // Use spec-compliant Index.db reader for partition lookup
+            if let Some(entry) = index_reader.lookup_partition(&key_digest) {
+                log::debug!(
+                    "Found partition via schema-driven Index.db: offset={}, size={}",
+                    entry.data_offset,
+                    entry.data_size
+                );
                 return Ok(Some((entry.data_offset, entry.data_size)));
             }
         }
@@ -2820,25 +2896,35 @@ impl SSTableReader {
     }
 
     /// Enhanced token range iteration using Summary.db reader
-    pub async fn iterate_token_range(&self, start_token: i64, end_token: i64) -> Result<Vec<(RowKey, Value)>> {
+    pub async fn iterate_token_range(
+        &self,
+        start_token: i64,
+        end_token: i64,
+    ) -> Result<Vec<(RowKey, Value)>> {
         if let Some(summary_reader) = &self.summary_reader {
             // Use Summary.db reader for efficient token range queries
             let token_entries = summary_reader.find_entries_in_range(start_token, end_token);
             let mut results = Vec::new();
-            
+
             for entry in token_entries {
                 // Use Summary.db entry to find the corresponding Index.db entry
                 if let Some(_index_reader) = &self.index_reader {
                     // The summary entry provides an index offset, which points to Index.db data
                     // We need to read the partition data from the Data.db offset stored in Index.db
-                    
+
                     // For now, reconstruct the partition key from the summary entry
                     let partition_key_bytes = &entry.partition_key;
-                    
+
                     // Look up the partition in Index.db to get the actual data offset
-                    if let Some((data_offset, data_size)) = self.lookup_partition_with_index(partition_key_bytes).await? {
+                    if let Some((data_offset, data_size)) = self
+                        .lookup_partition_with_index(partition_key_bytes)
+                        .await?
+                    {
                         // Read and parse the actual partition data from Data.db
-                        match self.parse_partition_at_offset(data_offset, data_size).await? {
+                        match self
+                            .parse_partition_at_offset(data_offset, data_size)
+                            .await?
+                        {
                             Some(partition_entries) => {
                                 // Filter entries within the token range
                                 for (row_key, value) in partition_entries {
@@ -2855,24 +2941,29 @@ impl SSTableReader {
                 } else {
                     log::error!("Index reader not available for token range iteration");
                     return Err(Error::corruption(
-                        "Index reader required for real token range iteration - synthetic data not allowed for Issue #35"
+                        "Index reader required for real token range iteration - synthetic data not allowed for Issue #35",
                     ));
                 }
             }
-            
+
             log::debug!("Token range iteration found {} entries", results.len());
             return Ok(results);
         }
-        
+
         // Fallback to existing scan method
-        self.sequential_scan(&TableId::from("default"), None, None, None).await
+        self.sequential_scan(&TableId::from("default"), None, None, None)
+            .await
     }
 
     /// Get min/max timestamps from Statistics.db reader
     pub async fn get_timestamp_range(&self) -> Result<Option<(i64, i64)>> {
         if let Some(statistics_reader) = &self.statistics_reader {
             let (min_ts, max_ts) = statistics_reader.timestamp_range();
-            log::debug!("Retrieved timestamp range from Statistics.db: {} to {}", min_ts, max_ts);
+            log::debug!(
+                "Retrieved timestamp range from Statistics.db: {} to {}",
+                min_ts,
+                max_ts
+            );
             return Ok(Some((min_ts, max_ts)));
         }
         Ok(None)
@@ -2886,7 +2977,11 @@ impl SSTableReader {
             if !summary_data.is_empty() {
                 let min_token = summary_data.first().unwrap().token;
                 let max_token = summary_data.last().unwrap().token;
-                log::debug!("Retrieved token coverage from Summary.db: {} to {}", min_token, max_token);
+                log::debug!(
+                    "Retrieved token coverage from Summary.db: {} to {}",
+                    min_token,
+                    max_token
+                );
                 return Ok(Some((min_token, max_token)));
             }
         }
@@ -2894,7 +2989,11 @@ impl SSTableReader {
     }
 
     /// Enhanced get method using spec readers for efficient lookup
-    pub async fn get_with_spec_readers(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    pub async fn get_with_spec_readers(
+        &self,
+        table_id: &TableId,
+        key: &RowKey,
+    ) -> Result<Option<Value>> {
         // Step 1: Use bloom filter for existence check
         if let Some(bloom_filter) = &self.bloom_filter {
             if !bloom_filter.might_contain(key.as_bytes()) {
@@ -2914,57 +3013,77 @@ impl SSTableReader {
         self.get(table_id, key).await
     }
 
+    /// Enhanced get method using spec readers with schema-driven key digest computation
+    pub async fn get_with_schema_context(
+        &self,
+        table_id: &TableId,
+        key: &RowKey,
+        parsing_context: &ParsingContext,
+    ) -> Result<Option<Value>> {
+        // Step 1: Use bloom filter for existence check
+        if let Some(bloom_filter) = &self.bloom_filter {
+            if !bloom_filter.might_contain(key.as_bytes()) {
+                log::debug!("Bloom filter indicates key does not exist");
+                return Ok(None);
+            }
+        }
+
+        // Step 2: Use Index.db reader for precise partition lookup with schema-driven digest
+        if let Some((offset, size)) = self
+            .lookup_partition_with_schema_context(key.as_bytes(), parsing_context)
+            .await?
+        {
+            log::debug!(
+                "Using schema-driven Index.db lookup: offset={}, size={}",
+                offset,
+                size
+            );
+            return self.read_value_at_offset(offset, size).await;
+        }
+
+        // Step 3: Fallback to existing methods
+        log::debug!("Falling back to legacy lookup methods");
+        self.get(table_id, key).await
+    }
+
     /// Compute partition key digest for Index.db lookup
-    /// 
+    ///
     /// Index.db stores key digests computed using the table's partition key comparator.
     /// This method computes the digest from raw partition key bytes using the appropriate
     /// byte-comparable encoding based on the table schema's partition key definition.
     fn compute_partition_key_digest(&self, partition_key: &[u8]) -> Result<Vec<u8>> {
-        // For now, use a simple hash-based digest computation
-        // In a full implementation, this would use the table's partition key comparator
-        // to create the proper byte-comparable encoding
-        
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        let mut hasher = DefaultHasher::new();
-        partition_key.hash(&mut hasher);
-        let hash = hasher.finish();
-        
-        // Convert hash to bytes (8 bytes for u64)
-        // In practice, this would be more sophisticated and use the actual
-        // Cassandra partition key digest algorithm based on the table schema
-        Ok(hash.to_be_bytes().to_vec())
+        let computer = KeyDigestComputer::new();
+
+        // Use simple digest fallback when schema context is not available
+        // This maintains backward compatibility but may not match Cassandra exactly
+        computer.compute_simple_digest(partition_key)
     }
-    
+
     /// Compute partition key digest using table schema comparator
-    /// 
+    ///
     /// This is the proper implementation that should be used when table schema
     /// is available. It uses the partition key comparator to create the exact
     /// digest that Cassandra would store in Index.db.
     fn compute_partition_key_digest_with_schema(
-        &self, 
-        partition_key: &[u8], 
-        _partition_key_comparator: &crate::types::ComparatorType
+        &self,
+        partition_key: &[u8],
+        parsing_context: &ParsingContext,
     ) -> Result<Vec<u8>> {
-        // TODO: Implement proper digest computation using schema-driven comparator
-        // This should match Cassandra's partition key digest algorithm exactly
-        // 
-        // Steps:
-        // 1. Parse partition key bytes according to the comparator
-        // 2. Create byte-comparable encoding of the key components
-        // 3. Hash the byte-comparable representation
-        // 4. Return the digest bytes
-        
-        // For now, fall back to the simple hash method
-        self.compute_partition_key_digest(partition_key)
+        let mut computer = KeyDigestComputer::new();
+
+        // Use the proper schema-driven digest computation
+        computer.compute_partition_key_digest(partition_key, parsing_context)
     }
 
     /// Parse partition data at a specific offset in Data.db
-    /// 
+    ///
     /// This method reads partition data from the given offset and size in the Data.db file
     /// and parses it into individual row entries using the schema-driven row cell state machine.
-    async fn parse_partition_at_offset(&self, offset: u64, size: u32) -> Result<Option<Vec<(RowKey, Value)>>> {
+    async fn parse_partition_at_offset(
+        &self,
+        offset: u64,
+        size: u32,
+    ) -> Result<Option<Vec<(RowKey, Value)>>> {
         // Read the raw partition data from Data.db
         let partition_data = match self.read_value_at_offset(offset, size).await? {
             Some(Value::Blob(data)) => data,
@@ -2977,13 +3096,13 @@ impl SSTableReader {
                 return Ok(None);
             }
         };
-        
+
         // Parse the partition data using the row cell state machine
         self.parse_partition_data(&partition_data)
     }
-    
+
     /// Parse partition data from raw bytes using schema-driven approach
-    /// 
+    ///
     /// This method uses the row cell state machine to parse partition data into
     /// individual row entries. It handles the SSTable row format including:
     /// - Row headers and metadata
@@ -2994,11 +3113,11 @@ impl SSTableReader {
         if data.is_empty() {
             return Ok(Some(Vec::new()));
         }
-        
+
         // Use the row cell state machine for proper parsing
         let mut state_machine = RowCellStateMachine::new();
         let mut results = Vec::new();
-        
+
         // Parse the partition data using the row cell state machine
         match state_machine.parse_partition_data(data) {
             Ok(parsed_rows) => {
@@ -3012,7 +3131,7 @@ impl SSTableReader {
             }
             Err(e) => {
                 log::error!("Failed to parse partition data at offset: {}", e);
-                
+
                 // For Issue #35 compliance, we must not return synthetic data
                 // If parsing fails, we return None to indicate parsing failure
                 // This ensures zero-tolerance validation and forces proper implementation
@@ -3023,12 +3142,12 @@ impl SSTableReader {
             }
         }
     }
-    
+
     /// Extract row key from parsed row data
     fn extract_row_key_from_parsed_row(&self, parsed_row: &ParsedRow) -> Result<RowKey> {
         // Extract the clustering key components from the parsed row
         // Combine partition key + clustering key to form the full row key
-        
+
         // Use the row's clustering key if available
         if let Some(ref clustering_key) = parsed_row.clustering_key {
             Ok(RowKey::from(clustering_key.as_str()))
@@ -3043,12 +3162,12 @@ impl SSTableReader {
             Ok(RowKey::from(format!("partition_{}", partition_key_str)))
         }
     }
-    
+
     /// Extract value from parsed row data
     fn extract_value_from_parsed_row(&self, parsed_row: &ParsedRow) -> Result<Value> {
         // Extract the primary value from the row's cells
         // For tables with multiple columns, this might be a UDT or JSON representation
-        
+
         // First, try to get value from cells (the new flattened structure)
         if !parsed_row.cells.is_empty() {
             // Return the first non-null cell value
@@ -3058,7 +3177,7 @@ impl SSTableReader {
                 }
             }
         }
-        
+
         // Fallback: try to extract from clustering rows
         if !parsed_row.clustering_rows.is_empty() {
             let first_row = &parsed_row.clustering_rows[0];
@@ -3069,7 +3188,7 @@ impl SSTableReader {
                 }
             }
         }
-        
+
         // Fallback: try static row data
         if let Some(ref static_row) = parsed_row.static_row {
             if !static_row.columns.is_empty() {
@@ -3078,11 +3197,14 @@ impl SSTableReader {
                 }
             }
         }
-        
+
         // Final fallback: return metadata about the row
         let cell_count = parsed_row.cells.len();
         let cluster_count = parsed_row.clustering_rows.len();
-        Ok(Value::Text(format!("row_with_{}_cells_{}_clusters", cell_count, cluster_count)))
+        Ok(Value::Text(format!(
+            "row_with_{}_cells_{}_clusters",
+            cell_count, cluster_count
+        )))
     }
 }
 

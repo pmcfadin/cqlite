@@ -83,10 +83,10 @@ pub struct BtiEntry {
 }
 
 /// Comprehensive BTI validation test suite for Issue #36
-/// 
+///
 /// Validates BTI (Cassandra 5.0) end-to-end functionality:
 /// - Partitions.db trie traversal
-/// - Rows.db decoding 
+/// - Rows.db decoding
 /// - Byte-comparable keys with round-trip validation
 /// - Parity vs sstabledump
 /// - Complex scenarios: multi-component keys, nested collections, UDTs, wide partitions
@@ -94,7 +94,8 @@ pub struct BtiEntry {
 pub struct BtiValidationSuite {
     parser: SSTableParser,
     test_data_path: PathBuf,
-    sstabledump_validator: Option<crate::validation::sstabledump_parity::SStableDumpParityValidator>,
+    sstabledump_validator:
+        Option<crate::validation::sstabledump_parity::SStableDumpParityValidator>,
     config: BtiValidationConfig,
 }
 
@@ -136,7 +137,9 @@ impl BtiValidationSuite {
 
         // Initialize sstabledump validator if enabled
         let sstabledump_validator = if config.enable_sstabledump_parity {
-            use crate::validation::sstabledump_parity::{SStableDumpParityValidator, SStableDumpParityConfig};
+            use crate::validation::sstabledump_parity::{
+                SStableDumpParityConfig, SStableDumpParityValidator,
+            };
             let parity_config = SStableDumpParityConfig {
                 test_sstable_paths: vec![test_data_path.clone()],
                 ..Default::default()
@@ -196,6 +199,19 @@ impl BtiValidationSuite {
             number::complete::{be_u16, be_u32, be_u64},
         };
 
+        fn parse_compression_info(input: &[u8]) -> IResult<&[u8], CompressionInfo> {
+            use nom::number::complete::be_u32;
+            let (input, chunk_size) = be_u32(input)?;
+            Ok((
+                input,
+                CompressionInfo {
+                    algorithm: "NONE".to_string(),
+                    chunk_size,
+                    parameters: std::collections::HashMap::new(),
+                },
+            ))
+        }
+
         fn parse_bti_header_impl(input: &[u8]) -> IResult<&[u8], BtiHeader> {
             let (input, magic) = be_u32(input)?;
             if magic != BTI_MAGIC {
@@ -247,6 +263,12 @@ impl BtiValidationSuite {
             multi::count,
             number::complete::{be_u8, be_u16, be_u32, be_u64},
         };
+
+        fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {
+            use nom::number::complete::be_u8;
+            let (input, len) = be_u8(input)?;
+            Ok((input, len as usize))
+        }
 
         fn parse_bti_entry(input: &[u8]) -> IResult<&[u8], BtiEntry> {
             let (input, key_len) = parse_vint_length(input)?;
@@ -323,18 +345,20 @@ impl BtiValidationSuite {
         };
 
         // Serialize compression manually (simplified)
-        result.extend_from_slice(&encode_vint(compression.algorithm.len() as i64));
+        result.extend_from_slice(&(compression.algorithm.len() as u32).to_be_bytes());
         result.extend_from_slice(compression.algorithm.as_bytes());
         result.extend_from_slice(&compression.chunk_size.to_be_bytes());
-        result.extend_from_slice(&encode_vint(0)); // No parameters
+        result.extend_from_slice(&0u32.to_be_bytes()); // No parameters
 
         result
     }
 
     /// Generate comprehensive BTI test datasets for issue #36 requirements
-    pub fn generate_comprehensive_test_datasets(&self) -> Result<Vec<BtiTestDataset>, Box<dyn std::error::Error>> {
+    pub fn generate_comprehensive_test_datasets(
+        &self,
+    ) -> Result<Vec<BtiTestDataset>, Box<dyn std::error::Error>> {
         let mut datasets = Vec::new();
-        
+
         // Dataset 1: Multi-component partition keys with complex types
         datasets.push(BtiTestDataset {
             name: "multi_component_partition_keys".to_string(),
@@ -351,59 +375,57 @@ impl BtiValidationSuite {
                     BtiTestValue::Boolean(true),
                 ],
             ],
-            clustering_keys: vec![
-                vec![
-                    BtiTestValue::Timestamp(1640995200000000i64),
-                    BtiTestValue::Text("event_type_A".to_string()),
-                ],
-            ],
+            clustering_keys: vec![vec![
+                BtiTestValue::Timestamp(1640995200000000i64),
+                BtiTestValue::Text("event_type_A".to_string()),
+            ]],
             has_wide_partitions: true,
             has_range_tombstones: true,
             expected_trie_depth: 3,
         });
-        
+
         // Dataset 2: Nested collections and UDTs
         datasets.push(BtiTestDataset {
             name: "nested_collections_udts".to_string(),
             description: "Complex nested collections and user-defined types".to_string(),
-            partition_keys: vec![
+            partition_keys: vec![vec![
+                BtiTestValue::Text("complex_key".to_string()),
+                BtiTestValue::NestedCollection(NestedCollectionType::MapOfLists),
+            ]],
+            clustering_keys: vec![vec![BtiTestValue::UDT(
+                "address".to_string(),
                 vec![
-                    BtiTestValue::Text("complex_key".to_string()),
-                    BtiTestValue::NestedCollection(NestedCollectionType::MapOfLists),
+                    (
+                        "street".to_string(),
+                        BtiTestValue::Text("123 Main St".to_string()),
+                    ),
+                    ("city".to_string(), BtiTestValue::Text("Boston".to_string())),
+                    ("zipcode".to_string(), BtiTestValue::Integer(02101)),
                 ],
-            ],
-            clustering_keys: vec![
-                vec![
-                    BtiTestValue::UDT("address".to_string(), vec![
-                        ("street".to_string(), BtiTestValue::Text("123 Main St".to_string())),
-                        ("city".to_string(), BtiTestValue::Text("Boston".to_string())),
-                        ("zipcode".to_string(), BtiTestValue::Integer(02101)),
-                    ]),
-                ],
-            ],
+            )]],
             has_wide_partitions: false,
             has_range_tombstones: false,
             expected_trie_depth: 4,
         });
-        
+
         // Dataset 3: Wide partitions with many clustering keys
         datasets.push(BtiTestDataset {
             name: "wide_partitions".to_string(),
             description: "Wide partitions with thousands of clustering keys".to_string(),
-            partition_keys: vec![
-                vec![BtiTestValue::Text("wide_partition".to_string())],
-            ],
-            clustering_keys: (0..10000).map(|i| {
-                vec![
-                    BtiTestValue::Integer(i),
-                    BtiTestValue::Timestamp(1640995200000000i64 + i as i64),
-                ]
-            }).collect(),
+            partition_keys: vec![vec![BtiTestValue::Text("wide_partition".to_string())]],
+            clustering_keys: (0..10000)
+                .map(|i| {
+                    vec![
+                        BtiTestValue::Integer(i),
+                        BtiTestValue::Timestamp(1640995200000000i64 + i as i64),
+                    ]
+                })
+                .collect(),
             has_wide_partitions: true,
             has_range_tombstones: true,
             expected_trie_depth: 2,
         });
-        
+
         Ok(datasets)
     }
 
@@ -454,7 +476,7 @@ impl BtiValidationSuite {
         // Serialize entries
         for entry in entries {
             // Key length and key
-            result.extend_from_slice(&encode_vint(entry.key.len() as i64));
+            result.extend_from_slice(&(entry.key.len() as u32).to_be_bytes());
             result.extend_from_slice(&entry.key);
 
             // Offset

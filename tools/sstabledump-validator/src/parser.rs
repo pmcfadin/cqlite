@@ -258,12 +258,18 @@ impl SstableDumpParser {
             let value = self.parse_cell_value(value_str, &column_name);
             let timestamp = timestamp_str.parse().unwrap_or(0);
 
+            // Parse TTL if present in the line
+            let ttl = self.extract_ttl_from_line(line);
+
+            // Parse deletion information if present
+            let deletion_info = self.extract_deletion_info_from_line(line);
+
             Some(ParsedCell {
                 column_name,
                 value,
                 timestamp,
-                ttl: None,
-                deletion_info: None,
+                ttl,
+                deletion_info,
             })
         } else {
             None
@@ -320,6 +326,75 @@ impl CqlitePatterns {
             metadata_pattern: Regex::new(r"([^.]+)\.([^.]+)").unwrap(),
         }
     }
+}
+
+impl SstableDumpParser {
+    /// Extract TTL information from a line if present
+    fn extract_ttl_from_line(&self, line: &str) -> Option<i32> {
+        if let Some(captures) = self.cassandra_patterns.ttl_pattern.captures(line) {
+            captures.get(1)?.as_str().parse().ok()
+        } else {
+            None
+        }
+    }
+
+    /// Extract deletion information from a line if present
+    fn extract_deletion_info_from_line(&self, line: &str) -> Option<DeletionInfo> {
+        // Look for deletion markers like "[deleted]" or "[ttl expired]"
+        if line.contains("[deleted]") {
+            // Extract deletion timestamp if available
+            if let Some(captures) = self.cassandra_patterns.timestamp_pattern.captures(line) {
+                if let Ok(deletion_time) = captures.get(1)?.as_str().parse::<i64>() {
+                    return Some(DeletionInfo {
+                        marked_for_deletion_at: deletion_time,
+                        local_deletion_time: (deletion_time / 1_000_000) as i32, // Convert to seconds
+                    });
+                }
+            }
+        } else if line.contains("[ttl expired]") {
+            // TTL expiration - use current time as deletion time
+            let current_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+            return Some(DeletionInfo {
+                marked_for_deletion_at: current_time,
+                local_deletion_time: (current_time / 1_000_000) as i32,
+            });
+        }
+        None
+    }
+
+    /// Parse range tombstone information from line
+    fn parse_range_tombstone(&self, line: &str) -> Option<RangeTombstone> {
+        // Look for range tombstone markers
+        if line.contains("[range deleted]") {
+            // Extract range bounds and deletion time
+            // This is a simplified implementation - real parsing would be more complex
+            if let Some(captures) = self.cassandra_patterns.timestamp_pattern.captures(line) {
+                if let Ok(deletion_time) = captures.get(1)?.as_str().parse::<i64>() {
+                    return Some(RangeTombstone {
+                        deletion_time,
+                        start_bound: None, // Would extract from actual format
+                        end_bound: None,   // Would extract from actual format
+                        inclusive_start: true,
+                        inclusive_end: true,
+                    });
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Range tombstone information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RangeTombstone {
+    pub deletion_time: i64,
+    pub start_bound: Option<String>,
+    pub end_bound: Option<String>,
+    pub inclusive_start: bool,
+    pub inclusive_end: bool,
 }
 
 impl Default for DumpMetadata {

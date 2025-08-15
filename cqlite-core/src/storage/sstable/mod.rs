@@ -11,6 +11,7 @@ pub mod directory_integration_tests;
 pub mod format_detector;
 pub mod index;
 pub mod index_reader;
+pub mod key_digest;
 pub mod performance_benchmarks;
 pub mod reader;
 pub mod summary_reader;
@@ -25,6 +26,10 @@ pub mod validation;
 pub mod writer;
 
 // Test modules
+#[cfg(test)]
+mod key_digest_integration_test;
+#[cfg(test)]
+mod key_digest_test;
 #[cfg(test)]
 mod oa_format_compliance_test;
 #[cfg(test)]

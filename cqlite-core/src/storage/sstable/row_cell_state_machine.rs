@@ -12,6 +12,7 @@
 use crate::{
     error::{Error, Result},
     parser::{
+        header::CassandraVersion,
         types::{CqlTypeId, parse_cql_value},
         vint::parse_vint_length,
     },
@@ -144,6 +145,8 @@ pub struct RowCellStateMachine {
     schema: Option<TableSchema>,
     /// Comparator type for key decoding
     comparator: Option<ComparatorType>,
+    /// Cassandra version for format-specific parsing
+    version: CassandraVersion,
 }
 
 impl RowCellStateMachine {
@@ -156,6 +159,7 @@ impl RowCellStateMachine {
             error_message: None,
             schema: None,
             comparator: None,
+            version: CassandraVersion::Legacy, // Default to legacy for backward compatibility
         }
     }
 
@@ -168,6 +172,37 @@ impl RowCellStateMachine {
             error_message: None,
             schema: Some(schema),
             comparator: Some(comparator),
+            version: CassandraVersion::Legacy, // Default to legacy for backward compatibility
+        }
+    }
+
+    /// Create a new state machine with version information
+    pub fn with_version(version: CassandraVersion) -> Self {
+        Self {
+            state: State::Header,
+            offset: 0,
+            parsed_row: None,
+            error_message: None,
+            schema: None,
+            comparator: None,
+            version,
+        }
+    }
+
+    /// Create a new state machine with schema and version information
+    pub fn with_schema_and_version(
+        schema: TableSchema,
+        comparator: ComparatorType,
+        version: CassandraVersion,
+    ) -> Self {
+        Self {
+            state: State::Header,
+            offset: 0,
+            parsed_row: None,
+            error_message: None,
+            schema: Some(schema),
+            comparator: Some(comparator),
+            version,
         }
     }
 
@@ -787,20 +822,103 @@ impl RowCellStateMachine {
                         if let Ok((_, parsed_value)) = parse_cql_value(value_data, type_id) {
                             parsed_value
                         } else {
-                            // Fall back to blob if parsing fails
-                            Value::Blob(value_data.to_vec())
+                            // For modern formats (BIG v5, BTI), blob fallback is not allowed
+                            match self.version {
+                                CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                                    return Err(Error::Schema(format!(
+                                        "Failed to parse column '{}' with data type '{}' in modern format {:?}. Blob fallback is disabled for modern formats.",
+                                        column_name, column.data_type, self.version
+                                    )));
+                                }
+                                _ => {
+                                    #[cfg(feature = "legacy-heuristics")]
+                                    {
+                                        // Legacy formats can fall back to blob with feature flag
+                                        Value::Blob(value_data.to_vec())
+                                    }
+                                    #[cfg(not(feature = "legacy-heuristics"))]
+                                    {
+                                        return Err(Error::Schema(format!(
+                                            "Failed to parse column '{}' with data type '{}'. Enable legacy-heuristics feature for blob fallback support.",
+                                            column_name, column.data_type
+                                        )));
+                                    }
+                                }
+                            }
                         }
                     } else {
-                        // Unknown type, preserve as blob
-                        Value::Blob(value_data.to_vec())
+                        // For modern formats, unknown types are not allowed
+                        match self.version {
+                            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                                return Err(Error::Schema(format!(
+                                    "Unknown data type '{}' for column '{}' in modern format {:?}. All types must be explicitly supported.",
+                                    column.data_type, column_name, self.version
+                                )));
+                            }
+                            _ => {
+                                #[cfg(feature = "legacy-heuristics")]
+                                {
+                                    // Legacy formats can preserve unknown types as blob
+                                    Value::Blob(value_data.to_vec())
+                                }
+                                #[cfg(not(feature = "legacy-heuristics"))]
+                                {
+                                    return Err(Error::Schema(format!(
+                                        "Unknown data type '{}' for column '{}'. Enable legacy-heuristics feature for blob fallback support.",
+                                        column.data_type, column_name
+                                    )));
+                                }
+                            }
+                        }
                     }
                 } else {
-                    // Column not found in schema, preserve as blob
-                    Value::Blob(value_data.to_vec())
+                    // For modern formats, all columns must be in schema
+                    match self.version {
+                        CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                            return Err(Error::Schema(format!(
+                                "Column '{}' not found in schema for modern format {:?}. All columns must be declared in schema.",
+                                column_name, self.version
+                            )));
+                        }
+                        _ => {
+                            #[cfg(feature = "legacy-heuristics")]
+                            {
+                                // Legacy formats can preserve unknown columns as blob
+                                Value::Blob(value_data.to_vec())
+                            }
+                            #[cfg(not(feature = "legacy-heuristics"))]
+                            {
+                                return Err(Error::Schema(format!(
+                                    "Column '{}' not found in schema. Enable legacy-heuristics feature for blob fallback support.",
+                                    column_name
+                                )));
+                            }
+                        }
+                    }
                 }
             } else {
-                // No schema available, preserve as blob
-                Value::Blob(value_data.to_vec())
+                // For modern formats, schema is required
+                match self.version {
+                    CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                        return Err(Error::Schema(format!(
+                            "Schema is required for parsing modern format {:?}. Blob fallback is disabled.",
+                            self.version
+                        )));
+                    }
+                    _ => {
+                        #[cfg(feature = "legacy-heuristics")]
+                        {
+                            // Legacy formats can work without schema (blob fallback)
+                            Value::Blob(value_data.to_vec())
+                        }
+                        #[cfg(not(feature = "legacy-heuristics"))]
+                        {
+                            return Err(Error::Schema(
+                                "Schema is required for parsing. Enable legacy-heuristics feature for schema-less blob fallback support.".to_string()
+                            ));
+                        }
+                    }
+                }
             }
         };
 
@@ -866,7 +984,7 @@ impl RowCellStateMachine {
     }
 
     /// Parse partition data from raw bytes and return all parsed rows
-    /// 
+    ///
     /// This method processes raw partition data according to Cassandra's SSTable format,
     /// parsing multiple rows from a single partition. It handles the complete row structure
     /// including partition keys, clustering rows, and cell data.
@@ -884,10 +1002,13 @@ impl RowCellStateMachine {
 
             // Try to parse a single row from the remaining data
             let remaining_data = &data[offset..];
-            
+
             // Skip empty or very small chunks
             if remaining_data.len() < 8 {
-                log::debug!("Skipping small data chunk of {} bytes", remaining_data.len());
+                log::debug!(
+                    "Skipping small data chunk of {} bytes",
+                    remaining_data.len()
+                );
                 break;
             }
 
@@ -897,7 +1018,7 @@ impl RowCellStateMachine {
                         results.push(parsed_row);
                     }
                     offset += consumed_bytes;
-                    
+
                     // Prevent infinite loops
                     if consumed_bytes == 0 {
                         log::debug!("No progress made, stopping partition parsing");
@@ -906,7 +1027,7 @@ impl RowCellStateMachine {
                 }
                 Err(e) => {
                     log::debug!("Failed to parse row at offset {}: {}", offset, e);
-                    
+
                     // For Issue #35 compliance, try more aggressive parsing methods
                     // before giving up completely
                     match self.try_alternative_parsing_methods(remaining_data) {
@@ -963,8 +1084,7 @@ impl RowCellStateMachine {
         let header = RowHeader {
             flags: data[0],
             timestamp: i64::from_be_bytes([
-                data[1], data[2], data[3], data[4], 
-                data[5], data[6], data[7], data[8]
+                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
             ]),
             ttl: None,
             local_deletion_time: None,
@@ -1041,7 +1161,7 @@ impl RowCellStateMachine {
             cells,
         })
     }
-    
+
     /// Try alternative parsing methods when standard parsing fails
     fn try_alternative_parsing_methods(&mut self, data: &[u8]) -> Result<Option<ParsedRow>> {
         // Method 1: Try to parse as a single cell with minimal structure
@@ -1050,39 +1170,38 @@ impl RowCellStateMachine {
                 return Ok(Some(parsed_row));
             }
         }
-        
+
         // Method 2: Try to parse using known SSTable patterns
         if data.len() >= 32 {
             if let Ok(parsed_row) = self.parse_using_sstable_patterns(data) {
                 return Ok(Some(parsed_row));
             }
         }
-        
+
         // Method 3: Try byte-level analysis to find structure
         if data.len() >= 8 {
             if let Ok(parsed_row) = self.parse_using_byte_analysis(data) {
                 return Ok(Some(parsed_row));
             }
         }
-        
+
         // All methods failed
         Ok(None)
     }
-    
+
     /// Parse data as a single cell row with minimal structure
     fn parse_as_single_cell_row(&self, data: &[u8]) -> Result<ParsedRow> {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros() as i64;
-        
+
         // Try to extract timestamp from first 8 bytes if they look like a timestamp
         let timestamp = if data.len() >= 8 {
             let candidate_ts = i64::from_be_bytes([
-                data[0], data[1], data[2], data[3],
-                data[4], data[5], data[6], data[7]
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ]);
-            
+
             // Check if it's a reasonable timestamp (between 2020 and 2030)
             if candidate_ts > 1_577_836_800_000_000 && candidate_ts < 1_893_456_000_000_000 {
                 candidate_ts
@@ -1092,14 +1211,14 @@ impl RowCellStateMachine {
         } else {
             current_time
         };
-        
+
         let header = RowHeader {
             flags: if data.len() > 8 { data[8] } else { 0 },
             timestamp,
             ttl: None,
             local_deletion_time: None,
         };
-        
+
         // Extract partition key from remaining data
         let key_start = if data.len() > 16 { 16 } else { 8 };
         let key_end = std::cmp::min(data.len(), key_start + 32);
@@ -1108,7 +1227,7 @@ impl RowCellStateMachine {
             key_bytes: data[key_start..key_end].to_vec(),
             components: vec![data[key_start..key_end].to_vec()],
         };
-        
+
         // Create cell from remaining data
         let cell_data_start = key_end;
         let cells = if cell_data_start < data.len() {
@@ -1121,7 +1240,7 @@ impl RowCellStateMachine {
         } else {
             vec![]
         };
-        
+
         Ok(ParsedRow {
             header,
             partition_key,
@@ -1132,24 +1251,27 @@ impl RowCellStateMachine {
             cells,
         })
     }
-    
+
     /// Parse using known SSTable patterns
     fn parse_using_sstable_patterns(&self, data: &[u8]) -> Result<ParsedRow> {
         // Look for VInt patterns that might indicate length prefixes
         let mut offset = 0;
         let mut cells = Vec::new();
-        
+
         while offset + 4 < data.len() {
             // Try to read a length prefix (4 bytes)
             let potential_length = u32::from_be_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
             ]);
-            
+
             // Reasonable length check
             if potential_length > 0 && potential_length < (data.len() - offset - 4) as u32 {
                 let value_start = offset + 4;
                 let value_end = value_start + potential_length as usize;
-                
+
                 if value_end <= data.len() {
                     cells.push(ParsedCell {
                         column_name: format!("col_{}", cells.len()),
@@ -1160,36 +1282,36 @@ impl RowCellStateMachine {
                             .as_micros() as i64,
                         ttl: None,
                     });
-                    
+
                     offset = value_end;
                     continue;
                 }
             }
-            
+
             // No valid pattern found, move forward
             offset += 1;
         }
-        
+
         // If we found some structured data, create a row
         if !cells.is_empty() {
             let current_time = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_micros() as i64;
-            
+
             let header = RowHeader {
                 flags: 0,
                 timestamp: current_time,
                 ttl: None,
                 local_deletion_time: None,
             };
-            
+
             let partition_key = PartitionKey {
                 component_count: 1,
                 key_bytes: data[..std::cmp::min(data.len(), 16)].to_vec(),
                 components: vec![data[..std::cmp::min(data.len(), 16)].to_vec()],
             };
-            
+
             return Ok(ParsedRow {
                 header,
                 partition_key,
@@ -1200,46 +1322,47 @@ impl RowCellStateMachine {
                 cells,
             });
         }
-        
+
         Err(Error::corruption("No SSTable patterns found"))
     }
-    
+
     /// Parse using byte-level analysis
     fn parse_using_byte_analysis(&self, data: &[u8]) -> Result<ParsedRow> {
         // Look for byte patterns that might indicate structure
         let mut interesting_offsets = Vec::new();
-        
+
         // Find positions where byte values change significantly
         for i in 1..data.len() {
-            let diff = (data[i] as i16 - data[i-1] as i16).abs();
-            if diff > 50 {  // Significant change
+            let diff = (data[i] as i16 - data[i - 1] as i16).abs();
+            if diff > 50 {
+                // Significant change
                 interesting_offsets.push(i);
             }
         }
-        
+
         // Use these offsets to create structured data
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros() as i64;
-        
+
         let header = RowHeader {
             flags: data[0],
             timestamp: current_time,
             ttl: None,
             local_deletion_time: None,
         };
-        
+
         let partition_key = PartitionKey {
             component_count: 1,
             key_bytes: data[..std::cmp::min(data.len(), 8)].to_vec(),
             components: vec![data[..std::cmp::min(data.len(), 8)].to_vec()],
         };
-        
+
         // Create cells from interesting segments
         let mut cells = Vec::new();
-        let mut last_offset = 8;  // Skip the first 8 bytes used for key
-        
+        let mut last_offset = 8; // Skip the first 8 bytes used for key
+
         for &offset in &interesting_offsets {
             if offset > last_offset && offset < data.len() {
                 cells.push(ParsedCell {
@@ -1251,7 +1374,7 @@ impl RowCellStateMachine {
                 last_offset = offset;
             }
         }
-        
+
         // Add final segment if any data remains
         if last_offset < data.len() {
             cells.push(ParsedCell {
@@ -1261,7 +1384,7 @@ impl RowCellStateMachine {
                 ttl: None,
             });
         }
-        
+
         Ok(ParsedRow {
             header,
             partition_key,

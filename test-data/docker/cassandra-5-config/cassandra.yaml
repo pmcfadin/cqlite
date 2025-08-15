@@ -1,0 +1,183 @@
+# CQLite Cassandra 5.0 Configuration - Issue #30
+# Optimized for Docker validation and CI environments
+
+# Cluster configuration
+cluster_name: 'CQLite Validation Cluster'
+num_tokens: 16
+auto_bootstrap: false
+
+# Data directories
+data_file_directories:
+    - /var/lib/cassandra/data
+commitlog_directory: /var/lib/cassandra/commitlog
+saved_caches_directory: /var/lib/cassandra/saved_caches
+
+# Network configuration
+listen_address: cassandra-5-0
+broadcast_address: cassandra-5-0
+rpc_address: 0.0.0.0
+broadcast_rpc_address: cassandra-5-0
+
+# Ports
+native_transport_port: 9042
+rpc_port: 9160
+storage_port: 7000
+ssl_storage_port: 7001
+
+# Authentication and authorization
+authenticator: AllowAllAuthenticator
+authorizer: AllowAllAuthorizer
+role_manager: CassandraRoleManager
+
+# Performance settings optimized for validation
+# Memory settings
+memtable_allocation_type: heap_buffers
+memtable_heap_space_in_mb: 1024
+memtable_offheap_space_in_mb: 0
+
+# Compaction settings for fast SSTable generation
+compaction_throughput_mb_per_sec: 64
+concurrent_compactors: 2
+
+# Read/Write settings
+concurrent_reads: 32
+concurrent_writes: 32
+concurrent_counter_writes: 32
+
+# Request timeouts (increased for CI stability)
+read_request_timeout_in_ms: 15000
+range_request_timeout_in_ms: 15000
+write_request_timeout_in_ms: 15000
+counter_write_request_timeout_in_ms: 15000
+cas_contention_timeout_in_ms: 10000
+truncate_request_timeout_in_ms: 60000
+request_timeout_in_ms: 10000
+
+# Batch settings
+batch_size_warn_threshold_in_kb: 128
+batch_size_fail_threshold_in_kb: 1024
+unlogged_batch_across_partitions_warn_threshold: 10
+
+# Streaming settings
+stream_throughput_outbound_megabits_per_sec: 400
+inter_dc_stream_throughput_outbound_megabits_per_sec: 200
+
+# Native transport settings
+start_native_transport: true
+native_transport_max_threads: 128
+native_transport_max_frame_size_in_mb: 256
+
+# RPC settings
+start_rpc: true
+rpc_keepalive: true
+rpc_server_type: sync
+
+# Internode settings
+internode_compression: dc
+inter_dc_tcp_nodelay: false
+
+# Commit log settings
+commitlog_sync: periodic
+commitlog_sync_period_in_ms: 10000
+commitlog_segment_size_in_mb: 32
+
+# SSTable settings (important for validation)
+sstable_preemptive_open_interval_in_mb: 50
+max_hints_delivery_threads: 2
+hints_directory: /var/lib/cassandra/hints
+hints_flush_period_in_ms: 10000
+max_hints_file_size_in_mb: 128
+
+# Index settings
+column_index_size_in_kb: 64
+column_index_cache_size_in_kb: 2
+
+# Security settings
+permissions_validity_in_ms: 2000
+permissions_cache_max_entries: 1000
+
+# Networking
+endpoint_snitch: GossipingPropertyFileSnitch
+dynamic_snitch_update_interval_in_ms: 100
+dynamic_snitch_reset_interval_in_ms: 600000
+dynamic_snitch_badness_threshold: 0.1
+
+# Cross-node timeout
+cross_node_timeout: false
+
+# GC settings
+gc_warn_threshold_in_ms: 1000
+
+# Tombstone settings (important for validation accuracy)
+tombstone_warn_threshold: 10000
+tombstone_failure_threshold: 100000
+
+# Prepared statement cache
+prepared_statements_cache_size_mb: 10
+
+# Key cache
+key_cache_size_in_mb: 100
+key_cache_save_period: 14400
+
+# Row cache
+row_cache_size_in_mb: 0
+row_cache_save_period: 0
+
+# Counter cache
+counter_cache_size_in_mb: 50
+counter_cache_save_period: 7200
+
+# File cache
+file_cache_size_in_mb: 512
+
+# Disk optimization
+disk_optimization_strategy: ssd
+
+# Incremental backup
+incremental_backups: false
+
+# Snapshot before compaction
+snapshot_before_compaction: false
+
+# Auto snapshot
+auto_snapshot: true
+
+# Misc settings
+buffer_pool_use_heap_if_exhausted: true
+disk_failure_policy: stop
+commit_failure_policy: stop
+key_cache_keys_to_save: 2147483647
+row_cache_keys_to_save: 2147483647
+counter_cache_keys_to_save: 2147483647
+
+# Migration settings
+migration_task_wait_in_seconds: 1
+
+# Repair settings
+repair_session_max_tree_depth: 18
+
+# Validation specific settings for CQLite testing
+enable_user_defined_functions: true
+enable_scripted_user_defined_functions: false
+enable_materialized_views: true
+enable_sasi_indexes: true
+
+# Advanced settings for comprehensive validation
+partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+phi_convict_threshold: 8
+request_scheduler: org.apache.cassandra.scheduler.NoScheduler
+
+# Compression settings for testing various algorithms
+# (Can be overridden per table)
+compression_parameters:
+    chunk_length_in_kb: 64
+    crc_check_chance: 1.0
+
+# Enable detailed monitoring for validation
+enable_materialized_views: true
+materialized_views_enabled: true
+
+# Experimental features (safe for validation environment)
+enable_drop_compact_storage: true
+
+# JVM settings are handled by environment variables in Docker

@@ -3,8 +3,101 @@
 //! This module defines the trie node structures and operations for the BTI format.
 //! Each node type is optimized for different branching patterns and storage efficiency.
 
-use super::{BtiError, BtiNodeType, BtiResult};
-use std::collections::HashMap;
+use crate::error::{Error, Result};
+use std::fmt;
+
+/// BTI-specific result type
+pub type BtiResult<T> = Result<T>;
+
+/// BTI-specific error types
+#[derive(Debug, Clone)]
+pub enum BtiError {
+    /// Parse error with details
+    Parse(String),
+    /// Invalid node structure
+    InvalidNodeStructure(String),
+    /// Navigation error during trie traversal
+    NavigationError(String),
+    /// Invalid node type
+    InvalidNodeType(u8),
+    /// Maximum depth exceeded
+    MaxDepthExceeded(usize),
+    /// Invalid byte-comparable key
+    InvalidByteComparableKey(String),
+    /// Corrupted trie structure
+    CorruptedTrie(String),
+    /// Missing component file
+    MissingComponent(String),
+}
+
+impl fmt::Display for BtiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BtiError::Parse(msg) => write!(f, "BTI parse error: {}", msg),
+            BtiError::InvalidNodeStructure(msg) => write!(f, "Invalid BTI node structure: {}", msg),
+            BtiError::NavigationError(msg) => write!(f, "BTI navigation error: {}", msg),
+            BtiError::InvalidNodeType(node_type) => {
+                write!(f, "Invalid BTI trie node type: 0x{:02x}", node_type)
+            }
+            BtiError::MaxDepthExceeded(depth) => {
+                write!(f, "BTI trie depth exceeded maximum: {}", depth)
+            }
+            BtiError::InvalidByteComparableKey(key) => {
+                write!(f, "Invalid byte-comparable key: {}", key)
+            }
+            BtiError::CorruptedTrie(msg) => {
+                write!(f, "Corrupted BTI trie structure: {}", msg)
+            }
+            BtiError::MissingComponent(component) => {
+                write!(f, "Missing BTI component: {}", component)
+            }
+        }
+    }
+}
+
+impl std::error::Error for BtiError {}
+
+impl From<BtiError> for Error {
+    fn from(err: BtiError) -> Self {
+        Error::ParseError(format!("BTI error: {}", err))
+    }
+}
+
+/// BTI node types corresponding to the four trie node variants
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BtiNodeType {
+    /// Payload-only node (leaf)
+    PayloadOnly,
+    /// Single child node
+    Single,
+    /// Sparse node with few children
+    Sparse,
+    /// Dense node with many consecutive children
+    Dense,
+}
+
+impl BtiNodeType {
+    /// Get expected children range for this node type
+    pub fn expected_children_range(&self) -> (usize, Option<usize>) {
+        match self {
+            BtiNodeType::PayloadOnly => (0, Some(0)),
+            BtiNodeType::Single => (1, Some(1)),
+            BtiNodeType::Sparse => (2, Some(256)), // Reasonable upper bound
+            BtiNodeType::Dense => (1, Some(256)),  // Full byte range
+        }
+    }
+}
+
+impl fmt::Display for BtiNodeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BtiNodeType::PayloadOnly => write!(f, "PayloadOnly"),
+            BtiNodeType::Single => write!(f, "Single"),
+            BtiNodeType::Sparse => write!(f, "Sparse"),
+            BtiNodeType::Dense => write!(f, "Dense"),
+        }
+    }
+}
 
 /// Sized pointer for encoding distances between parent and child nodes
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,10 +120,10 @@ impl SizedPointer {
         } else {
             8
         };
-        
+
         Self { distance, size }
     }
-    
+
     /// Encode the pointer to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         match self.size {
@@ -41,7 +134,7 @@ impl SizedPointer {
             _ => panic!("Invalid pointer size: {}", self.size),
         }
     }
-    
+
     /// Decode pointer from bytes
     pub fn from_bytes(data: &[u8], size: u8) -> BtiResult<Self> {
         let distance = match size {
@@ -49,12 +142,17 @@ impl SizedPointer {
             2 if data.len() >= 2 => u16::from_be_bytes([data[0], data[1]]) as u64,
             4 if data.len() >= 4 => u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u64,
             8 if data.len() >= 8 => u64::from_be_bytes([
-                data[0], data[1], data[2], data[3],
-                data[4], data[5], data[6], data[7]
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ]),
-            _ => return Err(BtiError::Parse(format!("Invalid pointer size {} or insufficient data", size))),
+            _ => {
+                return Err(BtiError::Parse(format!(
+                    "Invalid pointer size {} or insufficient data",
+                    size
+                ))
+                .into());
+            }
         };
-        
+
         Ok(Self { distance, size })
     }
 }
@@ -93,7 +191,7 @@ impl PayloadRef {
             checksum: None,
         }
     }
-    
+
     pub fn with_checksum(mut self, checksum: u32) -> Self {
         self.checksum = Some(checksum);
         self
@@ -117,20 +215,14 @@ pub struct BtiNode {
 #[derive(Debug, Clone)]
 pub enum BtiNodeData {
     /// Payload-only node (leaf)
-    PayloadOnly {
-        payload: PayloadRef,
-    },
-    
+    PayloadOnly { payload: PayloadRef },
+
     /// Single child node
-    Single {
-        transition: Transition,
-    },
-    
+    Single { transition: Transition },
+
     /// Sparse node with few children
-    Sparse {
-        transitions: Vec<Transition>,
-    },
-    
+    Sparse { transitions: Vec<Transition> },
+
     /// Dense node with many consecutive children
     Dense {
         /// Starting byte value for the consecutive range
@@ -150,7 +242,7 @@ impl BtiNode {
             data: BtiNodeData::PayloadOnly { payload },
         }
     }
-    
+
     /// Create a single child node
     pub fn single(level: u16, key_prefix: Vec<u8>, transition: Transition) -> Self {
         Self {
@@ -160,12 +252,12 @@ impl BtiNode {
             data: BtiNodeData::Single { transition },
         }
     }
-    
+
     /// Create a sparse node
     pub fn sparse(level: u16, key_prefix: Vec<u8>, mut transitions: Vec<Transition>) -> Self {
         // Ensure transitions are sorted by byte value for binary search
         transitions.sort_by_key(|t| t.byte);
-        
+
         Self {
             node_type: BtiNodeType::Sparse,
             level,
@@ -173,22 +265,30 @@ impl BtiNode {
             data: BtiNodeData::Sparse { transitions },
         }
     }
-    
+
     /// Create a dense node
-    pub fn dense(level: u16, key_prefix: Vec<u8>, start_byte: u8, children: Vec<SizedPointer>) -> Self {
+    pub fn dense(
+        level: u16,
+        key_prefix: Vec<u8>,
+        start_byte: u8,
+        children: Vec<SizedPointer>,
+    ) -> Self {
         Self {
             node_type: BtiNodeType::Dense,
             level,
             key_prefix,
-            data: BtiNodeData::Dense { start_byte, children },
+            data: BtiNodeData::Dense {
+                start_byte,
+                children,
+            },
         }
     }
-    
+
     /// Find the child node pointer for a given byte
     pub fn find_child(&self, byte: u8) -> Option<&SizedPointer> {
         match &self.data {
             BtiNodeData::PayloadOnly { .. } => None,
-            
+
             BtiNodeData::Single { transition } => {
                 if transition.byte == byte {
                     Some(&transition.child)
@@ -196,7 +296,7 @@ impl BtiNode {
                     None
                 }
             }
-            
+
             BtiNodeData::Sparse { transitions } => {
                 // Binary search on sorted transitions
                 transitions
@@ -204,9 +304,13 @@ impl BtiNode {
                     .ok()
                     .map(|idx| &transitions[idx].child)
             }
-            
-            BtiNodeData::Dense { start_byte, children } => {
-                if byte >= *start_byte && (byte as usize) < (*start_byte as usize + children.len()) {
+
+            BtiNodeData::Dense {
+                start_byte,
+                children,
+            } => {
+                if byte >= *start_byte && (byte as usize) < (*start_byte as usize + children.len())
+                {
                     let index = byte as usize - *start_byte as usize;
                     children.get(index)
                 } else {
@@ -215,14 +319,17 @@ impl BtiNode {
             }
         }
     }
-    
+
     /// Get all child transitions
     pub fn get_transitions(&self) -> Vec<&Transition> {
         match &self.data {
             BtiNodeData::PayloadOnly { .. } => Vec::new(),
             BtiNodeData::Single { transition } => vec![transition],
             BtiNodeData::Sparse { transitions } => transitions.iter().collect(),
-            BtiNodeData::Dense { start_byte, children } => {
+            BtiNodeData::Dense {
+                start_byte: _,
+                children: _,
+            } => {
                 // Convert dense representation to transitions
                 // Note: This creates temporary Transition objects
                 // In practice, you'd want to avoid this allocation
@@ -230,7 +337,7 @@ impl BtiNode {
             }
         }
     }
-    
+
     /// Get the payload reference if this is a leaf node
     pub fn get_payload(&self) -> Option<&PayloadRef> {
         match &self.data {
@@ -238,12 +345,12 @@ impl BtiNode {
             _ => None,
         }
     }
-    
+
     /// Check if this node is a leaf (has payload)
     pub fn is_leaf(&self) -> bool {
         matches!(self.data, BtiNodeData::PayloadOnly { .. })
     }
-    
+
     /// Get the number of children
     pub fn child_count(&self) -> usize {
         match &self.data {
@@ -253,29 +360,31 @@ impl BtiNode {
             BtiNodeData::Dense { children, .. } => children.len(),
         }
     }
-    
+
     /// Validate node structure consistency
     pub fn validate(&self) -> BtiResult<()> {
         let expected_range = self.node_type.expected_children_range();
         let child_count = self.child_count();
-        
+
         // Check child count is within expected range
         if child_count < expected_range.0 {
             return Err(BtiError::InvalidNodeStructure(format!(
                 "Node type {} has {} children, expected at least {}",
                 self.node_type, child_count, expected_range.0
-            )));
+            ))
+            .into());
         }
-        
+
         if let Some(max) = expected_range.1 {
             if child_count > max {
                 return Err(BtiError::InvalidNodeStructure(format!(
                     "Node type {} has {} children, expected at most {}",
                     self.node_type, child_count, max
-                )));
+                ))
+                .into());
             }
         }
-        
+
         // Type-specific validation
         match &self.data {
             BtiNodeData::Sparse { transitions } => {
@@ -283,25 +392,30 @@ impl BtiNode {
                 for window in transitions.windows(2) {
                     if window[0].byte >= window[1].byte {
                         return Err(BtiError::InvalidNodeStructure(
-                            "Sparse node transitions not sorted".to_string()
-                        ));
+                            "Sparse node transitions not sorted".to_string(),
+                        )
+                        .into());
                     }
                 }
             }
-            
-            BtiNodeData::Dense { start_byte, children } => {
+
+            BtiNodeData::Dense {
+                start_byte,
+                children,
+            } => {
                 // Check that we don't overflow byte range
                 let end_byte = *start_byte as usize + children.len();
                 if end_byte > 256 {
                     return Err(BtiError::InvalidNodeStructure(
-                        "Dense node range overflows byte values".to_string()
-                    ));
+                        "Dense node range overflows byte values".to_string(),
+                    )
+                    .into());
                 }
             }
-            
+
             _ => {} // Other types don't need special validation
         }
-        
+
         Ok(())
     }
 }
@@ -326,30 +440,30 @@ impl TrieNavigator {
             visited_offsets: std::collections::HashSet::new(),
         }
     }
-    
+
     /// Navigate to a child node
     pub fn navigate_to_child(&mut self, byte: u8, child_pointer: &SizedPointer) -> BtiResult<()> {
         let target_offset = self.current_offset + child_pointer.distance;
-        
+
         // Check for cycles
         if self.visited_offsets.contains(&target_offset) {
-            return Err(BtiError::NavigationError(
-                "Cycle detected in trie navigation".to_string()
-            ));
+            return Err(
+                BtiError::NavigationError("Cycle detected in trie navigation".to_string()).into(),
+            );
         }
-        
+
         self.visited_offsets.insert(self.current_offset);
         self.current_offset = target_offset;
         self.path.push(byte);
-        
+
         Ok(())
     }
-    
+
     /// Get the current path as a key prefix
     pub fn current_path(&self) -> &[u8] {
         &self.path
     }
-    
+
     /// Reset to navigate from root again
     pub fn reset(&mut self, root_offset: u64) {
         self.current_offset = root_offset;
@@ -361,30 +475,30 @@ impl TrieNavigator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_sized_pointer() {
         let small = SizedPointer::new(100);
         assert_eq!(small.size, 1);
         assert_eq!(small.to_bytes(), vec![100]);
-        
+
         let large = SizedPointer::new(0x10000);
         assert_eq!(large.size, 4);
         assert_eq!(large.to_bytes(), vec![0x00, 0x01, 0x00, 0x00]);
     }
-    
+
     #[test]
     fn test_node_creation() {
         let payload = PayloadRef::new(1000, 50);
         let node = BtiNode::payload_only(0, b"test".to_vec(), payload);
-        
+
         assert_eq!(node.node_type, BtiNodeType::PayloadOnly);
         assert_eq!(node.level, 0);
         assert_eq!(node.key_prefix, b"test");
         assert!(node.is_leaf());
         assert_eq!(node.child_count(), 0);
     }
-    
+
     #[test]
     fn test_sparse_node_search() {
         let transitions = vec![
@@ -392,17 +506,17 @@ mod tests {
             Transition::new(b'm', SizedPointer::new(200)),
             Transition::new(b'z', SizedPointer::new(300)),
         ];
-        
+
         let node = BtiNode::sparse(1, Vec::new(), transitions);
-        
+
         assert!(node.find_child(b'a').is_some());
         assert!(node.find_child(b'm').is_some());
         assert!(node.find_child(b'z').is_some());
         assert!(node.find_child(b'b').is_none());
-        
+
         assert_eq!(node.child_count(), 3);
     }
-    
+
     #[test]
     fn test_dense_node_lookup() {
         let children = vec![
@@ -410,39 +524,41 @@ mod tests {
             SizedPointer::new(200),
             SizedPointer::new(300),
         ];
-        
+
         let node = BtiNode::dense(1, Vec::new(), b'a', children);
-        
+
         assert!(node.find_child(b'a').is_some());
         assert!(node.find_child(b'b').is_some());
         assert!(node.find_child(b'c').is_some());
         assert!(node.find_child(b'd').is_none());
         assert!(node.find_child(b'@').is_none()); // Before range
     }
-    
+
     #[test]
     fn test_node_validation() {
         // Valid payload-only node
         let payload_node = BtiNode::payload_only(0, Vec::new(), PayloadRef::new(0, 10));
         assert!(payload_node.validate().is_ok());
-        
+
         // Invalid sparse node (not enough children)
-        let invalid_sparse = BtiNode::sparse(1, Vec::new(), vec![
-            Transition::new(b'a', SizedPointer::new(100))
-        ]);
+        let invalid_sparse = BtiNode::sparse(
+            1,
+            Vec::new(),
+            vec![Transition::new(b'a', SizedPointer::new(100))],
+        );
         // Note: This would be invalid in practice but our implementation
         // doesn't enforce minimum children for sparse nodes in this test
     }
-    
+
     #[test]
     fn test_trie_navigator() {
         let mut nav = TrieNavigator::new(1000);
         assert_eq!(nav.current_offset, 1000);
         assert_eq!(nav.current_path(), &[]);
-        
+
         let pointer = SizedPointer::new(100);
         nav.navigate_to_child(b'a', &pointer).unwrap();
-        
+
         assert_eq!(nav.current_offset, 1100);
         assert_eq!(nav.current_path(), &[b'a']);
     }

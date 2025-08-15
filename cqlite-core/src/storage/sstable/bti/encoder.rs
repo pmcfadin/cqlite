@@ -85,6 +85,7 @@ mod type_prefixes {
     pub const TUPLE: u8 = 0x60;
     pub const UDT: u8 = 0x61;
     pub const FROZEN: u8 = 0x70;
+    pub const TOMBSTONE: u8 = 0x80;
     #[allow(dead_code)]
     pub const ESCAPE: u8 = 0xFF;
     pub const SEPARATOR: u8 = 0x00;
@@ -616,6 +617,184 @@ impl ByteComparableDecoder {
         }
 
         format!("0x{}", hex)
+    }
+}
+
+/// Batch encoder for efficient encoding of multiple values
+pub struct BatchEncoder {
+    encoder: ByteComparableEncoder,
+    batch_buffer: Vec<Vec<u8>>,
+}
+
+impl BatchEncoder {
+    /// Create new batch encoder
+    pub fn new() -> Self {
+        Self {
+            encoder: ByteComparableEncoder::new(),
+            batch_buffer: Vec::new(),
+        }
+    }
+
+    /// Encode a batch of values efficiently
+    pub fn encode_batch(&mut self, values: &[Value]) -> Result<Vec<Vec<u8>>> {
+        self.batch_buffer.clear();
+        self.batch_buffer.reserve(values.len());
+
+        for value in values {
+            let encoded = self.encoder.encode_value(value)?;
+            self.batch_buffer.push(encoded);
+        }
+
+        Ok(self.batch_buffer.clone())
+    }
+
+    /// Clear the batch buffer
+    pub fn clear(&mut self) {
+        self.batch_buffer.clear();
+    }
+}
+
+/// Performance statistics for the encoder
+#[derive(Debug, Clone, Default)]
+pub struct EncoderStats {
+    /// Current buffer capacity
+    pub buffer_capacity: usize,
+    /// Current buffer size
+    pub buffer_size: usize,
+    /// Number of encodings performed
+    pub encodings_performed: u64,
+    /// Total bytes encoded
+    pub total_bytes_encoded: u64,
+}
+
+impl ByteComparableEncoder {
+    /// Reserve capacity in the internal buffer
+    pub fn reserve(&mut self, additional: usize) {
+        self.buffer.reserve(additional);
+    }
+
+    /// Get performance statistics
+    pub fn get_stats(&self) -> EncoderStats {
+        EncoderStats {
+            buffer_capacity: self.buffer.capacity(),
+            buffer_size: self.buffer.len(),
+            encodings_performed: 0, // Would need to track this in practice
+            total_bytes_encoded: self.buffer.len() as u64,
+        }
+    }
+
+    /// Validate an encoded key for correctness
+    pub fn validate_encoded_key(&self, encoded: &[u8]) -> Result<()> {
+        if encoded.is_empty() {
+            return Err(BtiError::InvalidByteComparableKey("Empty encoded key".to_string()).into());
+        }
+
+        let type_prefix = encoded[0];
+
+        // Validate type prefix
+        match type_prefix {
+            type_prefixes::NULL => {
+                if encoded.len() > 2 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "Null value too long".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::BOOLEAN_FALSE | type_prefixes::BOOLEAN_TRUE => {
+                if encoded.len() != 1 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "Boolean value should be exactly 1 byte".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::TINYINT => {
+                if encoded.len() != 2 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "TinyInt should be exactly 2 bytes".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::SMALLINT => {
+                if encoded.len() != 3 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "SmallInt should be exactly 3 bytes".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::INTEGER => {
+                if encoded.len() != 5 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "Integer should be exactly 5 bytes".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::BIGINT | type_prefixes::TIMESTAMP => {
+                if encoded.len() != 9 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "BigInt/Timestamp should be exactly 9 bytes".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::FLOAT => {
+                if encoded.len() != 5 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "Float should be exactly 5 bytes".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::DOUBLE => {
+                if encoded.len() != 9 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "Double should be exactly 9 bytes".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::UUID => {
+                if encoded.len() != 17 {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "UUID should be exactly 17 bytes".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::TEXT | type_prefixes::BLOB => {
+                if encoded.len() < 2 || encoded[encoded.len() - 1] != type_prefixes::TERMINATOR {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "Text/Blob should end with terminator".to_string(),
+                    )
+                    .into());
+                }
+            }
+            type_prefixes::LIST
+            | type_prefixes::SET
+            | type_prefixes::MAP
+            | type_prefixes::TUPLE
+            | type_prefixes::UDT => {
+                if encoded.len() < 2 || encoded[encoded.len() - 1] != type_prefixes::TERMINATOR {
+                    return Err(BtiError::InvalidByteComparableKey(
+                        "Collection/Complex type should end with terminator".to_string(),
+                    )
+                    .into());
+                }
+            }
+            _ => {
+                return Err(BtiError::InvalidByteComparableKey(format!(
+                    "Unknown type prefix: 0x{:02x}",
+                    type_prefix
+                ))
+                .into());
+            }
+        }
+
+        Ok(())
     }
 }
 

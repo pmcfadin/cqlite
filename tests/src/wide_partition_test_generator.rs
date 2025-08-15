@@ -20,11 +20,11 @@
 //!
 //! **Examples:**
 //! - 1,000 clustering keys × 100 bytes/row = 100KB ✅ (promotes)
-//! - 10,000 clustering keys × 10 bytes/row = 100KB ✅ (promotes) 
+//! - 10,000 clustering keys × 10 bytes/row = 100KB ✅ (promotes)
 //! - 100 clustering keys × 100 bytes/row = 10KB ❌ (no promotion)
 //!
 //! **Default Configuration:**
-//! - `clustering_keys_per_partition: 10,000` 
+//! - `clustering_keys_per_partition: 10,000`
 //! - `row_size_bytes: 1,024` (1KB)
 //! - **Result**: 10,000 × 1,024 = ~10MB per partition → **Guaranteed promoted index**
 //!

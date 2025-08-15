@@ -29,6 +29,8 @@ const PROTECTION_CONFIG = {
     strict: true,
     contexts: [
       'Quality Gates / quality-gates',  // Main quality gates job
+      'Mandatory SSTableDump Parity Validation',  // Issue #38 - Zero tolerance SSTable parity
+      'SSTableDump Parity Gate (Issue #38) / sstabledump-parity-validation',  // Full parity validation workflow
     ]
   },
   enforce_admins: true,  // NO EXCEPTIONS - Even admins must follow quality gates

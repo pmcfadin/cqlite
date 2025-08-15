@@ -166,8 +166,10 @@ impl CompressionInfo {
         })
     }
 
-    /// Alternative parsing method for different CompressionInfo.db formats
-    /// Some Cassandra versions may use slightly different layouts
+    /// Alternative parsing method for different CompressionInfo.db formats (legacy only)
+    /// Some legacy Cassandra versions may use slightly different layouts
+    /// DEPRECATED: Modern formats (BIG v5, BTI) should use structured CompressionInfo.db
+    #[cfg(feature = "legacy-heuristics")]
     pub fn parse_alternative_format(data: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(data);
 
@@ -220,7 +222,8 @@ impl CompressionInfo {
         })
     }
 
-    /// Detect chunk size from binary data by looking for common patterns
+    /// Detect chunk size from binary data by looking for common patterns (legacy heuristic)
+    #[cfg(feature = "legacy-heuristics")]
     fn detect_chunk_size(data: &[u8]) -> Option<u32> {
         if data.len() < 4 {
             return None;

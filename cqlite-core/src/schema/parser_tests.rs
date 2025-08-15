@@ -512,7 +512,10 @@ mod tests {
         column_comparators.insert("timestamp".to_string(), ComparatorType::BigInt);
         column_comparators.insert("name".to_string(), ComparatorType::Text);
         column_comparators.insert("data".to_string(), ComparatorType::Blob);
-        column_comparators.insert("tags".to_string(), ComparatorType::List(Box::new(ComparatorType::Text)));
+        column_comparators.insert(
+            "tags".to_string(),
+            ComparatorType::List(Box::new(ComparatorType::Text)),
+        );
         column_comparators.insert("user_profiles".to_string(), frozen_list_comparator);
 
         let context = ParsingContext {
@@ -531,20 +534,20 @@ mod tests {
         // Field 1: name
         data.extend_from_slice(&[0, 0, 0, 4]); // length for "John"
         data.extend_from_slice(b"John");
-        
+
         // Field 2: age
         data.extend_from_slice(&[0, 0, 0, 30]); // int 30
-        
+
         // Field 3: email
         data.extend_from_slice(&[0, 0, 0, 16]); // length for "john@example.com"
         data.extend_from_slice(b"john@example.com");
 
         let result = parser.parse_column_value("user_profiles", &data);
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         assert!(matches!(value, Value::Frozen(_)));
-        
+
         // Verify nested structure
         if let Value::Frozen(inner) = value {
             assert!(matches!(**inner, Value::List(_)));
@@ -579,13 +582,17 @@ mod tests {
         for i in 0..parsed_values.len() - 1 {
             let current = &parsed_values[i];
             let next = &parsed_values[i + 1];
-            
+
             // Compare using the text comparator
             let comparator = ComparatorType::Text;
             let comparison = comparator.compare(current, next).unwrap();
-            assert_eq!(comparison, std::cmp::Ordering::Less, 
-                "Value '{}' should be less than '{}'", 
-                values[i], values[i + 1]);
+            assert_eq!(
+                comparison,
+                std::cmp::Ordering::Less,
+                "Value '{}' should be less than '{}'",
+                values[i],
+                values[i + 1]
+            );
         }
 
         // Test byte-comparable ordering with integers
@@ -613,12 +620,16 @@ mod tests {
         for i in 0..parsed_int_values.len() - 1 {
             let current = &parsed_int_values[i];
             let next = &parsed_int_values[i + 1];
-            
+
             let comparator = ComparatorType::Int;
             let comparison = comparator.compare(current, next).unwrap();
-            assert_eq!(comparison, std::cmp::Ordering::Less,
-                "Value {} should be less than {}", 
-                int_values[i], int_values[i + 1]);
+            assert_eq!(
+                comparison,
+                std::cmp::Ordering::Less,
+                "Value {} should be less than {}",
+                int_values[i],
+                int_values[i + 1]
+            );
         }
 
         // Test that byte-wise ordering matches typed ordering for these types
@@ -626,10 +637,12 @@ mod tests {
         for i in 0..int_data_values.len() - 1 {
             let current_bytes = &int_data_values[i];
             let next_bytes = &int_data_values[i + 1];
-            
+
             // Byte-wise comparison should match typed comparison
-            assert!(current_bytes < next_bytes,
-                "Byte ordering should match typed ordering for integers");
+            assert!(
+                current_bytes < next_bytes,
+                "Byte ordering should match typed ordering for integers"
+            );
         }
     }
 }

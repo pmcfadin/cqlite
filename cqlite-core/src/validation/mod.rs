@@ -26,6 +26,9 @@ pub mod reports;
 // Issue #25 SSTableDump parity validation
 pub mod sstabledump_parity;
 
+// Issue #31 Hardened validator parser for cross-version complex type validation
+pub mod hardened_validator_parser;
+
 #[cfg(test)]
 pub mod sstabledump_parity_integration_test;
 

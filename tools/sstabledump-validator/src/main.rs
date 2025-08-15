@@ -9,7 +9,7 @@ mod parser;
 mod reporter;
 mod validator;
 
-use validator::SstableDumpValidator;
+use validator::{SstableDumpValidator, ValidationConfig, TestScope, SstableFormat, DataTypeCategory};
 
 #[derive(Parser)]
 #[command(name = "sstabledump-validator")]
@@ -80,6 +80,21 @@ enum Commands {
 
         #[arg(long, help = "Include edge cases")]
         edge_cases: bool,
+    },
+    
+    /// Run comprehensive validation with full corpus (Issue #38)
+    Comprehensive {
+        #[arg(long, help = "Test scope (quick|full|comprehensive)")]
+        scope: Option<String>,
+        
+        #[arg(long, help = "Fail fast on first difference")]
+        fail_fast: Option<bool>,
+        
+        #[arg(long, help = "Include BTI format validation")]
+        include_bti: bool,
+        
+        #[arg(long, help = "Include all data types")]
+        include_all_types: bool,
     },
 }
 
@@ -154,6 +169,110 @@ async fn main() -> Result<()> {
                 count, edge_cases
             );
             validator.generate_test_data(count, edge_cases).await?;
+        }
+
+        Commands::Comprehensive {
+            scope,
+            fail_fast,
+            include_bti,
+            include_all_types,
+        } => {
+            info!("Starting comprehensive validation for Issue #38");
+            
+            // Build configuration
+            let test_scope = match scope.as_deref() {
+                Some("quick") => TestScope::Quick,
+                Some("comprehensive") => TestScope::Comprehensive,
+                _ => TestScope::Full, // Default
+            };
+            
+            let mut sstable_formats = vec![SstableFormat::Big];
+            if include_bti {
+                sstable_formats.push(SstableFormat::Bti);
+            }
+            
+            let data_types = if include_all_types {
+                vec![
+                    DataTypeCategory::BasicTypes,
+                    DataTypeCategory::Collections,
+                    DataTypeCategory::UserDefinedTypes,
+                    DataTypeCategory::ComplexKeys,
+                    DataTypeCategory::StaticColumns,
+                    DataTypeCategory::Counters,
+                    DataTypeCategory::TimeSeries,
+                    DataTypeCategory::Tombstones,\n                    DataTypeCategory::ReconciliationScenarios,
+                    DataTypeCategory::LargeData,
+                    DataTypeCategory::EdgeCases,
+                ]
+            } else {
+                vec![
+                    DataTypeCategory::BasicTypes,
+                    DataTypeCategory::Collections,
+                    DataTypeCategory::ComplexKeys,
+                    DataTypeCategory::StaticColumns,
+                    DataTypeCategory::Counters,
+                    DataTypeCategory::TimeSeries,
+                    DataTypeCategory::Tombstones,\n                    DataTypeCategory::ReconciliationScenarios,
+                ]
+            };
+            
+            let config = ValidationConfig {
+                zero_tolerance: true, // Always true for Issue #38
+                fail_fast: fail_fast.unwrap_or(true),
+                detailed_reports: true,
+                test_scope,
+                sstable_formats,
+                data_types,
+            };
+            
+            info!("Configuration: {:?}", config);
+            
+            // Run comprehensive validation
+            let results = validator.run_comprehensive_validation(config).await?;
+            
+            // Analyze results
+            let total = results.len();
+            let failed = results.iter()
+                .filter(|r| matches!(r.validation_status, validator::ValidationStatus::Failed))
+                .count();
+            let errors = results.iter()
+                .filter(|r| matches!(r.validation_status, validator::ValidationStatus::Error))
+                .count();
+            
+            info!("Comprehensive validation completed:");
+            info!("  Total SSTables: {}", total);
+            info!("  Failed: {}", failed);
+            info!("  Errors: {}", errors);
+            
+            // Generate summary report
+            for result in &results {
+                match result.validation_status {
+                    validator::ValidationStatus::Perfect => {
+                        info!("✅ {}: Perfect parity", result.table_name);
+                    }
+                    validator::ValidationStatus::Failed => {
+                        error!("❌ {}: {} differences found", result.table_name, result.differences_found);
+                    }
+                    validator::ValidationStatus::Error => {
+                        error!("🚨 {}: Validation error: {}", result.table_name, 
+                               result.error_message.as_deref().unwrap_or("Unknown error"));
+                    }
+                    validator::ValidationStatus::WithinTolerance => {
+                        warn!("⚠️  {}: Within tolerance ({} differences)", result.table_name, result.differences_found);
+                    }
+                }
+            }
+            
+            // Exit with appropriate code for CI gating
+            if failed > 0 || errors > 0 {
+                error!("🚫 COMPREHENSIVE VALIDATION FAILED");
+                error!("   This is a MANDATORY CI gate for Issue #38");
+                error!("   Perfect SSTable compatibility is required");
+                std::process::exit(1);
+            } else {
+                info!("🎉 ALL COMPREHENSIVE VALIDATIONS PASSED");
+                info!("   CI gate allows merge to proceed");
+            }
         }
     }
 

@@ -10,7 +10,7 @@ mod tests {
         query::{SelectExecutor, SelectOptimizer, SelectStatement, parse_select},
         schema::SchemaManager,
         storage::StorageEngine,
-        types::{DataType, TableId, Value},
+        types::TableId,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -515,6 +515,7 @@ mod tests {
 #[cfg(test)]
 mod benchmarks {
     use super::tests::create_test_database;
+    #[allow(unused_imports)]
     use crate::{Config, Database};
     use std::time::Instant;
     use tempfile::TempDir;

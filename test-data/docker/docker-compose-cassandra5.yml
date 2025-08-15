@@ -1,11 +1,9 @@
-version: '3.8'
-
 # CQLite Enhanced Docker-based Cassandra 5+ Data Generation System
 # Issue #17: Comprehensive Cassandra data generation and validation
 # Enhanced support for Cassandra 5.0+ with complex data patterns
 
 services:
-  # Cassandra 5.0 - Latest version with new features
+  # Cassandra 5.0 - Latest version with new features (Enhanced for Issue #30)
   cassandra-5-0:
     image: cassandra:5.0
     container_name: cqlite-cassandra-5-0
@@ -17,31 +15,56 @@ services:
       - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
       - CASSANDRA_START_RPC=true
       - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      - CASSANDRA_LISTEN_ADDRESS=cassandra-5-0
+      - CASSANDRA_BROADCAST_ADDRESS=cassandra-5-0
       - CASSANDRA_AUTHENTICATOR=AllowAllAuthenticator
       - CASSANDRA_AUTHORIZER=AllowAllAuthorizer
       - CASSANDRA_AUTO_BOOTSTRAP=false
-      - MAX_HEAP_SIZE=2G
-      - HEAP_NEWSIZE=400m
-      # Cassandra 5.0 specific optimizations
-      - CASSANDRA_WRITE_REQUEST_TIMEOUT_IN_MS=10000
-      - CASSANDRA_READ_REQUEST_TIMEOUT_IN_MS=10000
-      - CASSANDRA_RANGE_REQUEST_TIMEOUT_IN_MS=10000
+      # Enhanced memory configuration for CI stability
+      - MAX_HEAP_SIZE=3G
+      - HEAP_NEWSIZE=600m
+      # Enhanced timeout configuration for reliability
+      - CASSANDRA_WRITE_REQUEST_TIMEOUT_IN_MS=15000
+      - CASSANDRA_READ_REQUEST_TIMEOUT_IN_MS=15000
+      - CASSANDRA_RANGE_REQUEST_TIMEOUT_IN_MS=15000
+      - CASSANDRA_COUNTER_WRITE_REQUEST_TIMEOUT_IN_MS=15000
+      - CASSANDRA_BATCH_SIZE_WARN_THRESHOLD_IN_KB=128
+      - CASSANDRA_BATCH_SIZE_FAIL_THRESHOLD_IN_KB=1024
+      # Performance optimizations for validation
+      - CASSANDRA_COMPACTION_THROUGHPUT_MB_PER_SEC=64
+      - CASSANDRA_CONCURRENT_READS=32
+      - CASSANDRA_CONCURRENT_WRITES=32
+      - CASSANDRA_MEMTABLE_ALLOCATION_TYPE=heap_buffers
     ports:
       - "9046:9042"   # CQL port
       - "7004:7000"   # Inter-node communication
       - "7203:7199"   # JMX
+      - "9164:9160"   # Thrift (for compatibility)
     volumes:
       - cassandra-5-0-data:/var/lib/cassandra
-      - ../scripts:/opt/scripts
-      - ../schemas:/opt/schemas
+      - ../scripts:/opt/scripts:ro
+      - ../schemas:/opt/schemas:ro
       - ../generated/v5.0:/opt/generated
-      - ./cassandra-5-config:/etc/cassandra
+      - ./cassandra-5-config:/etc/cassandra:ro
+      # Add temp directory for SSTable operations
+      - cassandra-5-0-temp:/tmp/cassandra
     healthcheck:
-      test: ["CMD-SHELL", "cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1"]
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT cluster_name FROM system.local;' && nodetool status | grep -q 'UN'"]
       interval: 30s
-      timeout: 20s
-      retries: 10
-      start_period: 180s
+      timeout: 30s
+      retries: 15
+      start_period: 300s
+    # Resource limits for CI environments
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+    # Restart policy for CI stability
+    restart: unless-stopped
     networks:
       - cqlite-test-network
 
@@ -184,4 +207,8 @@ networks:
 
 volumes:
   cassandra-5-0-data:
+    driver: local
   cassandra-4-1-compat-data:
+    driver: local
+  cassandra-5-0-temp:
+    driver: local

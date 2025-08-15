@@ -4,10 +4,18 @@
 //! trie-based indexes for improved performance over the legacy BIG format.
 
 pub mod encoder;
+pub mod node;
 pub mod nodes;
 pub mod parser;
 
-use crate::error::Error;
+// Re-export commonly used types
+pub use encoder::{BatchEncoder, ByteComparableEncoder, EncoderConfig, EncoderStats};
+pub use node::{
+    BtiError, BtiNode, BtiNodeData, BtiNodeType, BtiResult, PayloadRef, SizedPointer, Transition,
+    TrieNavigator,
+};
+pub use parser::{BtiHeader, BtiIndexStats, PartitionsParser, RowsParser};
+
 use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;
 
@@ -62,54 +70,7 @@ pub fn is_bti_format(magic_number: u32) -> bool {
     magic_number == BTI_MAGIC_NUMBER
 }
 
-/// BTI-specific error types
-#[derive(Debug, Clone)]
-pub enum BtiError {
-    /// Invalid trie node type
-    InvalidNodeType(u8),
-    /// Trie depth exceeded maximum
-    MaxDepthExceeded(usize),
-    /// Invalid byte-comparable key
-    InvalidByteComparableKey(String),
-    /// Corrupted trie structure
-    CorruptedTrie(String),
-    /// Missing BTI component file
-    MissingComponent(String),
-}
-
-impl std::fmt::Display for BtiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BtiError::InvalidNodeType(node_type) => {
-                write!(f, "Invalid BTI trie node type: 0x{:02x}", node_type)
-            }
-            BtiError::MaxDepthExceeded(depth) => {
-                write!(
-                    f,
-                    "BTI trie depth exceeded maximum: {} > {}",
-                    depth, MAX_TRIE_DEPTH
-                )
-            }
-            BtiError::InvalidByteComparableKey(key) => {
-                write!(f, "Invalid byte-comparable key: {}", key)
-            }
-            BtiError::CorruptedTrie(msg) => {
-                write!(f, "Corrupted BTI trie structure: {}", msg)
-            }
-            BtiError::MissingComponent(component) => {
-                write!(f, "Missing BTI component: {}", component)
-            }
-        }
-    }
-}
-
-impl std::error::Error for BtiError {}
-
-impl From<BtiError> for Error {
-    fn from(err: BtiError) -> Self {
-        Error::ParseError(format!("BTI error: {}", err))
-    }
-}
+// BTI-specific error types are defined in node.rs
 
 /// BTI lookup result
 #[derive(Debug, Clone)]

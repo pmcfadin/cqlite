@@ -3,9 +3,11 @@
 //! This test suite validates the implementation against the CEP-25 specification
 //! for Cassandra 5.0 byte-comparable key encoding used in BTI format.
 
-use cqlite_core::storage::sstable::bti::encoder::{ByteComparableEncoder, EncoderConfig, BatchEncoder};
-use cqlite_core::types::{Value, UdtValue, UdtField};
 use cqlite_core::Result;
+use cqlite_core::storage::sstable::bti::encoder::{
+    BatchEncoder, ByteComparableEncoder, EncoderConfig,
+};
+use cqlite_core::types::{UdtField, UdtValue, Value};
 
 #[cfg(test)]
 mod bti_encoder_tests {
@@ -38,7 +40,7 @@ mod bti_encoder_tests {
         for (value, description) in test_cases {
             let encoded = encoder.encode_value(&value).unwrap();
             assert!(!encoded.is_empty(), "Empty encoding for {}", description);
-            
+
             // Validate the encoding
             encoder.validate_encoded_key(&encoded).unwrap_or_else(|e| {
                 panic!("Invalid encoding for {}: {}", description, e);
@@ -71,14 +73,19 @@ mod bti_encoder_tests {
 
         // Verify proper IEEE 754 ordering (except NaN)
         for i in 0..encoded_floats.len() - 2 {
-            assert!(encoded_floats[i] <= encoded_floats[i + 1],
+            assert!(
+                encoded_floats[i] <= encoded_floats[i + 1],
                 "Float ordering violation: {} should be <= {}",
-                float_values[i], float_values[i + 1]);
+                float_values[i],
+                float_values[i + 1]
+            );
         }
 
         // NaN should sort last
-        assert!(encoded_floats[encoded_floats.len() - 2] < encoded_floats[encoded_floats.len() - 1],
-            "NaN should sort after infinity");
+        assert!(
+            encoded_floats[encoded_floats.len() - 2] < encoded_floats[encoded_floats.len() - 1],
+            "NaN should sort after infinity"
+        );
     }
 
     /// Test string encoding with UTF-8 and escape sequences
@@ -91,11 +98,11 @@ mod bti_encoder_tests {
             "a",
             "hello",
             "hello world",
-            "café",  // UTF-8 accented characters
-            "🚀",   // UTF-8 emoji
-            "你好",  // UTF-8 Chinese characters
-            "a\0b",  // Embedded null
-            "a\x01b", // Control character
+            "café",       // UTF-8 accented characters
+            "🚀",         // UTF-8 emoji
+            "你好",       // UTF-8 Chinese characters
+            "a\0b",       // Embedded null
+            "a\x01b",     // Control character
             "a\u{00FF}b", // High byte value
         ];
 
@@ -113,8 +120,10 @@ mod bti_encoder_tests {
         let mut expected_strings = test_strings.clone();
         expected_strings.sort();
 
-        assert_eq!(sorted_strings, expected_strings,
-            "UTF-8 string ordering not preserved after encoding");
+        assert_eq!(
+            sorted_strings, expected_strings,
+            "UTF-8 string ordering not preserved after encoding"
+        );
     }
 
     /// Test collection encoding with proper sorting
@@ -138,8 +147,10 @@ mod bti_encoder_tests {
         let encoded1 = encoder.encode_value(&set1).unwrap();
         let encoded2 = encoder.encode_value(&set2).unwrap();
 
-        assert_eq!(encoded1, encoded2,
-            "Set encoding should be deterministic regardless of input order");
+        assert_eq!(
+            encoded1, encoded2,
+            "Set encoding should be deterministic regardless of input order"
+        );
 
         // Test maps with different input orders
         let map1 = Value::Map(vec![
@@ -155,8 +166,10 @@ mod bti_encoder_tests {
         let encoded_map1 = encoder.encode_value(&map1).unwrap();
         let encoded_map2 = encoder.encode_value(&map2).unwrap();
 
-        assert_eq!(encoded_map1, encoded_map2,
-            "Map encoding should be deterministic regardless of input order");
+        assert_eq!(
+            encoded_map1, encoded_map2,
+            "Map encoding should be deterministic regardless of input order"
+        );
     }
 
     /// Test complex nested structures
@@ -165,36 +178,41 @@ mod bti_encoder_tests {
         let mut encoder = ByteComparableEncoder::new();
 
         // Create a complex nested structure
-        let complex_value = Value::Map(vec![
-            (
-                Value::Text("users".to_string()),
-                Value::List(vec![
-                    Value::Udt(UdtValue {
-                        type_name: "User".to_string(),
-                        keyspace: "test".to_string(),
-                        fields: vec![
-                            UdtField {
-                                name: "id".to_string(),
-                                value: Some(Value::Integer(1)),
-                            },
-                            UdtField {
-                                name: "profile".to_string(),
-                                value: Some(Value::Map(vec![
-                                    (Value::Text("name".to_string()), Value::Text("John".to_string())),
-                                    (Value::Text("tags".to_string()), Value::Set(vec![
-                                        Value::Text("admin".to_string()),
-                                        Value::Text("developer".to_string()),
-                                    ])),
-                                ])),
-                            },
-                        ],
-                    }),
-                ]),
-            ),
-        ]);
+        let complex_value = Value::Map(vec![(
+            Value::Text("users".to_string()),
+            Value::List(vec![Value::Udt(UdtValue {
+                type_name: "User".to_string(),
+                keyspace: "test".to_string(),
+                fields: vec![
+                    UdtField {
+                        name: "id".to_string(),
+                        value: Some(Value::Integer(1)),
+                    },
+                    UdtField {
+                        name: "profile".to_string(),
+                        value: Some(Value::Map(vec![
+                            (
+                                Value::Text("name".to_string()),
+                                Value::Text("John".to_string()),
+                            ),
+                            (
+                                Value::Text("tags".to_string()),
+                                Value::Set(vec![
+                                    Value::Text("admin".to_string()),
+                                    Value::Text("developer".to_string()),
+                                ]),
+                            ),
+                        ])),
+                    },
+                ],
+            })]),
+        )]);
 
         let encoded = encoder.encode_value(&complex_value).unwrap();
-        assert!(!encoded.is_empty(), "Complex nested structure should encode successfully");
+        assert!(
+            !encoded.is_empty(),
+            "Complex nested structure should encode successfully"
+        );
 
         // Validate the encoding
         encoder.validate_encoded_key(&encoded).unwrap();
@@ -210,22 +228,19 @@ mod bti_encoder_tests {
         let mut encoder = ByteComparableEncoder::with_config(config);
 
         // Test depth limit
-        let deeply_nested = Value::List(vec![
-            Value::List(vec![
-                Value::List(vec![
-                    Value::List(vec![
-                        Value::Integer(1)
-                    ])
-                ])
-            ])
-        ]);
+        let deeply_nested = Value::List(vec![Value::List(vec![Value::List(vec![Value::List(
+            vec![Value::Integer(1)],
+        )])])]);
 
         let result = encoder.encode_value(&deeply_nested);
         assert!(result.is_err(), "Should fail with deep nesting");
 
         // Test validation of invalid encodings
         let encoder = ByteComparableEncoder::new();
-        assert!(encoder.validate_encoded_key(&[]).is_err(), "Empty key should be invalid");
+        assert!(
+            encoder.validate_encoded_key(&[]).is_err(),
+            "Empty key should be invalid"
+        );
     }
 
     /// Test performance characteristics
@@ -234,9 +249,7 @@ mod bti_encoder_tests {
         let mut encoder = ByteComparableEncoder::new();
 
         // Test large collections
-        let large_list: Vec<Value> = (0..1000)
-            .map(|i| Value::Integer(i))
-            .collect();
+        let large_list: Vec<Value> = (0..1000).map(|i| Value::Integer(i)).collect();
         let large_list_value = Value::List(large_list);
 
         let start = std::time::Instant::now();
@@ -248,8 +261,10 @@ mod bti_encoder_tests {
 
         // Test memory efficiency
         let stats = encoder.get_stats();
-        println!("Buffer size: {} bytes, capacity: {} bytes", 
-            stats.buffer_size, stats.buffer_capacity);
+        println!(
+            "Buffer size: {} bytes, capacity: {} bytes",
+            stats.buffer_size, stats.buffer_capacity
+        );
     }
 
     /// Test batch encoding performance
@@ -268,18 +283,24 @@ mod bti_encoder_tests {
         // Compare with individual encoding
         let mut single_encoder = ByteComparableEncoder::new();
         let start = std::time::Instant::now();
-        let individual_encoded: Vec<_> = values.iter()
+        let individual_encoded: Vec<_> = values
+            .iter()
             .map(|v| single_encoder.encode_value(v).unwrap())
             .collect();
         let individual_time = start.elapsed();
 
-        println!("Batch encoding: {:?}, Individual encoding: {:?}", 
-            batch_time, individual_time);
+        println!(
+            "Batch encoding: {:?}, Individual encoding: {:?}",
+            batch_time, individual_time
+        );
 
         assert_eq!(encoded_batch.len(), individual_encoded.len());
         for i in 0..encoded_batch.len() {
-            assert_eq!(encoded_batch[i], individual_encoded[i],
-                "Batch and individual encoding should match for index {}", i);
+            assert_eq!(
+                encoded_batch[i], individual_encoded[i],
+                "Batch and individual encoding should match for index {}",
+                i
+            );
         }
     }
 
@@ -314,21 +335,21 @@ mod bti_encoder_tests {
 
         // Specific ordering checks
         // partition1 should come before partition2
-        let partition1_keys: Vec<_> = encoded_keys.iter()
-            .filter(|(_, key)| {
-                matches!(key.get(0), Some(Value::Text(s)) if s == "partition1")
-            })
+        let partition1_keys: Vec<_> = encoded_keys
+            .iter()
+            .filter(|(_, key)| matches!(key.get(0), Some(Value::Text(s)) if s == "partition1"))
             .collect();
 
-        let partition2_keys: Vec<_> = encoded_keys.iter()
-            .filter(|(_, key)| {
-                matches!(key.get(0), Some(Value::Text(s)) if s == "partition2")
-            })
+        let partition2_keys: Vec<_> = encoded_keys
+            .iter()
+            .filter(|(_, key)| matches!(key.get(0), Some(Value::Text(s)) if s == "partition2"))
             .collect();
 
         if !partition1_keys.is_empty() && !partition2_keys.is_empty() {
-            assert!(partition1_keys.last().unwrap().0 < partition2_keys.first().unwrap().0,
-                "partition1 keys should come before partition2 keys");
+            assert!(
+                partition1_keys.last().unwrap().0 < partition2_keys.first().unwrap().0,
+                "partition1 keys should come before partition2 keys"
+            );
         }
     }
 
@@ -374,8 +395,10 @@ mod bti_encoder_tests {
         // Verify that types are consistently ordered
         // (The specific ordering doesn't matter as much as consistency)
         for i in 0..encoded_mixed.len() - 1 {
-            assert!(encoded_mixed[i].0 <= encoded_mixed[i + 1].0,
-                "Encoded values should be in non-decreasing order");
+            assert!(
+                encoded_mixed[i].0 <= encoded_mixed[i + 1].0,
+                "Encoded values should be in non-decreasing order"
+            );
         }
     }
 
@@ -384,10 +407,10 @@ mod bti_encoder_tests {
     fn test_encoding_stability() {
         let value = Value::Map(vec![
             (Value::Text("key1".to_string()), Value::Integer(42)),
-            (Value::Text("key2".to_string()), Value::List(vec![
-                Value::Boolean(true),
-                Value::Float32(3.14),
-            ])),
+            (
+                Value::Text("key2".to_string()),
+                Value::List(vec![Value::Boolean(true), Value::Float32(3.14)]),
+            ),
         ]);
 
         // Encode with multiple encoder instances
@@ -399,8 +422,14 @@ mod bti_encoder_tests {
         let encoded2 = encoder2.encode_value(&value).unwrap();
         let encoded3 = encoder3.encode_value(&value).unwrap();
 
-        assert_eq!(encoded1, encoded2, "Different encoder instances should produce same result");
-        assert_eq!(encoded2, encoded3, "Different configs with same values should produce same result");
+        assert_eq!(
+            encoded1, encoded2,
+            "Different encoder instances should produce same result"
+        );
+        assert_eq!(
+            encoded2, encoded3,
+            "Different configs with same values should produce same result"
+        );
     }
 
     /// Test special value handling

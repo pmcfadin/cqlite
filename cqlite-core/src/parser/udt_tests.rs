@@ -8,7 +8,7 @@ mod tests {
     use super::super::types::*;
     use super::super::vint::encode_vint;
     use crate::schema::{CqlType, UdtRegistry};
-    use crate::types::{UdtField, UdtFieldDef, UdtTypeDef, UdtValue, Value};
+    use crate::types::{UdtField, UdtTypeDef, UdtValue, Value};
 
     /// Create a sample person UDT value for testing
     fn create_sample_person_udt() -> UdtValue {
