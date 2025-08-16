@@ -25,6 +25,13 @@ cqlite/
 - ❌ Temporary files
 - ❌ Database files (`*.db`)
 
+**✅ ALLOWED HIDDEN DEV DIRECTORIES IN ROOT (documented):**
+- `.claude/`, `.claude-flow/`, `.swarm/`, `.hive-mind/`, `.roo/`
+- `claude-flow*` launcher scripts
+- `.mcp.json`, `.roomodes`
+
+These are AI/coordination/dev automation assets and are not part of the Rust workspace. Do not rely on their presence at build time. They remain at root for developer tooling only.
+
 ### **Core Crates**
 
 #### **`cqlite-core/`** - Core Library
