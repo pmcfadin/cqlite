@@ -9,26 +9,13 @@
 //! - Parallel test execution support
 //! - Cross-platform compatibility testing
 
-use assert_cmd::prelude::*;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use fake::{Fake, Faker};
-use insta::assert_snapshot;
 use mockall::predicate::*;
-use predicates::prelude::*;
-use proptest::prelude::*;
-use quickcheck::{TestResult, quickcheck};
-use rstest::*;
-use serial_test::serial;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tempfile::{NamedTempFile, TempDir};
-use test_case::test_case;
-use tokio_test;
-use trycmd::TestCases;
+use tempfile::TempDir;
+// Removed test_case import - causing compilation issues
 
 /// Comprehensive test configuration
 #[derive(Debug, Clone)]
@@ -545,9 +532,9 @@ impl TestDataManager {
 
     pub async fn create_test_sstable(
         &self,
-        path: &Path,
-        record_count: usize,
-        scenario_type: &str,
+        _path: &Path,
+        _record_count: usize,
+        _scenario_type: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Implementation would create test SSTable files based on scenario
         Ok(())
@@ -861,7 +848,7 @@ impl Default for CoverageResults {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{TestFrameworkConfig, ComprehensiveTestFramework, TestResults, CoverageResults};
 
     #[tokio::test]
     async fn test_framework_initialization() {
@@ -871,11 +858,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[case(true, true, true, true, true)]
-    #[case(true, false, false, false, false)]
     async fn test_framework_configuration() {
         let unit = true;
-        let integration = true;
+        let integration = true; 
         let e2e = true;
         let performance = true;
         let coverage = true;
@@ -893,8 +878,9 @@ mod tests {
     }
 
     #[test]
-    #[test_case(85.0, false)]
-    fn test_coverage_threshold(threshold: f64, should_pass: bool) {
+    fn test_coverage_threshold() {
+        let threshold = 85.0;
+        let should_pass = true; // 88.5% coverage > 85% threshold should pass
         let config = TestFrameworkConfig {
             coverage_threshold: threshold,
             ..Default::default()
@@ -910,7 +896,7 @@ mod tests {
 
         let framework = ComprehensiveTestFramework::new(config).unwrap();
         let success = framework.evaluate_overall_success(&results);
-        assert_eq!(success != should_pass, false); // XOR logic - if should_pass is true, success should be true
+        assert_eq!(success, should_pass); // Direct logic - success should equal should_pass
     }
 }
 
