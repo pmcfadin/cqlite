@@ -8,8 +8,7 @@ use cqlite_core::storage::sstable::bti::BTI_MAGIC_NUMBER;
 // use cqlite_core::storage::sstable::bti::encoder::ByteComparableEncoder;
 // use cqlite_core::storage::sstable::bti::parser::{PartitionsParser, RowsParser};
 // use cqlite_core::storage::sstable::bti::config::BtiConfig;
-use std::fs::File;
-use std::io::{Cursor, Seek, Write as IoWrite};
+use std::io::{Seek, Write as IoWrite};
 use tempfile::NamedTempFile;
 
 /// Create a test BTI file with proper header and simple trie structure
@@ -42,6 +41,8 @@ fn create_test_bti_file() -> Result<NamedTempFile, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use std::fs::File;
+    use std::io::Cursor;
 
     #[test]
     fn test_bti_header_parsing() -> Result<(), Box<dyn std::error::Error>> {

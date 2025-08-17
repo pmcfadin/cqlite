@@ -921,7 +921,6 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn test_quality_gates_basic() {
