@@ -3,13 +3,12 @@
 //! This module provides comprehensive testing for the CQLite REPL system,
 //! validating all quality gates and user workflows.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
 
 /// REPL test configuration
 #[derive(Debug, Clone)]
@@ -737,6 +736,7 @@ paging = true
 mod tests {
     use super::*;
     use std::env;
+    use tempfile::TempDir;
 
     #[test]
     fn test_repl_integration_basic() {

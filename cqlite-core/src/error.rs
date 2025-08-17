@@ -250,6 +250,11 @@ impl Error {
         Self::InvalidInput(msg.into())
     }
 
+    /// Create a parse error
+    pub fn parser(msg: impl Into<String>) -> Self {
+        Self::ParseError(msg.into())
+    }
+
     /// Check if this error is recoverable
     pub fn is_recoverable(&self) -> bool {
         match self {

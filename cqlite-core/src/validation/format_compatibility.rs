@@ -13,6 +13,7 @@ use tokio::fs;
 
 /// Format compatibility validator
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct FormatCompatibilityValidator {
     /// Configuration for format validation
     config: CompatibilityConfig,
@@ -41,6 +42,7 @@ pub struct VersionCompatibilityResult {
 
 /// Format compatibility validator (legacy name)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct FormatValidator {
     /// Configuration for format validation
     config: CompatibilityConfig,
@@ -1323,6 +1325,7 @@ impl FormatValidator {
 
 /// Version difference calculation result
 #[derive(Debug)]
+#[allow(dead_code)]
 struct VersionDifference {
     major_diff: i32,
     minor_diff: i32,

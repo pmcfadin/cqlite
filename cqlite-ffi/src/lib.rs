@@ -19,10 +19,6 @@ pub use types::*;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
-use std::ptr;
-use std::sync::Arc;
-
-use tokio::runtime::Runtime;
 
 /// Initialize the CQLite library
 ///

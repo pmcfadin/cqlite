@@ -174,7 +174,7 @@ fn run_real_validation() -> ValidationResults {
             "✅ Found {} files with valid SSTable structure",
             structure_results.valid_structures
         );
-        println!("   - Data files: {}", structure_results.data_files);
+        println!("   - Data files: {}", structure_results._data_files);
         println!(
             "   - Statistics files: {}",
             structure_results.statistics_files
@@ -299,7 +299,7 @@ fn test_file_format_detection(files: &[PathBuf]) -> FormatDetectionResults {
 #[derive(Debug)]
 struct StructureAnalysisResults {
     valid_structures: usize,
-    data_files: usize,
+    _data_files: usize,
     statistics_files: usize,
     index_files: usize,
 }
@@ -325,7 +325,7 @@ fn analyze_file_structures(files: &[PathBuf]) -> StructureAnalysisResults {
 
     StructureAnalysisResults {
         valid_structures,
-        data_files,
+        _data_files: data_files,
         statistics_files,
         index_files,
     }

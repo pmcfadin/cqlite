@@ -1,5 +1,6 @@
 //! Basic CLI functionality integration tests
 
+use clap::Parser;
 use cqlite_cli::test_infrastructure::*;
 use cqlite_cli::{test_container, assert_cli_success, assert_cli_error};
 

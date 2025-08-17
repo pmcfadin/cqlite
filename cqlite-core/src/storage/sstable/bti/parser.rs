@@ -550,7 +550,9 @@ impl<R: Read + Seek> RowsParser<R> {
 
 /// Iterator over partitions in BTI index
 pub struct PartitionIterator<'a, R: Read + Seek> {
+    #[allow(dead_code)]
     parser: &'a mut PartitionsParser<R>,
+    #[allow(dead_code)]
     current_position: u64,
     finished: bool,
 }
@@ -583,7 +585,9 @@ impl<'a, R: Read + Seek> Iterator for PartitionIterator<'a, R> {
 
 /// Iterator over rows in BTI index
 pub struct RowIterator<'a, R: Read + Seek> {
+    #[allow(dead_code)]
     parser: &'a mut RowsParser<R>,
+    #[allow(dead_code)]
     current_position: u64,
     finished: bool,
 }

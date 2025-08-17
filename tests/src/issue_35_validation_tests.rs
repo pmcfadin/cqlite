@@ -3,8 +3,6 @@
 //! This test suite validates the implementation of Index.db, Summary.db, and Statistics.db
 //! readers against sstabledump output to ensure zero-diff parity as required by Issue #35.
 
-use anyhow::{Context, anyhow};
-use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,9 +12,9 @@ use cqlite_core::{
     Config, Result,
     platform::Platform,
     storage::sstable::{
-        index_reader::{IndexReader, IndexStatistics},
+        index_reader::IndexReader,
         statistics_reader::StatisticsReader,
-        summary_reader::{SummaryReader, SummaryStatistics},
+        summary_reader::SummaryReader,
     },
 };
 
@@ -162,11 +160,12 @@ impl Issue35ValidationHarness {
             }
         }
 
+        let zero_diff_compliance = failed_tests.is_empty();
         Ok(ValidationSummary {
             total_tests,
             passed_tests,
             failed_tests,
-            zero_diff_compliance: failed_tests.is_empty(),
+            zero_diff_compliance,
         })
     }
 
@@ -1150,7 +1149,7 @@ impl Issue35ValidationHarness {
         if let Some(token_stats) = statistics
             .column_stats
             .iter()
-            .find(|col| col.column_name == "token")
+            .find(|col| col.name == "token")
         {
             details.push(format!(
                 "   • Token column found: {} values",

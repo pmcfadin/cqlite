@@ -10,7 +10,10 @@ mod tests {
     use crate::schema::{CqlType, UdtRegistry};
     use crate::types::{UdtField, UdtTypeDef, UdtValue, Value};
 
+    #[allow(dead_code)]
+
     /// Create a sample person UDT value for testing
+    #[allow(dead_code)]
     fn create_sample_person_udt() -> UdtValue {
         UdtValue {
             type_name: "person".to_string(),
@@ -37,6 +40,7 @@ mod tests {
     }
 
     /// Create a sample address UDT value for testing
+    #[allow(dead_code)]
     fn create_sample_address_udt() -> UdtValue {
         UdtValue {
             type_name: "address".to_string(),
@@ -67,6 +71,7 @@ mod tests {
     }
 
     /// Serialize a UDT value to binary format for testing parsing
+    #[allow(dead_code)]
     fn serialize_udt_for_test(udt: &UdtValue) -> Vec<u8> {
         let mut data = Vec::new();
 
@@ -324,7 +329,7 @@ mod tests {
     #[test]
     fn test_udt_validation() {
         let registry = UdtRegistry::with_cassandra5_defaults();
-        let person_def = registry.get_udt("system", "person").unwrap();
+        let _person_def = registry.get_udt("system", "person").unwrap();
 
         // Valid person UDT
         let valid_person = UdtValue {
@@ -357,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_list_with_udt_elements() {
-        let registry = UdtRegistry::with_cassandra5_defaults();
+        let _registry = UdtRegistry::with_cassandra5_defaults();
 
         // Create a list of address UDTs
         let addresses = vec![
@@ -395,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_map_with_udt_values() {
-        let registry = UdtRegistry::with_cassandra5_defaults();
+        let _registry = UdtRegistry::with_cassandra5_defaults();
 
         // Create a map with text keys and person UDT values
         let people_map = vec![
@@ -451,6 +456,7 @@ mod tests {
 
         let empty_udt = Value::Udt(UdtValue {
             type_name: "test".to_string(),
+            keyspace: "test_ks".to_string(),
             fields: vec![],
         });
         if let Value::Udt(udt) = &empty_udt {
@@ -481,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_complex_nested_structure() {
-        let mut registry = UdtRegistry::with_cassandra5_defaults();
+        let registry = UdtRegistry::with_cassandra5_defaults();
 
         // Test the contact_info UDT which nests person and address
         let contact_info_def = registry.get_udt("system", "contact_info").unwrap();

@@ -22,6 +22,7 @@ const CASSANDRA_MAGIC: [u8; 4] = [0x5A, 0x5A, 0x5A, 0x5A];
 const CRC32_POLYNOMIAL: u32 = 0xEDB88320;
 
 /// SSTable writer for creating new SSTable files with Cassandra 5+ compatibility
+#[allow(dead_code)]
 pub struct SSTableWriter {
     /// Output file writer
     writer: Box<dyn Write + Send>,

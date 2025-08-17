@@ -23,6 +23,12 @@ pub struct ReconciliationTestDatasets {
     sequence: u32,
 }
 
+impl Default for ReconciliationTestDatasets {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReconciliationTestDatasets {
     /// Create new test dataset generator
     pub fn new() -> Self {
@@ -85,7 +91,7 @@ impl ReconciliationTestDatasets {
     }
 
     /// Generate dataset with overlapping writes at different timestamps
-    async fn generate_overlapping_writes_dataset(&mut self) -> Result<TestDatasetPair> {
+    pub async fn generate_overlapping_writes_dataset(&mut self) -> Result<TestDatasetPair> {
         let partition_key = format!("overlapping_writes_{}", self.next_sequence());
 
         // Create multiple writes to the same cell with different timestamps
@@ -160,7 +166,7 @@ impl ReconciliationTestDatasets {
     }
 
     /// Generate dataset with expired TTL scenarios
-    async fn generate_expired_ttl_dataset(&mut self) -> Result<TestDatasetPair> {
+    pub async fn generate_expired_ttl_dataset(&mut self) -> Result<TestDatasetPair> {
         let partition_key = format!("expired_ttl_{}", self.next_sequence());
 
         // Create cells with various TTL states
@@ -231,7 +237,7 @@ impl ReconciliationTestDatasets {
     }
 
     /// Generate dataset with row vs cell tombstone scenarios
-    async fn generate_row_vs_cell_tombstones_dataset(&mut self) -> Result<TestDatasetPair> {
+    pub async fn generate_row_vs_cell_tombstones_dataset(&mut self) -> Result<TestDatasetPair> {
         let partition_key = format!("row_vs_cell_tombstones_{}", self.next_sequence());
 
         let cassandra_data = ParsedData {
@@ -321,7 +327,7 @@ impl ReconciliationTestDatasets {
     }
 
     /// Generate dataset with range tombstones
-    async fn generate_range_tombstones_dataset(&mut self) -> Result<TestDatasetPair> {
+    pub async fn generate_range_tombstones_dataset(&mut self) -> Result<TestDatasetPair> {
         let partition_key = format!("range_tombstones_{}", self.next_sequence());
 
         let cassandra_data = ParsedData {
@@ -394,7 +400,7 @@ impl ReconciliationTestDatasets {
     }
 
     /// Generate complex mixed scenario dataset
-    async fn generate_complex_mixed_dataset(&mut self) -> Result<TestDatasetPair> {
+    pub async fn generate_complex_mixed_dataset(&mut self) -> Result<TestDatasetPair> {
         let partition_key = format!("complex_mixed_{}", self.next_sequence());
 
         let cassandra_data = ParsedData {
@@ -480,7 +486,7 @@ impl ReconciliationTestDatasets {
     }
 
     /// Generate TTL and tombstone interaction dataset
-    async fn generate_ttl_tombstone_interaction_dataset(&mut self) -> Result<TestDatasetPair> {
+    pub async fn generate_ttl_tombstone_interaction_dataset(&mut self) -> Result<TestDatasetPair> {
         let partition_key = format!("ttl_tombstone_interaction_{}", self.next_sequence());
 
         let cassandra_data = ParsedData {
@@ -547,7 +553,7 @@ impl ReconciliationTestDatasets {
     }
 
     /// Generate multi-generation conflict resolution dataset
-    async fn generate_multi_generation_conflicts_dataset(&mut self) -> Result<TestDatasetPair> {
+    pub async fn generate_multi_generation_conflicts_dataset(&mut self) -> Result<TestDatasetPair> {
         let partition_key = format!("multi_generation_conflicts_{}", self.next_sequence());
 
         let cassandra_data = ParsedData {

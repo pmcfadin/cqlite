@@ -3,9 +3,8 @@
 //! This module implements specific quality gate validation for Issue #10 requirements.
 //! Each quality gate must pass for the REPL to be considered production-ready.
 
-use anyhow::{Result, anyhow};
-use std::fs;
-use std::io::{BufReader, Read, Write};
+use anyhow::Result;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -23,6 +22,7 @@ pub struct QualityGateResult {
 /// REPL Quality Gates Validator
 pub struct ReplQualityGatesValidator {
     binary_path: PathBuf,
+    #[allow(dead_code)]
     timeout: Duration,
     results: Vec<QualityGateResult>,
 }
@@ -792,8 +792,9 @@ SELECT keyspace_name FROM system.keyspaces LIMIT 1;
                         let mut stdout_data = String::new();
                         let mut stderr_data = String::new();
 
-                        BufReader::new(stdout).read_to_string(&mut stdout_data)?;
-                        BufReader::new(stderr).read_to_string(&mut stderr_data)?;
+                        use std::io::Read;
+                        std::io::BufReader::new(stdout).read_to_string(&mut stdout_data)?;
+                        std::io::BufReader::new(stderr).read_to_string(&mut stderr_data)?;
 
                         break format!(
                             "Status: {}\nSTDOUT:\n{}\nSTDERR:\n{}",

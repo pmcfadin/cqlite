@@ -11,7 +11,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::process;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = Command::new("CQLite Real SSTable Compatibility Tester")
         .version("1.0.0")
         .author("CQLite Team")
@@ -101,7 +101,7 @@ fn main() {
     }
 
     // Create and run the compatibility tester
-    let mut tester = RealSSTableCompatibilityTester::new(config);
+    let mut tester = RealSSTableCompatibilityTester::new(config)?;
 
     match tester.run_comprehensive_tests() {
         Ok(()) => {
@@ -112,12 +112,12 @@ fn main() {
                 eprintln!("⚠️  Warning: Failed to store coordination results: {}", e);
             }
 
-            process::exit(0);
+            Ok(())
         }
         Err(e) => {
             eprintln!("\n❌ Compatibility testing failed: {}", e);
             eprintln!("💡 Check the error details above and ensure test data is accessible.");
-            process::exit(1);
+            Err(e.into())
         }
     }
 }
@@ -130,10 +130,10 @@ fn store_coordination_results(
     use std::process::Command;
 
     // Calculate summary statistics
-    let total_tests = tester.results.len();
-    let passed_tests = tester.results.iter().filter(|r| r.test_passed).count();
+    let total_tests = tester.results().len();
+    let passed_tests = tester.results().iter().filter(|r| r.test_passed).count();
     let critical_failures = tester
-        .results
+        .results()
         .iter()
         .filter(|r| !r.test_passed && (r.file_type == "Data.db" || r.file_type == "Statistics.db"))
         .count();
@@ -164,23 +164,23 @@ fn store_coordination_results(
         } else {
             "critical"
         },
-        "tables_tested": tester.results.iter()
+        "tables_tested": tester.results().iter()
             .map(|r| r.table_name.clone())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>(),
         "findings": {
-            "magic_numbers_valid": tester.results.iter()
+            "magic_numbers_valid": tester.results().iter()
                 .filter(|r| r.file_type == "Data.db")
                 .filter(|r| r.parser_details.as_ref()
                     .map(|d| d.magic_number_valid)
                     .unwrap_or(false))
                 .count(),
-            "vint_compatibility": tester.results.iter()
+            "vint_compatibility": tester.results().iter()
                 .filter_map(|r| r.parser_details.as_ref())
                 .map(|d| d.vint_samples.iter().filter(|s| s.encoding_valid).count())
                 .sum::<usize>(),
-            "total_vint_samples": tester.results.iter()
+            "total_vint_samples": tester.results().iter()
                 .filter_map(|r| r.parser_details.as_ref())
                 .map(|d| d.vint_samples.len())
                 .sum::<usize>()

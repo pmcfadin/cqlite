@@ -208,6 +208,9 @@ impl KeyDigestComputer {
             | ComparatorType::Udt { .. }
             | ComparatorType::Frozen(_)
             | ComparatorType::Custom(_)
+            | ComparatorType::Varint
+            | ComparatorType::Decimal
+            | ComparatorType::Duration
             | ComparatorType::Json => {
                 log::warn!(
                     "Complex type {} in partition key - using blob fallback",

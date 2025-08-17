@@ -5,12 +5,12 @@
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
 /// Test configuration for SSTable integration tests
@@ -42,6 +42,7 @@ fn get_cli_command() -> Command {
 }
 
 /// Helper function to run a command with timeout
+#[allow(dead_code)]
 fn run_command_with_timeout(
     mut cmd: Command,
     timeout: Duration,
@@ -422,7 +423,7 @@ fn test_sstable_select_command() -> Result<(), Box<dyn std::error::Error>> {
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    println!("Select query '{}' failed: {}", query, stderr);
+                    println!("Select query '{query}' failed: {stderr}");
                     continue;
                 }
 
@@ -540,18 +541,19 @@ fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
     // Test with non-existent file
     let mut cmd = get_cli_command();
     cmd.arg("info")
-        .arg("/non/existent/path")
-        .timeout(config.timeout);
+        .arg("/non/existent/path");
+        // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
     assert!(!output.status.success());
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("No such file") || stderr.contains("not found") || stderr.len() > 0);
+    assert!(stderr.contains("No such file") || stderr.contains("not found") || !stderr.is_empty());
 
     // Test read command without schema
     let mut cmd = get_cli_command();
-    cmd.arg("read").arg("/tmp").timeout(config.timeout);
+    cmd.arg("read").arg("/tmp");
+    // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
     assert!(!output.status.success());
@@ -564,8 +566,8 @@ fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("read")
         .arg("/tmp")
         .arg("--schema")
-        .arg(&invalid_schema)
-        .timeout(config.timeout);
+        .arg(&invalid_schema);
+        // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
     assert!(!output.status.success());
@@ -575,8 +577,8 @@ fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("info")
         .arg("/tmp")
         .arg("--cassandra-version")
-        .arg("99.99")
-        .timeout(config.timeout);
+        .arg("99.99");
+        // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
     assert!(!output.status.success());
@@ -682,14 +684,14 @@ fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
         let start = std::time::Instant::now();
         let mut cmd = get_cli_command();
         cmd.arg("info")
-            .arg(&sstable_dir)
-            .timeout(Duration::from_secs(60)); // Longer timeout for performance test
+            .arg(&sstable_dir);
+            // .timeout(Duration::from_secs(60)); // Removed timeout method call
 
         let output = cmd.output()?;
         let info_duration = start.elapsed();
 
         if output.status.success() {
-            println!("Info command took: {:?}", info_duration);
+            println!("Info command took: {info_duration:?}");
 
             // Performance should be reasonable (less than 30 seconds for most files)
             assert!(info_duration < Duration::from_secs(30));
@@ -700,14 +702,14 @@ fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
         let mut cmd = get_cli_command();
         cmd.arg("info")
             .arg(&sstable_dir)
-            .arg("--detailed")
-            .timeout(Duration::from_secs(60));
+            .arg("--detailed");
+            // .timeout(Duration::from_secs(60)); // Removed timeout method call
 
         let detailed_output = cmd.output()?;
         let detailed_duration = start.elapsed();
 
         if detailed_output.status.success() {
-            println!("Detailed info command took: {:?}", detailed_duration);
+            println!("Detailed info command took: {detailed_duration:?}");
 
             // Detailed analysis may take longer but should still be reasonable
             assert!(detailed_duration < Duration::from_secs(60));
@@ -757,8 +759,8 @@ fn test_complex_data_types() -> Result<(), Box<dyn std::error::Error>> {
                 .arg("--format")
                 .arg("json")
                 .arg("--limit")
-                .arg("3")
-                .timeout(Duration::from_secs(45));
+                .arg("3");
+                // .timeout(Duration::from_secs(45)); // Removed timeout method call
 
             let output = cmd.output()?;
 
@@ -771,7 +773,7 @@ fn test_complex_data_types() -> Result<(), Box<dyn std::error::Error>> {
                 );
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                println!("Complex types test failed: {}", stderr);
+                println!("Complex types test failed: {stderr}");
 
                 // Should provide meaningful error messages for unsupported types
                 assert!(
@@ -813,8 +815,8 @@ fn test_corrupted_file_handling() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("read")
         .arg(&corrupted_file)
         .arg("--schema")
-        .arg(&schema_path)
-        .timeout(config.timeout);
+        .arg(&schema_path);
+        // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
 
@@ -866,8 +868,8 @@ fn test_resource_management() -> Result<(), Box<dyn std::error::Error>> {
         let mut cmd = get_cli_command();
         cmd.arg("info")
             .arg(&sstable_dir)
-            .arg("--detailed")
-            .timeout(Duration::from_secs(120)); // Longer timeout for large files
+            .arg("--detailed");
+            // .timeout(Duration::from_secs(120)); // Removed timeout method call
 
         let output = cmd.output()?;
 
@@ -884,53 +886,6 @@ fn test_resource_management() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod integration_tests {
-    use super::*;
-
-    /// Test runner that can be called from external scripts
-    pub fn run_comprehensive_cli_tests() -> Result<(), Box<dyn std::error::Error>> {
-        println!("🧪 Running Comprehensive CQLite SSTable CLI Integration Tests");
-        println!("{}", "=".repeat(65));
-
-        let config = SSTableTestConfig::new()?;
-
-        if !config.test_data_dir.exists() {
-            println!(
-                "⚠️  Test data directory not found: {}",
-                config.test_data_dir.display()
-            );
-            println!("   Run the following to generate test data:");
-            println!(
-                "   cd test-env/cassandra5 && ./manage.sh start && ./scripts/extract-sstables.sh"
-            );
-            return Ok(());
-        }
-
-        println!(
-            "✅ Test data directory found: {}",
-            config.test_data_dir.display()
-        );
-
-        // Run a subset of tests programmatically
-        println!("\n📋 Running basic CLI functionality tests...");
-        test_cli_help_and_version();
-
-        println!("📋 Running SSTable info command tests...");
-        test_sstable_info_command()?;
-
-        println!("📋 Running error handling tests...");
-        test_error_handling()?;
-
-        println!("📋 Running version detection tests...");
-        test_version_detection()?;
-
-        println!("\n🎉 All CLI integration tests completed successfully!");
-
-        Ok(())
-    }
 }
 
 /// Helper function to validate test environment
@@ -985,4 +940,52 @@ pub fn validate_test_environment() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🚀 Environment validation complete - ready for testing!");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    /// Test runner that can be called from external scripts
+    #[allow(dead_code)]
+    pub fn run_comprehensive_cli_tests() -> Result<(), Box<dyn std::error::Error>> {
+        println!("🧪 Running Comprehensive CQLite SSTable CLI Integration Tests");
+        println!("{}", "=".repeat(65));
+
+        let config = SSTableTestConfig::new()?;
+
+        if !config.test_data_dir.exists() {
+            println!(
+                "⚠️  Test data directory not found: {}",
+                config.test_data_dir.display()
+            );
+            println!("   Run the following to generate test data:");
+            println!(
+                "   cd test-env/cassandra5 && ./manage.sh start && ./scripts/extract-sstables.sh"
+            );
+            return Ok(());
+        }
+
+        println!(
+            "✅ Test data directory found: {}",
+            config.test_data_dir.display()
+        );
+
+        // Run a subset of tests programmatically
+        println!("\n📋 Running basic CLI functionality tests...");
+        test_cli_help_and_version();
+
+        println!("📋 Running SSTable info command tests...");
+        test_sstable_info_command()?;
+
+        println!("📋 Running error handling tests...");
+        test_error_handling()?;
+
+        println!("📋 Running version detection tests...");
+        test_version_detection()?;
+
+        println!("\n🎉 All CLI integration tests completed successfully!");
+
+        Ok(())
+    }
 }

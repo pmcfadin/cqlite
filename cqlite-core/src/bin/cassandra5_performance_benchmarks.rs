@@ -299,6 +299,7 @@ fn generate_optimization_recommendations(
 }
 
 /// Display usage information
+#[allow(dead_code)]
 fn print_usage() {
     println!("Usage: cassandra5_performance_benchmarks [TEST_DATA_DIR]");
     println!();

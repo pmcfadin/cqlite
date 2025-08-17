@@ -5,7 +5,6 @@
 
 use cqlite_core::types::Value;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Comprehensive BTI test dataset for Issue #36 validation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +188,7 @@ impl BtiTestValue {
                     _ => Value::List(vec![Value::Integer(1)]), // Simplified fallback
                 }
             }
-            BtiTestValue::Tombstone(ts) => Value::Tombstone(*ts),
+            BtiTestValue::Tombstone(ts) => Value::cell_tombstone(*ts),
         }
     }
 

@@ -2,10 +2,7 @@
 //!
 //! This module contains the FFI database interface.
 
-use crate::error::*;
-use std::ffi::CStr;
-use std::os::raw::{c_char, c_int};
-use std::ptr;
+use std::os::raw::c_int;
 
 /// FFI Database handle
 pub struct CQLiteDB {

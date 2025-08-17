@@ -5,7 +5,6 @@ use sstabledump_validator::{
     test_datasets::ReconciliationTestDatasets,
 };
 use std::time::Duration;
-use tokio;
 
 #[tokio::test]
 async fn test_reconciliation_overlapping_writes() {
@@ -251,8 +250,7 @@ async fn test_reconciliation_dataset_comparison() {
         // For test datasets, Cassandra and CQLite should have identical reconciliation
         assert!(
             differences.is_empty(),
-            "Dataset {} should have zero reconciliation differences",
-            dataset_name
+            "Dataset {dataset_name} should have zero reconciliation differences"
         );
     }
 }

@@ -118,6 +118,9 @@ pub mod comprehensive_integration_tests;
 pub mod real_sstable_test_fixtures;
 pub mod validation_test_runner;
 
+// Validation modules
+pub mod validation;
+
 // Re-export comprehensive integration testing components (commented out to avoid conflicts with cli_integration_tests)
 // pub use integration::cli_tests::{get_cli_binary, create_temp_db};
 pub use collection_compatibility_tests::{
@@ -169,7 +172,7 @@ pub mod integration_test_harness;
 
 // Re-export new comprehensive testing components
 pub use comprehensive_integration_test_suite::{
-    ComprehensiveIntegrationTestSuite as CITSuite,
+    ComprehensiveIntegrationTestSuite,
     IntegrationTestConfig as ComprehensiveTestConfig, IntegrationTestSuiteResults,
     print_integration_test_results, run_comprehensive_integration_tests,
     run_quick_integration_tests,
@@ -190,6 +193,7 @@ pub use sstable_benchmark::{
 pub use sstable_validator::{SSTableValidator, run_validation};
 
 // Minimal smoke tests for baseline
+#[cfg(test)]
 pub mod minimal_smoke_tests;
 
 // CQL Schema Validation Modules
@@ -199,9 +203,13 @@ pub mod cql_performance_benchmarks;
 pub mod cql_test_data_fixtures;
 
 // ComparatorType Testing Module
+#[cfg(test)]
 pub mod comparator_type_tests;
 
 // Re-export CQL validation components
+pub use cql_integration_tests::{
+    CqlIntegrationTestSuite, IntegrationTestReport, IntegrationTestResult,
+};
 pub use cql_parser_validation_suite::{
     CqlParserValidationSuite, PerformanceMetric, ValidationReport,
     ValidationResult as CqlValidationResult,
@@ -221,12 +229,16 @@ pub mod issue_35_key_encoding_tests;
 pub mod issue_35_minimal_tests;
 
 // Issue #28a - Removal of header heuristics and blob fallbacks
+#[cfg(test)]
 pub mod issue_28a_heuristics_removal_tests;
 
-// Temporarily disabled due to private field access - will be re-enabled with public accessors:
-// pub mod issue_35_validation_tests;
-// pub mod issue_35_live_integration_tests;
-// pub mod issue_35_sstabledump_validation;
+// Re-enabled modules for Issue #35
+pub mod issue_35_validation_tests;
+#[cfg(test)]
+pub mod issue_35_live_integration_tests;
+#[cfg(test)]
+pub mod issue_35_sstabledump_validation;
+#[cfg(test)]
 pub mod wide_partition_test_generator;
 
 #[cfg(test)]

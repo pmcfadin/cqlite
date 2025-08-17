@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::fs;
-use tracing::{debug, warn};
+use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedData {
@@ -37,7 +37,7 @@ pub struct ParsedCell {
     pub deletion_info: Option<DeletionInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum CellValue {
     Text(String),
@@ -77,6 +77,7 @@ pub struct DumpMetadata {
 pub struct SstableDumpParser {
     // Regex patterns for parsing different dump formats
     cassandra_patterns: CassandraPatterns,
+    #[allow(dead_code)]
     cqlite_patterns: CqlitePatterns,
 }
 
@@ -90,11 +91,21 @@ struct CassandraPatterns {
 }
 
 struct CqlitePatterns {
+    #[allow(dead_code)]
     partition_start: Regex,
+    #[allow(dead_code)]
     row_start: Regex,
+    #[allow(dead_code)]
     cell_pattern: Regex,
+    #[allow(dead_code)]
     metadata_pattern: Regex,
     // CQLite might have different output format
+}
+
+impl Default for SstableDumpParser {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SstableDumpParser {
@@ -164,7 +175,7 @@ impl SstableDumpParser {
             // Parse row start
             else if let Some(captures) = self.cassandra_patterns.row_start.captures(line) {
                 // Save previous row
-                if let Some(mut row) = current_row.take() {
+                if let Some(row) = current_row.take() {
                     if let Some(ref mut partition) = current_partition {
                         partition.rows.push(row);
                     }
@@ -224,11 +235,11 @@ impl SstableDumpParser {
         }
     }
 
-    async fn parse_cqlite_text_format(&self, content: &str) -> Result<ParsedData> {
+    async fn parse_cqlite_text_format(&self, _content: &str) -> Result<ParsedData> {
         // Similar parsing logic to Cassandra but adapted for CQLite format
         // This is a placeholder - actual implementation would depend on CQLite output format
 
-        let mut parsed = ParsedData {
+        let parsed = ParsedData {
             keyspace: "cqlite_output".to_string(),
             table: "parsed_table".to_string(),
             partitions: Vec::new(),
@@ -366,6 +377,7 @@ impl SstableDumpParser {
     }
 
     /// Parse range tombstone information from line
+    #[allow(dead_code)]
     fn parse_range_tombstone(&self, line: &str) -> Option<RangeTombstone> {
         // Look for range tombstone markers
         if line.contains("[range deleted]") {
@@ -413,7 +425,6 @@ impl Default for DumpMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_test;
 
     #[tokio::test]
     async fn test_parse_cassandra_cell() {

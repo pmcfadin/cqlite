@@ -1,0 +1,649 @@
+warning: unused import: `cqlite_core::types::Value`
+  --> tests/src/bti_integration_tests.rs:6:5
+   |
+6  | use cqlite_core::types::Value;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> tests/src/lib.rs:52:1
+   |
+52 | pub mod bti_integration_tests;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::fs::File`
+  --> tests/src/bti_integration_tests.rs:12:5
+   |
+12 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> tests/src/lib.rs:52:1
+   |
+52 | pub mod bti_integration_tests;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Cursor`
+  --> tests/src/bti_integration_tests.rs:13:15
+   |
+13 | use std::io::{Cursor, Seek, Write as IoWrite};
+   |               ^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> tests/src/lib.rs:52:1
+   |
+52 | pub mod bti_integration_tests;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MockSSTableHeader` is never constructed
+  --> tests/src/parser_validation.rs:19:8
+   |
+19 | struct MockSSTableHeader {
+   |        ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: struct `MockCompressionInfo` is never constructed
+  --> tests/src/parser_validation.rs:30:8
+   |
+30 | struct MockCompressionInfo {
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MockStats` is never constructed
+  --> tests/src/parser_validation.rs:35:8
+   |
+35 | struct MockStats {
+   |        ^^^^^^^^^
+
+warning: function `create_mock_header` is never used
+  --> tests/src/parser_validation.rs:39:4
+   |
+39 | fn create_mock_header() -> MockSSTableHeader {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `create_test_bti_file` is never used
+  --> tests/src/bti_integration_tests.rs:17:4
+   |
+17 | fn create_test_bti_file() -> Result<NamedTempFile, Box<dyn std::error::Error>> {
+   |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `config` is never read
+  --> tests/src/issue_35_validation_tests.rs:26:5
+   |
+22 | pub struct Issue35ValidationHarness {
+   |            ------------------------ field in this struct
+...
+26 |     config: Config,
+   |     ^^^^^^
+
+warning: `cqlite-integration-tests` (lib) generated 9 warnings (run `cargo fix --lib -p cqlite-integration-tests` to apply 3 suggestions)
+warning: field `base_path` is never read
+   --> cqlite-cli/tests/comprehensive_test_framework.rs:491:5
+    |
+490 | pub struct TestDataManager {
+    |            --------------- field in this struct
+491 |     base_path: PathBuf,
+    |     ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: field `mocks` is never read
+   --> cqlite-cli/tests/comprehensive_test_framework.rs:546:5
+    |
+545 | pub struct MockRegistry {
+    |            ------------ field in this struct
+546 |     mocks: HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
+    |     ^^^^^
+
+warning: variable does not need to be mutable
+   --> cqlite-cli/src/test_infrastructure/container.rs:116:13
+    |
+116 |         let mut db_guard = self.database.lock().await;
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: `cqlite-cli` (test "comprehensive_test_framework") generated 2 warnings
+warning: `cqlite-cli` (lib test) generated 1 warning (run `cargo fix --lib -p cqlite-cli --tests` to apply 1 suggestion)
+warning: associated function `with_time` is never used
+   --> tools/sstabledump-validator/src/reconciliation.rs:160:12
+    |
+137 | impl ReconciliationEngine {
+    | ------------------------- associated function in this implementation
+...
+160 |     pub fn with_time(current_time: i64) -> Self {
+    |            ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: enum `ReportFormat` is never used
+  --> tools/sstabledump-validator/src/reporter.rs:36:10
+   |
+36 | pub enum ReportFormat {
+   |          ^^^^^^^^^^^^
+   |
+   = note: `ReportFormat` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `should_fail_ci`, `format_as_text`, and `format_difference` are never used
+   --> tools/sstabledump-validator/src/reporter.rs:115:12
+    |
+44  | impl ValidationReport {
+    | --------------------- methods in this implementation
+...
+115 |     pub fn should_fail_ci(&self) -> bool {
+    |            ^^^^^^^^^^^^^^
+...
+246 |     pub fn format_as_text(&self) -> String {
+    |            ^^^^^^^^^^^^^^
+...
+336 |     fn format_difference(&self, diff: &CellDifference) -> String {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: fields `base_timestamp` and `sequence` are never read
+  --> tools/sstabledump-validator/src/test_datasets.rs:21:5
+   |
+19 | pub struct ReconciliationTestDatasets {
+   |            -------------------------- fields in this struct
+20 |     /// Base timestamp for deterministic test data
+21 |     base_timestamp: i64,
+   |     ^^^^^^^^^^^^^^
+22 |     /// Current sequence number for unique identifiers
+23 |     sequence: u32,
+   |     ^^^^^^^^
+
+warning: multiple methods are never used
+   --> tools/sstabledump-validator/src/test_datasets.rs:42:18
+    |
+32  | impl ReconciliationTestDatasets {
+    | ------------------------------- methods in this implementation
+...
+42  |     pub async fn generate_all_datasets(&mut self) -> Result<HashMap<String, TestDatasetPair>> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+...
+94  |     pub async fn generate_overlapping_writes_dataset(&mut self) -> Result<TestDatasetPair> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+169 |     pub async fn generate_expired_ttl_dataset(&mut self) -> Result<TestDatasetPair> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+240 |     pub async fn generate_row_vs_cell_tombstones_dataset(&mut self) -> Result<TestDatasetPair> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+330 |     pub async fn generate_range_tombstones_dataset(&mut self) -> Result<TestDatasetPair> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+403 |     pub async fn generate_complex_mixed_dataset(&mut self) -> Result<TestDatasetPair> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+489 |     pub async fn generate_ttl_tombstone_interaction_dataset(&mut self) -> Result<TestDatasetPair> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+556 |     pub async fn generate_multi_generation_conflicts_dataset(&mut self) -> Result<TestDatasetPair> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+635 |     fn next_sequence(&mut self) -> u32 {
+    |        ^^^^^^^^^^^^^
+...
+641 |     pub fn create_test_range_tombstone(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `TestDatasetPair` is never constructed
+   --> tools/sstabledump-validator/src/test_datasets.rs:660:12
+    |
+660 | pub struct TestDatasetPair {
+    |            ^^^^^^^^^^^^^^^
+    |
+    = note: `TestDatasetPair` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `ExpectedReconciliation` is never constructed
+   --> tools/sstabledump-validator/src/test_datasets.rs:670:12
+    |
+670 | pub struct ExpectedReconciliation {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `ExpectedReconciliation` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `ExpectedCell` is never constructed
+   --> tools/sstabledump-validator/src/test_datasets.rs:678:12
+    |
+678 | pub struct ExpectedCell {
+    |            ^^^^^^^^^^^^
+    |
+    = note: `ExpectedCell` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: enum `ReportFormat` is never used
+  --> tools/sstabledump-validator/src/reporter.rs:36:10
+   |
+36 | pub enum ReportFormat {
+   |          ^^^^^^^^^^^^
+   |
+   = note: `ReportFormat` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` on by default
+
+warning: method `create_test_range_tombstone` is never used
+   --> tools/sstabledump-validator/src/test_datasets.rs:641:12
+    |
+32  | impl ReconciliationTestDatasets {
+    | ------------------------------- method in this implementation
+...
+641 |     pub fn create_test_range_tombstone(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `description`, `cqlite_data`, and `expected_reconciliation` are never read
+   --> tools/sstabledump-validator/src/test_datasets.rs:662:9
+    |
+660 | pub struct TestDatasetPair {
+    |            --------------- fields in this struct
+661 |     pub name: String,
+662 |     pub description: String,
+    |         ^^^^^^^^^^^
+663 |     pub cassandra_data: ParsedData,
+664 |     pub cqlite_data: ParsedData,
+    |         ^^^^^^^^^^^
+665 |     pub expected_reconciliation: ExpectedReconciliation,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `TestDatasetPair` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `visible_cells`, `expected_winner`, and `reconciliation_reason` are never read
+   --> tools/sstabledump-validator/src/test_datasets.rs:671:9
+    |
+670 | pub struct ExpectedReconciliation {
+    |            ---------------------- fields in this struct
+671 |     pub visible_cells: usize,
+    |         ^^^^^^^^^^^^^
+672 |     pub expected_winner: Option<ExpectedCell>,
+    |         ^^^^^^^^^^^^^^^
+673 |     pub reconciliation_reason: crate::reconciliation::ReconciliationReason,
+    |         ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `ExpectedReconciliation` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `column_name`, `value`, and `timestamp` are never read
+   --> tools/sstabledump-validator/src/test_datasets.rs:679:9
+    |
+678 | pub struct ExpectedCell {
+    |            ------------ fields in this struct
+679 |     pub column_name: String,
+    |         ^^^^^^^^^^^
+680 |     pub value: CellValue,
+    |         ^^^^^
+681 |     pub timestamp: i64,
+    |         ^^^^^^^^^
+    |
+    = note: `ExpectedCell` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: unused variable: `i`
+   --> cqlite-cli/tests/integration_tests.rs:461:13
+    |
+461 |         for i in 0..5 {
+    |             ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: function `validate_output_format` is never used
+  --> cqlite-cli/tests/test_helpers.rs:80:8
+   |
+80 | pub fn validate_output_format(output: &Output, format: &str) -> Result<bool> {
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `extract_timing_ms` is never used
+   --> cqlite-cli/tests/test_helpers.rs:292:8
+    |
+292 | pub fn extract_timing_ms(output: &Output) -> Option<f64> {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: struct `PerformanceMeasurement` is never constructed
+   --> cqlite-cli/tests/test_helpers.rs:332:12
+    |
+332 | pub struct PerformanceMeasurement {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `start`, `stop`, `duration`, and `duration_ms` are never used
+   --> cqlite-cli/tests/test_helpers.rs:338:12
+    |
+337 | impl PerformanceMeasurement {
+    | --------------------------- associated items in this implementation
+338 |     pub fn start() -> Self {
+    |            ^^^^^
+...
+345 |     pub fn stop(&mut self) {
+    |            ^^^^
+...
+349 |     pub fn duration(&self) -> Option<Duration> {
+    |            ^^^^^^^^
+...
+353 |     pub fn duration_ms(&self) -> Option<f64> {
+    |            ^^^^^^^^^^^
+
+warning: methods `assert_success`, `assert_failure`, `assert_contains`, `summary`, and `has_failures` are never used
+   --> cqlite-cli/tests/test_helpers.rs:380:12
+    |
+371 | impl TestValidator {
+    | ------------------ methods in this implementation
+...
+380 |     pub fn assert_success(&mut self, output: &Output, description: &str) {
+    |            ^^^^^^^^^^^^^^
+...
+394 |     pub fn assert_failure(&mut self, output: &Output, description: &str) {
+    |            ^^^^^^^^^^^^^^
+...
+404 |     pub fn assert_contains(&mut self, output: &Output, pattern: &str, description: &str) {
+    |            ^^^^^^^^^^^^^^^
+...
+420 |     pub fn summary(&self) -> String {
+    |            ^^^^^^^
+...
+424 |     pub fn has_failures(&self) -> bool {
+    |            ^^^^^^^^^^^^
+
+warning: function `test_basic_cli_info` is never used
+   --> cqlite-cli/tests/test_helpers.rs:434:12
+    |
+434 |     pub fn test_basic_cli_info() -> Result<()> {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `test_output_formats` is never used
+   --> cqlite-cli/tests/test_helpers.rs:459:12
+    |
+459 |     pub fn test_output_formats(db_path: &Path) -> Result<()> {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> cqlite-cli/tests/unit_tests.rs:415:9
+    |
+415 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by default
+
+warning: function `create_test_schema` is never used
+   --> cqlite-cli/tests/unit_tests.rs:418:12
+    |
+418 |     pub fn create_test_schema() -> cqlite_core::schema::TableSchema {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: function `create_test_data` is never used
+   --> cqlite-cli/tests/unit_tests.rs:461:12
+    |
+461 |     pub fn create_test_data(size: usize) -> Vec<(String, String)> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: function `validate_output_format` is never used
+   --> cqlite-cli/tests/unit_tests.rs:468:12
+    |
+468 |     pub fn validate_output_format(output: &str, format: &str) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `sstabledump-validator` (bin "sstabledump-validator") generated 8 warnings
+warning: `sstabledump-validator` (bin "sstabledump-validator" test) generated 5 warnings
+warning: `cqlite-cli` (test "integration_tests") generated 1 warning
+warning: `cqlite-cli` (test "test_runner") generated 7 warnings
+warning: `cqlite-cli` (test "unit_tests") generated 4 warnings (run `cargo fix --test "unit_tests"` to apply 1 suggestion)
+warning: unused imports: `TestResult` and `TestStatus`
+   --> tests/src/bin/issue_17_test_runner.rs:358:13
+    |
+358 |             TestResult, TestStatus, TestSuiteReport,
+    |             ^^^^^^^^^^  ^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by default
+
+warning: `cqlite-integration-tests` (bin "issue_17_test_runner" test) generated 1 warning (run `cargo fix --bin "issue_17_test_runner" --tests` to apply 1 suggestion)
+warning: field `config_file` is never read
+   --> tests/src/bin/performance_regression_test_runner.rs:108:5
+    |
+107 | pub struct PerformanceRegressionTester {
+    |            --------------------------- field in this struct
+108 |     config_file: PathBuf,
+    |     ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `cqlite-integration-tests` (bin "performance_regression_test_runner") generated 1 warning
+warning: `cqlite-integration-tests` (bin "performance_regression_test_runner" test) generated 1 warning (1 duplicate)
+warning: unused variable: `query_planner`
+  --> tests/src/integration_e2e.rs:56:9
+   |
+56 |     let query_planner = cqlite_core::query::planner::QueryPlanner::new(schema_manager.clone(), &config);
+   |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_planner`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `query_executor`
+  --> tests/src/integration_e2e.rs:57:9
+   |
+57 |     let query_executor = cqlite_core::query::executor::QueryExecutor::new(storage.clone(), schema_manager.clone(), &config);
+   |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_executor`
+
+warning: unused variable: `schema_manager`
+   --> tests/src/integration_e2e.rs:183:9
+    |
+183 |     let schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_schema_manager`
+
+warning: unused variable: `temp_dir`
+   --> tests/src/integration_e2e.rs:331:9
+    |
+331 |     let temp_dir = TempDir::new()?;
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_temp_dir`
+
+warning: unused variable: `config`
+   --> tests/src/integration_e2e.rs:332:9
+    |
+332 |     let config = Config::default();
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `parser`
+   --> tests/src/integration_e2e.rs:335:9
+    |
+335 |     let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?; // Using default config
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_parser`
+
+warning: unused variable: `remaining`
+   --> tests/src/integration_e2e.rs:340:10
+    |
+340 |     let (remaining, parsed_header) = parse_sstable_header(&serialized_header).map_err(|e| {
+    |          ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_remaining`
+
+warning: unused variable: `schema_manager`
+    --> tests/src/integration_e2e.rs:1106:9
+     |
+1106 |     let schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
+     |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_schema_manager`
+
+warning: `cqlite-integration-tests` (test "integration_e2e") generated 8 warnings
+warning: unused import: `std::env`
+   --> tests/src/repl_integration_tests.rs:738:9
+    |
+738 |     use std::env;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::env`
+   --> tests/src/repl_quality_gates.rs:924:9
+    |
+924 |     use std::env;
+    |         ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> tests/src/parser_validation.rs:225:9
+    |
+225 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `cqlite_core::types::Value`
+ --> tests/src/bti_integration_tests.rs:6:5
+  |
+6 | use cqlite_core::types::Value;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Duration` and `Instant`
+   --> tests/src/bti_integration_tests.rs:161:21
+    |
+161 |     use std::time::{Duration, Instant};
+    |                     ^^^^^^^^  ^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> tests/src/issue_35_live_integration_tests.rs:12:5
+   |
+12 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Path`
+  --> tests/src/issue_35_live_integration_tests.rs:13:17
+   |
+13 | use std::path::{Path, PathBuf};
+   |                 ^^^^
+
+warning: unused import: `PathBuf`
+  --> tests/src/issue_35_sstabledump_validation.rs:13:23
+   |
+13 | use std::path::{Path, PathBuf};
+   |                       ^^^^^^^
+
+warning: unused import: `std::process::Command`
+  --> tests/src/issue_35_sstabledump_validation.rs:14:5
+   |
+14 | use std::process::Command;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `reader`
+   --> tests/src/issue_35_sstabledump_validation.rs:513:9
+    |
+513 |         reader: &SSTableReader,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reader`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `reader`
+   --> tests/src/issue_35_sstabledump_validation.rs:624:9
+    |
+624 |         reader: &SSTableReader,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reader`
+
+warning: unused variable: `sstabledump_output`
+   --> tests/src/issue_35_sstabledump_validation.rs:625:9
+    |
+625 |         sstabledump_output: &SSTableDumpOutput,
+    |         ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sstabledump_output`
+
+warning: unused variable: `query_planner`
+  --> tests/src/integration_e2e.rs:56:9
+   |
+56 |     let query_planner = cqlite_core::query::planner::QueryPlanner::new(schema_manager.clone(), &config);
+   |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_planner`
+
+warning: unused variable: `suite`
+   --> tests/src/parser_validation.rs:482:13
+    |
+482 |         let suite = ParserValidationSuite::new();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_suite`
+
+warning: unused variable: `suite`
+   --> tests/src/parser_validation.rs:566:13
+    |
+566 |         let suite = ParserValidationSuite::new();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_suite`
+
+warning: unused variable: `suite`
+   --> tests/src/parser_validation.rs:772:13
+    |
+772 |         let suite = ParserValidationSuite::new();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_suite`
+
+warning: variable does not need to be mutable
+   --> tests/src/comprehensive_sstable_test_suite.rs:910:13
+    |
+910 |         let mut suite = ComprehensiveSSTableTestSuite::new().await.unwrap();
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: type `WidePartitionTestConfig` is more private than the item `Issue35LiveIntegrationTestSuite::generate_wide_partition_data`
+  --> tests/src/issue_35_live_integration_tests.rs:75:5
+   |
+75 |     pub async fn generate_wide_partition_data(&self, config: &WidePartitionTestConfig) -> Result<PathBuf> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `Issue35LiveIntegrationTestSuite::generate_wide_partition_data` is reachable at visibility `pub`
+   |
+note: but type `WidePartitionTestConfig` is only usable at visibility `pub(self)`
+  --> tests/src/issue_35_live_integration_tests.rs:19:1
+   |
+19 | struct WidePartitionTestConfig {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: field `config` is never read
+  --> tests/src/issue_35_validation_tests.rs:26:5
+   |
+22 | pub struct Issue35ValidationHarness {
+   |            ------------------------ field in this struct
+...
+26 |     config: Config,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `cqlite-integration-tests` (lib test) generated 26 warnings (7 duplicates) (run `cargo fix --lib -p cqlite-integration-tests --tests` to apply 10 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.83s
+     Running unittests src/lib.rs (target/debug/deps/cqlite_cli-30972892db0e2c38)
+
+running 20 tests
+test test_infrastructure::container::tests::test_test_config_builder ... ok
+test test_infrastructure::assertions::tests::test_command_result_assertion ... ok
+test test_infrastructure::assertions::tests::test_output_assertion ... ok
+test test_infrastructure::cli_helpers::tests::test_command_builder ... ok
+test test_infrastructure::integration::tests::test_integration_test_case_creation ... ok
+test test_infrastructure::fixtures::tests::test_schema_fixture ... ok
+test test_infrastructure::assertions::tests::test_json_assertion ... ok
+test test_infrastructure::performance::tests::test_benchmark_suite_creation ... ok
+test test_infrastructure::performance::tests::test_performance_benchmark_creation ... ok
+test test_infrastructure::fixtures::tests::test_sstable_fixture ... ok
+test test_infrastructure::assertions::tests::test_table_assertion ... ok
+test test_infrastructure::fixtures::tests::test_test_data_builder ... ok
+test test_infrastructure::cli_helpers::tests::test_cli_runner_creation ... ok
+test test_infrastructure::integration::tests::test_integration_test_suite_creation ... ok
+test test_infrastructure::container::tests::test_container_creation ... ok
+test test_infrastructure::integration::tests::test_e2e_runner_creation ... ok
+test test_infrastructure::performance::tests::test_performance_runner_creation ... ok
+test test_infrastructure::container::tests::test_cli_config_creation ... ok
+test test_infrastructure::performance::tests::test_statistics_calculation ... ok
+test test_infrastructure::container::tests::test_database_initialization ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (target/debug/deps/cqlite-3e44bad72892e423)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/comprehensive_test_framework.rs (target/debug/deps/comprehensive_test_framework-6d4d2f03647f2001)
+
+running 3 tests
+
+thread 'tests::test_coverage_threshold' panicked at cqlite-cli/tests/comprehensive_test_framework.rs:899:9:
+assertion `left == right` failed
+  left: true
+ right: false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::test_framework_configuration ... ok
+test tests::test_framework_initialization ... ok
+test tests::test_coverage_threshold ... FAILED
+
+failures:
+
+failures:
+    tests::test_coverage_threshold
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p cqlite-cli --test comprehensive_test_framework`

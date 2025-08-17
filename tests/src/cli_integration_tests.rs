@@ -4,10 +4,8 @@
 //! including all commands, output formats, error handling, and real-world usage scenarios.
 
 use assert_cmd::prelude::*;
-use predicates::prelude::*;
-use serde_json;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -53,7 +51,7 @@ pub struct CLITestResult {
 /// CLI integration test suite
 pub struct CLIIntegrationTestSuite {
     config: CLITestConfig,
-    temp_dir: TempDir,
+    _temp_dir: TempDir,
     test_data_dir: PathBuf,
 }
 
@@ -65,7 +63,7 @@ impl CLIIntegrationTestSuite {
 
         Ok(Self {
             config,
-            temp_dir,
+            _temp_dir: temp_dir,
             test_data_dir,
         })
     }
@@ -518,7 +516,7 @@ impl CLIIntegrationTestSuite {
         // Set timeout using timeout command on Unix systems
         #[cfg(unix)]
         {
-            let timeout_cmd = format!("timeout {} ", timeout);
+            let _timeout_cmd = format!("timeout {} ", timeout);
             // Note: This is a simplified approach. In production, you'd use proper timeout handling
         }
 
@@ -595,7 +593,7 @@ impl CLIIntegrationTestSuite {
     /// Generate detailed test information
     fn generate_test_details(
         &self,
-        test_name: &str,
+        _test_name: &str,
         status: &std::process::ExitStatus,
         stdout: &str,
         stderr: &str,

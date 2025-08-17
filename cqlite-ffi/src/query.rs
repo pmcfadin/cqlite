@@ -3,10 +3,7 @@
 //! This module contains the FFI query interface.
 
 use crate::database::CQLiteDB;
-use crate::error::*;
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
-use std::ptr;
+use std::os::raw::c_int;
 
 /// Query result handle
 pub struct CQLiteResult {

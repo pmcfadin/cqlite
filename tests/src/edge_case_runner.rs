@@ -4,7 +4,6 @@
 //! for CQLite's Cassandra compatibility, including data types, corruption,
 //! stress testing, and vulnerability detection.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use crate::edge_case_data_types::EdgeCaseDataTypeTests;
 use crate::edge_case_sstable_corruption::SSTableCorruptionTests;

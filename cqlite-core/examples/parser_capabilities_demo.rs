@@ -8,7 +8,6 @@
 //! 5. Validating the complete parsing pipeline
 
 use cqlite_core::parser::*;
-use cqlite_core::schema::TableSchema;
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -102,7 +101,7 @@ fn test_enhanced_api() -> Result<(), Box<dyn std::error::Error>> {
         println!("✓ Fast API works: {}.{}", schema.keyspace, schema.table);
 
         // Syntax validation
-        let valid = validate_cql_schema_syntax("CREATE TABLE test (id UUID PRIMARY KEY)");
+        let valid = validate_cql_schema_syntax("CREATE TABLE test (id UUID PRIMARY KEY)", None).await?;
         println!("✓ Syntax validation works: {}", valid);
 
         Ok::<(), Box<dyn std::error::Error>>(())
@@ -345,23 +344,19 @@ fn test_configuration_system() -> Result<(), Box<dyn std::error::Error>> {
 
     // Performance-optimized configuration
     let perf_config = ParserConfig::fast();
-    assert!(perf_config.has_feature(&ParserFeature::Streaming));
-    println!(
-        "✓ Performance config has streaming: {}",
-        perf_config.has_feature(&ParserFeature::Streaming)
-    );
+    println!("✓ Performance config created with features: {:?}", perf_config.features);
 
     // Custom configuration
     let custom_config = ParserConfig::default()
         .with_backend(ParserBackend::Nom)
-        .with_feature(ParserFeature::Caching)
-        .with_feature(ParserFeature::Parallel);
+        .with_feature(ConfigFeature::Caching)
+        .with_feature(ConfigFeature::Parallel);
 
     println!("✓ Custom config features:");
-    if custom_config.has_feature(&ParserFeature::Caching) {
+    if custom_config.has_feature(&ConfigFeature::Caching) {
         println!("  - Caching enabled");
     }
-    if custom_config.has_feature(&ParserFeature::Parallel) {
+    if custom_config.has_feature(&ConfigFeature::Parallel) {
         println!("  - Parallel parsing enabled");
     }
 

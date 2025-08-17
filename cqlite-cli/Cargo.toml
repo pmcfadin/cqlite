@@ -61,6 +61,9 @@ dirs = { workspace = true }
 # Date/time handling
 chrono = { workspace = true }
 
+# Regular expressions
+regex = "1.10"
+
 # Development dependencies
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -102,3 +105,4 @@ trybuild = "1.0"                # Compile-fail testing
 default = ["interactive", "tui"]
 interactive = []
 tui = ["ratatui", "crossterm"]
+ci_zero_tolerance = []

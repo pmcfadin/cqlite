@@ -43,6 +43,16 @@ pub struct BulletproofReader {
 }
 
 impl BulletproofReader {
+    /// Create a new bulletproof reader with default settings (for testing)
+    pub fn new() -> Self {
+        Self {
+            info: SSTableInfo::default(),
+            base_dir: PathBuf::new(),
+            decompressor: None,
+            data_reader: None,
+        }
+    }
+
     /// Create a new bulletproof reader from any SSTable file path
     ///
     /// This will automatically detect the format version and set up
@@ -261,7 +271,7 @@ impl BulletproofReader {
     /// reverse engineering and may not match the official Cassandra Big
     /// format specification. The magic number check and field interpretations
     /// should be verified against CEP-25 specification.
-    fn parse_oa_header(&self, data: &[u8]) -> Result<OaFormatHeader> {
+    pub fn parse_oa_header(&self, data: &[u8]) -> Result<OaFormatHeader> {
         if data.len() < 8 {
             return Err(Error::InvalidFormat(
                 "Insufficient data for 'oa' header".to_string(),
@@ -411,7 +421,7 @@ impl BulletproofReader {
     }
 
     /// Read Variable Length Integer (VInt) from data
-    fn read_vint(&self, data: &[u8]) -> Result<(u64, usize)> {
+    pub fn read_vint(&self, data: &[u8]) -> Result<(u64, usize)> {
         if data.is_empty() {
             return Err(Error::InvalidFormat("Empty data for VInt".to_string()));
         }
@@ -599,15 +609,17 @@ impl BulletproofReader {
 /// in CEP-25. Field interpretations and byte layouts should be verified
 /// against the official specification.
 #[derive(Debug, Clone)]
-struct OaFormatHeader {
+pub struct OaFormatHeader {
     /// Magic number (EXPERIMENTAL: assumed to be 0x6F610000)
     /// TODO: Verify against CEP-25 Big format specification
-    magic_number: u32,
+    #[allow(dead_code)]
+    pub magic_number: u32,
     /// Format version (interpretation may not match Big format spec)
-    format_version: u32,
+    pub format_version: u32,
     /// Number of partitions in this SSTable (experimental field interpretation)
     partition_count: u64,
     /// Size of metadata section (experimental field interpretation)
+    #[allow(dead_code)]
     metadata_size: u64,
     /// Total header size in bytes
     header_size: usize,

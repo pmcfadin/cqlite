@@ -31,6 +31,7 @@ unused_must_use = "deny"
 warnings = "warn"  # Allow warnings during Rust 2024 migration
 private_interfaces = "allow"  # Allow private interfaces during development
 
+
 [workspace.dependencies]
 # Core dependencies - avoid "full" features, enable per-crate
 tokio = { version = "1.0", default-features = false }

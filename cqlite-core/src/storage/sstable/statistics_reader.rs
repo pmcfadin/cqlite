@@ -429,8 +429,6 @@ pub async fn check_statistics_availability(sstable_dir: &Path) -> Result<Vec<Pat
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Config;
 
     #[tokio::test]
     async fn test_statistics_reader_creation() {
@@ -447,7 +445,7 @@ mod tests {
         // find_statistics_file would look for users-123abc-Statistics.db
         // This is a unit test for the path manipulation logic
 
-        if let Some(parent) = data_path.parent() {
+        if let Some(_parent) = data_path.parent() {
             if let Some(stem) = data_path.file_stem() {
                 if let Some(stem_str) = stem.to_str() {
                     let stats_name = stem_str.replace("-Data", "-Statistics") + ".db";

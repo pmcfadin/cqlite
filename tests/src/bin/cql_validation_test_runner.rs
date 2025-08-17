@@ -5,10 +5,11 @@
 //! generates consolidated reports.
 
 use clap::{Arg, ArgMatches, Command};
-use cqlite_tests::cql_integration_tests::{CqlIntegrationTestSuite, IntegrationTestResult};
+use cqlite_tests::cql_integration_tests::{CqlIntegrationTestSuite, IntegrationTestReport};
 use cqlite_tests::cql_parser_validation_suite::{CqlParserValidationSuite, ValidationReport};
 use cqlite_tests::cql_performance_benchmarks::{BenchmarkReport, CqlPerformanceBenchmarkSuite};
 use std::fs;
+use std::iter;
 use std::path::Path;
 use std::time::Instant;
 
@@ -46,7 +47,7 @@ pub struct TestRunnerConfig {
 #[derive(Debug)]
 pub struct ConsolidatedTestResults {
     pub validation_report: Option<ValidationReport>,
-    pub integration_report: Option<ValidationReport>,
+    pub integration_report: Option<IntegrationTestReport>,
     pub benchmark_report: Option<BenchmarkReport>,
     pub total_execution_time_ms: u64,
     pub overall_success: bool,
@@ -81,7 +82,7 @@ impl CqlValidationTestRunner {
         &mut self,
     ) -> Result<ConsolidatedTestResults, Box<dyn std::error::Error>> {
         println!("🚀 Starting CQL Schema Validation Test Runner");
-        println!("=".repeat(60));
+        println!("{}", "=".repeat(60));
 
         // Create output directory
         fs::create_dir_all(&self.config.output_dir)?;
@@ -97,7 +98,7 @@ impl CqlValidationTestRunner {
         // Run validation suite
         if self.config.run_validation_suite {
             println!("\n🧪 Phase 1: Running CQL Parser Validation Suite");
-            println!("-".repeat(40));
+            println!("{}", iter::repeat('-').take(40).collect::<String>());
 
             match self.run_validation_suite().await {
                 Ok(report) => {
@@ -121,7 +122,7 @@ impl CqlValidationTestRunner {
         // Run integration tests
         if self.config.run_integration_tests {
             println!("\n🔗 Phase 2: Running CQL Integration Tests");
-            println!("-".repeat(40));
+            println!("{}", iter::repeat('-').take(40).collect::<String>());
 
             match self.run_integration_tests().await {
                 Ok(report) => {
@@ -145,7 +146,7 @@ impl CqlValidationTestRunner {
         // Run performance benchmarks
         if self.config.run_performance_benchmarks {
             println!("\n⚡ Phase 3: Running CQL Performance Benchmarks");
-            println!("-".repeat(40));
+            println!("{}", iter::repeat('-').take(40).collect::<String>());
 
             match self.run_performance_benchmarks().await {
                 Ok(report) => {
@@ -226,7 +227,7 @@ impl CqlValidationTestRunner {
         results: &ConsolidatedTestResults,
     ) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n📊 Generating Test Reports");
-        println!("-".repeat(30));
+        println!("{}", iter::repeat('-').take(30).collect::<String>());
 
         // Generate JSON reports
         if let Some(validation_report) = &results.validation_report {
@@ -268,7 +269,7 @@ impl CqlValidationTestRunner {
                     passed_tests: r.passed_tests,
                     failed_tests: r.failed_tests,
                     execution_time_ms: r.total_execution_time_ms,
-                    schemas_validated: r.total_schemas_validated,
+                    schemas_validated: r.total_tests, // Using total_tests as schemas_validated is not available
                 }),
             benchmark_summary: results.benchmark_report.as_ref().map(|r| BenchmarkSummary {
                 total_benchmarks: r.total_benchmarks,
@@ -624,7 +625,7 @@ impl CqlValidationTestRunner {
     /// Print final summary to console
     fn print_final_summary(&self, results: &ConsolidatedTestResults) {
         println!("\n🎯 Final Test Summary");
-        println!("=".repeat(60));
+        println!("{}", iter::repeat('=').take(60).collect::<String>());
         println!(
             "Total Execution Time: {:.2}s",
             results.total_execution_time_ms as f64 / 1000.0
@@ -651,7 +652,7 @@ impl CqlValidationTestRunner {
             );
         }
 
-        println!("=".repeat(60));
+        println!("{}", iter::repeat('=').take(60).collect::<String>());
 
         if results.overall_success {
             println!("🎉 ALL TESTS PASSED! CQL schema validation is working correctly.");
@@ -725,7 +726,7 @@ fn parse_args() -> ArgMatches {
         )
         .arg(
             Arg::new("output")
-                .short("o")
+                .short('o')
                 .long("output")
                 .value_name("DIR")
                 .help("Output directory for reports")
@@ -733,7 +734,7 @@ fn parse_args() -> ArgMatches {
         )
         .arg(
             Arg::new("verbose")
-                .short("v")
+                .short('v')
                 .long("verbose")
                 .help("Verbose output")
                 .action(clap::ArgAction::SetTrue),

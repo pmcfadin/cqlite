@@ -479,6 +479,7 @@ pub use regression::{RegressionBaseline, RegressionTestCase};
 /// This provides the main interface for the comprehensive validation framework
 /// that integrates all validation components for robust error handling and
 /// data integrity validation with Cassandra 5+ support.
+#[allow(dead_code)]
 pub struct Issue17ValidationFramework {
     /// Core validation framework
     core_framework: std::sync::Arc<core::ValidationFramework>,

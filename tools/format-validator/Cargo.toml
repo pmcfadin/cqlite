@@ -37,3 +37,7 @@ pretty-hex = "0.4"
 
 [dependencies.cqlite-core]
 path = "../../cqlite-core"
+
+[features]
+default = []
+ci_zero_tolerance = []

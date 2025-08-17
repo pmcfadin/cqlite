@@ -3,10 +3,8 @@
 //! Comprehensive stress tests for large data volumes, memory constraints,
 //! and performance edge cases that could break Cassandra compatibility.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::parser::types::*;
-use cqlite_core::parser::vint::*;
 use cqlite_core::{Value, error::Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,13 +23,13 @@ struct StressTestResult {
     stress_type: StressTestType,
     passed: bool,
     error_message: Option<String>,
-    duration_ms: u64,
-    memory_used_bytes: u64,
+    _duration_ms: u64,
+    _memory_used_bytes: u64,
     throughput_ops_per_sec: f64,
     data_processed_bytes: u64,
     peak_memory_bytes: u64,
     memory_leak_detected: bool,
-    performance_degradation: f64,
+    _performance_degradation: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -290,13 +288,13 @@ impl StressTestFramework {
             stress_type: StressTestType::LargeDataVolume,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: throughput,
             data_processed_bytes: data_processed,
             peak_memory_bytes: memory_end,
             memory_leak_detected: memory_used > 100 * 1024 * 1024, // 100MB threshold
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -390,13 +388,13 @@ impl StressTestFramework {
             stress_type: StressTestType::LargeDataVolume,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: throughput,
             data_processed_bytes: data_processed,
             peak_memory_bytes: memory_end,
             memory_leak_detected: memory_used > 50 * 1024 * 1024, // 50MB threshold
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -480,13 +478,13 @@ impl StressTestFramework {
             stress_type: StressTestType::LargeDataVolume,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: throughput,
             data_processed_bytes: data_processed,
             peak_memory_bytes: memory_end,
             memory_leak_detected: memory_used > 200 * 1024 * 1024, // 200MB threshold
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -560,13 +558,13 @@ impl StressTestFramework {
             stress_type: StressTestType::LargeDataVolume,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: 0.0,
             data_processed_bytes: data_processed,
             peak_memory_bytes: memory_end,
             memory_leak_detected: false,
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -662,13 +660,13 @@ impl StressTestFramework {
             stress_type: StressTestType::LargeDataVolume,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: throughput,
             data_processed_bytes: data_processed,
             peak_memory_bytes: memory_end,
             memory_leak_detected: memory_used > 100 * 1024 * 1024, // 100MB threshold
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -729,13 +727,13 @@ impl StressTestFramework {
             stress_type: StressTestType::MemoryExhaustion,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: allocations as f64 / duration.as_secs_f64(),
             data_processed_bytes: (allocations * 1024 * 1024) as u64,
             peak_memory_bytes: memory_end,
             memory_leak_detected: false,
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -777,13 +775,13 @@ impl StressTestFramework {
             stress_type: StressTestType::MemoryExhaustion,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: 1.0 / duration.as_secs_f64(),
             data_processed_bytes: data_size as u64,
             peak_memory_bytes: memory_end,
             memory_leak_detected: false,
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -835,13 +833,13 @@ impl StressTestFramework {
             stress_type: StressTestType::MemoryExhaustion,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: 0,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: 0,
             throughput_ops_per_sec: 0.0,
             data_processed_bytes: 0,
             peak_memory_bytes: 0,
             memory_leak_detected: false,
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -894,13 +892,13 @@ impl StressTestFramework {
             stress_type: StressTestType::MemoryExhaustion,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: 0.0,
             data_processed_bytes: 0,
             peak_memory_bytes: memory_end,
             memory_leak_detected: memory_used > 50 * 1024 * 1024, // 50MB threshold
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())
@@ -995,13 +993,13 @@ impl StressTestFramework {
             stress_type: StressTestType::ConcurrencyStress,
             passed,
             error_message,
-            duration_ms: duration.as_millis() as u64,
-            memory_used_bytes: memory_used,
+            _duration_ms: duration.as_millis() as u64,
+            _memory_used_bytes: memory_used,
             throughput_ops_per_sec: throughput,
             data_processed_bytes: ops_completed as u64 * 100, // Estimate
             peak_memory_bytes: memory_end,
             memory_leak_detected: false,
-            performance_degradation: 0.0,
+            _performance_degradation: 0.0,
         });
 
         Ok(())

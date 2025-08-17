@@ -39,6 +39,7 @@ pub struct WriteAheadLog {
     file: Arc<Mutex<tokio::fs::File>>,
 
     /// Platform abstraction
+    #[allow(dead_code)]
     platform: Arc<Platform>,
 
     /// Configuration

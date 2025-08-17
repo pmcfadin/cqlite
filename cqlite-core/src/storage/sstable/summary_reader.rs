@@ -78,6 +78,7 @@ pub struct TokenRange {
 }
 
 /// High-level Summary.db file reader
+#[allow(dead_code)]
 pub struct SummaryReader {
     /// Path to the Summary.db file
     file_path: PathBuf,

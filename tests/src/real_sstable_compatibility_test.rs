@@ -3,13 +3,11 @@
 //! This module tests CQLite parser against actual Cassandra 5 SSTable files
 //! generated in the test environment to ensure 100% compatibility.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::header::{SSTABLE_MAGIC, parse_sstable_header};
+use cqlite_core::parser::header::SSTABLE_MAGIC;
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
-use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::{Value, types::*};
+use cqlite_core::parser::SSTableParser;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -77,7 +75,7 @@ pub struct DataStructureAnalysis {
 /// Main compatibility test runner for real SSTable files
 pub struct RealSSTableCompatibilityTester {
     config: RealCompatibilityConfig,
-    parser: SSTableParser,
+    _parser: SSTableParser,
     results: Vec<RealCompatibilityResult>,
 }
 
@@ -87,9 +85,14 @@ impl RealSSTableCompatibilityTester {
         let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
         Ok(Self {
             config,
-            parser,
+            _parser: parser,
             results: Vec::new(),
         })
+    }
+
+    /// Get a reference to the test results
+    pub fn results(&self) -> &Vec<RealCompatibilityResult> {
+        &self.results
     }
 
     /// Run comprehensive compatibility tests against real SSTable files

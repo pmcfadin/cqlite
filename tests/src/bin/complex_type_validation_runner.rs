@@ -342,7 +342,7 @@ async fn run_performance_benchmarks(
 }
 
 /// Generate comprehensive validation summary
-fn generate_comprehensive_summary(output_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn _generate_comprehensive_summary(output_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let summary_path = output_dir.join("VALIDATION_SUMMARY.md");
 
     let summary_content = format!(

@@ -229,6 +229,7 @@ fn demo_node_selection() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cqlite_core::storage::sstable::bti::FormatType;
 
     #[test]
     fn test_bti_demo_integration() {

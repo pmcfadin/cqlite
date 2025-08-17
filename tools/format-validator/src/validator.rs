@@ -229,7 +229,6 @@ impl FormatValidator for SSTableValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_validator_creation() {
@@ -260,7 +259,7 @@ mod tests {
         let mut data = vec![0x6F, 0x61, 0x00, 0x00]; // Magic
         data.extend_from_slice(&[0x00, 0x01]); // Version
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Checksum placeholder
-        data.extend_from_slice(&b"test data");
+        data.extend_from_slice(b"test data");
 
         let result = validator.validate_memory(&data, SSTableFileType::Data);
         assert!(result.is_ok());

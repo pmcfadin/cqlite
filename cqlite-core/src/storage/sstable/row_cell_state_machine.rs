@@ -12,13 +12,15 @@
 use crate::{
     error::{Error, Result},
     parser::{
-        header::CassandraVersion,
         types::{CqlTypeId, parse_cql_value},
         vint::parse_vint_length,
     },
     schema::TableSchema,
     types::{ComparatorType, TombstoneType, Value},
 };
+
+// Re-export CassandraVersion for test visibility
+pub use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;
 
 /// State machine states for Cassandra 5 'oa' format row/cell parsing
@@ -144,6 +146,7 @@ pub struct RowCellStateMachine {
     /// Table schema for type-aware parsing
     schema: Option<TableSchema>,
     /// Comparator type for key decoding
+    #[allow(dead_code)]
     comparator: Option<ComparatorType>,
     /// Cassandra version for format-specific parsing
     version: CassandraVersion,
@@ -511,95 +514,10 @@ impl RowCellStateMachine {
         Ok(offset)
     }
 
-    /// Parse static row data if present
+    /// Parse static row data if present (private implementation)
     fn parse_static_row(&mut self, data: &[u8]) -> Result<usize> {
-        if data.is_empty() {
-            return Err(Error::corruption("No data for static row"));
-        }
-
-        let mut offset = 0;
-
-        // Check static row flag
-        let static_flag = data[offset];
-        offset += 1;
-
-        if (static_flag & 0x40) == 0 {
-            // No static row, transition to clustering rows
-            self.state = State::ClusteringRows;
-            return Ok(0);
-        }
-
-        // Parse static column count (VInt)
-        let (remaining, column_count) = parse_vint_length(&data[offset..])
-            .map_err(|_| Error::corruption("Failed to parse static column count"))?;
-        offset = data.len() - remaining.len();
-
-        if column_count > 1000 {
-            return Err(Error::corruption("Too many static columns"));
-        }
-
-        let mut columns = HashMap::new();
-
-        // Parse each static column
-        for i in 0..column_count {
-            if offset >= data.len() {
-                return Err(Error::corruption(format!(
-                    "Insufficient data for static column {}",
-                    i
-                )));
-            }
-
-            // Parse column name length and data
-            let (remaining, name_len) = parse_vint_length(&data[offset..]).map_err(|_| {
-                Error::corruption(format!("Failed to parse static column {} name length", i))
-            })?;
-            offset = data.len() - remaining.len();
-
-            if name_len > remaining.len() {
-                return Err(Error::corruption(format!(
-                    "Static column {} name length exceeds available data",
-                    i
-                )));
-            }
-
-            let column_name = String::from_utf8(remaining[..name_len].to_vec()).map_err(|_| {
-                Error::corruption(format!("Invalid UTF-8 in static column {} name", i))
-            })?;
-            offset += name_len;
-
-            // Parse column value length and data
-            let (remaining, value_len) = parse_vint_length(&data[offset..]).map_err(|_| {
-                Error::corruption(format!("Failed to parse static column {} value length", i))
-            })?;
-            offset = data.len() - remaining.len();
-
-            if value_len > remaining.len() {
-                return Err(Error::corruption(format!(
-                    "Static column {} value length exceeds available data",
-                    i
-                )));
-            }
-
-            // Parse the actual value (assuming blob for now, would need schema info for proper parsing)
-            let value = Value::Blob(remaining[..value_len].to_vec());
-            columns.insert(column_name, value);
-            offset += value_len;
-        }
-
-        let static_row = StaticRow {
-            column_count,
-            columns,
-        };
-
-        // Update parsed row
-        if let Some(ref mut parsed_row) = self.parsed_row {
-            parsed_row.static_row = Some(static_row);
-        }
-
-        // Transition to clustering rows
-        self.state = State::ClusteringRows;
-
-        Ok(offset)
+        // Delegate to the new public implementation that handles modern format checks
+        self.parse_static_row_impl(data)
     }
 
     /// Parse clustering rows
@@ -1075,91 +993,65 @@ impl RowCellStateMachine {
     }
 
     /// Basic row parsing fallback when state machine parsing fails
-    fn parse_row_basic(&mut self, data: &[u8]) -> Result<usize> {
-        if data.len() < 16 {
-            return Err(Error::corruption("Insufficient data for basic row parsing"));
+    /// WARNING: This is a last-resort fallback and should not be used for modern formats
+    fn parse_row_basic(&mut self, _data: &[u8]) -> Result<usize> {
+        // Modern formats should never use basic fallback parsing with blob values
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                return Err(Error::Schema(format!(
+                    "Basic fallback parsing with blob values not allowed for modern format {:?}. \
+                     Proper schema-driven parsing is required.",
+                    self.version
+                )));
+            }
+            _ => {
+                // Legacy formats can use basic parsing as last resort
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    return Err(Error::Schema(
+                        "Basic fallback parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
+                    ));
+                }
+                #[cfg(feature = "legacy-heuristics")]
+                {
+                    // Legacy heuristic parsing implementation would go here
+                    return Err(Error::Schema(
+                        "Legacy basic parsing not yet implemented.".to_string()
+                    ));
+                }
+            }
         }
-
-        // Create a basic parsed row structure
-        let header = RowHeader {
-            flags: data[0],
-            timestamp: i64::from_be_bytes([
-                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
-            ]),
-            ttl: None,
-            local_deletion_time: None,
-        };
-
-        let partition_key = PartitionKey {
-            component_count: 1,
-            key_bytes: data[9..std::cmp::min(data.len(), 41)].to_vec(),
-            components: vec![data[9..std::cmp::min(data.len(), 41)].to_vec()],
-        };
-
-        // Create a single cell from remaining data
-        let cells = if data.len() > 41 {
-            vec![ParsedCell {
-                column_name: "value".to_string(),
-                value: Some(Value::Blob(data[41..].to_vec())),
-                timestamp: header.timestamp,
-                ttl: None,
-            }]
-        } else {
-            vec![]
-        };
-
-        let parsed_row = ParsedRow {
-            header,
-            partition_key,
-            deletion_info: None,
-            static_row: None,
-            clustering_rows: vec![],
-            clustering_key: Some("basic_clustering_key".to_string()),
-            cells,
-        };
-
-        self.parsed_row = Some(parsed_row);
-        self.state = State::Complete;
-
-        Ok(data.len())
     }
 
     /// Create a fallback row when parsing completely fails
-    fn create_fallback_row(&self, data: &[u8]) -> Result<ParsedRow> {
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-
-        let header = RowHeader {
-            flags: 0,
-            timestamp: current_time,
-            ttl: None,
-            local_deletion_time: None,
-        };
-
-        let partition_key = PartitionKey {
-            component_count: 1,
-            key_bytes: data[..std::cmp::min(data.len(), 32)].to_vec(),
-            components: vec![data[..std::cmp::min(data.len(), 32)].to_vec()],
-        };
-
-        let cells = vec![ParsedCell {
-            column_name: "fallback_data".to_string(),
-            value: Some(Value::Blob(data.to_vec())),
-            timestamp: current_time,
-            ttl: None,
-        }];
-
-        Ok(ParsedRow {
-            header,
-            partition_key,
-            deletion_info: None,
-            static_row: None,
-            clustering_rows: vec![],
-            clustering_key: Some(format!("fallback_{}", data.len())),
-            cells,
-        })
+    /// WARNING: This creates blob values and should not be used for modern formats
+    #[allow(dead_code)]
+    fn create_fallback_row(&self, _data: &[u8]) -> Result<ParsedRow> {
+        // Modern formats should never create fallback rows with blob values
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                return Err(Error::Schema(format!(
+                    "Fallback row creation with blob values not allowed for modern format {:?}. \
+                     Proper schema-driven parsing is required.",
+                    self.version
+                )));
+            }
+            _ => {
+                // Legacy formats can create fallback rows as last resort
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    return Err(Error::Schema(
+                        "Fallback row creation requires legacy-heuristics feature for legacy compatibility.".to_string()
+                    ));
+                }
+                #[cfg(feature = "legacy-heuristics")]
+                {
+                    return Err(Error::Schema(
+                        "Legacy fallback row creation not yet implemented.".to_string()
+                    ));
+                }
+            }
+        }
     }
 
     /// Try alternative parsing methods when standard parsing fails
@@ -1190,210 +1082,204 @@ impl RowCellStateMachine {
     }
 
     /// Parse data as a single cell row with minimal structure
-    fn parse_as_single_cell_row(&self, data: &[u8]) -> Result<ParsedRow> {
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-
-        // Try to extract timestamp from first 8 bytes if they look like a timestamp
-        let timestamp = if data.len() >= 8 {
-            let candidate_ts = i64::from_be_bytes([
-                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            ]);
-
-            // Check if it's a reasonable timestamp (between 2020 and 2030)
-            if candidate_ts > 1_577_836_800_000_000 && candidate_ts < 1_893_456_000_000_000 {
-                candidate_ts
-            } else {
-                current_time
+    /// WARNING: This creates blob values and should not be used for modern formats
+    fn parse_as_single_cell_row(&self, _data: &[u8]) -> Result<ParsedRow> {
+        // Modern formats should never parse as single cell with blob values
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                return Err(Error::Schema(format!(
+                    "Single cell parsing with blob values not allowed for modern format {:?}. \
+                     Proper schema-driven parsing is required.",
+                    self.version
+                )));
             }
-        } else {
-            current_time
-        };
-
-        let header = RowHeader {
-            flags: if data.len() > 8 { data[8] } else { 0 },
-            timestamp,
-            ttl: None,
-            local_deletion_time: None,
-        };
-
-        // Extract partition key from remaining data
-        let key_start = if data.len() > 16 { 16 } else { 8 };
-        let key_end = std::cmp::min(data.len(), key_start + 32);
-        let partition_key = PartitionKey {
-            component_count: 1,
-            key_bytes: data[key_start..key_end].to_vec(),
-            components: vec![data[key_start..key_end].to_vec()],
-        };
-
-        // Create cell from remaining data
-        let cell_data_start = key_end;
-        let cells = if cell_data_start < data.len() {
-            vec![ParsedCell {
-                column_name: "value".to_string(),
-                value: Some(Value::Blob(data[cell_data_start..].to_vec())),
-                timestamp,
-                ttl: None,
-            }]
-        } else {
-            vec![]
-        };
-
-        Ok(ParsedRow {
-            header,
-            partition_key,
-            deletion_info: None,
-            static_row: None,
-            clustering_rows: vec![],
-            clustering_key: Some(format!("parsed_cell_{}", data.len())),
-            cells,
-        })
+            _ => {
+                // Legacy formats can parse as single cell as last resort
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    return Err(Error::Schema(
+                        "Single cell parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
+                    ));
+                }
+                #[cfg(feature = "legacy-heuristics")]
+                {
+                    return Err(Error::Schema(
+                        "Legacy single cell parsing not yet implemented.".to_string()
+                    ));
+                }
+            }
+        }
     }
 
     /// Parse using known SSTable patterns
-    fn parse_using_sstable_patterns(&self, data: &[u8]) -> Result<ParsedRow> {
-        // Look for VInt patterns that might indicate length prefixes
-        let mut offset = 0;
-        let mut cells = Vec::new();
-
-        while offset + 4 < data.len() {
-            // Try to read a length prefix (4 bytes)
-            let potential_length = u32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-
-            // Reasonable length check
-            if potential_length > 0 && potential_length < (data.len() - offset - 4) as u32 {
-                let value_start = offset + 4;
-                let value_end = value_start + potential_length as usize;
-
-                if value_end <= data.len() {
-                    cells.push(ParsedCell {
-                        column_name: format!("col_{}", cells.len()),
-                        value: Some(Value::Blob(data[value_start..value_end].to_vec())),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_micros() as i64,
-                        ttl: None,
-                    });
-
-                    offset = value_end;
-                    continue;
+    fn parse_using_sstable_patterns(&self, _data: &[u8]) -> Result<ParsedRow> {
+        // Modern formats should never use pattern-based parsing with blob values
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                return Err(Error::Schema(format!(
+                    "Pattern-based parsing with blob values not allowed for modern format {:?}. \
+                     Proper schema-driven parsing is required.",
+                    self.version
+                )));
+            }
+            _ => {
+                // Legacy formats can use pattern parsing as last resort
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    return Err(Error::Schema(
+                        "Pattern-based parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
+                    ));
+                }
+                #[cfg(feature = "legacy-heuristics")]
+                {
+                    return Err(Error::Schema(
+                        "Legacy pattern parsing not yet implemented.".to_string()
+                    ));
                 }
             }
-
-            // No valid pattern found, move forward
-            offset += 1;
         }
-
-        // If we found some structured data, create a row
-        if !cells.is_empty() {
-            let current_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
-
-            let header = RowHeader {
-                flags: 0,
-                timestamp: current_time,
-                ttl: None,
-                local_deletion_time: None,
-            };
-
-            let partition_key = PartitionKey {
-                component_count: 1,
-                key_bytes: data[..std::cmp::min(data.len(), 16)].to_vec(),
-                components: vec![data[..std::cmp::min(data.len(), 16)].to_vec()],
-            };
-
-            return Ok(ParsedRow {
-                header,
-                partition_key,
-                deletion_info: None,
-                static_row: None,
-                clustering_rows: vec![],
-                clustering_key: Some(format!("pattern_parsed_{}", cells.len())),
-                cells,
-            });
-        }
-
-        Err(Error::corruption("No SSTable patterns found"))
     }
 
     /// Parse using byte-level analysis
-    fn parse_using_byte_analysis(&self, data: &[u8]) -> Result<ParsedRow> {
-        // Look for byte patterns that might indicate structure
-        let mut interesting_offsets = Vec::new();
+    /// WARNING: This creates blob values and should not be used for modern formats
+    fn parse_using_byte_analysis(&self, _data: &[u8]) -> Result<ParsedRow> {
+        // Modern formats should never use byte analysis parsing with blob values
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                return Err(Error::Schema(format!(
+                    "Byte analysis parsing with blob values not allowed for modern format {:?}. \
+                     Proper schema-driven parsing is required.",
+                    self.version
+                )));
+            }
+            _ => {
+                // Legacy formats can use byte analysis as last resort
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    return Err(Error::Schema(
+                        "Byte analysis parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
+                    ));
+                }
+                #[cfg(feature = "legacy-heuristics")]
+                {
+                    return Err(Error::Schema(
+                        "Legacy byte analysis parsing not yet implemented.".to_string()
+                    ));
+                }
+            }
+        }
+    }
 
-        // Find positions where byte values change significantly
-        for i in 1..data.len() {
-            let diff = (data[i] as i16 - data[i - 1] as i16).abs();
-            if diff > 50 {
-                // Significant change
-                interesting_offsets.push(i);
+    /// Set the Cassandra version for the state machine
+    pub fn set_version(&mut self, version: CassandraVersion) {
+        self.version = version;
+    }
+
+    /// Get the current Cassandra version
+    pub fn version(&self) -> CassandraVersion {
+        self.version
+    }
+
+    /// Parse static row data (public interface for tests)
+    pub fn parse_static_row_public(&mut self, data: &[u8]) -> Result<usize> {
+        self.parse_static_row_impl(data)
+    }
+
+    /// Internal implementation for static row parsing
+    fn parse_static_row_impl(&mut self, data: &[u8]) -> Result<usize> {
+        // Check if modern format and reject blob fallback appropriately
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                // Modern formats must have proper schema for static row parsing
+                if self.schema.is_none() {
+                    return Err(Error::Schema(format!(
+                        "Blob fallback not allowed for modern format {:?}. Schema is required for static row parsing.",
+                        self.version
+                    )));
+                }
+            }
+            _ => {
+                // Legacy formats can use heuristics if feature is enabled
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    return Err(Error::Schema(
+                        "Static row parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
+                    ));
+                }
             }
         }
 
-        // Use these offsets to create structured data
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
+        // Call the private implementation
+        self.parse_static_row_internal(data)
+    }
 
-        let header = RowHeader {
-            flags: data[0],
-            timestamp: current_time,
-            ttl: None,
-            local_deletion_time: None,
-        };
+    /// Internal implementation for static row parsing
+    fn parse_static_row_internal(&mut self, data: &[u8]) -> Result<usize> {
+        if data.is_empty() {
+            return Err(Error::corruption("No data for static row"));
+        }
 
-        let partition_key = PartitionKey {
-            component_count: 1,
-            key_bytes: data[..std::cmp::min(data.len(), 8)].to_vec(),
-            components: vec![data[..std::cmp::min(data.len(), 8)].to_vec()],
-        };
+        let mut offset = 0;
 
-        // Create cells from interesting segments
-        let mut cells = Vec::new();
-        let mut last_offset = 8; // Skip the first 8 bytes used for key
+        // Check static row flag
+        let static_flag = data[offset];
+        offset += 1;
 
-        for &offset in &interesting_offsets {
-            if offset > last_offset && offset < data.len() {
-                cells.push(ParsedCell {
-                    column_name: format!("segment_{}", cells.len()),
-                    value: Some(Value::Blob(data[last_offset..offset].to_vec())),
-                    timestamp: current_time,
-                    ttl: None,
-                });
-                last_offset = offset;
+        if (static_flag & 0x40) == 0 {
+            // No static row, transition to clustering rows
+            self.state = State::ClusteringRows;
+            return Ok(0);
+        }
+
+        // Parse static column count (VInt)
+        let (remaining, column_count) = parse_vint_length(&data[offset..])
+            .map_err(|_| Error::corruption("Failed to parse static column count"))?;
+        let _offset = data.len() - remaining.len();
+
+        if column_count > 1000 {
+            return Err(Error::corruption("Too many static columns"));
+        }
+
+        #[cfg(feature = "legacy-heuristics")]
+        let mut columns = HashMap::new();
+        #[cfg(not(feature = "legacy-heuristics"))]
+        let _columns: HashMap<String, Value> = HashMap::new();
+
+        // Modern formats should fail here if no schema
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                return Err(Error::Schema(format!(
+                    "Blob fallback not allowed for modern format {:?}. Proper schema-driven parsing is required.",
+                    self.version
+                )));
+            }
+            _ => {
+                // Legacy format implementation would continue here
+                #[cfg(feature = "legacy-heuristics")]
+                {
+                    // For legacy formats with feature enabled, create empty static row
+                    let static_row = StaticRow { 
+                        column_count,
+                        columns 
+                    };
+
+                    // Update parsed row
+                    if let Some(ref mut parsed_row) = self.parsed_row {
+                        parsed_row.static_row = Some(static_row);
+                    }
+
+                    // Transition to clustering rows
+                    self.state = State::ClusteringRows;
+                    return Ok(offset);
+                }
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    return Err(Error::Schema(
+                        "Static row parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
+                    ));
+                }
             }
         }
-
-        // Add final segment if any data remains
-        if last_offset < data.len() {
-            cells.push(ParsedCell {
-                column_name: format!("final_segment"),
-                value: Some(Value::Blob(data[last_offset..].to_vec())),
-                timestamp: current_time,
-                ttl: None,
-            });
-        }
-
-        Ok(ParsedRow {
-            header,
-            partition_key,
-            deletion_info: None,
-            static_row: None,
-            clustering_rows: vec![],
-            clustering_key: Some(format!("byte_analyzed_{}", data.len())),
-            cells,
-        })
     }
 }
 

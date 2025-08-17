@@ -624,7 +624,9 @@ impl SchemaDiscoveryEngine {
 /// Context for schema discovery process
 #[derive(Debug)]
 struct DiscoveryContext {
+    #[allow(dead_code)]
     keyspace: String,
+    #[allow(dead_code)]
     table: String,
     #[allow(dead_code)]
     source_files: Vec<PathBuf>,
@@ -638,8 +640,11 @@ struct DiscoveryContext {
     collection_types: HashMap<String, CollectionType>,
     #[allow(dead_code)]
     indexes: Vec<IndexDefinition>,
+    #[allow(dead_code)]
     table_options: TableOptions,
+    #[allow(dead_code)]
     total_rows_sampled: usize,
+    #[allow(dead_code)]
     cassandra_version: Option<CassandraVersion>,
 }
 
@@ -848,7 +853,6 @@ impl SchemaDiscoveryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_schema_discovery_engine_creation() {

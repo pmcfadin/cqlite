@@ -32,6 +32,12 @@ pub enum Value {
     Timestamp(i64),
     /// UUID as 16 bytes
     Uuid([u8; 16]),
+    /// Variable-length integer
+    Varint(Vec<u8>),
+    /// Decimal value with scale and unscaled value
+    Decimal { scale: i32, unscaled: Vec<u8> },
+    /// Duration value with months, days, and nanoseconds
+    Duration { months: i32, days: i32, nanos: i64 },
     /// JSON value
     Json(serde_json::Value),
     /// 8-bit signed integer (for exact Cassandra compatibility)
@@ -340,6 +346,9 @@ impl Value {
                 CqlType::Udt(udt.type_name.clone(), fields)
             }
             Value::Frozen(inner) => CqlType::Frozen(Box::new(inner.data_type())),
+            Value::Varint(_) => CqlType::Custom("varint".to_string()),
+            Value::Decimal { .. } => CqlType::Decimal,
+            Value::Duration { .. } => CqlType::Duration,
             Value::Tombstone(_) => CqlType::Text, // Tombstones don't have a specific type
         }
     }
@@ -611,6 +620,9 @@ impl Value {
                 size
             }
             Value::Frozen(inner) => inner.size_estimate(),
+            Value::Varint(data) => 4 + data.len(),
+            Value::Decimal { scale: _, unscaled } => 4 + 4 + unscaled.len(), // scale + length + data
+            Value::Duration { .. } => 12, // 3 * 4 bytes (months, days, nanos)
             Value::Tombstone(_) => 16, // timestamp + type + optional TTL
         }
     }
@@ -834,6 +846,9 @@ impl fmt::Display for Value {
             Value::Frozen(inner) => {
                 write!(f, "FROZEN({})", inner)
             }
+            Value::Varint(data) => write!(f, "VARINT({:?})", data),
+            Value::Decimal { scale, unscaled } => write!(f, "DECIMAL(scale={}, unscaled={:?})", scale, unscaled),
+            Value::Duration { months, days, nanos } => write!(f, "DURATION({}M {}D {}ns)", months, days, nanos),
             Value::Tombstone(info) => match info.tombstone_type {
                 TombstoneType::RowTombstone => write!(f, "TOMBSTONE(ROW@{})", info.deletion_time),
                 TombstoneType::CellTombstone => write!(f, "TOMBSTONE(CELL@{})", info.deletion_time),

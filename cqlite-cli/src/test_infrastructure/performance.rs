@@ -10,7 +10,7 @@ use super::{CliTestRunner, TestContainer, TestResult};
 /// Performance test runner for benchmarking CLI operations
 #[derive(Debug)]
 pub struct PerformanceTestRunner {
-    container: TestContainer,
+    _container: TestContainer,
     cli_runner: CliTestRunner,
     benchmarks: Vec<PerformanceBenchmark>,
     config: PerformanceConfig,
@@ -21,8 +21,8 @@ pub struct PerformanceTestRunner {
 pub struct BenchmarkSuite {
     name: String,
     benchmarks: Vec<PerformanceBenchmark>,
-    warmup_iterations: usize,
-    measurement_iterations: usize,
+    _warmup_iterations: usize,
+    _measurement_iterations: usize,
 }
 
 /// Individual performance benchmark
@@ -128,7 +128,7 @@ impl PerformanceTestRunner {
         let cli_runner = CliTestRunner::new(container.clone());
 
         Ok(Self {
-            container,
+            _container: container,
             cli_runner,
             benchmarks: Vec::new(),
             config: PerformanceConfig::default(),
@@ -289,7 +289,7 @@ impl PerformanceTestRunner {
     fn calculate_statistics(
         &self,
         times: &[Duration],
-        input_size: Option<usize>,
+        _input_size: Option<usize>,
     ) -> PerformanceStatistics {
         let mut sorted_times = times.to_vec();
         sorted_times.sort();
@@ -505,7 +505,7 @@ impl PerformanceTestRunner {
         // In a real implementation, you'd use tokio tasks and proper concurrency
         while start_time.elapsed() < config.test_duration {
             for benchmark in &self.benchmarks {
-                let operation_start = Instant::now();
+                let _operation_start = Instant::now();
 
                 match self.execute_benchmark_command(benchmark).await {
                     Ok(execution_time) => {
@@ -575,8 +575,8 @@ impl BenchmarkSuite {
         Self {
             name: name.into(),
             benchmarks: Vec::new(),
-            warmup_iterations: 3,
-            measurement_iterations: 10,
+            _warmup_iterations: 3,
+            _measurement_iterations: 10,
         }
     }
 
@@ -632,9 +632,10 @@ impl BenchmarkSuite {
 impl PerformanceBenchmark {
     /// Create a simple benchmark
     pub fn simple<S: Into<String>>(name: S, command: S) -> Self {
+        let name_string = name.into();
         Self {
-            name: name.into(),
-            description: format!("Benchmark: {}", name.into()),
+            name: name_string.clone(),
+            description: format!("Benchmark: {}", name_string),
             command: command.into(),
             args: vec![],
             setup_commands: vec![],
@@ -695,7 +696,7 @@ mod tests {
     #[test]
     fn test_statistics_calculation() {
         let runner = PerformanceTestRunner {
-            container: TestContainer::new().unwrap(),
+            _container: TestContainer::new().unwrap(),
             cli_runner: CliTestRunner::new(TestContainer::new().unwrap()),
             benchmarks: vec![],
             config: PerformanceConfig::default(),

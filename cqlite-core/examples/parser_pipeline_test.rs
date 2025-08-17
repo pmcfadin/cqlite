@@ -3,7 +3,7 @@
 //! This demonstrates the full pipeline: CQL → Parser → AST → Visitor → TableSchema
 
 use cqlite_core::parser::*;
-use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+use cqlite_core::schema::TableSchema;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔄 Parser Pipeline End-to-End Test");
@@ -186,15 +186,15 @@ fn demonstrate_visitors(ast: &CqlCreateTable) -> Result<(), Box<dyn std::error::
 
     println!("\nValidationVisitor Results:");
     match validation_result {
-        Ok(warnings) => {
-            println!("  ✓ Validation passed!");
-            if warnings.is_empty() {
-                println!("  No warnings");
-            } else {
-                println!("  Warnings: {}", warnings.len());
-                for warning in warnings {
-                    println!("    ⚠️  {}", warning);
+        Ok(()) => {
+            if validator.has_errors() {
+                println!("  ✗ Validation failed with {} errors:", validator.get_errors().len());
+                for error in validator.get_errors() {
+                    println!("    ❌ {}", error);
                 }
+            } else {
+                println!("  ✓ Validation passed!");
+                println!("  No errors found");
             }
         }
         Err(e) => {

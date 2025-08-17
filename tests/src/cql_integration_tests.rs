@@ -3,16 +3,15 @@
 //! Integration tests that work with real CQL files and test the complete
 //! schema parsing pipeline from CQL input to validated schema output.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
-use crate::fixtures::test_data::*;
 use cqlite_core::Config;
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::SSTableParser;
-use cqlite_core::schema::{CqlType, TableSchema, UdtRegistry};
+use cqlite_core::schema::{TableSchema, SchemaManager};
+use cqlite_core::platform::Platform;
+use cqlite_core::storage::StorageEngine;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -27,7 +26,7 @@ pub struct CqlIntegrationTestSuite {
 }
 
 /// Result of an integration test
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntegrationTestResult {
     pub test_name: String,
     pub passed: bool,
@@ -955,7 +954,7 @@ impl CqlIntegrationTestSuite {
                     expected_columns: 3,
                     has_collections: false,
                     has_clustering: false,
-                    has_complex_types: false,
+                    _has_complex_types: false,
                 },
             ),
             (
@@ -971,7 +970,7 @@ impl CqlIntegrationTestSuite {
                     expected_columns: 4,
                     has_collections: false,
                     has_clustering: true,
-                    has_complex_types: false,
+                    _has_complex_types: false,
                 },
             ),
             (
@@ -987,7 +986,7 @@ impl CqlIntegrationTestSuite {
                     expected_columns: 5,
                     has_collections: true,
                     has_clustering: false,
-                    has_complex_types: false,
+                    _has_complex_types: false,
                 },
             ),
             (
@@ -1002,7 +1001,7 @@ impl CqlIntegrationTestSuite {
                     expected_columns: 4,
                     has_collections: true,
                     has_clustering: false,
-                    has_complex_types: true,
+                    _has_complex_types: true,
                 },
             ),
         ];
@@ -1240,11 +1239,11 @@ struct SchemaCharacteristics {
     expected_columns: usize,
     has_collections: bool,
     has_clustering: bool,
-    has_complex_types: bool,
+    _has_complex_types: bool,
 }
 
 /// Integration test report
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntegrationTestReport {
     pub total_tests: usize,
     pub passed_tests: usize,

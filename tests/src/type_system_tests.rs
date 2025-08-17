@@ -3,9 +3,7 @@
 //! Comprehensive tests for all CQL data types and their serialization/parsing
 //! compatibility with Cassandra 5+ format specifications.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
-use cqlite_core::parser::types::*;
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::parser::{CqlTypeId, parse_cql_value, serialize_cql_value};
 use cqlite_core::{Value, error::Result};

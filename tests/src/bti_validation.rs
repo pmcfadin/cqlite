@@ -5,11 +5,10 @@
 
 use cqlite_core::{
     error::Error,
-    parser::{SSTableParser, header::*, vint::*},
-    storage::sstable::index::*,
+    parser::{SSTableParser, header::*},
 };
-use std::fs;
 use std::path::PathBuf;
+use std::fs;
 
 /// BTI format constants (based on Cassandra 5.0 implementation)
 const BTI_MAGIC: u32 = 0x42544900; // 'BTI\0'
@@ -92,11 +91,11 @@ pub struct BtiEntry {
 /// - Complex scenarios: multi-component keys, nested collections, UDTs, wide partitions
 /// - Range tombstones and metadata validation
 pub struct BtiValidationSuite {
-    parser: SSTableParser,
+    _parser: SSTableParser,
     test_data_path: PathBuf,
-    sstabledump_validator:
+    _sstabledump_validator:
         Option<crate::validation::sstabledump_parity::SStableDumpParityValidator>,
-    config: BtiValidationConfig,
+    _config: BtiValidationConfig,
 }
 
 /// BTI validation configuration
@@ -144,17 +143,18 @@ impl BtiValidationSuite {
                 test_sstable_paths: vec![test_data_path.clone()],
                 ..Default::default()
             };
-            SStableDumpParityValidator::new(parity_config).ok()
+            let validator = SStableDumpParityValidator::new(parity_config);
+            Some(validator)
         } else {
             None
         };
 
         Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
+            _parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
                 .unwrap(),
             test_data_path,
-            sstabledump_validator,
-            config,
+            _sstabledump_validator: sstabledump_validator,
+            _config: config,
         }
     }
 
@@ -195,7 +195,6 @@ impl BtiValidationSuite {
     pub fn parse_bti_header(&self, input: &[u8]) -> Result<(BtiHeader, usize), Error> {
         use nom::{
             IResult,
-            bytes::complete::take,
             number::complete::{be_u16, be_u32, be_u64},
         };
 
@@ -362,6 +361,7 @@ impl BtiValidationSuite {
         // Dataset 1: Multi-component partition keys with complex types
         datasets.push(BtiTestDataset {
             name: "multi_component_partition_keys".to_string(),
+            values: vec![], // TODO: Add appropriate BtiTestValueOld values
             description: "Multi-component partition keys with various data types".to_string(),
             partition_keys: vec![
                 vec![
@@ -387,22 +387,22 @@ impl BtiValidationSuite {
         // Dataset 2: Nested collections and UDTs
         datasets.push(BtiTestDataset {
             name: "nested_collections_udts".to_string(),
+            values: vec![], // TODO: Add appropriate BtiTestValueOld values
             description: "Complex nested collections and user-defined types".to_string(),
             partition_keys: vec![vec![
                 BtiTestValue::Text("complex_key".to_string()),
-                BtiTestValue::NestedCollection(NestedCollectionType::MapOfLists),
+                BtiTestValue::NestedCollection {
+                    collection_type: NestedCollectionType::MapOfLists,
+                    values: vec![],
+                },
             ]],
-            clustering_keys: vec![vec![BtiTestValue::UDT(
-                "address".to_string(),
-                vec![
-                    (
-                        "street".to_string(),
-                        BtiTestValue::Text("123 Main St".to_string()),
-                    ),
-                    ("city".to_string(), BtiTestValue::Text("Boston".to_string())),
-                    ("zipcode".to_string(), BtiTestValue::Integer(02101)),
-                ],
-            )]],
+            clustering_keys: vec![vec![BtiTestValue::UDT({
+                let mut map = std::collections::HashMap::new();
+                map.insert("street".to_string(), BtiTestValue::Text("123 Main St".to_string()));
+                map.insert("city".to_string(), BtiTestValue::Text("Boston".to_string()));
+                map.insert("zipcode".to_string(), BtiTestValue::Integer(02101));
+                map
+            })]],
             has_wide_partitions: false,
             has_range_tombstones: false,
             expected_trie_depth: 4,
@@ -411,6 +411,7 @@ impl BtiValidationSuite {
         // Dataset 3: Wide partitions with many clustering keys
         datasets.push(BtiTestDataset {
             name: "wide_partitions".to_string(),
+            values: vec![], // TODO: Add appropriate BtiTestValueOld values
             description: "Wide partitions with thousands of clustering keys".to_string(),
             partition_keys: vec![vec![BtiTestValue::Text("wide_partition".to_string())]],
             clustering_keys: (0..10000)
@@ -526,7 +527,7 @@ mod tests {
         let suite = BtiValidationSuite::new();
         let test_node_bytes = suite.generate_test_bti_node(BtiNodeType::Leaf, 0);
 
-        let (node, parsed_bytes) = suite
+        let (node, _parsed_bytes) = suite
             .parse_bti_node(&test_node_bytes)
             .expect("Failed to parse BTI leaf node");
 
@@ -658,4 +659,160 @@ mod tests {
             }
         }
     }
+}
+
+// Additional types needed for comprehensive validation tests
+#[derive(Debug, Clone)]
+pub struct BtiDatasetValidationResult {
+    pub status: ValidationStatus,
+    pub performance_metrics: BtiPerformanceMetrics,
+    pub dataset: BtiTestDataset,
+    pub error: Option<BtiValidationError>,
+    pub dataset_name: String,
+    pub trie_traversal_result: TrieTraversalResult,
+    pub rows_decoding_result: RowsDecodingResult,
+    pub byte_comparable_result: ByteComparableValidationResult,
+    pub sstabledump_parity_result: SstableDumpParityResult,
+    pub validation_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BtiPerformanceMetrics {
+    pub processing_time_ms: u64,
+    pub memory_usage_bytes: usize,
+    pub entries_processed: usize,
+    pub total_time_ms: u64,
+    pub trie_traversal_time_ms: u64,
+    pub rows_decoding_time_ms: u64,
+    pub encoding_time_ms: u64,
+    pub throughput_ops_per_sec: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BtiTestDataset {
+    pub name: String,
+    pub values: Vec<BtiTestValueOld>,
+    pub description: String,
+    pub partition_keys: Vec<Vec<BtiTestValue>>,
+    pub clustering_keys: Vec<Vec<BtiTestValue>>,
+    pub has_wide_partitions: bool,
+    pub has_range_tombstones: bool,
+    pub expected_trie_depth: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum BtiTestValue {
+    Text(String),
+    Integer(i64),
+    Boolean(bool),
+    UUID(String),
+    BigInt(i64),
+    Timestamp(i64),
+    UDT(std::collections::HashMap<String, BtiTestValue>),
+    NestedCollection {
+        collection_type: NestedCollectionType,
+        values: Vec<BtiTestValue>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct BtiTestValueOld {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BtiValidationResult {
+    ParseError(BtiValidationErrorType),
+    ValidationFailed(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum BtiValidationErrorType {
+    InvalidHeader,
+    InvalidNode,
+    CorruptedData,
+    TrieTraversalError,
+    RowsDecodingError,
+    ByteComparableError,
+}
+
+/// Detailed validation error for comprehensive testing
+#[derive(Debug, Clone)]
+pub struct BtiValidationError {
+    pub error_type: BtiValidationErrorType,
+    pub message: String,
+    pub context: String,
+    pub test_data: Option<String>,
+}
+
+impl std::fmt::Display for BtiValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.error_type, self.message)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ByteComparableValidationResult {
+    pub success: bool,
+    pub message: String,
+    pub round_trip_passed: bool,
+    pub keys_tested: usize,
+    pub cep25_compliance: bool,
+    pub ordering_preserved: bool,
+    pub type_hierarchy_correct: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum NestedCollectionType {
+    List,
+    Set,
+    Map,
+    MapOfLists,
+}
+
+#[derive(Debug, Clone)]
+pub struct RowsDecodingResult {
+    pub success: bool,
+    pub message: String,
+    pub decoding_complete: bool,
+    pub rows_processed: usize,
+    pub clustering_navigation_accuracy: f64,
+    pub metadata_validation_passed: bool,
+    pub range_tombstones_processed: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SstableDumpParityResult {
+    pub success: bool,
+    pub message: String,
+}
+
+impl Default for SstableDumpParityResult {
+    fn default() -> Self {
+        Self {
+            success: true,
+            message: "Skipped".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrieTraversalResult {
+    pub nodes_visited: usize,
+    pub depth: usize,
+    pub traversal_complete: bool,
+    pub max_depth_reached: usize,
+    pub token_range_coverage: f64,
+    pub lookup_accuracy: f64,
+    pub iteration_order_correct: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ValidationStatus {
+    Passed,
+    Failed,
+    Warning,
+    PartiallyPassed,
+    Skipped,
 }

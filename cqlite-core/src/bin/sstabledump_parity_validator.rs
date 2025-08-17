@@ -1,4 +1,4 @@
-//! SSTableDump Parity Validator Binary
+//! `SSTableDump` Parity Validator Binary
 //!
 //! Command-line tool to validate that our spec-accurate readers produce
 //! identical output to Cassandra's sstabledump tool. This provides zero
@@ -12,7 +12,6 @@ use cqlite_core::{
     },
 };
 use std::path::PathBuf;
-use tokio;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -105,7 +104,7 @@ async fn main() -> Result<()> {
     let validator = match SStableDumpParityValidator::new(config) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("❌ Failed to create validator: {}", e);
+            eprintln!("❌ Failed to create validator: {e}");
             std::process::exit(1);
         }
     };
@@ -115,7 +114,7 @@ async fn main() -> Result<()> {
     let result = match validator.validate_sstabledump_parity().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("❌ Validation failed: {}", e);
+            eprintln!("❌ Validation failed: {e}");
             std::process::exit(1);
         }
     };
@@ -174,7 +173,7 @@ async fn main() -> Result<()> {
             println!();
             println!("   🚨 Critical Issues:");
             for issue in &result.discrepancy_summary.critical_issues {
-                println!("      - {}", issue);
+                println!("      - {issue}");
             }
         }
         ParityStatus::ValidationFailed => {
@@ -194,14 +193,14 @@ async fn main() -> Result<()> {
     // Save report to file if specified
     if let Some(output_path) = output_file {
         match tokio::fs::write(output_path, &evidence_report).await {
-            Ok(_) => println!("   ✅ Report saved to: {}", output_path),
-            Err(e) => eprintln!("   ❌ Failed to save report: {}", e),
+            Ok(()) => println!("   ✅ Report saved to: {output_path}"),
+            Err(e) => eprintln!("   ❌ Failed to save report: {e}"),
         }
     } else {
         // Display report to console
         println!();
         println!("📄 EVIDENCE REPORT:");
-        println!("{}", evidence_report);
+        println!("{evidence_report}");
     }
 
     // Exit with appropriate code
@@ -213,7 +212,7 @@ async fn main() -> Result<()> {
     };
 
     println!();
-    println!("🏁 Validation complete with exit code: {}", exit_code);
+    println!("🏁 Validation complete with exit code: {exit_code}");
 
     std::process::exit(exit_code);
 }

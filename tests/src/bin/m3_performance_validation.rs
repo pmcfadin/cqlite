@@ -21,92 +21,100 @@ fn main() {
         .author("CQLite Team")
         .about("Validates M3 complex type performance targets")
         .arg(
-            Arg::with_name("output-dir")
+            Arg::new("output-dir")
                 .long("output-dir")
                 .value_name("DIR")
                 .help("Output directory for reports")
                 .default_value("m3_validation_reports")
-                .takes_value(true),
+                .action(clap::ArgAction::Set),
         )
         .arg(
-            Arg::with_name("no-simd")
+            Arg::new("no-simd")
                 .long("no-simd")
-                .help("Disable SIMD optimizations for testing"),
+                .help("Disable SIMD optimizations for testing")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::with_name("no-regression")
+            Arg::new("no-regression")
                 .long("no-regression")
-                .help("Skip regression tests"),
+                .help("Skip regression tests")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::with_name("update-baseline")
+            Arg::new("update-baseline")
                 .long("update-baseline")
-                .help("Update performance baseline after tests"),
+                .help("Update performance baseline after tests")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::with_name("no-reports")
+            Arg::new("no-reports")
                 .long("no-reports")
-                .help("Skip generating detailed reports"),
+                .help("Skip generating detailed reports")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::with_name("strict")
+            Arg::new("strict")
                 .long("strict")
-                .help("Use strict performance targets (higher thresholds)"),
+                .help("Use strict performance targets (higher thresholds)")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::with_name("throughput-target")
+            Arg::new("throughput-target")
                 .long("throughput-target")
                 .value_name("MB/s")
                 .help("Minimum throughput target in MB/s")
                 .default_value("100")
-                .takes_value(true),
+                .action(clap::ArgAction::Set),
         )
         .arg(
-            Arg::with_name("memory-ratio")
+            Arg::new("memory-ratio")
                 .long("memory-ratio")
                 .value_name("RATIO")
                 .help("Maximum memory increase ratio")
                 .default_value("1.5")
-                .takes_value(true),
+                .action(clap::ArgAction::Set),
         )
         .arg(
-            Arg::with_name("latency-limit")
+            Arg::new("latency-limit")
                 .long("latency-limit")
                 .value_name("MS")
                 .help("Maximum additional latency in milliseconds")
                 .default_value("10")
-                .takes_value(true),
+                .action(clap::ArgAction::Set),
         )
         .arg(
-            Arg::with_name("slowdown-ratio")
+            Arg::new("slowdown-ratio")
                 .long("slowdown-ratio")
                 .value_name("RATIO")
                 .help("Maximum complex type slowdown ratio")
                 .default_value("2.0")
-                .takes_value(true),
+                .action(clap::ArgAction::Set),
         )
         .arg(
-            Arg::with_name("quiet")
-                .short("q")
+            Arg::new("quiet")
+                .short('q')
                 .long("quiet")
-                .help("Suppress detailed output, only show final results"),
+                .help("Suppress detailed output, only show final results")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::with_name("json-output")
+            Arg::new("json-output")
                 .long("json-output")
-                .help("Output results in JSON format for CI integration"),
+                .help("Output results in JSON format for CI integration")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::with_name("fail-fast")
+            Arg::new("fail-fast")
                 .long("fail-fast")
-                .help("Exit immediately on first test failure"),
+                .help("Exit immediately on first test failure")
+                .action(clap::ArgAction::SetTrue),
         )
         .get_matches();
 
     let start_time = Instant::now();
 
     // Setup logging
-    if !matches.is_present("quiet") {
+    if !matches.get_flag("quiet") {
         env_logger::Builder::from_default_env()
             // Remove log filter - using println! instead
             .init();
@@ -122,7 +130,7 @@ fn main() {
     };
 
     // Print startup banner
-    if !matches.is_present("quiet") {
+    if !matches.get_flag("quiet") {
         print_banner(&config);
     }
 
@@ -138,9 +146,9 @@ fn main() {
     };
 
     // Output results
-    if matches.is_present("json-output") {
+    if matches.get_flag("json-output") {
         output_json_results(&results);
-    } else if !matches.is_present("quiet") {
+    } else if !matches.get_flag("quiet") {
         // Summary already printed by validator
     } else {
         print_quiet_summary(&results);
@@ -148,7 +156,7 @@ fn main() {
 
     let total_time = start_time.elapsed();
 
-    if !matches.is_present("quiet") {
+    if !matches.get_flag("quiet") {
         println!(
             "🏁 Total execution time: {:.2} seconds",
             total_time.as_secs_f64()
@@ -157,12 +165,12 @@ fn main() {
 
     // Exit with appropriate code
     if results.passed {
-        if !matches.is_present("quiet") {
+        if !matches.get_flag("quiet") {
             println!("✅ M3 performance validation PASSED");
         }
         process::exit(0);
     } else {
-        if !matches.is_present("quiet") {
+        if !matches.get_flag("quiet") {
             println!("❌ M3 performance validation FAILED");
         }
         process::exit(1);
@@ -171,30 +179,30 @@ fn main() {
 
 fn parse_config(matches: &ArgMatches) -> Result<ValidationConfig, String> {
     let throughput_target = matches
-        .value_of("throughput-target")
+        .get_one::<String>("throughput-target")
         .unwrap()
         .parse::<f64>()
         .map_err(|_| "Invalid throughput target")?;
 
     let memory_ratio = matches
-        .value_of("memory-ratio")
+        .get_one::<String>("memory-ratio")
         .unwrap()
         .parse::<f64>()
         .map_err(|_| "Invalid memory ratio")?;
 
     let latency_limit = matches
-        .value_of("latency-limit")
+        .get_one::<String>("latency-limit")
         .unwrap()
         .parse::<f64>()
         .map_err(|_| "Invalid latency limit")?;
 
     let slowdown_ratio = matches
-        .value_of("slowdown-ratio")
+        .get_one::<String>("slowdown-ratio")
         .unwrap()
         .parse::<f64>()
         .map_err(|_| "Invalid slowdown ratio")?;
 
-    let custom_targets = if matches.is_present("strict") {
+    let custom_targets = if matches.get_flag("strict") {
         Some(PerformanceTargets {
             max_complex_slowdown_ratio: 1.5,   // Stricter: 1.5x instead of 2x
             max_memory_increase_ratio: 1.3,    // Stricter: 1.3x instead of 1.5x
@@ -211,12 +219,12 @@ fn parse_config(matches: &ArgMatches) -> Result<ValidationConfig, String> {
     };
 
     Ok(ValidationConfig {
-        enable_simd: !matches.is_present("no-simd"),
-        run_regression_tests: !matches.is_present("no-regression"),
-        update_baselines: matches.is_present("update-baseline"),
+        enable_simd: !matches.get_flag("no-simd"),
+        run_regression_tests: !matches.get_flag("no-regression"),
+        update_baselines: matches.get_flag("update-baseline"),
         custom_targets,
-        output_dir: matches.value_of("output-dir").unwrap().to_string(),
-        generate_reports: !matches.is_present("no-reports"),
+        output_dir: matches.get_one::<String>("output-dir").unwrap().to_string(),
+        generate_reports: !matches.get_flag("no-reports"),
     })
 }
 
@@ -355,29 +363,29 @@ mod tests {
     fn test_config_parsing() {
         let matches = Command::new("test")
             .arg(
-                Arg::with_name("throughput-target")
+                Arg::new("throughput-target")
                     .long("throughput-target")
-                    .takes_value(true),
+                    .action(clap::ArgAction::Set),
             )
             .arg(
-                Arg::with_name("memory-ratio")
+                Arg::new("memory-ratio")
                     .long("memory-ratio")
-                    .takes_value(true),
+                    .action(clap::ArgAction::Set),
             )
             .arg(
-                Arg::with_name("latency-limit")
+                Arg::new("latency-limit")
                     .long("latency-limit")
-                    .takes_value(true),
+                    .action(clap::ArgAction::Set),
             )
             .arg(
-                Arg::with_name("slowdown-ratio")
+                Arg::new("slowdown-ratio")
                     .long("slowdown-ratio")
-                    .takes_value(true),
+                    .action(clap::ArgAction::Set),
             )
             .arg(
-                Arg::with_name("output-dir")
+                Arg::new("output-dir")
                     .long("output-dir")
-                    .takes_value(true),
+                    .action(clap::ArgAction::Set),
             )
             .get_matches_from(vec![
                 "test",
@@ -410,35 +418,35 @@ mod tests {
     #[test]
     fn test_strict_mode() {
         let matches = Command::new("test")
-            .arg(Arg::with_name("strict").long("strict"))
+            .arg(Arg::new("strict").long("strict").action(clap::ArgAction::SetTrue))
             .arg(
-                Arg::with_name("throughput-target")
+                Arg::new("throughput-target")
                     .long("throughput-target")
-                    .takes_value(true)
+                    .action(clap::ArgAction::Set)
                     .default_value("100"),
             )
             .arg(
-                Arg::with_name("memory-ratio")
+                Arg::new("memory-ratio")
                     .long("memory-ratio")
-                    .takes_value(true)
+                    .action(clap::ArgAction::Set)
                     .default_value("1.5"),
             )
             .arg(
-                Arg::with_name("latency-limit")
+                Arg::new("latency-limit")
                     .long("latency-limit")
-                    .takes_value(true)
+                    .action(clap::ArgAction::Set)
                     .default_value("10"),
             )
             .arg(
-                Arg::with_name("slowdown-ratio")
+                Arg::new("slowdown-ratio")
                     .long("slowdown-ratio")
-                    .takes_value(true)
+                    .action(clap::ArgAction::Set)
                     .default_value("2.0"),
             )
             .arg(
-                Arg::with_name("output-dir")
+                Arg::new("output-dir")
                     .long("output-dir")
-                    .takes_value(true)
+                    .action(clap::ArgAction::Set)
                     .default_value("test"),
             )
             .get_matches_from(vec!["test", "--strict"]);

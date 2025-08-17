@@ -251,7 +251,7 @@ fn analyze_flags(flags: u32) {
     }
 }
 
-fn analyze_index_file(data: &[u8]) -> Result<(), ValidationError> {
+fn analyze_index_file(_data: &[u8]) -> Result<(), ValidationError> {
     println!("📑 Index file analysis not yet implemented");
     Ok(())
 }
@@ -300,7 +300,7 @@ fn analyze_bti_partitions_file(data: &[u8]) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn analyze_bti_rows_file(data: &[u8]) -> Result<(), ValidationError> {
+fn analyze_bti_rows_file(_data: &[u8]) -> Result<(), ValidationError> {
     println!("🌲 BTI Rows file analysis not yet implemented");
     Ok(())
 }

@@ -474,7 +474,7 @@ mod tests {
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage.clone(), &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
@@ -500,7 +500,7 @@ mod tests {
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage.clone(), &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
@@ -533,7 +533,7 @@ mod tests {
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage.clone(), &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
@@ -571,7 +571,7 @@ mod tests {
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage.clone(), &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
@@ -602,7 +602,7 @@ mod tests {
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage.clone(), &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );

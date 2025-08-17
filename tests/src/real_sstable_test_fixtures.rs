@@ -3,7 +3,6 @@
 //! This module creates and manages real Cassandra 5+ SSTable files for testing
 //! CQLite's compatibility and parsing accuracy.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::{
     Value,
@@ -12,14 +11,12 @@ use cqlite_core::{
         CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
         parse_sstable_header, serialize_sstable_header,
     },
-    parser::types::{parse_cql_value, serialize_cql_value},
-    parser::{CqlTypeId, SSTableParser},
-    types::DataType,
+    parser::types::serialize_cql_value,
+    parser::SSTableParser,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tempfile::TempDir;
 
 /// SSTable test fixture configuration
 #[derive(Debug, Clone)]
@@ -60,7 +57,7 @@ pub struct SSTableTestFixture {
 pub struct SSTableTestFixtureGenerator {
     config: SSTableTestFixtureConfig,
     output_dir: PathBuf,
-    parser: SSTableParser,
+    _parser: SSTableParser,
 }
 
 impl SSTableTestFixtureGenerator {
@@ -69,7 +66,7 @@ impl SSTableTestFixtureGenerator {
         Ok(Self {
             config,
             output_dir,
-            parser,
+            _parser: parser,
         })
     }
 
@@ -823,13 +820,13 @@ impl SSTableTestFixtureGenerator {
 
 /// Validate SSTable test fixtures
 pub struct SSTableTestFixtureValidator {
-    parser: SSTableParser,
+    _parser: SSTableParser,
 }
 
 impl SSTableTestFixtureValidator {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?,
+            _parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?,
         })
     }
 

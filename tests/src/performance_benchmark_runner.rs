@@ -13,7 +13,7 @@ use crate::performance_validation_suite::{
 use cqlite_core::error::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::fs;
 
 /// Configuration for the performance benchmark runner

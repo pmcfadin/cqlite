@@ -24,7 +24,7 @@ use cli::InfoOutputFormat;
 #[command(about = "CQLite - High-performance embedded database with CQL support")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(author = "CQLite Team")]
-struct Cli {
+pub struct Cli {
     /// Database file path
     #[arg(short, long, value_name = "FILE")]
     database: Option<PathBuf>,

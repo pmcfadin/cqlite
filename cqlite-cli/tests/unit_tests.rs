@@ -1,6 +1,5 @@
 use anyhow::Result;
-use cqlite_cli::*;
-use cqlite_core::Database;
+use clap::Parser;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -105,7 +104,6 @@ level = "trace"
 #[cfg(test)]
 mod cli_parsing_tests {
     use super::*;
-    use clap::Parser;
     use cqlite_cli::{AdminCommands, BenchCommands, Cli, Commands, SchemaCommands};
 
     #[test]
@@ -171,8 +169,9 @@ mod cli_parsing_tests {
 
         match cli.command {
             Some(Commands::Admin { command }) => match command {
-                AdminCommands::Backup { output } => {
-                    assert_eq!(output, PathBuf::from("/tmp/backup.db"));
+                AdminCommands::Backup { destination, compression } => {
+                    assert_eq!(destination, PathBuf::from("/tmp/backup.db"));
+                    assert_eq!(compression, 6);
                 }
                 _ => panic!("Expected Backup admin command"),
             },
@@ -221,9 +220,10 @@ mod cli_parsing_tests {
 
         match cli.command {
             Some(Commands::Bench { command }) => match command {
-                BenchCommands::Read { ops, threads } => {
-                    assert_eq!(ops, 1000);
-                    assert_eq!(threads, 4);
+                BenchCommands::Read { operations, concurrency, table } => {
+                    assert_eq!(operations, 1000);
+                    assert_eq!(concurrency, 4);
+                    assert_eq!(table, None);
                 }
                 _ => panic!("Expected Read bench command"),
             },
@@ -326,8 +326,8 @@ mod error_handling_tests {
     #[test]
     fn test_database_initialization_errors() -> Result<()> {
         // Test with invalid database path
-        let invalid_path = PathBuf::from("/root/readonly/invalid.db");
-        let config = cqlite_cli::config::Config::default();
+        let _invalid_path = PathBuf::from("/root/readonly/invalid.db");
+        let _config = cqlite_cli::config::Config::default();
 
         // This should be tested when compilation is fixed
         // let result = cqlite_cli::initialize_database(&invalid_path, &config).await;
@@ -376,7 +376,7 @@ mod utility_tests {
     fn test_cassandra_version_validation() -> Result<()> {
         // Test valid versions
         let valid_versions = vec!["3.11", "4.0", "5.0"];
-        for version in valid_versions {
+        for _version in valid_versions {
             // This should be tested when compilation is fixed
             // let result = cqlite_cli::cli::validate_cassandra_version(version);
             // assert!(result.is_ok(), "Should accept version {}", version);
@@ -384,7 +384,7 @@ mod utility_tests {
 
         // Test invalid versions
         let invalid_versions = vec!["2.0", "99.0", "invalid"];
-        for version in invalid_versions {
+        for _version in invalid_versions {
             // This should be tested when compilation is fixed
             // let result = cqlite_cli::cli::validate_cassandra_version(version);
             // assert!(result.is_err(), "Should reject version {}", version);
@@ -412,7 +412,7 @@ mod utility_tests {
 /// Test data structures and helpers
 #[cfg(test)]
 mod test_helpers {
-    use super::*;
+    
 
     /// Create a sample schema for testing
     pub fn create_test_schema() -> cqlite_core::schema::TableSchema {

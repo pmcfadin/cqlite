@@ -55,7 +55,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schema_driven_digest_computation() -> Result<()> {
-        let mut registry = create_test_schema_registry().await?;
+        let registry = create_test_schema_registry().await?;
         let schema = create_test_table_schema();
 
         // Register the schema
@@ -105,7 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parsing_context_creation() -> Result<()> {
-        let mut registry = create_test_schema_registry().await?;
+        let registry = create_test_schema_registry().await?;
         let schema = create_test_table_schema();
 
         registry
@@ -128,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schema_registry_partition_key_comparator() -> Result<()> {
-        let mut registry = create_test_schema_registry().await?;
+        let registry = create_test_schema_registry().await?;
         let schema = create_test_table_schema();
 
         registry
@@ -159,7 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_digest_computation_with_different_types() -> Result<()> {
-        let mut registry = create_test_schema_registry().await?;
+        let registry = create_test_schema_registry().await?;
 
         // Create schemas with different partition key types
         let test_cases = vec![
@@ -286,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn test_byte_comparable_ordering_consistency() -> Result<()> {
         // Test that byte-comparable encoding produces consistent ordering
-        let mut registry = create_test_schema_registry().await?;
+        let registry = create_test_schema_registry().await?;
 
         let schema = TableSchema {
             keyspace: "test_ks".to_string(),

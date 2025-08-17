@@ -9,12 +9,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let test_path = "test-env/cassandra5/sstables";
 
     if !Path::new(test_path).exists() {
-        eprintln!("❌ Test directory not found: {}", test_path);
+        eprintln!("❌ Test directory not found: {test_path}");
         eprintln!("Please run from the project root directory.");
         std::process::exit(1);
     }
 
-    println!("📂 Testing SSTable directories in: {}", test_path);
+    println!("📂 Testing SSTable directories in: {test_path}");
     println!();
 
     match test_all_directories(test_path) {
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut total_corrupted = 0;
 
             for (dir_name, report) in &results {
-                println!("\n🗂️  Directory: {}", dir_name);
+                println!("\n🗂️  Directory: {dir_name}");
                 println!("   {}", report.summary());
 
                 if report.is_valid() {
@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             report.validation_errors.len()
                         );
                         for error in &report.validation_errors {
-                            println!("         • {}", error);
+                            println!("         • {error}");
                         }
                     }
                     if !report.toc_inconsistencies.is_empty() {
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             report.toc_inconsistencies.len()
                         );
                         for inconsistency in &report.toc_inconsistencies {
-                            println!("         • {}", inconsistency);
+                            println!("         • {inconsistency}");
                         }
                     }
                     if !report.header_inconsistencies.is_empty() {
@@ -62,13 +62,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             report.header_inconsistencies.len()
                         );
                         for issue in &report.header_inconsistencies {
-                            println!("         • {}", issue);
+                            println!("         • {issue}");
                         }
                     }
                     if !report.corrupted_files.is_empty() {
                         println!("      💥 Corrupted Files: {}", report.corrupted_files.len());
                         for file in &report.corrupted_files {
-                            println!("         • {}", file);
+                            println!("         • {file}");
                         }
                     }
                 }
@@ -85,16 +85,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Valid directories: {}/{} ({:.1}%)",
                 valid_count,
                 results.len(),
-                if results.len() > 0 {
+                if !results.is_empty() {
                     (valid_count as f64 / results.len() as f64) * 100.0
                 } else {
                     0.0
                 }
             );
-            println!("Total validation errors: {}", total_errors);
-            println!("Total TOC inconsistencies: {}", total_toc_issues);
-            println!("Total header issues: {}", total_header_issues);
-            println!("Total corrupted files: {}", total_corrupted);
+            println!("Total validation errors: {total_errors}");
+            println!("Total TOC inconsistencies: {total_toc_issues}");
+            println!("Total header issues: {total_header_issues}");
+            println!("Total corrupted files: {total_corrupted}");
 
             // Print detailed reports for invalid directories
             println!("\n📋 Detailed Reports for Invalid Directories");
@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .filter(|&&v| v)
                         .count();
                     let total_files = analysis.accessibility_status.len();
-                    println!("   Accessible files: {}/{}", accessible_count, total_files);
+                    println!("   Accessible files: {accessible_count}/{total_files}");
                 }
             }
 
@@ -150,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => {
-            eprintln!("❌ Failed to validate directories: {}", e);
+            eprintln!("❌ Failed to validate directories: {e}");
             std::process::exit(1);
         }
     }

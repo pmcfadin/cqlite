@@ -14,18 +14,20 @@ use tempfile::TempDir;
 /// - Performance measurement tools
 
 pub const CLI_BINARY: &str = "cqlite";
+#[allow(dead_code)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Execute CLI command with arguments
 pub fn run_cli(args: &[&str]) -> Result<Output> {
     Command::new("cargo")
-        .args(&["run", "--bin", CLI_BINARY, "--"])
+        .args(["run", "--bin", CLI_BINARY, "--"])
         .args(args)
         .output()
         .map_err(|e| anyhow::anyhow!("Failed to execute CLI command: {}", e))
 }
 
 /// Execute CLI command with timeout (basic implementation)
+#[allow(dead_code)]
 pub fn run_cli_with_timeout(args: &[&str], _timeout: Duration) -> Result<Output> {
     // For now, this is the same as run_cli
     // In a full implementation, this would use process timeout mechanisms
@@ -58,10 +60,11 @@ pub fn get_stderr(output: &Output) -> Result<String> {
 pub fn get_combined_output(output: &Output) -> Result<String> {
     let stdout = get_stdout(output)?;
     let stderr = get_stderr(output)?;
-    Ok(format!("{}{}", stdout, stderr))
+    Ok(format!("{stdout}{stderr}"))
 }
 
 /// Check if output contains all given patterns
+#[allow(dead_code)]
 pub fn output_contains_all(output: &Output, patterns: &[&str]) -> Result<bool> {
     let combined = get_combined_output(output)?;
     Ok(patterns.iter().all(|pattern| combined.contains(pattern)))
@@ -190,7 +193,7 @@ pub fn create_test_schema_files(temp_dir: &TempDir) -> Result<(PathBuf, PathBuf)
 pub fn create_mock_sstable_dir(temp_dir: &TempDir, table_name: &str) -> Result<PathBuf> {
     let sstable_dir = temp_dir
         .path()
-        .join(format!("{}-46436710673711f0b2cf19d64e7cbecb", table_name));
+        .join(format!("{table_name}-46436710673711f0b2cf19d64e7cbecb"));
     std::fs::create_dir_all(&sstable_dir)?;
 
     // Create essential SSTable files
@@ -319,7 +322,7 @@ pub fn extract_timing_ms(output: &Output) -> Option<f64> {
 /// Check if CLI binary is available
 pub fn cli_available() -> bool {
     Command::new("cargo")
-        .args(&["check", "--bin", CLI_BINARY])
+        .args(["check", "--bin", CLI_BINARY])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -354,66 +357,72 @@ impl PerformanceMeasurement {
 
 /// Test result validation
 pub struct TestValidator {
-    pub passed: usize,
-    pub failed: usize,
-    pub errors: Vec<String>,
+    pub _passed: usize,
+    pub _failed: usize,
+    pub _errors: Vec<String>,
+}
+
+impl Default for TestValidator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestValidator {
     pub fn new() -> Self {
         Self {
-            passed: 0,
-            failed: 0,
-            errors: Vec::new(),
+            _passed: 0,
+            _failed: 0,
+            _errors: Vec::new(),
         }
     }
 
     pub fn assert_success(&mut self, output: &Output, description: &str) {
         if command_succeeded(output) {
-            self.passed += 1;
+            self._passed += 1;
         } else {
-            self.failed += 1;
+            self._failed += 1;
             let error = format!(
                 "{}: Command failed - stderr: {}",
                 description,
                 get_stderr(output).unwrap_or_else(|_| "Unable to decode stderr".to_string())
             );
-            self.errors.push(error);
+            self._errors.push(error);
         }
     }
 
     pub fn assert_failure(&mut self, output: &Output, description: &str) {
         if command_failed(output) {
-            self.passed += 1;
+            self._passed += 1;
         } else {
-            self.failed += 1;
-            let error = format!("{}: Expected command to fail but it succeeded", description);
-            self.errors.push(error);
+            self._failed += 1;
+            let error = format!("{description}: Expected command to fail but it succeeded");
+            self._errors.push(error);
         }
     }
 
     pub fn assert_contains(&mut self, output: &Output, pattern: &str, description: &str) {
         match output_contains_all(output, &[pattern]) {
-            Ok(true) => self.passed += 1,
+            Ok(true) => self._passed += 1,
             Ok(false) => {
-                self.failed += 1;
-                let error = format!("{}: Output does not contain '{}'", description, pattern);
-                self.errors.push(error);
+                self._failed += 1;
+                let error = format!("{description}: Output does not contain '{pattern}'");
+                self._errors.push(error);
             }
             Err(e) => {
-                self.failed += 1;
-                let error = format!("{}: Error checking output: {}", description, e);
-                self.errors.push(error);
+                self._failed += 1;
+                let error = format!("{description}: Error checking output: {e}");
+                self._errors.push(error);
             }
         }
     }
 
     pub fn summary(&self) -> String {
-        format!("Tests: {} passed, {} failed", self.passed, self.failed)
+        format!("Tests: {} passed, {} failed", self._passed, self._failed)
     }
 
     pub fn has_failures(&self) -> bool {
-        self.failed > 0
+        self._failed > 0
     }
 }
 
@@ -436,8 +445,8 @@ pub mod scenarios {
 
         if validator.has_failures() {
             eprintln!("Basic CLI info test failures:");
-            for error in &validator.errors {
-                eprintln!("  - {}", error);
+            for error in &validator._errors {
+                eprintln!("  - {error}");
             }
             return Err(anyhow::anyhow!("Basic CLI info tests failed"));
         }
@@ -461,13 +470,13 @@ pub mod scenarios {
                 "SELECT 1 as test",
             ])?;
 
-            validator.assert_success(&output, &format!("Format {}", format));
+            validator.assert_success(&output, &format!("Format {format}"));
         }
 
         if validator.has_failures() {
             eprintln!("Output format test failures:");
-            for error in &validator.errors {
-                eprintln!("  - {}", error);
+            for error in &validator._errors {
+                eprintln!("  - {error}");
             }
             return Err(anyhow::anyhow!("Output format tests failed"));
         }
@@ -483,7 +492,7 @@ pub struct TestEnvironment {
     pub db_path: PathBuf,
     pub config_path: PathBuf,
     pub schema_files: (PathBuf, PathBuf),
-    pub data_files: (PathBuf, PathBuf, PathBuf),
+    pub _data_files: (PathBuf, PathBuf, PathBuf),
 }
 
 impl TestEnvironment {
@@ -500,7 +509,7 @@ impl TestEnvironment {
             db_path,
             config_path,
             schema_files,
-            data_files,
+            _data_files: data_files,
         })
     }
 

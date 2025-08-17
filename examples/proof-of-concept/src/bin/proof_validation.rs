@@ -5,9 +5,9 @@
 
 use cqlite_core::{
     Config, Database, Value,
-    parser::{SSTableParser, complex_types::ComplexTypeParser},
+    parser::{complex_types::ComplexTypeParser},
     platform::Platform,
-    storage::sstable::{SSTableManager, reader::SSTableReader},
+    storage::sstable::{reader::SSTableReader},
     types::{RowKey, TableId},
 };
 use std::path::{Path, PathBuf};
@@ -93,6 +93,7 @@ struct EndToEndValidation {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct OperationResult {
     operation: String,
     success: bool,
@@ -102,6 +103,7 @@ struct OperationResult {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct PerformanceValidation {
     throughput_records_per_second: f64,
     memory_usage_mb: f64,
@@ -128,7 +130,7 @@ async fn generate_test_files() -> Result<PathBuf, Box<dyn std::error::Error>> {
     for (filename, data) in test_files {
         let file_path = test_dir.join(filename);
         create_test_sstable(&file_path, data, &config, platform.clone()).await?;
-        println!("   ✓ Generated {}", filename);
+        println!("   ✓ Generated {filename}");
     }
 
     Ok(test_dir)
@@ -154,7 +156,7 @@ async fn validate_sstable_parsing(
     let mut dir_entries = fs::read_dir(test_dir).await?;
     while let Some(entry) = dir_entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "sst") {
+        if path.extension().is_some_and(|ext| ext == "sst") {
             validation.files_tested += 1;
 
             match test_sstable_parsing(&path, &config, platform.clone()).await {
@@ -210,7 +212,7 @@ async fn test_sstable_parsing(
         }
 
         // Verify value can be serialized (round-trip test)
-        let serialized = serialize_value_for_test(&value)?;
+        let serialized = serialize_value_for_test(value)?;
         if serialized.is_empty() {
             return Err("Value serialization failed".into());
         }
@@ -249,11 +251,11 @@ async fn validate_complex_types() -> Result<ComplexTypeValidation, Box<dyn std::
             Ok(_) => {
                 validation.successful_types.push(type_name.to_string());
                 validation.serialization_roundtrips += 1;
-                println!("   ✓ {}", type_name);
+                println!("   ✓ {type_name}");
             }
             Err(e) => {
                 validation.failed_types.push(type_name.to_string());
-                println!("   ✗ {}: {}", type_name, e);
+                println!("   ✗ {type_name}: {e}");
             }
         }
     }
@@ -276,7 +278,7 @@ async fn test_complex_type_roundtrip(
 
     // Verify equality (simplified comparison)
     if !values_approximately_equal(value, &parsed_value) {
-        return Err(format!("Round-trip failed: original != parsed for {}", type_name).into());
+        return Err(format!("Round-trip failed: original != parsed for {type_name}").into());
     }
 
     Ok(())
@@ -345,13 +347,11 @@ async fn validate_end_to_end_operations(
                 if success {
                     validation.successful_operations += 1;
                     println!(
-                        "   ✓ {} ({} records, {}ms)",
-                        query, actual_records, execution_time
+                        "   ✓ {query} ({actual_records} records, {execution_time}ms)"
                     );
                 } else {
                     println!(
-                        "   ⚠ {} (expected {}, got {} records, {}ms)",
-                        query, expected_records, actual_records, execution_time
+                        "   ⚠ {query} (expected {expected_records}, got {actual_records} records, {execution_time}ms)"
                     );
                 }
 
@@ -365,7 +365,7 @@ async fn validate_end_to_end_operations(
             }
             Err(e) => {
                 let execution_time = op_start.elapsed().as_millis() as u64;
-                println!("   ✗ {} ({}ms): {}", query, execution_time, e);
+                println!("   ✗ {query} ({execution_time}ms): {e}");
 
                 validation.database_operations.push(OperationResult {
                     operation: query.to_string(),
@@ -417,9 +417,9 @@ async fn benchmark_performance(
     let stats = reader.stats().await?;
     let memory_usage = stats.file_size as f64 / (1024.0 * 1024.0); // Convert to MB
 
-    println!("   📊 Throughput: {:.1} records/second", throughput);
-    println!("   ⏱️  Query latency: {:.1}ms", query_latency);
-    println!("   💾 Memory usage: {:.1}MB", memory_usage);
+    println!("   📊 Throughput: {throughput:.1} records/second");
+    println!("   ⏱️  Query latency: {query_latency:.1}ms");
+    println!("   💾 Memory usage: {memory_usage:.1}MB");
 
     Ok(PerformanceValidation {
         throughput_records_per_second: throughput,
@@ -454,7 +454,7 @@ fn generate_validation_report(results: ValidationResults) {
     if !results.parsing_results.parsing_errors.is_empty() {
         println!("   Parsing errors:");
         for error in &results.parsing_results.parsing_errors {
-            println!("     ✗ {}", error);
+            println!("     ✗ {error}");
         }
     }
 
@@ -481,7 +481,7 @@ fn generate_validation_report(results: ValidationResults) {
     if !results.complex_type_results.failed_types.is_empty() {
         println!("   Failed types:");
         for failed_type in &results.complex_type_results.failed_types {
-            println!("     ✗ {}", failed_type);
+            println!("     ✗ {failed_type}");
         }
     }
 
@@ -594,10 +594,10 @@ fn generate_simple_test_data() -> Vec<(TableId, RowKey, Value)> {
         .map(|i| {
             (
                 TableId::new("simple_table".to_string()),
-                RowKey::from(format!("key_{}", i)),
+                RowKey::from(format!("key_{i}")),
                 Value::Tuple(vec![
                     Value::Integer(i),
-                    Value::Text(format!("name_{}", i)),
+                    Value::Text(format!("name_{i}")),
                     Value::Boolean(i % 2 == 0),
                 ]),
             )
@@ -610,7 +610,7 @@ fn generate_complex_test_data() -> Vec<(TableId, RowKey, Value)> {
         .map(|i| {
             (
                 TableId::new("complex_table".to_string()),
-                RowKey::from(format!("complex_key_{}", i)),
+                RowKey::from(format!("complex_key_{i}")),
                 create_complex_test_value(i),
             )
         })
@@ -622,7 +622,7 @@ fn generate_performance_test_data() -> Vec<(TableId, RowKey, Value)> {
         .map(|i| {
             (
                 TableId::new("perf_table".to_string()),
-                RowKey::from(format!("perf_key_{}", i)),
+                RowKey::from(format!("perf_key_{i}")),
                 create_performance_test_value(i),
             )
         })
@@ -652,7 +652,7 @@ fn create_complex_test_value(id: i32) -> Value {
 fn create_performance_test_value(id: i32) -> Value {
     Value::Tuple(vec![
         Value::Integer(id),
-        Value::Text(format!("record_{}", id)),
+        Value::Text(format!("record_{id}")),
         Value::Boolean(id % 2 == 0),
         Value::Float(id as f64 * 1.5),
         Value::Timestamp(1640995200000 + id as i64),

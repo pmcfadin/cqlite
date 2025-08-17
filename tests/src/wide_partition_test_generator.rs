@@ -32,12 +32,11 @@
 //! promoted index creation by analyzing the resulting Index.db files.
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use tempfile::TempDir;
 
 /// Configuration for generating wide partition test data
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WidePartitionConfig {
     /// Number of clustering keys per partition (to force wide partitions)
     pub clustering_keys_per_partition: usize,
@@ -319,7 +318,6 @@ pub struct WidePartitionTestFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_wide_partition_generator() {

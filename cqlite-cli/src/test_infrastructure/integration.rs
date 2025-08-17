@@ -3,7 +3,7 @@
 //! This module provides utilities for running end-to-end integration tests,
 //! including database setup, query execution, and result validation.
 
-use super::assertions::{CommandResult, ResultAssertion};
+use super::assertions::CommandResult;
 use super::fixtures::{TestDataBuilder, TestFixture};
 use super::{CliTestRunner, TestContainer, TestDatabase, TestResult};
 use std::path::PathBuf;
@@ -255,7 +255,7 @@ impl IntegrationTestSuite {
         args.extend(command.args.iter().map(|s| s.as_str()));
 
         let assertion = self.cli_runner.run(&args)?;
-        let cmd_result = assertion.raw_command();
+        let _cmd_result = assertion.raw_command();
 
         // This is a simplified version - in practice, you'd capture the actual output
         let result = CommandResult {
@@ -400,13 +400,14 @@ impl E2ETestRunner {
         let passed_tests = results.iter().filter(|r| r.success).count();
         let failed_tests = total_tests - passed_tests;
 
+        let performance_summary = self.calculate_performance_summary(&results);
         let report = E2ETestReport {
             total_tests,
             passed_tests,
             failed_tests,
             total_execution_time: total_time,
             test_results: results,
-            performance_summary: self.calculate_performance_summary(&results),
+            performance_summary,
         };
 
         self.print_summary(&report);
@@ -514,9 +515,10 @@ pub struct PerformanceSummary {
 impl IntegrationTestCase {
     /// Create a simple test case
     pub fn simple<S: Into<String>>(name: S, command: S, expected_output: S) -> Self {
+        let name_string = name.into();
         Self {
-            name: name.into(),
-            description: format!("Simple test: {}", name.into()),
+            name: name_string.clone(),
+            description: format!("Simple test: {}", name_string),
             setup_commands: vec![],
             test_commands: vec![TestCommand {
                 command: command.into(),

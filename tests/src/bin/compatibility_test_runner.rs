@@ -4,11 +4,10 @@
 
 use clap::{Arg, Command};
 use cqlite_tests::{
-    IntegrationTestConfig, IntegrationTestRunner, run_compatibility_validation,
+    IntegrationTestConfig, IntegrationTestRunner,
     run_performance_validation, run_quick_compatibility_check,
 };
 use std::process;
-use tokio;
 
 #[tokio::main]
 async fn main() {
@@ -144,14 +143,14 @@ async fn main() {
             }
         }
         Err(e) => {
-            eprintln!("❌ Test execution failed: {:?}", e);
+            eprintln!("❌ Test execution failed: {e:?}");
             process::exit(3);
         }
     }
 }
 
 /// Print help information about the test suite
-fn print_test_info() {
+fn _print_test_info() {
     println!("📋 Available Test Categories:");
     println!("  🔧 Format Tests: SSTable header, compression, metadata parsing");
     println!("  🔢 Type Tests: All CQL data types, serialization, edge cases");
@@ -181,8 +180,6 @@ fn print_test_info() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_runner_compilation() {
         // Basic test to ensure the runner compiles

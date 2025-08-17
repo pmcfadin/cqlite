@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -23,9 +23,9 @@ mod e2e_tests {
     const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Helper to run CLI with timeout
-    fn run_cli_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output> {
+    fn run_cli_with_timeout(args: &[&str], _timeout: Duration) -> Result<std::process::Output> {
         let mut cmd = Command::new("cargo");
-        cmd.args(&["run", "--bin", CLI_BINARY, "--"])
+        cmd.args(["run", "--bin", CLI_BINARY, "--"])
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -141,7 +141,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("Create table output: {:?}", create_output);
+        println!("Create table output: {create_output:?}");
 
         // Step 2: List tables
         let list_output = run_cli_with_timeout(
@@ -149,7 +149,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("List tables output: {:?}", list_output);
+        println!("List tables output: {list_output:?}");
 
         // Step 3: Insert data
         let insert_output = run_cli_with_timeout(
@@ -162,7 +162,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("Insert data output: {:?}", insert_output);
+        println!("Insert data output: {insert_output:?}");
 
         // Step 4: Query data with different formats
         for format in &["table", "json", "csv", "yaml"] {
@@ -178,7 +178,7 @@ mod e2e_tests {
                 TEST_TIMEOUT,
             )?;
 
-            println!("Query ({}) output: {:?}", format, query_output);
+            println!("Query ({format}) output: {query_output:?}");
         }
 
         // Step 5: Get database info
@@ -187,7 +187,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("Database info output: {:?}", info_output);
+        println!("Database info output: {info_output:?}");
 
         // Step 6: Run benchmark
         let bench_output = run_cli_with_timeout(
@@ -204,7 +204,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("Benchmark output: {:?}", bench_output);
+        println!("Benchmark output: {bench_output:?}");
 
         Ok(())
     }
@@ -219,7 +219,7 @@ mod e2e_tests {
         let info_output =
             run_cli_with_timeout(&["info", sstable_dir.to_str().unwrap()], TEST_TIMEOUT)?;
 
-        println!("SSTable info output: {:?}", info_output);
+        println!("SSTable info output: {info_output:?}");
 
         // Test SSTable info with detailed flag
         let detailed_info_output = run_cli_with_timeout(
@@ -227,7 +227,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("Detailed SSTable info output: {:?}", detailed_info_output);
+        println!("Detailed SSTable info output: {detailed_info_output:?}");
 
         // Test SSTable reading
         let read_output = run_cli_with_timeout(
@@ -242,7 +242,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("SSTable read output: {:?}", read_output);
+        println!("SSTable read output: {read_output:?}");
 
         // Test with different output formats
         for format in &["json", "csv", "yaml"] {
@@ -260,7 +260,7 @@ mod e2e_tests {
                 TEST_TIMEOUT,
             )?;
 
-            println!("SSTable read ({}) output: {:?}", format, format_output);
+            println!("SSTable read ({format}) output: {format_output:?}");
         }
 
         // Test auto-detection features
@@ -275,7 +275,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("Auto-detect output: {:?}", auto_detect_output);
+        println!("Auto-detect output: {auto_detect_output:?}");
 
         Ok(())
     }
@@ -291,7 +291,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("JSON schema validation: {:?}", json_validation);
+        println!("JSON schema validation: {json_validation:?}");
 
         // Test CQL schema validation
         let cql_validation = run_cli_with_timeout(
@@ -299,7 +299,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("CQL schema validation: {:?}", cql_validation);
+        println!("CQL schema validation: {cql_validation:?}");
 
         // Test invalid schema
         let invalid_schema = temp_dir.path().join("invalid.json");
@@ -310,7 +310,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("Invalid schema validation: {:?}", invalid_validation);
+        println!("Invalid schema validation: {invalid_validation:?}");
         // Should fail but not crash
 
         Ok(())
@@ -353,7 +353,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("JSON import: {:?}", json_import);
+        println!("JSON import: {json_import:?}");
 
         // Test CSV import
         let csv_import = run_cli_with_timeout(
@@ -370,7 +370,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("CSV import: {:?}", csv_import);
+        println!("CSV import: {csv_import:?}");
 
         // Test export
         let export_file = temp_dir.path().join("exported.json");
@@ -387,7 +387,7 @@ mod e2e_tests {
             TEST_TIMEOUT,
         )?;
 
-        println!("Export output: {:?}", export_output);
+        println!("Export output: {export_output:?}");
 
         Ok(())
     }
@@ -428,7 +428,7 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("Configuration test output: {:?}", config_output);
+        println!("Configuration test output: {config_output:?}");
 
         // Test quiet mode
         let quiet_output = run_cli_with_timeout(
@@ -444,7 +444,7 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("Quiet mode output: {:?}", quiet_output);
+        println!("Quiet mode output: {quiet_output:?}");
 
         Ok(())
     }
@@ -465,7 +465,7 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("Non-existent database output: {:?}", no_db_output);
+        println!("Non-existent database output: {no_db_output:?}");
 
         // Test invalid query
         let db_path = temp_dir.path().join("error_test.db");
@@ -479,13 +479,13 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("Invalid query output: {:?}", invalid_query_output);
+        println!("Invalid query output: {invalid_query_output:?}");
 
         // Test non-existent SSTable
         let no_sstable_output =
             run_cli_with_timeout(&["info", "/tmp/nonexistent/sstable/path"], TEST_TIMEOUT)?;
 
-        println!("Non-existent SSTable output: {:?}", no_sstable_output);
+        println!("Non-existent SSTable output: {no_sstable_output:?}");
 
         // Test invalid Cassandra version
         let invalid_version_output = run_cli_with_timeout(
@@ -493,7 +493,7 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("Invalid version output: {:?}", invalid_version_output);
+        println!("Invalid version output: {invalid_version_output:?}");
 
         Ok(())
     }
@@ -520,7 +520,7 @@ default_database = "default.db"
             Duration::from_secs(60),
         )?; // Longer timeout for performance test
 
-        println!("Large benchmark output: {:?}", large_benchmark);
+        println!("Large benchmark output: {large_benchmark:?}");
 
         // Test query performance
         let query_performance = run_cli_with_timeout(
@@ -534,7 +534,7 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("Query performance output: {:?}", query_performance);
+        println!("Query performance output: {query_performance:?}");
 
         Ok(())
     }
@@ -549,7 +549,7 @@ default_database = "default.db"
 
         // Test REPL mode startup (should timeout and exit gracefully)
         let repl_output = Command::new("timeout")
-            .args(&[
+            .args([
                 "5s",
                 "cargo",
                 "run",
@@ -564,10 +564,10 @@ default_database = "default.db"
 
         match repl_output {
             Ok(output) => {
-                println!("REPL simulation output: {:?}", output);
+                println!("REPL simulation output: {output:?}");
             }
             Err(e) => {
-                println!("REPL simulation failed (expected): {}", e);
+                println!("REPL simulation failed (expected): {e}");
                 // This is expected if timeout is not available
             }
         }
@@ -591,8 +591,8 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("JSON validation: {:?}", json_validation);
-        println!("CQL validation: {:?}", cql_validation);
+        println!("JSON validation: {json_validation:?}");
+        println!("CQL validation: {cql_validation:?}");
 
         // Both should succeed (when compilation is fixed)
 
@@ -619,7 +619,7 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("Memory usage test: {:?}", memory_test);
+        println!("Memory usage test: {memory_test:?}");
 
         // Test database info after operations
         let post_info = run_cli_with_timeout(
@@ -627,7 +627,7 @@ default_database = "default.db"
             TEST_TIMEOUT,
         )?;
 
-        println!("Post-operation info: {:?}", post_info);
+        println!("Post-operation info: {post_info:?}");
 
         Ok(())
     }
@@ -639,25 +639,29 @@ mod e2e_helpers {
     use super::*;
 
     /// Validate that output contains expected patterns
+    #[allow(dead_code)]
     pub fn validate_output_contains(output: &std::process::Output, patterns: &[&str]) -> bool {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{}{}", stdout, stderr);
+        let combined = format!("{stdout}{stderr}");
 
         patterns.iter().all(|pattern| combined.contains(pattern))
     }
 
     /// Validate that command executed successfully
+    #[allow(dead_code)]
     pub fn validate_success(output: &std::process::Output) -> bool {
         output.status.success()
     }
 
     /// Validate that command failed as expected
+    #[allow(dead_code)]
     pub fn validate_failure(output: &std::process::Output) -> bool {
         !output.status.success()
     }
 
     /// Extract timing information from output
+    #[allow(dead_code)]
     pub fn extract_timing_info(output: &std::process::Output) -> Option<Duration> {
         let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -678,6 +682,7 @@ mod e2e_helpers {
     }
 
     /// Create comprehensive test dataset
+    #[allow(dead_code)]
     pub fn create_large_test_dataset(temp_dir: &TempDir, size: usize) -> Result<PathBuf> {
         let data_file = temp_dir.path().join("large_dataset.csv");
         let mut file = std::fs::File::create(&data_file)?;

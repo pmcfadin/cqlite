@@ -746,14 +746,14 @@ mod tests {
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage.clone(), &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
 
         let executor = QueryExecutor::new(storage, schema, &config);
         assert_eq!(
-            executor.config.query.query_parallelism,
+            executor._config.query.query_parallelism,
             config.query.query_parallelism
         );
     }
@@ -769,7 +769,7 @@ mod tests {
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage.clone(), &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
@@ -798,7 +798,7 @@ mod tests {
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage.clone(), &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );

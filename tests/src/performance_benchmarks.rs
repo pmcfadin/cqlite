@@ -5,16 +5,18 @@
 
 use cqlite_core::error::Result;
 use cqlite_core::parser::header::{
-    CassandraVersion, SSTableHeader, parse_sstable_header, serialize_sstable_header,
+    CassandraVersion, SSTableHeader, parse_sstable_header,
 };
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::{Config, RowKey, Value, storage::StorageEngine, types::TableId};
-use cqlite_core::{platform::Platform, schema::SchemaManager};
-use criterion::{BenchmarkId, Criterion, black_box};
+use cqlite_core::{Config, RowKey, Value};
+use cqlite_core::platform::Platform;
+use cqlite_core::storage::StorageEngine;
+use cqlite_core::types::TableId;
+use criterion::black_box;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tempfile::TempDir;
 
 /// Performance benchmark configuration
@@ -118,7 +120,7 @@ impl PerformanceBenchmarks {
         let mut successful_parses = 0;
 
         for _ in 0..iterations {
-            let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+            let _parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
             match parse_sstable_header(&serialized) {
                 Ok(_) => successful_parses += 1,
                 Err(_) => {}

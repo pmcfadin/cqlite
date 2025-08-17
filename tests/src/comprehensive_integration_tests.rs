@@ -8,24 +8,21 @@ use cqlite_core::{platform::Platform, storage::StorageEngine};
 use cqlite_core::{
     Config,
     error::Result,
-    parser::SSTableParser,
-    parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value},
+    parser::types::serialize_cql_value,
     schema::SchemaManager,
     types::{RowKey, TableId, Value},
 };
 
 use assert_cmd::prelude::*;
-use predicates::prelude::*;
 use serde_json;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::time::timeout;
-use uuid::Uuid;
 
 /// Integration test configuration
 #[derive(Debug, Clone)]
@@ -94,7 +91,7 @@ pub enum TestStatus {
 /// Main integration test suite
 pub struct ComprehensiveIntegrationTestSuite {
     config: IntegrationTestConfig,
-    temp_dir: TempDir,
+    _temp_dir: TempDir,
     test_data_path: PathBuf,
 }
 
@@ -117,7 +114,7 @@ impl ComprehensiveIntegrationTestSuite {
 
         Ok(Self {
             config,
-            temp_dir,
+            _temp_dir: temp_dir,
             test_data_path,
         })
     }
@@ -526,7 +523,7 @@ impl ComprehensiveIntegrationTestSuite {
         }
 
         // Retrieve and verify data
-        for (key, expected_value) in &test_data {
+        for (key, _expected_value) in &test_data {
             let retrieved = storage.get(&table_id, key).await?;
             if retrieved.is_none() {
                 return Ok(TestReport {
@@ -620,7 +617,7 @@ impl ComprehensiveIntegrationTestSuite {
         let mut successful_roundtrips = 0;
         for (i, value) in test_values.iter().enumerate() {
             match serialize_cql_value(value) {
-                Ok(serialized) => {
+                Ok(_serialized) => {
                     // For this test, we just verify serialization doesn't fail
                     // Full round-trip testing would require type information
                     successful_roundtrips += 1;
@@ -1142,7 +1139,7 @@ async fn run_comprehensive_integration_tests() -> Result<()> {
 }
 
 // Serde implementations for JSON reporting
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 impl Serialize for IntegrationTestResults {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>

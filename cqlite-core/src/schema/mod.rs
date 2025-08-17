@@ -37,6 +37,9 @@ pub use json_exporter::{
     JsonUDT, JsonValidationResults,
 };
 
+// Type alias for backward compatibility
+pub type ColumnSpec = Column;
+
 use crate::Config;
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;

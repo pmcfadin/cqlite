@@ -163,6 +163,7 @@ pub enum FileHealthStatus {
 }
 
 /// Memory-efficient SSTable data manager
+#[allow(dead_code)]
 pub struct SSTableDataManager {
     /// Configuration
     config: SSTableDataManagerConfig,

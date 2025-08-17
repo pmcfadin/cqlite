@@ -206,6 +206,17 @@ impl Database {
     }
 }
 
+impl Clone for Database {
+    fn clone(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+            query: self.query.clone(),
+            memory: self.memory.clone(),
+            config: self.config.clone(),
+        }
+    }
+}
+
 /// Database statistics
 #[derive(Debug, Clone)]
 pub struct DatabaseStats {

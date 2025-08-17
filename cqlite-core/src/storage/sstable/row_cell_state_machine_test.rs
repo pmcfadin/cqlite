@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::row_cell_state_machine::*;
-    use crate::schema::{Column, TableSchema};
+    use crate::schema::{Column, ClusteringColumn, TableSchema};
     use crate::types::{ComparatorType, Value};
     use std::collections::HashMap;
 
@@ -648,17 +648,17 @@ mod tests {
         // Create schema with multi-component clustering
         let mut schema = create_test_schema();
         schema.clustering_keys = vec![
-            Column {
+            ClusteringColumn {
                 name: "timestamp".to_string(),
                 data_type: "timestamp".to_string(),
-                nullable: false,
-                default: None,
+                position: 0,
+                order: "ASC".to_string(),
             },
-            Column {
+            ClusteringColumn {
                 name: "sequence".to_string(),
                 data_type: "int".to_string(),
-                nullable: false,
-                default: None,
+                position: 1,
+                order: "ASC".to_string(),
             },
         ];
 

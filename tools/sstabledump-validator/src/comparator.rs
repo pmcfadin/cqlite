@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, warn};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComparisonResult {
     pub summary: ComparisonSummary,
     pub differences: Vec<CellDifference>,
     pub statistics: ComparisonStatistics,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComparisonSummary {
     pub total_cells_compared: u64,
     pub matching_cells: u64,
@@ -21,7 +21,7 @@ pub struct ComparisonSummary {
     pub compatibility_score: f64, // 0.0 to 1.0
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CellDifference {
     pub location: CellLocation,
     pub difference_type: DifferenceType,
@@ -30,7 +30,7 @@ pub struct CellDifference {
     pub severity: DifferenceSeverity,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CellLocation {
     pub partition_key: String,
     pub clustering_key: Option<String>,
@@ -39,7 +39,7 @@ pub struct CellLocation {
     pub cell_index: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DifferenceType {
     ValueMismatch,
     TimestampMismatch,
@@ -50,7 +50,7 @@ pub enum DifferenceType {
     DeletionInfoMismatch,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DifferenceSeverity {
     Critical, // Data corruption or major incompatibility
     High,     // Significant functional difference
@@ -59,7 +59,7 @@ pub enum DifferenceSeverity {
     Info,     // Informational only
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComparisonStatistics {
     pub cassandra_partitions: usize,
     pub cqlite_partitions: usize,
@@ -77,6 +77,12 @@ pub struct CellByCell {
     pub ignore_formatting_differences: bool,
 }
 
+impl Default for CellByCell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CellByCell {
     pub fn new() -> Self {
         Self {
@@ -86,6 +92,7 @@ impl CellByCell {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_zero_tolerance(mut self, zero_tolerance: bool) -> Self {
         self.zero_tolerance = zero_tolerance;
         self
@@ -485,7 +492,7 @@ impl CellByCell {
                 let key = row
                     .clustering_key
                     .clone()
-                    .unwrap_or_else(|| format!("row_{}", idx));
+                    .unwrap_or_else(|| format!("row_{idx}"));
                 (key, row)
             })
             .collect()
@@ -551,7 +558,7 @@ mod tests {
     async fn test_different_values_comparison() {
         let comparator = CellByCell::new();
 
-        let mut data1 = create_test_data();
+        let data1 = create_test_data();
         let mut data2 = create_test_data();
 
         // Modify one value

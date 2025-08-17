@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 struct SstableDataDemo {
     args: Args,
     data_manager: Arc<SSTableDataManager>,

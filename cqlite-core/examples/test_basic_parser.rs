@@ -8,12 +8,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test basic CREATE TABLE parsing
     let cql = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, age INT)";
-    println!("\n✅ Testing CQL: {}", cql);
+    println!("\n✅ Testing CQL: {cql}");
 
     match parse_cql_schema(cql) {
         Ok((remaining, schema)) => {
             println!("✓ Parse successful!");
-            println!("  Remaining input: '{}'", remaining);
+            println!("  Remaining input: '{remaining}'");
             println!("  Table: {}.{}", schema.keyspace, schema.table);
             println!("  Columns: {}", schema.columns.len());
             println!("  Partition Keys: {}", schema.partition_keys.len());
@@ -27,8 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => {
-            println!("✗ Parse failed: {:?}", e);
-            return Err(format!("Parse error: {:?}", e).into());
+            println!("✗ Parse failed: {e:?}");
+            return Err(format!("Parse error: {e:?}").into());
         }
     }
 

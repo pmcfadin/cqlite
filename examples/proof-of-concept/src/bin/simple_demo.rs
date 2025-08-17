@@ -3,7 +3,7 @@
 //! A working demonstration that proves CQLite can handle basic database operations
 //! and complex data types.
 
-use cqlite_core::{Config, Database, Value};
+use cqlite_core::{Config, Database};
 use std::time::Instant;
 use tempfile::TempDir;
 

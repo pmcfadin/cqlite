@@ -8,6 +8,7 @@
 //! - Golden file testing
 //! - Compile-fail testing
 
+use clap::Parser;
 use cqlite_cli::{cli, config, formatter, query_processor};
 use fake::{Fake, Faker};
 use insta::assert_snapshot;

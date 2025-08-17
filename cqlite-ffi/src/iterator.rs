@@ -3,10 +3,8 @@
 //! This module contains the FFI iterator interface.
 
 use crate::database::CQLiteDB;
-use crate::error::*;
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int};
-use std::ptr;
+use crate::CQLITE_OK;
+use std::os::raw::c_int;
 
 /// Iterator handle
 pub struct CQLiteIterator {

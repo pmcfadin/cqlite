@@ -2,7 +2,6 @@
 //!
 //! This module contains type definitions for the FFI interface.
 
-use std::os::raw::c_int;
 
 /// Opaque database handle
 #[repr(C)]

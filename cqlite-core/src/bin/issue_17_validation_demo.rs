@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Err(e) => {
-            println!("⚠️  Real-time status unavailable: {}", e);
+            println!("⚠️  Real-time status unavailable: {e}");
         }
     }
     println!();
@@ -89,13 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if !section.metrics.is_empty() {
                     for (key, value) in &section.metrics {
-                        println!("      • {}: {:.2}", key, value);
+                        println!("      • {key}: {value:.2}");
                     }
                 }
 
                 if !section.recommendations.is_empty() {
                     for recommendation in &section.recommendations {
-                        println!("      💡 {}", recommendation);
+                        println!("      💡 {recommendation}");
                     }
                 }
             }
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 Err(e) => {
-                    println!("⚠️  JSON report generation failed: {}", e);
+                    println!("⚠️  JSON report generation failed: {e}");
                 }
             }
 
@@ -158,13 +158,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !recommendations.is_empty() {
                     println!("   Recommendations:");
                     for recommendation in recommendations {
-                        println!("     • {}", recommendation);
+                        println!("     • {recommendation}");
                     }
                 }
             }
         }
         Err(e) => {
-            println!("❌ Validation failed: {}", e);
+            println!("❌ Validation failed: {e}");
             println!("   This indicates a framework setup issue that needs to be resolved");
             return Err(e.into());
         }

@@ -80,6 +80,7 @@ pub struct IndexData {
 }
 
 /// High-level Index.db file reader
+#[allow(dead_code)]
 pub struct IndexReader {
     /// Path to the Index.db file
     file_path: PathBuf,

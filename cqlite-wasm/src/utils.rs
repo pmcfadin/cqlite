@@ -3,7 +3,6 @@
 //! This module contains utility functions for WASM bindings.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// WASM feature detection result
 #[derive(Debug, Serialize, Deserialize)]

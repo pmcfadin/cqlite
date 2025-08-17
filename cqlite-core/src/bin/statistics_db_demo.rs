@@ -1,4 +1,4 @@
-//! Statistics.db analysis demo for CQLite
+//! Statistics.db analysis demo for `CQLite`
 //!
 //! This binary demonstrates the enhanced Statistics.db parsing capabilities
 //! for real Cassandra 5.0 'nb' format files.
@@ -30,11 +30,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = Path::new(file_path);
 
     if !path.exists() {
-        eprintln!("❌ File not found: {}", file_path);
+        eprintln!("❌ File not found: {file_path}");
         return Ok(());
     }
 
-    println!("🔍 Analyzing Statistics.db file: {}", file_path);
+    println!("🔍 Analyzing Statistics.db file: {file_path}");
     println!("📊 File: {}", path.file_name().unwrap().to_string_lossy());
 
     // Read the file
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, chunk) in file_data[..64.min(file_data.len())].chunks(16).enumerate() {
         print!("  {:04x}: ", i * 16);
         for byte in chunk {
-            print!("{:02x} ", byte);
+            print!("{byte:02x} ");
         }
         // Print ASCII representation
         print!(" |");
@@ -94,9 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "  Table ID: {}",
                     table_id
                         .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<Vec<_>>()
-                        .join("")
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
                 );
             }
 
@@ -210,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !analysis.query_performance_hints.is_empty() {
                 println!("\n💡 Performance Hints:");
                 for hint in &analysis.query_performance_hints {
-                    println!("  • {}", hint);
+                    println!("  • {hint}");
                 }
             }
 
@@ -218,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !analysis.storage_recommendations.is_empty() {
                 println!("\n📝 Storage Recommendations:");
                 for rec in &analysis.storage_recommendations {
-                    println!("  • {}", rec);
+                    println!("  • {rec}");
                 }
             }
 
@@ -226,14 +225,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !statistics.metadata.is_empty() {
                 println!("\n🏷️ Metadata:");
                 for (key, value) in &statistics.metadata {
-                    println!("  {}: {}", key, value);
+                    println!("  {key}: {value}");
                 }
             }
 
             println!("\n✅ Analysis complete!");
         }
         Err(e) => {
-            println!("\n❌ Failed to parse Statistics.db file: {:?}", e);
+            println!("\n❌ Failed to parse Statistics.db file: {e:?}");
             println!("This might be a format not yet supported by the enhanced parser.");
         }
     }

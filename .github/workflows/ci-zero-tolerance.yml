@@ -1,0 +1,54 @@
+name: CI Zero Tolerance
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  zero-tolerance-checks:
+    name: Zero Tolerance Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Check formatting
+      run: cargo fmt --all --check
+    
+    - name: Clippy with zero tolerance
+      run: cargo clippy --all-targets --all-features --features ci_zero_tolerance -- -D warnings
+    
+    - name: Test with zero tolerance
+      run: |
+        export RUSTFLAGS="-D warnings"
+        cargo test --all-features --features ci_zero_tolerance
+    
+    - name: Check compilation with zero tolerance
+      run: |
+        export RUSTFLAGS="-D warnings"
+        cargo check --all-targets --all-features --features ci_zero_tolerance
+    
+    - name: Documentation check
+      run: |
+        export RUSTDOCFLAGS="-D warnings"
+        cargo doc --all-features --no-deps --document-private-items

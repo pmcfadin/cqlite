@@ -205,6 +205,7 @@ impl StreamingBlock {
 }
 
 /// High-performance streaming SSTable reader
+#[allow(dead_code)]
 pub struct StreamingSSTableReader {
     /// Path to the SSTable file
     file_path: PathBuf,
@@ -817,7 +818,6 @@ pub struct StreamingStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn test_buffer_pool() {

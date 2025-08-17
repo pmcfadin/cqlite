@@ -2,7 +2,6 @@
 //!
 //! This module contains utility functions for the FFI interface.
 
-use crate::error::{CQLITE_ERROR_INIT, set_last_error};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::Runtime;
 

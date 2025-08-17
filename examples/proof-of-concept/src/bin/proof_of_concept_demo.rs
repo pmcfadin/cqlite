@@ -52,6 +52,7 @@ struct ProofOfConceptResult {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct QueryResult {
     query: String,
     execution_time_ms: u64,
@@ -64,7 +65,7 @@ struct QueryResult {
 async fn run_proof_of_concept_demo(
     db_path: &Path,
 ) -> Result<ProofOfConceptResult, Box<dyn std::error::Error>> {
-    let overall_start = Instant::now();
+    let _overall_start = Instant::now();
 
     // Initialize database with optimized config
     let start = Instant::now();

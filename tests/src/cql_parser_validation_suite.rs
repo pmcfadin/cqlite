@@ -4,13 +4,11 @@
 //! to ensure correct parsing of various CREATE TABLE formats, type conversions,
 //! and error handling.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
-use crate::fixtures::test_data::*;
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::{SSTableParser, types::CqlTypeId};
 use cqlite_core::schema::{CqlType, TableSchema, UdtRegistry};
-use cqlite_core::{Value, types::*};
+use cqlite_core::Value;
 use serde_json;
 use std::collections::HashMap;
 use std::fs;
@@ -19,9 +17,9 @@ use std::path::Path;
 /// Comprehensive CQL parser validation test suite
 pub struct CqlParserValidationSuite {
     /// Parser instance for testing
-    parser: SSTableParser,
+    _parser: SSTableParser,
     /// UDT registry for type validation
-    udt_registry: UdtRegistry,
+    _udt_registry: UdtRegistry,
     /// Test results
     results: HashMap<String, ValidationResult>,
     /// Performance metrics
@@ -52,9 +50,9 @@ impl CqlParserValidationSuite {
     /// Create a new validation suite
     pub fn new() -> Self {
         Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
+            _parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
                 .unwrap(),
-            udt_registry: UdtRegistry::new(),
+            _udt_registry: UdtRegistry::new(),
             results: HashMap::new(),
             performance_metrics: Vec::new(),
         }
@@ -441,9 +439,9 @@ impl CqlParserValidationSuite {
                 // Disabled test
                 match Ok::<Vec<u8>, cqlite_core::Error>(vec![]) {
                     // self.parser.serialize_value(test_value) {
-                    Ok(serialized) => {
+                    Ok(_serialized) => {
                         // Try to determine type ID from value
-                        let type_id = self.value_to_type_id(test_value);
+                        let _type_id = self.value_to_type_id(test_value);
                         match Ok::<(cqlite_core::Value, i32), cqlite_core::Error>((
                             test_value.clone(),
                             0,
@@ -1263,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_basic_type_parsing() {
-        let suite = CqlParserValidationSuite::new();
+        let _suite = CqlParserValidationSuite::new();
 
         // Test primitive type parsing
         assert_eq!(CqlType::parse("TEXT").unwrap(), CqlType::Text);
@@ -1273,7 +1271,7 @@ mod tests {
 
     #[test]
     fn test_collection_type_parsing() {
-        let suite = CqlParserValidationSuite::new();
+        let _suite = CqlParserValidationSuite::new();
 
         // Test collection parsing
         match CqlType::parse("LIST<TEXT>").unwrap() {

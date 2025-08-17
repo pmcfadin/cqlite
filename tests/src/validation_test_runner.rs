@@ -12,7 +12,7 @@ use crate::{
 use serde_json;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -92,7 +92,7 @@ pub struct PerformanceValidationResult {
 /// Main validation test runner
 pub struct ValidationTestRunner {
     config: ValidationTestConfig,
-    temp_dir: TempDir,
+    _temp_dir: TempDir,
     test_output_dir: PathBuf,
 }
 
@@ -104,7 +104,7 @@ impl ValidationTestRunner {
 
         Ok(Self {
             config,
-            temp_dir,
+            _temp_dir: temp_dir,
             test_output_dir,
         })
     }
@@ -690,7 +690,7 @@ impl ValidationTestRunner {
 }
 
 // Serde implementations for JSON reports
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 impl Serialize for ValidationTestResults {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

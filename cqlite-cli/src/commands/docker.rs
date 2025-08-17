@@ -1,7 +1,5 @@
 /// Docker integration commands for cqlite-cli
 use clap::{Args, Subcommand};
-use cqlite_core::docker::{DockerContainer, DockerCqlshClient};
-use cqlite_core::testing::{CassandraTestRunner, TestSuiteResult};
 
 #[derive(Args)]
 pub struct DockerArgs {

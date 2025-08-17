@@ -132,6 +132,7 @@ pub enum DiscoveryMethod {
 }
 
 /// Schema discovery engine
+#[allow(dead_code)]
 pub struct SchemaDiscovery {
     /// Configuration
     config: SchemaDiscoveryConfig,
@@ -685,6 +686,9 @@ impl ValueExt for Value {
             Value::Tuple(_) => "Tuple".to_string(),
             Value::Udt(_) => "UDT".to_string(),
             Value::Frozen(_) => "Frozen".to_string(),
+            Value::Varint(_) => "Varint".to_string(),
+            Value::Decimal { .. } => "Decimal".to_string(),
+            Value::Duration { .. } => "Duration".to_string(),
             Value::Tombstone(_) => "Tombstone".to_string(),
         }
     }
@@ -715,6 +719,9 @@ impl ValueExt for Value {
             Value::Tuple(t) => t.iter().map(|v| v.estimate_size()).sum::<usize>() + 8,
             Value::Udt(_) => 32,                   // UDT estimate
             Value::Frozen(f) => f.estimate_size(), // Recursive
+            Value::Varint(data) => data.len(),
+            Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + data
+            Value::Duration { .. } => 12, // 3 * 4 bytes
             Value::Tombstone(_) => 8,              // Tombstone marker
         }
     }
@@ -727,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schema_discovery_creation() {
-        let temp_dir = TempDir::new().unwrap();
+        let _temp_dir = TempDir::new().unwrap();
         let config = SchemaDiscoveryConfig::default();
         let core_config = Config::default();
         let platform = Arc::new(Platform::new(&core_config).await.unwrap());

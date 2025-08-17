@@ -97,3 +97,12 @@ path = "src/bin/performance_regression_test_runner.rs"
 [[bin]]
 name = "issue_17_test_runner"
 path = "src/bin/issue_17_test_runner.rs"
+
+# Integration tests
+[[test]]
+name = "integration_e2e"
+path = "src/integration_e2e.rs"
+
+[features]
+default = []
+ci_zero_tolerance = []

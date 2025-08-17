@@ -11,10 +11,8 @@ use cqlite_core::{
         // parse_list_with_type, parse_set_with_type, parse_map_with_types,
         // parse_tuple, parse_udt
     },
-    types::{DataType, Value},
+    types::Value,
 };
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
-use std::collections::HashMap;
 
 /// Test collection parsing against Cassandra 5+ format specification
 pub struct CollectionCompatibilityTester {

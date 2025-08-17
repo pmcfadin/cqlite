@@ -36,6 +36,12 @@ pub enum ComparatorType {
     Timestamp,
     /// UUID comparator (byte-wise)
     Uuid,
+    /// Variable-length integer comparator
+    Varint,
+    /// Decimal type comparator
+    Decimal,
+    /// Duration type comparator
+    Duration,
     /// JSON document comparator
     Json,
     /// List comparator with element comparator
@@ -112,12 +118,13 @@ impl ComparatorType {
                 ComparatorType::Frozen(Box::new(inner_comparator))
             }
             CqlType::Custom(type_name) => ComparatorType::Custom(type_name.clone()),
-            // Map unsupported types to custom for now
+            // Map newly supported types
+            CqlType::Decimal => ComparatorType::Decimal,
+            CqlType::Duration => ComparatorType::Duration,
+            // Map remaining unsupported types to custom for now
             CqlType::Date => ComparatorType::Custom("date".to_string()),
             CqlType::Time => ComparatorType::Custom("time".to_string()),
-            CqlType::Duration => ComparatorType::Custom("duration".to_string()),
             CqlType::Inet => ComparatorType::Custom("inet".to_string()),
-            CqlType::Decimal => ComparatorType::Custom("decimal".to_string()),
         };
 
         Ok(comparator)
@@ -156,6 +163,9 @@ impl ComparatorType {
             ComparatorType::Blob => self.compare_blob(left, right),
             ComparatorType::Timestamp => self.compare_timestamp(left, right),
             ComparatorType::Uuid => self.compare_uuid(left, right),
+            ComparatorType::Varint => self.compare_varint(left, right),
+            ComparatorType::Decimal => self.compare_decimal(left, right),
+            ComparatorType::Duration => self.compare_duration(left, right),
             ComparatorType::Json => self.compare_json(left, right),
             ComparatorType::List(element_comparator) => {
                 self.compare_list(left, right, element_comparator)
@@ -220,6 +230,9 @@ impl ComparatorType {
             ComparatorType::Blob => "blob",
             ComparatorType::Timestamp => "timestamp",
             ComparatorType::Uuid => "uuid",
+            ComparatorType::Varint => "varint",
+            ComparatorType::Decimal => "decimal",
+            ComparatorType::Duration => "duration",
             ComparatorType::Json => "json",
             ComparatorType::List(_) => "list",
             ComparatorType::Set(_) => "set",
@@ -245,6 +258,9 @@ impl ComparatorType {
             | ComparatorType::Blob
             | ComparatorType::Timestamp
             | ComparatorType::Uuid
+            | ComparatorType::Varint
+            | ComparatorType::Decimal
+            | ComparatorType::Duration
             | ComparatorType::Json => true,
             ComparatorType::List(element_comparator) => element_comparator.supports_ordering(),
             ComparatorType::Set(_) => false, // Sets only support equality
@@ -373,6 +389,61 @@ impl ComparatorType {
             (Value::Uuid(l), Value::Uuid(r)) => Ok(l.cmp(r)),
             _ => Err(Error::Schema(
                 "Type mismatch: expected uuid values".to_string(),
+            )),
+        }
+    }
+
+    fn compare_varint(&self, left: &Value, right: &Value) -> Result<Ordering> {
+        match (left, right) {
+            (Value::Varint(l), Value::Varint(r)) => Ok(l.cmp(r)),
+            _ => Err(Error::Schema(
+                "Type mismatch: expected varint values".to_string(),
+            )),
+        }
+    }
+
+    fn compare_decimal(&self, left: &Value, right: &Value) -> Result<Ordering> {
+        match (left, right) {
+            (Value::Decimal { scale: l_scale, unscaled: l_unscaled }, 
+             Value::Decimal { scale: r_scale, unscaled: r_unscaled }) => {
+                // Compare by normalizing to same scale if needed
+                if l_scale == r_scale {
+                    Ok(l_unscaled.cmp(r_unscaled))
+                } else {
+                    // For now, simple string comparison
+                    // A full implementation would normalize scales
+                    let l_str = format!("{:?}.{}", l_unscaled, l_scale);
+                    let r_str = format!("{:?}.{}", r_unscaled, r_scale);
+                    Ok(l_str.cmp(&r_str))
+                }
+            }
+            _ => Err(Error::Schema(
+                "Type mismatch: expected decimal values".to_string(),
+            )),
+        }
+    }
+
+    fn compare_duration(&self, left: &Value, right: &Value) -> Result<Ordering> {
+        match (left, right) {
+            (Value::Duration { months: l_months, days: l_days, nanos: l_nanos },
+             Value::Duration { months: r_months, days: r_days, nanos: r_nanos }) => {
+                // Compare months first
+                match l_months.cmp(r_months) {
+                    Ordering::Equal => {
+                        // Compare days next
+                        match l_days.cmp(r_days) {
+                            Ordering::Equal => {
+                                // Compare nanoseconds last
+                                Ok(l_nanos.cmp(r_nanos))
+                            }
+                            other => Ok(other),
+                        }
+                    }
+                    other => Ok(other),
+                }
+            }
+            _ => Err(Error::Schema(
+                "Type mismatch: expected duration values".to_string(),
             )),
         }
     }

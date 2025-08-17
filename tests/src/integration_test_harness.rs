@@ -4,8 +4,6 @@
 //! of CQLite with real Cassandra 5.0 SSTable data.
 
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::SSTableParser;
-use cqlite_core::storage::sstable::directory::SSTableDirectory;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -383,7 +381,7 @@ impl TestDataGenerator {
     }
 
     /// Generate truncated file data
-    pub fn generate_truncated_file(&self, original_size: usize) -> Vec<u8> {
+    pub fn generate_truncated_file(&self, _original_size: usize) -> Vec<u8> {
         vec![0x6F, 0x61] // Only magic number, missing rest
     }
 

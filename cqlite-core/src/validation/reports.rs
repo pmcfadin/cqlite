@@ -60,6 +60,7 @@ pub struct ValidationSummary {
 
 /// Report generator
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ReportGenerator {
     /// Report format
     format: ReportFormat,

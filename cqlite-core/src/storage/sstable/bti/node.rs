@@ -541,7 +541,7 @@ mod tests {
         assert!(payload_node.validate().is_ok());
 
         // Invalid sparse node (not enough children)
-        let invalid_sparse = BtiNode::sparse(
+        let _invalid_sparse = BtiNode::sparse(
             1,
             Vec::new(),
             vec![Transition::new(b'a', SizedPointer::new(100))],
@@ -554,7 +554,7 @@ mod tests {
     fn test_trie_navigator() {
         let mut nav = TrieNavigator::new(1000);
         assert_eq!(nav.current_offset, 1000);
-        assert_eq!(nav.current_path(), &[]);
+        assert_eq!(nav.current_path(), &[] as &[u8]);
 
         let pointer = SizedPointer::new(100);
         nav.navigate_to_child(b'a', &pointer).unwrap();

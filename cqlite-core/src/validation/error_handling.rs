@@ -14,10 +14,13 @@ use tokio::fs;
 #[derive(Debug)]
 pub struct ErrorHandler {
     /// Configuration for error handling validation
+    #[allow(dead_code)]
     config: ErrorHandlingConfig,
     /// Test scenarios and their results
+    #[allow(dead_code)]
     scenarios: HashMap<String, ErrorScenarioResult>,
     /// Recovery strategies
+    #[allow(dead_code)]
     recovery_strategies: Vec<RecoveryStrategy>,
 }
 
@@ -1532,7 +1535,6 @@ impl From<ErrorHandlingReport> for super::reports::ValidationSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_error_handler_creation() {
@@ -1584,10 +1586,10 @@ mod tests {
         let handler = ErrorHandler::new(ErrorHandlingConfig::default()).unwrap();
 
         let corruption_error = Error::corruption("Test corruption");
-        assert!(handler.is_expected_error(&corruption_error, ErrorScenarioType::CorruptedData));
+        assert!(handler.is_expected_error(&corruption_error, &ErrorScenarioType::CorruptedData));
 
         let io_error = Error::storage("I/O error");
-        assert!(handler.is_expected_error(&io_error, ErrorScenarioType::IoError));
+        assert!(handler.is_expected_error(&io_error, &ErrorScenarioType::IoError));
     }
 
     #[test]

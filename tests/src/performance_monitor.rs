@@ -3,15 +3,13 @@
 //! Provides real-time performance monitoring and analysis tools
 //! for comprehensive testing and optimization.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, atomic::{AtomicU64, AtomicUsize, Ordering}};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 
 /// Performance metrics collector
 #[derive(Debug, Clone)]
@@ -320,7 +318,7 @@ impl PerformanceMonitor {
 
     async fn record_system_metrics(&self) {
         // Record current timestamp
-        let timestamp = self.start_time.elapsed().as_millis() as u64;
+        let _timestamp = self.start_time.elapsed().as_millis() as u64;
 
         // Record CPU usage (simplified)
         // In a real implementation, this would use system APIs
@@ -453,6 +451,7 @@ where
 
 /// Batch performance measurement
 pub struct BatchPerformanceMeasurer {
+    #[allow(dead_code)]
     monitor: PerformanceMonitor,
     latency_tracker: LatencyTracker,
     operation_count: AtomicUsize,

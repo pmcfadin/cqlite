@@ -98,6 +98,7 @@ mod header_validation {
     }
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     struct HeaderInfo {
         generation: u32,
         table_id: String,

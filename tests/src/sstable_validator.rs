@@ -1,24 +1,20 @@
 //! Comprehensive SSTable validator for testing reader/writer functionality
 //! and Cassandra 5+ 'oa' format specification compliance
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
-
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
     Config, Result, RowKey, Value,
+    platform::Platform,
     storage::sstable::{
-        SSTableManager,
-        bloom::BloomFilter,
         reader::SSTableReader,
         validation::{CassandraValidationFramework, TestResult, ValidationReport},
         writer::SSTableWriter,
     },
-    types::{DataType, TableId},
+    types::TableId,
 };
 
 use tempfile::TempDir;

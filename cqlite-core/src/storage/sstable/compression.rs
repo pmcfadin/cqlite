@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_compression_reader_with_block_size() {
-        let mut reader = CompressionReader::with_block_size(CompressionAlgorithm::None, 32768);
+        let reader = CompressionReader::with_block_size(CompressionAlgorithm::None, 32768);
         assert_eq!(reader.block_size(), 32768);
     }
 
@@ -712,6 +712,7 @@ mod tests {
 }
 
 /// Compression reader for streaming decompression
+#[allow(dead_code)]
 pub struct CompressionReader {
     algorithm: CompressionAlgorithm,
     buffer: Vec<u8>,

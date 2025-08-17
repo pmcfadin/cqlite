@@ -28,6 +28,7 @@ use crate::{
 
 /// Schema-aware SSTable reader that uses SchemaParser for all value parsing
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SchemaAwareReader {
     /// Path to the SSTable file
     file_path: PathBuf,
@@ -172,7 +173,7 @@ impl SchemaAwareReader {
     }
 
     /// Validate that the schema contains all required fields for schema-aware parsing
-    fn validate_schema_completeness(schema: &TableSchema) -> Result<()> {
+    pub fn validate_schema_completeness(schema: &TableSchema) -> Result<()> {
         // Must have at least one partition key
         if schema.partition_keys.is_empty() {
             return Err(Error::Schema(format!(
@@ -242,7 +243,7 @@ impl SchemaAwareReader {
     }
 
     /// Create parsing context from schema and registry
-    fn create_parsing_context(
+    pub fn create_parsing_context(
         schema: &TableSchema,
         _registry: &SchemaRegistry,
     ) -> Result<ParsingContext> {

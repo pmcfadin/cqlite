@@ -1,6 +1,5 @@
 //! Test helper utilities
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

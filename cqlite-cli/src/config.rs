@@ -59,9 +59,11 @@ pub struct LoggingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum LogFormat {
     Plain,
     Json,
+    #[default]
     Pretty,
 }
 
@@ -187,6 +189,7 @@ impl Config {
         Ok(Self::default())
     }
 
+    #[allow(dead_code)]
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
         let content = match path.extension().and_then(|ext| ext.to_str()) {
             Some("toml") => toml::to_string_pretty(self)
@@ -212,11 +215,6 @@ impl Config {
     }
 }
 
-impl Default for LogFormat {
-    fn default() -> Self {
-        LogFormat::Pretty
-    }
-}
 
 impl Default for ReplConfig {
     fn default() -> Self {

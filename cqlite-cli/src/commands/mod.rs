@@ -137,7 +137,6 @@ impl QueryResult {
 // use crate::query_executor::{QueryExecutor, QueryExecutorConfig};
 // use crate::table_scanner::{TableScanner, ScanStrategy, ScanConfig};
 use anyhow::{Context, Result};
-use chrono;
 use cqlite_core::{
     Database,
     schema::{ClusteringColumn, Column, KeyColumn, TableSchema, parse_cql_schema},
@@ -145,7 +144,6 @@ use cqlite_core::{
 };
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
-use serde_json;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -187,7 +185,7 @@ pub async fn execute_query(
         if !explain_result.selected_indexes.is_empty() {
             println!("\nSelected Indexes:");
             for index in &explain_result.selected_indexes {
-                println!("  - {}", index);
+                println!("  - {index}");
             }
         }
 
@@ -201,7 +199,7 @@ pub async fn execute_query(
         if !explain_result.parallelization_info.is_empty() {
             println!("\nParallelization:");
             for info in &explain_result.parallelization_info {
-                println!("  - {}", info);
+                println!("  - {info}");
             }
         }
 
@@ -223,7 +221,7 @@ pub async fn execute_query(
     match format {
         OutputFormat::Table => {
             // Use the built-in Display implementation for table format
-            println!("{}", result);
+            println!("{result}");
         }
         OutputFormat::Json => {
             let json_result = result.to_json();
@@ -273,7 +271,7 @@ pub async fn execute_query(
     if !warnings.is_empty() {
         println!("\nWarnings:");
         for warning in warnings {
-            println!("  ⚠️  {}", warning);
+            println!("  ⚠️  {warning}");
         }
     }
 
@@ -298,7 +296,7 @@ fn print_csv_format(result: &cqlite_core::query::result::QueryResult) -> Result<
         for column_name in &column_names {
             let value = row
                 .get(column_name)
-                .map(|v| format!("{}", v))
+                .map(|v| format!("{v}"))
                 .unwrap_or_else(|| "NULL".to_string());
             record.push(value);
         }
@@ -316,7 +314,7 @@ pub async fn import_data(
     table: Option<&str>,
 ) -> Result<()> {
     println!("Importing data from: {}", file.display());
-    println!("Format: {}, Target table: {:?}", format, table);
+    println!("Format: {format}, Target table: {table:?}");
 
     // Validate input file exists
     if !file.exists() {
@@ -341,8 +339,7 @@ pub async fn import_data(
 
     // Validate target table exists
     let table_check_query = format!(
-        "SELECT table_name FROM system.tables WHERE table_name = '{}'",
-        target_table
+        "SELECT table_name FROM system.tables WHERE table_name = '{target_table}'"
     );
     match database.execute(&table_check_query).await {
         Ok(result) if result.rows.is_empty() => {
@@ -352,7 +349,7 @@ pub async fn import_data(
             ));
         }
         Ok(_) => {
-            println!("✓ Target table '{}' found", target_table);
+            println!("✓ Target table '{target_table}' found");
         }
         Err(_) => {
             println!("⚠️  Warning: Could not verify table existence. Proceeding anyway...");
@@ -366,15 +363,15 @@ pub async fn import_data(
             Vec::new()
         });
 
-    let mut imported_rows = 0;
+    let mut _imported_rows = 0;
     let error_count = 0;
 
     match format {
         ImportFormat::Csv => {
-            imported_rows = import_csv_data(database, file, &target_table, &table_columns).await?;
+            _imported_rows = import_csv_data(database, file, &target_table, &table_columns).await?;
         }
         ImportFormat::Json => {
-            imported_rows = import_json_data(database, file, &target_table, &table_columns).await?;
+            _imported_rows = import_json_data(database, file, &target_table, &table_columns).await?;
         }
         ImportFormat::Parquet => {
             return Err(anyhow::anyhow!(
@@ -384,9 +381,9 @@ pub async fn import_data(
     }
 
     println!("\n📊 Import Summary:");
-    println!("  Rows imported: {}", imported_rows);
+    println!("  Rows imported: {_imported_rows}");
     if error_count > 0 {
-        println!("  Errors: {}", error_count);
+        println!("  Errors: {error_count}");
     }
     println!("  ✅ Import completed successfully!");
 
@@ -482,7 +479,7 @@ async fn import_csv_data(
         execute_batch_statements(database, &mut batch_statements, &mut imported_count).await?;
     }
 
-    pb.finish_with_message(format!("Imported {} rows from CSV", imported_count));
+    pb.finish_with_message(format!("Imported {imported_count} rows from CSV"));
     Ok(imported_count)
 }
 
@@ -557,7 +554,7 @@ async fn import_json_data(
                     .await?;
             }
         } else {
-            println!("⚠️  Skipping non-object JSON element at index {}", index);
+            println!("⚠️  Skipping non-object JSON element at index {index}");
         }
     }
 
@@ -566,7 +563,7 @@ async fn import_json_data(
         execute_batch_statements(database, &mut batch_statements, &mut imported_count).await?;
     }
 
-    pb.finish_with_message(format!("Imported {} objects from JSON", imported_count));
+    pb.finish_with_message(format!("Imported {imported_count} objects from JSON"));
     Ok(imported_count)
 }
 
@@ -582,7 +579,7 @@ async fn execute_batch_statements(
                 *imported_count += 1;
             }
             Err(e) => {
-                println!("⚠️  Error executing statement: {}", e);
+                println!("⚠️  Error executing statement: {e}");
                 println!(
                     "   Statement: {}",
                     statement.chars().take(100).collect::<String>() + "..."
@@ -597,8 +594,7 @@ async fn execute_batch_statements(
 /// Get table columns for schema validation
 async fn get_table_columns(database: &Database, table: &str) -> Result<Vec<String>> {
     let query = format!(
-        "SELECT column_name FROM system.columns WHERE table_name = '{}'",
-        table
+        "SELECT column_name FROM system.columns WHERE table_name = '{table}'"
     );
     match database.execute(&query).await {
         Ok(result) => {
@@ -622,7 +618,7 @@ pub async fn export_data(
 ) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
 
-    println!("Exporting data from: {}", source);
+    println!("Exporting data from: {source}");
     println!("Output file: {}, Format: {}", file.display(), format);
 
     // Create output directory if it doesn't exist
@@ -636,7 +632,7 @@ pub async fn export_data(
         source.to_string()
     } else {
         // Assume it's a table name
-        format!("SELECT * FROM {}", source)
+        format!("SELECT * FROM {source}")
     };
 
     println!(
@@ -648,7 +644,7 @@ pub async fn export_data(
     let result = database
         .execute(&query)
         .await
-        .with_context(|| format!("Failed to execute export query: {}", query))?;
+        .with_context(|| format!("Failed to execute export query: {query}"))?;
 
     if result.rows.is_empty() {
         println!("⚠️  No data to export");
@@ -733,7 +729,7 @@ async fn export_to_csv(
             .map(|col| {
                 row.get(col)
                     .map(|v| v.to_string())
-                    .unwrap_or_else(|| String::new())
+                    .unwrap_or_else(String::new)
             })
             .collect();
 
@@ -835,7 +831,7 @@ async fn export_to_sql(
 
     // Write header comment
     writeln!(writer, "-- SQL Export from CQLite")?;
-    writeln!(writer, "-- Source: {}", source)?;
+    writeln!(writer, "-- Source: {source}")?;
     writeln!(writer, "-- Generated: {}", chrono::Utc::now().to_rfc3339())?;
     writeln!(writer, "-- Rows: {}", result.rows.len())?;
     writeln!(writer)?;
@@ -981,13 +977,12 @@ pub async fn read_sstable(
             }
 
             println!(
-                "\n✅ Bulletproof reader processed {} entries, displayed {} rows",
-                processed, displayed
+                "\n✅ Bulletproof reader processed {processed} entries, displayed {displayed} rows"
             );
             return Ok(());
         }
         Err(e) => {
-            println!("⚠️  Bulletproof parser still in development: {}", e);
+            println!("⚠️  Bulletproof parser still in development: {e}");
             println!("🔄 Falling back to raw data display...");
 
             // Show raw decompressed data as fallback
@@ -997,7 +992,7 @@ pub async fn read_sstable(
                     for (i, chunk) in data.chunks(16).enumerate() {
                         print!("  {:04x}: ", i * 16);
                         for byte in chunk {
-                            print!("{:02x} ", byte);
+                            print!("{byte:02x} ");
                         }
                         print!("  ");
                         for byte in chunk {
@@ -1006,7 +1001,7 @@ pub async fn read_sstable(
                             } else {
                                 '.'
                             };
-                            print!("{}", c);
+                            print!("{c}");
                         }
                         println!();
                     }
@@ -1020,7 +1015,7 @@ pub async fn read_sstable(
                     return Ok(());
                 }
                 Err(e) => {
-                    println!("❌ Bulletproof reader failed to read raw data: {}", e);
+                    println!("❌ Bulletproof reader failed to read raw data: {e}");
                 }
             }
         }
@@ -1080,8 +1075,7 @@ pub async fn read_sstable(
     }
 
     println!(
-        "\n✅ Processed {} entries, displayed {} rows",
-        processed, displayed
+        "\n✅ Processed {processed} entries, displayed {displayed} rows"
     );
     println!("🎯 Data source: LIVE SSTable file (no mocking!)");
 
@@ -1098,19 +1092,19 @@ pub async fn execute_select_query(
     cassandra_version: Option<String>,
 ) -> Result<()> {
     // Load schema from file (supports both .cql and .json)
-    let schema = load_schema_file(schema_path, auto_detect, cassandra_version.as_deref())?;
+    let _schema = load_schema_file(schema_path, auto_detect, cassandra_version.as_deref())?;
 
     println!("🚀 Executing CQL query against LIVE SSTable data!");
     println!("📂 SSTable: {}", sstable_path.display());
     println!("📋 Schema: {}", schema_path.display());
-    println!("🔍 Query: {}", query);
+    println!("🔍 Query: {query}");
 
     // Smart path resolution: if directory, find the Data.db file
     let actual_sstable_path = resolve_sstable_path(sstable_path)?;
     println!("📄 Data file: {}", actual_sstable_path.display());
 
     // Create query executor
-    let executor = QueryExecutor::new(QueryExecutorConfig::default());
+    let executor = QueryExecutor::new(QueryExecutorConfig);
 
     // Execute the query
     let result = executor.execute_select(query).await?;
@@ -1235,10 +1229,10 @@ fn load_schema_file(
             parse_cql_schema(&schema_content).with_context(|| "Failed to parse CQL schema")
         }
         _ => {
-            return Err(anyhow::anyhow!(
+            Err(anyhow::anyhow!(
                 "Unsupported schema file extension: .{}\nSupported formats: .json, .cql",
                 extension
-            ));
+            ))
         }
     }
 }
@@ -1504,7 +1498,7 @@ async fn export_as_csv(
     }
 
     wtr.flush()?;
-    pb.finish_with_message(format!("Exported {} rows to CSV", exported_count));
+    pb.finish_with_message(format!("Exported {exported_count} rows to CSV"));
     Ok(())
 }
 
@@ -1547,11 +1541,7 @@ async fn export_as_sql(
                     .map(|col| {
                         parsed_row
                             .get(col)
-                            .map(|v| match v {
-                                // crate::data_parser::ParsedValue::Text(s) => format!("'{}'", s.replace("'", "''")),
-                                // crate::data_parser::ParsedValue::Null => "NULL".to_string(),
-                                _ => "NULL".to_string(), // Temporary placeholder for disabled data_parser
-                            })
+                            .map(|_v| "NULL".to_string())
                             .unwrap_or_else(|| "NULL".to_string())
                     })
                     .collect();
@@ -1572,7 +1562,7 @@ async fn export_as_sql(
         }
     }
 
-    pb.finish_with_message(format!("Exported {} rows to SQL", exported_count));
+    pb.finish_with_message(format!("Exported {exported_count} rows to SQL"));
     Ok(())
 }
 
@@ -1671,14 +1661,14 @@ pub async fn validate_sstable(
     println!("📄 Data file: {}", actual_sstable_path.display());
 
     let mut issues_found = 0;
-    let mut issues_fixed = 0;
+    let issues_fixed = 0;
     let mut validation_errors = Vec::new();
 
     // Basic file existence and readability
     println!("\n🔍 Basic file validation:");
     if !actual_sstable_path.exists() {
         let error = "❌ SSTable file does not exist";
-        println!("{}", error);
+        println!("{error}");
         validation_errors.push(error.to_string());
         issues_found += 1;
     } else {
@@ -1691,14 +1681,14 @@ pub async fn validate_sstable(
 
                 if metadata.len() == 0 {
                     let error = "⚠️  Warning: SSTable file is empty";
-                    println!("{}", error);
+                    println!("{error}");
                     validation_errors.push(error.to_string());
                     issues_found += 1;
                 }
             }
             Err(e) => {
-                let error = format!("❌ Cannot read file metadata: {}", e);
-                println!("{}", error);
+                let error = format!("❌ Cannot read file metadata: {e}");
+                println!("{error}");
                 validation_errors.push(error);
                 issues_found += 1;
             }
@@ -1738,7 +1728,7 @@ pub async fn validate_sstable(
                                     let parser = RealDataParser::new(schema);
 
                                     let mut parsing_errors = 0;
-                                    for (i, entry) in entries.iter().enumerate() {
+                                    for entry in entries.iter() {
                                         let key = entry.key.clone();
                                         let value =
                                             cqlite_core::Value::Text(format!("{:?}", entry.key));
@@ -1750,10 +1740,9 @@ pub async fn validate_sstable(
 
                                     if parsing_errors > 0 {
                                         let error = format!(
-                                            "⚠️  {} entries failed schema validation",
-                                            parsing_errors
+                                            "⚠️  {parsing_errors} entries failed schema validation"
                                         );
-                                        println!("{}", error);
+                                        println!("{error}");
                                         validation_errors.push(error);
                                         issues_found += parsing_errors;
                                     } else {
@@ -1762,16 +1751,16 @@ pub async fn validate_sstable(
                                 }
                                 Err(e) => {
                                     let error =
-                                        format!("⚠️  Could not load schema for validation: {}", e);
-                                    println!("{}", error);
+                                        format!("⚠️  Could not load schema for validation: {e}");
+                                    println!("{error}");
                                     validation_errors.push(error);
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        let error = format!("❌ Failed to parse SSTable data: {}", e);
-                        println!("{}", error);
+                        let error = format!("❌ Failed to parse SSTable data: {e}");
+                        println!("{error}");
                         validation_errors.push(error);
                         issues_found += 1;
                     }
@@ -1779,8 +1768,8 @@ pub async fn validate_sstable(
             }
         }
         Err(e) => {
-            let error = format!("❌ Cannot open SSTable with bulletproof reader: {}", e);
-            println!("{}", error);
+            let error = format!("❌ Cannot open SSTable with bulletproof reader: {e}");
+            println!("{error}");
             validation_errors.push(error);
             issues_found += 1;
         }
@@ -1807,7 +1796,7 @@ pub async fn validate_sstable(
         );
 
         for error in &validation_errors {
-            report_content.push_str(&format!("- {}\n", error));
+            report_content.push_str(&format!("- {error}\n"));
         }
 
         std::fs::write(report_path, report_content)
@@ -1818,8 +1807,8 @@ pub async fn validate_sstable(
 
     // Summary
     println!("\n📊 Validation Summary:");
-    println!("   Issues found: {}", issues_found);
-    println!("   Issues fixed: {}", issues_fixed);
+    println!("   Issues found: {issues_found}");
+    println!("   Issues fixed: {issues_fixed}");
 
     if issues_found == 0 {
         println!("✅ SSTable validation passed!");
@@ -1875,17 +1864,17 @@ pub async fn analyze_sstable(
                 file_size,
                 file_size as f64 / 1_048_576.0
             );
-            analysis_results.push(format!("File size: {} bytes", file_size));
+            analysis_results.push(format!("File size: {file_size} bytes"));
 
             if let Ok(created) = metadata.created() {
-                println!("   Created: {:?}", created);
+                println!("   Created: {created:?}");
             }
             if let Ok(modified) = metadata.modified() {
-                println!("   Modified: {:?}", modified);
+                println!("   Modified: {modified:?}");
             }
         }
         Err(e) => {
-            println!("❌ Cannot read file metadata: {}", e);
+            println!("❌ Cannot read file metadata: {e}");
             return Err(anyhow::anyhow!("File metadata not accessible"));
         }
     }
@@ -1916,16 +1905,16 @@ pub async fn analyze_sstable(
             match reader.parse_sstable_data() {
                 Ok(entries) => {
                     let entry_count = entries.len();
-                    println!("   Total entries: {}", entry_count);
-                    analysis_results.push(format!("Total entries: {}", entry_count));
+                    println!("   Total entries: {entry_count}");
+                    analysis_results.push(format!("Total entries: {entry_count}"));
 
                     if entry_count > 0 {
                         // Calculate average key size
                         let total_key_size: usize =
                             entries.iter().map(|e| format!("{:?}", e.key).len()).sum();
                         let avg_key_size = total_key_size / entry_count;
-                        println!("   Average key size: {} bytes", avg_key_size);
-                        analysis_results.push(format!("Average key size: {} bytes", avg_key_size));
+                        println!("   Average key size: {avg_key_size} bytes");
+                        analysis_results.push(format!("Average key size: {avg_key_size} bytes"));
 
                         // Show sample entries
                         println!("\n📋 Sample Entries (first 5):");
@@ -1956,12 +1945,10 @@ pub async fn analyze_sstable(
                             let median_key_len = key_lengths[key_lengths.len() / 2];
 
                             println!(
-                                "   Key length min/max/median: {}/{}/{}",
-                                min_key_len, max_key_len, median_key_len
+                                "   Key length min/max/median: {min_key_len}/{max_key_len}/{median_key_len}"
                             );
                             analysis_results.push(format!(
-                                "Key lengths - min: {}, max: {}, median: {}",
-                                min_key_len, max_key_len, median_key_len
+                                "Key lengths - min: {min_key_len}, max: {max_key_len}, median: {median_key_len}"
                             ));
                         }
 
@@ -1979,13 +1966,13 @@ pub async fn analyze_sstable(
                     }
                 }
                 Err(e) => {
-                    println!("❌ Failed to parse SSTable data: {}", e);
-                    analysis_results.push(format!("Parse error: {}", e));
+                    println!("❌ Failed to parse SSTable data: {e}");
+                    analysis_results.push(format!("Parse error: {e}"));
                 }
             }
         }
         Err(e) => {
-            println!("❌ Cannot open SSTable: {}", e);
+            println!("❌ Cannot open SSTable: {e}");
             return Err(anyhow::anyhow!("Cannot analyze SSTable: {}", e));
         }
     }
@@ -2006,7 +1993,7 @@ pub async fn analyze_sstable(
         );
 
         for result in &analysis_results {
-            report_content.push_str(&format!("- {}\n", result));
+            report_content.push_str(&format!("- {result}\n"));
         }
 
         std::fs::write(report_path, report_content)
@@ -2036,8 +2023,8 @@ pub async fn benchmark_sstable(
         println!("📋 Schema: {}", schema.display());
     }
 
-    println!("🔄 Iterations: {}", iterations);
-    println!("🎯 Operations: {}", operations);
+    println!("🔄 Iterations: {iterations}");
+    println!("🎯 Operations: {operations}");
 
     if memory_profile {
         println!("📊 Memory profiling enabled");
@@ -2063,13 +2050,13 @@ pub async fn benchmark_sstable(
     println!("\n🚀 Starting benchmarks...");
 
     for op in &ops {
-        println!("\n📊 Benchmarking operation: {}", op);
+        println!("\n📊 Benchmarking operation: {op}");
 
         let mut times = Vec::new();
         let mut memory_usage = Vec::new();
 
         for i in 1..=iterations {
-            print!("   Iteration {}/{}: ", i, iterations);
+            print!("   Iteration {i}/{iterations}: ");
 
             let start_time = std::time::Instant::now();
             let initial_memory = if memory_profile {
@@ -2085,7 +2072,7 @@ pub async fn benchmark_sstable(
                 "scan" => benchmark_scan_operation(&actual_sstable_path).await,
                 "query" => benchmark_query_operation(&actual_sstable_path, schema_path).await,
                 _ => {
-                    println!("❌ Unknown operation: {}", op);
+                    println!("❌ Unknown operation: {op}");
                     continue;
                 }
             };
@@ -2111,7 +2098,7 @@ pub async fn benchmark_sstable(
                     }
                 }
                 Err(e) => {
-                    println!("❌ Failed: {}", e);
+                    println!("❌ Failed: {e}");
                 }
             }
         }
@@ -2124,21 +2111,20 @@ pub async fn benchmark_sstable(
             let avg_time = times.iter().sum::<f64>() / times.len() as f64;
             let median_time = times[times.len() / 2];
 
-            println!("\n   📊 {} Statistics:", op);
-            println!("      Min time: {:.2}ms", min_time);
-            println!("      Max time: {:.2}ms", max_time);
-            println!("      Avg time: {:.2}ms", avg_time);
-            println!("      Median time: {:.2}ms", median_time);
+            println!("\n   📊 {op} Statistics:");
+            println!("      Min time: {min_time:.2}ms");
+            println!("      Max time: {max_time:.2}ms");
+            println!("      Avg time: {avg_time:.2}ms");
+            println!("      Median time: {median_time:.2}ms");
 
             benchmark_results.push(format!(
-                "{}: min={:.2}ms, max={:.2}ms, avg={:.2}ms, median={:.2}ms",
-                op, min_time, max_time, avg_time, median_time
+                "{op}: min={min_time:.2}ms, max={max_time:.2}ms, avg={avg_time:.2}ms, median={median_time:.2}ms"
             ));
 
             if memory_profile && !memory_usage.is_empty() {
                 let avg_memory = memory_usage.iter().sum::<u64>() / memory_usage.len() as u64;
-                println!("      Avg memory: {} bytes", avg_memory);
-                benchmark_results.push(format!("{}: avg_memory={}bytes", op, avg_memory));
+                println!("      Avg memory: {avg_memory} bytes");
+                benchmark_results.push(format!("{op}: avg_memory={avg_memory}bytes"));
             }
         }
     }
@@ -2161,7 +2147,7 @@ pub async fn benchmark_sstable(
         );
 
         for result in &benchmark_results {
-            report_content.push_str(&format!("- {}\n", result));
+            report_content.push_str(&format!("- {result}\n"));
         }
 
         std::fs::write(report_path, report_content)
@@ -2177,7 +2163,7 @@ pub async fn benchmark_sstable(
 
 /// Benchmark read operation (open and basic info)
 async fn benchmark_read_operation(sstable_path: &Path) -> Result<usize> {
-    let mut reader =
+    let reader =
         BulletproofReader::open(sstable_path).with_context(|| "Failed to open SSTable")?;
 
     let _info = reader.info();

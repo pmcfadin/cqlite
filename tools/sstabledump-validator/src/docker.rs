@@ -69,6 +69,14 @@ impl DockerManager {
     pub async fn generate_test_data(&self, _count: u32, _edge_cases: bool) -> Result<()> {
         Err(anyhow!("Docker integration is disabled"))
     }
+
+    pub async fn execute_cql(&self, _cql: &str) -> Result<String> {
+        Err(anyhow!("Docker integration is disabled"))
+    }
+
+    pub async fn extract_sstables(&self, _keyspace: &str, _table: &str) -> Result<Vec<String>> {
+        Err(anyhow!("Docker integration is disabled"))
+    }
 }
 
 #[cfg(feature = "docker-integration")]
@@ -512,6 +520,55 @@ impl DockerManager {
         }
 
         Ok(())
+    }
+
+    /// Execute a CQL command and return the result
+    pub async fn execute_cql(&self, cql: &str) -> Result<String> {
+        self.execute_cql_command(cql).await
+    }
+
+    /// Extract SSTable files from a keyspace and table
+    pub async fn extract_sstables(&self, keyspace: &str, table: &str) -> Result<Vec<String>> {
+        let container_id = self
+            .cassandra_container_id
+            .as_ref()
+            .ok_or_else(|| anyhow!("No container ID"))?;
+
+        let data_dir = format!("/var/lib/cassandra/data/{}/{}-*/", keyspace, table);
+        
+        let exec_config = CreateExecOptions {
+            cmd: Some(vec!["find", &data_dir, "-name", "*.db", "-type", "f"]),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+
+        let exec_response = self.docker.create_exec(container_id, exec_config).await?;
+
+        let mut output_str = String::new();
+        if let StartExecResults::Attached { mut output, .. } =
+            self.docker.start_exec(&exec_response.id, None).await?
+        {
+            use futures_util::StreamExt;
+            while let Some(chunk) = output.next().await {
+                match chunk {
+                    Ok(log_output) => {
+                        output_str.push_str(&log_output.to_string());
+                    }
+                    Err(_e) => {
+                        // Ignore errors in command output
+                    }
+                }
+            }
+        }
+
+        let sstable_paths: Vec<String> = output_str
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_string())
+            .collect();
+
+        Ok(sstable_paths)
     }
 }
 

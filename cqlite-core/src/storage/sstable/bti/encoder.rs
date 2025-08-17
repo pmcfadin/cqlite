@@ -85,6 +85,7 @@ mod type_prefixes {
     pub const TUPLE: u8 = 0x60;
     pub const UDT: u8 = 0x61;
     pub const FROZEN: u8 = 0x70;
+    #[allow(dead_code)]
     pub const TOMBSTONE: u8 = 0x80;
     #[allow(dead_code)]
     pub const ESCAPE: u8 = 0xFF;
@@ -190,6 +191,19 @@ impl ByteComparableEncoder {
             Value::Frozen(inner) => {
                 self.buffer.push(type_prefixes::FROZEN);
                 self.encode_value_to_buffer_with_depth(inner, depth + 1)
+            }
+            Value::Varint(data) => {
+                // For BTI encoding, treat varint as blob since we don't have the original value
+                self.encode_blob(data)
+            }
+            Value::Decimal { scale: _, unscaled } => self.encode_blob(unscaled), // Treat decimal as blob for BTI
+            Value::Duration { months, days, nanos } => {
+                // Encode duration as a composite key
+                self.buffer.push(type_prefixes::DURATION);
+                self.encode_int(*months)?;
+                self.encode_int(*days)?;
+                self.encode_bigint(*nanos)?;
+                Ok(())
             }
             Value::Tombstone(_) => {
                 // Tombstones are encoded as null with special marker
@@ -801,7 +815,6 @@ impl ByteComparableEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use uuid::Uuid;
 
     #[test]
@@ -824,9 +837,9 @@ mod tests {
     fn test_integer_encoding() {
         let mut encoder = ByteComparableEncoder::new();
 
-        let encoded_neg = encoder.encode_value(&Value::Int(-100)).unwrap();
-        let encoded_zero = encoder.encode_value(&Value::Int(0)).unwrap();
-        let encoded_pos = encoder.encode_value(&Value::Int(100)).unwrap();
+        let encoded_neg = encoder.encode_value(&Value::Integer(-100)).unwrap();
+        let encoded_zero = encoder.encode_value(&Value::Integer(0)).unwrap();
+        let encoded_pos = encoder.encode_value(&Value::Integer(100)).unwrap();
 
         // Proper numeric ordering
         assert!(encoded_neg < encoded_zero);
@@ -851,8 +864,8 @@ mod tests {
         let uuid1 = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let uuid2 = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
 
-        let encoded1 = encoder.encode_value(&Value::Uuid(uuid1)).unwrap();
-        let encoded2 = encoder.encode_value(&Value::Uuid(uuid2)).unwrap();
+        let encoded1 = encoder.encode_value(&Value::Uuid(*uuid1.as_bytes())).unwrap();
+        let encoded2 = encoder.encode_value(&Value::Uuid(*uuid2.as_bytes())).unwrap();
 
         assert!(encoded1 < encoded2);
     }
@@ -861,9 +874,9 @@ mod tests {
     fn test_composite_key_encoding() {
         let mut encoder = ByteComparableEncoder::new();
 
-        let key1 = vec![Value::Text("partition1".to_string()), Value::Int(1)];
-        let key2 = vec![Value::Text("partition1".to_string()), Value::Int(2)];
-        let key3 = vec![Value::Text("partition2".to_string()), Value::Int(1)];
+        let key1 = vec![Value::Text("partition1".to_string()), Value::Integer(1)];
+        let key2 = vec![Value::Text("partition1".to_string()), Value::Integer(2)];
+        let key3 = vec![Value::Text("partition2".to_string()), Value::Integer(1)];
 
         let encoded1 = encoder.encode_composite_key(&key1).unwrap();
         let encoded2 = encoder.encode_composite_key(&key2).unwrap();
@@ -878,8 +891,8 @@ mod tests {
     fn test_list_encoding() {
         let mut encoder = ByteComparableEncoder::new();
 
-        let list1 = Value::List(vec![Value::Int(1), Value::Int(2)]);
-        let list2 = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let list1 = Value::List(vec![Value::Integer(1), Value::Integer(2)]);
+        let list2 = Value::List(vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
 
         let encoded1 = encoder.encode_value(&list1).unwrap();
         let encoded2 = encoder.encode_value(&list2).unwrap();
@@ -893,12 +906,12 @@ mod tests {
         let mut encoder = ByteComparableEncoder::new();
 
         let neg_inf = encoder
-            .encode_value(&Value::Float(f32::NEG_INFINITY))
+            .encode_value(&Value::Float(f64::NEG_INFINITY))
             .unwrap();
         let neg_one = encoder.encode_value(&Value::Float(-1.0)).unwrap();
         let zero = encoder.encode_value(&Value::Float(0.0)).unwrap();
         let one = encoder.encode_value(&Value::Float(1.0)).unwrap();
-        let pos_inf = encoder.encode_value(&Value::Float(f32::INFINITY)).unwrap();
+        let pos_inf = encoder.encode_value(&Value::Float(f64::INFINITY)).unwrap();
 
         // Proper float ordering
         assert!(neg_inf < neg_one);

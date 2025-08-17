@@ -68,7 +68,7 @@ pub async fn execute_info_command(
             Err(e) => {
                 pb.finish_with_message("❌ Version validation failed");
                 return Err(anyhow::anyhow!(create_version_error(
-                    &format!("Invalid Cassandra version: {}", e),
+                    &format!("Invalid Cassandra version: {e}"),
                     detected_version.as_deref(),
                     Some(version)
                 )));
@@ -158,7 +158,7 @@ async fn analyze_sstable_directory(
             if let Ok(metadata) = std::fs::metadata(path) {
                 gen_size += metadata.len();
                 component_details.push(ComponentInfo {
-                    component_type: format!("{:?}", component),
+                    component_type: format!("{component:?}"),
                     file_path: path.clone(),
                     file_size: metadata.len(),
                 });
@@ -338,7 +338,7 @@ async fn analyze_with_bulletproof_reader(file_path: &Path) -> Result<Bulletproof
             sample_entries: entries
                 .into_iter()
                 .take(5)
-                .map(|e| format!("{:?}", e))
+                .map(|e| format!("{e:?}"))
                 .collect(),
         }),
         Err(_) => None,
@@ -577,16 +577,16 @@ async fn display_text_format(metadata: &SSTableInfoMetadata) -> Result<()> {
 
     // Version information
     if let Some(ref version) = metadata.detected_version {
-        println!("🔍 Detected Version: {}", version);
+        println!("🔍 Detected Version: {version}");
     }
     if let Some(ref version) = metadata.validated_version {
-        println!("✅ Cassandra Version: {}", version);
+        println!("✅ Cassandra Version: {version}");
     }
 
     // Format features
     println!("\n🚀 Format Features:");
     for feature in &metadata.format_features {
-        println!("  • {}", feature);
+        println!("  • {feature}");
     }
 
     // Bulletproof reader information
@@ -707,7 +707,7 @@ async fn display_text_format(metadata: &SSTableInfoMetadata) -> Result<()> {
     if let Some((ref path, ref status)) = metadata.statistics_file {
         println!("\n📊 Statistics File:");
         println!("  Path: {}", path.display());
-        println!("  Status: {}", status);
+        println!("  Status: {status}");
     }
 
     // Validation results
@@ -730,14 +730,14 @@ async fn display_text_format(metadata: &SSTableInfoMetadata) -> Result<()> {
         if !validation.errors.is_empty() {
             println!("  Errors:");
             for error in &validation.errors {
-                println!("    ❌ {}", error);
+                println!("    ❌ {error}");
             }
         }
 
         if !validation.warnings.is_empty() {
             println!("  Warnings:");
             for warning in &validation.warnings {
-                println!("    ⚠️ {}", warning);
+                println!("    ⚠️ {warning}");
             }
         }
     }
@@ -749,7 +749,7 @@ async fn display_text_format(metadata: &SSTableInfoMetadata) -> Result<()> {
 /// Display metadata in JSON format
 async fn display_json_format(metadata: &SSTableInfoMetadata) -> Result<()> {
     let json = serde_json::to_string_pretty(metadata)?;
-    println!("{}", json);
+    println!("{json}");
     Ok(())
 }
 
@@ -758,7 +758,7 @@ async fn display_csv_format(metadata: &SSTableInfoMetadata) -> Result<()> {
     let mut wtr = csv::Writer::from_writer(std::io::stdout());
 
     // Write headers
-    wtr.write_record(&[
+    wtr.write_record([
         "path",
         "type",
         "size_bytes",
@@ -819,7 +819,7 @@ async fn display_csv_format(metadata: &SSTableInfoMetadata) -> Result<()> {
         .unwrap_or_default();
 
     // Write data row
-    wtr.write_record(&[
+    wtr.write_record([
         &metadata.file_path.display().to_string(),
         file_type,
         &metadata.file_size.to_string(),

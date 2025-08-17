@@ -398,6 +398,10 @@ impl IdentifierCollector {
             identifiers: Vec::new(),
         }
     }
+    
+    pub fn into_identifiers(self) -> Vec<CqlIdentifier> {
+        self.identifiers
+    }
 }
 
 impl CqlVisitor<()> for IdentifierCollector {
@@ -1023,6 +1027,10 @@ impl CqlVisitor<TableSchema> for SchemaBuilderVisitor {
 }
 
 impl SchemaBuilderVisitor {
+    /// Create a new SchemaBuilderVisitor
+    pub fn new() -> Self {
+        Self
+    }
     /// Convert CqlDataType to string representation compatible with existing schema format
     fn convert_cql_data_type_to_string(&self, data_type: &CqlDataType) -> String {
         match data_type {

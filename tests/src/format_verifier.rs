@@ -195,7 +195,7 @@ impl SSTableFormatVerifier {
             .map_err(|e| Error::storage(format!("Failed to read footer: {}", e)))?;
 
         let mut issues = Vec::new();
-        let mut warnings = Vec::new();
+        let warnings = Vec::new();
 
         // Parse index offset (bytes 0-7, big-endian)
         let index_offset = u64::from_be_bytes([
@@ -240,10 +240,10 @@ impl SSTableFormatVerifier {
     /// Verify data section integrity
     fn verify_data_section(
         file: &mut File,
-        header: &HeaderDetails,
+        _header: &HeaderDetails,
         footer: &FooterVerificationResult,
     ) -> Result<DataSectionResult> {
-        let mut issues = Vec::new();
+        let issues = Vec::new();
         let mut warnings = Vec::new();
 
         // Position after header

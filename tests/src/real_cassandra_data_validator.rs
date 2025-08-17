@@ -3,19 +3,16 @@
 //! This module provides validation against actual Cassandra 5+ SSTable files
 //! to ensure 100% format compatibility for complex types.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
-use cqlite_core::parser::header::SSTableHeader;
-use cqlite_core::parser::types::*;
-use cqlite_core::schema::{CqlType, TableSchema};
-use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::types::{DataType, Value};
+use cqlite_core::schema::TableSchema;
 use cqlite_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use std::fs;
+#[cfg(test)]
+use tempfile::TempDir;
 
 /// Configuration for real Cassandra data validation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,7 +428,7 @@ impl RealCassandraDataValidator {
         file_result.schema_match = table_schema.is_some();
 
         // Read and validate SSTable header
-        let sstable_data = fs::read(sstable_path)?;
+        let sstable_data: Vec<u8> = fs::read(sstable_path)?;
 
         match self
             .validate_sstable_format(&sstable_data, &mut file_result)
@@ -668,7 +665,7 @@ impl RealCassandraDataValidator {
         let report_json = serde_json::to_string_pretty(&self.results)
             .map_err(|e| Error::serialization(format!("Failed to serialize report: {}", e)))?;
 
-        fs::write(output_path, report_json).map_err(|e| {
+        std::fs::write(output_path, report_json).map_err(|e| {
             Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Failed to write report: {}", e),
@@ -683,7 +680,6 @@ impl RealCassandraDataValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_validator_creation() {

@@ -265,6 +265,29 @@ fn test_major_discrepancy_detection() {
             avg_time_per_file_ms: 400.0,
             performance_ratio: 1.2,
             peak_memory_usage_mb: 45.0,
+            guardrail_results: crate::validation::sstabledump_parity::PerformanceGuardrailResults {
+                all_guardrails_passed: true,
+                guardrail_checks: vec![],
+                baseline_comparison: crate::validation::sstabledump_parity::BaselineComparison {
+                    performance_ratio: 1.14,
+                    regression_threshold: 1.2,
+                    within_threshold: true,
+                    baseline_ms_per_mb: 3.5,
+                    current_ms_per_mb: 4.0,
+                },
+                memory_guardrails: crate::validation::sstabledump_parity::MemoryGuardrails {
+                    peak_memory_mb: 45.0,
+                    memory_threshold_mb: 100.0,
+                    within_limits: true,
+                    memory_efficiency_ratio: 0.45,
+                },
+                throughput_guardrails: crate::validation::sstabledump_parity::ThroughputGuardrails {
+                    throughput_mb_per_sec: 2.5,
+                    min_throughput_mb_per_sec: 0.5,
+                    meets_minimum: true,
+                    vs_sstabledump_ratio: 1.2,
+                },
+            },
         },
         timestamp: chrono::Utc::now(),
     };

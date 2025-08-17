@@ -6,18 +6,16 @@
 use cqlite_core::{
     Config, Result,
     platform::Platform,
-    storage::sstable::SSTableReader,
-    types::{ComparatorType, RowKey, Value},
+    types::{ComparatorType, Value},
 };
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::fs;
 
 /// Test suite for Issue #35 key encoding and digest validation
 pub struct Issue35KeyEncodingTests {
-    temp_dir: TempDir,
-    config: Config,
-    platform: Arc<Platform>,
+    _temp_dir: TempDir,
+    _config: Config,
+    _platform: Arc<Platform>,
 }
 
 impl Issue35KeyEncodingTests {
@@ -28,9 +26,9 @@ impl Issue35KeyEncodingTests {
         let platform = Arc::new(Platform::new(&config).await?);
 
         Ok(Self {
-            temp_dir,
-            config,
-            platform,
+            _temp_dir: temp_dir,
+            _config: config,
+            _platform: platform,
         })
     }
 
@@ -197,7 +195,7 @@ impl Issue35KeyEncodingTests {
                 Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             ),
             (ComparatorType::Boolean, Value::Boolean(true)),
-            (ComparatorType::Uuid, Value::Uuid(uuid::Uuid::new_v4())),
+            (ComparatorType::Uuid, Value::Uuid(uuid::Uuid::new_v4().into_bytes())),
         ];
 
         for (comparator, value) in test_cases {
@@ -401,7 +399,7 @@ fn value_to_key_bytes(value: &Value, _comparator: &ComparatorType) -> Result<Vec
         // BigInteger not available, using Integer for now
         Value::Boolean(b) => Ok(vec![if *b { 1 } else { 0 }]),
         Value::Blob(bytes) => Ok(bytes.clone()),
-        Value::Uuid(uuid) => Ok(uuid.to_bytes_le().to_vec()),
+        Value::Uuid(uuid) => Ok(uuid.to_vec()),
         Value::Null => Ok(Vec::new()),
         _ => Ok(format!("{:?}", value).into_bytes()),
     }

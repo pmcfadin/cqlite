@@ -3,12 +3,10 @@
 //! These tests verify basic functionality without complex integration
 //! to establish that the test infrastructure is working.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
+use cqlite_core::error::Error;
+use cqlite_core::parser::{config::ParserConfig, SSTableParser};
+use cqlite_core::types::Value;
 
-use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::SSTableParser;
-use cqlite_core::parser::config::ParserConfig;
-use cqlite_core::{Value, types::*};
 
 /// Basic smoke test to verify the test framework loads
 #[test]

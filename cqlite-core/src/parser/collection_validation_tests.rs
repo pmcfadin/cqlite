@@ -34,20 +34,20 @@ mod cassandra_format_tests {
             ]
         }"#;
 
-        let schema = TableSchema::from_json(schema_json).unwrap();
+        let _schema = TableSchema::from_json(schema_json).unwrap();
 
         // Validate that our schema parsing understands the collection types
-        let list_col = schema
+        let list_col = _schema
             .columns
             .iter()
             .find(|c| c.name == "list_col")
             .unwrap();
         assert_eq!(list_col.data_type, "list<text>");
 
-        let set_col = schema.columns.iter().find(|c| c.name == "set_col").unwrap();
+        let set_col = _schema.columns.iter().find(|c| c.name == "set_col").unwrap();
         assert_eq!(set_col.data_type, "set<int>");
 
-        let map_col = schema.columns.iter().find(|c| c.name == "map_col").unwrap();
+        let map_col = _schema.columns.iter().find(|c| c.name == "map_col").unwrap();
         assert_eq!(map_col.data_type, "map<text, int>");
     }
 
@@ -228,7 +228,7 @@ mod cassandra_format_tests {
 
         // Check that the data type is correctly identified
         if let CqlType::List(element_type) = int_list.data_type() {
-            assert_eq!(**element_type, CqlType::Int);
+            assert_eq!(*element_type, CqlType::Int);
         } else {
             panic!("Expected List type");
         }

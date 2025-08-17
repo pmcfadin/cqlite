@@ -5,19 +5,13 @@
 
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::header::{
-    CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
+    CassandraVersion, SSTableHeader,
     parse_sstable_header, serialize_sstable_header,
 };
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
-use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::{Config, RowKey, Value, storage::StorageEngine, types::TableId};
-use cqlite_core::{platform::Platform, schema::SchemaManager};
+use cqlite_core::{RowKey, Value};
 use std::collections::HashMap;
-use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Comprehensive test result tracking
@@ -127,7 +121,7 @@ impl CompatibilityTestFramework {
         // Test deserialization
         let (remaining, parsed_header) = parse_sstable_header(&serialized)
             .map_err(|e| Error::InvalidFormat(format!("Failed to parse header: {:?}", e)))?;
-        let bytes_read = serialized.len() - remaining.len();
+        let _bytes_read = serialized.len() - remaining.len();
 
         // Validate round-trip consistency
         let passed = self.validate_header_roundtrip(&header, &parsed_header);
@@ -326,7 +320,7 @@ impl CompatibilityTestFramework {
         let mut total_bytes = 0;
 
         // Test composite primary key
-        let composite_key = RowKey::from("user_123:session_456:timestamp_789");
+        let _composite_key = RowKey::from("user_123:session_456:timestamp_789");
 
         // Test multi-part key serialization
         let key_parts = vec![
@@ -405,7 +399,7 @@ impl CompatibilityTestFramework {
         let batch_size = 1000;
 
         for i in 0..(large_data_size / batch_size) {
-            let key = RowKey::from(format!("large_key_{:08}", i));
+            let _key = RowKey::from(format!("large_key_{:08}", i));
             let value = Value::Text(format!(
                 "Large value {} with extra data to test scalability",
                 i

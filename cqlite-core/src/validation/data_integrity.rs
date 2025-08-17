@@ -17,10 +17,13 @@ use tokio::fs;
 #[derive(Debug)]
 pub struct DataIntegrityValidator {
     /// Validation configuration
+    #[allow(dead_code)]
     config: IntegrityConfig,
     /// Test results storage
+    #[allow(dead_code)]
     results: HashMap<String, IntegrityCheck>,
     /// Performance metrics
+    #[allow(dead_code)]
     metrics: HashMap<String, IntegrityMetrics>,
 }
 
@@ -910,7 +913,6 @@ impl DataIntegrityValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_data_integrity_validator_creation() {
@@ -939,7 +941,7 @@ mod tests {
         assert!(validator.has_corruption_patterns(&corrupted_data));
 
         // Test with valid-looking data
-        let valid_data = (0..1000u8).collect::<Vec<_>>();
+        let valid_data = (0..255u8).cycle().take(1000).collect::<Vec<_>>();
         assert!(!validator.has_corruption_patterns(&valid_data));
     }
 

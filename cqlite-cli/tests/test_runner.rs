@@ -343,7 +343,7 @@ impl TestRunner {
 
         for (args, description) in test_cases {
             match run_cli(&args) {
-                Ok(output) => {
+                Ok(_output) => {
                     // For now, just check that the command doesn't crash
                     // When compilation is fixed, we can validate actual behavior
                     self.results.add_result(true, description, None);
@@ -403,7 +403,7 @@ impl TestRunner {
                 "query",
                 "SELECT 1",
             ]) {
-                Ok(output) => {
+                Ok(_output) => {
                     // Check that command runs (compilation issues prevent format validation for now)
                     self.results
                         .add_result(true, &format!("Output format: {}", format), None);

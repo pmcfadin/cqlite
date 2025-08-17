@@ -12,7 +12,6 @@ use cqlite_core::{
 };
 use std::path::Path;
 use std::sync::Arc;
-use tempfile::TempDir;
 use tokio::fs;
 
 #[tokio::main]
@@ -520,7 +519,7 @@ fn create_user_record(id: i32, email: &str, name: &str, tier: &str) -> Value {
 
 /// Create proper Cassandra 5+ SSTable header
 fn create_cassandra_5_header() -> SSTableHeader {
-    use cqlite_core::parser::header::{CassandraVersion, ColumnInfo};
+    use cqlite_core::parser::header::CassandraVersion;
     use std::collections::HashMap;
 
     let mut properties = HashMap::new();

@@ -37,7 +37,6 @@ pub const CQLITE_ERROR_OUT_OF_MEMORY: c_int = -9;
 /// End of file error
 pub const CQLITE_ERROR_EOF: c_int = -10;
 
-/// Thread-local storage for the last error message
 thread_local! {
     static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }

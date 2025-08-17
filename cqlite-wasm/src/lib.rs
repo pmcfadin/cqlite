@@ -96,7 +96,7 @@ impl WasmConfig {
 
     /// Enable or disable IndexedDB storage
     #[wasm_bindgen]
-    pub fn set_use_indexeddb(&mut self, enabled: bool) {
+    pub fn set_use_indexeddb(&mut self, _enabled: bool) {
         #[cfg(target_arch = "wasm32")]
         {
             self.config.wasm.use_indexeddb = enabled;
@@ -105,7 +105,7 @@ impl WasmConfig {
 
     /// Enable or disable SIMD optimizations
     #[wasm_bindgen]
-    pub fn set_enable_simd(&mut self, enabled: bool) {
+    pub fn set_enable_simd(&mut self, _enabled: bool) {
         #[cfg(target_arch = "wasm32")]
         {
             self.config.wasm.enable_simd = enabled;
@@ -114,7 +114,7 @@ impl WasmConfig {
 
     /// Enable or disable Web Workers
     #[wasm_bindgen]
-    pub fn set_enable_workers(&mut self, enabled: bool) {
+    pub fn set_enable_workers(&mut self, _enabled: bool) {
         #[cfg(target_arch = "wasm32")]
         {
             self.config.wasm.enable_workers = enabled;
@@ -123,7 +123,7 @@ impl WasmConfig {
 
     /// Set maximum number of Web Workers
     #[wasm_bindgen]
-    pub fn set_max_workers(&mut self, count: usize) {
+    pub fn set_max_workers(&mut self, _count: usize) {
         #[cfg(target_arch = "wasm32")]
         {
             self.config.wasm.max_workers = count;
@@ -318,7 +318,7 @@ impl CQLiteDB {
     /// List all tables
     #[wasm_bindgen]
     pub async fn list_tables(&self) -> Result<JsValue, JsValue> {
-        let tables = self.database.list_tables().await.map_err(|e| e)?;
+        let _tables = self.database.list_tables().await.map_err(|e| e)?;
 
         Ok(JsValue::NULL) // Stub implementation
     }
@@ -326,7 +326,7 @@ impl CQLiteDB {
     /// Get database statistics
     #[wasm_bindgen]
     pub async fn stats(&self) -> Result<JsValue, JsValue> {
-        let stats = self.database.stats().await.map_err(|e| e)?;
+        let _stats = self.database.stats().await.map_err(|e| e)?;
 
         Ok(JsValue::NULL) // Stub implementation
     }

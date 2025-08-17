@@ -12,12 +12,22 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 
 /// Test container that manages test dependencies and lifecycle
-#[derive(Debug)]
 pub struct TestContainer {
     config: TestConfig,
     temp_dir: Arc<TempDir>,
     database: Arc<Mutex<Option<TestDatabase>>>,
     cleanup_handlers: Vec<Box<dyn Fn() -> TestResult + Send + Sync>>,
+}
+
+impl std::fmt::Debug for TestContainer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestContainer")
+            .field("config", &self.config)
+            .field("temp_dir", &self.temp_dir)
+            .field("database", &self.database)
+            .field("cleanup_handlers", &format!("{} cleanup handlers", self.cleanup_handlers.len()))
+            .finish()
+    }
 }
 
 /// Test database wrapper with enhanced testing capabilities
@@ -95,23 +105,23 @@ impl TestContainer {
             data_fixtures: Vec::new(),
         };
 
-        let test_db_arc = Arc::new(Mutex::new(test_db));
-        *self.database.lock().await = Some(test_db_arc.lock().await.clone());
+        let test_db_arc = Arc::new(Mutex::new(test_db.clone()));
+        *self.database.lock().await = Some(test_db);
 
         Ok(test_db_arc)
     }
 
     /// Get or initialize the test database
     pub async fn database(&self) -> TestResult<Arc<Mutex<TestDatabase>>> {
-        let mut db_guard = self.database.lock().await;
+        let db_guard = self.database.lock().await;
         if db_guard.is_none() {
             drop(db_guard);
             return self.init_database().await;
         }
 
-        // Return a clone of the existing database
-        let existing_db = db_guard.as_ref().unwrap();
-        Ok(Arc::new(Mutex::new(existing_db.lock().await.clone())))
+        // Extract the TestDatabase and wrap it in Arc<Mutex<>>
+        let test_db = db_guard.as_ref().unwrap().clone();
+        Ok(Arc::new(Mutex::new(test_db)))
     }
 
     /// Create CLI configuration for testing
@@ -170,6 +180,17 @@ impl Drop for TestContainer {
     fn drop(&mut self) {
         if let Err(e) = self.cleanup() {
             eprintln!("Failed to cleanup test container: {}", e);
+        }
+    }
+}
+
+impl Clone for TestContainer {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            temp_dir: self.temp_dir.clone(),
+            database: self.database.clone(),
+            cleanup_handlers: Vec::new(), // Skip clone handlers as they contain closures
         }
     }
 }

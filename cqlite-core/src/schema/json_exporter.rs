@@ -793,7 +793,6 @@ impl Default for JsonExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::UNIX_EPOCH;
 
     #[test]
     fn test_json_exporter_creation() {

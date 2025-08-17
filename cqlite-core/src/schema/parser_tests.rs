@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        schema::{Column, KeyColumn, TableSchema, parser::SchemaParser, registry::ParsingContext},
+        schema::{Column, KeyColumn, ClusteringColumn, TableSchema, parser::SchemaParser, registry::ParsingContext},
         types::{ComparatorType, Value},
     };
     use std::collections::HashMap;
@@ -18,10 +18,11 @@ mod tests {
                 data_type: "int".to_string(),
                 position: 0,
             }],
-            clustering_keys: vec![KeyColumn {
+            clustering_keys: vec![ClusteringColumn {
                 name: "timestamp".to_string(),
                 data_type: "bigint".to_string(),
                 position: 0,
+                order: "ASC".to_string(),
             }],
             columns: vec![
                 Column {
@@ -395,15 +396,17 @@ mod tests {
                 },
             ],
             clustering_keys: vec![
-                KeyColumn {
+                ClusteringColumn {
                     name: "timestamp".to_string(),
                     data_type: "timestamp".to_string(),
                     position: 0,
+                    order: "ASC".to_string(),
                 },
-                KeyColumn {
+                ClusteringColumn {
                     name: "sequence".to_string(),
                     data_type: "bigint".to_string(),
                     position: 1,
+                    order: "ASC".to_string(),
                 },
             ],
             columns: vec![
@@ -550,7 +553,7 @@ mod tests {
 
         // Verify nested structure
         if let Value::Frozen(inner) = value {
-            assert!(matches!(**inner, Value::List(_)));
+            assert!(matches!(*inner, Value::List(_)));
         }
     }
 

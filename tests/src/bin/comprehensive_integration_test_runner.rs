@@ -2,7 +2,6 @@
 ///
 /// Standalone executable for running the complete CQLite integration test suite.
 /// This runner provides a CI/CD friendly interface with clear pass/fail results.
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_tests::comprehensive_integration_test_suite::{
     ComprehensiveIntegrationTestSuite, IntegrationTestConfig, print_integration_test_results,
@@ -10,11 +9,10 @@ use cqlite_tests::comprehensive_integration_test_suite::{
 };
 use std::env;
 use std::path::PathBuf;
-use std::process;
 use tokio;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     println!("🧪 CQLite Comprehensive Integration Test Runner");
@@ -38,7 +36,7 @@ async fn main() {
                     eprintln!(
                         "Error: --mode requires a value (full, quick, real-only, performance-only)"
                     );
-                    process::exit(1);
+                    return Err("Invalid argument".into());
                 }
             }
             "--test-data" | "-d" => {
@@ -47,7 +45,7 @@ async fn main() {
                     i += 2;
                 } else {
                     eprintln!("Error: --test-data requires a path");
-                    process::exit(1);
+                    return Err("Invalid argument".into());
                 }
             }
             "--timeout" | "-t" => {
@@ -56,7 +54,7 @@ async fn main() {
                     i += 2;
                 } else {
                     eprintln!("Error: --timeout requires a value in seconds");
-                    process::exit(1);
+                    return Err("Invalid argument".into());
                 }
             }
             "--fail-fast" | "-f" => {
@@ -69,12 +67,12 @@ async fn main() {
             }
             "--help" | "-h" => {
                 print_help();
-                process::exit(0);
+                return Ok(());
             }
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
                 print_help();
-                process::exit(1);
+                return Err("Invalid argument".into());
             }
         }
     }
@@ -92,7 +90,7 @@ async fn main() {
             test_data_path.display()
         );
         eprintln!("💡 Hint: Run './test-env/cassandra5/manage.sh all' to generate test data");
-        process::exit(1);
+        return Err("Invalid state".into());
     }
 
     // Run tests based on mode
@@ -121,10 +119,10 @@ async fn main() {
                 stress_test_enabled: false,
                 detailed_reporting,
                 fail_fast,
-                test_data_path,
+                test_data_path: test_data_path.clone(),
                 timeout_seconds,
             };
-            let mut suite = ComprehensiveIntegrationTestSuite::new(config);
+            let mut suite = ComprehensiveIntegrationTestSuite::new(config)?;
             suite.run_all_tests().await
         }
         "performance-only" => {
@@ -142,10 +140,10 @@ async fn main() {
                 stress_test_enabled: true,
                 detailed_reporting,
                 fail_fast,
-                test_data_path,
+                test_data_path: test_data_path.clone(),
                 timeout_seconds,
             };
-            let mut suite = ComprehensiveIntegrationTestSuite::new(config);
+            let mut suite = ComprehensiveIntegrationTestSuite::new(config)?;
             suite.run_all_tests().await
         }
         "collections-only" => {
@@ -163,16 +161,16 @@ async fn main() {
                 stress_test_enabled: false,
                 detailed_reporting,
                 fail_fast,
-                test_data_path,
+                test_data_path: test_data_path.clone(),
                 timeout_seconds,
             };
-            let mut suite = ComprehensiveIntegrationTestSuite::new(config);
+            let mut suite = ComprehensiveIntegrationTestSuite::new(config)?;
             suite.run_all_tests().await
         }
         _ => {
             eprintln!("❌ Error: Unknown test mode: {}", test_mode);
             eprintln!("💡 Valid modes: full, quick, real-only, performance-only, collections-only");
-            process::exit(1);
+            return Err("Invalid state".into());
         }
     };
 
@@ -231,7 +229,11 @@ async fn main() {
                 eprintln!("⚠️  Warning: Could not generate CI results file: {}", e);
             }
 
-            process::exit(exit_code);
+            if exit_code == 0 {
+                Ok(())
+            } else {
+                Err("Tests failed or had issues".into())
+            }
         }
         Err(e) => {
             eprintln!("💥 INTEGRATION TESTS FAILED: {}", e);
@@ -252,7 +254,7 @@ async fn main() {
                 eprintln!("        Run: cd test-env/cassandra5 && ./manage.sh all");
             }
 
-            process::exit(3);
+            return Err("Test execution failed".into());
         }
     }
 }

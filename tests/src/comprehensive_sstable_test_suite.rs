@@ -4,10 +4,10 @@
 //! reading functionality across all supported Cassandra versions (3.x, 4.x, 5.x)
 //! with >90% code coverage and robust error handling.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+use tempfile::TempDir;
 
 use cqlite_core::{
     Error, Result,
@@ -16,15 +16,12 @@ use cqlite_core::{
     storage::sstable::{
         SSTableManager,
         bulletproof_reader::BulletproofReader,
-        format_detector::SSTableFormat,
         reader::{
-            IntegrityCheckResult, IntegrityStatus, SSTableReader, SSTableReaderHealthMetrics,
+            IntegrityStatus, SSTableReader,
         },
     },
-    types::{RowKey, TableId, Value},
 };
 
-use tempfile::TempDir;
 
 /// Comprehensive test result reporting
 #[derive(Debug, Clone)]
@@ -228,7 +225,7 @@ impl ComprehensiveSSTableTestSuite {
             ("unknown_format", "Testing unknown format handling"),
         ];
 
-        for (test_id, description) in versions_to_test {
+        for (test_id, _description) in versions_to_test {
             let start_time = Instant::now();
             let test_result = match test_id {
                 "cassandra_3x" => self.test_cassandra_3x_compatibility().await,
@@ -272,7 +269,7 @@ impl ComprehensiveSSTableTestSuite {
             ("empty_file", "Testing empty file handling"),
         ];
 
-        for (test_id, description) in error_scenarios {
+        for (test_id, _description) in error_scenarios {
             let start_time = Instant::now();
             let test_result = match test_id {
                 "corrupted_file" => self.test_corrupted_file_handling().await,
@@ -316,7 +313,7 @@ impl ComprehensiveSSTableTestSuite {
             ("large_dataset", "Testing large dataset performance"),
         ];
 
-        for (test_id, description) in performance_tests {
+        for (test_id, _description) in performance_tests {
             let start_time = Instant::now();
             let test_result = match test_id {
                 "read_throughput" => self.test_read_throughput().await,
@@ -387,7 +384,7 @@ impl ComprehensiveSSTableTestSuite {
             ("thread_safety", "Testing thread safety"),
         ];
 
-        for (test_id, description) in memory_tests {
+        for (test_id, _description) in memory_tests {
             let start_time = Instant::now();
             let test_result = match test_id {
                 "resource_cleanup" => self.test_resource_cleanup().await,
@@ -426,7 +423,7 @@ impl ComprehensiveSSTableTestSuite {
             ("resource_contention", "Testing resource contention"),
         ];
 
-        for (test_id, description) in concurrency_tests {
+        for (test_id, _description) in concurrency_tests {
             let start_time = Instant::now();
             let test_result = match test_id {
                 "concurrent_reads" => self.test_concurrent_reads().await,
@@ -465,7 +462,7 @@ impl ComprehensiveSSTableTestSuite {
             ("end_to_end", "Testing end-to-end data flow"),
         ];
 
-        for (test_id, description) in integration_tests {
+        for (test_id, _description) in integration_tests {
             let start_time = Instant::now();
             let test_result = match test_id {
                 "sstable_manager" => self.test_sstable_manager_integration().await,

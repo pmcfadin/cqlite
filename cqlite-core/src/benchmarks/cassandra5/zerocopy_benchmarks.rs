@@ -584,13 +584,17 @@ enum DataComplexity {
 
 /// Zero-copy chunk view (no allocations)
 struct ChunkView<'a> {
+    #[allow(dead_code)]
     data: &'a [u8],
+    #[allow(dead_code)]
     processed: bool,
 }
 
 /// Traditional chunk copy (with allocations)
 struct ChunkCopy {
+    #[allow(dead_code)]
     data: Vec<u8>,
+    #[allow(dead_code)]
     processed: bool,
 }
 

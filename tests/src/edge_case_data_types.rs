@@ -3,7 +3,6 @@
 //! This module tests extreme boundary conditions, malformed data handling,
 //! and edge cases that could break Cassandra compatibility.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
@@ -847,7 +846,7 @@ impl EdgeCaseDataTypeTests {
         // We'll simulate this without actually allocating 1GB
         let start_time = std::time::Instant::now();
 
-        let result: Result<i32> = Ok(0); // Skip actual GB allocation for practical reasons
+        let _result: Result<i32> = Ok(0); // Skip actual GB allocation for practical reasons
 
         let elapsed = start_time.elapsed();
 

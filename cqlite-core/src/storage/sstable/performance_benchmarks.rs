@@ -374,6 +374,7 @@ impl PerformanceBenchmarks {
 }
 
 /// Memory usage monitoring helper
+#[allow(dead_code)]
 pub struct MemoryMonitor {
     start_time: Instant,
     samples: Vec<(Instant, f64)>,

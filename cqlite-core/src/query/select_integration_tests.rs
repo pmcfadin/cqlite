@@ -357,10 +357,10 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 
         let optimizer = SelectOptimizer::new(schema.clone(), storage.clone());
-        let executor = SelectExecutor::new(schema.clone(), storage.clone());
+        let _executor = SelectExecutor::new(schema.clone(), storage.clone());
 
         // Test simple SELECT statement
         let statement = SelectStatement::select_all_from(TableId::new("users"));
@@ -518,7 +518,6 @@ mod benchmarks {
     #[allow(unused_imports)]
     use crate::{Config, Database};
     use std::time::Instant;
-    use tempfile::TempDir;
 
     #[tokio::test]
     #[ignore] // Run manually with: cargo test benchmarks -- --ignored

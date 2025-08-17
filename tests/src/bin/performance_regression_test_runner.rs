@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Arg, Command as ClapCommand};
@@ -225,7 +225,7 @@ impl PerformanceRegressionTester {
 
     fn run_single_benchmark(&self, config: &PerformanceBenchmarkConfig) -> Result<BenchmarkResult> {
         let mut durations = Vec::new();
-        let total_iterations = config.warmup_iterations + config.benchmark_iterations;
+        let _total_iterations = config.warmup_iterations + config.benchmark_iterations;
 
         // Run warmup iterations
         if self.verbose {

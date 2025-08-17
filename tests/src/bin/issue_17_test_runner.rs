@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_github_summary_generation() {
-        use integration_tests::comprehensive_sstable_test_suite::{
+        use cqlite_tests::comprehensive_sstable_test_suite::{
             TestResult, TestStatus, TestSuiteReport,
         };
         use std::time::Duration;

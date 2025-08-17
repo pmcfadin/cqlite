@@ -996,7 +996,6 @@ impl SStableDumpParityValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_parity_validator_creation() {

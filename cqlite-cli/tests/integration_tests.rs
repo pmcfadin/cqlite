@@ -13,31 +13,31 @@ use tempfile::TempDir;
 /// - Interactive REPL mode
 /// - SSTable reading capabilities
 
+const CLI_BINARY: &str = "cqlite";
+
+/// Test helper to create a temporary database
+pub fn create_temp_database() -> Result<(TempDir, PathBuf)> {
+    let temp_dir = TempDir::new()?;
+    let db_path = temp_dir.path().join("test.db");
+    Ok((temp_dir, db_path))
+}
+
+/// Test helper to run CLI commands
+pub fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
+    Command::new("cargo")
+        .args(&["run", "--bin", CLI_BINARY, "--"])
+        .args(args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run CLI command: {}", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const CLI_BINARY: &str = "cqlite";
-
-    /// Test helper to create a temporary database
-    pub fn create_temp_database() -> Result<(TempDir, PathBuf)> {
-        let temp_dir = TempDir::new()?;
-        let db_path = temp_dir.path().join("test.db");
-        Ok((temp_dir, db_path))
-    }
-
-    /// Test helper to run CLI commands
-    pub fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
-        Command::new("cargo")
-            .args(&["run", "--bin", CLI_BINARY, "--"])
-            .args(args)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run CLI command: {}", e))
-    }
-
     #[test]
     fn test_cli_help() -> Result<()> {
-        let output = super::tests::run_cli_command(&["--help"])?;
+        let output = run_cli_command(&["--help"])?;
         assert!(output.status.success(), "CLI help should succeed");
 
         let stdout = String::from_utf8(output.stdout)?;
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn test_cli_version() -> Result<()> {
-        let output = super::tests::run_cli_command(&["--version"])?;
+        let output = run_cli_command(&["--version"])?;
         assert!(output.status.success(), "CLI version should succeed");
 
         let stdout = String::from_utf8(output.stdout)?;
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_cli_invalid_argument() -> Result<()> {
-        let output = super::tests::run_cli_command(&["--invalid-argument"])?;
+        let output = run_cli_command(&["--invalid-argument"])?;
         assert!(!output.status.success(), "Invalid argument should fail");
 
         let stderr = String::from_utf8(output.stderr)?;
@@ -83,7 +83,7 @@ mod tests {
     fn test_query_command_basic() -> Result<()> {
         let (_temp_dir, db_path) = create_temp_database()?;
 
-        let output = super::tests::run_cli_command(&[
+        let output = run_cli_command(&[
             "--database",
             db_path.to_str().unwrap(),
             "query",
@@ -101,7 +101,7 @@ mod tests {
     fn test_query_command_with_timing() -> Result<()> {
         let (_temp_dir, db_path) = create_temp_database()?;
 
-        let output = super::tests::run_cli_command(&[
+        let output = run_cli_command(&[
             "--database",
             db_path.to_str().unwrap(),
             "query",
@@ -118,7 +118,7 @@ mod tests {
     fn test_query_command_with_explain() -> Result<()> {
         let (_temp_dir, db_path) = create_temp_database()?;
 
-        let output = super::tests::run_cli_command(&[
+        let output = run_cli_command(&[
             "--database",
             db_path.to_str().unwrap(),
             "query",
@@ -311,7 +311,7 @@ level = "info"
 "#,
         )?;
 
-        let output = super::tests::run_cli_command(&[
+        let output = run_cli_command(&[
             "--database",
             db_path.to_str().unwrap(),
             "--config",
@@ -328,7 +328,7 @@ level = "info"
     #[test]
     fn test_sstable_auto_detect() -> Result<()> {
         // Test auto-detection feature
-        let output = super::tests::run_cli_command(&[
+        let output = run_cli_command(&[
             "--auto-detect",
             "--cassandra-version",
             "5.0",
@@ -361,7 +361,7 @@ level = "info"
     #[test]
     fn test_error_handling() -> Result<()> {
         // Test with non-existent database file
-        let output = super::tests::run_cli_command(&[
+        let output = run_cli_command(&[
             "--database",
             "/tmp/nonexistent.db",
             "query",
@@ -421,10 +421,10 @@ mod performance_tests {
     #[test]
     #[ignore] // Run with: cargo test --ignored
     fn test_large_query_performance() -> Result<()> {
-        let (_temp_dir, db_path) = super::tests::create_temp_database()?;
+        let (_temp_dir, db_path) = create_temp_database()?;
 
         let start = std::time::Instant::now();
-        let output = super::tests::run_cli_command(&[
+        let output = run_cli_command(&[
             "--database",
             db_path.to_str().unwrap(),
             "--format",
@@ -450,9 +450,11 @@ mod performance_tests {
     fn test_concurrent_cli_operations() -> Result<()> {
         use std::sync::Arc;
         use std::thread;
+        use std::path::PathBuf;
+        use super::{create_temp_database, run_cli_command};
 
         let (_temp_dir, db_path) = create_temp_database()?;
-        let db_path = Arc::new(db_path);
+        let db_path: Arc<PathBuf> = Arc::new(db_path);
 
         let mut handles = vec![];
 

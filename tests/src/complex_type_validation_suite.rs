@@ -9,10 +9,9 @@
 //!
 //! All tests use REAL Cassandra SSTable data for 100% compatibility validation.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::schema::{CqlType, TableSchema};
-use cqlite_core::types::{DataType, Value};
+use cqlite_core::types::Value;
 use cqlite_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -114,8 +113,8 @@ pub struct CompatibilitySummary {
 pub struct ComplexTypeValidationSuite {
     config: ComplexTypeValidationConfig,
     results: ComplexTypeValidationResults,
-    test_schemas: Vec<TableSchema>,
-    real_sstable_data: HashMap<String, Vec<u8>>,
+    _test_schemas: Vec<TableSchema>,
+    _real_sstable_data: HashMap<String, Vec<u8>>,
 }
 
 impl ComplexTypeValidationSuite {
@@ -140,8 +139,8 @@ impl ComplexTypeValidationSuite {
                 },
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
-            test_schemas: Vec::new(),
-            real_sstable_data: HashMap::new(),
+            _test_schemas: Vec::new(),
+            _real_sstable_data: HashMap::new(),
         };
 
         suite.load_test_data()?;
@@ -647,7 +646,7 @@ impl ComplexTypeValidationSuite {
         ];
 
         let mut passed = 0;
-        let mut total = data_files.len();
+        let total = data_files.len();
 
         for file in data_files {
             if let Ok(_) = self.validate_sstable_file(file).await {

@@ -3,19 +3,16 @@
 //! Comprehensive tests for SSTable format robustness, corruption handling,
 //! and extreme edge cases that could break Cassandra compatibility.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::parser::header::*;
 use cqlite_core::parser::types::*;
 use cqlite_core::parser::vint::*;
-use cqlite_core::{Value, error::Result};
-use std::collections::HashMap;
-use std::io::Cursor;
+use cqlite_core::error::Result;
 
 /// Comprehensive SSTable corruption and robustness test suite
 pub struct SSTableCorruptionTests {
     test_results: Vec<CorruptionTestResult>,
-    corruption_patterns: Vec<CorruptionPattern>,
+    _corruption_patterns: Vec<CorruptionPattern>,
 }
 
 #[derive(Debug, Clone)]
@@ -23,8 +20,8 @@ struct CorruptionTestResult {
     test_name: String,
     corruption_type: CorruptionType,
     passed: bool,
-    error_message: Option<String>,
-    data_size: usize,
+    _error_message: Option<String>,
+    _data_size: usize,
     processing_time_nanos: u64,
     crash_detected: bool,
     memory_leak_detected: bool,
@@ -42,24 +39,24 @@ enum CorruptionType {
     MetadataCorruption,
     TruncationCorruption,
     ByteFlipCorruption,
-    RandomInsertionCorruption,
+    _RandomInsertionCorruption,
     LengthFieldMismatch,
-    SequenceNumberCorruption,
-    TimestampCorruption,
+    _SequenceNumberCorruption,
+    _TimestampCorruption,
 }
 
 #[derive(Debug, Clone)]
 struct CorruptionPattern {
-    name: String,
-    corruption_fn: fn(&[u8]) -> Vec<u8>,
-    description: String,
+    _name: String,
+    _corruption_fn: fn(&[u8]) -> Vec<u8>,
+    _description: String,
 }
 
 impl SSTableCorruptionTests {
     pub fn new() -> Self {
         let mut tests = Self {
             test_results: Vec::new(),
-            corruption_patterns: Vec::new(),
+            _corruption_patterns: Vec::new(),
         };
         tests.initialize_corruption_patterns();
         tests
@@ -985,8 +982,8 @@ impl SSTableCorruptionTests {
             test_name: test_name.to_string(),
             corruption_type,
             passed: result.is_ok() && !crash_detected,
-            error_message: result.clone().err(),
-            data_size: corrupted_data.len(),
+            _error_message: result.clone().err(),
+            _data_size: corrupted_data.len(),
             processing_time_nanos: elapsed.as_nanos() as u64,
             crash_detected,
             memory_leak_detected,

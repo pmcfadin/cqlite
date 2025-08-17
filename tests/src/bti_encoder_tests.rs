@@ -3,11 +3,10 @@
 //! This test suite validates the implementation against the CEP-25 specification
 //! for Cassandra 5.0 byte-comparable key encoding used in BTI format.
 
-use cqlite_core::Result;
-use cqlite_core::storage::sstable::bti::encoder::{
-    BatchEncoder, ByteComparableEncoder, EncoderConfig,
-};
-use cqlite_core::types::{UdtField, UdtValue, Value};
+#[cfg(test)]
+use cqlite_core::types::{Value, UdtValue, UdtField};
+#[cfg(test)]
+use cqlite_core::storage::sstable::bti::encoder::{ByteComparableEncoder, BatchEncoder, EncoderConfig};
 
 #[cfg(test)]
 mod bti_encoder_tests {

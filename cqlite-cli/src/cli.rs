@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
 use std::path::PathBuf;
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
 pub enum OutputFormat {
     Table,
     Json,
@@ -70,6 +70,20 @@ impl std::fmt::Display for InfoOutputFormat {
             InfoOutputFormat::Text => write!(f, "text"),
             InfoOutputFormat::Json => write!(f, "json"),
             InfoOutputFormat::Csv => write!(f, "csv"),
+        }
+    }
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "table" => Ok(OutputFormat::Table),
+            "json" => Ok(OutputFormat::Json),
+            "csv" => Ok(OutputFormat::Csv),
+            "yaml" => Ok(OutputFormat::Yaml),
+            _ => Err(format!("Invalid output format: {}", s)),
         }
     }
 }
@@ -183,11 +197,11 @@ pub fn create_version_error(
     let mut error_msg = base_error.to_string();
 
     if let Some(detected) = detected_version {
-        error_msg.push_str(&format!("\nDetected SSTable version: {}", detected));
+        error_msg.push_str(&format!("\nDetected SSTable version: {detected}"));
     }
 
     if let Some(provided) = provided_version {
-        error_msg.push_str(&format!("\nProvided Cassandra version: {}", provided));
+        error_msg.push_str(&format!("\nProvided Cassandra version: {provided}"));
     }
 
     error_msg.push_str("\nHint: Try using --auto-detect flag for automatic version detection");

@@ -18,11 +18,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = &args[1];
 
     if !Path::new(file_path).exists() {
-        eprintln!("Error: File does not exist: {}", file_path);
+        eprintln!("Error: File does not exist: {file_path}");
         std::process::exit(1);
     }
 
-    println!("Checking format for: {}", file_path);
+    println!("Checking format for: {file_path}");
 
     // Placeholder format checking functionality
     // TODO: Implement actual format checking logic

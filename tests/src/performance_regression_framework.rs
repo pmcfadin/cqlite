@@ -3,9 +3,10 @@
 //! This module provides comprehensive performance regression detection and tracking
 //! to ensure CQLite maintains its performance targets over time and across releases.
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use cqlite_core::error::Result;
+use cqlite_core::platform::Platform;
+use cqlite_core::storage::StorageEngine;
 use cqlite_core::{Config, RowKey, Value, types::TableId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -159,10 +160,12 @@ pub struct PerformanceRegressionFramework {
     /// Current baseline
     baseline: Option<PerformanceBaseline>,
     /// Temporary directory for tests
+    #[allow(dead_code)]
     temp_dir: TempDir,
     /// Storage engine for testing
     storage_engine: Arc<StorageEngine>,
     /// Platform abstraction
+    #[allow(dead_code)]
     platform: Arc<Platform>,
 }
 

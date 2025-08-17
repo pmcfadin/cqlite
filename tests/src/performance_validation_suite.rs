@@ -9,17 +9,13 @@
 //! - Sub-millisecond partition key lookups
 //! - Query latency competitive with Cassandra performance
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
+use cqlite_core::{platform::Platform, storage::StorageEngine};
 
 use cqlite_core::error::Result;
 use cqlite_core::memory::MemoryManager;
-use cqlite_core::parser::header::SSTableHeader;
-use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::{Config, RowKey, Value, types::TableId};
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tempfile::TempDir;
 use tokio::sync::Barrier;
 
@@ -176,9 +172,12 @@ pub struct ConcurrentQueryResult {
 /// Main performance validation suite
 pub struct PerformanceValidationSuite {
     config: PerformanceValidationConfig,
+    #[allow(dead_code)]
     temp_dir: TempDir,
     storage_engine: Arc<StorageEngine>,
+    #[allow(dead_code)]
     memory_manager: Arc<MemoryManager>,
+    #[allow(dead_code)]
     platform: Arc<Platform>,
 }
 
@@ -353,7 +352,7 @@ impl PerformanceValidationSuite {
         }
 
         let large_data_memory = self.get_current_memory_usage().await?;
-        peak_memory = large_data_memory.saturating_sub(baseline_memory);
+        let _peak_memory = large_data_memory.saturating_sub(baseline_memory);
 
         // Test concurrent operations memory usage
         if self.config.enable_memory_pressure {

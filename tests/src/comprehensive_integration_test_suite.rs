@@ -10,25 +10,21 @@
 //! 7. Collection types and UDT integration
 //! 8. Tombstone and deletion handling
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
-use crate::compatibility_framework::CompatibilityTestFramework;
 use crate::performance_benchmarks::{BenchmarkConfig, PerformanceBenchmarks};
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use crate::real_sstable_compatibility_test::{
     RealCompatibilityConfig, RealSSTableCompatibilityTester,
 };
 use cqlite_core::error::{Error, Result};
-use cqlite_core::parser::header::{CassandraVersion, parse_magic_and_version};
 // use cqlite_core::parser::complex_types::{parse_collection_value, parse_udt_value, CollectionType};
 use cqlite_core::parser::SSTableParser;
-use cqlite_core::storage::sstable::directory::SSTableDirectory;
-use cqlite_core::{Value, types::*};
 use serde_json;
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Comprehensive test configuration
 #[derive(Debug, Clone)]
@@ -85,7 +81,7 @@ pub struct IntegrationTestResult {
 }
 
 /// Performance metrics for tests
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PerformanceMetrics {
     pub throughput_mb_per_sec: f64,
     pub avg_parse_time_us: u64,
@@ -112,7 +108,7 @@ pub struct IntegrationTestSuiteResults {
 /// Main comprehensive integration test suite
 pub struct ComprehensiveIntegrationTestSuite {
     config: IntegrationTestConfig,
-    parser: SSTableParser,
+    _parser: SSTableParser,
     results: Vec<IntegrationTestResult>,
     start_time: Instant,
 }
@@ -123,7 +119,7 @@ impl ComprehensiveIntegrationTestSuite {
         let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
         Ok(Self {
             config,
-            parser,
+            _parser: parser,
             results: Vec::new(),
             start_time: Instant::now(),
         })
@@ -404,7 +400,7 @@ impl ComprehensiveIntegrationTestSuite {
         println!("{}", "-".repeat(50));
 
         let test_start = Instant::now();
-        let mut bytes_processed = 0;
+        let mut _bytes_processed = 0;
 
         // Test with collections_table data
         let collections_table_path = self
@@ -415,13 +411,13 @@ impl ComprehensiveIntegrationTestSuite {
         if collections_table_path.exists() {
             match self.test_collections_parsing(&collections_table_path).await {
                 Ok((bytes, features_tested)) => {
-                    bytes_processed = bytes;
+                    _bytes_processed = bytes;
                     self.results.push(IntegrationTestResult {
                         test_name: "Collection Types Parsing".to_string(),
                         test_category: "Complex Types".to_string(),
                         passed: true,
                         execution_time_ms: test_start.elapsed().as_millis() as u64,
-                        bytes_processed,
+                        bytes_processed: _bytes_processed,
                         files_tested: features_tested,
                         error_message: None,
                         performance_metrics: None,
@@ -960,7 +956,7 @@ impl ComprehensiveIntegrationTestSuite {
         Ok((total_bytes, generations_found))
     }
 
-    async fn test_compression_integration(&self) -> Result<(usize, usize)> {
+    async fn _test_compression_integration(&self) -> Result<(usize, usize)> {
         let mut total_bytes = 0;
         let mut compression_files = 0;
 
@@ -968,7 +964,7 @@ impl ComprehensiveIntegrationTestSuite {
         if let Ok(entries) = fs::read_dir(&self.config.test_data_path) {
             for entry in entries.flatten().take(3) {
                 if entry.path().is_dir() {
-                    if let Some(compression_file) = self.find_compression_file(&entry.path()) {
+                    if let Some(compression_file) = self._find_compression_file(&entry.path()) {
                         if let Ok(compression_data) = fs::read(&compression_file) {
                             total_bytes += compression_data.len();
                             compression_files += 1;
@@ -981,7 +977,7 @@ impl ComprehensiveIntegrationTestSuite {
         Ok((total_bytes, compression_files))
     }
 
-    async fn test_statistics_integration(&self) -> Result<(usize, usize)> {
+    async fn _test_statistics_integration(&self) -> Result<(usize, usize)> {
         let mut total_bytes = 0;
         let mut stats_files = 0;
 
@@ -989,7 +985,7 @@ impl ComprehensiveIntegrationTestSuite {
         if let Ok(entries) = fs::read_dir(&self.config.test_data_path) {
             for entry in entries.flatten().take(3) {
                 if entry.path().is_dir() {
-                    if let Some(stats_file) = self.find_statistics_file(&entry.path()) {
+                    if let Some(stats_file) = self._find_statistics_file(&entry.path()) {
                         if let Ok(stats_data) = fs::read(&stats_file) {
                             total_bytes += stats_data.len();
                             stats_files += 1;
@@ -1002,7 +998,7 @@ impl ComprehensiveIntegrationTestSuite {
         Ok((total_bytes, stats_files))
     }
 
-    async fn test_schema_validation_integration(&self) -> Result<(usize, usize)> {
+    async fn _test_schema_validation_integration(&self) -> Result<(usize, usize)> {
         // Test schema validation with actual table structures
         let schema_file = self
             .config
@@ -1200,11 +1196,11 @@ impl ComprehensiveIntegrationTestSuite {
         self.find_file_with_pattern(dir, "Data.db")
     }
 
-    fn find_compression_file(&self, dir: &Path) -> Option<PathBuf> {
+    fn _find_compression_file(&self, dir: &Path) -> Option<PathBuf> {
         self.find_file_with_pattern(dir, "CompressionInfo.db")
     }
 
-    fn find_statistics_file(&self, dir: &Path) -> Option<PathBuf> {
+    fn _find_statistics_file(&self, dir: &Path) -> Option<PathBuf> {
         self.find_file_with_pattern(dir, "Statistics.db")
     }
 

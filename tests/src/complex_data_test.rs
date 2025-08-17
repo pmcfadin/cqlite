@@ -1,13 +1,13 @@
 //! Complex data type testing for SSTable operations
 //! Tests serialization and deserialization of various Cassandra data types
 
-use cqlite_core::{platform::Platform, schema::SchemaManager, storage::StorageEngine};
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cqlite_core::platform::Platform;
 use cqlite_core::{
     Config, Result, RowKey, Value,
     storage::sstable::{reader::SSTableReader, writer::SSTableWriter},

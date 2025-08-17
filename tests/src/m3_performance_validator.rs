@@ -1,4 +1,3 @@
-use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platform};
 /// M3 Performance Validation Test Runner
 ///
 /// Comprehensive test runner for validating M3 complex type performance targets.
@@ -6,10 +5,9 @@ use cqlite_core::{storage::StorageEngine, schema::SchemaManager, platform::Platf
 
 use cqlite_core::parser::{
     M3PerformanceBenchmarks, OptimizedComplexTypeParser, PerformanceRegressionFramework,
-    PerformanceTargets, RegressionThresholds,
+    PerformanceTargets,
 };
 use cqlite_core::error::Result;
-use std::path::Path;
 use std::time::Instant;
 
 /// M3 Performance Validation Suite
@@ -143,7 +141,7 @@ impl M3PerformanceValidator {
         
         // Create output directory
         std::fs::create_dir_all(&self.config.output_dir).map_err(|e| {
-            cqlite_core::Error::Io(format!("Failed to create output directory: {}", e))
+            cqlite_core::Error::Serialization(format!("Failed to create output directory: {}", e))
         })?;
 
         // Run performance benchmarks
@@ -206,7 +204,7 @@ impl M3PerformanceValidator {
         for _ in 0..100 {
             let _ = optimized_parser.parse_optimized_list(&test_data);
         }
-        let simd_time = start.elapsed();
+        let _simd_time = start.elapsed();
         
         // Calculate effectiveness based on SIMD operations performed
         let simd_ops = optimized_parser.get_metrics().simd_operations
@@ -354,21 +352,21 @@ impl M3PerformanceValidator {
         let main_report = self.format_validation_report(results);
         let main_report_path = format!("{}/m3_validation_report.md", self.config.output_dir);
         std::fs::write(&main_report_path, main_report).map_err(|e| {
-            cqlite_core::Error::Io(format!("Failed to write main report: {}", e))
+            cqlite_core::Error::Serialization(format!("Failed to write main report: {}", e))
         })?;
         
         // Generate JSON summary for automation
         let json_summary = self.format_json_summary(results)?;
         let json_path = format!("{}/m3_validation_summary.json", self.config.output_dir);
         std::fs::write(&json_path, json_summary).map_err(|e| {
-            cqlite_core::Error::Io(format!("Failed to write JSON summary: {}", e))
+            cqlite_core::Error::Serialization(format!("Failed to write JSON summary: {}", e))
         })?;
         
         // Generate performance charts data (CSV)
         let charts_data = self.format_charts_data(results);
         let charts_path = format!("{}/m3_performance_data.csv", self.config.output_dir);
         std::fs::write(&charts_path, charts_data).map_err(|e| {
-            cqlite_core::Error::Io(format!("Failed to write charts data: {}", e))
+            cqlite_core::Error::Serialization(format!("Failed to write charts data: {}", e))
         })?;
         
         println!("   📊 Main report: {}", main_report_path);
@@ -615,7 +613,6 @@ impl Default for M3PerformanceValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_validator_creation() {

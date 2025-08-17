@@ -3,20 +3,18 @@
 //! Comprehensive performance testing for CQL parsing operations,
 //! including throughput, latency, and memory usage measurements.
 
-use crate::fixtures::test_data::*;
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::SSTableParser;
 use cqlite_core::schema::{CqlType, TableSchema};
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// Performance benchmark suite for CQL parsing
 pub struct CqlPerformanceBenchmarkSuite {
     /// Parser instance for benchmarking
-    parser: SSTableParser,
+    _parser: SSTableParser,
     /// Benchmark results
     results: HashMap<String, BenchmarkResult>,
     /// Memory tracking
@@ -65,7 +63,7 @@ impl CqlPerformanceBenchmarkSuite {
     /// Create new benchmark suite
     pub fn new() -> Self {
         Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
+            _parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
                 .unwrap(),
             results: HashMap::new(),
             memory_tracker: MemoryTracker::new(),
@@ -116,6 +114,10 @@ impl CqlPerformanceBenchmarkSuite {
             max_avg_latency_ms: 1.0,
             max_memory_usage_kb: 1024,
             max_p99_latency_ms: 5,
+            max_complex_slowdown_ratio: 2.0,
+            max_memory_increase_ratio: 1.5,
+            min_complex_throughput_mbs: 10.0,
+            max_additional_latency_ms: 2,
         };
 
         self.run_benchmark(benchmark_name, test_cql, iterations, targets)?;
@@ -143,6 +145,10 @@ impl CqlPerformanceBenchmarkSuite {
             max_avg_latency_ms: 10.0,
             max_memory_usage_kb: 2048,
             max_p99_latency_ms: 50,
+            max_complex_slowdown_ratio: 3.0,
+            max_memory_increase_ratio: 2.0,
+            min_complex_throughput_mbs: 5.0,
+            max_additional_latency_ms: 20,
         };
 
         self.run_benchmark(benchmark_name, complex_cql, iterations, targets)?;
@@ -162,6 +168,10 @@ impl CqlPerformanceBenchmarkSuite {
             max_avg_latency_ms: 100.0,
             max_memory_usage_kb: 8192,
             max_p99_latency_ms: 500,
+            max_complex_slowdown_ratio: 5.0,
+            max_memory_increase_ratio: 3.0,
+            min_complex_throughput_mbs: 2.0,
+            max_additional_latency_ms: 100,
         };
 
         self.run_benchmark(benchmark_name, &large_cql, iterations, targets)?;
@@ -194,7 +204,7 @@ impl CqlPerformanceBenchmarkSuite {
 
         let mut handles = vec![];
 
-        for thread_id in 0..num_threads {
+        for _thread_id in 0..num_threads {
             let cql = test_cql.to_string();
             let success_counter = Arc::clone(&success_counter);
             let error_counter = Arc::clone(&error_counter);
@@ -304,6 +314,10 @@ impl CqlPerformanceBenchmarkSuite {
             max_avg_latency_ms: 0.0,         // Not applicable
             max_memory_usage_kb: 16384,      // 16MB max
             max_p99_latency_ms: 0,           // Not applicable
+            max_complex_slowdown_ratio: 1.0, // Not applicable
+            max_memory_increase_ratio: 1.0,  // Not applicable
+            min_complex_throughput_mbs: 0.0, // Not applicable
+            max_additional_latency_ms: 0,    // Not applicable
         };
 
         let passed = memory_growth_rate < 10.0 && // Less than 10KB per column
@@ -388,6 +402,10 @@ impl CqlPerformanceBenchmarkSuite {
             max_avg_latency_ms: 2.0,
             max_memory_usage_kb: 4096,
             max_p99_latency_ms: 10,
+            max_complex_slowdown_ratio: 2.0,
+            max_memory_increase_ratio: 1.5,
+            min_complex_throughput_mbs: 10.0,
+            max_additional_latency_ms: 5,
         };
 
         let throughput = total_validations as f64 / total_duration.as_secs_f64();
@@ -489,6 +507,10 @@ impl CqlPerformanceBenchmarkSuite {
             max_avg_latency_ms: 0.1,
             max_memory_usage_kb: 2048,
             max_p99_latency_ms: 1,
+            max_complex_slowdown_ratio: 2.0,
+            max_memory_increase_ratio: 1.5,
+            min_complex_throughput_mbs: 10.0,
+            max_additional_latency_ms: 1,
         };
 
         let throughput = total_conversions as f64 / total_duration.as_secs_f64();
@@ -581,6 +603,10 @@ impl CqlPerformanceBenchmarkSuite {
             max_avg_latency_ms: 5000.0,      // 5 seconds max for massive schemas
             max_memory_usage_kb: 32768,      // 32MB max
             max_p99_latency_ms: 10000,       // 10 seconds
+            max_complex_slowdown_ratio: 5.0,
+            max_memory_increase_ratio: 3.0,
+            min_complex_throughput_mbs: 1.0,
+            max_additional_latency_ms: 1000,
         };
 
         let throughput = successful_operations as f64 / total_duration.as_secs_f64();

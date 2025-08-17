@@ -431,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn test_integration_runner_creation() {
         let config = IntegrationTestConfig::default();
-        let runner = IntegrationTestRunner::new(config);
+        let _runner = IntegrationTestRunner::new(config);
         // Basic creation test
         assert!(true);
     }

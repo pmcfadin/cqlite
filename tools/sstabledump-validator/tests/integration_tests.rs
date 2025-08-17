@@ -67,6 +67,7 @@ mod test_utils {
     use super::*;
     use std::fs;
 
+    #[allow(dead_code)]
     pub fn create_mock_sstable_file(
         path: &PathBuf,
         content: &str,
@@ -75,6 +76,7 @@ mod test_utils {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn create_mock_cassandra_dump() -> String {
         r#"
 [
@@ -105,11 +107,13 @@ mod test_utils {
         .to_string()
     }
 
+    #[allow(dead_code)]
     pub fn create_mock_cqlite_dump() -> String {
         // This should match the Cassandra dump exactly for positive test
         create_mock_cassandra_dump()
     }
 
+    #[allow(dead_code)]
     pub fn create_mock_different_cqlite_dump() -> String {
         r#"
 [

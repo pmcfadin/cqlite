@@ -659,7 +659,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let schema = Arc::new(SchemaManager::new(storage.clone(), &config).await.unwrap());
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 
         SelectOptimizer { schema, storage }
     }

@@ -306,7 +306,7 @@ impl SSTableFixture {
     }
 
     /// Add a column definition
-    pub fn add_column<S: Into<String>, T: Into<String>>(mut self, name: S, data_type: T) -> Self {
+    pub fn add_column<S: Into<String>, T: Into<String>>(mut self, name: S, _data_type: T) -> Self {
         self.column_names.push(name.into());
         self
     }

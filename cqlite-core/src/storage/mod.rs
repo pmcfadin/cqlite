@@ -417,7 +417,7 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-        let mut storage = StorageEngine::open(temp_dir.path(), &config, platform)
+        let storage = StorageEngine::open(temp_dir.path(), &config, platform)
             .await
             .unwrap();
         let stats = storage.stats().await.unwrap();

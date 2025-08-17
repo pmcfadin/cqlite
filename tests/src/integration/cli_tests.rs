@@ -1,9 +1,10 @@
 //! CLI Integration Tests
 
 use assert_cmd::prelude::*;
+#[allow(unused_imports)]
 use predicates::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -40,6 +41,7 @@ pub struct CLITestResult {
 /// CLI Integration Test Suite
 #[derive(Debug)]
 pub struct CLIIntegrationTestSuite {
+    #[allow(dead_code)]
     config: CLITestConfig,
     results: Vec<CLITestResult>,
 }

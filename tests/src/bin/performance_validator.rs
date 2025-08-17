@@ -5,7 +5,8 @@
 
 use clap::{Arg, Command};
 use cqlite_tests::{
-    BenchmarkRunnerConfig, PerformanceBenchmarkRunner, PerformanceTargets, TestConfiguration,
+    BenchmarkRunnerConfig, PerformanceBenchmarkRunner, TestConfiguration,
+    performance_benchmark_runner::PerformanceTargets,
 };
 use std::path::PathBuf;
 use std::process;
@@ -230,10 +231,11 @@ async fn main() {
             performance_iterations: iterations,
             enable_profiling: true,
             performance_targets: PerformanceTargets {
-                max_complex_slowdown_ratio: 2.0,
-                max_memory_increase_ratio: 1.5,
-                min_complex_throughput_mbs: parse_target * 100.0,
-                max_additional_latency_ms: latency_target,
+                max_parse_time_1gb_seconds: parse_target,
+                max_memory_usage_mb: 8192,
+                max_lookup_latency_ms: latency_target,
+                min_write_throughput_ops_sec: 100.0,
+                min_read_throughput_ops_sec: 100.0,
             },
         },
     };

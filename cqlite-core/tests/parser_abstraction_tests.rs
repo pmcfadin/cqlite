@@ -48,16 +48,16 @@ fn test_data_types() {
     assert!(matches!(CqlDataType::Uuid, CqlDataType::Uuid));
 
     // Test collection types
-    let list_type = CqlDataType::List(Box::new(CqlDataType::Text));
-    match list_type {
+    let _list_type = CqlDataType::List(Box::new(CqlDataType::Text));
+    match _list_type {
         CqlDataType::List(inner) => {
             assert!(matches!(*inner, CqlDataType::Text));
         }
         _ => panic!("Expected List type"),
     }
 
-    let map_type = CqlDataType::Map(Box::new(CqlDataType::Text), Box::new(CqlDataType::Int));
-    match map_type {
+    let _map_type = CqlDataType::Map(Box::new(CqlDataType::Text), Box::new(CqlDataType::Int));
+    match _map_type {
         CqlDataType::Map(key, value) => {
             assert!(matches!(*key, CqlDataType::Text));
             assert!(matches!(*value, CqlDataType::Int));
@@ -91,11 +91,11 @@ fn test_visitor_pattern() {
         options: CqlTableOptions::default(),
     };
 
-    let statement = CqlStatement::CreateTable(create_table);
+    let _statement = CqlStatement::CreateTable(create_table);
 
     // Test IdentifierCollector
     let mut collector = IdentifierCollector::new();
-    collector.visit_statement(&statement).unwrap();
+    collector.visit_statement(&_statement).unwrap();
     let identifiers = collector.into_identifiers();
 
     assert!(identifiers.len() >= 3); // At least: test, id, name
@@ -132,18 +132,18 @@ fn test_configuration_system() {
     // Builder pattern
     let custom = ParserConfig::default()
         .with_backend(ParserBackend::Nom)
-        .with_feature(ParserFeature::Streaming);
+        .with_feature(ConfigFeature::Streaming);
 
     assert_eq!(custom.backend, ParserBackend::Nom);
-    assert!(custom.has_feature(&ParserFeature::Streaming));
-    assert!(!custom.has_feature(&ParserFeature::CodeCompletion));
+    assert!(custom.has_feature(&ConfigFeature::Streaming));
+    assert!(!custom.has_feature(&ConfigFeature::CodeCompletion));
 
     // Predefined configurations
     let fast = ParserConfig::fast();
-    assert!(fast.has_feature(&ParserFeature::Streaming));
+    assert!(fast.has_feature(&ConfigFeature::Streaming));
 
     let strict = ParserConfig::strict();
-    assert!(strict.has_feature(&ParserFeature::SyntaxHighlighting));
+    assert!(strict.has_feature(&ConfigFeature::SyntaxHighlighting));
 }
 
 #[test]
@@ -176,11 +176,11 @@ fn test_schema_builder_visitor() {
         options: CqlTableOptions::default(),
     };
 
-    let statement = CqlStatement::CreateTable(create_table);
+    let _statement = CqlStatement::CreateTable(create_table);
 
     // Use SchemaBuilderVisitor to convert to TableSchema
     let mut builder = SchemaBuilderVisitor::new();
-    let schema = builder.visit_statement(&statement).unwrap();
+    let schema = builder.visit_statement(&_statement).unwrap();
 
     // Verify the conversion
     assert_eq!(schema.keyspace, "myks");

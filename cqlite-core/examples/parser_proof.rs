@@ -56,7 +56,7 @@ fn proof_backward_compatibility() {
     println!("Return type correct: ✓");
 
     match result {
-        Ok((remaining, schema)) => {
+        Ok((remaining, _schema)) => {
             println!("Parse result: Ok((\"{}\"", remaining);
             println!("Returns TableSchema: ✓");
         }
@@ -98,9 +98,9 @@ fn proof_ast_creation() {
     }
 
     // Create collection types
-    let list_type = CqlDataType::List(Box::new(CqlDataType::Text));
-    let set_type = CqlDataType::Set(Box::new(CqlDataType::Int));
-    let map_type = CqlDataType::Map(Box::new(CqlDataType::Text), Box::new(CqlDataType::Uuid));
+    let _list_type = CqlDataType::List(Box::new(CqlDataType::Text));
+    let _set_type = CqlDataType::Set(Box::new(CqlDataType::Int));
+    let _map_type = CqlDataType::Map(Box::new(CqlDataType::Text), Box::new(CqlDataType::Uuid));
 
     println!("\nCollection types created:");
     println!("  - LIST<TEXT>");
@@ -130,7 +130,7 @@ fn proof_ast_creation() {
         options: CqlTableOptions::default(),
     };
 
-    let statement = CqlStatement::CreateTable(create_table.clone());
+    let _statement = CqlStatement::CreateTable(create_table.clone());
 
     println!("\nComplete CREATE TABLE AST created:");
     println!(

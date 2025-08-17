@@ -712,6 +712,26 @@ impl ToJson for Value {
                 serde_json::Value::Object(json_obj)
             }
             Value::Frozen(boxed_value) => boxed_value.to_json(),
+            Value::Varint(data) => {
+                use base64::Engine;
+                let engine = base64::engine::general_purpose::STANDARD;
+                serde_json::Value::String(engine.encode(data))
+            }
+            Value::Decimal { scale, unscaled } => {
+                let mut json_obj = serde_json::Map::new();
+                json_obj.insert("scale".to_string(), serde_json::Value::Number((*scale).into()));
+                use base64::Engine;
+                let engine = base64::engine::general_purpose::STANDARD;
+                json_obj.insert("unscaled".to_string(), serde_json::Value::String(engine.encode(unscaled)));
+                serde_json::Value::Object(json_obj)
+            }
+            Value::Duration { months, days, nanos } => {
+                let mut json_obj = serde_json::Map::new();
+                json_obj.insert("months".to_string(), serde_json::Value::Number((*months).into()));
+                json_obj.insert("days".to_string(), serde_json::Value::Number((*days).into()));
+                json_obj.insert("nanos".to_string(), serde_json::Value::Number((*nanos).into()));
+                serde_json::Value::Object(json_obj)
+            }
             Value::Tombstone(info) => {
                 let mut json_obj = serde_json::Map::new();
                 json_obj.insert(

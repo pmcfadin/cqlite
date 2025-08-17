@@ -11,12 +11,12 @@
 //! - Multi-generation value reconciliation
 
 use crate::parser::{
-    DeletionInfo, ParsedCell, ParsedData, ParsedPartition, ParsedRow, RangeTombstone,
+    ParsedCell, ParsedData, ParsedPartition, ParsedRow, RangeTombstone,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Reconciliation engine for read-time data visibility
 #[derive(Debug)]
@@ -24,6 +24,7 @@ pub struct ReconciliationEngine {
     /// Current time for TTL calculations (microseconds since epoch)
     current_time: i64,
     /// Reconciliation rules configuration
+    #[allow(dead_code)]
     config: ReconciliationConfig,
 }
 
@@ -87,7 +88,7 @@ pub enum CellVisibility {
 }
 
 /// Reason for reconciliation decision
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ReconciliationReason {
     /// Cell is visible as-is
     Visible,
@@ -127,6 +128,12 @@ pub struct RowReconciliationResult {
     pub row_deletion_reason: Option<ReconciliationReason>,
 }
 
+impl Default for ReconciliationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReconciliationEngine {
     /// Create new reconciliation engine
     pub fn new() -> Self {
@@ -142,14 +149,20 @@ impl ReconciliationEngine {
     }
 
     /// Create reconciliation engine with specific time (for testing)
-    pub fn with_time(current_time: i64) -> Self {
+    pub fn _with_time(current_time: i64) -> Self {
         Self {
             current_time,
             config: ReconciliationConfig::default(),
         }
     }
 
+    /// Public wrapper for backward compatibility
+    pub fn with_time(current_time: i64) -> Self {
+        Self::_with_time(current_time)
+    }
+
     /// Create engine with custom configuration
+    #[allow(dead_code)]
     pub fn with_config(config: ReconciliationConfig) -> Self {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -163,6 +176,7 @@ impl ReconciliationEngine {
     }
 
     /// Reconcile two parsed datasets according to Cassandra semantics
+    #[allow(dead_code)]
     pub async fn reconcile_datasets(
         &self,
         cassandra_data: &ParsedData,
@@ -192,6 +206,7 @@ impl ReconciliationEngine {
     }
 
     /// Reconcile a single partition with comprehensive tombstone semantics
+    #[allow(dead_code)]
     pub async fn reconcile_partition(
         &self,
         partition: &ParsedPartition,
@@ -210,7 +225,7 @@ impl ReconciliationEngine {
             let key = row
                 .clustering_key
                 .clone()
-                .unwrap_or_else(|| format!("row_{}", idx));
+                .unwrap_or_else(|| format!("row_{idx}"));
             rows_by_clustering
                 .entry(key)
                 .or_insert_with(Vec::new)
@@ -255,7 +270,7 @@ impl ReconciliationEngine {
         debug!("Reconciling row group: clustering_key={:?}", clustering_key);
 
         // Sort rows by timestamp (newest first) for proper conflict resolution
-        let mut sorted_rows: Vec<_> = rows.iter().copied().collect();
+        let mut sorted_rows: Vec<_> = rows.to_vec();
         sorted_rows.sort_by(|a, b| b.timestamp.unwrap_or(0).cmp(&a.timestamp.unwrap_or(0)));
 
         // Find row-level tombstones
@@ -263,7 +278,7 @@ impl ReconciliationEngine {
         for row in &sorted_rows {
             if self.is_row_tombstone(row) {
                 if let Some(deletion_time) = self.get_row_deletion_time(row) {
-                    if row_tombstone_time.map_or(true, |existing| deletion_time > existing) {
+                    if row_tombstone_time.is_none_or(|existing| deletion_time > existing) {
                         row_tombstone_time = Some(deletion_time);
                     }
                 }
@@ -330,7 +345,7 @@ impl ReconciliationEngine {
         let mut affected_by_tombstone = false;
         let mut affected_by_ttl = false;
 
-        for mut candidate in candidates.iter_mut() {
+        for candidate in candidates.iter_mut() {
             // Check if cell is deleted by row tombstone
             if let Some(row_tombstone_time) = row_tombstone_time {
                 if candidate.cell.timestamp <= row_tombstone_time {
@@ -418,6 +433,7 @@ impl ReconciliationEngine {
     }
 
     /// Apply range tombstones to reconciled results
+    #[allow(dead_code)]
     pub fn apply_range_tombstones(
         &self,
         results: &mut PartitionReconciliationResult,
@@ -444,6 +460,7 @@ impl ReconciliationEngine {
     }
 
     /// Check if a row falls within a range tombstone
+    #[allow(dead_code)]
     fn row_matches_range(
         &self,
         row: &RowReconciliationResult,
@@ -452,19 +469,19 @@ impl ReconciliationEngine {
         // Simplified range matching - real implementation would use proper clustering key comparison
         let clustering_key = row.clustering_key.as_deref().unwrap_or("");
 
-        let start_match = range_tombstone.start_bound.as_ref().map_or(true, |start| {
+        let start_match = range_tombstone.start_bound.as_ref().is_none_or(|start| {
             if range_tombstone.inclusive_start {
-                clustering_key >= start
+                clustering_key >= start.as_str()
             } else {
-                clustering_key > start
+                clustering_key > start.as_str()
             }
         });
 
-        let end_match = range_tombstone.end_bound.as_ref().map_or(true, |end| {
+        let end_match = range_tombstone.end_bound.as_ref().is_none_or(|end| {
             if range_tombstone.inclusive_end {
-                clustering_key <= end
+                clustering_key <= end.as_str()
             } else {
-                clustering_key < end
+                clustering_key < end.as_str()
             }
         });
 
@@ -492,6 +509,7 @@ impl Default for ReconciliationConfig {
 
 impl DatasetReconciliationResult {
     /// Compare reconciled datasets and identify differences
+    #[allow(dead_code)]
     pub fn compare(&self) -> Vec<ReconciliationDifference> {
         let mut differences = Vec::new();
 
@@ -541,6 +559,7 @@ impl DatasetReconciliationResult {
         differences
     }
 
+    #[allow(dead_code)]
     fn cells_match(&self, cassandra: &ReconciledCell, cqlite: &ReconciledCell) -> bool {
         // Compare visibility
         let cassandra_visible = cassandra.value.is_some();
@@ -564,6 +583,7 @@ impl DatasetReconciliationResult {
         cassandra.reconciliation_reason == cqlite.reconciliation_reason
     }
 
+    #[allow(dead_code)]
     fn classify_difference(
         &self,
         cassandra: &ReconciledCell,
@@ -601,13 +621,13 @@ pub enum DifferenceType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{CellValue, DeletionInfo, ParsedCell, ParsedPartition, ParsedRow};
+    use crate::parser::{CellValue, DeletionInfo, ParsedCell, ParsedRow};
 
     #[tokio::test]
     async fn test_basic_tombstone_reconciliation() {
         let engine = ReconciliationEngine::with_time(5000);
 
-        let mut row = ParsedRow {
+        let row = ParsedRow {
             clustering_key: Some("test_key".to_string()),
             cells: vec![
                 ParsedCell {

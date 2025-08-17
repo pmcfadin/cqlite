@@ -303,7 +303,7 @@ mod tests {
     fn test_simple_digest_fallback() {
         let computer = KeyDigestComputer::new();
 
-        let test_cases = vec![
+        let test_cases: Vec<&[u8]> = vec![
             b"simple_key",
             b"another_key",
             b"",

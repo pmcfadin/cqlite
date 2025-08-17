@@ -1383,6 +1383,23 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 }
             }
         }
+        Value::Varint(data) => {
+            result.push(CqlTypeId::Varint as u8);
+            result.extend_from_slice(&encode_vint(data.len() as i64));
+            result.extend_from_slice(data);
+        }
+        Value::Decimal { scale, unscaled } => {
+            result.push(CqlTypeId::Decimal as u8);
+            result.extend_from_slice(&scale.to_be_bytes());
+            result.extend_from_slice(&encode_vint(unscaled.len() as i64));
+            result.extend_from_slice(unscaled);
+        }
+        Value::Duration { months, days, nanos } => {
+            result.push(CqlTypeId::Duration as u8);
+            result.extend_from_slice(&months.to_be_bytes());
+            result.extend_from_slice(&days.to_be_bytes());
+            result.extend_from_slice(&nanos.to_be_bytes());
+        }
     }
 
     Ok(result)
@@ -1410,6 +1427,9 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
         Value::Udt(_) => CqlTypeId::Udt,
         Value::Frozen(_) => CqlTypeId::Blob, // Frozen is a wrapper, use blob as fallback
         Value::Tombstone(_) => CqlTypeId::Tombstone,
+        Value::Varint(_) => CqlTypeId::Varint,
+        Value::Decimal { .. } => CqlTypeId::Decimal,
+        Value::Duration { .. } => CqlTypeId::Duration,
     }
 }
 

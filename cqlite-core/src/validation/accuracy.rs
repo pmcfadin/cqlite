@@ -380,6 +380,7 @@ fn find_test_data_by_pattern(config: &ValidationConfig, pattern: &str) -> Option
 }
 
 /// Get reference data from cqlsh
+#[allow(dead_code)]
 async fn get_cqlsh_reference_data(
     cqlsh_path: &str,
     test_case: &AccuracyTestCase,

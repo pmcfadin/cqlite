@@ -115,7 +115,7 @@ mod integration_tests {
         }
 
         // Test the users table specifically since we know it exists
-        let users_dir_pattern = format!("{}/users-*", REAL_DATA_PATH);
+        let _users_dir_pattern = format!("{}/users-*", REAL_DATA_PATH);
         let users_dirs: Vec<_> = std::fs::read_dir(REAL_DATA_PATH)
             .expect("Failed to read directory")
             .filter_map(|e| e.ok())

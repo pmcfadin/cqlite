@@ -11,9 +11,7 @@ use cqlite_core::parser::vint::*;
 use cqlite_core::storage::sstable::{SSTableManager, SSTableReader, SSTableWriter};
 use cqlite_core::{error::Result, platform::Platform, Config, Value, RowKey};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
 
 /// Advanced edge case test suite for production readiness
 pub struct AdvancedEdgeCaseTests {

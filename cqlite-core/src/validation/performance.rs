@@ -10,6 +10,7 @@ use std::time::Instant;
 
 /// Performance validator
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PerformanceValidator {
     /// Validation framework reference
     framework: Arc<super::core::ValidationFramework>,

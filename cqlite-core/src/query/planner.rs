@@ -718,13 +718,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
-        let storage = Arc::new(
+        let _storage = Arc::new(
             crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
                 .await
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage, &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
@@ -738,13 +738,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
-        let storage = Arc::new(
+        let _storage = Arc::new(
             crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
                 .await
                 .unwrap(),
         );
         let schema = Arc::new(
-            crate::schema::SchemaManager::new(storage, &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
@@ -776,13 +776,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
-        let storage = Arc::new(
+        let _storage = Arc::new(
             crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
                 .await
                 .unwrap(),
         );
         let schema_manager = Arc::new(
-            crate::schema::SchemaManager::new(storage, &config)
+            crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );

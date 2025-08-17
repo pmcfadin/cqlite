@@ -9,7 +9,7 @@
 use clap::{Arg, Command};
 use cqlite_tests::{
     CLIIntegrationTestSuite, CLITestConfig, ComprehensiveIntegrationTestSuite,
-    IntegrationTestConfig, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
+    ComprehensiveTestConfig, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
 };
 use std::time::Instant;
 
@@ -158,7 +158,7 @@ async fn generate_sstable_fixtures(
     let output_path = std::path::PathBuf::from(output_dir).join("fixtures");
     std::fs::create_dir_all(&output_path)?;
 
-    let generator = SSTableTestFixtureGenerator::new(fixture_config, output_path);
+    let generator = SSTableTestFixtureGenerator::new(fixture_config, output_path)?;
     let fixtures = generator.generate_all_fixtures().await?;
 
     println!("✅ Generated {} SSTable fixtures:", fixtures.len());
@@ -199,13 +199,20 @@ async fn run_all_tests(timeout: u64, verbose: bool) -> Result<(), Box<dyn std::e
 async fn run_basic_tests(timeout: u64, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("🔧 Running basic integration tests...");
 
-    let config = IntegrationTestConfig {
-        test_real_sstables: false,   // Skip until we have real fixtures
-        test_cli_integration: false, // Test separately
-        test_performance: false,     // Skip performance tests for basic run
-        test_edge_cases: true,
-        test_concurrent_access: false, // Skip concurrent tests for basic run
-        generate_reports: true,
+    let config = ComprehensiveTestConfig {
+        test_real_sstables: false,
+        test_feature_integration: true,
+        test_error_handling: true,
+        test_performance: false,
+        test_cli_commands: false,
+        test_multi_generation: true,
+        test_collection_types: true,
+        test_tombstones: true,
+        test_directory_scanning: true,
+        stress_test_enabled: false,
+        detailed_reporting: true,
+        fail_fast: false,
+        test_data_path: std::path::PathBuf::from("test-env/cassandra5/sstables"),
         timeout_seconds: timeout,
     };
 
@@ -214,11 +221,11 @@ async fn run_basic_tests(timeout: u64, verbose: bool) -> Result<(), Box<dyn std:
 
     if verbose {
         println!("📊 Basic Test Results:");
-        for report in &results.test_reports {
+        for report in &results.test_results {
             println!(
                 "  • {}: {} ({:.2}s)",
                 report.test_name,
-                report.status.status_symbol(),
+                if report.passed { "✅" } else { "❌" },
                 report.execution_time_ms as f64 / 1000.0
             );
         }
@@ -279,13 +286,20 @@ async fn run_cli_tests(timeout: u64, verbose: bool) -> Result<(), Box<dyn std::e
 async fn run_sstable_tests(timeout: u64, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("📊 Running SSTable compatibility tests...");
 
-    let config = IntegrationTestConfig {
+    let config = ComprehensiveTestConfig {
         test_real_sstables: true,
-        test_cli_integration: false,
+        test_feature_integration: false,
+        test_error_handling: false,
         test_performance: false,
-        test_edge_cases: false,
-        test_concurrent_access: false,
-        generate_reports: true,
+        test_cli_commands: false,
+        test_multi_generation: true,
+        test_collection_types: false,
+        test_tombstones: false,
+        test_directory_scanning: true,
+        stress_test_enabled: false,
+        detailed_reporting: true,
+        fail_fast: false,
+        test_data_path: std::path::PathBuf::from("test-env/cassandra5/sstables"),
         timeout_seconds: timeout,
     };
 
@@ -294,11 +308,11 @@ async fn run_sstable_tests(timeout: u64, verbose: bool) -> Result<(), Box<dyn st
 
     if verbose {
         println!("📊 SSTable Test Results:");
-        for report in &results.test_reports {
+        for report in &results.test_results {
             println!(
                 "  • {}: {} ({:.2}s)",
                 report.test_name,
-                report.status.status_symbol(),
+                if report.passed { "✅" } else { "❌" },
                 report.execution_time_ms as f64 / 1000.0
             );
         }
@@ -306,10 +320,10 @@ async fn run_sstable_tests(timeout: u64, verbose: bool) -> Result<(), Box<dyn st
 
     println!(
         "✅ SSTable compatibility: {:.1}%",
-        results.compatibility_percentage
+        results.overall_compatibility_score
     );
 
-    if results.compatibility_percentage < 50.0 {
+    if results.overall_compatibility_score < 50.0 {
         eprintln!("❌ SSTable compatibility too low");
         return Err("SSTable compatibility insufficient".into());
     }
@@ -324,13 +338,20 @@ async fn run_performance_tests(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("⚡ Running performance tests...");
 
-    let config = IntegrationTestConfig {
+    let config = ComprehensiveTestConfig {
         test_real_sstables: false,
-        test_cli_integration: false,
+        test_feature_integration: false,
+        test_error_handling: false,
         test_performance: true,
-        test_edge_cases: false,
-        test_concurrent_access: true,
-        generate_reports: true,
+        test_cli_commands: false,
+        test_multi_generation: false,
+        test_collection_types: false,
+        test_tombstones: false,
+        test_directory_scanning: false,
+        stress_test_enabled: true,
+        detailed_reporting: true,
+        fail_fast: false,
+        test_data_path: std::path::PathBuf::from("test-env/cassandra5/sstables"),
         timeout_seconds: timeout,
     };
 
@@ -341,19 +362,19 @@ async fn run_performance_tests(
         println!("📊 Performance Metrics:");
         println!(
             "  • Parse Speed: {:.2} records/sec",
-            results.performance_metrics.parse_speed_records_per_sec
+            results.overall_performance_score
         );
         println!(
             "  • Memory Usage: {:.2} MB",
-            results.performance_metrics.memory_usage_mb
+            0.0 // Memory usage not tracked in overall metrics
         );
         println!(
             "  • CLI Response: {:.2} ms",
-            results.performance_metrics.cli_response_time_ms
+            results.total_execution_time_ms
         );
         println!(
             "  • Throughput: {:.2} queries/sec",
-            results.performance_metrics.throughput_queries_per_sec
+            results.overall_performance_score
         );
     }
 

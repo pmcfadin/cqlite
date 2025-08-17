@@ -288,6 +288,18 @@ impl SSTableInfo {
     }
 }
 
+impl Default for SSTableInfo {
+    fn default() -> Self {
+        Self {
+            format: SSTableFormat::Unknown("unknown".to_string()),
+            generation: 0,
+            size: "unknown".to_string(),
+            component: SSTableComponent::Data,
+            base_name: "unknown".to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

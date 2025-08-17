@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use crate::memory::MemoryManager;
 use crate::storage::memtable::MemTable;
-use crate::storage::sstable::SSTableManager;
 use crate::types::{TableId, Value};
 use crate::{Config, RowKey};
 

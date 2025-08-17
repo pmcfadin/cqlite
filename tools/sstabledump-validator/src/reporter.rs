@@ -116,7 +116,7 @@ impl ValidationReport {
         self.fail_on_diff && self.has_differences()
     }
 
-    pub fn format_as_text(&self) -> String {
+    pub fn _format_as_text(&self) -> String {
         let mut output = String::new();
 
         // Header
@@ -242,11 +242,16 @@ impl ValidationReport {
         output
     }
 
-    pub fn format_as_json(&self) -> Result<String> {
+    /// Public wrapper for backward compatibility
+    pub fn format_as_text(&self) -> String {
+        self._format_as_text()
+    }
+
+    pub fn _format_as_json(&self) -> Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    pub fn format_as_csv(&self) -> String {
+    pub fn _format_as_csv(&self) -> String {
         let mut output = String::new();
 
         // CSV header
@@ -264,13 +269,13 @@ impl ValidationReport {
             let cassandra_value = diff
                 .cassandra_value
                 .as_ref()
-                .map(|v| format!("{:?}", v))
+                .map(|v| format!("{v:?}"))
                 .unwrap_or_else(|| "NULL".to_string());
 
             let cqlite_value = diff
                 .cqlite_value
                 .as_ref()
-                .map(|v| format!("{:?}", v))
+                .map(|v| format!("{v:?}"))
                 .unwrap_or_else(|| "NULL".to_string());
 
             output.push_str(&format!(
@@ -286,7 +291,7 @@ impl ValidationReport {
         output
     }
 
-    pub fn format_as_junit(&self) -> String {
+    pub fn _format_as_junit(&self) -> String {
         let test_name = format!(
             "sstabledump_validation_{}",
             self.sstable_path
@@ -301,8 +306,7 @@ impl ValidationReport {
 
         if self.should_fail_ci() {
             output.push_str(&format!(
-                "  <testcase name=\"{}\" classname=\"ValidationHarness\">\n",
-                test_name
+                "  <testcase name=\"{test_name}\" classname=\"ValidationHarness\">\n"
             ));
             output.push_str("    <failure message=\"Cell-by-cell comparison failed\">\n");
             output.push_str(&format!(
@@ -317,8 +321,7 @@ impl ValidationReport {
             output.push_str("  </testcase>\n");
         } else {
             output.push_str(&format!(
-                "  <testcase name=\"{}\" classname=\"ValidationHarness\">\n",
-                test_name
+                "  <testcase name=\"{test_name}\" classname=\"ValidationHarness\">\n"
             ));
             if self.has_differences() {
                 output.push_str("    <skipped message=\"Differences found but not in zero-tolerance mode\" />\n");
@@ -373,7 +376,7 @@ impl ValidationReport {
                 )
             }
             other => {
-                format!("{}: {:?}", location, other)
+                format!("{location}: {other:?}")
             }
         }
     }

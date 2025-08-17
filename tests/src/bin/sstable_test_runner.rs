@@ -139,7 +139,7 @@ async fn run_comprehensive_tests() -> Result<()> {
 async fn run_format_verification_tests() -> Result<()> {
     println!("Creating test SSTable files for format verification...");
 
-    let validator = SSTableValidator::new().await?;
+    let _validator = SSTableValidator::new().await?;
 
     // Create test files with different configurations
     let test_configs = vec![
@@ -211,7 +211,7 @@ async fn run_performance_tests() -> Result<()> {
 async fn run_edge_case_tests() -> Result<()> {
     println!("Testing edge cases and error conditions...");
 
-    let validator = SSTableValidator::new().await?;
+    let _validator = SSTableValidator::new().await?;
 
     // Test edge cases
     let edge_cases = vec![
@@ -293,7 +293,7 @@ fn print_help(program_name: &str) {
 pub async fn create_test_data() -> Result<()> {
     println!("📝 Creating comprehensive test data...");
 
-    let validator = SSTableValidator::new().await?;
+    let _validator = SSTableValidator::new().await?;
     let benchmark = SSTableBenchmark::new().await?;
 
     // Create different types of test files

@@ -1243,6 +1243,7 @@ impl SchemaRegistry {
         cql.push_str("\n);");
         cql
     }
+
 }
 
 /// Registry statistics
@@ -1329,7 +1330,6 @@ impl SchemaValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_schema_registry_creation() {

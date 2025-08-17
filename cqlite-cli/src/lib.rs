@@ -9,6 +9,9 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 
+// CLI types module - re-exports from main
+pub mod cli_types;
+
 #[cfg(test)]
 pub mod test_infrastructure;
 
@@ -16,7 +19,7 @@ pub mod test_infrastructure;
 pub use cli::{ExportFormat, ImportFormat, OutputFormat};
 
 // Re-export CLI types for external use
-pub use commands::{AdminCommands, BenchCommands, Cli, Commands, SchemaCommands};
+pub use cli_types::{AdminCommands, BenchCommands, Cli, Commands, SchemaCommands};
 pub use config::Config;
 
 #[cfg(test)]

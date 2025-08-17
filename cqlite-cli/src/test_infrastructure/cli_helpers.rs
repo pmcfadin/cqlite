@@ -82,7 +82,7 @@ impl CliTestRunner {
     /// Test basic CLI functionality
     pub fn test_help(&self) -> TestResult<()> {
         self.run(&["--help"])?
-            .assert_success()
+            .assert_success()?
             .stdout_contains("CQLite - High-performance embedded database")?;
         Ok(())
     }
@@ -90,7 +90,7 @@ impl CliTestRunner {
     /// Test version command
     pub fn test_version(&self) -> TestResult<()> {
         self.run(&["--version"])?
-            .assert_success()
+            .assert_success()?
             .stdout_contains(env!("CARGO_PKG_VERSION"))?;
         Ok(())
     }
@@ -200,7 +200,7 @@ impl CliTestBuilder {
 
         // Set stdin data if provided
         if let Some(ref stdin) = self.stdin_data {
-            assert_cmd.write_stdin(stdin);
+            assert_cmd.write_stdin(stdin.as_str());
         }
 
         // Set timeout if provided
@@ -214,19 +214,19 @@ impl CliTestBuilder {
 
 impl CommandAssertion {
     /// Assert command succeeds
-    pub fn assert_success(self) -> TestResult<Self> {
+    pub fn assert_success(mut self) -> TestResult<Self> {
         self.cmd.assert().success();
         Ok(self)
     }
 
     /// Assert command fails
-    pub fn assert_failure(self) -> TestResult<Self> {
+    pub fn assert_failure(mut self) -> TestResult<Self> {
         self.cmd.assert().failure();
         Ok(self)
     }
 
     /// Assert stdout contains text
-    pub fn stdout_contains<S: AsRef<str>>(self, expected: S) -> TestResult<Self> {
+    pub fn stdout_contains<S: AsRef<str>>(mut self, expected: S) -> TestResult<Self> {
         self.cmd
             .assert()
             .stdout(predicate::str::contains(expected.as_ref()));
@@ -234,7 +234,7 @@ impl CommandAssertion {
     }
 
     /// Assert stderr contains text
-    pub fn stderr_contains<S: AsRef<str>>(self, expected: S) -> TestResult<Self> {
+    pub fn stderr_contains<S: AsRef<str>>(mut self, expected: S) -> TestResult<Self> {
         self.cmd
             .assert()
             .stderr(predicate::str::contains(expected.as_ref()));
@@ -242,31 +242,33 @@ impl CommandAssertion {
     }
 
     /// Assert stdout matches exactly
-    pub fn stdout_equals<S: AsRef<str>>(self, expected: S) -> TestResult<Self> {
-        self.cmd.assert().stdout(expected.as_ref());
+    pub fn stdout_equals<S: AsRef<str>>(mut self, expected: S) -> TestResult<Self> {
+        let expected_string = expected.as_ref().to_string();
+        self.cmd.assert().stdout(expected_string);
         Ok(self)
     }
 
     /// Assert stderr matches exactly
-    pub fn stderr_equals<S: AsRef<str>>(self, expected: S) -> TestResult<Self> {
-        self.cmd.assert().stderr(expected.as_ref());
+    pub fn stderr_equals<S: AsRef<str>>(mut self, expected: S) -> TestResult<Self> {
+        let expected_string = expected.as_ref().to_string();
+        self.cmd.assert().stderr(expected_string);
         Ok(self)
     }
 
     /// Assert stdout is empty
-    pub fn stdout_empty(self) -> TestResult<Self> {
+    pub fn stdout_empty(mut self) -> TestResult<Self> {
         self.cmd.assert().stdout(predicate::str::is_empty());
         Ok(self)
     }
 
     /// Assert stderr is empty
-    pub fn stderr_empty(self) -> TestResult<Self> {
+    pub fn stderr_empty(mut self) -> TestResult<Self> {
         self.cmd.assert().stderr(predicate::str::is_empty());
         Ok(self)
     }
 
     /// Assert exit code
-    pub fn exit_code(self, code: i32) -> TestResult<Self> {
+    pub fn exit_code(mut self, code: i32) -> TestResult<Self> {
         self.cmd.assert().code(code);
         Ok(self)
     }

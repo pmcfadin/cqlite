@@ -352,6 +352,9 @@ impl MemoryManager {
                 .map(|f| f.value.as_ref().map_or(0, |v| self.estimate_value_size(v)))
                 .sum(),
             Value::Frozen(boxed_value) => self.estimate_value_size(boxed_value),
+            Value::Varint(data) => data.len(),
+            Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + unscaled data
+            Value::Duration { .. } => 12, // 3 * 4 bytes
             Value::Tombstone(_) => 16, // timestamp + type + optional TTL
         }
     }
@@ -492,7 +495,7 @@ mod tests {
         // Cache hit
         let result = manager.get_row(&table_id, row_key);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().data, data);
+        assert_eq!(result.unwrap()._data, data);
     }
 
     #[test]

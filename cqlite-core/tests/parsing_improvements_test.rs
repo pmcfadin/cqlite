@@ -34,12 +34,12 @@ mod parsing_improvements_tests {
 
         // This should be detected as text, not UUID, due to improved validation
         if let Ok(text) = std::str::from_utf8(text_16_bytes) {
-            let text_value = Value::Text(text.to_string());
+            let _text_value = Value::Text(text.to_string());
             assert_eq!(text, "Hello, World!!!");
         }
 
         // Test case 3: Invalid UUID should be rejected
-        let invalid_uuid = [
+        let _invalid_uuid = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00,
         ]; // All zeros - not a valid UUID
@@ -80,7 +80,7 @@ mod parsing_improvements_tests {
         }
 
         // Test case 4: Invalid UTF-8 should fallback to blob
-        let invalid_utf8 = &[0xFF, 0xFE, 0xFD, 0xFC];
+        let _invalid_utf8 = &[0xFF, 0xFE, 0xFD, 0xFC];
         // Should not panic and should handle gracefully
     }
 
@@ -127,7 +127,7 @@ mod parsing_improvements_tests {
     #[test]
     fn test_null_and_empty_value_handling() {
         // Test case 1: Empty data should be null
-        let empty_data: &[u8] = &[];
+        let _empty_data: &[u8] = &[];
         // Should handle empty data gracefully
 
         // Test case 2: Zero-length string
@@ -158,7 +158,7 @@ mod parsing_improvements_tests {
         }
 
         // Test case 2: Mixed binary/text should be handled appropriately
-        let mixed_data = b"Hello\xFF\xFEWorld";
+        let _mixed_data = b"Hello\xFF\xFEWorld";
         // Should be detected as blob due to invalid UTF-8 sequences
     }
 
@@ -167,13 +167,13 @@ mod parsing_improvements_tests {
         // Test various data patterns that could cause false positives
 
         // Test case 1: 16-byte data that looks like UUID but isn't
-        let fake_uuid_1 = [
+        let _fake_uuid_1 = [
             b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', b'j', b'k', b'l', b'm', b'n',
             b'o', b'p',
         ]; // 16 letters - should be text, not UUID
 
         // Test case 2: 8-byte data that could be timestamp or bigint
-        let maybe_timestamp = 1234567890123456i64.to_be_bytes();
+        let _maybe_timestamp = 1234567890123456i64.to_be_bytes();
         // Should be detected based on value range
 
         // Test case 3: 4-byte data that could be int, float, or date
@@ -217,14 +217,14 @@ mod parsing_improvements_tests {
     #[test]
     fn test_edge_cases_and_error_handling() {
         // Test case 1: Truncated data
-        let truncated_uuid = &[0x6b, 0xa7, 0xb8, 0x10]; // Only 4 bytes of UUID
+        let _truncated_uuid = &[0x6b, 0xa7, 0xb8, 0x10]; // Only 4 bytes of UUID
         // Should handle gracefully without panicking
 
         // Test case 2: Oversized data
         // Test with very large data that could cause memory issues
 
         // Test case 3: Malformed length prefixes
-        let bad_length_prefix = &[0xFF, 0xFF, 0xFF, 0xFF]; // Huge length
+        let _bad_length_prefix = &[0xFF, 0xFF, 0xFF, 0xFF]; // Huge length
         // Should handle gracefully
 
         // Test case 4: Nested error conditions

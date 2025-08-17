@@ -6,7 +6,9 @@ use tracing::{error, info, warn};
 mod comparator;
 mod docker;
 mod parser;
+mod reconciliation;
 mod reporter;
+mod test_datasets;
 mod validator;
 
 use validator::{SstableDumpValidator, ValidationConfig, TestScope, SstableFormat, DataTypeCategory};
@@ -200,7 +202,8 @@ async fn main() -> Result<()> {
                     DataTypeCategory::StaticColumns,
                     DataTypeCategory::Counters,
                     DataTypeCategory::TimeSeries,
-                    DataTypeCategory::Tombstones,\n                    DataTypeCategory::ReconciliationScenarios,
+                    DataTypeCategory::Tombstones,
+                    DataTypeCategory::ReconciliationScenarios,
                     DataTypeCategory::LargeData,
                     DataTypeCategory::EdgeCases,
                 ]
@@ -212,7 +215,8 @@ async fn main() -> Result<()> {
                     DataTypeCategory::StaticColumns,
                     DataTypeCategory::Counters,
                     DataTypeCategory::TimeSeries,
-                    DataTypeCategory::Tombstones,\n                    DataTypeCategory::ReconciliationScenarios,
+                    DataTypeCategory::Tombstones,
+                    DataTypeCategory::ReconciliationScenarios,
                 ]
             };
             

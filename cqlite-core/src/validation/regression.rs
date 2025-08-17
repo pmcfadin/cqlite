@@ -34,6 +34,7 @@ pub struct RegressionBaseline {
 }
 
 /// Regression test suite manager
+#[allow(dead_code)]
 pub struct RegressionTestSuite {
     test_cases: Vec<RegressionTestCase>,
     baseline_results: HashMap<String, RegressionTestResult>,

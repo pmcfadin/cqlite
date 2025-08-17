@@ -301,6 +301,9 @@ impl MemTable {
             Some(Value::Frozen(boxed_val)) => {
                 self.estimate_value_size(&Some((**boxed_val).clone()))
             }
+            Some(Value::Varint(data)) => data.len(),
+            Some(Value::Decimal { unscaled, .. }) => 4 + unscaled.len(), // scale + data
+            Some(Value::Duration { .. }) => 12, // 3 * 4 bytes (months, days, nanos)
             Some(Value::Tombstone(_)) => 16, // timestamp + type + optional TTL
         }
     }

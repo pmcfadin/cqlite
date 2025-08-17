@@ -129,7 +129,7 @@ impl OutputAssertion {
     }
 
     /// Assert stdout contains text
-    pub fn stdout_contains<S: AsRef<str>>(self, expected: S) -> TestResult<Self> {
+    pub fn stdout_contains<S: AsRef<str>>(&self, expected: S) -> TestResult<Self> {
         let expected = expected.as_ref();
         if !self.stdout.contains(expected) {
             return Err(format!(
@@ -138,11 +138,15 @@ impl OutputAssertion {
             )
             .into());
         }
-        Ok(self)
+        Ok(Self {
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            exit_code: self.exit_code,
+        })
     }
 
     /// Assert stderr contains text
-    pub fn stderr_contains<S: AsRef<str>>(self, expected: S) -> TestResult<Self> {
+    pub fn stderr_contains<S: AsRef<str>>(&self, expected: S) -> TestResult<Self> {
         let expected = expected.as_ref();
         if !self.stderr.contains(expected) {
             return Err(format!(
@@ -151,11 +155,15 @@ impl OutputAssertion {
             )
             .into());
         }
-        Ok(self)
+        Ok(Self {
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            exit_code: self.exit_code,
+        })
     }
 
     /// Assert stdout matches exactly
-    pub fn stdout_equals<S: AsRef<str>>(self, expected: S) -> TestResult<Self> {
+    pub fn stdout_equals<S: AsRef<str>>(&self, expected: S) -> TestResult<Self> {
         let expected = expected.as_ref();
         if self.stdout.trim() != expected {
             return Err(format!(
@@ -164,7 +172,11 @@ impl OutputAssertion {
             )
             .into());
         }
-        Ok(self)
+        Ok(Self {
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            exit_code: self.exit_code,
+        })
     }
 
     /// Assert stderr is empty
@@ -244,7 +256,7 @@ impl JsonAssertion {
     }
 
     /// Assert JSON is an object
-    pub fn is_object(self) -> TestResult<Self> {
+    pub fn is_object(&self) -> TestResult<Self> {
         if !self.data.is_object() {
             return Err(format!(
                 "Expected JSON to be an object, but got: {}",
@@ -252,11 +264,13 @@ impl JsonAssertion {
             )
             .into());
         }
-        Ok(self)
+        Ok(Self {
+            data: self.data.clone(),
+        })
     }
 
     /// Assert JSON is an array
-    pub fn is_array(self) -> TestResult<Self> {
+    pub fn is_array(&self) -> TestResult<Self> {
         if !self.data.is_array() {
             return Err(format!(
                 "Expected JSON to be an array, but got: {}",
@@ -264,11 +278,13 @@ impl JsonAssertion {
             )
             .into());
         }
-        Ok(self)
+        Ok(Self {
+            data: self.data.clone(),
+        })
     }
 
     /// Assert JSON has specific field
-    pub fn has_field<S: AsRef<str>>(self, field_name: S) -> TestResult<Self> {
+    pub fn has_field<S: AsRef<str>>(&self, field_name: S) -> TestResult<Self> {
         let field_name = field_name.as_ref();
         if let Value::Object(ref obj) = self.data {
             if !obj.contains_key(field_name) {
@@ -282,7 +298,9 @@ impl JsonAssertion {
         } else {
             return Err("Cannot check field on non-object JSON".into());
         }
-        Ok(self)
+        Ok(Self {
+            data: self.data.clone(),
+        })
     }
 
     /// Assert field equals specific value
@@ -332,7 +350,7 @@ impl JsonAssertion {
 }
 
 /// Assertion helper for table output
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TableAssertion {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
@@ -377,7 +395,7 @@ impl TableAssertion {
     }
 
     /// Assert table has specific number of columns
-    pub fn column_count(self, expected_count: usize) -> TestResult<Self> {
+    pub fn column_count(&self, expected_count: usize) -> TestResult<Self> {
         if self.headers.len() != expected_count {
             return Err(format!(
                 "Expected {} columns, but got {}. Headers: {:?}",
@@ -387,11 +405,14 @@ impl TableAssertion {
             )
             .into());
         }
-        Ok(self)
+        Ok(Self {
+            headers: self.headers.clone(),
+            rows: self.rows.clone(),
+        })
     }
 
     /// Assert table has specific number of rows
-    pub fn row_count(self, expected_count: usize) -> TestResult<Self> {
+    pub fn row_count(&self, expected_count: usize) -> TestResult<Self> {
         if self.rows.len() != expected_count {
             return Err(format!(
                 "Expected {} rows, but got {}",
@@ -400,7 +421,7 @@ impl TableAssertion {
             )
             .into());
         }
-        Ok(self)
+        Ok(self.clone())
     }
 
     /// Assert table has specific header

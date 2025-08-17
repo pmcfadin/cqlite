@@ -8,11 +8,9 @@
 //! - Ordering and equality semantics
 //! - Integration with SchemaRegistry and TableSchema
 
-use cqlite_core::schema::{ClusteringColumn, Column, CqlType, KeyColumn, TableSchema};
-use cqlite_core::types::{ComparatorType, UdtField, UdtValue, Value};
-use cqlite_core::{Error, Result};
-use std::cmp::Ordering;
-use std::collections::HashMap;
+use cqlite_core::types::{Value, UdtValue, UdtField, ComparatorType};
+use cqlite_core::schema::{CqlType, TableSchema, KeyColumn, ClusteringColumn, Column};
+use std::{cmp::Ordering, collections::HashMap};
 
 #[cfg(test)]
 mod primitive_type_tests {
@@ -173,22 +171,22 @@ mod primitive_type_tests {
         let dur1 = Value::Duration {
             months: 1,
             days: 2,
-            nanoseconds: 3,
+            nanos: 3,
         };
         let dur2 = Value::Duration {
             months: 1,
             days: 2,
-            nanoseconds: 4,
+            nanos: 4,
         };
         let dur3 = Value::Duration {
             months: 1,
             days: 3,
-            nanoseconds: 2,
+            nanos: 2,
         };
         let dur4 = Value::Duration {
             months: 2,
             days: 1,
-            nanoseconds: 1,
+            nanos: 1,
         };
 
         assert_eq!(comparator.compare(&dur1, &dur2).unwrap(), Ordering::Less);
