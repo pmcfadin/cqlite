@@ -719,6 +719,7 @@ fn create_test_frozen() -> Value {
 }
 
 // Helper functions for testing
+#[cfg(feature = "experimental")]
 async fn create_test_sstable(
     path: &Path,
     data: Vec<(TableId, RowKey, Value)>,
@@ -735,6 +736,16 @@ async fn create_test_sstable(
 
     writer.finish().await?;
     Ok(())
+}
+
+#[cfg(not(feature = "experimental"))]
+async fn create_test_sstable(
+    _path: &Path,
+    _data: Vec<(TableId, RowKey, Value)>,
+    _config: &Config,
+    _platform: Arc<Platform>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("SSTable writer requires experimental feature".into())
 }
 
 fn serialize_value_for_test(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

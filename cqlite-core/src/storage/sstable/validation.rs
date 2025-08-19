@@ -1,14 +1,21 @@
 //! SSTable Cassandra compatibility validation framework
 
+#[cfg(feature = "experimental")]
 use std::fs::File;
+#[cfg(feature = "experimental")]
 use std::io::Read;
+#[cfg(feature = "experimental")]
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(feature = "experimental")]
 use crate::storage::sstable::writer::SSTableWriter;
+#[cfg(feature = "experimental")]
 use crate::types::TableId;
 use crate::{Config, platform::Platform};
-use crate::{Result, RowKey, Value, error::Error};
+#[cfg(feature = "experimental")]
+use crate::{RowKey, Value};
+use crate::{Result, error::Error};
 use std::sync::Arc;
 
 /// Validation framework for Cassandra compatibility
@@ -32,6 +39,7 @@ impl CassandraValidationFramework {
     }
 
     /// Run comprehensive validation suite
+    #[cfg(feature = "experimental")]
     pub async fn run_full_validation(&self) -> Result<ValidationReport> {
         let mut report = ValidationReport::new();
 
@@ -61,8 +69,14 @@ impl CassandraValidationFramework {
 
         Ok(report)
     }
+    
+    #[cfg(not(feature = "experimental"))]
+    pub async fn run_full_validation(&self) -> Result<ValidationReport> {
+        Err(Error::unsupported_format("Validation requires experimental feature"))
+    }
 
     /// Validate header format against Cassandra specification
+    #[cfg(feature = "experimental")]
     async fn validate_header_format(&self) -> Result<TestResult> {
         let test_path = format!("{}/header_test.sst", self.test_dir);
 
@@ -116,6 +130,7 @@ impl CassandraValidationFramework {
     }
 
     /// Validate magic bytes are correct
+    #[cfg(feature = "experimental")]
     async fn validate_magic_bytes(&self) -> Result<TestResult> {
         let test_path = format!("{}/magic_test.sst", self.test_dir);
 
@@ -155,6 +170,7 @@ impl CassandraValidationFramework {
     }
 
     /// Validate big-endian encoding
+    #[cfg(feature = "experimental")]
     async fn validate_endianness(&self) -> Result<TestResult> {
         let test_path = format!("{}/endian_test.sst", self.test_dir);
 
@@ -202,6 +218,7 @@ impl CassandraValidationFramework {
     }
 
     /// Validate compression compatibility
+    #[cfg(feature = "experimental")]
     async fn validate_compression_compatibility(&self) -> Result<TestResult> {
         // Test each compression algorithm
         let algorithms = ["lz4", "snappy", "deflate"];
@@ -226,6 +243,7 @@ impl CassandraValidationFramework {
     }
 
     /// Test specific compression algorithm
+    #[cfg(feature = "experimental")]
     async fn test_compression_algorithm(&self, algorithm: &str) -> Result<TestResult> {
         // Update config for specific algorithm
         let mut test_config = self.config.clone();
@@ -240,7 +258,7 @@ impl CassandraValidationFramework {
         let test_path = format!("{}/compression_{}_test.sst", self.test_dir, algorithm);
 
         let mut writer =
-            SSTableWriter::create(Path::new(&test_path), &test_config, self.platform.clone())
+            writer::SSTableWriter::create(Path::new(&test_path), &test_config, self.platform.clone())
                 .await?;
 
         // Add test data that should compress well
@@ -272,8 +290,17 @@ impl CassandraValidationFramework {
             )))
         }
     }
+    
+    #[cfg(not(feature = "experimental"))]
+    async fn test_compression_algorithm(&self, algorithm: &str) -> Result<TestResult> {
+        Ok(TestResult::warning(
+            "Compression testing requires experimental feature",
+            &format!("Cannot test {} compression", algorithm),
+        ))
+    }
 
     /// Validate round-trip compatibility with Cassandra
+    #[cfg(feature = "experimental")]
     async fn validate_round_trip(&self) -> Result<TestResult> {
         // This would require having Cassandra installed and accessible
         // For now, we'll do a basic round-trip test within CQLite
@@ -326,6 +353,7 @@ impl CassandraValidationFramework {
     }
 
     /// Validate bloom filter compatibility
+    #[cfg(feature = "experimental")]
     async fn validate_bloom_filter_compatibility(&self) -> Result<TestResult> {
         let test_path = format!("{}/bloom_test.sst", self.test_dir);
 
@@ -334,7 +362,7 @@ impl CassandraValidationFramework {
         test_config.storage.bloom_filter_fp_rate = 0.01;
 
         let mut writer =
-            SSTableWriter::create(Path::new(&test_path), &test_config, self.platform.clone())
+            writer::SSTableWriter::create(Path::new(&test_path), &test_config, self.platform.clone())
                 .await?;
 
         // Add test entries

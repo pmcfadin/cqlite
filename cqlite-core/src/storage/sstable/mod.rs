@@ -24,6 +24,7 @@ pub mod streaming_reader;
 #[cfg(feature = "tombstones")]
 pub mod tombstone_merger;
 pub mod validation;
+#[cfg(feature = "experimental")]
 pub mod writer;
 
 // Test modules
@@ -31,7 +32,7 @@ pub mod writer;
 mod key_digest_integration_test;
 #[cfg(test)]
 mod key_digest_test;
-#[cfg(test)]
+#[cfg(all(test, feature = "experimental"))]
 mod oa_format_compliance_test;
 #[cfg(test)]
 mod row_cell_state_machine_test;
@@ -146,6 +147,7 @@ impl SSTableManager {
     }
 
     /// Create a new SSTable from MemTable data
+    #[cfg(feature = "experimental")]
     pub async fn create_from_memtable(
         &self,
         data: Vec<(TableId, RowKey, Value)>,
@@ -181,6 +183,14 @@ impl SSTableManager {
         }
 
         Ok(sstable_id)
+    }
+    
+    #[cfg(not(feature = "experimental"))]
+    pub async fn create_from_memtable(
+        &self,
+        _data: Vec<(TableId, RowKey, Value)>,
+    ) -> Result<SSTableId> {
+        Err(crate::error::Error::unsupported_format("SSTable writing requires experimental feature"))
     }
 
     /// Get a value by key from all SSTables with proper tombstone merging
@@ -366,6 +376,7 @@ impl SSTableManager {
     }
 
     /// Merge multiple SSTables into a new one
+    #[cfg(feature = "experimental")]
     pub async fn merge_sstables(
         &self,
         source_ids: Vec<SSTableId>,
@@ -429,6 +440,15 @@ impl SSTableManager {
         }
 
         Ok(())
+    }
+    
+    #[cfg(not(feature = "experimental"))]
+    pub async fn merge_sstables(
+        &self,
+        _source_ids: Vec<SSTableId>,
+        _target_id: SSTableId,
+    ) -> Result<()> {
+        Err(crate::error::Error::unsupported_format("SSTable merging requires experimental feature"))
     }
 }
 

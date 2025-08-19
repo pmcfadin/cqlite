@@ -10,9 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cqlite_core::platform::Platform;
 use cqlite_core::{
     Config, Result, RowKey, Value,
-    storage::sstable::{reader::SSTableReader, writer::SSTableWriter},
+    storage::sstable::reader::SSTableReader,
     types::TableId,
 };
+#[cfg(feature = "experimental")]
+use cqlite_core::storage::sstable::writer::SSTableWriter;
 
 use tempfile::TempDir;
 
@@ -155,6 +157,7 @@ impl ComplexDataTestSuite {
     }
 
     /// Test basic data types
+    #[cfg(feature = "experimental")]
     async fn test_basic_data_types(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("basic_types.sst");
         let mut writer =
@@ -237,6 +240,7 @@ impl ComplexDataTestSuite {
     }
 
     /// Test Unicode and special characters
+    #[cfg(feature = "experimental")]
     async fn test_unicode_data(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("unicode_test.sst");
         let mut writer =
@@ -296,6 +300,7 @@ impl ComplexDataTestSuite {
     }
 
     /// Test binary data with various patterns
+    #[cfg(feature = "experimental")]
     async fn test_binary_data(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("binary_test.sst");
         let mut writer =
@@ -366,6 +371,7 @@ impl ComplexDataTestSuite {
     }
 
     /// Test large values
+    #[cfg(feature = "experimental")]
     async fn test_large_values(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("large_values_test.sst");
         let mut writer =
@@ -434,6 +440,7 @@ impl ComplexDataTestSuite {
     }
 
     /// Test edge cases
+    #[cfg(feature = "experimental")]
     async fn test_edge_cases(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("edge_cases_test.sst");
         let mut writer =
@@ -505,6 +512,7 @@ impl ComplexDataTestSuite {
     }
 
     /// Test timestamp precision
+    #[cfg(feature = "experimental")]
     async fn test_timestamp_precision(&self) -> Result<()> {
         let test_path = self.test_dir.path().join("timestamp_test.sst");
         let mut writer =
@@ -636,18 +644,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[cfg(feature = "experimental")]
     async fn test_suite_creation() {
         let suite = ComplexDataTestSuite::new().await.unwrap();
         assert!(suite.test_dir_path().exists());
     }
 
     #[tokio::test]
+    #[cfg(feature = "experimental")]
     async fn test_basic_data_types() {
         let suite = ComplexDataTestSuite::new().await.unwrap();
         suite.test_basic_data_types().await.unwrap();
     }
 
     #[tokio::test]
+    #[cfg(feature = "experimental")]
     async fn test_unicode_data() {
         let suite = ComplexDataTestSuite::new().await.unwrap();
         suite.test_unicode_data().await.unwrap();

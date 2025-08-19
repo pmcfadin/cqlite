@@ -3,6 +3,7 @@
 //! This binary creates real Cassandra-compatible SSTable files with complex types
 //! for testing CQLite's parsing and query capabilities.
 
+#[cfg(feature = "experimental")]
 use cqlite_core::{
     Config, Value,
     parser::header::{CompressionInfo, SSTableHeader, SSTableStats},
@@ -10,10 +11,14 @@ use cqlite_core::{
     storage::sstable::writer::SSTableWriter,
     types::{RowKey, TableId, UdtField, UdtValue},
 };
+#[cfg(feature = "experimental")]
 use std::path::Path;
+#[cfg(feature = "experimental")]
 use std::sync::Arc;
+#[cfg(feature = "experimental")]
 use tokio::fs;
 
+#[cfg(feature = "experimental")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🏗️  SSTable Test Data Generator");
@@ -35,7 +40,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(feature = "experimental"))]
+fn main() {
+    println!("❌ SSTable writer requires experimental feature");
+    println!("   Compile with --features experimental to use this tool");
+}
+
 /// Generate simple SSTable with basic types
+#[cfg(feature = "experimental")]
+#[cfg(feature = "experimental")]
 async fn generate_simple_sstable(output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📝 Generating simple SSTable...");
 
@@ -85,6 +98,7 @@ async fn generate_simple_sstable(output_dir: &str) -> Result<(), Box<dyn std::er
 }
 
 /// Generate SSTable with complex types (Lists, Sets, Maps, Tuples, UDTs)
+#[cfg(feature = "experimental")]
 async fn generate_complex_types_sstable(
     output_dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -126,6 +140,7 @@ async fn generate_complex_types_sstable(
 }
 
 /// Generate large dataset for performance testing
+#[cfg(feature = "experimental")]
 async fn generate_large_dataset_sstable(
     output_dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -161,6 +176,7 @@ async fn generate_large_dataset_sstable(
 }
 
 /// Generate Cassandra-compatible SSTable with proper headers
+#[cfg(feature = "experimental")]
 async fn generate_cassandra_compatible_sstable(
     output_dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {

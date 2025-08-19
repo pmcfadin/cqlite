@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     Config, Result,
+    error::Error,
     parser::header::{CassandraVersion, SSTableHeader},
     platform::Platform,
     schema::{ClusteringColumn, UdtRegistry},
@@ -561,17 +562,33 @@ impl SchemaDiscoveryEngine {
     }
 
     /// Export schema as JSON
+    #[cfg(feature = "experimental")]
     pub async fn export_json(&self, schema: &SchemaInfo) -> Result<String> {
         self.exporter.export_json(schema).await
     }
+    
+    #[cfg(not(feature = "experimental"))]
+    pub async fn export_json(&self, _schema: &SchemaInfo) -> Result<String> {
+        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
+    }
 
     /// Export schema as JSON with custom configuration
+    #[cfg(feature = "experimental")]
     pub async fn export_json_with_config(
         &self,
         schema: &SchemaInfo,
         config: &crate::schema::json_exporter::JsonExportConfig,
     ) -> Result<String> {
         self.exporter.export_json_with_config(schema, config).await
+    }
+    
+    #[cfg(not(feature = "experimental"))]
+    pub async fn export_json_with_config<T>(
+        &self,
+        _schema: &SchemaInfo,
+        _config: &T,
+    ) -> Result<String> {
+        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
     }
 
     /// Generate schema comparison report
@@ -717,6 +734,7 @@ impl SchemaExporter {
     }
 
     /// Export schema as JSON
+    #[cfg(feature = "experimental")]
     async fn export_json(&self, schema: &SchemaInfo) -> Result<String> {
         self.export_json_with_config(
             schema,
@@ -726,6 +744,7 @@ impl SchemaExporter {
     }
 
     /// Export schema as JSON with custom configuration
+    #[cfg(feature = "experimental")]
     async fn export_json_with_config(
         &self,
         schema: &SchemaInfo,
@@ -734,9 +753,24 @@ impl SchemaExporter {
         let exporter = crate::schema::json_exporter::JsonExporter::with_config(config.clone());
         exporter.export_schema_info(schema)
     }
+    
+    #[cfg(not(feature = "experimental"))]
+    async fn export_json(&self, _schema: &SchemaInfo) -> Result<String> {
+        Err(Error::unsupported_format("JSON export requires experimental feature"))
+    }
+    
+    #[cfg(not(feature = "experimental"))]
+    async fn export_json_with_config<T>(
+        &self,
+        _schema: &SchemaInfo,
+        _config: &T,  // Generic placeholder for when experimental feature is disabled
+    ) -> Result<String> {
+        Err(Error::unsupported_format("JSON export requires experimental feature"))
+    }
 
     /// Export schema as compact JSON (minimal format)
     #[allow(dead_code)]
+    #[cfg(feature = "experimental")]
     async fn export_json_compact(&self, schema: &SchemaInfo) -> Result<String> {
         let config = crate::schema::json_exporter::JsonExportConfig {
             format_variant: crate::schema::json_exporter::JsonFormat::Compact,
@@ -751,6 +785,7 @@ impl SchemaExporter {
 
     /// Export schema for API documentation (OpenAPI-compatible format)
     #[allow(dead_code)]
+    #[cfg(feature = "experimental")]
     async fn export_json_openapi(&self, schema: &SchemaInfo) -> Result<String> {
         let config = crate::schema::json_exporter::JsonExportConfig {
             format_variant: crate::schema::json_exporter::JsonFormat::OpenApi,
@@ -764,6 +799,7 @@ impl SchemaExporter {
 
     /// Export schema for data pipeline tools
     #[allow(dead_code)]
+    #[cfg(feature = "experimental")]
     async fn export_json_pipeline(&self, schema: &SchemaInfo) -> Result<String> {
         let config = crate::schema::json_exporter::JsonExportConfig {
             format_variant: crate::schema::json_exporter::JsonFormat::DataPipeline,

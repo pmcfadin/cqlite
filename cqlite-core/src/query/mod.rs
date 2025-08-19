@@ -21,6 +21,7 @@ pub mod result;
 pub mod select_ast;
 pub mod select_demo;
 pub mod select_executor;
+#[cfg(feature = "state_machine")]
 pub mod select_integration_tests;
 pub mod select_optimizer;
 pub mod select_parser;
