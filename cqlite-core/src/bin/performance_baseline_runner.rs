@@ -2,13 +2,19 @@
 //!
 //! Establishes and validates performance baselines for Issue #15
 
+#[cfg(feature = "benchmarks")]
 use cqlite_core::Value;
+#[cfg(feature = "benchmarks")]
 use cqlite_core::parser::types::serialize_cql_value;
+#[cfg(feature = "benchmarks")]
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
+#[cfg(feature = "benchmarks")]
 use cqlite_core::performance_monitor::PerformanceMonitor;
+#[cfg(feature = "benchmarks")]
 use std::time::Instant;
 
 /// Performance baseline validation results
+#[cfg(feature = "benchmarks")]
 #[derive(Debug)]
 pub struct BaselineValidationResults {
     pub tests_run: usize,
@@ -20,11 +26,13 @@ pub struct BaselineValidationResults {
 }
 
 /// Main performance baseline runner
+#[cfg(feature = "benchmarks")]
 pub struct PerformanceBaselineRunner {
     results: Vec<BaselineResult>,
     monitor: PerformanceMonitor,
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Clone)]
 pub struct BaselineResult {
     pub test_name: String,
@@ -35,12 +43,14 @@ pub struct BaselineResult {
     pub performance_ratio: f64, // measured/target
 }
 
+#[cfg(feature = "benchmarks")]
 impl Default for PerformanceBaselineRunner {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "benchmarks")]
 impl PerformanceBaselineRunner {
     #[must_use]
     pub fn new() -> Self {
@@ -300,6 +310,7 @@ impl PerformanceBaselineRunner {
 }
 
 // Helper functions
+#[cfg(feature = "benchmarks")]
 fn generate_mixed_vint_values(count: usize) -> Vec<i64> {
     (0..count)
         .map(|i| match i % 4 {
@@ -311,10 +322,12 @@ fn generate_mixed_vint_values(count: usize) -> Vec<i64> {
         .collect()
 }
 
+#[cfg(feature = "benchmarks")]
 fn create_test_list(size: usize) -> Value {
     Value::List((0..size).map(|i| Value::Integer(i as i32)).collect())
 }
 
+#[cfg(feature = "benchmarks")]
 fn create_test_map(size: usize) -> Value {
     Value::Map(
         (0..size)
@@ -323,6 +336,7 @@ fn create_test_map(size: usize) -> Value {
     )
 }
 
+#[cfg(feature = "benchmarks")]
 fn create_test_set(size: usize) -> Value {
     Value::Set(
         (0..size)
@@ -331,6 +345,7 @@ fn create_test_set(size: usize) -> Value {
     )
 }
 
+#[cfg(feature = "benchmarks")]
 fn estimate_memory_usage_mb() -> f64 {
     // Simplified memory usage estimation
     // In production, this would use actual memory profiling tools
@@ -338,6 +353,7 @@ fn estimate_memory_usage_mb() -> f64 {
     f64::from(pid) / 1000.0 + f64::from(pid % 100) // Simulate deterministic "random" based on PID
 }
 
+#[cfg(feature = "benchmarks")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎯 CQLite Performance Baseline Validation");
     println!("Issue #15: Establish performance baselines and monitoring");
@@ -403,6 +419,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📝 Baseline validation completed for Issue #15");
 
     Ok(())
+}
+
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Run with: cargo run --features benchmarks --bin performance_baseline_runner");
+    std::process::exit(1);
 }
 
 // Add rand dependency for realistic testing

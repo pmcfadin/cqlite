@@ -9,6 +9,16 @@ use super::*;
 use crate::types::Value;
 // HashMap import removed - not needed in this test module
 
+/// Helper function to assert that input buffer is fully consumed
+fn assert_fully_consumed(remaining: &[u8]) {
+    assert!(remaining.is_empty(), "Expected input to be fully consumed, but {} bytes remain: {:?}", remaining.len(), remaining);
+}
+
+/// Helper function for approximate floating point equality with default epsilon
+fn approx_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() < f64::EPSILON
+}
+
 /// Test comprehensive list parsing with various element types
 #[cfg(test)]
 mod list_tests {
@@ -68,7 +78,7 @@ mod list_tests {
         // Element type
         data.push(CqlTypeId::Int as u8);
 
-        // Elements with length prefixes
+        // Elements (all elements need length prefixes for null support)
         for &i in &test_ints {
             let int_bytes = i.to_be_bytes();
             data.extend_from_slice(&encode_vint(int_bytes.len() as i64));
@@ -460,30 +470,34 @@ mod tuple_tests {
         // Tuple: (42, "hello", true, 3.14)
         let mut data = Vec::new();
 
-        // Count
+        // Field count
         data.extend_from_slice(&encode_vint(4));
 
-        // Element 1: Integer 42
-        data.push(CqlTypeId::Int as u8);
+        // Field type definitions (all field types first)
+        data.push(CqlTypeId::Int as u8);       // Field 0: Integer
+        data.push(CqlTypeId::Varchar as u8);   // Field 1: String
+        data.push(CqlTypeId::Boolean as u8);   // Field 2: Boolean
+        data.push(CqlTypeId::Double as u8);    // Field 3: Double
+
+        // Field values with 32-bit big-endian length prefixes
+        
+        // Field 0: Integer 42
         let int_bytes = 42i32.to_be_bytes();
-        data.extend_from_slice(&encode_vint(int_bytes.len() as i64));
+        data.extend_from_slice(&(int_bytes.len() as i32).to_be_bytes());
         data.extend_from_slice(&int_bytes);
 
-        // Element 2: String "hello"
-        data.push(CqlTypeId::Varchar as u8);
+        // Field 1: String "hello"
         let str_bytes = "hello".as_bytes();
-        data.extend_from_slice(&encode_vint(str_bytes.len() as i64));
+        data.extend_from_slice(&(str_bytes.len() as i32).to_be_bytes());
         data.extend_from_slice(str_bytes);
 
-        // Element 3: Boolean true
-        data.push(CqlTypeId::Boolean as u8);
-        data.extend_from_slice(&encode_vint(1));
+        // Field 2: Boolean true
+        data.extend_from_slice(&1i32.to_be_bytes()); // length = 1
         data.push(1u8);
 
-        // Element 4: Double 3.14
-        data.push(CqlTypeId::Double as u8);
+        // Field 3: Double 3.14
         let double_bytes = 3.14f64.to_be_bytes();
-        data.extend_from_slice(&encode_vint(double_bytes.len() as i64));
+        data.extend_from_slice(&(double_bytes.len() as i32).to_be_bytes());
         data.extend_from_slice(&double_bytes);
 
         let (remaining, value) = parse_tuple(&data).unwrap();
@@ -496,7 +510,7 @@ mod tuple_tests {
             assert!(matches!(parsed_tuple[0], Value::Integer(42)));
             assert!(matches!(parsed_tuple[1], Value::Text(ref s) if s == "hello"));
             assert!(matches!(parsed_tuple[2], Value::Boolean(true)));
-            assert!(matches!(parsed_tuple[3], Value::Float(f) if (f - 3.14).abs() < f64::EPSILON));
+            assert!(matches!(parsed_tuple[3], Value::Float(f) if approx_eq(f, 3.14)));
         } else {
             panic!("Expected tuple value");
         }
@@ -631,7 +645,7 @@ mod edge_case_tests {
         data.extend_from_slice(&inner_list_2);
 
         let (remaining, value) = parse_list(&data).unwrap();
-        assert!(remaining.is_empty());
+        assert_fully_consumed(remaining);
 
         if let Value::List(outer_list) = value {
             assert_eq!(outer_list.len(), 2);
@@ -639,10 +653,12 @@ mod edge_case_tests {
             // Check first inner list
             if let Value::List(inner1) = &outer_list[0] {
                 assert_eq!(inner1.len(), 2);
+                println!("Inner list 1 element 0: {:?}", inner1[0]);
+                println!("Inner list 1 element 1: {:?}", inner1[1]);
                 assert_eq!(inner1[0], Value::Integer(1));
                 assert_eq!(inner1[1], Value::Integer(2));
             } else {
-                panic!("Expected inner list at index 0");
+                panic!("Expected inner list at index 0, got: {:?}", &outer_list[0]);
             }
 
             // Check second inner list

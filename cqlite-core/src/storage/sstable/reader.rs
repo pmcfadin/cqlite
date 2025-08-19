@@ -32,8 +32,10 @@ use super::{
     row_cell_state_machine::{ParsedRow, RowCellStateMachine},
     statistics_reader::StatisticsReader,
     summary_reader::SummaryReader,
-    tombstone_merger::{GenerationValue, TombstoneMerger},
 };
+
+#[cfg(feature = "tombstones")]
+use super::tombstone_merger::{GenerationValue, TombstoneMerger};
 
 /// SSTable reader health and performance metrics
 #[derive(Debug, Clone)]
@@ -210,6 +212,7 @@ pub struct SSTableReader {
     /// Statistics
     stats: SSTableReaderStats,
     /// Tombstone merger for deletion handling
+    #[cfg(feature = "tombstones")]
     tombstone_merger: TombstoneMerger,
     /// SSTable generation number (for multi-generation merging)
     pub generation: u64,
@@ -337,6 +340,7 @@ impl SSTableReader {
             config: reader_config,
             platform,
             stats,
+            #[cfg(feature = "tombstones")]
             tombstone_merger: TombstoneMerger::new(),
             generation,
             index_reader,
@@ -1176,6 +1180,7 @@ impl SSTableReader {
 
     /// Enhanced tombstone filtering using TombstoneMerger
     /// Properly handles all types of deletions and TTL expiration
+    #[cfg(feature = "tombstones")]
     fn filter_tombstone(&self, value: &Value) -> bool {
         // Use the fast tombstone check for performance
         let write_time = self.extract_write_time_from_value(value);
@@ -1204,8 +1209,16 @@ impl SSTableReader {
         true // Keep valid, non-deleted values
     }
 
+    /// Simple tombstone filtering (fallback when tombstones feature is disabled)
+    #[cfg(not(feature = "tombstones"))]
+    fn filter_tombstone(&self, _value: &Value) -> bool {
+        // Without tombstone feature, assume all values are valid
+        true
+    }
+
     /// Enhanced multi-generation tombstone filtering for compaction
     /// Merges values from multiple SSTable generations correctly with comprehensive conflict resolution
+    #[cfg(feature = "tombstones")]
     pub async fn filter_with_multi_generation_merge(
         &self,
         table_id: &TableId,
@@ -1260,6 +1273,7 @@ impl SSTableReader {
     }
 
     /// Enhanced filtering logic for post-merge values including collection validation
+    #[cfg(feature = "tombstones")]
     fn should_include_value_after_merge(
         &self,
         value: &Value,
@@ -1295,6 +1309,7 @@ impl SSTableReader {
     }
 
     /// Extract TTL from value metadata (placeholder implementation)
+    #[cfg(feature = "tombstones")]
     fn extract_ttl_from_value(&self, value: &Value) -> Option<i64> {
         // In a full implementation, this would extract TTL from SSTable metadata
         // For now, only tombstones carry TTL information
@@ -1305,6 +1320,7 @@ impl SSTableReader {
     }
 
     /// Extract write time from value (enhanced implementation)
+    #[cfg(feature = "tombstones")]
     fn extract_write_time_from_value(&self, value: &Value) -> i64 {
         match value {
             Value::Tombstone(info) => info.deletion_time,

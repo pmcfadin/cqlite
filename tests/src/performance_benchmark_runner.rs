@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance Benchmark Runner
 //!
 //! This module provides a comprehensive runner for all performance validation,

@@ -12,6 +12,7 @@ pub mod cli_helpers;
 pub mod container;
 pub mod fixtures;
 pub mod integration;
+#[cfg(feature = "benchmarks")]
 pub mod performance;
 
 // Re-export commonly used types
@@ -20,6 +21,7 @@ pub use cli_helpers::{CliTestBuilder, CliTestRunner, CommandAssertion};
 pub use container::{TestContainer, TestDatabase, TestEnvironment};
 pub use fixtures::{SSTableFixture, SchemaFixture, TestDataBuilder};
 pub use integration::{E2ETestRunner, IntegrationTestSuite};
+#[cfg(feature = "benchmarks")]
 pub use performance::{BenchmarkSuite, PerformanceTestRunner};
 
 /// Common test result type

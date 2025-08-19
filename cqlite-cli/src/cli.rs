@@ -90,6 +90,7 @@ impl std::str::FromStr for OutputFormat {
 
 /// Supported Cassandra versions for compatibility
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum CassandraVersion {
     V311,
     V400,
@@ -97,6 +98,7 @@ pub enum CassandraVersion {
     Unknown(String),
 }
 
+#[allow(dead_code)]
 impl CassandraVersion {
     pub fn from_string(version: &str) -> Self {
         match version {
@@ -125,6 +127,7 @@ impl CassandraVersion {
 }
 
 /// SSTable format version detection
+#[allow(dead_code)]
 pub fn detect_sstable_version(sstable_path: &PathBuf) -> Result<String> {
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
@@ -175,6 +178,7 @@ pub fn detect_sstable_version(sstable_path: &PathBuf) -> Result<String> {
 }
 
 /// Validate Cassandra version string
+#[allow(dead_code)]
 pub fn validate_cassandra_version(version: &str) -> Result<CassandraVersion> {
     let cassandra_version = CassandraVersion::from_string(version);
 
@@ -189,6 +193,7 @@ pub fn validate_cassandra_version(version: &str) -> Result<CassandraVersion> {
 }
 
 /// Create enhanced error message with version context
+#[allow(dead_code)]
 pub fn create_version_error(
     base_error: &str,
     detected_version: Option<&str>,

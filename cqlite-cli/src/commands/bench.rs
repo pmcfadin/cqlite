@@ -1,21 +1,20 @@
-use crate::BenchCommands;
+use crate::cli_types::BenchCommands;
 use anyhow::Result;
 use cqlite_core::Database;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
-use tokio::task::JoinSet;
+use std::sync::Arc;
 use chrono;
 
 pub async fn handle_bench_command(database: &Database, command: BenchCommands) -> Result<()> {
     match command {
-        BenchCommands::Read { ops, threads } => run_read_benchmark(database, ops, threads).await,
-        BenchCommands::Write { ops, threads } => run_write_benchmark(database, ops, threads).await,
+        BenchCommands::Read { operations, concurrency, table: _ } => run_read_benchmark(database, operations as u64, concurrency as u32).await,
+        BenchCommands::Write { operations, concurrency, table: _ } => run_write_benchmark(database, operations as u64, concurrency as u32).await,
         BenchCommands::Mixed {
-            read_pct,
-            ops,
-            threads,
-        } => run_mixed_benchmark(database, read_pct, ops, threads).await,
+            operations,
+            read_ratio,
+            concurrency,
+        } => run_mixed_benchmark(database, (read_ratio * 100.0) as u8, operations as u64, concurrency as u32).await,
     }
 }
 
@@ -82,77 +81,6 @@ async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Resu
         // Multi-threaded benchmark - simplified for now
         println!("⚠️  Multi-threaded benchmarks temporarily simplified");
         return run_simple_read_benchmark(database, ops, 1).await;
-        use tokio::task::JoinSet;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::sync::Mutex;
-        
-        let successful_counter = Arc::new(AtomicU64::new(0));
-        let failed_counter = Arc::new(AtomicU64::new(0));
-        let latencies = Arc::new(Mutex::new(Vec::<Duration>::new()));
-        let pb = Arc::new(Mutex::new(pb));
-        
-        let ops_per_thread = ops / threads as u64;
-        let mut tasks = JoinSet::new();
-        
-        for thread_id in 0..threads {
-            let database = database.clone();
-            let successful_counter = successful_counter.clone();
-            let failed_counter = failed_counter.clone();
-            let latencies = latencies.clone();
-            let pb = pb.clone();
-            
-            tasks.spawn(async move {
-                for i in 0..ops_per_thread {
-                    let op_start = Instant::now();
-                    
-                    let query = match (thread_id as u64 + i) % 4 {
-                        0 => "SELECT * FROM benchmark_table LIMIT 10".to_string(),
-                        1 => format!("SELECT * FROM benchmark_table WHERE id = {}", ((thread_id as u64 + i) % 1000) + 1),
-                        2 => "SELECT COUNT(*) FROM benchmark_table".to_string(),
-                        _ => "SELECT id, name FROM benchmark_table ORDER BY id LIMIT 5".to_string(),
-                    };
-                    
-                    match database.execute(&query).await {
-                        Ok(_) => {
-                            successful_counter.fetch_add(1, Ordering::Relaxed);
-                            let latency = op_start.elapsed();
-                            
-                            if let Ok(mut lat_vec) = latencies.lock() {
-                                lat_vec.push(latency);
-                            }
-                        }
-                        Err(_) => {
-                            failed_counter.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    
-                    if let Ok(pb) = pb.lock() {
-                        pb.inc(1);
-                        if i % 50 == 0 {
-                            let success = successful_counter.load(Ordering::Relaxed);
-                            let failed = failed_counter.load(Ordering::Relaxed);
-                            pb.set_message(format!("Thread {} - success: {}, failed: {}", thread_id, success, failed));
-                        }
-                    }
-                }
-            });
-        }
-        
-        // Wait for all tasks to complete
-        while let Some(_) = tasks.join_next().await {}
-        
-        successful_ops = successful_counter.load(Ordering::Relaxed);
-        failed_ops = failed_counter.load(Ordering::Relaxed);
-        
-        // Calculate latency statistics
-        if let Ok(lat_vec) = latencies.lock() {
-            if !lat_vec.is_empty() {
-                total_latency = lat_vec.iter().sum();
-                min_latency = *lat_vec.iter().min().unwrap_or(&Duration::ZERO);
-                max_latency = *lat_vec.iter().max().unwrap_or(&Duration::ZERO);
-            }
-        }
     }
 
     // pb.finish_with_message("Read benchmark completed");
@@ -184,7 +112,7 @@ async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Resu
 }
 
 /// Simple read benchmark using system queries when benchmark table is not available
-async fn run_simple_read_benchmark(database: &Database, ops: u64, threads: u32) -> Result<()> {
+async fn run_simple_read_benchmark(database: &Database, ops: u64, _threads: u32) -> Result<()> {
     let pb = create_progress_bar(ops, "Simple reads");
     let start = Instant::now();
     let mut successful_ops = 0u64;
@@ -290,80 +218,6 @@ async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Res
         // Multi-threaded benchmark - simplified for now
         println!("⚠️  Multi-threaded benchmarks temporarily simplified");
         return run_simple_read_benchmark(database, ops, 1).await;
-        use tokio::task::JoinSet;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::sync::Mutex;
-        
-        let successful_counter = Arc::new(AtomicU64::new(0));
-        let failed_counter = Arc::new(AtomicU64::new(0));
-        let latencies = Arc::new(Mutex::new(Vec::<Duration>::new()));
-        let pb = Arc::new(Mutex::new(pb));
-        
-        let ops_per_thread = ops / threads as u64;
-        let mut tasks = JoinSet::new();
-        
-        for thread_id in 0..threads {
-            let database = database.clone();
-            let successful_counter = successful_counter.clone();
-            let failed_counter = failed_counter.clone();
-            let latencies = latencies.clone();
-            let pb = pb.clone();
-            
-            tasks.spawn(async move {
-                for i in 0..ops_per_thread {
-                    let op_start = Instant::now();
-                    let thread_offset = thread_id as u64 * 1000000;
-                    
-                    let query = format!(
-                        "INSERT INTO benchmark_table (id, name, value, created_at) VALUES ({}, 'thread_{}_user_{}', {}, '{}')",
-                        thread_offset + 2000000 + i, // Unique IDs per thread
-                        thread_id,
-                        i,
-                        (thread_id as u64 + i) * 10,
-                        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
-                    );
-                    
-                    match database.execute(&query).await {
-                        Ok(_) => {
-                            successful_counter.fetch_add(1, Ordering::Relaxed);
-                            let latency = op_start.elapsed();
-                            
-                            if let Ok(mut lat_vec) = latencies.lock() {
-                                lat_vec.push(latency);
-                            }
-                        }
-                        Err(_) => {
-                            failed_counter.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    
-                    if let Ok(pb) = pb.lock() {
-                        pb.inc(1);
-                        if i % 25 == 0 {
-                            let success = successful_counter.load(Ordering::Relaxed);
-                            let failed = failed_counter.load(Ordering::Relaxed);
-                            pb.set_message(format!("Thread {} - success: {}, failed: {}", thread_id, success, failed));
-                        }
-                    }
-                }
-            });
-        }
-        
-        // Wait for all tasks to complete
-        while let Some(_) = tasks.join_next().await {}
-        
-        successful_ops = successful_counter.load(Ordering::Relaxed);
-        failed_ops = failed_counter.load(Ordering::Relaxed);
-        
-        // Calculate latency statistics
-        if let Ok(lat_vec) = latencies.lock() {
-            if !lat_vec.is_empty() {
-                total_latency = lat_vec.iter().sum();
-                min_latency = *lat_vec.iter().min().unwrap_or(&Duration::ZERO);
-                max_latency = *lat_vec.iter().max().unwrap_or(&Duration::ZERO);
-            }
-        }
     }
 
     // pb.finish_with_message("Write benchmark completed");
@@ -625,7 +479,7 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
 }
 
 /// Simple mixed benchmark using system queries when benchmark table is not available
-async fn run_simple_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, threads: u32) -> Result<()> {
+async fn run_simple_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, _threads: u32) -> Result<()> {
     let pb = create_progress_bar(ops, "Simple mixed");
     let start = Instant::now();
     let mut read_ops = 0u64;

@@ -14,7 +14,8 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-// TODO: Replace with actual header struct once implemented
+// Mock structures for parser validation tests
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct MockSSTableHeader {
     keyspace: String,
@@ -22,20 +23,30 @@ struct MockSSTableHeader {
     generation: u64,
     version: u16,
     compression: MockCompressionInfo,
-    stats: MockStats,
-    columns: Vec<String>,
+    stats: MockSSTableStats,
+    columns: Vec<MockColumnInfo>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct MockCompressionInfo {
     algorithm: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
-struct MockStats {
+struct MockSSTableStats {
     row_count: u64,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct MockColumnInfo {
+    #[allow(dead_code)]
+    name: String,
+}
+
+#[cfg(test)]
 fn create_mock_header() -> MockSSTableHeader {
     MockSSTableHeader {
         keyspace: "test_ks".to_string(),
@@ -43,12 +54,19 @@ fn create_mock_header() -> MockSSTableHeader {
         generation: 1,
         version: 0x0000,
         compression: MockCompressionInfo {
-            algorithm: "none".to_string(),
+            algorithm: "LZ4".to_string(),
         },
-        stats: MockStats {
+        stats: MockSSTableStats {
             row_count: 100,
         },
-        columns: vec!["id".to_string(), "name".to_string()],
+        columns: vec![
+            MockColumnInfo {
+                name: "id".to_string(),
+            },
+            MockColumnInfo {
+                name: "data".to_string(),
+            },
+        ],
     }
 }
 
@@ -222,7 +240,6 @@ impl ParserValidationSuite {
 /// Comprehensive VInt validation tests
 #[cfg(test)]
 mod vint_validation_tests {
-    use super::*;
     use cqlite_core::parser::vint::*;
 
     #[test]
@@ -334,6 +351,7 @@ mod vint_validation_tests {
 /// Header parsing validation tests
 #[cfg(test)]
 mod header_validation_tests {
+    #[allow(unused_imports)]
     use super::*;
     use cqlite_core::parser::header::*;
 
@@ -430,6 +448,7 @@ mod header_validation_tests {
 /// CQL type parsing validation tests
 #[cfg(test)]
 mod type_validation_tests {
+    #[allow(unused_imports)]
     use super::*;
     use cqlite_core::parser::types::*;
 
@@ -479,7 +498,7 @@ mod type_validation_tests {
 
     #[test]
     fn test_primitive_type_parsing() {
-        let suite = ParserValidationSuite::new();
+        let _suite = ParserValidationSuite::new();
 
         // Boolean values
         let bool_data = vec![0x01]; // true
@@ -563,7 +582,7 @@ mod type_validation_tests {
 
     #[test]
     fn test_value_serialization_roundtrip() {
-        let suite = ParserValidationSuite::new();
+        let _suite = ParserValidationSuite::new();
 
         let test_values = vec![
             Value::Boolean(true),
@@ -609,6 +628,7 @@ mod type_validation_tests {
 /// Integration tests with real SSTable files
 #[cfg(test)]
 mod integration_tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
@@ -764,12 +784,13 @@ mod integration_tests {
 /// Performance validation tests
 #[cfg(test)]
 mod performance_tests {
+    #[allow(unused_imports)]
     use super::*;
     use std::time::Instant;
 
     #[test]
     fn test_vint_parsing_performance() {
-        let suite = ParserValidationSuite::new();
+        let _suite = ParserValidationSuite::new();
 
         // Generate test data
         let test_values: Vec<i64> = (0..10000).map(|i| i * 1000 - 5000000).collect();
@@ -834,6 +855,7 @@ mod performance_tests {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

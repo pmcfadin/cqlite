@@ -52,6 +52,7 @@ hex = "0.4"
 base64 = "0.21"
 futures = { workspace = true }
 parking_lot = { workspace = true }
+insta = "1.34"
 
 [[bench]]
 name = "end_to_end_bench"
@@ -103,6 +104,20 @@ path = "src/bin/issue_17_test_runner.rs"
 name = "integration_e2e"
 path = "src/integration_e2e.rs"
 
+# Cassandra 5 compatibility tests
+[[test]]
+name = "cassandra5_header_tests"
+path = "cassandra5_header_tests.rs"
+
+[[test]]
+name = "cassandra5_smoke_test"
+path = "cassandra5_smoke_test.rs"
+
+[[test]]
+name = "cassandra5_simple_test"
+path = "cassandra5_simple_test.rs"
+
 [features]
 default = []
+benchmarks = []
 ci_zero_tolerance = []

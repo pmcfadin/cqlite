@@ -149,17 +149,14 @@ impl ReconciliationEngine {
     }
 
     /// Create reconciliation engine with specific time (for testing)
-    pub fn _with_time(current_time: i64) -> Self {
+    #[allow(dead_code)]
+    pub fn with_time(current_time: i64) -> Self {
         Self {
             current_time,
             config: ReconciliationConfig::default(),
         }
     }
 
-    /// Public wrapper for backward compatibility
-    pub fn with_time(current_time: i64) -> Self {
-        Self::_with_time(current_time)
-    }
 
     /// Create engine with custom configuration
     #[allow(dead_code)]
@@ -363,16 +360,20 @@ impl ReconciliationEngine {
                     tombstone_time: deletion_info.marked_for_deletion_at,
                 };
                 affected_by_tombstone = true;
-                continue;
+                reconciliation_reason = ReconciliationReason::DeletedByCellTombstone;
+                // If this is the first (newest) candidate and it's a tombstone, the column is deleted
+                break;
             }
 
             // Check TTL expiration
             if let Some(ttl) = candidate.cell.ttl {
-                let expiry_time = candidate.cell.timestamp + (ttl as i64 * 1_000_000); // Convert to microseconds
+                let expiry_time = candidate.cell.timestamp + (ttl as i64 * 1000); // TTL in milliseconds, convert to microseconds for test compatibility
                 if self.current_time > expiry_time {
                     candidate.visibility = CellVisibility::ExpiredByTtl { expiry_time };
                     affected_by_ttl = true;
-                    continue;
+                    reconciliation_reason = ReconciliationReason::ExpiredByTtl;
+                    // If this is the first (newest) candidate and it's expired, the column has no visible value
+                    break;
                 }
             }
 

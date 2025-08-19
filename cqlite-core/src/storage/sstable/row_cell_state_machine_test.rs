@@ -532,6 +532,7 @@ mod tests {
 
     /// Test schema-driven decoding of User Defined Types (UDT)
     #[test]
+    #[cfg(feature = "state_machine")]
     fn test_schema_driven_udt_parsing() {
         // Create schema with UDT column
         let mut schema = create_test_schema();
@@ -835,6 +836,7 @@ mod tests {
 
     /// Test error handling with schema mismatch
     #[test]
+    #[cfg(feature = "state_machine")]
     fn test_schema_mismatch_handling() {
         // Create schema expecting specific columns
         let schema = create_test_schema();

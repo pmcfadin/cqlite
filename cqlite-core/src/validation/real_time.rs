@@ -326,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "M2+ feature; gated for M1"]
     fn test_event_recording() {
         let config = MonitoringConfig::default();
         let mut validator = RealtimeValidator::new(config).unwrap();
@@ -393,6 +394,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "M2+ feature; gated for M1"]
     fn test_event_history_limit() {
         let mut config = MonitoringConfig::default();
         config.max_event_history = 2;
@@ -426,6 +428,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "M2+ feature; gated for M1"]
     fn test_validation_statistics() {
         let config = MonitoringConfig::default();
         let mut validator = RealtimeValidator::new(config).unwrap();
@@ -463,6 +466,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "M2+ feature; gated for M1"]
     fn test_get_events_by_type() {
         let config = MonitoringConfig::default();
         let mut validator = RealtimeValidator::new(config).unwrap();

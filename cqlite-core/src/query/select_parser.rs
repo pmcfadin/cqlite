@@ -452,9 +452,13 @@ impl SelectParser {
         self.expect(Token::Select)?;
         let select_clause = self.parse_select_clause()?;
 
-        // Parse FROM clause
-        self.expect(Token::From)?;
-        let from_clause = self.parse_from_clause()?;
+        // Parse optional FROM clause
+        let from_clause = if self.current_token == Some(Token::From) {
+            self.advance()?;
+            Some(self.parse_from_clause()?)
+        } else {
+            None
+        };
 
         // Parse optional WHERE clause
         let where_clause = if self.current_token == Some(Token::Where) {
@@ -987,7 +991,7 @@ mod tests {
     fn test_simple_select() {
         let stmt = parse_select("SELECT * FROM users").unwrap();
         assert_eq!(stmt.select_clause, SelectClause::All);
-        if let FromClause::Table(table) = stmt.from_clause {
+        if let Some(FromClause::Table(table)) = stmt.from_clause {
             assert_eq!(table.name(), "users");
         } else {
             panic!("Expected Table in FROM clause");
@@ -999,6 +1003,23 @@ mod tests {
         let stmt = parse_select("SELECT id, name, email FROM users").unwrap();
         if let SelectClause::Columns(exprs) = stmt.select_clause {
             assert_eq!(exprs.len(), 3);
+        } else {
+            panic!("Expected Columns in SELECT clause");
+        }
+    }
+
+    #[test]
+    fn test_select_constant() {
+        let stmt = parse_select("SELECT 1").unwrap();
+        assert!(stmt.from_clause.is_none());
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            assert_eq!(exprs.len(), 1);
+            // Expression parsed successfully
+            if let SelectExpression::Literal(Value::BigInt(1)) = &exprs[0] {
+                // Success
+            } else {
+                panic!("Expected literal BigInt 1, got: {:?}", &exprs[0]);
+            }
         } else {
             panic!("Expected Columns in SELECT clause");
         }

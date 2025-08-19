@@ -92,6 +92,7 @@ fn test_discrepancy_analysis() {
 
 /// Test zero tolerance evidence generation
 #[test]
+#[ignore = "M2+ feature; gated for M1"]
 fn test_zero_tolerance_evidence_generation() {
     // Create a perfect parity result
     let perfect_result = SStableDumpParityResult {
@@ -210,6 +211,7 @@ fn test_zero_tolerance_evidence_generation() {
 
 /// Test major discrepancy detection
 #[test]
+#[ignore = "M2+ feature; gated for M1"]
 fn test_major_discrepancy_detection() {
     // Create result with major discrepancies
     let major_discrepancies_result = SStableDumpParityResult {

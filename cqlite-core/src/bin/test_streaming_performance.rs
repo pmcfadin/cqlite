@@ -3,11 +3,16 @@
 //! This binary tests the integration of all streaming performance components
 //! with real `SSTable` files from the test environment.
 
+#[cfg(feature = "benchmarks")]
 use std::env;
+#[cfg(feature = "benchmarks")]
 use std::path::PathBuf;
+#[cfg(feature = "benchmarks")]
 use std::sync::Arc;
+#[cfg(feature = "benchmarks")]
 use std::time::Instant;
 
+#[cfg(feature = "benchmarks")]
 use cqlite_core::{
     Config,
     platform::Platform,
@@ -19,6 +24,7 @@ use cqlite_core::{
     types::TableId,
 };
 
+#[cfg(feature = "benchmarks")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -58,6 +64,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Run with: cargo run --features benchmarks --bin test_streaming_performance");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "benchmarks")]
 async fn test_compression_algorithm_selection() -> Result<(), Box<dyn std::error::Error>> {
     println!("  📋 Testing compression algorithm selection logic...");
 
@@ -104,6 +118,7 @@ async fn test_compression_algorithm_selection() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+#[cfg(feature = "benchmarks")]
 async fn test_streaming_reader_performance(
     test_data_dir: &PathBuf,
     config: &Config,
@@ -173,6 +188,7 @@ async fn test_streaming_reader_performance(
     Ok(())
 }
 
+#[cfg(feature = "benchmarks")]
 async fn test_memory_usage_monitoring(
     test_data_dir: &PathBuf,
     config: &Config,
@@ -237,6 +253,7 @@ async fn test_memory_usage_monitoring(
     Ok(())
 }
 
+#[cfg(feature = "benchmarks")]
 async fn test_large_file_handling(
     test_data_dir: &PathBuf,
     config: &Config,
@@ -326,6 +343,7 @@ async fn test_large_file_handling(
     Ok(())
 }
 
+#[cfg(feature = "benchmarks")]
 async fn test_real_data_integration(
     test_data_dir: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -367,6 +385,7 @@ async fn test_real_data_integration(
     Ok(())
 }
 
+#[cfg(feature = "benchmarks")]
 fn get_test_data_dir() -> PathBuf {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 {

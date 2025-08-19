@@ -193,16 +193,16 @@ test_sstable_read() {
     
     # Test with users table if available
     if [[ -n "$users_dir" && -f "$SCHEMA_DIR/users.json" ]]; then
-        run_test "Read users table (JSON format)" "$CLI_BINARY read '$users_dir' --schema '$SCHEMA_DIR/users.json' --limit 5"
-        run_test "Read users table (CSV format)" "$CLI_BINARY read '$users_dir' --schema '$SCHEMA_DIR/users.json' --format csv --limit 3"
-        run_test "Read users table (JSON output)" "$CLI_BINARY read '$users_dir' --schema '$SCHEMA_DIR/users.json' --format json --limit 2"
+        run_test "Read users table (JSON format)" "$CLI_BINARY read-sstable '$users_dir' --schema '$SCHEMA_DIR/users.json' --limit 5"
+        run_test "Read users table (CSV format)" "$CLI_BINARY read-sstable '$users_dir' --schema '$SCHEMA_DIR/users.json' --format csv --limit 3"
+        run_test "Read users table (JSON output)" "$CLI_BINARY read-sstable '$users_dir' --schema '$SCHEMA_DIR/users.json' --format json --limit 2"
     else
         skip_test "Users table read tests" "users SSTable or schema not available"
     fi
     
     # Test with all_types table if available  
     if [[ -n "$all_types_dir" && -f "$SCHEMA_DIR/all_types.json" ]]; then
-        run_test "Read all_types table" "$CLI_BINARY read '$all_types_dir' --schema '$SCHEMA_DIR/all_types.json' --limit 3" true 60
+        run_test "Read all_types table" "$CLI_BINARY read-sstable '$all_types_dir' --schema '$SCHEMA_DIR/all_types.json' --limit 3" true 60
     else
         skip_test "All types table read tests" "all_types SSTable or schema not available"
     fi
@@ -245,12 +245,12 @@ test_schema_formats() {
     if [[ -n "$test_dir" ]]; then
         # Test JSON schema format
         if [[ -f "$SCHEMA_DIR/users.json" ]]; then
-            run_test "JSON schema format detection" "$CLI_BINARY read '$test_dir' --schema '$SCHEMA_DIR/users.json' --limit 1"
+            run_test "JSON schema format detection" "$CLI_BINARY read-sstable '$test_dir' --schema '$SCHEMA_DIR/users.json' --limit 1"
         fi
         
         # Test CQL schema format  
         if [[ -f "$SCHEMA_DIR/products.cql" ]]; then
-            run_test "CQL schema format detection" "$CLI_BINARY read '$test_dir' --schema '$SCHEMA_DIR/products.cql' --limit 1" false
+            run_test "CQL schema format detection" "$CLI_BINARY read-sstable '$test_dir' --schema '$SCHEMA_DIR/products.cql' --limit 1" false
         fi
     else
         skip_test "Schema format tests" "no SSTable directories found"
@@ -285,15 +285,15 @@ test_error_handling() {
     
     # Test with non-existent files
     run_test "Non-existent file handling" "$CLI_BINARY info /non/existent/path" false
-    run_test "Non-existent schema handling" "$CLI_BINARY read /tmp --schema /non/existent/schema.json" false
+    run_test "Non-existent schema handling" "$CLI_BINARY read-sstable /tmp --schema /non/existent/schema.json" false
     
     # Test with invalid schema files
     if [[ -f "cqlite-cli/tests/test_data/fixtures/invalid_schemas/malformed.json" ]]; then
-        run_test "Invalid JSON schema handling" "$CLI_BINARY read /tmp --schema cqlite-cli/tests/test_data/fixtures/invalid_schemas/malformed.json" false
+        run_test "Invalid JSON schema handling" "$CLI_BINARY read-sstable /tmp --schema cqlite-cli/tests/test_data/fixtures/invalid_schemas/malformed.json" false
     fi
     
     if [[ -f "cqlite-cli/tests/test_data/fixtures/invalid_schemas/empty.json" ]]; then
-        run_test "Empty schema handling" "$CLI_BINARY read /tmp --schema cqlite-cli/tests/test_data/fixtures/invalid_schemas/empty.json" false
+        run_test "Empty schema handling" "$CLI_BINARY read-sstable /tmp --schema cqlite-cli/tests/test_data/fixtures/invalid_schemas/empty.json" false
     fi
     
     # Test with invalid queries
@@ -332,7 +332,7 @@ test_performance() {
         
         # Test with schema if available
         if [[ -f "$SCHEMA_DIR/users.json" ]]; then
-            run_test "Performance: Read with limit" "$CLI_BINARY read '$largest_dir' --schema '$SCHEMA_DIR/users.json' --limit 100" true 300
+            run_test "Performance: Read with limit" "$CLI_BINARY read-sstable '$largest_dir' --schema '$SCHEMA_DIR/users.json' --limit 100" true 300
         fi
     else
         skip_test "Performance tests" "no suitable SSTable directories found"

@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance testing utilities
 //!
 //! This module provides comprehensive performance testing capabilities,

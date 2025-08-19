@@ -285,7 +285,8 @@ impl MemoryManager {
     pub fn deallocate_buffer(&self, mut buffer: Vec<u8>) {
         let size = buffer.len();
         buffer.clear();
-        buffer.shrink_to_fit();
+        // Don't shrink_to_fit() as we want to preserve capacity for reuse
+        buffer.resize(size, 0);
 
         let mut pool = self.buffer_pool.write();
         pool.free_buffers

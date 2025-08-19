@@ -409,6 +409,7 @@ impl SchemaRegistry {
     }
 
     /// Validate a schema
+    #[allow(dead_code)]
     pub async fn validate_schema(&self, keyspace: &str, table: &str) -> Result<ValidationReport> {
         let schema = self.get_schema(keyspace, table).await?;
         let table_id = format!("{}.{}", keyspace, table);

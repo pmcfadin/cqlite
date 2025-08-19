@@ -9,6 +9,7 @@ pub mod repl_quality_gates;
 
 pub mod compatibility_framework;
 pub mod integration_runner;
+#[cfg(feature = "benchmarks")]
 pub mod performance_benchmarks;
 pub mod sstable_format_tests;
 pub mod type_system_tests;
@@ -16,12 +17,16 @@ pub mod type_system_tests;
 // SSTable validation and testing modules
 pub mod complex_data_test;
 pub mod format_verifier;
+#[cfg(feature = "benchmarks")]
 pub mod sstable_benchmark;
 pub mod sstable_validator;
 
 // Advanced Performance Testing Modules
+#[cfg(feature = "benchmarks")]
 pub mod performance_benchmark_runner;
+#[cfg(feature = "benchmarks")]
 pub mod performance_regression_framework;
+#[cfg(feature = "benchmarks")]
 pub mod performance_validation_suite;
 
 // Existing modules
@@ -42,6 +47,7 @@ pub mod fixtures {
     pub mod test_data;
 }
 
+#[cfg(feature = "benchmarks")]
 pub mod performance_monitor;
 
 /// Comprehensive parser validation tests against real Cassandra 5+ data
@@ -75,6 +81,7 @@ pub use cli_integration_tests::{CLIIntegrationTestSuite, CLITestConfig, CLITestR
 // Re-export SSTable test fixture components (initial export)
 // Note: real_sstable_test_fixtures is exported again below with additional types
 
+#[cfg(feature = "benchmarks")]
 pub use performance_benchmarks::{
     BenchmarkConfig, BenchmarkResult as PerfBenchmarkResult, PerformanceBenchmarks,
 };
@@ -82,18 +89,22 @@ pub use sstable_format_tests::SSTableFormatTests;
 pub use type_system_tests::TypeSystemTests;
 
 // Re-export advanced performance testing components
+#[cfg(feature = "benchmarks")]
 pub use performance_benchmark_runner::{
     BenchmarkRunnerConfig, PerformanceBenchmarkRunner, PerformanceResults, TestConfiguration,
 };
+#[cfg(feature = "benchmarks")]
 pub use performance_regression_framework::{
     PerformanceRegressionFramework, RegressionTestConfig, RegressionTestResult,
 };
+#[cfg(feature = "benchmarks")]
 pub use performance_validation_suite::{
     PerformanceValidationConfig, PerformanceValidationResults, PerformanceValidationSuite,
 };
 
 // Re-export commonly used test utilities
 pub use fixtures::{helpers, test_data};
+#[cfg(feature = "benchmarks")]
 pub use performance_monitor::*;
 
 // Edge case testing modules for comprehensive compatibility validation
@@ -142,6 +153,7 @@ pub use validation_test_runner::{
 
 // Complex Type Validation Modules - M3 Validation Engineer
 pub mod complex_type_validation_suite;
+#[cfg(feature = "benchmarks")]
 pub mod performance_complex_types_benchmark;
 pub mod real_cassandra_data_validator;
 
@@ -149,6 +161,7 @@ pub mod real_cassandra_data_validator;
 pub use complex_type_validation_suite::{
     ComplexTypeValidationConfig, ComplexTypeValidationResults, ComplexTypeValidationSuite,
 };
+#[cfg(feature = "benchmarks")]
 pub use performance_complex_types_benchmark::{
     ComplexTypeBenchmarkConfig, ComplexTypeBenchmarkResults, ComplexTypePerformanceBenchmark,
 };
@@ -186,6 +199,7 @@ pub use integration_test_harness::{
 // Re-export SSTable validation components
 pub use complex_data_test::{ComplexDataTestResults, ComplexDataTestSuite, run_complex_data_tests};
 pub use format_verifier::{FormatVerificationResult, SSTableFormatVerifier, verify_sstable_format};
+#[cfg(feature = "benchmarks")]
 pub use sstable_benchmark::{
     BenchmarkConfig as SSTableBenchmarkConfig, BenchmarkResults, SSTableBenchmark,
     run_comprehensive_benchmark,
@@ -199,6 +213,7 @@ pub mod minimal_smoke_tests;
 // CQL Schema Validation Modules
 pub mod cql_integration_tests;
 pub mod cql_parser_validation_suite;
+#[cfg(feature = "benchmarks")]
 pub mod cql_performance_benchmarks;
 pub mod cql_test_data_fixtures;
 
@@ -214,6 +229,7 @@ pub use cql_parser_validation_suite::{
     CqlParserValidationSuite, PerformanceMetric, ValidationReport,
     ValidationResult as CqlValidationResult,
 };
+#[cfg(feature = "benchmarks")]
 pub use cql_performance_benchmarks::{
     BenchmarkReport, BenchmarkResult as CqlBenchmarkResult, CqlPerformanceBenchmarkSuite,
     PerformanceTargets,
@@ -227,6 +243,9 @@ pub use cql_test_data_fixtures::{
 // Main working tests:
 pub mod issue_35_key_encoding_tests;
 pub mod issue_35_minimal_tests;
+
+// Shared test support utilities
+pub mod support;
 
 // Issue #28a - Removal of header heuristics and blob fallbacks
 #[cfg(test)]

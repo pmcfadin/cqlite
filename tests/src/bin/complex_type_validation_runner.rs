@@ -13,6 +13,7 @@ use tokio;
 use cqlite_tests::complex_type_validation_suite::{
     ComplexTypeValidationConfig, ComplexTypeValidationSuite,
 };
+#[cfg(feature = "benchmarks")]
 use cqlite_tests::performance_complex_types_benchmark::{
     ComplexTypeBenchmarkConfig, ComplexTypePerformanceBenchmark,
 };
@@ -284,6 +285,7 @@ async fn run_real_data_validation(
 }
 
 /// Run performance benchmarks
+#[cfg(feature = "benchmarks")]
 async fn run_performance_benchmarks(
     output_dir: &PathBuf,
     iterations: usize,
@@ -339,6 +341,20 @@ async fn run_performance_benchmarks(
             false
         }
     }
+}
+
+/// Run performance benchmarks (fallback when benchmarks feature is disabled)
+#[cfg(not(feature = "benchmarks"))]
+async fn run_performance_benchmarks(
+    _output_dir: &PathBuf,
+    _iterations: usize,
+    _enable_stress: bool,
+) -> bool {
+    println!("⚡ Performance Benchmarks (Skipped - benchmarks feature disabled)");
+    println!("─────────────────────────────────────────────────────────────────");
+    println!("ℹ️  Performance benchmarks require the 'benchmarks' feature to be enabled");
+    println!("ℹ️  Compile with: cargo build --features benchmarks");
+    true // Don't fail validation when benchmarks are disabled
 }
 
 /// Generate comprehensive validation summary

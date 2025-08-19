@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 // Legacy validation modules
 pub mod accuracy;
 pub mod compatibility;
+#[cfg(feature = "benchmarks")]
 pub mod performance;
 pub mod regression;
 pub mod report;
@@ -147,6 +148,7 @@ impl ValidationEngine {
         self.run_accuracy_tests().await;
         self.run_compatibility_tests().await;
 
+        #[cfg(feature = "benchmarks")]
         if self.config.enable_performance_benchmarks {
             self.run_performance_tests().await;
         }
@@ -182,6 +184,7 @@ impl ValidationEngine {
     }
 
     /// Run performance benchmark tests
+    #[cfg(feature = "benchmarks")]
     async fn run_performance_tests(&mut self) {
         let test_cases = self.generate_performance_test_cases();
 
@@ -222,6 +225,7 @@ impl ValidationEngine {
     }
 
     /// Generate performance test cases
+    #[cfg(feature = "benchmarks")]
     fn generate_performance_test_cases(&self) -> Vec<PerformanceTestCase> {
         performance::generate_test_cases(&self.config)
     }
@@ -274,6 +278,7 @@ impl ValidationEngine {
     }
 
     /// Run individual performance test
+    #[cfg(feature = "benchmarks")]
     async fn run_performance_test(&self, test_case: PerformanceTestCase) -> ValidationResult {
         performance::run_test(test_case, &self.config).await
     }
@@ -471,6 +476,7 @@ pub struct EdgeCaseTestCase {
 // Re-export types from legacy submodules
 pub use accuracy::{AccuracyMetrics, AccuracyTestCase};
 pub use compatibility::{CompatibilityCheck, CompatibilityTestCase};
+#[cfg(feature = "benchmarks")]
 pub use performance::{PerformanceMetrics, PerformanceTestCase};
 pub use regression::{RegressionBaseline, RegressionTestCase};
 

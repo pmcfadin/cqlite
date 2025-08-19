@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance Monitoring Utilities for CQLite Testing
 //!
 //! Provides real-time performance monitoring and analysis tools

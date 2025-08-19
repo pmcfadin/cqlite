@@ -160,6 +160,7 @@ impl Default for ValidationConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct SstableDumpValidator {
     docker: DockerManager,
     parser: SstableDumpParser,

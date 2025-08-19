@@ -53,8 +53,8 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
     let _schema_engine = Arc::new(SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?);
 
     // Initialize query components
-    let query_planner = cqlite_core::query::planner::QueryPlanner::new(schema_manager.clone(), &config);
-    let query_executor = cqlite_core::query::executor::QueryExecutor::new(storage.clone(), schema_manager.clone(), &config);
+    let _query_planner = cqlite_core::query::planner::QueryPlanner::new(schema_manager.clone(), &config);
+    let _query_executor = cqlite_core::query::executor::QueryExecutor::new(storage.clone(), schema_manager.clone(), &config);
 
     // Step 1: Create table schema - simplified for testing
     let table_id = TableId::new("users");
@@ -180,7 +180,7 @@ async fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
     let platform = Arc::new(Platform::new(&config).await?);
 
     let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await?);
-    let schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
+    let _schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
     let schema_config = cqlite_core::schema::SchemaDiscoveryConfig::default();
     let _schema_engine = Arc::new(SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?);
 
@@ -328,16 +328,16 @@ async fn test_concurrent_operations() -> Result<(), Box<dyn std::error::Error>> 
 async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔄 Testing Cassandra 5+ SSTable compatibility...");
 
-    let temp_dir = TempDir::new()?;
-    let config = Config::default();
+    let _temp_dir = TempDir::new()?;
+    let _config = Config::default();
 
     // Create SSTable parser with strict Cassandra 5 compatibility
-    let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?; // Using default config
+    let _parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?; // Using default config
 
     // Test 1: Parse mock Cassandra 5+ SSTable header
     let mock_header = create_mock_cassandra5_header();
     let serialized_header = serialize_sstable_header(&mock_header)?;
-    let (remaining, parsed_header) = parse_sstable_header(&serialized_header).map_err(|e| {
+    let (_remaining, parsed_header) = parse_sstable_header(&serialized_header).map_err(|e| {
         cqlite_core::error::Error::parser(format!("Failed to parse header: {:?}", e))
     })?;
 
@@ -1103,7 +1103,7 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
     let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await?);
-    let schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
+    let _schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
     let schema_config = cqlite_core::schema::SchemaDiscoveryConfig::default();
     let _schema_engine = Arc::new(SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?);
 

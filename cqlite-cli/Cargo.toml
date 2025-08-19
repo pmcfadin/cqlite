@@ -105,4 +105,6 @@ trybuild = "1.0"                # Compile-fail testing
 default = ["interactive", "tui"]
 interactive = []
 tui = ["ratatui", "crossterm"]
+benchmarks = []
 ci_zero_tolerance = []
+integration-tests = []

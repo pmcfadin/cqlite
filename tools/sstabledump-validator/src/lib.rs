@@ -12,5 +12,6 @@ pub use parser::{CellValue, ParsedData, RangeTombstone, SstableDumpParser};
 pub use reconciliation::{
     ReconciledCell, ReconciliationConfig, ReconciliationEngine, ReconciliationReason,
 };
-pub use reporter::{ReportFormat, ValidationReport, ValidationStatus};
+pub use reporter::{ValidationReport, ValidationStatus};
+pub use test_datasets::{ReconciliationTestDatasets, TestDatasetPair, ExpectedReconciliation, ExpectedCell};
 pub use validator::SstableDumpValidator;

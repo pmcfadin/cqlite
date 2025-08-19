@@ -9,14 +9,13 @@ use cqlite_core::{
     storage::sstable::{SSTableReader, SSTableManager},
     types::{RowKey, TableId, Value},
 };
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
 
 /// Test configuration for wide partition generation
-struct WidePartitionTestConfig {
+pub struct WidePartitionTestConfig {
     /// Number of clustering keys per partition (should be >= 1000 to force promoted index)
     clustering_keys_per_partition: usize,
     /// Size of each row in bytes

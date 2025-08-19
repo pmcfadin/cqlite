@@ -463,6 +463,7 @@ pub struct SchemaDiscoveryEngine {
     #[allow(dead_code)]
     type_inference: Arc<TypeInferenceEngine>,
     /// Schema validator
+    #[allow(dead_code)]
     validator: Arc<SchemaValidator>,
     /// Schema exporter
     exporter: Arc<SchemaExporter>,
@@ -538,14 +539,8 @@ impl SchemaDiscoveryEngine {
         // Phase 6: Infer complete schema
         let schema_info = self.build_schema_info(&mut discovery_context).await?;
 
-        // Phase 7: Validate schema
-        let validated_schema = if self.config.enable_cross_file_validation {
-            self.validator
-                .validate_schema(&schema_info, &discovery_context)
-                .await?
-        } else {
-            schema_info
-        };
+        // Phase 7: Schema validation (disabled - unimplemented)
+        let validated_schema = schema_info;
 
         // Calculate discovery metrics
         let discovery_time = start_time.elapsed().unwrap_or(Duration::ZERO);
@@ -703,15 +698,6 @@ impl SchemaValidator {
         Self {}
     }
 
-    /// Validate schema consistency and correctness
-    async fn validate_schema(
-        &self,
-        schema: &SchemaInfo,
-        _context: &DiscoveryContext,
-    ) -> Result<SchemaInfo> {
-        // TODO: Implement comprehensive validation
-        Ok(schema.clone())
-    }
 }
 
 /// Schema exporter for generating output formats

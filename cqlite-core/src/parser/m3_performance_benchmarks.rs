@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! M3 Complex Type Performance Benchmarks
 //!
 //! Comprehensive benchmarking suite for validating M3 performance targets:

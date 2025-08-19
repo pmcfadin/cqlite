@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance testing utilities
 
 use std::time::Instant;

@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance Validation Framework
 //!
 //! This module provides performance validation and benchmarking for Issue #17.

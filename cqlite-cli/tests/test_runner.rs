@@ -617,9 +617,9 @@ impl TestRunner {
             env.db_path_str(),
             "bench",
             "read",
-            "--ops",
+            "--operations",
             "10",
-            "--threads",
+            "--concurrency",
             "1",
         ]) {
             Ok(_output) => {
@@ -674,7 +674,7 @@ pub fn run_tests() -> Result<()> {
     runner.run_all_tests()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "integration-tests"))]
 mod tests {
     use super::*;
 

@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance benchmarks for SSTable readers using real test data
 //!
 //! This module provides comprehensive benchmarking of SSTable reader performance

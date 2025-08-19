@@ -150,6 +150,27 @@ impl QueryEngine {
 
     /// Execute a SELECT query using the advanced parser and optimizer
     async fn execute_select_query(&self, sql: &str, start_time: Instant) -> Result<QueryResult> {
+        // Check plan cache first for SELECT queries too
+        if let Some(cached_entry) = self.plan_cache.get(sql) {
+            // Update cache hit statistics
+            {
+                let mut stats = self.stats.write();
+                stats.cache_hit_ratio = (stats.cache_hit_ratio * (stats.total_queries - 1) as f64
+                    + 1.0)
+                    / stats.total_queries as f64;
+            }
+
+            // Update cache entry hit count
+            let mut entry = cached_entry.clone();
+            entry.hit_count += 1;
+            self.plan_cache.insert(sql.to_string(), entry.clone());
+
+            // Execute the cached plan
+            let mut result = self.executor.execute(&entry.plan).await?;
+            self.update_execution_stats(&mut result, start_time);
+            return Ok(result);
+        }
+
         // Parse SELECT statement using advanced parser
         let select_statement = select_parser::parse_select(sql).map_err(|e| {
             // Update error statistics
@@ -160,6 +181,34 @@ impl QueryEngine {
 
         // Optimize the query plan
         let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
+
+        // For now, let's create a simple entry in the cache to track that we've seen this query
+        let entry = QueryCacheEntry {
+            plan: super::planner::QueryPlan {
+                plan_type: super::planner::PlanType::TableScan,
+                table: None,
+                estimated_cost: 1.0,
+                estimated_rows: 0,
+                selected_indexes: vec![],
+                steps: vec![],
+                hints: super::planner::QueryHints::default(),
+            },
+            parsed_query: super::ParsedQuery {
+                query_type: super::QueryType::Select,
+                table: None,
+                columns: vec![],
+                where_clause: None,
+                values: vec![],
+                set_clause: std::collections::HashMap::new(),
+                order_by: vec![],
+                limit: None,
+                sql: sql.to_string(),
+            },
+            cached_at: Instant::now(),
+            hit_count: 0,
+        };
+
+        self.plan_cache.insert(sql.to_string(), entry);
 
         // Execute the optimized plan
         let mut result = self.select_executor.execute(optimized_plan).await?;
@@ -490,7 +539,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_caching() {
         let temp_dir = TempDir::new().unwrap();
-        let mut config = Config::default();
+        let mut config = Config::test_config();
         config.query.query_cache_size = Some(10);
 
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());

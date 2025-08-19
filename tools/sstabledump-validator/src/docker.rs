@@ -24,12 +24,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "docker-integration")]
+#[derive(Debug)]
 pub struct DockerManager {
     docker: Docker,
     cassandra_container_id: Option<String>,
 }
 
 #[cfg(not(feature = "docker-integration"))]
+#[derive(Debug)]
 pub struct DockerManager {
     // Mock implementation when Docker integration is disabled
 }

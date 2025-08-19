@@ -3,18 +3,24 @@
 //! Executable for running comprehensive M3 complex type performance validation.
 //! This binary can be used in CI/CD pipelines and for development validation.
 
+#[cfg(feature = "benchmarks")]
 use clap::{Arg, ArgMatches, Command};
+#[cfg(feature = "benchmarks")]
 use std::process;
+#[cfg(feature = "benchmarks")]
 use std::time::Instant;
 
-// Include the M3 performance validator
-mod m3_performance_validator {
-    include!("../m3_performance_validator.rs");
-}
+#[cfg(feature = "benchmarks")]
+use cqlite_core::validation::hardened_validator_parser::PerformanceTargets;
 
-use cqlite_core::parser::PerformanceTargets;
+#[cfg(feature = "benchmarks")]
+#[path = "../m3_performance_validator.rs"]
+mod m3_performance_validator;
+
+#[cfg(feature = "benchmarks")]
 use m3_performance_validator::{M3PerformanceValidator, ValidationConfig};
 
+#[cfg(feature = "benchmarks")]
 fn main() {
     let matches = Command::new("M3 Performance Validator")
         .version("1.0.0")
@@ -177,6 +183,7 @@ fn main() {
     }
 }
 
+#[cfg(feature = "benchmarks")]
 fn parse_config(matches: &ArgMatches) -> Result<ValidationConfig, String> {
     let throughput_target = matches
         .get_one::<String>("throughput-target")
@@ -228,6 +235,7 @@ fn parse_config(matches: &ArgMatches) -> Result<ValidationConfig, String> {
     })
 }
 
+#[cfg(feature = "benchmarks")]
 fn print_banner(config: &ValidationConfig) {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║                 M3 Performance Validator v1.0.0              ║");
@@ -291,6 +299,7 @@ fn print_banner(config: &ValidationConfig) {
     println!();
 }
 
+#[cfg(feature = "benchmarks")]
 fn output_json_results(results: &m3_performance_validator::ValidationResults) {
     use serde_json::json;
 
@@ -331,6 +340,7 @@ fn output_json_results(results: &m3_performance_validator::ValidationResults) {
     println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
 }
 
+#[cfg(feature = "benchmarks")]
 fn print_quiet_summary(results: &m3_performance_validator::ValidationResults) {
     let status = if results.passed { "PASSED" } else { "FAILED" };
     let pass_rate = (results.performance_summary.passed_tests as f64
@@ -355,9 +365,11 @@ fn print_quiet_summary(results: &m3_performance_validator::ValidationResults) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "benchmarks"))]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
+    use clap::{Arg, Command};
 
     #[test]
     fn test_config_parsing() {
@@ -460,4 +472,11 @@ mod tests {
         assert_eq!(targets.min_complex_throughput_mbs, 120.0);
         assert_eq!(targets.max_additional_latency_ms, 5.0);
     }
+}
+
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Compile with: cargo build --features benchmarks");
+    std::process::exit(1);
 }

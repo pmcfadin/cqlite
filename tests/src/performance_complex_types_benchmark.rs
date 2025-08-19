@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance Benchmarks for Complex Types
 //!
 //! This module provides comprehensive performance benchmarking for complex type

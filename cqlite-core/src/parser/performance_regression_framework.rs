@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance Regression Testing Framework for Complex Types
 //!
 //! This framework provides automated performance regression testing to ensure

@@ -414,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn test_storage_engine_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::default();
+        let config = Config::test_config();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
         let storage = StorageEngine::open(temp_dir.path(), &config, platform)

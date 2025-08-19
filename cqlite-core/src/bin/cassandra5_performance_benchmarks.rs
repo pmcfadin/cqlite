@@ -7,14 +7,18 @@
 //! - Throughput ≥100K ops/sec
 //! - Zero-copy deserialization efficiency
 
+#[cfg(feature = "benchmarks")]
 use std::env;
+#[cfg(feature = "benchmarks")]
 use std::path::PathBuf;
 
+#[cfg(feature = "benchmarks")]
 use cqlite_core::{
     benchmarks::cassandra5::{Cassandra5PerformanceSuite, PRDTargets},
     performance_monitor::PerformanceMonitor,
 };
 
+#[cfg(feature = "benchmarks")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Cassandra 5+ Performance Benchmarking Suite");
@@ -163,7 +167,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::process::exit(exit_code);
 }
 
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Run with: cargo run --features benchmarks --bin cassandra5_performance_benchmarks");
+    std::process::exit(1);
+}
+
 /// Categorize and display benchmark results by type
+#[cfg(feature = "benchmarks")]
 fn categorize_and_display_results(
     results: &[cqlite_core::benchmarks::cassandra5::BenchmarkResult],
 ) {
@@ -230,6 +242,7 @@ fn categorize_and_display_results(
 }
 
 /// Generate optimization recommendations based on failed benchmarks
+#[cfg(feature = "benchmarks")]
 fn generate_optimization_recommendations(
     results: &[cqlite_core::benchmarks::cassandra5::BenchmarkResult],
 ) {
@@ -299,6 +312,7 @@ fn generate_optimization_recommendations(
 }
 
 /// Display usage information
+#[cfg(feature = "benchmarks")]
 #[allow(dead_code)]
 fn print_usage() {
     println!("Usage: cassandra5_performance_benchmarks [TEST_DATA_DIR]");

@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Parser performance benchmarks
 //!
 //! This module provides comprehensive benchmarking for all parser components
