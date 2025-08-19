@@ -108,7 +108,7 @@ fn extract_timestamp_statistics<'a>(
         .as_micros() as i64;
 
     let timestamp_stats = TimestampStatistics {
-        min_timestamp: current_time_micros - 86400_000_000, // 1 day ago
+        min_timestamp: current_time_micros - 86_400_000_000, // 1 day ago
         max_timestamp: current_time_micros,
         min_deletion_time: 0,
         max_deletion_time: 0,

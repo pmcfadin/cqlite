@@ -300,33 +300,31 @@ impl Tokenizer {
                         self.advance();
                         self.advance();
                         return Ok(Token::NotEqual);
-                    } else {
-                        return Err(Error::sql_parse("Unexpected character: !"));
                     }
+                    return Err(Error::sql_parse("Unexpected character: !"));
                 }
                 Some('<') => {
                     if self.peek() == Some('=') {
                         self.advance();
                         self.advance();
                         return Ok(Token::LessThanEqual);
-                    } else if self.peek() == Some('>') {
+                    }
+                    if self.peek() == Some('>') {
                         self.advance();
                         self.advance();
                         return Ok(Token::NotEqual);
-                    } else {
-                        self.advance();
-                        return Ok(Token::LessThan);
                     }
+                    self.advance();
+                    return Ok(Token::LessThan);
                 }
                 Some('>') => {
                     if self.peek() == Some('=') {
                         self.advance();
                         self.advance();
                         return Ok(Token::GreaterThanEqual);
-                    } else {
-                        self.advance();
-                        return Ok(Token::GreaterThan);
                     }
+                    self.advance();
+                    return Ok(Token::GreaterThan);
                 }
                 Some('\'') => {
                     let string_val = self.read_string('\'')?;
@@ -578,9 +576,8 @@ impl SelectParser {
             if let Some(Token::Identifier(alias)) = self.current_token.clone() {
                 self.advance()?;
                 return Ok(SelectExpression::Aliased(Box::new(expr), alias));
-            } else {
-                return Err(Error::sql_parse("Expected alias name after AS"));
             }
+            return Err(Error::sql_parse("Expected alias name after AS"));
         }
 
         Ok(expr)

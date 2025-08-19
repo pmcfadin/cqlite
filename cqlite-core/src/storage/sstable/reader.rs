@@ -3476,7 +3476,7 @@ mod tests {
             offset: 1024,
             compressed_size: 512,
             uncompressed_size: 1024,
-            checksum: 0x12345678,
+            checksum: 0x1234_5678,
             first_key: RowKey::from("key1"),
             last_key: RowKey::from("key10"),
             entry_count: 10,

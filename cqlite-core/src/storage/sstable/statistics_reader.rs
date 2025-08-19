@@ -16,13 +16,13 @@ use tokio::io::AsyncReadExt;
 
 /// Calculate CRC32 checksum for data validation
 fn crc32_checksum(data: &[u8]) -> u32 {
-    let mut crc = 0xffffffffu32;
+    let mut crc = 0xffff_ffff_u32;
 
     for &byte in data {
         crc ^= byte as u32;
         for _ in 0..8 {
             if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xedb88320u32;
+                crc = (crc >> 1) ^ 0xedb8_8320_u32;
             } else {
                 crc >>= 1;
             }

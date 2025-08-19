@@ -278,12 +278,12 @@ impl BulletproofReader {
             ));
         }
 
-        // Read magic number (first 4 bytes) - EXPERIMENTAL: should be 0x6F610000 for 'oa' format
+        // Read magic number (first 4 bytes) - EXPERIMENTAL: should be 0x6F61_0000 for 'oa' format
         // This may not match the actual Big format magic number from CEP-25
         let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        if magic != 0x6F610000 {
+        if magic != 0x6F61_0000 {
             warn!(
-                "EXPERIMENTAL: Magic number mismatch: expected 0x6F610000, got 0x{:08x}",
+                "EXPERIMENTAL: Magic number mismatch: expected 0x6F61_0000, got 0x{:08x}",
                 magic
             );
             warn!("This may indicate Big format specification differences");
@@ -610,7 +610,7 @@ impl BulletproofReader {
 /// against the official specification.
 #[derive(Debug, Clone)]
 pub struct OaFormatHeader {
-    /// Magic number (EXPERIMENTAL: assumed to be 0x6F610000)
+    /// Magic number (EXPERIMENTAL: assumed to be 0x6F61_0000)
     /// TODO: Verify against CEP-25 Big format specification
     #[allow(dead_code)]
     pub magic_number: u32,

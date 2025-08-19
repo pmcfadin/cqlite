@@ -755,11 +755,13 @@ impl SchemaExporter {
     }
     
     #[cfg(not(feature = "experimental"))]
+    #[allow(dead_code)]
     async fn export_json(&self, _schema: &SchemaInfo) -> Result<String> {
         Err(Error::unsupported_format("JSON export requires experimental feature"))
     }
     
     #[cfg(not(feature = "experimental"))]
+    #[allow(dead_code)]
     async fn export_json_with_config<T>(
         &self,
         _schema: &SchemaInfo,

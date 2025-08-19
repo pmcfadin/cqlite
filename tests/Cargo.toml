@@ -121,3 +121,4 @@ path = "cassandra5_simple_test.rs"
 default = []
 benchmarks = []
 ci_zero_tolerance = []
+experimental = []

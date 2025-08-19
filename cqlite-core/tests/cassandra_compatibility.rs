@@ -4,6 +4,8 @@
 //! that are compatible with Apache Cassandra, including format validation,
 //! compression support, and data integrity checks.
 
+#![cfg(feature = "experimental")]
+
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;

@@ -21,10 +21,13 @@ use std::sync::Arc;
 /// Validation framework for Cassandra compatibility
 pub struct CassandraValidationFramework {
     /// Platform abstraction
+    #[allow(dead_code)]
     platform: Arc<Platform>,
     /// Configuration
+    #[allow(dead_code)]
     config: Config,
     /// Test data directory
+    #[allow(dead_code)]
     test_dir: String,
 }
 
@@ -292,6 +295,7 @@ impl CassandraValidationFramework {
     }
     
     #[cfg(not(feature = "experimental"))]
+    #[allow(dead_code)]
     async fn test_compression_algorithm(&self, algorithm: &str) -> Result<TestResult> {
         Ok(TestResult::warning(
             "Compression testing requires experimental feature",

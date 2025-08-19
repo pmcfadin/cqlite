@@ -3,18 +3,18 @@
 
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "experimental")]
 use std::fs;
+#[cfg(feature = "experimental")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
-    Config, Result, RowKey, Value,
+    Config, Result,
     platform::Platform,
-    storage::sstable::{
-        reader::SSTableReader,
-        validation::{CassandraValidationFramework, TestResult, ValidationReport},
-    },
-    types::TableId,
+    storage::sstable::validation::{CassandraValidationFramework, TestResult, TestStatus, ValidationReport},
 };
+#[cfg(feature = "experimental")]
+use cqlite_core::{RowKey, Value, storage::sstable::reader::SSTableReader, types::TableId};
 #[cfg(feature = "experimental")]
 use cqlite_core::storage::sstable::writer::SSTableWriter;
 
@@ -23,8 +23,10 @@ use tempfile::TempDir;
 /// Comprehensive SSTable validator
 pub struct SSTableValidator {
     /// Platform abstraction
+    #[allow(dead_code)]
     platform: Arc<Platform>,
     /// Configuration
+    #[allow(dead_code)]
     config: Config,
     /// Test output directory
     test_dir: TempDir,
@@ -882,6 +884,93 @@ impl SSTableValidator {
     /// Get test directory path for external tools
     pub fn test_dir_path(&self) -> &Path {
         self.test_dir.path()
+    }
+
+    // Fallback methods when experimental feature is not enabled
+    #[cfg(not(feature = "experimental"))]
+    pub async fn new() -> Result<Self> {
+        Err(cqlite_core::error::Error::unsupported_format("SSTableValidator requires experimental feature"))
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_basic_write_read(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_data_type_serialization(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_complex_data_structures(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_file_format_compliance(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_compression_functionality(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_bloom_filter_functionality(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_index_functionality(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_edge_cases(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    async fn test_performance_characteristics(&self) -> Result<TestResult> {
+        Ok(TestResult {
+            status: TestStatus::Warning,
+            message: "Requires experimental feature".to_string(),
+            details: "SSTable writer functionality not available".to_string(),
+        })
     }
 }
 

@@ -204,6 +204,7 @@ async fn generate_cassandra_compatible_sstable(
 }
 
 /// Create simple user record
+#[cfg(feature = "experimental")]
 fn create_simple_user_record(id: i32, name: &str, age: i32, active: bool) -> Value {
     // Simple tuple representing: (id, name, age, active)
     Value::Tuple(vec![
@@ -215,6 +216,7 @@ fn create_simple_user_record(id: i32, name: &str, age: i32, active: bool) -> Val
 }
 
 /// Create complex record with Lists, Sets, Maps
+#[cfg(feature = "experimental")]
 fn create_complex_record_1() -> Value {
     let scores_list = Value::List(vec![
         Value::Integer(95),
@@ -254,6 +256,7 @@ fn create_complex_record_1() -> Value {
 }
 
 /// Create complex record with nested structures
+#[cfg(feature = "experimental")]
 fn create_complex_record_2() -> Value {
     let nested_list = Value::List(vec![
         Value::List(vec![Value::Integer(1), Value::Integer(2)]),
@@ -292,6 +295,7 @@ fn create_complex_record_2() -> Value {
 }
 
 /// Create complex record with UDTs and frozen types
+#[cfg(feature = "experimental")]
 fn create_complex_record_3() -> Value {
     let history_list = Value::List(vec![
         Value::Tuple(vec![
@@ -328,6 +332,7 @@ fn create_complex_record_3() -> Value {
 }
 
 /// Create address UDT value
+#[cfg(feature = "experimental")]
 fn create_address_udt(street: &str, city: &str, zipcode: i32, coordinates: (f64, f64)) -> Value {
     let fields = vec![
         UdtField {
@@ -359,6 +364,7 @@ fn create_address_udt(street: &str, city: &str, zipcode: i32, coordinates: (f64,
 }
 
 /// Create performance test record with reasonable complexity
+#[cfg(feature = "experimental")]
 fn create_performance_test_record(id: i32) -> Value {
     let scores = Value::List((1..=10).map(|i| Value::Integer(id % 100 + i)).collect());
 
@@ -388,6 +394,7 @@ fn create_performance_test_record(id: i32) -> Value {
 }
 
 /// Create realistic e-commerce test data
+#[cfg(feature = "experimental")]
 fn create_ecommerce_test_data() -> Vec<(TableId, RowKey, Value)> {
     vec![
         // Product table
@@ -431,6 +438,7 @@ fn create_ecommerce_test_data() -> Vec<(TableId, RowKey, Value)> {
     ]
 }
 
+#[cfg(feature = "experimental")]
 fn create_product_record(
     id: i32,
     name: &str,
@@ -465,6 +473,7 @@ fn create_product_record(
     ])
 }
 
+#[cfg(feature = "experimental")]
 fn create_order_record(id: i32, user_id: &str, items: Vec<(i32, i32)>, total: f64) -> Value {
     let order_items = Value::List(
         items
@@ -500,6 +509,7 @@ fn create_order_record(id: i32, user_id: &str, items: Vec<(i32, i32)>, total: f6
     ])
 }
 
+#[cfg(feature = "experimental")]
 fn create_user_record(id: i32, email: &str, name: &str, tier: &str) -> Value {
     let preferences = Value::Map(vec![
         (Value::Text("newsletter".to_string()), Value::Boolean(true)),
@@ -534,6 +544,7 @@ fn create_user_record(id: i32, email: &str, name: &str, tier: &str) -> Value {
 }
 
 /// Create proper Cassandra 5+ SSTable header
+#[cfg(feature = "experimental")]
 fn create_cassandra_5_header() -> SSTableHeader {
     use cqlite_core::parser::header::CassandraVersion;
     use std::collections::HashMap;
