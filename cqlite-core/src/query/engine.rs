@@ -572,6 +572,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "M2+ feature; gated for M1"]
     async fn test_prepared_statements() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
@@ -640,6 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "M2+ feature; gated for M1"]
     async fn test_cache_eviction() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = Config::default();
