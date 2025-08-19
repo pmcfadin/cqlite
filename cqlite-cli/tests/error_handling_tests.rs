@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::process::Command;
-use tempfile::TempDir;
+// use tempfile::TempDir; // TODO: Add TempDir tests
 
 /// Comprehensive error handling and edge case tests
 ///
@@ -13,11 +13,11 @@ use tempfile::TempDir;
 /// - Data corruption scenarios
 /// - Security and permission issues
 
-const CLI_BINARY: &str = "cqlite";
+const _CLI_BINARY: &str = "cqlite"; // TODO: Use in actual CLI tests
 
-fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
+fn _run_cli_command(args: &[&str]) -> Result<std::process::Output> {
     Command::new("cargo")
-        .args(&["run", "--bin", CLI_BINARY, "--"])
+        .args(&["run", "--bin", _CLI_BINARY, "--"])
         .args(args)
         .output()
         .map_err(|e| anyhow::anyhow!("Failed to run CLI command: {}", e))
