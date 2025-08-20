@@ -907,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_functionality() {
-        let mut suite = ComprehensiveSSTableTestSuite::new().await.unwrap();
+        let suite = ComprehensiveSSTableTestSuite::new().await.unwrap();
         let result = suite.test_reader_initialization().await;
         // Should pass even with mock data
         assert!(result.is_ok() || result.unwrap_err().to_string().contains("format"));

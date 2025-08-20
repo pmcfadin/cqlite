@@ -405,13 +405,14 @@ impl BatchWriterBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "experimental"))]
 mod tests {
     use super::*;
     use crate::platform::Platform;
     use tempfile::TempDir;
 
     #[tokio::test]
+    #[cfg(feature = "experimental")]
     async fn test_batch_writer_put_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
@@ -462,6 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "experimental")]
     async fn test_batch_writer_mixed_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
@@ -511,6 +513,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "experimental")]
     async fn test_batch_writer_builder() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();

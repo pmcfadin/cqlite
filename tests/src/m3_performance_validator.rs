@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 /// M3 Performance Validation Test Runner
 ///
 /// Comprehensive test runner for validating M3 complex type performance targets.

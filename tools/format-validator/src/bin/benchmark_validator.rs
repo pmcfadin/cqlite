@@ -2,8 +2,10 @@
 //!
 //! This binary provides benchmarking capabilities for format validation operations.
 
+#[cfg(feature = "benchmarks")]
 use std::time::Instant;
 
+#[cfg(feature = "benchmarks")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Benchmark Validator - Format Validation Benchmarks");
 
@@ -17,4 +19,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Benchmarks completed in: {:?}", duration);
 
     Ok(())
+}
+
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Run with: cargo run --features benchmarks --bin benchmark_validator");
+    std::process::exit(1);
 }

@@ -33,6 +33,7 @@ pub mod schema_integration;
 pub mod binary;
 
 // Re-export existing modules for backward compatibility
+#[cfg(feature = "benchmarks")]
 pub mod benchmarks;
 pub mod collection_benchmarks;
 #[cfg(test)]
@@ -108,6 +109,7 @@ pub use nom_backend::NomParser;
 pub use binary::{CQLiteParseError, ParseResult, SSTableParser};
 
 // Re-export binary format parsers for backward compatibility
+#[cfg(feature = "benchmarks")]
 pub use benchmarks::*;
 pub use complex_types::*;
 pub use enhanced_statistics_parser::*;
@@ -118,8 +120,11 @@ pub use validation::*;
 pub use vint::*;
 
 // Re-export M3 performance modules
+#[cfg(feature = "benchmarks")]
 pub use m3_performance_benchmarks::{M3PerformanceBenchmarks, PerformanceTargets};
+#[cfg(feature = "benchmarks")]
 pub use optimized_complex_types::OptimizedComplexTypeParser;
+#[cfg(feature = "benchmarks")]
 pub use performance_regression_framework::{PerformanceRegressionFramework, RegressionThresholds};
 
 use crate::error::Result;

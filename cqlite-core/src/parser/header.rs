@@ -341,9 +341,20 @@ pub fn parse_sstable_header(input: &[u8]) -> IResult<&[u8], SSTableHeader> {
 pub fn serialize_sstable_header(header: &SSTableHeader) -> Result<Vec<u8>> {
     let mut result = Vec::new();
 
-    // Magic and version - use the magic number for the detected Cassandra version
+    // Magic and version - handle different layouts for different Cassandra versions
     result.extend_from_slice(&header.cassandra_version.magic_number().to_be_bytes());
-    result.extend_from_slice(&header.version.to_be_bytes());
+    
+    match header.cassandra_version {
+        CassandraVersion::V5_0NewBig => {
+            // For 'nb' format, add 25 bytes of padding before the version
+            result.extend_from_slice(&[0u8; 25]);
+            result.extend_from_slice(&header.version.to_be_bytes());
+        }
+        _ => {
+            // Standard format: version immediately follows magic number
+            result.extend_from_slice(&header.version.to_be_bytes());
+        }
+    }
 
     // Table ID
     result.extend_from_slice(&header.table_id);
@@ -495,11 +506,16 @@ mod tests {
     fn test_magic_and_version_cassandra_5_newbig() {
         let mut data = Vec::new();
         data.extend_from_slice(&CassandraVersion::V5_0NewBig.magic_number().to_be_bytes());
+        // For 'nb' format, add 25 bytes of padding before the version
+        data.extend_from_slice(&[0u8; 25]);
         data.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
 
-        let (_, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
+        let (remaining, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
         assert_eq!(cassandra_version, CassandraVersion::V5_0NewBig);
         assert_eq!(version, SUPPORTED_VERSION);
+        
+        // Verify that parser consumed the expected amount of data
+        assert!(remaining.is_empty(), "Parser should consume all data, but {} bytes remain", remaining.len());
     }
 
     #[test]

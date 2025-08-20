@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance Regression Testing Framework
 //!
 //! This module provides comprehensive performance regression detection and tracking

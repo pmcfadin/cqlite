@@ -7,6 +7,7 @@
 use clap::{Arg, ArgMatches, Command};
 use cqlite_tests::cql_integration_tests::{CqlIntegrationTestSuite, IntegrationTestReport};
 use cqlite_tests::cql_parser_validation_suite::{CqlParserValidationSuite, ValidationReport};
+#[cfg(feature = "benchmarks")]
 use cqlite_tests::cql_performance_benchmarks::{BenchmarkReport, CqlPerformanceBenchmarkSuite};
 use std::fs;
 use std::iter;
@@ -48,6 +49,7 @@ pub struct TestRunnerConfig {
 pub struct ConsolidatedTestResults {
     pub validation_report: Option<ValidationReport>,
     pub integration_report: Option<IntegrationTestReport>,
+    #[cfg(feature = "benchmarks")]
     pub benchmark_report: Option<BenchmarkReport>,
     pub total_execution_time_ms: u64,
     pub overall_success: bool,
@@ -90,6 +92,7 @@ impl CqlValidationTestRunner {
         let mut results = ConsolidatedTestResults {
             validation_report: None,
             integration_report: None,
+            #[cfg(feature = "benchmarks")]
             benchmark_report: None,
             total_execution_time_ms: 0,
             overall_success: true,
@@ -143,27 +146,36 @@ impl CqlValidationTestRunner {
             }
         }
 
-        // Run performance benchmarks
+        // Run performance benchmarks (if benchmarks feature is enabled)
         if self.config.run_performance_benchmarks {
-            println!("\n⚡ Phase 3: Running CQL Performance Benchmarks");
-            println!("{}", iter::repeat('-').take(40).collect::<String>());
+            #[cfg(feature = "benchmarks")]
+            {
+                println!("\n⚡ Phase 3: Running CQL Performance Benchmarks");
+                println!("{}", iter::repeat('-').take(40).collect::<String>());
 
-            match self.run_performance_benchmarks().await {
-                Ok(report) => {
-                    let success = report.failed_benchmarks == 0;
-                    results.overall_success &= success;
-                    results.benchmark_report = Some(report);
+                match self.run_performance_benchmarks().await {
+                    Ok(report) => {
+                        let success = report.failed_benchmarks == 0;
+                        results.overall_success &= success;
+                        results.benchmark_report = Some(report);
 
-                    if success {
-                        println!("✅ Performance benchmarks completed successfully");
-                    } else {
-                        println!("❌ Performance benchmarks had failures");
+                        if success {
+                            println!("✅ Performance benchmarks completed successfully");
+                        } else {
+                            println!("❌ Performance benchmarks had failures");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Performance benchmarks failed to run: {}", e);
+                        results.overall_success = false;
                     }
                 }
-                Err(e) => {
-                    eprintln!("❌ Performance benchmarks failed to run: {}", e);
-                    results.overall_success = false;
-                }
+            }
+            #[cfg(not(feature = "benchmarks"))]
+            {
+                println!("\n⚡ Phase 3: Performance Benchmarks (Skipped - benchmarks feature disabled)");
+                println!("{}", iter::repeat('-').take(40).collect::<String>());
+                println!("ℹ️  Performance benchmarks require the 'benchmarks' feature to be enabled");
             }
         }
 
@@ -207,6 +219,7 @@ impl CqlValidationTestRunner {
     }
 
     /// Run performance benchmarks
+    #[cfg(feature = "benchmarks")]
     async fn run_performance_benchmarks(
         &self,
     ) -> Result<BenchmarkReport, Box<dyn std::error::Error>> {
@@ -243,6 +256,7 @@ impl CqlValidationTestRunner {
             println!("📄 Integration report saved to: {}", json_path.display());
         }
 
+        #[cfg(feature = "benchmarks")]
         if let Some(benchmark_report) = &results.benchmark_report {
             let json_path = Path::new(&self.config.output_dir).join("benchmark_report.json");
             benchmark_report.save_to_file(&json_path)?;
@@ -271,6 +285,7 @@ impl CqlValidationTestRunner {
                     execution_time_ms: r.total_execution_time_ms,
                     schemas_validated: r.total_tests, // Using total_tests as schemas_validated is not available
                 }),
+            #[cfg(feature = "benchmarks")]
             benchmark_summary: results.benchmark_report.as_ref().map(|r| BenchmarkSummary {
                 total_benchmarks: r.total_benchmarks,
                 passed_benchmarks: r.passed_benchmarks,
@@ -279,6 +294,8 @@ impl CqlValidationTestRunner {
                 execution_time_ms: r.total_execution_time_ms,
                 peak_memory_kb: r.peak_memory_usage_kb,
             }),
+            #[cfg(not(feature = "benchmarks"))]
+            benchmark_summary: None,
             overall_success: results.overall_success,
             total_execution_time_ms: results.total_execution_time_ms,
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -407,6 +424,7 @@ impl CqlValidationTestRunner {
             ));
         }
 
+        #[cfg(feature = "benchmarks")]
         if let Some(benchmark_report) = &results.benchmark_report {
             let benchmark_class = if benchmark_report.failed_benchmarks == 0 {
                 "success"
@@ -440,6 +458,7 @@ impl CqlValidationTestRunner {
             html.push_str(&self.generate_integration_section(integration_report));
         }
 
+        #[cfg(feature = "benchmarks")]
         if let Some(benchmark_report) = &results.benchmark_report {
             html.push_str(&self.generate_benchmark_section(benchmark_report));
         }
@@ -562,6 +581,7 @@ impl CqlValidationTestRunner {
     }
 
     /// Generate benchmark section for HTML report
+    #[cfg(feature = "benchmarks")]
     fn generate_benchmark_section(&self, report: &BenchmarkReport) -> String {
         let mut html = String::from(
             r#"        <div class="section">
@@ -645,6 +665,7 @@ impl CqlValidationTestRunner {
             );
         }
 
+        #[cfg(feature = "benchmarks")]
         if let Some(benchmark_report) = &results.benchmark_report {
             println!(
                 "Performance Benchmarks: {}/{} passed",

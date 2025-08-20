@@ -272,9 +272,9 @@ impl ByteComparableEncoder {
 
         // Use two's complement transformation for proper ordering
         let unsigned = if value >= 0 {
-            (value as u32) + 0x80000000
+            (value as u32) + 0x8000_0000
         } else {
-            (value as u32) ^ 0xFFFFFFFF
+            (value as u32) ^ 0xFFFF_FFFF
         };
 
         self.buffer.extend_from_slice(&unsigned.to_be_bytes());
@@ -287,9 +287,9 @@ impl ByteComparableEncoder {
 
         // Use two's complement transformation for proper ordering
         let unsigned = if value >= 0 {
-            (value as u64) + 0x8000000000000000
+            (value as u64) + 0x8000_0000_0000_0000
         } else {
-            (value as u64) ^ 0xFFFFFFFFFFFFFFFF
+            (value as u64) ^ 0xFFFF_FFFF_FFFF_FFFF
         };
 
         self.buffer.extend_from_slice(&unsigned.to_be_bytes());
@@ -310,9 +310,9 @@ impl ByteComparableEncoder {
 
         // Transform for proper ordering (timestamps can be negative)
         let unsigned = if timestamp >= 0 {
-            (timestamp as u64) + 0x8000000000000000
+            (timestamp as u64) + 0x8000_0000_0000_0000
         } else {
-            (timestamp as u64) ^ 0xFFFFFFFFFFFFFFFF
+            (timestamp as u64) ^ 0xFFFF_FFFF_FFFF_FFFF
         };
 
         self.buffer.extend_from_slice(&unsigned.to_be_bytes());
@@ -343,9 +343,9 @@ impl ByteComparableEncoder {
         let bits = value.to_bits();
 
         // Adjust for proper ordering of IEEE 754 floats
-        let adjusted = if (bits & 0x80000000) == 0 {
+        let adjusted = if (bits & 0x8000_0000) == 0 {
             // Positive: add sign bit offset
-            bits | 0x80000000
+            bits | 0x8000_0000
         } else {
             // Negative: flip all bits
             !bits
@@ -370,9 +370,9 @@ impl ByteComparableEncoder {
         let bits = value.to_bits();
 
         // Adjust for proper ordering of IEEE 754 floats
-        let adjusted = if (bits & 0x8000000000000000) == 0 {
+        let adjusted = if (bits & 0x8000_0000_0000_0000) == 0 {
             // Positive: add sign bit offset
-            bits | 0x8000000000000000
+            bits | 0x8000_0000_0000_0000
         } else {
             // Negative: flip all bits
             !bits

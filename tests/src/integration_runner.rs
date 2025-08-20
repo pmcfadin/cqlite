@@ -4,6 +4,7 @@
 //! interface for running comprehensive Cassandra 5+ validation.
 
 use crate::compatibility_framework::{CompatibilityTestConfig, CompatibilityTestFramework};
+#[cfg(feature = "benchmarks")]
 use crate::performance_benchmarks::{BenchmarkConfig, PerformanceBenchmarks};
 use crate::sstable_format_tests::SSTableFormatTests;
 use crate::type_system_tests::TypeSystemTests;
@@ -75,7 +76,7 @@ impl IntegrationTestRunner {
         let mut total_tests = 0;
         let mut passed_tests = 0;
         let mut compatibility_scores = Vec::new();
-        let mut performance_scores = Vec::new();
+        let performance_scores = Vec::new();
         let mut recommendations = Vec::new();
 
         // Run compatibility framework tests
@@ -149,6 +150,7 @@ impl IntegrationTestRunner {
         }
 
         // Run performance benchmarks
+        #[cfg(feature = "benchmarks")]
         if self.config.run_performance_benchmarks {
             println!("🚀 Running Performance Benchmarks...");
             match self.run_performance_benchmarks().await {
@@ -265,6 +267,7 @@ impl IntegrationTestRunner {
     }
 
     /// Run performance benchmarks
+    #[cfg(feature = "benchmarks")]
     async fn run_performance_benchmarks(&self) -> Result<(usize, f64)> {
         let mut config = BenchmarkConfig::default();
         if self.config.run_stress_tests {

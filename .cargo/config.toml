@@ -1,11 +1,12 @@
-[build]
-rustflags = ["--cfg", "coverage_nightly"]
+# Temporarily disabled coverage settings that cause compilation hang
+# [build]
+# rustflags = ["--cfg", "coverage_nightly"]
 
-[env]
-# Environment variables for coverage
-CARGO_INCREMENTAL = "0"
-RUSTFLAGS = "-Cinstrument-coverage"
-LLVM_PROFILE_FILE = "cargo-test-%p-%m.profraw"
+# [env]
+# # Environment variables for coverage
+# CARGO_INCREMENTAL = "0"
+# RUSTFLAGS = "-Cinstrument-coverage"
+# LLVM_PROFILE_FILE = "cargo-test-%p-%m.profraw"
 
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]

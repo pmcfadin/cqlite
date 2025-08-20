@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Compression Performance Benchmarks for Cassandra 5+
 //!
 //! This module focuses on benchmarking compression performance for LZ4, Snappy, and Deflate
@@ -616,8 +618,9 @@ mod tests {
         let test_data = generate_test_data(1.0); // 1MB test data
         let targets = PRDTargets::default();
 
+        // Use Lz4 instead of Snappy since it's enabled by default
         let result = benchmarks
-            .benchmark_roundtrip(&test_data, CompressionAlgorithm::Snappy, 1.0, &targets)
+            .benchmark_roundtrip(&test_data, CompressionAlgorithm::Lz4, 1.0, &targets)
             .await;
 
         assert!(result.is_ok());

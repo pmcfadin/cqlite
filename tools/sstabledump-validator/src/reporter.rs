@@ -32,14 +32,7 @@ pub enum ValidationStatus {
     Failed,       // Critical differences or errors
 }
 
-#[derive(Debug)]
-pub enum ReportFormat {
-    Text,
-    Json,
-    Csv,
-    Html,
-    Junit, // For CI integration
-}
+// ReportFormat removed - unused enum
 
 impl ValidationReport {
     pub fn new(
@@ -112,11 +105,13 @@ impl ValidationReport {
         self.comparison_result.differences.len()
     }
 
+    #[allow(dead_code)]
     pub fn should_fail_ci(&self) -> bool {
         self.fail_on_diff && self.has_differences()
     }
 
-    pub fn _format_as_text(&self) -> String {
+    #[allow(dead_code)]
+    pub fn format_as_text(&self) -> String {
         let mut output = String::new();
 
         // Header
@@ -198,7 +193,7 @@ impl ValidationReport {
                 output.push('\n');
 
                 for (i, diff) in critical_diffs.iter().enumerate() {
-                    output.push_str(&format!("{}. {}\n", i + 1, self.format_difference(diff)));
+                    output.push_str(&format!("{}. {}\n", i + 1, self._format_difference(diff)));
                 }
                 output.push('\n');
             }
@@ -242,10 +237,6 @@ impl ValidationReport {
         output
     }
 
-    /// Public wrapper for backward compatibility
-    pub fn format_as_text(&self) -> String {
-        self._format_as_text()
-    }
 
     pub fn _format_as_json(&self) -> Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
@@ -333,7 +324,7 @@ impl ValidationReport {
         output
     }
 
-    fn format_difference(&self, diff: &CellDifference) -> String {
+    fn _format_difference(&self, diff: &CellDifference) -> String {
         let location = format!(
             "{}/{}/{}",
             diff.location.partition_key,

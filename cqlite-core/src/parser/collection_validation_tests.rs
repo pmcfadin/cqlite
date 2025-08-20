@@ -97,8 +97,9 @@ mod cassandra_format_tests {
         // Element type
         data.push(CqlTypeId::Int as u8);
 
-        // Elements (int elements are fixed 4 bytes each)
+        // Elements (int elements are 4 bytes each with length prefix)
         for &i in &test_ints {
+            data.extend_from_slice(&encode_vint(4)); // Length of int32
             data.extend_from_slice(&i.to_be_bytes());
         }
 
@@ -138,7 +139,8 @@ mod cassandra_format_tests {
             data.extend_from_slice(&encode_vint(key.len() as i64));
             data.extend_from_slice(key.as_bytes());
 
-            // Value (fixed 4-byte int)
+            // Value (4-byte int with length prefix)
+            data.extend_from_slice(&encode_vint(4)); // Length of int32
             data.extend_from_slice(&value.to_be_bytes());
         }
 

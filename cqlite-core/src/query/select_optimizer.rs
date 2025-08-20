@@ -190,8 +190,13 @@ impl SelectOptimizer {
             },
         };
 
-        // Step 1: Analyze table metadata
-        let table_id = self.extract_table_id(&statement.from_clause)?;
+        // Step 1: Handle queries without FROM clause
+        if statement.from_clause.is_none() {
+            // For constant queries like SELECT 1, no table scanning needed
+            return Ok(plan);
+        }
+
+        let table_id = self.extract_table_id(statement.from_clause.as_ref().unwrap())?;
         let table_stats = self.get_table_statistics(&table_id).await?;
 
         // Step 2: Analyze WHERE clause for predicate pushdown

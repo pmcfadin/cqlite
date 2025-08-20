@@ -11,6 +11,7 @@
 //! 8. Tombstone and deletion handling
 
 
+#[cfg(feature = "benchmarks")]
 use crate::performance_benchmarks::{BenchmarkConfig, PerformanceBenchmarks};
 use std::collections::HashMap;
 use std::fs;
@@ -173,6 +174,7 @@ impl ComprehensiveIntegrationTestSuite {
         }
 
         // Phase 8: Performance Tests
+        #[cfg(feature = "benchmarks")]
         if self.config.test_performance {
             self.run_performance_tests().await?;
         }
@@ -708,6 +710,7 @@ impl ComprehensiveIntegrationTestSuite {
     }
 
     /// Test performance under realistic conditions
+    #[cfg(feature = "benchmarks")]
     async fn run_performance_tests(&mut self) -> Result<()> {
         println!("🚀 Phase 8: Performance Tests");
         println!("{}", "-".repeat(50));

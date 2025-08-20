@@ -35,3 +35,8 @@ path = "proof-of-concept/src/bin/sstable_generator.rs"
 [[bin]]
 name = "vint_demo"
 path = "proof-of-concept/src/bin/vint_demo.rs"
+
+[features]
+default = []
+benchmarks = []
+experimental = []

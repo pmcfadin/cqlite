@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Memory Usage Benchmarks for Cassandra 5+ Large SSTable Files
 //!
 //! This module focuses on validating memory usage for large SSTable files (up to 1GB)

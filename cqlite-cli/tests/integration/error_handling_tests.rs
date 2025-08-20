@@ -21,7 +21,7 @@ async fn test_missing_required_arguments() -> TestResult<()> {
     let runner = CliTestRunner::new(container);
     
     // Test read command without required arguments
-    runner.run(&["read"])?
+    runner.run(&["read-sstable"])?
         .assert_failure()?
         .stderr_contains("required")?;
     
@@ -40,7 +40,7 @@ async fn test_invalid_file_paths() -> TestResult<()> {
     
     // Test read command with non-existent SSTable file
     runner.run(&[
-        "read",
+        "read-sstable",
         "/non/existent/sstable/path",
         "--schema",
         "/non/existent/schema/path",
@@ -66,7 +66,7 @@ async fn test_invalid_command_line_options() -> TestResult<()> {
         .stderr_contains("invalid")?;
     
     // Test invalid numeric values
-    runner.run(&["read", "dummy", "--schema", "dummy", "--limit", "not_a_number"])?
+    runner.run(&["read-sstable", "dummy", "--schema", "dummy", "--limit", "not_a_number"])?
         .assert_failure()?;
     
     Ok(())
@@ -113,7 +113,7 @@ async fn test_schema_validation_errors() -> TestResult<()> {
     
     // Test read command with invalid schema
     runner.run(&[
-        "read",
+        "read-sstable",
         dummy_sstable_path.to_str().unwrap(),
         "--schema",
         invalid_schema_path.to_str().unwrap(),
@@ -136,7 +136,7 @@ async fn test_memory_limit_errors() -> TestResult<()> {
     
     // Test with extremely low memory limit (should fail gracefully)
     runner.run(&[
-        "read",
+        "read-sstable",
         dummy_sstable_path.to_str().unwrap(),
         "--schema",
         dummy_schema_path.to_str().unwrap(),
@@ -189,7 +189,7 @@ async fn test_timeout_error_handling() -> TestResult<()> {
     
     // This is a basic test - actual timeout behavior would depend on implementation
     let result = runner.run(&[
-        "read",
+        "read-sstable",
         dummy_sstable_path.to_str().unwrap(),
         "--schema",
         dummy_schema_path.to_str().unwrap(),
@@ -222,7 +222,7 @@ async fn test_resource_exhaustion_handling() -> TestResult<()> {
     
     // Test with minimal resource limits
     let result = runner.run(&[
-        "read",
+        "read-sstable",
         large_dummy_path.to_str().unwrap(),
         "--schema",
         dummy_schema_path.to_str().unwrap(),

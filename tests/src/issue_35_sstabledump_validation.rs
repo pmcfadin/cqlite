@@ -10,8 +10,9 @@ use cqlite_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
+#[allow(unused_imports)]
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
@@ -510,8 +511,8 @@ impl SSTableDumpParityValidator {
     /// Validate Summary.db parity against sstabledump
     pub async fn validate_summary_parity(
         &self,
-        reader: &SSTableReader,
-        sstabledump_output: &SSTableDumpOutput,
+        _reader: &SSTableReader,
+        _sstabledump_output: &SSTableDumpOutput,
     ) -> Result<ParityValidationResult> {
         println!("🔍 Validating Summary.db parity...");
         
@@ -522,7 +523,7 @@ impl SSTableDumpParityValidator {
             details: HashMap::new(),
         };
         
-        if let Some(_sstabledump_summary) = &sstabledump_output.summary {
+        if let Some(_sstabledump_summary) = &_sstabledump_output.summary {
             // TODO: Summary.db parity validation requires access to internal reader structure
             // Test 1: Token range validation
             // let our_entries = summary_reader.get_entries(); // TODO: Need to implement access to summary reader
@@ -621,8 +622,8 @@ impl SSTableDumpParityValidator {
     /// Validate Statistics.db parity against sstabledump
     pub async fn validate_statistics_parity(
         &self,
-        reader: &SSTableReader,
-        sstabledump_output: &SSTableDumpOutput,
+        _reader: &SSTableReader,
+        _sstabledump_output: &SSTableDumpOutput,
     ) -> Result<ParityValidationResult> {
         println!("🔍 Validating Statistics.db parity...");
         

@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Zero-Copy Deserialization Benchmarks for Cassandra 5+
 //!
 //! This module benchmarks zero-copy deserialization performance for Cassandra 5+

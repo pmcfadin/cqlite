@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Cassandra 5+ Performance Benchmarking Suite
 //!
 //! This module provides comprehensive performance benchmarking specifically for Cassandra 5+

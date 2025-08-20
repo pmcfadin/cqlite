@@ -406,47 +406,274 @@ impl IdentifierCollector {
 
 impl CqlVisitor<()> for IdentifierCollector {
     fn visit_statement(&mut self, statement: &CqlStatement) -> Result<()> {
-        DefaultVisitor.visit_statement(statement)
+        match statement {
+            CqlStatement::Select(select) => self.visit_select(select),
+            CqlStatement::Insert(insert) => self.visit_insert(insert),
+            CqlStatement::Update(update) => self.visit_update(update),
+            CqlStatement::Delete(delete) => self.visit_delete(delete),
+            CqlStatement::CreateTable(create) => self.visit_create_table(create),
+            CqlStatement::DropTable(drop) => self.visit_drop_table(drop),
+            CqlStatement::CreateIndex(create) => self.visit_create_index(create),
+            CqlStatement::AlterTable(alter) => self.visit_alter_table(alter),
+            _ => Ok(()),
+        }
     }
 
     fn visit_select(&mut self, select: &CqlSelect) -> Result<()> {
-        DefaultVisitor.visit_select(select)
+        // Visit select items
+        for item in &select.select_list {
+            match item {
+                CqlSelectItem::Expression { expression, .. } => {
+                    self.visit_expression(expression)?;
+                }
+                CqlSelectItem::Function { args, .. } => {
+                    for arg in args {
+                        self.visit_expression(arg)?;
+                    }
+                }
+                CqlSelectItem::Wildcard => {}
+            }
+        }
+        
+        // Visit table reference - collect table name as identifier
+        self.visit_identifier(&select.from.name)?;
+        if let Some(keyspace) = &select.from.keyspace {
+            self.visit_identifier(keyspace)?;
+        }
+        
+        // Visit WHERE clause
+        if let Some(where_clause) = &select.where_clause {
+            self.visit_expression(where_clause)?;
+        }
+        
+        Ok(())
     }
 
     fn visit_insert(&mut self, insert: &CqlInsert) -> Result<()> {
-        DefaultVisitor.visit_insert(insert)
+        // Visit table name
+        self.visit_identifier(&insert.table.name)?;
+        if let Some(keyspace) = &insert.table.keyspace {
+            self.visit_identifier(keyspace)?;
+        }
+        
+        // Visit column names
+        for column in &insert.columns {
+            self.visit_identifier(column)?;
+        }
+        
+        // Visit values
+        match &insert.values {
+            CqlInsertValues::Values(values) => {
+                for value in values {
+                    self.visit_expression(value)?;
+                }
+            }
+            CqlInsertValues::Json(_) => {} // JSON doesn't contain identifiers
+        }
+        
+        Ok(())
     }
 
     fn visit_update(&mut self, update: &CqlUpdate) -> Result<()> {
-        DefaultVisitor.visit_update(update)
+        // Visit table name
+        self.visit_identifier(&update.table.name)?;
+        if let Some(keyspace) = &update.table.keyspace {
+            self.visit_identifier(keyspace)?;
+        }
+        
+        // Visit assignments
+        for assignment in &update.assignments {
+            self.visit_identifier(&assignment.column)?;
+            self.visit_expression(&assignment.value)?;
+        }
+        
+        // Visit WHERE clause
+        self.visit_expression(&update.where_clause)?;
+        
+        Ok(())
     }
 
     fn visit_delete(&mut self, delete: &CqlDelete) -> Result<()> {
-        DefaultVisitor.visit_delete(delete)
+        // Visit table name
+        self.visit_identifier(&delete.table.name)?;
+        if let Some(keyspace) = &delete.table.keyspace {
+            self.visit_identifier(keyspace)?;
+        }
+        
+        // Visit WHERE clause
+        self.visit_expression(&delete.where_clause)?;
+        
+        Ok(())
     }
 
     fn visit_create_table(&mut self, create: &CqlCreateTable) -> Result<()> {
-        DefaultVisitor.visit_create_table(create)
+        // Visit table name
+        self.visit_identifier(&create.table.name)?;
+        if let Some(keyspace) = &create.table.keyspace {
+            self.visit_identifier(keyspace)?;
+        }
+        
+        // Visit column definitions
+        for column in &create.columns {
+            self.visit_identifier(&column.name)?;
+            self.visit_data_type(&column.data_type)?;
+        }
+        
+        // Visit primary key
+        for pk_col in &create.primary_key.partition_key {
+            self.visit_identifier(pk_col)?;
+        }
+        for ck_col in &create.primary_key.clustering_key {
+            self.visit_identifier(ck_col)?;
+        }
+        
+        Ok(())
     }
 
     fn visit_drop_table(&mut self, drop: &CqlDropTable) -> Result<()> {
-        DefaultVisitor.visit_drop_table(drop)
+        self.visit_identifier(&drop.table.name)?;
+        if let Some(keyspace) = &drop.table.keyspace {
+            self.visit_identifier(keyspace)?;
+        }
+        Ok(())
     }
 
     fn visit_create_index(&mut self, create: &CqlCreateIndex) -> Result<()> {
-        DefaultVisitor.visit_create_index(create)
+        if let Some(index_name) = &create.name {
+            self.visit_identifier(index_name)?;
+        }
+        self.visit_identifier(&create.table.name)?;
+        if let Some(keyspace) = &create.table.keyspace {
+            self.visit_identifier(keyspace)?;
+        }
+        // Visit indexed columns
+        for column in &create.columns {
+            match column {
+                CqlIndexColumn::Column(identifier) => {
+                    self.visit_identifier(identifier)?;
+                }
+                CqlIndexColumn::Keys(identifier) => {
+                    self.visit_identifier(identifier)?;
+                }
+                CqlIndexColumn::Values(identifier) => {
+                    self.visit_identifier(identifier)?;
+                }
+                CqlIndexColumn::Entries(identifier) => {
+                    self.visit_identifier(identifier)?;
+                }
+                CqlIndexColumn::Full(identifier) => {
+                    self.visit_identifier(identifier)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn visit_alter_table(&mut self, alter: &CqlAlterTable) -> Result<()> {
-        DefaultVisitor.visit_alter_table(alter)
+        self.visit_identifier(&alter.table.name)?;
+        if let Some(keyspace) = &alter.table.keyspace {
+            self.visit_identifier(keyspace)?;
+        }
+        
+        match &alter.operation {
+            CqlAlterTableOp::AddColumn(column_def) => {
+                self.visit_identifier(&column_def.name)?;
+                self.visit_data_type(&column_def.data_type)?;
+            }
+            CqlAlterTableOp::DropColumn(column_name) => {
+                self.visit_identifier(column_name)?;
+            }
+            CqlAlterTableOp::AlterColumn { column, new_type } => {
+                self.visit_identifier(column)?;
+                self.visit_data_type(new_type)?;
+            }
+            CqlAlterTableOp::RenameColumn { old_name, new_name } => {
+                self.visit_identifier(old_name)?;
+                self.visit_identifier(new_name)?;
+            }
+            _ => {} // Other operations don't contain identifiers we care about
+        }
+        
+        Ok(())
     }
 
     fn visit_data_type(&mut self, data_type: &CqlDataType) -> Result<()> {
-        DefaultVisitor.visit_data_type(data_type)
+        match data_type {
+            CqlDataType::List(inner) | CqlDataType::Set(inner) | CqlDataType::Frozen(inner) => {
+                self.visit_data_type(inner)?;
+            }
+            CqlDataType::Map(key, value) => {
+                self.visit_data_type(key)?;
+                self.visit_data_type(value)?;
+            }
+            CqlDataType::Udt(name) => {
+                self.visit_identifier(name)?;
+            }
+            _ => {} // Primitive types don't contain identifiers
+        }
+        Ok(())
     }
 
     fn visit_expression(&mut self, expression: &CqlExpression) -> Result<()> {
-        DefaultVisitor.visit_expression(expression)
+        match expression {
+            CqlExpression::Column(identifier) => {
+                self.visit_identifier(identifier)?;
+            }
+            CqlExpression::Literal(literal) => {
+                self.visit_literal(literal)?;
+            }
+            CqlExpression::Function { name, args } => {
+                self.visit_identifier(name)?;
+                for arg in args {
+                    self.visit_expression(arg)?;
+                }
+            }
+            CqlExpression::Binary { left, right, .. } => {
+                self.visit_expression(left)?;
+                self.visit_expression(right)?;
+            }
+            CqlExpression::Unary { operand, .. } => {
+                self.visit_expression(operand)?;
+            }
+            CqlExpression::In { expression, values } => {
+                self.visit_expression(expression)?;
+                for value in values {
+                    self.visit_expression(value)?;
+                }
+            }
+            CqlExpression::Contains { column, value } => {
+                self.visit_identifier(column)?;
+                self.visit_expression(value)?;
+            }
+            CqlExpression::ContainsKey { column, key } => {
+                self.visit_identifier(column)?;
+                self.visit_expression(key)?;
+            }
+            CqlExpression::CollectionAccess { collection, index } => {
+                self.visit_expression(collection)?;
+                self.visit_expression(index)?;
+            }
+            CqlExpression::FieldAccess { object, field } => {
+                self.visit_expression(object)?;
+                self.visit_identifier(field)?;
+            }
+            CqlExpression::Case { when_clauses, else_clause } => {
+                for when_clause in when_clauses {
+                    self.visit_expression(&when_clause.condition)?;
+                    self.visit_expression(&when_clause.result)?;
+                }
+                if let Some(else_expr) = else_clause {
+                    self.visit_expression(else_expr)?;
+                }
+            }
+            CqlExpression::Cast { expression, target_type } => {
+                self.visit_expression(expression)?;
+                self.visit_data_type(target_type)?;
+            }
+            CqlExpression::Parameter(_) => {} // Parameters don't contain identifiers
+            CqlExpression::NamedParameter(_) => {} // Named parameters don't contain identifiers we collect
+        }
+        Ok(())
     }
 
     fn visit_identifier(&mut self, identifier: &CqlIdentifier) -> Result<()> {
@@ -454,8 +681,9 @@ impl CqlVisitor<()> for IdentifierCollector {
         Ok(())
     }
 
-    fn visit_literal(&mut self, literal: &CqlLiteral) -> Result<()> {
-        DefaultVisitor.visit_literal(literal)
+    fn visit_literal(&mut self, _literal: &CqlLiteral) -> Result<()> {
+        // Literals don't contain identifiers
+        Ok(())
     }
 }
 

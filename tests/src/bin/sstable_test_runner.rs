@@ -10,9 +10,11 @@ use cqlite_core::Result;
 // Import our test modules
 use cqlite_tests::{
     format_verifier::{SSTableFormatVerifier, verify_sstable_format},
-    sstable_benchmark::{BenchmarkConfig, SSTableBenchmark, run_comprehensive_benchmark},
     sstable_validator::{SSTableValidator, run_validation},
 };
+
+#[cfg(feature = "benchmarks")]
+use cqlite_tests::sstable_benchmark::{BenchmarkConfig, SSTableBenchmark, run_comprehensive_benchmark};
 
 #[tokio::main]
 async fn main() {
@@ -36,8 +38,14 @@ async fn run_tests() -> Result<()> {
             run_validation().await?;
         }
         Some("benchmark") => {
-            println!("⚡ Running performance benchmarks...");
-            run_comprehensive_benchmark().await?;
+            #[cfg(feature = "benchmarks")] {
+                println!("⚡ Running performance benchmarks...");
+                run_comprehensive_benchmark().await?;
+            }
+            #[cfg(not(feature = "benchmarks"))] {
+                println!("⚡ Performance benchmarks (Skipped - benchmarks feature disabled)");
+                println!("ℹ️  Performance benchmarks require the 'benchmarks' feature to be enabled");
+            }
         }
         Some("format") => {
             if let Some(file_path) = args.get(2) {
@@ -136,6 +144,7 @@ async fn run_comprehensive_tests() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "benchmarks")]
 async fn run_format_verification_tests() -> Result<()> {
     println!("Creating test SSTable files for format verification...");
 
@@ -174,6 +183,14 @@ async fn run_format_verification_tests() -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "benchmarks"))]
+async fn run_format_verification_tests() -> Result<()> {
+    println!("Format verification tests (Skipped - benchmarks feature disabled)");
+    println!("ℹ️  Benchmark-based format tests require the 'benchmarks' feature to be enabled");
+    Ok(())
+}
+
+#[cfg(feature = "benchmarks")]
 async fn run_performance_tests() -> Result<()> {
     println!("Running performance benchmarks with conservative settings...");
 
@@ -208,6 +225,13 @@ async fn run_performance_tests() -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "benchmarks"))]
+async fn run_performance_tests() -> Result<()> {
+    println!("Performance tests (Skipped - benchmarks feature disabled)");
+    println!("ℹ️  Performance benchmarks require the 'benchmarks' feature to be enabled");
+    Ok(())
+}
+
 async fn run_edge_case_tests() -> Result<()> {
     println!("Testing edge cases and error conditions...");
 
@@ -233,14 +257,19 @@ async fn run_edge_case_tests() -> Result<()> {
                 // Test handled in validator
             }
             "many_small_entries" => {
-                // Test with many small entries
-                let benchmark = SSTableBenchmark::new().await?;
-                let config = BenchmarkConfig {
-                    entry_count: 10_000,
-                    value_size: 32,
-                    ..Default::default()
-                };
-                let _result = benchmark.run_benchmark(config).await?;
+                #[cfg(feature = "benchmarks")] {
+                    // Test with many small entries
+                    let benchmark = SSTableBenchmark::new().await?;
+                    let config = BenchmarkConfig {
+                        entry_count: 10_000,
+                        value_size: 32,
+                        ..Default::default()
+                    };
+                    let _result = benchmark.run_benchmark(config).await?;
+                }
+                #[cfg(not(feature = "benchmarks"))] {
+                    println!("   (Skipped - requires benchmarks feature)");
+                }
             }
             "unicode_data" => {
                 // Test handled in validator
@@ -294,43 +323,50 @@ pub async fn create_test_data() -> Result<()> {
     println!("📝 Creating comprehensive test data...");
 
     let _validator = SSTableValidator::new().await?;
-    let benchmark = SSTableBenchmark::new().await?;
+    
+    #[cfg(feature = "benchmarks")] {
+        let benchmark = SSTableBenchmark::new().await?;
 
-    // Create different types of test files
-    let test_scenarios = vec![
-        (
-            "small_compressed",
-            BenchmarkConfig {
-                entry_count: 100,
-                value_size: 64,
-                enable_compression: true,
-                ..Default::default()
-            },
-        ),
-        (
-            "large_uncompressed",
-            BenchmarkConfig {
-                entry_count: 1000,
-                value_size: 2048,
-                enable_compression: false,
-                ..Default::default()
-            },
-        ),
-        (
-            "many_small",
-            BenchmarkConfig {
-                entry_count: 10000,
-                value_size: 16,
-                enable_compression: true,
-                ..Default::default()
-            },
-        ),
-    ];
+        // Create different types of test files
+        let test_scenarios = vec![
+            (
+                "small_compressed",
+                BenchmarkConfig {
+                    entry_count: 100,
+                    value_size: 64,
+                    enable_compression: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "large_uncompressed",
+                BenchmarkConfig {
+                    entry_count: 1000,
+                    value_size: 2048,
+                    enable_compression: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "many_small",
+                BenchmarkConfig {
+                    entry_count: 10000,
+                    value_size: 16,
+                    enable_compression: true,
+                    ..Default::default()
+                },
+            ),
+        ];
 
-    for (name, config) in test_scenarios {
-        println!("Creating {} test file...", name);
-        let _result = benchmark.run_benchmark(config).await?;
-        println!("✅ {} test file created", name);
+        for (name, config) in test_scenarios {
+            println!("Creating {} test file...", name);
+            let _result = benchmark.run_benchmark(config).await?;
+            println!("✅ {} test file created", name);
+        }
+    }
+    #[cfg(not(feature = "benchmarks"))] {
+        println!("Test data creation (Skipped - benchmarks feature disabled)");
+        println!("ℹ️  Benchmark-based test data creation requires the 'benchmarks' feature to be enabled");
     }
 
     Ok(())

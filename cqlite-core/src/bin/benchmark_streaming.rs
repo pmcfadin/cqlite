@@ -3,12 +3,17 @@
 //! This binary tests the streaming SSTable reader performance optimizations
 //! using real Cassandra 5 SSTable files from the test environment.
 
+#[cfg(feature = "benchmarks")]
 use std::env;
+#[cfg(feature = "benchmarks")]
 use std::path::PathBuf;
+#[cfg(feature = "benchmarks")]
 use std::process;
 
+#[cfg(feature = "benchmarks")]
 use cqlite_core::storage::sstable::performance_benchmarks::PerformanceBenchmarks;
 
+#[cfg(feature = "benchmarks")]
 #[tokio::main]
 async fn main() {
     // Parse command line arguments
@@ -76,6 +81,7 @@ async fn main() {
     }
 }
 
+#[cfg(feature = "benchmarks")]
 async fn export_results_to_json(
     results: &[cqlite_core::storage::sstable::performance_benchmarks::BenchmarkResults],
 ) {
@@ -143,4 +149,11 @@ async fn export_results_to_json(
     } else {
         println!("⚠️  Failed to export results to JSON");
     }
+}
+
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Run with: cargo run --features benchmarks --bin benchmark_streaming");
+    std::process::exit(1);
 }

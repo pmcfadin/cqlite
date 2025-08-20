@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Performance Monitoring and Baseline System
 //!
 //! Provides continuous performance monitoring and regression detection

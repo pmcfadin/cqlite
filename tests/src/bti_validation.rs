@@ -199,12 +199,23 @@ impl BtiValidationSuite {
         };
 
         fn parse_compression_info(input: &[u8]) -> IResult<&[u8], CompressionInfo> {
-            use nom::number::complete::be_u32;
+            use nom::{bytes::complete::take, number::complete::be_u32};
+            
+            // Parse algorithm name
+            let (input, algorithm_len) = be_u32(input)?;
+            let (input, algorithm_bytes) = take(algorithm_len)(input)?;
+            let algorithm = String::from_utf8_lossy(algorithm_bytes).into_owned();
+            
+            // Parse chunk size
             let (input, chunk_size) = be_u32(input)?;
+            
+            // Parse parameters count (currently ignored)
+            let (input, _params_count) = be_u32(input)?;
+            
             Ok((
                 input,
                 CompressionInfo {
-                    algorithm: "NONE".to_string(),
+                    algorithm,
                     chunk_size,
                     parameters: std::collections::HashMap::new(),
                 },
@@ -264,31 +275,34 @@ impl BtiValidationSuite {
         };
 
         fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {
-            use nom::number::complete::be_u8;
-            let (input, len) = be_u8(input)?;
+            use nom::number::complete::be_u32;
+            let (input, len) = be_u32(input)?;
             Ok((input, len as usize))
         }
 
-        fn parse_bti_entry(input: &[u8]) -> IResult<&[u8], BtiEntry> {
-            let (input, key_len) = parse_vint_length(input)?;
-            let (input, key) = take(key_len)(input)?;
-            let (input, offset) = be_u64(input)?;
-            let (input, length) = if key_len > 0 {
-                // Simplified check for leaf vs branch
-                let (input, len) = be_u32(input)?;
-                (input, Some(len))
-            } else {
-                (input, None)
-            };
+        fn parse_bti_entry(node_type: BtiNodeType) -> impl Fn(&[u8]) -> IResult<&[u8], BtiEntry> {
+            move |input: &[u8]| {
+                let (input, key_len) = parse_vint_length(input)?;
+                let (input, key) = take(key_len)(input)?;
+                let (input, offset) = be_u64(input)?;
+                
+                // Only leaf nodes have length fields
+                let (input, length) = if node_type == BtiNodeType::Leaf {
+                    let (input, len) = be_u32(input)?;
+                    (input, Some(len))
+                } else {
+                    (input, None)
+                };
 
-            Ok((
-                input,
-                BtiEntry {
-                    key: key.to_vec(),
-                    offset,
-                    length,
-                },
-            ))
+                Ok((
+                    input,
+                    BtiEntry {
+                        key: key.to_vec(),
+                        offset,
+                        length,
+                    },
+                ))
+            }
         }
 
         fn parse_bti_node_impl(input: &[u8]) -> IResult<&[u8], BtiNode> {
@@ -299,7 +313,7 @@ impl BtiValidationSuite {
 
             let (input, level) = be_u16(input)?;
             let (input, entry_count) = be_u32(input)?;
-            let (input, entries) = count(parse_bti_entry, entry_count as usize)(input)?;
+            let (input, entries) = count(parse_bti_entry(node_type), entry_count as usize)(input)?;
 
             Ok((
                 input,

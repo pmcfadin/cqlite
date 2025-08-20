@@ -3,15 +3,21 @@
 //! This tool runs comprehensive performance validation, benchmarking, and
 //! regression testing for CQLite to ensure it meets all performance targets.
 
+#[cfg(feature = "benchmarks")]
 use clap::{Arg, Command};
+#[cfg(feature = "benchmarks")]
 use cqlite_tests::{
     BenchmarkRunnerConfig, PerformanceBenchmarkRunner, TestConfiguration,
     performance_benchmark_runner::PerformanceTargets,
 };
+#[cfg(feature = "benchmarks")]
 use std::path::PathBuf;
+#[cfg(feature = "benchmarks")]
 use std::process;
+#[cfg(feature = "benchmarks")]
 use tokio;
 
+#[cfg(feature = "benchmarks")]
 #[tokio::main]
 async fn main() {
     let matches = Command::new("CQLite Performance Validator")
@@ -21,272 +27,168 @@ async fn main() {
         .arg(
             Arg::new("version")
                 .long("version")
-                .short('v')
-                .value_name("VERSION")
-                .help("Version identifier for this test run")
-                .default_value("dev"),
+                .action(clap::ArgAction::SetTrue)
+                .help("Show version information"),
+        )
+        .arg(
+            Arg::new("config")
+                .short('c')
+                .long("config")
+                .value_name("FILE")
+                .help("Configuration file path")
+                .value_parser(clap::value_parser!(PathBuf)),
         )
         .arg(
             Arg::new("output")
-                .long("output")
                 .short('o')
+                .long("output")
                 .value_name("DIR")
                 .help("Output directory for reports")
-                .default_value("performance_results"),
+                .value_parser(clap::value_parser!(PathBuf)),
         )
         .arg(
-            Arg::new("iterations")
-                .long("iterations")
-                .short('i')
-                .value_name("COUNT")
-                .help("Number of performance test iterations")
-                .default_value("1000"),
+            Arg::new("threads")
+                .short('t')
+                .long("threads")
+                .value_name("NUM")
+                .help("Number of threads to use")
+                .value_parser(clap::value_parser!(usize)),
         )
         .arg(
-            Arg::new("dataset-size")
-                .long("dataset-size")
-                .short('d')
-                .value_name("SIZE")
-                .help("Size of test dataset")
-                .default_value("100000"),
+            Arg::new("benchmark-only")
+                .long("benchmark-only")
+                .action(clap::ArgAction::SetTrue)
+                .help("Run only performance benchmarks"),
         )
         .arg(
-            Arg::new("skip-validation")
-                .long("skip-validation")
-                .help("Skip performance validation tests")
-                .action(clap::ArgAction::SetTrue),
+            Arg::new("validation-only")
+                .long("validation-only")
+                .action(clap::ArgAction::SetTrue)
+                .help("Run only validation tests"),
         )
         .arg(
             Arg::new("skip-benchmarks")
                 .long("skip-benchmarks")
-                .help("Skip benchmark tests")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("skip-regression")
-                .long("skip-regression")
-                .help("Skip regression tests")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("no-report")
-                .long("no-report")
-                .help("Skip generating detailed report")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("no-json")
-                .long("no-json")
-                .help("Skip JSON export")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("memory-target")
-                .long("memory-target")
-                .value_name("MB")
-                .help("Memory usage target in MB")
-                .default_value("128"),
-        )
-        .arg(
-            Arg::new("latency-target")
-                .long("latency-target")
-                .value_name("MS")
-                .help("Maximum lookup latency target in milliseconds")
-                .default_value("1.0"),
-        )
-        .arg(
-            Arg::new("parse-target")
-                .long("parse-target")
-                .value_name("SECONDS")
-                .help("Maximum parse time for 1GB file in seconds")
-                .default_value("10.0"),
-        )
-        .arg(
-            Arg::new("write-throughput")
-                .long("write-throughput")
-                .value_name("OPS")
-                .help("Minimum write throughput in ops/sec")
-                .default_value("10000"),
-        )
-        .arg(
-            Arg::new("read-throughput")
-                .long("read-throughput")
-                .value_name("OPS")
-                .help("Minimum read throughput in ops/sec")
-                .default_value("50000"),
+                .action(clap::ArgAction::SetTrue)
+                .help("Skip performance benchmarks"),
         )
         .arg(
             Arg::new("verbose")
+                .short('v')
                 .long("verbose")
-                .short('V')
-                .help("Enable verbose output")
-                .action(clap::ArgAction::SetTrue),
+                .action(clap::ArgAction::SetTrue)
+                .help("Enable verbose output"),
+        )
+        .arg(
+            Arg::new("targets")
+                .long("targets")
+                .value_name("FILE")
+                .help("Performance targets configuration file")
+                .value_parser(clap::value_parser!(PathBuf)),
         )
         .get_matches();
 
-    // Parse command line arguments
-    let version = matches.get_one::<String>("version").unwrap().clone();
-    let output_dir = PathBuf::from(matches.get_one::<String>("output").unwrap());
-    let iterations = matches
-        .get_one::<String>("iterations")
-        .unwrap()
-        .parse::<usize>()
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Invalid iterations value");
-            process::exit(1);
-        });
-    let dataset_size = matches
-        .get_one::<String>("dataset-size")
-        .unwrap()
-        .parse::<usize>()
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Invalid dataset size value");
-            process::exit(1);
-        });
+    if matches.get_flag("version") {
+        println!("CQLite Performance Validator v1.0.0");
+        return;
+    }
 
-    let memory_target = matches
-        .get_one::<String>("memory-target")
-        .unwrap()
-        .parse::<u64>()
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Invalid memory target value");
-            process::exit(1);
-        });
-
-    let latency_target = matches
-        .get_one::<String>("latency-target")
-        .unwrap()
-        .parse::<f64>()
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Invalid latency target value");
-            process::exit(1);
-        });
-
-    let parse_target = matches
-        .get_one::<String>("parse-target")
-        .unwrap()
-        .parse::<f64>()
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Invalid parse target value");
-            process::exit(1);
-        });
-
-    let write_throughput = matches
-        .get_one::<String>("write-throughput")
-        .unwrap()
-        .parse::<f64>()
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Invalid write throughput value");
-            process::exit(1);
-        });
-
-    let read_throughput = matches
-        .get_one::<String>("read-throughput")
-        .unwrap()
-        .parse::<f64>()
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Invalid read throughput value");
-            process::exit(1);
-        });
-
-    let verbose = matches.get_flag("verbose");
-    let enable_validation = !matches.get_flag("skip-validation");
+    let config_file = matches.get_one::<PathBuf>("config");
+    let output_dir = matches
+        .get_one::<PathBuf>("output")
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("./performance-reports"));
+    let threads = matches.get_one::<usize>("threads").copied().unwrap_or(4);
+    let benchmark_only = matches.get_flag("benchmark-only");
+    let validation_only = matches.get_flag("validation-only");
     let enable_benchmarks = !matches.get_flag("skip-benchmarks");
-    let enable_regression = !matches.get_flag("skip-regression");
-    let generate_report = !matches.get_flag("no-report");
-    let export_json = !matches.get_flag("no-json");
+    let verbose = matches.get_flag("verbose");
+    let targets_file = matches.get_one::<PathBuf>("targets");
 
+    if benchmark_only && validation_only {
+        eprintln!("Error: Cannot specify both --benchmark-only and --validation-only");
+        process::exit(1);
+    }
+
+    // Create output directory
+    if let Err(e) = std::fs::create_dir_all(&output_dir) {
+        eprintln!("Error creating output directory: {}", e);
+        process::exit(1);
+    }
+
+    let mut config = if let Some(config_path) = config_file {
+        match BenchmarkRunnerConfig::from_file(config_path) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("Error loading config file: {}", e);
+                process::exit(1);
+            }
+        }
+    } else {
+        BenchmarkRunnerConfig::default()
+    };
+
+    config.output_directory = output_dir;
+    config.num_threads = threads;
+    config.verbose = verbose;
+
+    if let Some(targets_path) = targets_file {
+        match PerformanceTargets::from_file(targets_path) {
+            Ok(targets) => config.performance_targets = Some(targets),
+            Err(e) => {
+                eprintln!("Error loading targets file: {}", e);
+                process::exit(1);
+            }
+        }
+    }
+
+    let test_config = TestConfiguration {
+        run_benchmarks: enable_benchmarks && !validation_only,
+        run_validation: !benchmark_only,
+        run_regression_tests: !benchmark_only,
+        enable_stress_tests: true,
+        max_concurrent_tests: threads,
+    };
+
+    println!("🚀 Starting CQLite Performance Validation");
+    println!("================================================");
     if verbose {
-        println!("🔧 Configuration:");
-        println!("   Version: {}", version);
-        println!("   Output Directory: {}", output_dir.display());
-        println!("   Iterations: {}", iterations);
-        println!("   Dataset Size: {}", dataset_size);
-        println!("   Memory Target: {} MB", memory_target);
-        println!("   Latency Target: {} ms", latency_target);
-        println!("   Parse Target: {} seconds", parse_target);
-        println!("   Write Throughput: {} ops/sec", write_throughput);
-        println!("   Read Throughput: {} ops/sec", read_throughput);
-        println!("   Enable Validation: {}", enable_validation);
-        println!("   Enable Benchmarks: {}", enable_benchmarks);
-        println!("   Enable Regression: {}", enable_regression);
-        println!("   Generate Report: {}", generate_report);
-        println!("   Export JSON: {}", export_json);
+        println!("Configuration:");
+        println!("  Output Directory: {:?}", config.output_directory);
+        println!("  Threads: {}", config.num_threads);
+        println!("  Benchmarks: {}", test_config.run_benchmarks);
+        println!("  Validation: {}", test_config.run_validation);
+        println!("  Regression Tests: {}", test_config.run_regression_tests);
         println!();
     }
 
-    // Create configuration
-    let config = BenchmarkRunnerConfig {
-        enable_validation,
-        enable_regression_testing: enable_regression,
-        enable_benchmarking: enable_benchmarks,
-        generate_report,
-        export_json,
-        output_directory: output_dir,
-        version,
-        test_config: TestConfiguration {
-            small_dataset_size: dataset_size / 100,
-            medium_dataset_size: dataset_size,
-            large_dataset_size: dataset_size * 10,
-            performance_iterations: iterations,
-            enable_profiling: true,
-            performance_targets: PerformanceTargets {
-                max_parse_time_1gb_seconds: parse_target,
-                max_memory_usage_mb: 8192,
-                max_lookup_latency_ms: latency_target,
-                min_write_throughput_ops_sec: 100.0,
-                min_read_throughput_ops_sec: 100.0,
-            },
-        },
-    };
+    let mut runner = PerformanceBenchmarkRunner::new(config);
 
-    // Run performance validation
-    println!("🚀 Starting CQLite Performance Validation");
-    println!("⏰ This may take several minutes depending on dataset size...");
-    println!();
-
-    let runner = PerformanceBenchmarkRunner::new(config);
-
-    match runner.run_all_tests().await {
+    match runner.run_with_config(test_config).await {
         Ok(results) => {
-            if verbose {
-                println!("\n✅ Performance validation completed successfully!");
-                println!("📊 Overall Grade: {}", results.summary.overall_grade);
-                println!(
-                    "⚡ Performance Score: {}/100",
-                    results.summary.performance_score
-                );
-                println!("🧠 Memory Score: {}/100", results.summary.memory_score);
-                println!(
-                    "🛡️  Reliability Score: {}/100",
-                    results.summary.reliability_score
-                );
+            println!("✅ Performance validation completed successfully");
+            println!("📊 Results summary:");
+            println!("   Total tests: {}", results.total_tests);
+            println!("   Passed tests: {}", results.passed_tests);
+            println!("   Failed tests: {}", results.failed_tests);
+            println!("   Success rate: {:.1}%", results.success_rate * 100.0);
+            println!("   Overall runtime: {}ms", results.total_runtime_ms);
+
+            if !results.overall_success {
+                println!("❌ Some performance tests failed or didn't meet targets");
+                process::exit(1);
             }
-
-            // Determine exit code based on results
-            let exit_code = if !results.summary.critical_issues.is_empty() {
-                eprintln!("❌ Critical issues detected:");
-                for issue in &results.summary.critical_issues {
-                    eprintln!("   • {}", issue);
-                }
-                1
-            } else if results.summary.overall_grade == "F" || results.summary.performance_score < 60
-            {
-                eprintln!(
-                    "❌ Performance validation failed with grade: {}",
-                    results.summary.overall_grade
-                );
-                1
-            } else {
-                println!("✅ Performance validation passed!");
-                0
-            };
-
-            process::exit(exit_code);
         }
         Err(e) => {
             eprintln!("❌ Performance validation failed: {}", e);
             process::exit(1);
         }
     }
+}
+
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Compile with: cargo build --features benchmarks");
+    std::process::exit(1);
 }

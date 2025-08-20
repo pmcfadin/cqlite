@@ -19,17 +19,19 @@ use std::path::Path;
 #[cfg(feature = "docker-integration")]
 use tokio::fs;
 #[cfg(feature = "docker-integration")]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 #[cfg(feature = "docker-integration")]
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "docker-integration")]
+#[derive(Debug)]
 pub struct DockerManager {
     docker: Docker,
     cassandra_container_id: Option<String>,
 }
 
 #[cfg(not(feature = "docker-integration"))]
+#[derive(Debug)]
 pub struct DockerManager {
     // Mock implementation when Docker integration is disabled
 }

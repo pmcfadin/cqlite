@@ -1,4 +1,4 @@
-use crate::AdminCommands;
+use crate::cli_types::AdminCommands;
 use anyhow::Result;
 use cqlite_core::Database;
 use chrono;
@@ -6,10 +6,9 @@ use chrono;
 pub async fn handle_admin_command(database: &Database, command: AdminCommands) -> Result<()> {
     match command {
         AdminCommands::Info => show_database_info(database).await,
-        AdminCommands::Compact => compact_database(database).await,
-        AdminCommands::Backup { output } => backup_database(database, &output).await,
-        AdminCommands::Restore { input } => restore_database(database, &input).await,
-        AdminCommands::Repair => repair_database(database).await,
+        AdminCommands::Compact { force: _ } => compact_database(database).await,
+        AdminCommands::Backup { destination, compression: _ } => backup_database(database, &destination).await,
+        AdminCommands::Restore { backup, force: _ } => restore_database(database, &backup).await,
     }
 }
 
@@ -87,7 +86,7 @@ async fn backup_database(database: &Database, output: &std::path::Path) -> Resul
     };
     
     // Create progress bar
-    let total_entries = stats.storage_stats.sstables.total_entries + stats.storage_stats.memtable.entry_count;
+    let total_entries = stats.storage_stats.sstables.total_entries + (stats.storage_stats.memtable.entry_count as u64);
     let pb = ProgressBar::new(total_entries);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -194,7 +193,7 @@ async fn backup_database(database: &Database, output: &std::path::Path) -> Resul
     Ok(())
 }
 
-async fn create_basic_backup(database: &Database, writer: &mut std::io::BufWriter<std::fs::File>, output: &std::path::Path) -> Result<()> {
+async fn create_basic_backup(_database: &Database, writer: &mut std::io::BufWriter<std::fs::File>, output: &std::path::Path) -> Result<()> {
     use std::io::Write;
     
     // Basic backup without system table access
@@ -253,7 +252,6 @@ async fn restore_database(database: &Database, input: &std::path::Path) -> Resul
     let mut errors = 0;
     let mut line_number = 0;
     let mut current_statement = String::new();
-    let mut in_multiline_statement = false;
     
     // Parse backup metadata if present
     let mut backup_version: Option<String> = None;
@@ -303,7 +301,7 @@ async fn restore_database(database: &Database, input: &std::path::Path) -> Resul
             if !statement.is_empty() {
                 // Execute the statement
                 match database.execute(statement).await {
-                    Ok(result) => {
+                    Ok(_result) => {
                         executed_statements += 1;
                         if line_number % 100 == 0 {
                             pb.set_message(format!("Executed {} statements", executed_statements));
@@ -328,9 +326,6 @@ async fn restore_database(database: &Database, input: &std::path::Path) -> Resul
             }
             
             current_statement.clear();
-            in_multiline_statement = false;
-        } else {
-            in_multiline_statement = true;
         }
     }
     
@@ -368,194 +363,4 @@ async fn restore_database(database: &Database, input: &std::path::Path) -> Resul
     Ok(())
 }
 
-async fn repair_database(database: &Database) -> Result<()> {
-    use indicatif::{ProgressBar, ProgressStyle};
-    
-    println!("🔧 Starting database repair...");
-    
-    // Create progress indicator
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .unwrap(),
-    );
-    
-    let mut repair_actions = 0;
-    let mut issues_found = 0;
-    let mut issues_fixed = 0;
-    
-    // Step 1: Flush any pending writes
-    pb.set_message("Flushing pending writes...");
-    match database.flush().await {
-        Ok(_) => {
-            println!("✓ Flushed pending writes");
-            repair_actions += 1;
-        }
-        Err(e) => {
-            println!("⚠️  Warning: Failed to flush writes: {}", e);
-            issues_found += 1;
-        }
-    }
-    
-    // Step 2: Compact database to clean up fragmentation
-    pb.set_message("Compacting database files...");
-    match database.compact().await {
-        Ok(_) => {
-            println!("✓ Database compaction completed");
-            repair_actions += 1;
-            issues_fixed += 1;
-        }
-        Err(e) => {
-            println!("⚠️  Warning: Compaction failed: {}", e);
-            issues_found += 1;
-        }
-    }
-    
-    // Step 3: Validate system tables
-    pb.set_message("Validating system tables...");
-    let system_tables = vec!["system.tables", "system.columns", "system.keyspaces"];
-    
-    for table in &system_tables {
-        match database.execute(&format!("SELECT COUNT(*) FROM {}", table)).await {
-            Ok(result) => {
-                if let Some(row) = result.rows.first() {
-                    if let Some(count) = row.get("count") {
-                        println!("✓ System table {} validated: {} entries", table, count);
-                        repair_actions += 1;
-                    }
-                }
-            }
-            Err(e) => {
-                println!("❌ System table {} validation failed: {}", table, e);
-                issues_found += 1;
-                
-                // Try to repair by recreating essential system tables
-                pb.set_message(&format!("Attempting to repair {}...", table));
-                match repair_system_table(database, table).await {
-                    Ok(_) => {
-                        println!("✓ Repaired system table: {}", table);
-                        issues_fixed += 1;
-                    }
-                    Err(repair_err) => {
-                        println!("❌ Failed to repair {}: {}", table, repair_err);
-                    }
-                }
-            }
-        }
-    }
-    
-    // Step 4: Check user tables integrity
-    pb.set_message("Checking user table integrity...");
-    match database.execute("SELECT keyspace_name, table_name FROM system.tables WHERE keyspace_name != 'system'").await {
-        Ok(tables_result) => {
-            for table_row in &tables_result.rows {
-                if let (Some(keyspace), Some(table)) = (table_row.get("keyspace_name"), table_row.get("table_name")) {
-                    let full_table_name = format!("{}.{}", keyspace, table);
-                    
-                    // Test basic query on each table
-                    match database.execute(&format!("SELECT COUNT(*) FROM {}", full_table_name)).await {
-                        Ok(count_result) => {
-                            if let Some(row) = count_result.rows.first() {
-                                if let Some(count) = row.get("count") {
-                                    println!("✓ Table {} validated: {} rows", full_table_name, count);
-                                    repair_actions += 1;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            println!("⚠️  Table {} has issues: {}", full_table_name, e);
-                            issues_found += 1;
-                            
-                            // Try basic repair by running a simple query
-                            match database.execute(&format!("SELECT * FROM {} LIMIT 1", full_table_name)).await {
-                                Ok(_) => {
-                                    println!("✓ Table {} structure appears recoverable", full_table_name);
-                                    issues_fixed += 1;
-                                }
-                                Err(_) => {
-                                    println!("❌ Table {} may need manual intervention", full_table_name);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!("❌ Could not access system tables for user table validation: {}", e);
-            issues_found += 1;
-        }
-    }
-    
-    // Step 5: Memory cleanup and optimization
-    pb.set_message("Optimizing memory usage...");
-    // Note: In a real implementation, this would call memory cleanup functions
-    // For now, we'll just indicate the step was attempted
-    println!("✓ Memory optimization completed");
-    repair_actions += 1;
-    
-    pb.finish_with_message("Database repair completed");
-    
-    // Summary
-    println!("\n📊 Repair Summary:");
-    println!("  Repair actions performed: {}", repair_actions);
-    println!("  Issues identified: {}", issues_found);
-    println!("  Issues resolved: {}", issues_fixed);
-    
-    if issues_found == 0 {
-        println!("  ✅ Database appears to be in good condition!");
-    } else if issues_fixed >= issues_found {
-        println!("  ✅ All identified issues have been resolved!");
-    } else {
-        println!("  ⚠️  Some issues remain unresolved. Manual intervention may be required.");
-        println!("  💡 Consider creating a backup before making manual changes.");
-    }
-    
-    Ok(())
-}
 
-/// Attempt to repair a system table
-async fn repair_system_table(database: &Database, table_name: &str) -> Result<()> {
-    // This is a simplified repair approach
-    // In a real implementation, this would recreate system tables with proper schema
-    
-    match table_name {
-        "system.tables" => {
-            // Try to recreate the tables system table
-            let create_stmt = r#"
-                CREATE TABLE IF NOT EXISTS system.tables (
-                    keyspace_name text,
-                    table_name text,
-                    PRIMARY KEY (keyspace_name, table_name)
-                )
-            "#;
-            database.execute(create_stmt).await?;
-        }
-        "system.columns" => {
-            let create_stmt = r#"
-                CREATE TABLE IF NOT EXISTS system.columns (
-                    keyspace_name text,
-                    table_name text,
-                    column_name text,
-                    type text,
-                    PRIMARY KEY (keyspace_name, table_name, column_name)
-                )
-            "#;
-            database.execute(create_stmt).await?;
-        }
-        "system.keyspaces" => {
-            let create_stmt = r#"
-                CREATE TABLE IF NOT EXISTS system.keyspaces (
-                    keyspace_name text PRIMARY KEY
-                )
-            "#;
-            database.execute(create_stmt).await?;
-        }
-        _ => {
-            return Err(anyhow::anyhow!("Unknown system table: {}", table_name));
-        }
-    }
-    
-    Ok(())
-}

@@ -6,10 +6,15 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_database: Option<PathBuf>,
+    #[serde(default)]
     pub connection: ConnectionConfig,
+    #[serde(default)]
     pub output: OutputConfig,
+    #[serde(default)]
     pub performance: PerformanceConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
     pub repl: ReplConfig,
     pub data_directory: Option<PathBuf>,
     pub default_keyspace: Option<String>,
@@ -36,12 +41,33 @@ pub struct ConnectionConfig {
     pub pool_size: u32,
 }
 
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 30000,
+            retry_attempts: 3,
+            pool_size: 10,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
     pub max_rows: Option<usize>,
     pub pager: Option<String>,
     pub colors: bool,
     pub timestamp_format: String,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            max_rows: Some(1000),
+            pager: None,
+            colors: true,
+            timestamp_format: "%Y-%m-%d %H:%M:%S".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,11 +77,31 @@ pub struct PerformanceConfig {
     pub cache_size_mb: u64,
 }
 
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            query_timeout_ms: 30000,
+            memory_limit_mb: None,
+            cache_size_mb: 64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub level: String,
     pub file: Option<PathBuf>,
     pub format: LogFormat,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            file: None,
+            format: LogFormat::Pretty,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,27 +131,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_database: None,
-            connection: ConnectionConfig {
-                timeout_ms: 30000,
-                retry_attempts: 3,
-                pool_size: 10,
-            },
-            output: OutputConfig {
-                max_rows: Some(1000),
-                pager: None,
-                colors: true,
-                timestamp_format: "%Y-%m-%d %H:%M:%S".to_string(),
-            },
-            performance: PerformanceConfig {
-                query_timeout_ms: 300000, // 5 minutes
-                memory_limit_mb: None,
-                cache_size_mb: 256,
-            },
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                file: None,
-                format: LogFormat::Pretty,
-            },
+            connection: ConnectionConfig::default(),
+            output: OutputConfig::default(),
+            performance: PerformanceConfig::default(),
+            logging: LoggingConfig::default(),
             repl: ReplConfig::default(),
             data_directory: None,
             default_keyspace: None,

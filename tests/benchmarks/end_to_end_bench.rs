@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use std::time::Duration;
+// use std::time::Duration; // TODO: Use when implementing timing benchmarks
 use tempfile::TempDir;
 
 fn create_test_database() -> (TempDir, std::path::PathBuf) {

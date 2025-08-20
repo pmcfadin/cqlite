@@ -337,14 +337,14 @@ impl CliTestScenarios {
 
         // Test missing required argument
         runner
-            .run(&["read"])?
+            .run(&["read-sstable"])?
             .assert_failure()?
             .stderr_contains("required")?;
 
         // Test non-existent file
         runner
             .run(&[
-                "read",
+                "read-sstable",
                 "/non/existent/file",
                 "--schema",
                 "/non/existent/schema",

@@ -115,7 +115,7 @@ impl SizedPointer {
             1
         } else if distance <= 0xFFFF {
             2
-        } else if distance <= 0xFFFFFFFF {
+        } else if distance <= 0xFFFF_FFFF {
             4
         } else {
             8

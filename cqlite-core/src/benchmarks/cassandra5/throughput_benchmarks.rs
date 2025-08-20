@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Throughput Benchmarks for Cassandra 5+ vs Native Tools
 //!
 //! This module benchmarks SSTable reading throughput compared to native Cassandra tools,

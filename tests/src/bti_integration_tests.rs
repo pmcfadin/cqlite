@@ -12,7 +12,7 @@ use std::io::{Seek, Write as IoWrite};
 use tempfile::NamedTempFile;
 
 /// Create a test BTI file with proper header and simple trie structure
-fn create_test_bti_file() -> Result<NamedTempFile, Box<dyn std::error::Error>> {
+fn _create_test_bti_file() -> Result<NamedTempFile, Box<dyn std::error::Error>> {
     let mut file = NamedTempFile::new()?;
 
     // Write BTI header
@@ -46,7 +46,7 @@ mod integration_tests {
 
     #[test]
     fn test_bti_header_parsing() -> Result<(), Box<dyn std::error::Error>> {
-        let test_file = create_test_bti_file()?;
+        let test_file = _create_test_bti_file()?;
         let file = File::open(test_file.path())?;
 
         // TODO: Implement PartitionsParser::new once available
@@ -59,7 +59,7 @@ mod integration_tests {
 
     #[test]
     fn test_partitions_parser_creation() -> Result<(), Box<dyn std::error::Error>> {
-        let test_file = create_test_bti_file()?;
+        let test_file = _create_test_bti_file()?;
         let file = File::open(test_file.path())?;
 
         // TODO: Implement PartitionsParser once available
@@ -74,7 +74,7 @@ mod integration_tests {
 
     #[test]
     fn test_rows_parser_creation() -> Result<(), Box<dyn std::error::Error>> {
-        let test_file = create_test_bti_file()?;
+        let test_file = _create_test_bti_file()?;
         let file = File::open(test_file.path())?;
 
         // TODO: Implement RowsParser once available
@@ -158,7 +158,7 @@ mod integration_tests {
 #[cfg(test)]
 mod performance_tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::fs::File;
 
     #[test]
     fn test_encoding_performance() {
@@ -169,7 +169,7 @@ mod performance_tests {
 
     #[test]
     fn test_parser_memory_usage() {
-        let test_file = create_test_bti_file().unwrap();
+        let test_file = _create_test_bti_file().unwrap();
         let file = File::open(test_file.path()).unwrap();
 
         // TODO: Implement PartitionsParser once available
@@ -184,6 +184,7 @@ mod performance_tests {
 #[cfg(test)]
 mod edge_case_tests {
     use super::*;
+    use std::fs::File;
 
     #[test]
     fn test_corrupted_file_handling() {

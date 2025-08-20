@@ -38,6 +38,16 @@ mod config_tests {
         std::fs::write(
             &config_path,
             r#"
+[connection]
+timeout_ms = 30000
+retry_attempts = 3
+pool_size = 10
+
+[output]
+max_rows = 1000
+colors = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+
 [performance]
 cache_size_mb = 256
 query_timeout_ms = 60000
@@ -45,6 +55,18 @@ memory_limit_mb = 1024
 
 [logging]
 level = "debug"
+format = "Pretty"
+
+[repl]
+enable_history = true
+enable_completion = true
+enable_colors = true
+show_timing = false
+page_size = 50
+enable_paging = true
+max_history_size = 1000
+prompt = "cqlite> "
+prompt_continuation = "    -> "
 "#,
         )?;
 
@@ -86,15 +108,41 @@ cache_size_mb = -10
         std::fs::write(
             &config_path,
             r#"
+[connection]
+timeout_ms = 30000
+retry_attempts = 3
+pool_size = 10
+
+[output]
+max_rows = 1000
+colors = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+
+[performance]
+query_timeout_ms = 300000
+cache_size_mb = 256
+
 [logging]
 level = "trace"
+format = "Pretty"
+
+[repl]
+enable_history = true
+enable_completion = true
+enable_colors = true
+show_timing = false
+page_size = 50
+enable_paging = true
+max_history_size = 1000
+prompt = "cqlite> "
+prompt_continuation = "    -> "
 "#,
         )?;
 
         let config = Config::load(Some(config_path))?;
 
-        // Should use defaults for missing performance section
-        assert_eq!(config.performance.cache_size_mb, 64);
+        // Should use explicit values from TOML
+        assert_eq!(config.performance.cache_size_mb, 256);
         assert_eq!(config.logging.level, "trace");
 
         Ok(())
@@ -215,7 +263,7 @@ mod cli_parsing_tests {
     #[test]
     fn test_bench_commands() -> Result<()> {
         // Test read benchmark
-        let args = vec!["cqlite", "bench", "read", "--ops", "1000", "--threads", "4"];
+        let args = vec!["cqlite", "bench", "read", "--operations", "1000", "--concurrency", "4"];
         let cli = Cli::try_parse_from(args)?;
 
         match cli.command {
@@ -415,6 +463,7 @@ mod test_helpers {
     
 
     /// Create a sample schema for testing
+    #[allow(dead_code)]
     pub fn create_test_schema() -> cqlite_core::schema::TableSchema {
         use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
         use std::collections::HashMap;
@@ -458,6 +507,7 @@ mod test_helpers {
     }
 
     /// Create test data for benchmarking
+    #[allow(dead_code)]
     pub fn create_test_data(size: usize) -> Vec<(String, String)> {
         (0..size)
             .map(|i| (format!("key_{}", i), format!("value_{}", i)))
@@ -465,6 +515,7 @@ mod test_helpers {
     }
 
     /// Validate test output format
+    #[allow(dead_code)]
     pub fn validate_output_format(output: &str, format: &str) -> bool {
         match format {
             "json" => output.trim_start().starts_with('{') || output.trim_start().starts_with('['),

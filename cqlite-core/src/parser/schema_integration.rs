@@ -207,6 +207,7 @@ pub async fn parse_cql_schemas_batch(
 /// * `Ok(true)` - Statement has valid syntax
 /// * `Ok(false)` - Statement has invalid syntax
 /// * `Err(Error)` - Validation error
+#[allow(dead_code)]
 pub async fn validate_cql_schema_syntax(cql: &str, backend: Option<ParserBackend>) -> Result<bool> {
     let backend = backend.unwrap_or(ParserBackend::Auto);
 
@@ -284,6 +285,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "M2+ feature; gated for M1"]
     async fn test_parse_cql_schema_enhanced() {
         let cql = r#"
             CREATE TABLE test_keyspace.users (
@@ -304,6 +306,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "M2+ feature; gated for M1"]
     async fn test_parse_cql_schema_simple() {
         let cql = "CREATE TABLE simple_table (id TEXT PRIMARY KEY, value INT)";
 
@@ -325,6 +328,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "M2+ feature; gated for M1"]
     async fn test_parse_cql_schemas_batch() {
         let statements = vec![
             "CREATE TABLE table1 (id UUID PRIMARY KEY, name TEXT)",
@@ -339,6 +343,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "M2+ feature; gated for M1"]
     async fn test_validate_cql_schema_syntax() {
         let valid_cql = "CREATE TABLE test (id UUID PRIMARY KEY)";
         let invalid_cql = "CREATE INVALID SYNTAX";

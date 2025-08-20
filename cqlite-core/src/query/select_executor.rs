@@ -87,12 +87,24 @@ impl SelectExecutor {
 
     /// Execute an optimized query plan
     pub async fn execute(&self, plan: OptimizedQueryPlan) -> Result<QueryResult> {
+        let table_id = if let Some(ref from_clause) = plan.statement.from_clause {
+            self.extract_table_id(from_clause)?
+        } else {
+            // For queries without FROM clause (like SELECT 1), use a dummy table ID
+            TableId::new("_dummy_")
+        };
+
         let mut context = ExecutionContext {
-            table_id: self.extract_table_id(&plan.statement.from_clause)?,
+            table_id,
             columns: self.get_result_columns(&plan.statement).await?,
             rows_processed: 0,
             bytes_read: 0,
         };
+
+        // Handle queries without FROM clause (like SELECT 1)
+        if plan.statement.from_clause.is_none() {
+            return self.execute_constant_query(&plan.statement, &context).await;
+        }
 
         // Execute the plan step by step
         let mut intermediate_results = Vec::new();
@@ -735,6 +747,122 @@ impl SelectExecutor {
         }
 
         Ok(projected_rows)
+    }
+
+    /// Execute a query without FROM clause (constant expressions like SELECT 1)
+    async fn execute_constant_query(&self, statement: &SelectStatement, _context: &ExecutionContext) -> Result<QueryResult> {
+        let mut values = HashMap::new();
+        let mut columns = Vec::new();
+
+        match &statement.select_clause {
+            SelectClause::All => {
+                return Err(Error::query_execution("SELECT * requires a FROM clause".to_string()));
+            }
+            SelectClause::Columns(expressions) | SelectClause::Distinct(expressions) => {
+                for (i, expr) in expressions.iter().enumerate() {
+                    let (value, column_name) = self.evaluate_constant_expression(expr)?;
+                    let key = column_name.unwrap_or_else(|| format!("column_{}", i));
+                    values.insert(key.clone(), value);
+                    columns.push(ColumnInfo {
+                        name: key,
+                        data_type: crate::types::DataType::Text, // Simplified for now
+                        nullable: true,
+                        position: i,
+                        table_name: None, // No table for constant expressions
+                    });
+                }
+            }
+        }
+
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        
+        Ok(QueryResult {
+            rows: vec![row],
+            rows_affected: 0,
+            execution_time_ms: 0,
+            metadata: crate::query::result::QueryMetadata {
+                columns,
+                total_rows: Some(1),
+                plan_info: None,
+                performance: crate::query::result::PerformanceMetrics::default(),
+                warnings: Vec::new(),
+            },
+        })
+    }
+
+    /// Evaluate a constant expression (no table access needed)
+    fn evaluate_constant_expression(&self, expr: &SelectExpression) -> Result<(Value, Option<String>)> {
+        match expr {
+            SelectExpression::Literal(value) => Ok((value.clone(), None)),
+            SelectExpression::Aliased(inner_expr, alias) => {
+                let (value, _) = self.evaluate_constant_expression(inner_expr)?;
+                Ok((value, Some(alias.clone())))
+            }
+            SelectExpression::Arithmetic(arith) => {
+                // Simplified arithmetic evaluation
+                let (left_val, _) = self.evaluate_constant_expression(&arith.left)?;
+                let (right_val, _) = self.evaluate_constant_expression(&arith.right)?;
+                
+                let result = match arith.operator {
+                    ArithmeticOperator::Add => {
+                        match (left_val, right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a + b),
+                            (Value::BigInt(a), Value::BigInt(b)) => Value::BigInt(a + b),
+                            (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
+                            _ => return Err(Error::query_execution("Cannot add incompatible types".to_string())),
+                        }
+                    }
+                    ArithmeticOperator::Subtract => {
+                        match (left_val, right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a - b),
+                            (Value::BigInt(a), Value::BigInt(b)) => Value::BigInt(a - b),
+                            (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
+                            _ => return Err(Error::query_execution("Cannot subtract incompatible types".to_string())),
+                        }
+                    }
+                    ArithmeticOperator::Multiply => {
+                        match (left_val, right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a * b),
+                            (Value::BigInt(a), Value::BigInt(b)) => Value::BigInt(a * b),
+                            (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
+                            _ => return Err(Error::query_execution("Cannot multiply incompatible types".to_string())),
+                        }
+                    }
+                    ArithmeticOperator::Divide => {
+                        match (left_val, right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => {
+                                if b == 0 { return Err(Error::query_execution("Division by zero".to_string())); }
+                                Value::Integer(a / b)
+                            }
+                            (Value::BigInt(a), Value::BigInt(b)) => {
+                                if b == 0 { return Err(Error::query_execution("Division by zero".to_string())); }
+                                Value::BigInt(a / b)
+                            }
+                            (Value::Float(a), Value::Float(b)) => {
+                                if b == 0.0 { return Err(Error::query_execution("Division by zero".to_string())); }
+                                Value::Float(a / b)
+                            }
+                            _ => return Err(Error::query_execution("Cannot divide incompatible types".to_string())),
+                        }
+                    }
+                    ArithmeticOperator::Modulo => {
+                        match (left_val, right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => {
+                                if b == 0 { return Err(Error::query_execution("Modulo by zero".to_string())); }
+                                Value::Integer(a % b)
+                            }
+                            (Value::BigInt(a), Value::BigInt(b)) => {
+                                if b == 0 { return Err(Error::query_execution("Modulo by zero".to_string())); }
+                                Value::BigInt(a % b)
+                            }
+                            _ => return Err(Error::query_execution("Modulo only supported for integers".to_string())),
+                        }
+                    }
+                };
+                Ok((result, None))
+            }
+            _ => Err(Error::query_execution("Expression type not supported in constant queries".to_string())),
+        }
     }
 
     /// Helper methods

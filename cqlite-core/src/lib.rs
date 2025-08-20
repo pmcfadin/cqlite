@@ -252,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn test_database_open_close() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::default();
+        let config = Config::test_config();
 
         let db = Database::open(temp_dir.path(), config).await.unwrap();
         db.close().await.unwrap();
@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_database_basic_operations() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::default();
+        let config = Config::test_config();
 
         let db = Database::open(temp_dir.path(), config).await.unwrap();
 

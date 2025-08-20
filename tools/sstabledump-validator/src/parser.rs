@@ -74,6 +74,7 @@ pub struct DumpMetadata {
     pub data_size: Option<u64>,
 }
 
+#[derive(Debug)]
 pub struct SstableDumpParser {
     // Regex patterns for parsing different dump formats
     cassandra_patterns: CassandraPatterns,
@@ -81,6 +82,7 @@ pub struct SstableDumpParser {
     cqlite_patterns: CqlitePatterns,
 }
 
+#[derive(Debug)]
 struct CassandraPatterns {
     partition_start: Regex,
     row_start: Regex,
@@ -90,6 +92,7 @@ struct CassandraPatterns {
     ttl_pattern: Regex,
 }
 
+#[derive(Debug)]
 struct CqlitePatterns {
     #[allow(dead_code)]
     partition_start: Regex,

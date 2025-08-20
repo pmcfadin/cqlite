@@ -7,17 +7,26 @@
 //!
 //! CRITICAL SUCCESS FACTOR: Command-line test execution MUST work reliably!
 
+#[cfg(feature = "benchmarks")]
 use std::collections::HashMap;
+#[cfg(feature = "benchmarks")]
 use std::fs;
+#[cfg(feature = "benchmarks")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "benchmarks")]
 use std::process::{Command, Stdio};
+#[cfg(feature = "benchmarks")]
 use std::time::Instant;
 
+#[cfg(feature = "benchmarks")]
 use anyhow::{Context, Result};
+#[cfg(feature = "benchmarks")]
 use clap::{Arg, Command as ClapCommand};
+#[cfg(feature = "benchmarks")]
 use serde::{Deserialize, Serialize};
 
 // Performance benchmark configuration
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceBenchmarkConfig {
     pub name: String,
@@ -31,6 +40,7 @@ pub struct PerformanceBenchmarkConfig {
     pub regression_threshold_percent: f64,
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
     pub min_duration_ms: f64,
@@ -45,6 +55,7 @@ pub struct PerformanceMetrics {
     pub cpu_usage_percent: f64,
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkResult {
     pub config: PerformanceBenchmarkConfig,
@@ -55,6 +66,7 @@ pub struct BenchmarkResult {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PerformanceRegressionReport {
     pub baseline_file: Option<PathBuf>,
@@ -66,6 +78,7 @@ pub struct PerformanceRegressionReport {
     pub generated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegressionAnalysis {
     pub benchmark_name: String,
@@ -77,6 +90,7 @@ pub struct RegressionAnalysis {
     pub severity: RegressionSeverity,
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImprovementAnalysis {
     pub benchmark_name: String,
@@ -86,6 +100,7 @@ pub struct ImprovementAnalysis {
     pub improvement_percent: f64,
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RegressionSeverity {
     Minor,    // 5-15% regression
@@ -93,6 +108,7 @@ pub enum RegressionSeverity {
     Critical, // >30% regression
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PerformanceSummary {
     pub total_benchmarks: usize,
@@ -104,14 +120,16 @@ pub struct PerformanceSummary {
     pub recommendation: String,
 }
 
+#[cfg(feature = "benchmarks")]
 pub struct PerformanceRegressionTester {
-    config_file: PathBuf,
+    _config_file: PathBuf,
     baseline_file: Option<PathBuf>,
     output_dir: PathBuf,
     benchmarks: Vec<PerformanceBenchmarkConfig>,
     verbose: bool,
 }
 
+#[cfg(feature = "benchmarks")]
 impl PerformanceRegressionTester {
     pub fn new(
         config_file: PathBuf,
@@ -122,7 +140,7 @@ impl PerformanceRegressionTester {
         let benchmarks = Self::load_benchmark_configs(&config_file)?;
 
         Ok(PerformanceRegressionTester {
-            config_file,
+            _config_file: config_file,
             baseline_file,
             output_dir,
             benchmarks,
@@ -735,6 +753,7 @@ impl PerformanceRegressionTester {
 }
 
 // Default benchmark configurations
+#[cfg(feature = "benchmarks")]
 fn create_default_benchmark_config() -> Result<Vec<PerformanceBenchmarkConfig>> {
     Ok(vec![
         PerformanceBenchmarkConfig {
@@ -820,6 +839,7 @@ fn create_default_benchmark_config() -> Result<Vec<PerformanceBenchmarkConfig>> 
     ])
 }
 
+#[cfg(feature = "benchmarks")]
 fn main() -> Result<()> {
     let matches = ClapCommand::new("performance-regression-test-runner")
         .version("1.0.0")
@@ -967,4 +987,11 @@ fn main() -> Result<()> {
     };
 
     std::process::exit(exit_code);
+}
+
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Compile with: cargo build --features benchmarks");
+    std::process::exit(1);
 }

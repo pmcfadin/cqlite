@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[tokio::test]
+#[cfg(feature = "docker-integration")]
 async fn test_validator_initialization() {
     let validator = SstableDumpValidator::new().await;
 
@@ -15,6 +16,16 @@ async fn test_validator_initialization() {
         }
         Err(e) => panic!("Unexpected error: {}", e),
     }
+}
+
+#[tokio::test]
+#[cfg(not(feature = "docker-integration"))]
+async fn test_validator_initialization() {
+    // When Docker integration is disabled, validator should return an error
+    let validator = SstableDumpValidator::new().await;
+    
+    assert!(validator.is_err(), "Should fail without Docker integration");
+    assert!(validator.unwrap_err().to_string().contains("Docker integration is disabled"));
 }
 
 #[tokio::test]

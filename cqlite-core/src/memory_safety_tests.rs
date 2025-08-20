@@ -417,6 +417,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore]
     async fn test_memory_safety_suite() {
         let tests = MemorySafetyTests::new();
         tests

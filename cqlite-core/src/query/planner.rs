@@ -98,6 +98,8 @@ pub enum StepType {
     Scan,
     /// Filter rows
     Filter,
+    /// Insert rows
+    Insert,
     /// Sort results
     Sort,
     /// Limit results
@@ -314,9 +316,9 @@ impl QueryPlanner {
         let _table_stats = self.get_table_statistics(table).await?;
 
         let steps = vec![ExecutionStep {
-            step_type: StepType::Scan, // Insert operation
+            step_type: StepType::Insert, // Insert operation
             columns: query.columns.clone(),
-            conditions: vec![],
+            conditions: vec![], // No conditions needed for INSERT
             cost: self.cost_model.row_scan_cost,
             parallelization: ParallelizationInfo {
                 can_parallelize: false,
@@ -326,7 +328,7 @@ impl QueryPlanner {
         }];
 
         Ok(QueryPlan {
-            plan_type: PlanType::PointLookup,
+            plan_type: PlanType::TableScan, // Insert is more like a table modification
             table: Some(table.clone()),
             estimated_cost: self.cost_model.row_scan_cost,
             estimated_rows: 1,

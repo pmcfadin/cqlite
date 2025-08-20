@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::cli::{ExportFormat, ImportFormat, OutputFormat};
 // use crate::formatter::CqlshTableFormatter;
 // use crate::data_parser::{RealDataParser, ParsedRow};
@@ -150,9 +152,9 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-// pub mod admin;
-// pub mod bench;
-// pub mod schema;
+pub mod admin;
+pub mod bench;
+pub mod schema;
 
 pub mod docker;
 pub mod info;
@@ -337,22 +339,19 @@ pub async fn import_data(
         }
     };
 
-    // Validate target table exists
+    // Try to validate target table exists, but don't fail if we can't verify
     let table_check_query = format!(
         "SELECT table_name FROM system.tables WHERE table_name = '{target_table}'"
     );
     match database.execute(&table_check_query).await {
         Ok(result) if result.rows.is_empty() => {
-            return Err(anyhow::anyhow!(
-                "Target table '{}' does not exist. Please create the table first or check the table name.",
-                target_table
-            ));
+            println!("⚠️  Warning: Table '{}' not found in system catalog. Assuming it exists or will be created during import.", target_table);
         }
         Ok(_) => {
             println!("✓ Target table '{target_table}' found");
         }
         Err(_) => {
-            println!("⚠️  Warning: Could not verify table existence. Proceeding anyway...");
+            println!("⚠️  Warning: Could not verify table existence (system tables may not be implemented). Proceeding with import...");
         }
     }
 

@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! Advanced Performance Validation Suite for CQLite
 //!
 //! This module provides comprehensive performance validation to ensure CQLite meets

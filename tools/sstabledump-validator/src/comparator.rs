@@ -70,6 +70,7 @@ pub struct ComparisonStatistics {
     pub comparison_duration_ms: u128,
 }
 
+#[derive(Debug)]
 pub struct CellByCell {
     // Configuration for comparison sensitivity
     pub zero_tolerance: bool,

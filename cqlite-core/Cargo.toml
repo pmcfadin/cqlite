@@ -80,6 +80,7 @@ proptest = { workspace = true }
 tempfile = "3.8"
 rand = "0.8"
 tokio-test = "0.4"
+insta = "1.34"
 
 [[bin]]
 name = "memory_safety_validator"
@@ -122,6 +123,14 @@ legacy-heuristics = []
 
 # CI zero tolerance - treat warnings as errors
 ci_zero_tolerance = []
+
+# M1 testing remediation feature flags (not enabled by default)
+antlr = []            # CQL/ANTLR parser work (M2+)
+state_machine = []    # query/state orchestration (M2+)
+events = []           # validation/event recording (M2+)
+tombstones = []       # tombstone/GC logic (M3+)
+benchmarks = []       # opt-in perf runs
+experimental = []     # umbrella for WIP tests
 
 [lints]
 workspace = true

@@ -17,6 +17,7 @@ use nom::{
     number::complete::{be_f32, be_f64, be_i32, be_i64, be_u8, be_u16, be_u32},
 };
 
+
 /// CQL type identifiers as they appear in the binary format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -125,6 +126,58 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
         CqlTypeId::Custom => {
             // Custom types require additional metadata, return as blob for now
             parse_blob(input)
+        }
+    }
+}
+
+/// Parse a CQL value from raw data (without length prefix)
+/// This is used for collection elements where length is already parsed
+pub fn parse_cql_value_raw(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value> {
+    match type_id {
+        CqlTypeId::Boolean => parse_boolean(input),
+        CqlTypeId::Tinyint => parse_tinyint(input),
+        CqlTypeId::Smallint => parse_smallint(input),
+        CqlTypeId::Int => parse_int(input),
+        CqlTypeId::BigInt | CqlTypeId::Counter => parse_bigint(input),
+        CqlTypeId::Float => parse_float(input),
+        CqlTypeId::Double => parse_double(input),
+        CqlTypeId::Ascii | CqlTypeId::Varchar => {
+            // Check if input starts with a length prefix (for compatibility with serialized data)
+            if let Ok((remaining_after_length, text_length)) = parse_vint(input) {
+                if text_length >= 0 && remaining_after_length.len() == text_length as usize {
+                    // Input has length prefix, use only the text data
+                    let text = String::from_utf8(remaining_after_length.to_vec()).map_err(|_| {
+                        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+                    })?;
+                    return Ok((&[], Value::Text(text)));
+                }
+            }
+            // No length prefix or malformed, treat all input as text
+            let text = String::from_utf8(input.to_vec()).map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?;
+            Ok((&[], Value::Text(text)))
+        },
+        CqlTypeId::Blob => {
+            // For blob, use all input as blob data
+            Ok((&[], Value::Blob(input.to_vec())))
+        },
+        CqlTypeId::Uuid | CqlTypeId::Timeuuid => parse_uuid(input),
+        CqlTypeId::Timestamp => parse_timestamp(input),
+        CqlTypeId::Date => parse_date(input),
+        CqlTypeId::Time => parse_time(input),
+        CqlTypeId::Varint => parse_varint(input),
+        CqlTypeId::Decimal => parse_decimal(input),
+        CqlTypeId::Duration => parse_duration(input),
+        CqlTypeId::Inet => parse_inet(input),
+        // Collections and complex types should not be called with raw parsing
+        CqlTypeId::List | CqlTypeId::Set | CqlTypeId::Map | CqlTypeId::Udt | CqlTypeId::Tuple => {
+            parse_cql_value(input, type_id) // Fallback to normal parsing
+        },
+        CqlTypeId::Tombstone => parse_tombstone(input),
+        CqlTypeId::Custom => {
+            // Custom types require additional metadata, return as blob for now
+            Ok((&[], Value::Blob(input.to_vec())))
         }
     }
 }
@@ -281,9 +334,24 @@ pub fn parse_list(input: &[u8]) -> IResult<&[u8], Value> {
     let mut remaining = input;
 
     for _ in 0..count {
-        let (new_remaining, element) = parse_cql_value(remaining, element_type)?;
-        elements.push(element);
+        // Parse element length prefix using VInt (which can be negative for null)
+        let (new_remaining, element_length) = parse_vint(remaining)?;
         remaining = new_remaining;
+
+        let element = if element_length == -1 {
+            Value::Null // Null element
+        } else if element_length < 0 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                remaining,
+                nom::error::ErrorKind::Verify,
+            )));
+        } else {
+            let (new_remaining, element_data) = take(element_length as usize)(remaining)?;
+            remaining = new_remaining;
+            parse_cql_value_raw(element_data, element_type)?.1
+        };
+
+        elements.push(element);
     }
 
     Ok((remaining, Value::List(elements)))
@@ -347,11 +415,41 @@ pub fn parse_map(input: &[u8]) -> IResult<&[u8], Value> {
     let mut remaining = input;
 
     for _ in 0..count {
-        let (new_remaining, key) = parse_cql_value(remaining, key_type)?;
-        let (new_remaining, value) = parse_cql_value(new_remaining, value_type)?;
+        // Parse key length prefix
+        let (new_remaining, key_length) = parse_vint(remaining)?;
+        remaining = new_remaining;
+
+        let key = if key_length == -1 {
+            Value::Null // Null key (unusual but possible)
+        } else if key_length < 0 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                remaining,
+                nom::error::ErrorKind::Verify,
+            )));
+        } else {
+            let (new_remaining, key_data) = take(key_length as usize)(remaining)?;
+            remaining = new_remaining;
+            parse_cql_value_raw(key_data, key_type)?.1
+        };
+
+        // Parse value length prefix
+        let (new_remaining, value_length) = parse_vint(remaining)?;
+        remaining = new_remaining;
+
+        let value = if value_length == -1 {
+            Value::Null // Null value
+        } else if value_length < 0 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                remaining,
+                nom::error::ErrorKind::Verify,
+            )));
+        } else {
+            let (new_remaining, value_data) = take(value_length as usize)(remaining)?;
+            remaining = new_remaining;
+            parse_cql_value_raw(value_data, value_type)?.1
+        };
 
         map.push((key, value));
-        remaining = new_remaining;
     }
 
     Ok((remaining, Value::Map(map)))
@@ -922,7 +1020,7 @@ pub fn parse_tuple(input: &[u8]) -> IResult<&[u8], Value> {
         } else {
             let (new_remaining, field_data) = take(length as usize)(remaining)?;
             remaining = new_remaining;
-            parse_cql_value(field_data, field_type_id)?.1
+            parse_cql_value_raw(field_data, field_type_id)?.1
         };
 
         fields.push(field_value);
@@ -1241,8 +1339,15 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 result.push(element_type as u8);
 
                 for element in list {
-                    let element_bytes = serialize_cql_value(element)?;
-                    result.extend_from_slice(&element_bytes[1..]); // Skip type byte
+                    if let Value::Null = element {
+                        // Null element: length = -1
+                        result.extend_from_slice(&encode_vint(-1));
+                    } else {
+                        let element_bytes = serialize_cql_value(element)?;
+                        let element_data = &element_bytes[1..]; // Skip type byte
+                        result.extend_from_slice(&encode_vint(element_data.len() as i64));
+                        result.extend_from_slice(element_data);
+                    }
                 }
             }
         }
@@ -1258,11 +1363,25 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 result.push(value_type as u8);
 
                 for (key, value) in map {
-                    let key_bytes = serialize_cql_value(key)?;
-                    let value_bytes = serialize_cql_value(value)?;
+                    // Serialize key with length prefix
+                    if let Value::Null = key {
+                        result.extend_from_slice(&encode_vint(-1));
+                    } else {
+                        let key_bytes = serialize_cql_value(key)?;
+                        let key_data = &key_bytes[1..]; // Skip type byte
+                        result.extend_from_slice(&encode_vint(key_data.len() as i64));
+                        result.extend_from_slice(key_data);
+                    }
 
-                    result.extend_from_slice(&key_bytes[1..]); // Skip type byte
-                    result.extend_from_slice(&value_bytes[1..]); // Skip type byte
+                    // Serialize value with length prefix
+                    if let Value::Null = value {
+                        result.extend_from_slice(&encode_vint(-1));
+                    } else {
+                        let value_bytes = serialize_cql_value(value)?;
+                        let value_data = &value_bytes[1..]; // Skip type byte
+                        result.extend_from_slice(&encode_vint(value_data.len() as i64));
+                        result.extend_from_slice(value_data);
+                    }
                 }
             }
         }
@@ -1287,8 +1406,15 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 result.push(element_type as u8);
 
                 for element in set {
-                    let element_bytes = serialize_cql_value(element)?;
-                    result.extend_from_slice(&element_bytes[1..]); // Skip type byte
+                    if let Value::Null = element {
+                        // Null element: length = -1
+                        result.extend_from_slice(&encode_vint(-1));
+                    } else {
+                        let element_bytes = serialize_cql_value(element)?;
+                        let element_data = &element_bytes[1..]; // Skip type byte
+                        result.extend_from_slice(&encode_vint(element_data.len() as i64));
+                        result.extend_from_slice(element_data);
+                    }
                 }
             }
         }
@@ -1302,10 +1428,17 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 result.push(element_type as u8);
             }
 
-            // Serialize field values
+            // Serialize field values with proper length prefixes
             for element in tuple {
-                let element_bytes = serialize_cql_value(element)?;
-                result.extend_from_slice(&element_bytes[1..]); // Skip type byte
+                if let Value::Null = element {
+                    // Null field: length = -1
+                    result.extend_from_slice(&(-1i32).to_be_bytes());
+                } else {
+                    let element_bytes = serialize_cql_value(element)?;
+                    let element_data = &element_bytes[1..]; // Skip type byte
+                    result.extend_from_slice(&(element_data.len() as i32).to_be_bytes());
+                    result.extend_from_slice(element_data);
+                }
             }
         }
         Value::Udt(udt) => {
@@ -1441,7 +1574,7 @@ mod tests {
     fn test_cql_type_id_conversion() {
         assert_eq!(CqlTypeId::try_from(0x04).unwrap(), CqlTypeId::Boolean);
         assert_eq!(CqlTypeId::try_from(0x09).unwrap(), CqlTypeId::Int);
-        assert!(CqlTypeId::try_from(0xFF).is_err());
+        assert_eq!(CqlTypeId::try_from(0xFF).unwrap(), CqlTypeId::Tombstone);
     }
 
     #[test]

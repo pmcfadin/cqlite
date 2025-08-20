@@ -1,4 +1,4 @@
-use crate::SchemaCommands;
+use crate::cli_types::SchemaCommands;
 use anyhow::{Context, Result};
 use cqlite_core::{Database, schema::{TableSchema, Column, KeyColumn, ClusteringColumn, parse_cql_schema}};
 use serde_json;
@@ -9,13 +9,13 @@ pub async fn handle_schema_command(database: &Database, command: SchemaCommands)
     match command {
         SchemaCommands::List => list_tables(database).await,
         SchemaCommands::Describe { table } => describe_table(database, &table).await,
-        SchemaCommands::Create { file } => create_table_from_file(database, &file).await,
+        SchemaCommands::Create { schema } => create_table_from_file(database, &schema).await,
         SchemaCommands::Drop { table, force } => drop_table(database, &table, force).await,
-        SchemaCommands::Validate { file } => validate_schema(&file).await,
     }
 }
 
-async fn list_tables(database: &Database) -> Result<()> {
+#[allow(dead_code)]
+async fn list_tables(_database: &Database) -> Result<()> {
     // TODO: Implement actual table listing from database
     println!("Tables in database:");
     println!("- users");
@@ -26,7 +26,8 @@ async fn list_tables(database: &Database) -> Result<()> {
     Ok(())
 }
 
-async fn describe_table(database: &Database, table: &str) -> Result<()> {
+#[allow(dead_code)]
+async fn describe_table(_database: &Database, table: &str) -> Result<()> {
     // TODO: Implement actual table description from database schema
     println!("Describing table '{}'", table);
     println!("Columns:");
@@ -93,6 +94,7 @@ async fn drop_table(database: &Database, table: &str, force: bool) -> Result<()>
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn validate_schema(file_path: &Path) -> Result<()> {
     println!("Validating schema: {}", file_path.display());
 
@@ -129,6 +131,7 @@ async fn validate_schema(file_path: &Path) -> Result<()> {
     }
 }
 
+#[allow(dead_code)]
 async fn validate_json_schema(json_path: &Path) -> Result<()> {
     // Read the JSON file
     let schema_content = std::fs::read_to_string(json_path)
@@ -164,6 +167,7 @@ async fn validate_json_schema(json_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn validate_cql_schema(cql_path: &Path) -> Result<()> {
     // Read the CQL file
     let cql_content = std::fs::read_to_string(cql_path)
@@ -195,6 +199,7 @@ async fn validate_cql_schema(cql_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn print_schema_details(schema: &TableSchema) {
     println!("📋 Table: {}.{}", schema.keyspace, schema.table);
     println!("📊 Columns: {}", schema.columns.len());
@@ -217,6 +222,7 @@ fn print_schema_details(schema: &TableSchema) {
 }
 
 /// Parse CQL DDL and convert to TableSchema
+#[allow(dead_code)]
 fn parse_cql_ddl(cql_content: &str) -> Result<TableSchema> {
     let cql_content = cql_content.trim().to_uppercase();
     
@@ -287,6 +293,7 @@ fn parse_cql_ddl(cql_content: &str) -> Result<TableSchema> {
 }
 
 /// Parse column definitions from CQL DDL
+#[allow(dead_code)]
 fn parse_column_definitions(definitions: &str) -> Result<(Vec<Column>, Vec<KeyColumn>, Vec<ClusteringColumn>)> {
     let mut columns = Vec::new();
     let mut partition_keys = Vec::new();
@@ -354,6 +361,7 @@ fn parse_column_definitions(definitions: &str) -> Result<(Vec<Column>, Vec<KeyCo
 }
 
 /// Split column definitions while respecting nested types
+#[allow(dead_code)]
 fn split_column_definitions(definitions: &str) -> Result<Vec<String>> {
     let mut parts = Vec::new();
     let mut current_part = String::new();
@@ -386,6 +394,7 @@ fn split_column_definitions(definitions: &str) -> Result<Vec<String>> {
 }
 
 /// Parse PRIMARY KEY constraint like "PRIMARY KEY (id)" or "PRIMARY KEY ((user_id, tenant_id), created_at)"
+#[allow(dead_code)]
 fn parse_primary_key_constraint(
     constraint: &str,
     columns: &[Column],
@@ -448,6 +457,7 @@ fn parse_primary_key_constraint(
 }
 
 /// Parse composite primary key with explicit partition and clustering keys
+#[allow(dead_code)]
 fn parse_composite_primary_key(
     key_spec: &str,
     columns: &[Column],

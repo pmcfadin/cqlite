@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 pub struct SelectStatement {
     /// SELECT clause - what to return
     pub select_clause: SelectClause,
-    /// FROM clause - which table(s) to query
-    pub from_clause: FromClause,
+    /// FROM clause - which table(s) to query (optional for constant expressions)
+    pub from_clause: Option<FromClause>,
     /// WHERE clause - filtering conditions
     pub where_clause: Option<WhereExpression>,
     /// GROUP BY clause - grouping columns
@@ -293,7 +293,7 @@ impl SelectStatement {
     pub fn select_all_from(table: TableId) -> Self {
         Self {
             select_clause: SelectClause::All,
-            from_clause: FromClause::Table(table),
+            from_clause: Some(FromClause::Table(table)),
             where_clause: None,
             group_by: None,
             having_clause: None,
@@ -522,7 +522,7 @@ mod tests {
                     distinct: false,
                 },
             )]),
-            from_clause: FromClause::Table(TableId::new("users")),
+            from_clause: Some(FromClause::Table(TableId::new("users"))),
             where_clause: None,
             group_by: None,
             having_clause: None,

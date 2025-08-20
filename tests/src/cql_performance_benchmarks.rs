@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 //! CQL Parser Performance Benchmarks
 //!
 //! Comprehensive performance testing for CQL parsing operations,

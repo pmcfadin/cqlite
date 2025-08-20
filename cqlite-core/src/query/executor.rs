@@ -494,6 +494,9 @@ impl QueryExecutor {
                 StepType::Scan => {
                     // Scan step is handled by the scan methods
                 }
+                StepType::Insert => {
+                    rows = self.apply_insert_step(rows, step).await?;
+                }
             }
         }
 
@@ -603,6 +606,19 @@ impl QueryExecutor {
         // Simplified join - in a real implementation, this would handle
         // various join types (INNER, LEFT, RIGHT, FULL)
         Ok(rows)
+    }
+
+    /// Apply insert step
+    async fn apply_insert_step(
+        &self,
+        _rows: Vec<QueryRow>,
+        _step: &ExecutionStep,
+    ) -> Result<Vec<QueryRow>> {
+        // For INSERT operations, we typically don't return rows,
+        // just confirm the operation succeeded
+        // In a real implementation, this would perform the actual insert
+        // and return empty result set
+        Ok(vec![])
     }
 
     /// Extract range conditions from execution steps

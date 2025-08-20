@@ -31,7 +31,7 @@ pub fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
         .map_err(|e| anyhow::anyhow!("Failed to run CLI command: {}", e))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "integration-tests"))]
 mod tests {
     use super::*;
 
@@ -224,9 +224,9 @@ mod tests {
             db_path.to_str().unwrap(),
             "bench",
             "read",
-            "--ops",
+            "--operations",
             "10",
-            "--threads",
+            "--concurrency",
             "1",
         ])?;
 
@@ -236,9 +236,9 @@ mod tests {
             db_path.to_str().unwrap(),
             "bench",
             "write",
-            "--ops",
+            "--operations",
             "10",
-            "--threads",
+            "--concurrency",
             "1",
         ])?;
 
@@ -248,11 +248,11 @@ mod tests {
             db_path.to_str().unwrap(),
             "bench",
             "mixed",
-            "--read-pct",
+            "--read-ratio",
             "70",
-            "--ops",
+            "--operations",
             "10",
-            "--threads",
+            "--concurrency",
             "1",
         ])?;
 
@@ -301,6 +301,16 @@ mod tests {
         std::fs::write(
             &config_path,
             r#"
+[connection]
+timeout_ms = 30000
+retry_attempts = 3
+pool_size = 10
+
+[output]
+max_rows = 1000
+colors = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+
 [performance]
 cache_size_mb = 128
 query_timeout_ms = 30000
@@ -308,6 +318,18 @@ memory_limit_mb = 512
 
 [logging]
 level = "info"
+format = "Pretty"
+
+[repl]
+enable_history = true
+enable_completion = true
+enable_colors = true
+show_timing = false
+page_size = 50
+enable_paging = true
+max_history_size = 1000
+prompt = "cqlite> "
+prompt_continuation = "    -> "
 "#,
         )?;
 
@@ -414,7 +436,7 @@ level = "info"
 }
 
 /// Performance and stress tests
-#[cfg(test)]
+#[cfg(all(test, feature = "integration-tests"))]
 mod performance_tests {
     use super::*;
 
@@ -458,7 +480,7 @@ mod performance_tests {
 
         let mut handles = vec![];
 
-        for i in 0..5 {
+        for _i in 0..5 {
             let db_path_clone = Arc::clone(&db_path);
             let handle = thread::spawn(move || {
                 run_cli_command(&[

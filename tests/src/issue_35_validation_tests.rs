@@ -23,7 +23,7 @@ pub struct Issue35ValidationHarness {
     /// Platform for file operations
     platform: Arc<Platform>,
     /// Configuration
-    config: Config,
+    _config: Config,
     /// Test data directories
     test_data_dirs: Vec<PathBuf>,
     /// Validation results
@@ -69,7 +69,7 @@ impl Issue35ValidationHarness {
 
         Ok(Self {
             platform,
-            config,
+            _config: config,
             test_data_dirs,
             results: HashMap::new(),
         })

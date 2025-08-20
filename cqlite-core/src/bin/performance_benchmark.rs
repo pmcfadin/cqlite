@@ -2,6 +2,7 @@
 //!
 //! Comprehensive performance validation and benchmarking tool for CQLite.
 
+#[cfg(feature = "benchmarks")]
 use cqlite_core::{
     RowKey, Value,
     parser::{
@@ -10,14 +11,18 @@ use cqlite_core::{
         vint::{encode_vint, parse_vint},
     },
 };
+#[cfg(feature = "benchmarks")]
 use std::collections::HashMap;
+#[cfg(feature = "benchmarks")]
 use std::time::Instant;
 
 /// Performance benchmark runner
+#[cfg(feature = "benchmarks")]
 pub struct PerformanceBenchmarkRunner {
     results: HashMap<String, BenchmarkResult>,
 }
 
+#[cfg(feature = "benchmarks")]
 #[derive(Debug, Clone)]
 pub struct BenchmarkResult {
     pub name: String,
@@ -28,6 +33,7 @@ pub struct BenchmarkResult {
     pub meets_target: bool,
 }
 
+#[cfg(feature = "benchmarks")]
 impl PerformanceBenchmarkRunner {
     pub fn new() -> Self {
         Self {
@@ -363,6 +369,7 @@ impl PerformanceBenchmarkRunner {
 }
 
 /// Estimate current memory usage (simplified)
+#[cfg(feature = "benchmarks")]
 fn estimate_memory_usage() -> u64 {
     // In a real implementation, this would use actual memory profiling
     // For demo purposes, return a simulated value
@@ -370,6 +377,7 @@ fn estimate_memory_usage() -> u64 {
 }
 
 /// Benchmark scalar operations (simulated)
+#[cfg(feature = "benchmarks")]
 fn benchmark_scalar_operations(size: usize) -> f64 {
     let start = Instant::now();
 
@@ -386,6 +394,7 @@ fn benchmark_scalar_operations(size: usize) -> f64 {
 }
 
 /// Benchmark SIMD operations (simulated)
+#[cfg(feature = "benchmarks")]
 fn benchmark_simd_operations(size: usize) -> f64 {
     let start = Instant::now();
 
@@ -406,6 +415,7 @@ fn benchmark_simd_operations(size: usize) -> f64 {
     start.elapsed().as_secs_f64() * 0.4 // 2.5x speedup simulation
 }
 
+#[cfg(feature = "benchmarks")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("CQLite Performance Benchmark Suite v1.0");
     println!("========================================");
@@ -415,4 +425,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n🏁 Benchmark completed successfully!");
     Ok(())
+}
+
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    eprintln!("This binary requires the 'benchmarks' feature to be enabled.");
+    eprintln!("Run with: cargo run --features benchmarks --bin performance_benchmark");
+    std::process::exit(1);
 }

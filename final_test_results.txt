@@ -1,0 +1,1307 @@
+   Compiling cqlite-core v0.1.0 (/Users/patrick/local_projects/cqlite/cqlite-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.96s
+     Running unittests src/lib.rs (target/debug/deps/cqlite_core-03c149b532b1a188)
+
+running 646 tests
+test benchmarks::cassandra5::memory_benchmarks::tests::test_memory_access_pattern_enum ... ok
+test benchmarks::cassandra5::tests::test_prd_targets_default ... ok
+test benchmarks::cassandra5::tests::test_generate_test_data ... ok
+test benchmarks::cassandra5::tests::test_benchmark_result_creation ... ok
+test benchmarks::cassandra5::tests::test_cassandra5_performance_suite_creation ... ok
+test benchmarks::cassandra5::compression_benchmarks::tests::test_compression_benchmarks_creation ... ok
+test benchmarks::cassandra5::memory_benchmarks::tests::test_memory_benchmarks_creation ... ok
+test benchmarks::cassandra5::memory_benchmarks::tests::test_memory_growth_analysis ... ok
+test benchmarks::cassandra5::throughput_benchmarks::tests::test_native_performance_estimates ... ok
+test benchmarks::cassandra5::throughput_benchmarks::tests::test_throughput_pattern_enum ... ok
+test benchmarks::cassandra5::throughput_benchmarks::tests::test_scalability_calculation ... ok
+test benchmarks::cassandra5::throughput_benchmarks::tests::test_throughput_benchmarks_creation ... ok
+test benchmarks::cassandra5::zerocopy_benchmarks::tests::test_data_complexity_enum ... ok
+test benchmarks::cassandra5::zerocopy_benchmarks::tests::test_zerocopy_benchmarks_creation ... ok
+test config::tests::test_default_config ... ok
+test config::tests::test_memory_optimized_config ... ok
+test config::tests::test_config_validation ... ok
+test config::tests::test_performance_optimized_config ... ok
+test error::tests::test_error_categories ... ok
+test error::tests::test_error_creation ... ok
+test error::tests::test_error_recoverability ... ok
+test benchmarks::cassandra5::zerocopy_benchmarks::tests::test_complex_data_generation ... ok
+test memory::tests::test_block_cache ... ok
+test memory::tests::test_buffer_pool ... ok
+test memory::tests::test_memory_manager_creation ... ok
+test docker::tests::test_parse_cqlsh_output ... ok
+test memory::tests::test_row_cache ... ok
+test memory_safety_tests::tests::test_buffer_overflow_basic ... ok
+test benchmarks::cassandra5::throughput_benchmarks::tests::test_operations_per_second ... ok
+Running memory safety tests...
+1. Testing memory manager safety...
+test benchmarks::cassandra5::tests::test_precision_timer ... ok
+test benchmarks::cassandra5::zerocopy_benchmarks::tests::test_zerocopy_vs_traditional ... ok
+test memory_safety_tests::tests::test_tracking_allocator ... ok
+test memory_safety_tests::tests::test_unsafe_code_basic ... ok
+test parser::antlr_backend::tests::test_antlr_parser_creation ... ok
+test parser::antlr_backend::tests::test_not_implemented_error ... ok
+test parser::antlr_backend::tests::test_unsupported_features ... ok
+test parser::ast::tests::test_data_type_conversion ... ok
+test parser::ast::tests::test_identifier_creation ... ok
+test parser::ast::tests::test_identifier_validation ... ok
+test parser::ast::tests::test_table_creation ... ok
+🚀 Running VInt performance benchmarks...
+✅ VInt encoding: 259.64 MB/s
+✅ VInt decoding: 952.00 MB/s
+🚀 Running header parsing benchmarks...
+✅ Header parsing: 377.26 MB/s
+🚀 Running type system benchmarks...
+✅ Type system: 414.09 MB/s
+test parser::benchmarks::tests::test_benchmark_framework ... ok
+test parser::binary::tests::test_binary_parser_creation ... ok
+test parser::binary::tests::test_binary_parser_unsupported ... ok
+test parser::binary::tests::test_parse_binary_data ... ok
+test parser::binary::tests::test_parse_vint_binary ... ok
+🔥 Running Collection Performance Benchmarks...
+  📋 Benchmarking List operations...
+test benchmarks::cassandra5::throughput_benchmarks::tests::test_sequential_throughput ... ok
+test parser::collection_tests::edge_case_tests::test_collection_size_estimates ... ok
+test parser::collection_tests::edge_case_tests::test_empty_collections ... ok
+test parser::collection_tests::edge_case_tests::test_insufficient_data_handling ... ok
+
+thread 'parser::collection_tests::edge_case_tests::test_malformed_element_length' panicked at cqlite-core/src/parser/collection_tests.rs:706:9:
+Should fail with malformed element length
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test parser::collection_tests::edge_case_tests::test_malformed_element_length ... FAILED
+
+thread 'parser::collection_tests::edge_case_tests::test_nested_collections' panicked at cqlite-core/src/parser/collection_tests.rs:633:9:
+assertion failed: remaining.is_empty()
+test parser::collection_tests::edge_case_tests::test_nested_collections ... FAILED
+test parser::collection_tests::list_tests::test_empty_list_parsing ... ok
+test parser::collection_tests::list_tests::test_integer_list_parsing ... ok
+test parser::collection_tests::list_tests::test_large_list_safety ... ok
+
+thread 'parser::collection_tests::list_tests::test_list_with_null_elements' panicked at cqlite-core/src/parser/collection_tests.rs:183:52:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [0, 0, 3], code: Eof })
+  🎯 Benchmarking Set operations...
+test parser::collection_tests::list_tests::test_list_with_null_elements ... FAILED
+test parser::collection_tests::list_tests::test_list_with_variable_length_strings ... ok
+
+thread 'parser::collection_tests::list_tests::test_nested_list_parsing' panicked at cqlite-core/src/parser/collection_tests.rs:131:9:
+assertion failed: remaining.is_empty()
+test parser::collection_tests::list_tests::test_nested_list_parsing ... FAILED
+test parser::collection_tests::list_tests::test_string_list_parsing ... ok
+test parser::collection_tests::map_tests::test_empty_map_parsing ... ok
+test parser::collection_tests::map_tests::test_map_large_count_validation ... ok
+
+thread 'parser::collection_tests::map_tests::test_map_with_null_values' panicked at cqlite-core/src/parser/collection_tests.rs:400:51:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [1, 8, 107, 101, 121, 50, 1, 8, 107, 101, 121, 51, 8, 0, 0, 0, 3], code: Verify })
+test parser::collection_tests::map_tests::test_map_with_null_values ... FAILED
+
+thread 'parser::collection_tests::map_tests::test_string_to_int_map_parsing' panicked at cqlite-core/src/parser/collection_tests.rs:355:51:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [1, 6, 116, 119, 111, 8, 0, 0, 0, 2, 10, 116, 104, 114, 101, 101, 8, 0, 0, 0, 3], code: Verify })
+test parser::collection_tests::map_tests::test_string_to_int_map_parsing ... FAILED
+test benchmarks::cassandra5::memory_benchmarks::tests::test_sequential_access ... ok
+test parser::collection_tests::roundtrip_tests::test_list_roundtrip ... ok
+
+thread 'parser::collection_tests::roundtrip_tests::test_tuple_roundtrip' panicked at cqlite-core/src/parser/collection_tests.rs:570:79:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [10, 104, 101, 108, 108, 111, 1, 64, 9, 30, 184, 81, 235, 133, 31], code: Eof })
+test parser::collection_tests::roundtrip_tests::test_map_roundtrip ... ok
+test parser::collection_tests::set_tests::test_empty_set_parsing ... ok
+test parser::collection_tests::set_tests::test_set_duplicate_detection ... ok
+test parser::collection_tests::set_tests::test_string_set_parsing ... ok
+test parser::collection_tests::roundtrip_tests::test_tuple_roundtrip ... FAILED
+test parser::collection_tests::tuple_tests::test_empty_tuple_parsing ... ok
+
+thread 'parser::collection_tests::tuple_tests::test_mixed_type_tuple_parsing' panicked at cqlite-core/src/parser/collection_tests.rs:488:53:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [104, 101, 108, 108, 111, 4, 2, 1, 7, 16, 64, 9, 30, 184, 81, 235, 133, 31], code: Eof })
+test parser::collection_tests::tuple_tests::test_mixed_type_tuple_parsing ... FAILED
+  🗺️  Benchmarking Map operations...
+test parser::collection_validation_tests::cassandra_format_tests::test_collection_type_identification ... ok
+test parser::collection_validation_tests::cassandra_format_tests::test_empty_collections_edge_cases ... ok
+test parser::collection_validation_tests::cassandra_format_tests::test_list_text_parsing_cassandra_format ... ok
+test parser::collection_validation_tests::cassandra_format_tests::test_map_text_int_parsing_cassandra_format ... ok
+test parser::collection_validation_tests::cassandra_format_tests::test_memory_safety_large_collections ... ok
+test parser::collection_validation_tests::cassandra_format_tests::test_mixed_type_validation ... ok
+test parser::collection_validation_tests::cassandra_format_tests::test_collections_table_schema_compatibility ... ok
+test parser::collection_validation_tests::cassandra_format_tests::test_set_int_parsing_cassandra_format ... ok
+test parser::collection_validation_tests::cassandra_format_tests::test_sstable_compatibility_format ... ok
+test parser::collection_validation_tests::performance_tests::test_collection_parsing_performance ... ok
+test parser::complex_types::tests::test_map_type_parsing ... ok
+test parser::complex_types::tests::test_collection_type_parsing ... ok
+test parser::complex_types::tests::test_type_inference_from_value ... ok
+test parser::complex_types::tests::test_primitive_type_parsing ... ok
+test parser::config::tests::test_config_builder ... ok
+test parser::config::tests::test_config_validation ... ok
+test parser::config::tests::test_default_config ... ok
+test parser::config::tests::test_feature_management ... ok
+test parser::config::tests::test_preset_configs ... ok
+test parser::config::tests::test_input_based_config ... ok
+test parser::enhanced_statistics_parser::tests::test_nb_format_header_parsing ... ok
+test parser::enhanced_statistics_parser::tests::test_partitioner_extraction ... ok
+test parser::enhanced_statistics_parser::tests::test_statistics_data_extraction ... ok
+  ⏭️  Skipping missing test file: test-env/cassandra5/sstables/users-46436710673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db
+  ⏭️  Skipping missing test file: test-env/cassandra5/sstables/all_types-46200090673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db
+  ⏭️  Skipping missing test file: test-env/cassandra5/sstables/collections_table-462afd10673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db
+  ⏭️  Skipping missing test file: test-env/cassandra5/sstables/time_series-464cb5e0673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db
+  ⏭️  Skipping missing test file: test-env/cassandra5/sstables/multi_clustering-465604b0673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db
+📊 Enhanced parser test summary:
+  Total files tested: 0
+  Successful parses: 0
+  Success rate: 0.0%
+
+thread 'parser::enhanced_statistics_test::tests::test_enhanced_parser_real_files' panicked at cqlite-core/src/parser/enhanced_statistics_test.rs:121:9:
+At least one file should parse successfully
+test parser::enhanced_statistics_test::tests::test_enhanced_parser_components ... ok
+test benchmarks::cassandra5::tests::test_memory_monitor ... ok
+test parser::enhanced_statistics_test::tests::test_parser_fallback ... ok
+test parser::error::tests::test_error_conversion ... ok
+test parser::error::tests::test_error_context ... ok
+test parser::error::tests::test_error_recovery_suggestions ... ok
+
+thread 'parser::error::tests::test_parser_error_creation' panicked at cqlite-core/src/parser/error.rs:631:9:
+assertion failed: !backend_err.is_recoverable()
+test parser::factory::tests::test_auto_backend_selection ... ok
+test parser::error::tests::test_parser_error_creation ... FAILED
+test parser::factory::tests::test_backend_availability ... ok
+test parser::enhanced_statistics_test::tests::test_enhanced_parser_real_files ... FAILED
+test parser::factory::tests::test_backend_recommendation ... ok
+test parser::factory::tests::test_factory_creation ... ok
+test parser::factory::tests::test_parser_registry ... ok
+test parser::header::tests::test_cassandra_version_from_magic ... ok
+test parser::header::tests::test_cassandra_version_strings ... ok
+test parser::header::tests::test_column_info_roundtrip ... ok
+
+thread 'parser::header::tests::test_header_serialization_roundtrip' panicked at cqlite-core/src/parser/header.rs:663:68:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [115, 112, 97, 99, 101, 20, 116, 101, 115, 116, 95, 116, 97, 98, 108, 101, 0, 0, 0, 0, 0, 0, 48, 57, 6, 76, 90, 52, 0, 0, 16, 0, 2, 10, 108, 101, 118, 101, 108, 2, 54, 0, 0, 0, 0, 0, 0, 3, 232, 135, 207, 135, 208, 131, 232, 63, 232, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 30, 2, 22, 116, 101, 115, 116, 95, 99, 111, 108, 117, 109, 110, 8, 116, 101, 120, 116, 1, 0, 0, 2, 16, 116, 101, 115, 116, 95, 107, 101, 121, 20, 116, 101, 115, 116, 95, 118, 97, 108, 117, 101], code: Verify })
+test parser::header::tests::test_compression_info_roundtrip ... ok
+test parser::header::tests::test_header_serialization_roundtrip ... FAILED
+test parser::header::tests::test_magic_and_version_cassandra_5_alpha ... ok
+test parser::header::tests::test_magic_and_version_cassandra_5_beta ... ok
+test parser::header::tests::test_magic_and_version_cassandra_5_release ... ok
+
+thread 'parser::header::tests::test_magic_and_version_cassandra_5_newbig' panicked at cqlite-core/src/parser/header.rs:500:80:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [0, 1], code: Eof })
+test parser::header::tests::test_magic_and_version_invalid ... ok
+test parser::header::tests::test_magic_and_version_cassandra_5_newbig ... FAILED
+test parser::header::tests::test_magic_and_version_legacy ... ok
+test parser::header::tests::test_vstring_parsing ... ok
+test parser::m3_performance_benchmarks::tests::test_custom_targets ... ok
+test parser::m3_performance_benchmarks::tests::test_m3_benchmark_creation ... ok
+test parser::m3_performance_benchmarks::tests::test_report_generation ... ok
+test parser::m3_performance_benchmarks::tests::test_data_generation ... ok
+test parser::nom_backend::tests::test_basic_parsing ... ok
+test parser::nom_backend::tests::test_nom_parser_creation ... ok
+test parser::nom_backend::tests::test_syntax_validation ... ok
+test parser::nom_backend::tests::test_type_parsing ... ok
+test parser::nom_backend::tests::test_expression_parsing ... ok
+test parser::nom_backend::tests::test_unsupported_features ... ok
+test parser::optimized_complex_types::tests::test_optimized_list_parsing ... ok
+test parser::optimized_complex_types::tests::test_optimized_map_parsing ... ok
+test parser::optimized_complex_types::tests::test_performance_metrics ... ok
+test parser::optimized_complex_types::tests::test_performance_report ... ok
+SIMD support detected: false
+test parser::optimized_complex_types::tests::test_simd_detection ... ok
+test parser::performance_regression_framework::tests::test_environment_detection ... ok
+test parser::performance_regression_framework::tests::test_regression_analysis ... ok
+test parser::performance_regression_framework::tests::test_regression_framework_creation ... ok
+
+thread 'parser::schema_integration::tests::test_parse_cql_schema_enhanced' panicked at cqlite-core/src/parser/schema_integration.rs:297:65:
+called `Result::unwrap()` on an `Err` value: Internal("ANTLR parser not yet implemented - this is a placeholder for future implementation")
+test parser::schema_integration::tests::test_extract_table_name ... ok
+test parser::performance_regression_framework::tests::test_baseline_storage ... ok
+
+thread 'parser::schema_integration::tests::test_parse_cql_schema_simple' panicked at cqlite-core/src/parser/schema_integration.rs:310:57:
+called `Result::unwrap()` on an `Err` value: Internal("ANTLR parser not yet implemented - this is a placeholder for future implementation")
+test parser::schema_integration::tests::test_parse_cql_schema_fast ... ok
+test parser::schema_integration::tests::test_parse_cql_schema_enhanced ... FAILED
+
+thread 'parser::schema_integration::tests::test_parse_cql_schemas_batch' panicked at cqlite-core/src/parser/schema_integration.rs:334:71:
+called `Result::unwrap()` on an `Err` value: Internal("ANTLR parser not yet implemented - this is a placeholder for future implementation")
+test parser::schema_integration::tests::test_parse_cql_schema_simple ... FAILED
+test parser::schema_integration::tests::test_schema_parser_config ... ok
+test parser::schema_integration::tests::test_table_name_matches ... ok
+test parser::schema_integration::tests::test_parse_cql_schemas_batch ... FAILED
+
+thread 'parser::schema_integration::tests::test_validate_cql_schema_syntax' panicked at cqlite-core/src/parser/schema_integration.rs:350:9:
+assertion failed: !invalid_result
+test parser::statistics::tests::test_statistics_header_parsing ... ok
+test parser::statistics::tests::test_statistics_analyzer ... ok
+test parser::schema_integration::tests::test_validate_cql_schema_syntax ... FAILED
+test parser::statistics_test::tests::test_column_statistics_structure ... ok
+Row statistics test data prepared: 18 bytes
+  ⏭️  Skipping missing test file: test-env/cassandra5/sstables/users-46436710673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db
+  ⏭️  Skipping missing test file: test-env/cassandra5/sstables/all_types-46200090673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db
+  ⏭️  Skipping missing test file: test-env/cassandra5/sstables/collections_table-462afd10673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db
+test parser::statistics_test::tests::test_row_statistics_parsing ... ok
+test parser::statistics_test::tests::test_statistics_analyzer ... ok
+test parser::statistics_test::tests::test_real_statistics_parsing ... ok
+test parser::statistics_test::tests::test_statistics_header_parsing ... ok
+test parser::statistics_test::tests::test_timestamp_statistics_parsing ... ok
+test parser::tests::test_available_backends ... ok
+test parser::tests::test_ast_types ... ok
+test parser::tests::test_backend_availability ... ok
+test parser::tests::test_backend_recommendations ... ok
+test parser::tests::test_basic_parsing ... ok
+test parser::tests::test_configuration ... ok
+test parser::tests::test_error_types ... ok
+test parser::tests::test_parser_creation ... ok
+test parser::tests::test_parser_with_config ... ok
+
+thread 'parser::tests::test_visitor_pattern' panicked at cqlite-core/src/parser/mod.rs:289:9:
+assertion failed: identifiers.iter().any(|id| id.name() == "users")
+test parser::traits::tests::test_parser_backend_info ... ok
+test parser::tests::test_visitor_pattern ... FAILED
+test parser::tests::test_use_case_parsers ... ok
+test parser::traits::tests::test_source_position ... ok
+test parser::traits::tests::test_validation_context_creation ... ok
+
+thread 'parser::types::tests::test_cql_type_id_conversion' panicked at cqlite-core/src/parser/types.rs:1444:9:
+assertion failed: CqlTypeId::try_from(0xFF).is_err()
+test parser::types::tests::test_boolean_parsing ... ok
+test parser::types::tests::test_int_parsing ... ok
+test parser::types::tests::test_cql_type_id_conversion ... FAILED
+test parser::types::tests::test_text_parsing ... ok
+test parser::types::tests::test_tombstone_parsing ... ok
+test parser::types::tests::test_tombstone_serialization ... ok
+test parser::types::tests::test_tuple_serialization ... ok
+test parser::types::tests::test_udt_serialization ... ok
+test parser::types::tests::test_uuid_parsing ... ok
+test parser::types::tests::test_value_serialization_roundtrip ... ok
+test parser::udt_tests::tests::test_basic_udt_parsing ... ok
+test parser::udt_tests::tests::test_empty_value_creation_for_cql_types ... ok
+test parser::udt_tests::tests::test_list_with_udt_elements ... ok
+test parser::udt_tests::tests::test_map_with_udt_values ... ok
+
+thread 'parser::udt_tests::tests::test_frozen_udt_parsing' panicked at cqlite-core/src/parser/udt_tests.rs:313:81:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [114, 101, 115, 115, 10, 12, 115, 116, 114, 101, 101, 116, 13, 8, 99, 105, 116, 121, 13, 10, 115, 116, 97, 116, 101, 13, 16, 122, 105, 112, 95, 99, 111, 100, 101, 13, 14, 99, 111, 117, 110, 116, 114, 121, 13, 0, 0, 0, 12, 22, 49, 50, 51, 32, 77, 97, 105, 110, 32, 83, 116, 0, 0, 0, 8, 14, 65, 110, 121, 116, 111, 119, 110, 0, 0, 0, 3, 4, 67, 65, 0, 0, 0, 6, 10, 49, 50, 51, 52, 53, 0, 0, 0, 4, 6, 85, 83, 65], code: Eof })
+test parser::udt_tests::tests::test_complex_nested_structure ... ok
+test parser::udt_tests::tests::test_nested_udt_parsing ... ok
+test parser::udt_tests::tests::test_frozen_udt_parsing ... FAILED
+
+thread 'parser::udt_tests::tests::test_udt_enhanced_parsing_fallback' panicked at cqlite-core/src/parser/udt_tests.rs:477:73:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [115, 111, 110, 8, 20, 102, 105, 114, 115, 116, 95, 110, 97, 109, 101, 13, 18, 108, 97, 115, 116, 95, 110, 97, 109, 101, 13, 6, 97, 103, 101, 9, 10, 101, 109, 97, 105, 108, 13, 0, 0, 0, 5, 8, 74, 111, 104, 110, 0, 0, 0, 4, 6, 68, 111, 101, 0, 0, 0, 4, 0, 0, 0, 30, 0, 0, 0, 21, 40, 106, 111, 104, 110, 46, 100, 111, 101, 64, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111, 109], code: Eof })
+
+thread 'parser::udt_tests::tests::test_udt_parsing_with_registrytest parser::udt_tests::tests::test_udt_registry_circular_dependency_detection ... ' panicked at okcqlite-core/src/parser/udt_tests.rs
+:243:81:
+called `Result::unwrap()` on an `Err` value: Error(Error { input: [115, 111, 110, 8, 20, 102, 105, 114, 115, 116, 95, 110, 97, 109, 101, 13, 18, 108, 97, 115, 116, 95, 110, 97, 109, 101, 13, 6, 97, 103, 101, 9, 10, 101, 109, 97, 105, 108, 13, 0, 0, 0, 5, 8, 74, 111, 104, 110, 0, 0, 0, 4, 6, 68, 111, 101, 0, 0, 0, 4, 0, 0, 0, 30, 0, 0, 0, 21, 40, 106, 111, 104, 110, 46, 100, 111, 101, 64, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111, 109], code: Eof })
+test parser::udt_tests::tests::test_udt_enhanced_parsing_fallback ... FAILED
+test parser::udt_tests::tests::test_udt_parsing_with_registry ... FAILED
+test parser::udt_tests::tests::test_udt_registry_dependency_validation ... ok
+test parser::udt_tests::tests::test_udt_registry_creation ... ok
+test parser::udt_tests::tests::test_udt_registry_dependent_udts ... ok
+test parser::udt_tests::tests::test_udt_registry_export_definitions ... ok
+✅ VInt roundtrip validation passed (37 values, 54.51 MB/s)
+✅ VInt bit pattern validation passed
+❌ VInt boundary validation failed: Value -64 should encode to 2 bytes, got 1; Value 16383 should encode to 2 bytes, got 3; Value -16383 should encode to 2 bytes, got 3
+test parser::udt_tests::tests::test_udt_with_collections ... ok
+test parser::udt_tests::tests::test_udt_validation ... ok
+test parser::vint::tests::test_vint_comprehensive_roundtrip ... ok
+test parser::vint::tests::test_vint_edge_case_patterns ... ok
+test parser::vint::tests::test_vint_errors ... ok
+  📦 Benchmarking Tuple operations...
+test parser::vint::tests::test_vint_format_compliance ... ok
+
+thread 'parser::collection_benchmarks::tests::test_collection_benchmarks' panicked at cqlite-core/src/parser/collection_benchmarks.rs:611:9:
+Collection benchmarks failed: Err(SqlParse("Parse error: Error(Error { input: [], code: Eof })"))
+test parser::vint::tests::test_vint_length ... ok
+test parser::vint::tests::test_vint_multi_byte_encoding ... ok
+test parser::vint::tests::test_vint_single_byte_encoding ... ok
+test parser::collection_benchmarks::tests::test_collection_benchmarks ... FAILED
+test parser::vint::tests::test_vint_size_calculation ... ok
+test parser::vint::tests::test_vuint_positive ... ok
+test parser::vint::tests::test_zigzag_encoding ... ok
+
+thread 'parser::visitor::tests::test_identifier_collector' panicked at cqlite-core/src/parser/visitor.rs:1386:9:
+assertion `left == right` failed
+  left: 0
+ right: 4
+test parser::vint::tests::test_zigzag_roundtrip ... ok
+test parser::visitor::tests::test_identifier_collector ... FAILED
+test parser::visitor::tests::test_semantic_validator ... ok
+test parser::visitor::tests::test_schema_builder_visitor ... ok
+test parser::visitor::tests::test_utils ... ok
+test parser::visitor::tests::test_type_collector_visitor ... ok
+⚠️ PERFORMANCE IMPROVEMENT - parse_speed_mb_per_sec: 120.00 (baseline: 100.00, deviation: 20.0%)
+test parser::visitor::tests::test_validation_visitor ... ok
+test performance_monitor::tests::test_performance_monitor_creation ... ok
+⚠️ PERFORMANCE IMPROVEMENT - parse_speed_mb_per_sec: 120.00 (baseline: 100.00, deviation: 20.0%)
+🚨 TARGET MISSED - parse_speed_mb_per_sec: 50.00 (baseline: 100.00, deviation: -50.0%)
+test performance_monitor::tests::test_performance_report_generation ... ok
+test performance_monitor::tests::test_record_measurement ... ok
+test performance_monitor::tests::test_regression_detection ... ok
+test platform::tests::test_platform_creation ... ok
+test platform::tests::test_time_provider ... ok
+test platform::tests::test_threading_provider ... ok
+test platform::tests::test_file_system ... ok
+
+thread 'query::engine::tests::test_cache_eviction' panicked at cqlite-core/src/query/engine.rs:674:9:
+assertion `left == right` failed
+  left: 3
+ right: 2
+
+thread 'query::engine::tests::test_prepared_statements' panicked at cqlite-core/src/query/engine.rs:605:9:
+assertion failed: result.execution_time_ms > 0
+test query::engine::tests::test_prepared_statements ... FAILED
+test query::engine::tests::test_cache_eviction ... FAILED
+test query::engine::tests::test_query_explain ... ok
+     ✅ Lz4 compression: 59.36 MB/s, 24.2 MB memory, 74.9% compression
+test benchmarks::cassandra5::compression_benchmarks::tests::test_compression_benchmark ... ok
+test query::engine::tests::test_query_engine_creation ... ok
+test query::executor::tests::test_condition_evaluation ... ok
+test query::parser::tests::test_parse_delete ... ok
+test query::executor::tests::test_query_executor_creation ... ok
+test query::parser::tests::test_parse_insert ... ok
+test query::parser::tests::test_parse_select_basic ... ok
+test query::parser::tests::test_parse_select_with_columns ... ok
+test query::parser::tests::test_parse_select_with_where ... ok
+test query::parser::tests::test_parse_value_types ... ok
+test query::parser::tests::test_parse_update ... ok
+test query::executor::tests::test_value_comparison ... ok
+test query::planner::tests::test_plan_type_determination ... ok
+test query::prepared::tests::test_execution_hints ... ok
+test query::prepared::tests::test_parameter_metadata ... ok
+test query::prepared::tests::test_prepared_query_builder ... ok
+test query::planner::tests::test_query_planner_creation ... ok
+test query::planner::tests::test_selectivity_estimation ... ok
+test query::result::tests::test_column_info ... ok
+test query::result::tests::test_json_serialization ... ok
+test query::result::tests::test_performance_metrics ... ok
+test query::result::tests::test_query_result_creation ... ok
+test query::result::tests::test_query_result_with_rows ... ok
+
+thread 'query::prepared::tests::test_prepared_query_creation' panicked at cqlite-core/src/query/prepared.rs:427:9:
+assertion failed: prepared.is_cache_friendly()
+test query::result::tests::test_query_row_operations ... ok
+test query::result::tests::test_result_iteration ... ok
+test query::prepared::tests::test_prepared_query_creation ... FAILED
+test query::result::tests::test_row_metadata ... ok
+test query::select_ast::tests::test_aggregate_detection ... ok
+test query::select_ast::tests::test_pushdown_capability ... ok
+test query::select_ast::tests::test_column_references ... ok
+🚀 REVOLUTIONARY CQL SELECT PARSER DEMONSTRATION
+=================================================
+The FIRST EVER CQL SELECT parser for direct SSTable access!
+
+📋 BASIC SELECT STATEMENTS
+--------------------------
+✅ SELECT * FROM users
+   → Parsed successfully!
+✅ SELECT id, name, email FROM customers
+   → Parsed successfully!
+✅ SELECT DISTINCT category FROM products
+   → Parsed successfully!
+test query::select_ast::tests::test_simple_select_statement ... ok
+✅ SELECT u.name, u.email FROM users u
+   → Parsed successfully!
+
+🔍 COMPLEX WHERE CLAUSES
+------------------------
+✅ SELECT * FROM orders WHERE amount > 100 AND status = 'pending'
+   → WHERE clause can be pushed to SSTable: true
+✅ SELECT * FROM products WHERE price BETWEEN 50 AND 500
+   → WHERE clause can be pushed to SSTable: true
+✅ SELECT * FROM users WHERE age IN (25, 30, 35, 40)
+   → WHERE clause can be pushed to SSTable: true
+✅ SELECT * FROM customers WHERE name LIKE 'John%'
+   → WHERE clause can be pushed to SSTable: false
+✅ SELECT * FROM inventory WHERE quantity IS NOT NULL
+   → WHERE clause can be pushed to SSTable: false
+✅ SELECT * FROM events WHERE (priority = 'high' OR urgent = true) AND created_at > '2024-01-01'
+   → WHERE clause can be pushed to SSTable: false
+✅ SELECT * FROM logs WHERE NOT (level = 'debug') AND message LIKE '%error%'
+   → WHERE clause can be pushed to SSTable: false
+
+📊 AGGREGATION FUNCTIONS
+-------------------------
+❌ SELECT COUNT(*) FROM users: SQL parse error: Unexpected token in expression: Some(Multiply)
+✅ SELECT SUM(amount), AVG(amount) FROM orders
+   → Requires aggregation: true
+   → Has aggregate functions: true
+❌ SELECT region, COUNT(*), SUM(sales) FROM sales_data GROUP BY region: SQL parse error: Unexpected token in expression: Some(Multiply)
+test query::prepared::tests::test_type_matching ... ok
+✅ SELECT category, MIN(price), MAX(price) FROM products GROUP BY category
+   → Requires aggregation: true
+   → Has aggregate functions: true
+   → GROUP BY detected
+✅ SELECT department, AVG(salary) FROM employees GROUP BY department HAVING AVG(salary) > 50000
+   → Requires aggregation: true
+   → Has aggregate functions: true
+   → GROUP BY detected
+   → HAVING clause detected
+✅ SELECT COUNT(DISTINCT customer_id) FROM orders
+   → Requires aggregation: true
+   → Has aggregate functions: true
+
+📦 COLLECTION OPERATIONS
+-------------------------
+✅ SELECT user_id, tags[0], tags[1] FROM user_profiles
+   → Referenced columns: 2
+✅ SELECT user_id, preferences['theme'], preferences['language'] FROM user_settings
+   → Referenced columns: 2
+✅ SELECT * FROM posts WHERE tags CONTAINS 'technology'
+   → Referenced columns: 1
+✅ SELECT * FROM user_data WHERE settings CONTAINS KEY 'notifications'
+   → Referenced columns: 1
+✅ SELECT id, list_field[2] FROM collection_table WHERE map_field['key1'] = 'value1'
+   → Referenced columns: 2
+
+🌟 ADVANCED FEATURES
+--------------------
+✅ SELECT * FROM users ORDER BY created_at DESC, name ASC LIMIT 10
+   → ORDER BY detected
+   → LIMIT detected
+✅ SELECT * FROM products ORDER BY price DESC LIMIT 5 OFFSET 10
+   → ORDER BY detected
+   → LIMIT detected
+   → OFFSET detected
+❌ SELECT user_id, order_count FROM (SELECT user_id, COUNT(*) as order_count FROM orders GROUP BY user_id) ORDER BY order_count DESC: SQL parse error: Expected table name in FROM clause
+✅ SELECT u.name, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.name
+✅ SELECT *, (price * quantity) as total_value FROM inventory WHERE (price * quantity) > 1000
+
+⚡ PERFORMANCE FEATURES
+=======================
+The SELECT parser includes revolutionary optimizations:
+
+🔥 PREDICATE PUSHDOWN:
+   • WHERE conditions pushed to SSTable level
+   • Bloom filter utilization for existence tests
+   • Range queries optimized with SSTable sort order
+
+🚀 PARALLEL EXECUTION:
+   • Multi-threaded SSTable scanning
+   • Parallel aggregation with merge strategies
+   • Adaptive parallelization based on data size
+
+💾 MEMORY EFFICIENCY:
+   • Streaming results for large datasets
+   • Configurable memory limits for aggregation
+   • Lazy evaluation of projection expressions
+
+📈 QUERY OPTIMIZATION:
+   • Cost-based optimization
+   • Index selection and utilization
+   • Statistics-driven planning
+🌍 REAL-WORLD QUERY EXAMPLES
+=============================
+Examples of queries this parser can handle:
+
+📊 E-commerce Analytics:
+   ❌ Parse error: SQL parse error: Unexpected token in expression: Some(Multiply)
+   ✅ Complex query parsed successfully
+      Aggregation: false
+      Columns: 2
+
+📊 IoT Sensor Data:
+   ✅ Complex query parsed successfully
+      Aggregation: true
+      Columns: 6
+   ❌ Parse error: SQL parse error: Unexpected token in expression: Some(Multiply)
+
+📊 User Behavior Analytics:
+   ❌ Parse error: SQL parse error: Unexpected token in expression: Some(Multiply)
+   ✅ Complex query parsed successfully
+      Aggregation: true
+      Columns: 5
+
+📊 Financial Data:
+   ✅ Complex query parsed successfully
+      Aggregation: true
+      Columns: 5
+   ❌ Parse error: SQL parse error: Unexpected token in expression: Some(Multiply)
+
+test query::select_demo::demo_tests::test_demonstrations ... ok
+test query::select_integration_tests::benchmarks::benchmark_select_performance ... ignored
+     ✅ Lz4 round-trip: 34.40 MB/s, 41.6 MB memory
+test benchmarks::cassandra5::compression_benchmarks::tests::test_roundtrip_benchmark ... ok
+test query::select_executor::tests::test_value_comparison ... ok
+     ✅ Lz4 decompression: 57.68 MB/s, 30.5 MB memory
+test benchmarks::cassandra5::compression_benchmarks::tests::test_decompression_benchmark ... ok
+
+thread 'query::select_integration_tests::tests::test_collection_operations' panicked at cqlite-core/src/query/select_integration_tests.rs:313:14:
+called `Result::unwrap()` on an `Err` value: QueryExecution("Expression type not supported in constant queries")
+
+thread 'query::select_integration_tests::tests::test_aggregation_functions' panicked at cqlite-core/src/query/select_integration_tests.rs:148:69:
+called `Result::unwrap()` on an `Err` value: SqlParse("Unexpected token in expression: Some(Multiply)")
+
+thread 'query::select_integration_tests::tests::test_complex_where_expressions' panicked at cqlite-core/src/query/select_integration_tests.rs:239:9:
+assertion failed: result.rows.len() >= 2
+test query::select_integration_tests::tests::test_complex_where_expressions ... FAILED
+test query::select_integration_tests::tests::test_collection_operations ... FAILED
+test query::select_integration_tests::tests::test_aggregation_functions ... FAILED
+test query::select_executor::tests::test_like_pattern_matching ... ok
+
+thread 'query::select_integration_tests::tests::test_parser_only' panicked at cqlite-core/src/query/select_integration_tests.rs:336:43:
+called `Result::unwrap()` on an `Err` value: SqlParse("Unexpected token in expression: Some(Multiply)")
+test query::select_integration_tests::tests::test_parser_only ... FAILED
+✅ VInt performance validation passed: Encode 147.34 MB/s, Decode 542.92 MB/s
+
+thread 'query::select_integration_tests::tests::test_error_handling' panicked at cqlite-core/src/query/select_integration_tests.rs:424:9:
+assertion failed: result.is_err()
+
+thread 'query::select_integration_tests::tests::test_like_pattern_matching' panicked at cqlite-core/src/query/select_integration_tests.rs:285:9:
+assertion `left == right` failed
+  left: 0
+ right: 2
+test query::select_integration_tests::tests::test_optimizer_and_executor_integration ... ok
+
+thread 'query::select_integration_tests::tests::test_order_by_and_limit' panicked at cqlite-core/src/query/select_integration_tests.rs:195:9:
+assertion `left == right` failed
+  left: 0
+ right: 4
+test query::select_integration_tests::tests::test_error_handling ... FAILED
+test query::select_integration_tests::tests::test_like_pattern_matching ... FAILED
+test query::select_integration_tests::tests::test_order_by_and_limit ... FAILED
+
+thread 'query::select_integration_tests::tests::test_real_world_query_examples' panicked at cqlite-core/src/query/select_integration_tests.rs:482:14:
+called `Result::unwrap()` on an `Err` value: SqlParse("Unexpected token in expression: Some(Multiply)")
+
+thread 'query::select_integration_tests::tests::test_select_with_in_clause' panicked at cqlite-core/src/query/select_integration_tests.rs:121:9:
+assertion `left == right` failed
+  left: 0
+ right: 2
+test query::select_integration_tests::tests::test_real_world_query_examples ... FAILED
+
+thread 'query::select_integration_tests::tests::test_select_with_where_clause' panicked at cqlite-core/src/query/select_integration_tests.rs:76:9:
+assertion `left == right` failed
+  left: 0
+ right: 2
+
+thread 'query::select_integration_tests::tests::test_simple_select_all' panicked at cqlite-core/src/query/select_integration_tests.rs:45:9:
+assertion `left == right` failed
+  left: 0
+ right: 2
+test query::select_integration_tests::tests::test_select_with_in_clause ... FAILED
+test query::select_integration_tests::tests::test_select_with_where_clause ... FAILED
+test query::select_parser::tests::test_between_clause ... ok
+test query::select_parser::tests::test_complex_where_clause ... ok
+test query::select_integration_tests::tests::test_simple_select_all ... FAILED
+test query::select_parser::tests::test_in_clause ... ok
+test query::select_parser::tests::test_order_by_and_limit ... ok
+
+thread 'query::select_parser::tests::test_select_with_aggregates' panicked at cqlite-core/src/query/select_parser.rs:1036:87:
+called `Result::unwrap()` on an `Err` value: SqlParse("Unexpected token in expression: Some(Multiply)")
+test query::select_parser::tests::test_select_constant ... ok
+test query::select_parser::tests::test_select_with_columns ... ok
+test query::select_parser::tests::test_select_with_where ... ok
+test query::select_parser::tests::test_simple_select ... ok
+test query::select_parser::tests::test_select_with_aggregates ... FAILED
+test query::select_optimizer::tests::test_cost_estimation ... ok
+test schema::cql_parser::tests::test_all_primitive_types ... ok
+test schema::cql_parser::tests::test_case_insensitive_keywords ... ok
+test schema::cql_parser::tests::test_complex_types ... ok
+test schema::cql_parser::tests::test_composite_primary_key ... ok
+test schema::cql_parser::tests::test_cql_type_conversion ... ok
+test schema::cql_parser::tests::test_fallback_table_extraction ... ok
+test schema::cql_parser::tests::test_frozen_collections ... ok
+test schema::cql_parser::tests::test_qualified_table_name ... ok
+test schema::cql_parser::tests::test_quoted_identifiers ... ok
+test schema::cql_parser::tests::test_simple_table_parsing ... ok
+test schema::cql_parser::tests::test_table_name_matching ... ok
+test schema::cql_parser::tests::test_table_name_extraction ... ok
+test query::select_optimizer::tests::test_predicate_extraction ... ok
+test schema::cql_parser::tests::test_udt_columns ... ok
+test schema::cql_parser::tests::test_tuple_types ... ok
+test schema::discovery::tests::test_discovery_context_creation ... ok
+test schema::discovery::tests::test_schema_discovery_engine_creation ... ok
+test schema::json_exporter::tests::test_collection_type_extraction ... ok
+test schema::json_exporter::tests::test_element_types_extraction ... ok
+test schema::discovery::tests::test_schema_info_serialization ... ok
+test schema::json_exporter::tests::test_json_exporter_creation ... ok
+
+thread 'schema::json_exporter::tests::test_type_details_generation' panicked at cqlite-core/src/schema/json_exporter.rs:831:9:
+assertion failed: type_details.example_values.is_some()
+test schema::json_exporter::tests::test_json_exporter_with_custom_config ... ok
+test schema::parser::tests::tests::test_error_on_insufficient_data ... ok
+test schema::json_exporter::tests::test_type_details_generation ... FAILED
+test schema::parser::tests::tests::test_error_on_missing_column ... ok
+test schema::parser::tests::tests::test_incomplete_context_rejected ... ok
+test query::tests::test_query_engine_creation ... ok
+
+thread 'schema::parser::tests::tests::test_nested_udt_in_frozen_collection' panicked at cqlite-core/src/schema/parser_tests.rs:549:9:
+assertion failed: result.is_ok()
+test schema::parser::tests::tests::test_multi_component_partition_and_clustering_keys ... ok
+test schema::parser::tests::tests::test_multi_component_partition_key ... ok
+test schema::parser::tests::tests::test_nested_udt_in_frozen_collection ... FAILED
+test schema::parser::tests::tests::test_ordering_equivalence_byte_comparable_vs_typed ... ok
+test schema::parser::tests::tests::test_parse_blob_column ... ok
+test schema::parser::tests::tests::test_parse_clustering_keys ... ok
+test schema::parser::tests::tests::test_parse_frozen_type ... ok
+test schema::parser::tests::tests::test_parse_nested_collection ... ok
+test schema::parser::tests::tests::test_parse_list_column ... ok
+test schema::parser::tests::tests::test_parse_partition_key ... ok
+test schema::parser::tests::tests::test_parse_text_column ... ok
+test schema::parser::tests::tests::test_parse_uuid_type ... ok
+test schema::parser::tests::tests::test_schema_parser_creation ... ok
+test schema::registry::tests::test_schema_query_creation ... ok
+test schema::tests::test_cql_type_parsing ... ok
+test schema::tests::test_schema_validation ... ok
+test schema::registry::tests::test_schema_registry_creation ... ok
+test schema::tests::test_schema_validation_failures ... ok
+test storage::compaction::tests::test_compaction_manager_creation ... ok
+test storage::compaction::tests::test_compaction_stats ... ok
+test storage::compaction::tests::test_compaction_strategy_default ... ok
+test storage::batch_writer::tests::test_batch_writer_builder ... ok
+
+thread 'storage::batch_writer::tests::test_batch_writer_put_operations' panicked at cqlite-core/src/storage/sstable/writer.rs:178:9:
+assertion `left == right` failed: Cassandra header must be exactly 32 bytes
+  left: 41
+ right: 32
+Warning: SSTableWriter dropped without being finalized
+  Entries written: 0
+  Data size: 0 bytes
+
+thread 'storage::batch_writer::tests::test_batch_writer_mixed_operations' panicked at cqlite-core/src/storage/sstable/writer.rs:178:9:
+assertion `left == right` failed: Cassandra header must be exactly 32 bytes
+  left: 41
+ right: 32
+Warning: SSTableWriter dropped without being finalized
+  Entries written: 0
+  Data size: 0 bytes
+✅ VInt validation completed in 18.551333ms
+🔍 Validating header parsing...
+✅ Header validation passed
+🔍 Validating type system...
+✅ Type Boolean validation passed
+✅ Type Int validation passed
+✅ Type BigInt validation passed
+❌ Type Float parsing left 4 unparsed bytes
+✅ Type Varchar validation passed
+✅ Type Blob validation passed
+✅ Type Uuid validation passed
+test parser::validation::tests::test_parser_validation_framework ... ok
+test storage::batch_writer::tests::test_batch_writer_put_operations ... FAILED
+test storage::batch_writer::tests::test_batch_writer_mixed_operations ... FAILED
+test storage::manifest::tests::test_manifest_creation ... ok
+test storage::memtable::tests::test_memtable_basic_operations ... ok
+test storage::memtable::tests::test_memtable_flush ... ok
+test storage::memtable::tests::test_memtable_scan ... ok
+
+thread 'query::select_integration_tests::tests::test_performance_with_large_dataset' panicked at cqlite-core/src/query/select_integration_tests.rs:406:14:
+called `Result::unwrap()` on an `Err` value: SqlParse("Unexpected token in expression: Some(Multiply)")
+test storage::memtable::tests::test_memtable_stats ... ok
+test storage::manifest::tests::test_manifest_sequence_numbers ... ok
+test query::select_integration_tests::tests::test_performance_with_large_dataset ... FAILED
+test storage::schema_discovery::tests::test_column_data_analysis ... ok
+test storage::schema_discovery::tests::test_schema_discovery_creation ... ok
+test storage::manifest::tests::test_manifest_schema_operations ... 
+thread 'storage::sstable::bloom::tests::test_bloom_filter_clear' panicked at cqlite-core/src/storage/sstable/bloom.rs:66:46:
+attempt to multiply with overflow
+ok
+test storage::sstable::bloom::tests::test_bloom_filter_creation ... ok
+test storage::sstable::bloom::tests::test_bloom_filter_clear ... FAILED
+test storage::manifest::tests::test_manifest_persistence ... ok
+
+thread 'storage::sstable::bloom::tests::test_bloom_filter_false_positive_rate' panicked at cqlite-core/src/storage/sstable/bloom.rs:66:46:
+attempt to multiply with overflow
+
+thread 'storage::sstable::bloom::tests::test_bloom_filter_insert_and_contains' panicked at cqlite-core/src/storage/sstable/bloom.rs:66:46:
+attempt to multiply with overflow
+test storage::manifest::tests::test_manifest_sstable_operations ... ok
+test storage::sstable::bloom::tests::test_bloom_filter_false_positive_rate ... FAILED
+
+thread 'storage::sstable::bloom::tests::test_bloom_filter_serialization' panicked at cqlite-core/src/storage/sstable/bloom.rs:66:46:
+attempt to multiply with overflow
+
+thread 'storage::sstable::bloom::tests::test_bloom_filter_stats' panicked at cqlite-core/src/storage/sstable/bloom.rs:66:46:
+attempt to multiply with overflow
+test storage::sstable::bloom::tests::test_bloom_filter_insert_and_contains ... FAILED
+test storage::sstable::bloom::tests::test_bloom_filter_invalid_parameters ... ok
+test storage::sstable::bloom::tests::test_bloom_filter_serialization ... FAILED
+test storage::repl_data_api::tests::test_repl_api_creation ... ok
+test storage::sstable::bloom::tests::test_bloom_filter_stats ... FAILED
+test storage::sstable::bti::encoder::tests::test_batch_encoder ... ok
+test storage::sstable::bti::encoder::tests::test_boolean_encoding ... ok
+
+thread 'storage::sstable::bti::encoder::tests::test_decode_key_debug' panicked at cqlite-core/src/storage/sstable/bti/encoder.rs:927:9:
+assertion failed: decoded.contains("hello")
+test storage::sstable::bti::encoder::tests::test_blob_encoding ... ok
+test storage::sstable::bti::encoder::tests::test_composite_key_encoding ... ok
+test storage::repl_data_api::tests::test_query_context_updates ... ok
+test storage::sstable::bti::encoder::tests::test_decode_key_debug ... FAILED
+test storage::sstable::bti::encoder::tests::test_comprehensive_ordering ... ok
+test storage::sstable::bti::encoder::tests::test_float_special_values ... ok
+test storage::sstable::bti::encoder::tests::test_encoder_config ... ok
+test storage::sstable::bti::encoder::tests::test_encoder_reuse ... ok
+test storage::sstable::bti::encoder::tests::test_integer_encoding ... ok
+test storage::sstable::bti::encoder::tests::test_list_encoding ... ok
+test storage::sstable::bti::encoder::tests::test_max_nesting_depth ... ok
+test storage::sstable::bti::encoder::tests::test_performance_stats ... ok
+test storage::sstable::bti::encoder::tests::test_ordering_across_types ... ok
+test storage::sstable::bti::encoder::tests::test_text_encoding ... ok
+test storage::sstable::bti::encoder::tests::test_uuid_encoding ... ok
+test storage::sstable::bti::encoder::tests::test_timestamp_encoding ... ok
+test storage::sstable::bti::encoder::tests::test_validation ... ok
+test storage::sstable::bti::node::tests::test_dense_node_lookup ... ok
+test storage::sstable::bti::node::tests::test_node_creation ... ok
+test storage::sstable::bti::node::tests::test_node_validation ... ok
+test storage::sstable::bti::node::tests::test_sized_pointer ... ok
+test storage::sstable::bti::node::tests::test_sparse_node_search ... ok
+test storage::sstable::bti::nodes::tests::test_character_range ... ok
+test storage::sstable::bti::node::tests::test_trie_navigator ... ok
+test storage::sstable::bti::nodes::tests::test_node_type_header_byte ... ok
+test storage::sstable::bti::nodes::tests::test_node_ref ... ok
+test storage::sstable::bti::nodes::tests::test_node_type_parsing ... ok
+test storage::sstable::bti::nodes::tests::test_optimal_node_type_selection ... ok
+test storage::sstable::bti::parser::tests::test_bti_header_parsing ... ok
+test storage::sstable::bti::nodes::tests::test_trie_node_transitions ... ok
+test storage::sstable::bti::parser::tests::test_header_serialization_round_trip ... ok
+
+thread 'storage::sstable::bti::tests::test_bti_error_display' panicked at cqlite-core/src/storage/sstable/bti/mod.rs:124:9:
+assertion failed: err.to_string().contains("Invalid BTI trie node type: 0xFF")
+test storage::sstable::bti::parser::tests::test_partitions_parser_creation ... ok
+test storage::sstable::bti::parser::tests::test_rows_parser_creation ... ok
+
+thread 'storage::sstable::bti::parser::tests::test_partition_lookup' panicked at cqlite-core/src/storage/sstable/bti/parser.rs:731:9:
+assertion failed: result.is_some()
+test storage::sstable::bti::tests::test_bti_error_display ... FAILED
+
+thread 'storage::sstable::bulletproof_reader::tests::test_vint_reading' panicked at cqlite-core/src/storage/sstable/bulletproof_reader.rs:740:18:
+called `Result::unwrap()` on an `Err` value: InvalidFormat("Invalid generation number: nb")
+test storage::sstable::bti::tests::test_bti_magic_number_detection ... ok
+test storage::sstable::bti::tests::test_bti_config_default ... ok
+
+thread 'storage::sstable::compression::tests::test_algorithm_selection' panicked at cqlite-core/src/storage/sstable/compression.rs:445:58:
+attempt to subtract with overflow
+test storage::sstable::bti::parser::tests::test_partition_lookup ... FAILED
+test storage::sstable::chunk_decompressor::tests::test_chunk_cache ... ok
+
+thread 'storage::sstable::compression::tests::test_compression_info_binary_parsing' panicked at cqlite-core/src/storage/sstable/compression.rs:582:9:
+assertion `left == right` failed
+  left: ""
+ right: "LZ4"
+test storage::sstable::chunk_decompressor::tests::test_chunk_decompressor_creation ... ok
+test storage::sstable::bulletproof_reader::tests::test_vint_reading ... FAILED
+test storage::sstable::compression::tests::test_compression_algorithm_from_string ... ok
+test storage::sstable::compression::tests::test_algorithm_selection ... FAILED
+test storage::sstable::compression::tests::test_compression_info_binary_parsing ... FAILED
+test storage::sstable::compression::tests::test_compression_info_json_parsing ... ok
+test storage::sstable::compression::tests::test_compression_invalid_data ... ok
+test storage::sstable::compression::tests::test_compression_ratio_estimates ... ok
+test storage::sstable::compression::tests::test_compression_reader_with_block_size ... ok
+test storage::sstable::compression::tests::test_compression_stats ... ok
+
+thread 'storage::sstable::compression::tests::test_repetition_score' panicked at cqlite-core/src/storage/sstable/compression.rs:445:58:
+attempt to subtract with overflow
+test storage::sstable::compression::tests::test_compression_reader ... ok
+test storage::sstable::compression::tests::test_compression_streaming ... ok
+
+thread 'storage::sstable::compression_info::tests::test_parse_compression_info' panicked at cqlite-core/src/storage/sstable/compression_info.rs:435:9:
+assertion `left == right` failed
+  left: 0
+ right: 16384
+test storage::sstable::compression::tests::test_entropy_calculation ... ok
+
+thread 'storage::sstable::compression_info::tests::test_parse_compression_info_with_crc' panicked at cqlite-core/src/storage/sstable/compression_info.rs:458:50:
+called `Result::unwrap()` on an `Err` value: InvalidFormat("Too many chunks: 268435456")
+test storage::sstable::compression_info::tests::test_chunk_calculations ... ok
+test storage::sstable::compression::tests::test_no_compression ... ok
+
+thread 'storage::sstable::compression_info::tests::test_parse_with_invalid_crc' panicked at cqlite-core/src/storage/sstable/compression_info.rs:486:13:
+assertion failed: error_msg.contains("CRC32 mismatch")
+test storage::sstable::compression::tests::test_repetition_score ... FAILED
+test storage::sstable::compression_info::tests::test_parse_compression_info ... FAILED
+test storage::sstable::compression_info::tests::test_parse_compression_info_with_crc ... FAILED
+test storage::sstable::compression_info::tests::test_validation ... ok
+Skipping integration test - test data not available at test-env/cassandra5/sstables
+test storage::sstable::compression_info::tests::test_parse_with_crc_required ... ok
+test storage::sstable::compression_info::tests::test_parse_with_invalid_crc ... FAILED
+test storage::sstable::directory::tests::test_component_properties ... ok
+test storage::sstable::directory::tests::test_directory_validation_integration ... ok
+test storage::sstable::directory::tests::test_extract_table_name ... ok
+test storage::sstable::directory::tests::test_parse_sstable_filename ... ok
+TOC.txt parsed: 4 valid components, 0 unknown components from 4 lines
+test storage::sstable::directory::tests::test_toc_parsing_and_validation ... ok
+test storage::sstable::directory::tests::test_component_validation ... ok
+Skipping real data test - test data not available at /Users/patrick/local_projects/cqlite/test-env/cassandra5/sstables
+Directory scan completed: 5 total files, 5 SSTable files, 1 generations found
+Directory scan completed: 4 total files, 3 SSTable files, 1 generations found
+Directory scan completed: 3 total files, 3 SSTable files, 1 generations found
+Warning: Unknown component in TOC.txt line 6: NonExistent.db
+TOC.txt parsed: 5 valid components, 1 unknown components from 6 lines
+
+thread 'storage::sstable::directory::tests::test_enhanced_toc_validation' panicked at cqlite-core/src/storage/sstable/directory.rs:1479:9:
+assertion failed: !report.toc_inconsistencies.is_empty()
+test storage::sstable::directory_integration_tests::integration_tests::test_real_cassandra_sstables ... ok
+test storage::sstable::directory::tests::test_enhanced_component_validation ... ok
+test storage::sstable::directory::tests::test_enhanced_toc_validation ... Directory scan completed: 5 total files, 5 SSTable files, 2 generations found
+FAILED
+Skipping specific table test - test data not available
+Skipping TOC consistency test - test data not available
+test storage::sstable::directory_integration_tests::integration_tests::test_specific_table_directory ... ok
+test storage::sstable::directory_integration_tests::integration_tests::test_toc_consistency_with_real_data ... ok
+test storage::sstable::format_detector::tests::test_component_detection ... ok
+test storage::sstable::format_detector::tests::test_format_detection ... ok
+test storage::sstable::format_detector::tests::test_format_features ... ok
+test storage::sstable::format_detector::tests::test_path_parsing ... ok
+test storage::sstable::format_detector::tests::test_sstable_info_parsing ... ok
+test storage::sstable::index::tests::test_index_add_entry ... ok
+Directory scan completed: 6 total files, 6 SSTable files, 1 generations found
+test storage::sstable::index::tests::test_index_stats ... ok
+test storage::sstable::index::tests::test_index_creation ... ok
+
+thread 'storage::sstable::index::tests::test_index_range_query' panicked at cqlite-core/src/storage/sstable/index.rs:289:9:
+assertion `left == right` failed
+  left: 5
+ right: 4
+test storage::sstable::index_reader::tests::test_index_header_parsing ... ok
+test storage::sstable::directory::tests::test_secondary_index_scanning ... ok
+test storage::sstable::index::tests::test_index_range_query ... FAILED
+test storage::sstable::index_reader::tests::test_partition_index_entry_parsing ... ok
+test storage::sstable::directory::tests::test_sstable_directory_scan ... ok
+test storage::sstable::key_digest::tests::test_multi_component_key ... ok
+test storage::sstable::key_digest::tests::test_byte_ordering_equivalence ... ok
+test storage::sstable::key_digest::tests::test_single_component_int_key ... ok
+TOC.txt parsed: 6 valid components, 0 unknown components from 6 lines
+test storage::sstable::key_digest::tests::test_simple_digest_fallback ... ok
+test storage::sstable::key_digest::tests::test_single_component_text_key ... ok
+Error: test storage::sstable::key_digest_integration_test::tests::test_byte_comparable_ordering_consistency ... Schemaok
+("Column 'pk_int' not found in table 'test_ks.test_table'")
+test storage::sstable::key_digest_integration_test::tests::test_schema_registry_partition_key_comparator ... FAILED
+test storage::sstable::key_digest_integration_test::tests::test_digest_computation_with_different_types ... ok
+test storage::sstable::key_digest_integration_test::tests::test_schema_driven_digest_computation ... ok
+test storage::sstable::key_digest_integration_test::tests::test_parsing_context_creation ... ok
+test storage::sstable::key_digest_test::tests::test_blob_key_digest ... ok
+
+thread 'storage::sstable::directory::tests::test_validation_functionality' panicked at cqlite-core/src/storage/sstable/directory.rs:1351:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+test storage::sstable::key_digest_test::tests::test_boolean_key_digest ... ok
+test storage::sstable::key_digest_test::tests::test_byte_ordering_vs_typed_ordering_equivalence ... ok
+test storage::sstable::key_digest_test::tests::test_multi_component_key_digest ... ok
+test storage::sstable::key_digest_test::tests::test_murmur3_compatibility ... ok
+test storage::sstable::key_digest_test::tests::test_simple_digest_fallback ... ok
+test storage::sstable::key_digest_test::tests::test_single_component_bigint_key_digest ... ok
+test storage::sstable::key_digest_test::tests::test_single_component_int_key_digest ... ok
+test storage::sstable::key_digest_test::tests::test_single_component_text_key_digest ... ok
+test storage::sstable::key_digest_test::tests::test_triple_component_key_digest ... ok
+test storage::sstable::directory::tests::test_validation_functionality ... FAILED
+test storage::sstable::key_digest_test::tests::test_uuid_key_digest ... ok
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_big_endian_compliance' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:261:9:
+assertion `left == right` failed: Version should be parsed as big-endian 0x0001
+  left: 65536
+ right: 1
+test storage::sstable::oa_format_compliance_test::tests::test_big_endian_compliance ... FAILED
+test storage::sstable::oa_format_compliance_test::tests::test_compression_offset_format ... ok
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_cross_platform_compatibility' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:487:9:
+assertion `left == right` failed
+  left: 65536
+ right: 1
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_flag_parsing_compliance' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:169:13:
+assertion `left == right` failed
+  left: 65536
+ right: 1
+test storage::sstable::key_digest_test::tests::prop_single_bigint_key_deterministic ... ok
+test storage::sstable::oa_format_compliance_test::tests::test_cross_platform_compatibility ... FAILED
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_format_detection_accuracy' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:412:9:
+assertion `left == right` failed: Should correctly identify format version
+  left: 65536
+ right: 1
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_header_size_compliance' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:283:9:
+Should reject undersized header
+test storage::sstable::oa_format_compliance_test::tests::test_flag_parsing_compliance ... FAILED
+test storage::sstable::oa_format_compliance_test::tests::test_format_detection_accuracy ... FAILED
+test storage::sstable::key_digest_test::tests::prop_single_int_key_deterministic ... ok
+test storage::sstable::oa_format_compliance_test::tests::test_magic_number_exact_compliance ... ok
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_invalid_magic_numbers' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:96:13:
+Should reject invalid magic: Wrong second byte
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_memory_layout_compliance' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:471:9:
+assertion `left == right` failed
+  left: 4
+ right: 2
+test storage::sstable::oa_format_compliance_test::tests::test_header_size_compliance ... FAILED
+test storage::sstable::oa_format_compliance_test::tests::test_partition_data_structure ... ok
+test storage::sstable::oa_format_compliance_test::tests::test_invalid_magic_numbers ... FAILED
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_spec_regression_prevention' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:454:13:
+Should reject non-'oa' format: [111, 98, 0, 0]
+test storage::sstable::oa_format_compliance_test::tests::test_reserved_bytes_validation ... ok
+test storage::sstable::oa_format_compliance_test::tests::test_memory_layout_compliance ... FAILED
+test storage::sstable::oa_format_compliance_test::tests::test_timestamp_format_compliance ... ok
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_version_validation' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:136:13:
+Should reject unsupported version: [0, 0]
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_vint_decoding_spec_compliance' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:218:13:
+assertion `left == right` failed: Wrong value for Two byte encoding start: expected 64, got 8256
+  left: 8256
+ right: 64
+test storage::sstable::oa_format_compliance_test::tests::test_token_coverage_format ... ok
+test storage::sstable::oa_format_compliance_test::tests::test_version_validation ... FAILED
+
+thread 'storage::sstable::oa_format_compliance_test::tests::test_vint_error_handling' panicked at cqlite-core/src/storage/sstable/oa_format_compliance_test.rs:244:13:
+Should fail for invalid VInt: Incomplete multi-byte VInt
+test storage::sstable::oa_format_compliance_test::tests::test_spec_regression_prevention ... FAILED
+test storage::sstable::oa_format_compliance_test::tests::test_vint_decoding_spec_compliance ... FAILED
+test storage::sstable::oa_format_compliance_test::tests::test_vint_error_handling ... FAILED
+test storage::sstable::performance_benchmarks::tests::test_benchmark_results ... ok
+test storage::sstable::reader::tests::test_block_meta ... ok
+test storage::sstable::reader::tests::test_reader_config ... ok
+test storage::sstable::performance_benchmarks::tests::test_memory_monitor ... ok
+test storage::sstable::reader::tests::test_reader_stats ... ok
+test storage::sstable::row_cell_state_machine::tests::test_error_handling ... ok
+test storage::sstable::row_cell_state_machine::tests::test_minimal_valid_row ... ok
+test storage::sstable::row_cell_state_machine::tests::test_state_machine_creation ... ok
+test storage::sstable::key_digest_test::tests::prop_text_key_deterministic ... ok
+test storage::sstable::row_cell_state_machine::tests::test_state_transitions ... ok
+test storage::sstable::performance_benchmarks::tests::test_benchmark_creation ... 
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_complete_row_with_all_sections' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:347:9:
+assertion failed: state_machine.is_complete()
+ok
+test storage::sstable::row_cell_state_machine_test::tests::test_empty_clustering_rows ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_complete_row_with_all_sections ... FAILED
+test storage::sstable::row_cell_state_machine_test::tests::test_insufficient_data_error ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_multiple_component_partition_keys ... ok
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_parse_dense_clustering_rows' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:301:9:
+assertion failed: state_machine.is_complete()
+test storage::sstable::row_cell_state_machine_test::tests::test_parse_composite_partition_key ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_parse_dense_clustering_rows ... FAILED
+test storage::sstable::row_cell_state_machine_test::tests::test_parse_header_with_deletion ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_parse_header_with_ttl ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_parse_simple_header ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_parse_simple_partition_key ... ok
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_parse_sparse_clustering_rows' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:323:9:
+assertion failed: state_machine.is_complete()
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_multi_component_clustering_keys' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:699:9:
+assertion `left == right` failed
+  left: 8
+ right: 12
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_frozen_vs_non_frozen_collections' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:752:9:
+assertion failed: state_machine.is_complete()
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_parse_static_row' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:279:9:
+assertion failed: state_machine.is_complete()
+test storage::sstable::row_cell_state_machine_test::tests::test_multi_component_clustering_keys ... FAILED
+test storage::sstable::row_cell_state_machine_test::tests::test_frozen_vs_non_frozen_collections ... FAILED
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_schema_aware_parsing' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:412:9:
+assertion failed: state_machine.is_complete()
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_schema_driven_nested_collections' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:517:9:
+assertion failed: state_machine.is_complete()
+test storage::sstable::row_cell_state_machine_test::tests::test_parse_static_row ... FAILED
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_schema_driven_complex_map' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:820:9:
+assertion failed: state_machine.is_complete()
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_schema_driven_tuple_parsing' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:629:9:
+assertion failed: state_machine.is_complete()
+test storage::sstable::row_cell_state_machine_test::tests::test_parse_sparse_clustering_rows ... FAILED
+test storage::sstable::row_cell_state_machine_test::tests::test_schema_driven_nested_collections ... FAILED
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_schema_driven_udt_parsing' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:573:9:
+assertion failed: state_machine.is_complete()
+test storage::sstable::row_cell_state_machine_test::tests::test_schema_aware_parsing ... FAILED
+
+thread 'storage::sstable::row_cell_state_machine_test::tests::test_schema_mismatch_handling' panicked at cqlite-core/src/storage/sstable/row_cell_state_machine_test.rs:864:9:
+assertion failed: state_machine.is_complete()
+test storage::sstable::row_cell_state_machine_test::tests::test_schema_driven_complex_map ... FAILED
+test storage::sstable::row_cell_state_machine_test::tests::test_schema_driven_tuple_parsing ... FAILED
+test storage::sstable::row_cell_state_machine_test::tests::test_schema_driven_udt_parsing ... FAILED
+test storage::sstable::row_cell_state_machine_test::tests::test_schema_mismatch_handling ... FAILED
+test storage::sstable::row_cell_state_machine_test::tests::test_state_machine_creation ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_state_machine_reset ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_state_machine_with_schema ... ok
+test storage::sstable::schema_aware_reader::tests::test_invalid_schema_validation ... ok
+test storage::sstable::row_cell_state_machine_test::tests::test_ttl_and_deletion_coexistence ... ok
+test storage::sstable::schema_aware_reader::tests::test_non_contiguous_positions ... ok
+test storage::sstable::schema_aware_reader::tests::test_schema_validation ... ok
+test storage::sstable::schema_aware_reader_test::tests::test_error_types ... ok
+test storage::sstable::schema_aware_reader_test::tests::test_invalid_column_types ... ok
+test storage::sstable::schema_aware_reader_test::tests::test_invalid_schema_validation ... ok
+test storage::sstable::schema_aware_reader_test::tests::test_non_contiguous_clustering_keys ... ok
+test storage::sstable::schema_aware_reader_test::tests::test_parsing_context_creation ... ignored
+test storage::sstable::schema_aware_reader_test::tests::test_schema_aware_reader_config_defaults ... ok
+test storage::sstable::schema_aware_reader_test::tests::test_non_contiguous_partition_keys ... ok
+test storage::sstable::schema_aware_reader_test::tests::test_schema_validation ... ok
+test storage::sstable::statistics_reader::tests::test_statistics_reader_creation ... ok
+test storage::sstable::statistics_reader::tests::test_find_statistics_file ... ok
+test storage::sstable::streaming_reader::tests::test_buffer_pool ... ok
+test storage::sstable::streaming_reader::tests::test_streaming_config ... ok
+test storage::sstable::summary_reader::tests::test_summary_entry_parsing ... ok
+test storage::sstable::summary_reader::tests::test_summary_header_parsing ... ok
+test storage::sstable::summary_reader::tests::test_token_range_building ... ok
+test storage::sstable::streaming_reader::tests::test_streaming_block ... ok
+test storage::sstable::tests::test_sstable_id_generation ... ok
+test storage::sstable::tombstone_merger::tests::test_basic_tombstone_merge ... ok
+
+thread 'storage::sstable::tombstone_merger::tests::test_collection_tombstone_handling' panicked at cqlite-core/src/storage/sstable/tombstone_merger.rs:729:13:
+assertion `left == right` failed
+  left: 4
+ right: 3
+test storage::sstable::tombstone_merger::tests::test_enhanced_multi_generation_merge ... ok
+test storage::sstable::tombstone_merger::tests::test_collection_tombstone_handling ... FAILED
+
+thread 'storage::sstable::tombstone_merger::tests::test_fast_tombstone_check_performance' panicked at cqlite-core/src/storage/sstable/tombstone_merger.rs:749:13:
+assertion failed: merger.fast_tombstone_check(&ttl_tombstone, 3000)
+
+thread 'storage::sstable::tombstone_merger::tests::test_garbage_collection_identification' panicked at cqlite-core/src/storage/sstable/tombstone_merger.rs:700:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+test storage::sstable::tombstone_merger::tests::test_fast_tombstone_check_performance ... FAILED
+test storage::sstable::tombstone_merger::tests::test_range_tombstone_application ... ok
+test storage::sstable::tombstone_merger::tests::test_garbage_collection_identification ... FAILED
+test storage::sstable::tombstone_merger::tests::test_row_level_tombstone ... ok
+test storage::sstable::tombstone_merger::tests::test_ttl_expiration ... ok
+test storage::sstable::validation::tests::test_validation_report ... ok
+test storage::sstable::key_digest_test::tests::prop_simple_digest_deterministic ... ok
+test storage::sstable::validation::tests::test_validation_framework_creation ... ok
+
+thread 'storage::sstable::writer::tests::test_sstable_writer_add_entry' panicked at cqlite-core/src/storage/sstable/writer.rs:178:9:
+assertion `left == right` failed: Cassandra header must be exactly 32 bytes
+  left: 41
+ right: 32
+test storage::sstable::tests::test_sstable_manager_creation ... ok
+Warning: SSTableWriter dropped without being finalized
+  Entries written: 0
+  Data size: 0 bytes
+
+thread 'storage::sstable::writer::tests::test_sstable_writer_batch_operations' panicked at cqlite-core/src/storage/sstable/writer.rs:178:9:
+assertion `left == right` failed: Cassandra header must be exactly 32 bytes
+  left: 41
+ right: 32
+
+thread 'storage::sstable::writer::tests::test_sstable_writer_creation' panicked at cqlite-core/src/storage/sstable/writer.rs:178:9:
+assertion `left == right` failed: Cassandra header must be exactly 32 bytes
+  left: 41
+ right: 32
+Warning: SSTableWriter dropped without being finalized
+  Entries written: 0
+  Data size: 0 bytes
+Warning: SSTableWriter dropped without being finalized
+  Entries written: 0
+  Data size: 0 bytes
+test storage::sstable::writer::tests::test_sstable_writer_add_entry ... FAILED
+test storage::sstable::writer::tests::test_sstable_writer_batch_operations ... FAILED
+test storage::sstable::writer::tests::test_sstable_writer_creation ... FAILED
+
+thread 'storage::sstable::writer::tests::test_sstable_writer_performance_metrics' panicked at cqlite-core/src/storage/sstable/writer.rs:178:9:
+assertion `left == right` failed: Cassandra header must be exactly 32 bytes
+  left: 41
+ right: 32
+🔍 Detected Cassandra version: Legacy (magic: 0x64756d6d) for "/var/folders/wx/_jgt34xx3bn78km75b1p5lh80000gp/T/.tmpg5sFrf/test.sst"
+📁 Using default generation 0 for: test.sst
+Warning: SSTableWriter dropped without being finalized
+  Entries written: 0
+  Data size: 0 bytes
+test storage::sstable::writer::tests::test_sstable_writer_performance_metrics ... FAILED
+No compression detected for "/var/folders/wx/_jgt34xx3bn78km75b1p5lh80000gp/T/.tmpg5sFrf/test.sst"
+📁 Using default generation 0 for: test.sst
+
+thread 'storage::sstable::schema_aware_reader_test::tests::test_schema_aware_stats' panicked at cqlite-core/src/storage/sstable/schema_aware_reader_test.rs:179:9:
+assertion failed: result.is_err()
+test storage::sstable::schema_aware_reader_test::tests::test_schema_aware_stats ... FAILED
+test storage::sstable::tombstone_merger::tests::test_batch_processing_performance ... ok
+test storage::sstable_data_manager::tests::test_cache_statistics ... ok
+test storage::sstable_data_manager::tests::test_data_manager_creation ... ok
+
+thread 'storage::tests::test_batch_operations' panicked at cqlite-core/src/storage/sstable/writer.rs:178:9:
+assertion `left == right` failed: Cassandra header must be exactly 32 bytes
+  left: 41
+ right: 32
+Warning: SSTableWriter dropped without being finalized
+  Entries written: 0
+  Data size: 0 bytes
+test storage::wal::tests::test_wal_creation ... ok
+test storage::wal::tests::test_wal_append ... ok
+test testing::cassandra_test::tests::test_comparison_result ... ok
+test storage::tests::test_batch_operations ... FAILED
+test types::comparator::tests::test_null_comparisons ... ok
+test types::comparator::tests::test_primitive_comparisons ... ok
+test types::comparator::tests::test_supports_ordering ... ok
+test types::comparator_test::tests::test_basic_int_comparison ... ok
+test types::comparator_test::tests::test_display_formatting ... ok
+test types::comparator_test::tests::test_from_cql_type ... ok
+test types::comparator_test::tests::test_from_type_string ... ok
+test types::comparator_test::tests::test_list_comparison ... ok
+test types::comparator_test::tests::test_null_handling ... ok
+test storage::wal::tests::test_wal_truncate ... ok
+test types::comparator_test::tests::test_set_comparison ... ok
+test types::comparator_test::tests::test_text_comparison ... ok
+test types::comparator_test::tests::test_type_mismatch_error ... ok
+test types::comparator_test::tests::test_type_names ... ok
+test storage::wal::tests::test_wal_read_all ... ok
+test types::tests::test_new_value_types ... ok
+test types::tests::test_row_key_creation ... ok
+
+thread 'tests::test_database_basic_operations' panicked at cqlite-core/src/lib.rs:280:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+test types::tests::test_new_data_types ... ok
+test types::tests::test_tombstone_display ... ok
+test types::tests::test_tombstone_functionality ... ok
+test types::tests::test_value_conversions ... ok
+test types::tests::test_value_display ... ok
+test types::tests::test_value_types ... ok
+test validation::core::tests::test_metrics_update ... ok
+test validation::core::tests::test_configuration_flags ... ok
+test tests::test_database_basic_operations ... FAILED
+test validation::core::tests::test_validation_framework_creation ... ok
+test validation::core::tests::test_shared_state ... ok
+test validation::core::tests::test_validation_phase_update ... ok
+test validation::data_integrity::tests::test_corruption_detection ... ok
+test validation::data_integrity::tests::test_data_integrity_validator_creation ... ok
+test validation::data_integrity::tests::test_generate_test_values ... ok
+test validation::data_integrity::tests::test_integrity_metrics_calculation ... ok
+test validation::error_handling::tests::test_error_handler_creation ... ok
+test validation::error_handling::tests::test_recovery_statistics ... ok
+test validation::error_handling::tests::test_error_type_matching ... ok
+test validation::error_handling::tests::test_recovery_strategies ... ok
+test validation::format_compatibility::tests::test_compatibility_matrix ... ok
+test validation::format_compatibility::tests::test_migration_recommendations ... ok
+test validation::format_compatibility::tests::test_format_validator_creation ... ok
+test validation::format_compatibility::tests::test_version_comparison ... ok
+test validation::format_compatibility::tests::test_version_support_creation ... ok
+test validation::hardened_validator_parser::tests::test_cassandra_version_parsing ... ok
+test validation::hardened_validator_parser::tests::test_complex_type_test_result_merge ... ok
+test validation::hardened_validator_parser::tests::test_hardened_validator_creation ... ok
+test validation::hardened_validator_parser::tests::test_validation_status_determination ... ok
+test validation::performance::tests::test_default_benchmarks_focus_cassandra5 ... ok
+test validation::hardened_validator_parser::tests::test_version_support_features ... ok
+
+thread 'validation::real_time::tests::test_event_history_limit' panicked at cqlite-core/src/validation/real_time.rs:423:9:
+assertion `left == right` failed
+  left: 0
+ right: 2
+test validation::real_time::tests::test_event_filtering ... ok
+
+thread 'validation::real_time::tests::test_event_recording' panicked at cqlite-core/src/validation/real_time.rs:351:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+test validation::real_time::tests::test_event_history_limit ... FAILED
+test validation::real_time::tests::test_event_recording ... FAILED
+
+thread 'validation::real_time::tests::test_get_events_by_type' panicked at cqlite-core/src/validation/real_time.rs:498:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+test validation::real_time::tests::test_realtime_validator_creation ... ok
+test validation::real_time::tests::test_get_events_by_type ... FAILED
+
+thread 'validation::real_time::tests::test_validation_statistics' panicked at cqlite-core/src/validation/real_time.rs:459:9:
+assertion `left == right` failed
+  left: 1
+ right: 3
+test validation::reports::tests::test_add_section_updates_summary ... ok
+test validation::real_time::tests::test_validation_statistics ... FAILED
+test validation::reports::tests::test_failed_section_affects_overall_status ... ok
+test validation::reports::tests::test_generate_report ... ok
+test validation::reports::tests::test_get_all_recommendations ... ok
+test validation::reports::tests::test_get_failed_sections ... ok
+
+thread 'validation::reports::tests::test_mixed_sections_status_priority' panicked at cqlite-core/src/validation/reports.rs:553:9:
+assertion `left == right` failed
+  left: 33.33333333333333
+ right: 33.333333333333336
+test validation::reports::tests::test_mixed_sections_status_priority ... FAILED
+test validation::reports::tests::test_report_generator_creation ... ok
+test validation::reports::tests::test_status_text ... ok
+test validation::reports::tests::test_validation_report_creation ... ok
+test validation::sstabledump_parity::tests::test_discrepancy_creation ... ok
+test validation::reports::tests::test_warning_section_affects_overall_status ... ok
+test validation::sstabledump_parity::tests::test_parity_result_status_determination ... ok
+test validation::sstabledump_parity::tests::test_parity_validator_creation ... ok
+test validation::sstabledump_parity_integration_test::test_ci_cd_integration_demo ... ok
+test validation::sstabledump_parity_integration_test::test_discrepancy_analysis ... ok
+
+thread 'validation::sstabledump_parity_integration_test::test_major_discrepancy_detection' panicked at cqlite-core/src/validation/sstabledump_parity_integration_test.rs:305:5:
+assertion failed: evidence_report.contains("Files with Discrepancies: 2")
+test validation::sstabledump_parity_integration_test::test_major_discrepancy_detection ... FAILED
+
+thread 'validation::sstabledump_parity_integration_test::test_zero_tolerance_evidence_generation' panicked at cqlite-core/src/validation/sstabledump_parity_integration_test.rs:193:5:
+assertion failed: evidence_report.contains("IDENTICAL output")
+test validation::sstabledump_parity_integration_test::test_zero_tolerance_evidence_generation ... FAILED
+test validation::tests::test_edge_case_generation ... ok
+Generated evidence report:
+# SSTableDump Parity Validation Report
+## Issue #25: Zero Tolerance Evidence
+
+**Validation Timestamp:** 2025-08-18 22:32:25 UTC
+**Overall Status:** ValidationFailed
+
+## Summary
+- **Total Files Tested:** 0
+- **Perfect Parity:** 0
+- **Files with Discrepancies:** 0
+- **Total Discrepancies Found:** 0
+
+## ⚠️ DISCREPANCIES FOUND - REQUIRES ATTENTION
+
+**Critical Issues:**
+- Cannot validate without test SSTable files
+
+## Performance Metrics & Guardrails
+- **Total Validation Time:** 0ms
+- **Average Time per File:** 0.00ms
+- **Performance vs Baseline:** 0.00x
+- **Peak Memory Usage:** 0.0 MB
+- **Guardrail Status:** ⚠️ SOME GUARDRAILS FAILED
+
+### Performance Guardrail Details
+
+### Baseline Performance Comparison
+- **Current Performance:** 0.0 ms/MB
+- **Baseline Performance:** 250.0 ms/MB
+- **Performance Ratio:** 0.00x (FASTER than baseline)
+- **Regression Threshold:** 1.20x (19.999999999999996% slower allowed)
+
+### Throughput Analysis
+- **Processing Throughput:** 0.00 MB/s
+- **Minimum Required:** 2.00 MB/s
+- **Meets Minimum:** ❌ No
+
+
+test validation::tests::test_validation_engine_creation ... ok
+test validation::tests::test_validation_result_creation ... ok
+test validation::tests::test_validation_summary_pass_rate ... ok
+test validation::sstabledump_parity_integration_test::test_sstabledump_parity_validation_framework ... ok
+Memory Safety Tools Available:
+  Miri: ✗
+  Valgrind: ✗
+  AddressSanitizer: ✓
+  To install Miri: rustup component add miri
+  To install Valgrind: sudo apt-get install valgrind (Ubuntu/Debian)
+Miri available: false
+Valgrind available: false
+ASAN available: true
+test memory_safety_runner::tests::test_runner_creation ... ok
+test memory_safety_runner::tests::test_tool_detection ... ok
+test validation::error_handling::tests::test_corruption_detection ... ok
+test memory_safety_tests::tests::test_memory_manager_basic_safety ... ok
+   ✓ Memory manager safety test passed
+2. Testing MemTable memory safety...
+
+thread 'validation::hardened_validator_parser::tests::test_cross_version_compatibility' panicked at cqlite-core/src/validation/hardened_validator_parser.rs:2477:9:
+assertion failed: result.is_ok()
+test validation::hardened_validator_parser::tests::test_cross_version_compatibility ... FAILED
+test memory_safety_tests::tests::test_memtable_basic_safety ... ok
+   ✓ MemTable memory safety test passed
+3. Testing buffer overflow protection...
+   ✓ Buffer overflow protection test passed
+4. Testing concurrent memory stress...
+   ✓ Concurrent memory stress test passed
+5. Testing unsafe code safety...
+   ✓ Unsafe code safety test passed
+6. Testing error cleanup...
+
+thread 'memory_safety_tests::tests::test_memory_safety_suite' panicked at cqlite-core/src/memory_safety_tests.rs:341:13:
+Simulated error
+   ✓ Error cleanup test passed
+All memory safety tests passed! 🎉
+
+Memory Usage Statistics:
+  Peak memory usage: 0 bytes
+  Total allocations: 0
+  Total deallocations: 0
+  Current memory: 0 bytes
+test memory_safety_tests::tests::test_memory_safety_suite ... ok

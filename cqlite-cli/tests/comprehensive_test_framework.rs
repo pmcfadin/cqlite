@@ -488,7 +488,7 @@ impl ComprehensiveTestFramework {
 
 /// Test data manager for generating fixtures
 pub struct TestDataManager {
-    base_path: PathBuf,
+    _base_path: PathBuf,
 }
 
 impl TestDataManager {
@@ -497,7 +497,7 @@ impl TestDataManager {
         fs::create_dir_all(&fixtures_dir)?;
 
         Ok(Self {
-            base_path: fixtures_dir,
+            _base_path: fixtures_dir,
         })
     }
 
@@ -543,13 +543,13 @@ impl TestDataManager {
 
 /// Mock registry for managing test mocks
 pub struct MockRegistry {
-    mocks: HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
+    _mocks: HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl MockRegistry {
     pub fn new() -> Self {
         Self {
-            mocks: HashMap::new(),
+            _mocks: HashMap::new(),
         }
     }
 

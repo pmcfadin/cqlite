@@ -18,9 +18,9 @@ use tracing::info;
 /// Test dataset generator for reconciliation scenarios
 pub struct ReconciliationTestDatasets {
     /// Base timestamp for deterministic test data
-    base_timestamp: i64,
+    _base_timestamp: i64,
     /// Current sequence number for unique identifiers
-    sequence: u32,
+    _sequence: u32,
 }
 
 impl Default for ReconciliationTestDatasets {
@@ -29,12 +29,13 @@ impl Default for ReconciliationTestDatasets {
     }
 }
 
+#[allow(dead_code)]
 impl ReconciliationTestDatasets {
     /// Create new test dataset generator
     pub fn new() -> Self {
         Self {
-            base_timestamp: 1640995200_000_000, // 2022-01-01 00:00:00 UTC in microseconds
-            sequence: 0,
+            _base_timestamp: 1640995200_000_000, // 2022-01-01 00:00:00 UTC in microseconds
+            _sequence: 0,
         }
     }
 
@@ -107,11 +108,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "value".to_string(),
                             value: CellValue::Text("first_write".to_string()),
-                            timestamp: self.base_timestamp + 1000,
+                            timestamp: self._base_timestamp + 1000,
                             ttl: None,
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp + 1000),
+                        timestamp: Some(self._base_timestamp + 1000),
                         ttl: None,
                     },
                     // Second write (newer)
@@ -120,11 +121,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "value".to_string(),
                             value: CellValue::Text("second_write".to_string()),
-                            timestamp: self.base_timestamp + 2000,
+                            timestamp: self._base_timestamp + 2000,
                             ttl: None,
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp + 2000),
+                        timestamp: Some(self._base_timestamp + 2000),
                         ttl: None,
                     },
                     // Third write (newest - should win)
@@ -133,11 +134,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "value".to_string(),
                             value: CellValue::Text("third_write_winner".to_string()),
-                            timestamp: self.base_timestamp + 3000,
+                            timestamp: self._base_timestamp + 3000,
                             ttl: None,
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp + 3000),
+                        timestamp: Some(self._base_timestamp + 3000),
                         ttl: None,
                     },
                 ],
@@ -158,7 +159,7 @@ impl ReconciliationTestDatasets {
                 expected_winner: Some(ExpectedCell {
                     column_name: "value".to_string(),
                     value: CellValue::Text("third_write_winner".to_string()),
-                    timestamp: self.base_timestamp + 3000,
+                    timestamp: self._base_timestamp + 3000,
                 }),
                 reconciliation_reason: crate::reconciliation::ReconciliationReason::Visible,
             },
@@ -181,11 +182,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "expired_value".to_string(),
                             value: CellValue::Text("should_be_expired".to_string()),
-                            timestamp: self.base_timestamp,
+                            timestamp: self._base_timestamp,
                             ttl: Some(1), // Expires after 1 second
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp),
+                        timestamp: Some(self._base_timestamp),
                         ttl: Some(1),
                     },
                     ParsedRow {
@@ -193,11 +194,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "active_value".to_string(),
                             value: CellValue::Text("still_active".to_string()),
-                            timestamp: self.base_timestamp,
+                            timestamp: self._base_timestamp,
                             ttl: Some(3600), // Expires after 1 hour
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp),
+                        timestamp: Some(self._base_timestamp),
                         ttl: Some(3600),
                     },
                     ParsedRow {
@@ -205,11 +206,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "permanent_value".to_string(),
                             value: CellValue::Text("no_ttl".to_string()),
-                            timestamp: self.base_timestamp,
+                            timestamp: self._base_timestamp,
                             ttl: None,
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp),
+                        timestamp: Some(self._base_timestamp),
                         ttl: None,
                     },
                 ],
@@ -229,7 +230,7 @@ impl ReconciliationTestDatasets {
                 expected_winner: Some(ExpectedCell {
                     column_name: "active_value".to_string(),
                     value: CellValue::Text("still_active".to_string()),
-                    timestamp: self.base_timestamp,
+                    timestamp: self._base_timestamp,
                 }),
                 reconciliation_reason: crate::reconciliation::ReconciliationReason::Visible,
             },
@@ -253,23 +254,23 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "deleted_cell".to_string(),
                                 value: CellValue::Text("deleted".to_string()),
-                                timestamp: self.base_timestamp + 1000,
+                                timestamp: self._base_timestamp + 1000,
                                 ttl: None,
                                 deletion_info: Some(DeletionInfo {
-                                    marked_for_deletion_at: self.base_timestamp + 2000,
-                                    local_deletion_time: ((self.base_timestamp + 2000) / 1_000_000)
+                                    marked_for_deletion_at: self._base_timestamp + 2000,
+                                    local_deletion_time: ((self._base_timestamp + 2000) / 1_000_000)
                                         as i32,
                                 }),
                             },
                             ParsedCell {
                                 column_name: "surviving_cell".to_string(),
                                 value: CellValue::Text("survives".to_string()),
-                                timestamp: self.base_timestamp + 3000, // Newer than deletion
+                                timestamp: self._base_timestamp + 3000, // Newer than deletion
                                 ttl: None,
                                 deletion_info: None,
                             },
                         ],
-                        timestamp: Some(self.base_timestamp + 3000),
+                        timestamp: Some(self._base_timestamp + 3000),
                         ttl: None,
                     },
                     // Row tombstone scenario
@@ -278,15 +279,15 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "deleted_by_row".to_string(),
                             value: CellValue::Text("row_deleted".to_string()),
-                            timestamp: self.base_timestamp + 1000,
+                            timestamp: self._base_timestamp + 1000,
                             ttl: None,
                             deletion_info: Some(DeletionInfo {
-                                marked_for_deletion_at: self.base_timestamp + 2000,
-                                local_deletion_time: ((self.base_timestamp + 2000) / 1_000_000)
+                                marked_for_deletion_at: self._base_timestamp + 2000,
+                                local_deletion_time: ((self._base_timestamp + 2000) / 1_000_000)
                                     as i32,
                             }),
                         }],
-                        timestamp: Some(self.base_timestamp + 2000),
+                        timestamp: Some(self._base_timestamp + 2000),
                         ttl: None,
                     },
                     // Row tombstone with newer data
@@ -295,11 +296,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "newer_than_row_tombstone".to_string(),
                             value: CellValue::Text("newer_data".to_string()),
-                            timestamp: self.base_timestamp + 4000, // Newer than row tombstone
+                            timestamp: self._base_timestamp + 4000, // Newer than row tombstone
                             ttl: None,
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp + 4000),
+                        timestamp: Some(self._base_timestamp + 4000),
                         ttl: None,
                     },
                 ],
@@ -319,7 +320,7 @@ impl ReconciliationTestDatasets {
                 expected_winner: Some(ExpectedCell {
                     column_name: "surviving_cell".to_string(),
                     value: CellValue::Text("survives".to_string()),
-                    timestamp: self.base_timestamp + 3000,
+                    timestamp: self._base_timestamp + 3000,
                 }),
                 reconciliation_reason: crate::reconciliation::ReconciliationReason::Visible,
             },
@@ -342,11 +343,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "value".to_string(),
                             value: CellValue::Text("in_range".to_string()),
-                            timestamp: self.base_timestamp + 1000,
+                            timestamp: self._base_timestamp + 1000,
                             ttl: None,
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp + 1000),
+                        timestamp: Some(self._base_timestamp + 1000),
                         ttl: None,
                     },
                     // Row outside range (should survive)
@@ -355,11 +356,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "value".to_string(),
                             value: CellValue::Text("outside_range".to_string()),
-                            timestamp: self.base_timestamp + 1000,
+                            timestamp: self._base_timestamp + 1000,
                             ttl: None,
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp + 1000),
+                        timestamp: Some(self._base_timestamp + 1000),
                         ttl: None,
                     },
                     // Row at boundary (inclusive)
@@ -368,11 +369,11 @@ impl ReconciliationTestDatasets {
                         cells: vec![ParsedCell {
                             column_name: "value".to_string(),
                             value: CellValue::Text("at_boundary".to_string()),
-                            timestamp: self.base_timestamp + 1000,
+                            timestamp: self._base_timestamp + 1000,
                             ttl: None,
                             deletion_info: None,
                         }],
-                        timestamp: Some(self.base_timestamp + 1000),
+                        timestamp: Some(self._base_timestamp + 1000),
                         ttl: None,
                     },
                 ],
@@ -392,7 +393,7 @@ impl ReconciliationTestDatasets {
                 expected_winner: Some(ExpectedCell {
                     column_name: "value".to_string(),
                     value: CellValue::Text("outside_range".to_string()),
-                    timestamp: self.base_timestamp + 1000,
+                    timestamp: self._base_timestamp + 1000,
                 }),
                 reconciliation_reason: crate::reconciliation::ReconciliationReason::Visible,
             },
@@ -417,7 +418,7 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "expired_ttl_cell".to_string(),
                                 value: CellValue::Text("expired".to_string()),
-                                timestamp: self.base_timestamp,
+                                timestamp: self._base_timestamp,
                                 ttl: Some(1), // Expired
                                 deletion_info: None,
                             },
@@ -425,11 +426,11 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "tombstoned_cell".to_string(),
                                 value: CellValue::Text("deleted".to_string()),
-                                timestamp: self.base_timestamp + 1000,
+                                timestamp: self._base_timestamp + 1000,
                                 ttl: None,
                                 deletion_info: Some(DeletionInfo {
-                                    marked_for_deletion_at: self.base_timestamp + 2000,
-                                    local_deletion_time: ((self.base_timestamp + 2000) / 1_000_000)
+                                    marked_for_deletion_at: self._base_timestamp + 2000,
+                                    local_deletion_time: ((self._base_timestamp + 2000) / 1_000_000)
                                         as i32,
                                 }),
                             },
@@ -437,14 +438,14 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "multi_gen_cell".to_string(),
                                 value: CellValue::Text("old_value".to_string()),
-                                timestamp: self.base_timestamp + 1000,
+                                timestamp: self._base_timestamp + 1000,
                                 ttl: None,
                                 deletion_info: None,
                             },
                             ParsedCell {
                                 column_name: "multi_gen_cell".to_string(),
                                 value: CellValue::Text("new_value".to_string()),
-                                timestamp: self.base_timestamp + 3000,
+                                timestamp: self._base_timestamp + 3000,
                                 ttl: None,
                                 deletion_info: None,
                             },
@@ -452,12 +453,12 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "surviving_cell".to_string(),
                                 value: CellValue::Text("survives".to_string()),
-                                timestamp: self.base_timestamp + 5000,
+                                timestamp: self._base_timestamp + 5000,
                                 ttl: Some(7200), // Valid for 2 hours
                                 deletion_info: None,
                             },
                         ],
-                        timestamp: Some(self.base_timestamp + 5000),
+                        timestamp: Some(self._base_timestamp + 5000),
                         ttl: None,
                     },
                 ],
@@ -478,7 +479,7 @@ impl ReconciliationTestDatasets {
                 expected_winner: Some(ExpectedCell {
                     column_name: "multi_gen_cell".to_string(),
                     value: CellValue::Text("new_value".to_string()),
-                    timestamp: self.base_timestamp + 3000,
+                    timestamp: self._base_timestamp + 3000,
                 }),
                 reconciliation_reason: crate::reconciliation::ReconciliationReason::Visible,
             },
@@ -501,7 +502,7 @@ impl ReconciliationTestDatasets {
                         ParsedCell {
                             column_name: "ttl_before_tombstone".to_string(),
                             value: CellValue::Text("ttl_expires_first".to_string()),
-                            timestamp: self.base_timestamp,
+                            timestamp: self._base_timestamp,
                             ttl: Some(1), // Expires quickly
                             deletion_info: None,
                         },
@@ -509,11 +510,11 @@ impl ReconciliationTestDatasets {
                         ParsedCell {
                             column_name: "ttl_before_tombstone".to_string(),
                             value: CellValue::Text("deleted".to_string()),
-                            timestamp: self.base_timestamp + 5000,
+                            timestamp: self._base_timestamp + 5000,
                             ttl: None,
                             deletion_info: Some(DeletionInfo {
-                                marked_for_deletion_at: self.base_timestamp + 5000,
-                                local_deletion_time: ((self.base_timestamp + 5000) / 1_000_000)
+                                marked_for_deletion_at: self._base_timestamp + 5000,
+                                local_deletion_time: ((self._base_timestamp + 5000) / 1_000_000)
                                     as i32,
                             }),
                         },
@@ -521,16 +522,16 @@ impl ReconciliationTestDatasets {
                         ParsedCell {
                             column_name: "tombstone_before_ttl".to_string(),
                             value: CellValue::Text("deleted_then_expires".to_string()),
-                            timestamp: self.base_timestamp + 1000,
+                            timestamp: self._base_timestamp + 1000,
                             ttl: Some(7200), // Long TTL
                             deletion_info: Some(DeletionInfo {
-                                marked_for_deletion_at: self.base_timestamp + 2000,
-                                local_deletion_time: ((self.base_timestamp + 2000) / 1_000_000)
+                                marked_for_deletion_at: self._base_timestamp + 2000,
+                                local_deletion_time: ((self._base_timestamp + 2000) / 1_000_000)
                                     as i32,
                             }),
                         },
                     ],
-                    timestamp: Some(self.base_timestamp + 5000),
+                    timestamp: Some(self._base_timestamp + 5000),
                     ttl: None,
                 }],
             }],
@@ -570,7 +571,7 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "contested_cell".to_string(),
                                 value: CellValue::Text("generation_1".to_string()),
-                                timestamp: self.base_timestamp + 1000,
+                                timestamp: self._base_timestamp + 1000,
                                 ttl: None,
                                 deletion_info: None,
                             },
@@ -578,7 +579,7 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "contested_cell".to_string(),
                                 value: CellValue::Text("generation_2".to_string()),
-                                timestamp: self.base_timestamp + 2000,
+                                timestamp: self._base_timestamp + 2000,
                                 ttl: Some(3600), // With TTL
                                 deletion_info: None,
                             },
@@ -586,11 +587,11 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "contested_cell".to_string(),
                                 value: CellValue::Text("generation_3_deleted".to_string()),
-                                timestamp: self.base_timestamp + 3000,
+                                timestamp: self._base_timestamp + 3000,
                                 ttl: None,
                                 deletion_info: Some(DeletionInfo {
-                                    marked_for_deletion_at: self.base_timestamp + 3000,
-                                    local_deletion_time: ((self.base_timestamp + 3000) / 1_000_000)
+                                    marked_for_deletion_at: self._base_timestamp + 3000,
+                                    local_deletion_time: ((self._base_timestamp + 3000) / 1_000_000)
                                         as i32,
                                 }),
                             },
@@ -598,12 +599,12 @@ impl ReconciliationTestDatasets {
                             ParsedCell {
                                 column_name: "contested_cell".to_string(),
                                 value: CellValue::Text("generation_4_resurrection".to_string()),
-                                timestamp: self.base_timestamp + 4000,
+                                timestamp: self._base_timestamp + 4000,
                                 ttl: None,
                                 deletion_info: None,
                             },
                         ],
-                        timestamp: Some(self.base_timestamp + 4000),
+                        timestamp: Some(self._base_timestamp + 4000),
                         ttl: None,
                     },
                 ],
@@ -623,7 +624,7 @@ impl ReconciliationTestDatasets {
                 expected_winner: Some(ExpectedCell {
                     column_name: "contested_cell".to_string(),
                     value: CellValue::Text("generation_4_resurrection".to_string()),
-                    timestamp: self.base_timestamp + 4000,
+                    timestamp: self._base_timestamp + 4000,
                 }),
                 reconciliation_reason:
                     crate::reconciliation::ReconciliationReason::ConflictResolvedByTimestamp,
@@ -633,8 +634,8 @@ impl ReconciliationTestDatasets {
 
     /// Get next sequence number
     fn next_sequence(&mut self) -> u32 {
-        self.sequence += 1;
-        self.sequence
+        self._sequence += 1;
+        self._sequence
     }
 
     /// Create range tombstone for testing
@@ -646,7 +647,7 @@ impl ReconciliationTestDatasets {
         inclusive_end: bool,
     ) -> RangeTombstone {
         RangeTombstone {
-            deletion_time: self.base_timestamp + 2000,
+            deletion_time: self._base_timestamp + 2000,
             start_bound: start.map(|s| s.to_string()),
             end_bound: end.map(|s| s.to_string()),
             inclusive_start,
@@ -657,6 +658,7 @@ impl ReconciliationTestDatasets {
 
 /// Test dataset pair (Cassandra vs CQLite)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TestDatasetPair {
     pub name: String,
     pub description: String,
@@ -667,6 +669,7 @@ pub struct TestDatasetPair {
 
 /// Expected reconciliation result for validation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ExpectedReconciliation {
     pub visible_cells: usize,
     pub expected_winner: Option<ExpectedCell>,
@@ -675,6 +678,7 @@ pub struct ExpectedReconciliation {
 
 /// Expected cell result
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ExpectedCell {
     pub column_name: String,
     pub value: CellValue,

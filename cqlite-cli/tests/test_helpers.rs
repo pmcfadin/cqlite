@@ -77,6 +77,7 @@ pub fn output_contains_any(output: &Output, patterns: &[&str]) -> Result<bool> {
 }
 
 /// Validate output format based on expected format
+#[allow(dead_code)]
 pub fn validate_output_format(output: &Output, format: &str) -> Result<bool> {
     let stdout = get_stdout(output)?;
 
@@ -221,6 +222,16 @@ pub fn create_test_config(temp_dir: &TempDir) -> Result<PathBuf> {
     let config_path = temp_dir.path().join("test_config.toml");
 
     let config_content = r#"
+[connection]
+timeout_ms = 30000
+retry_attempts = 3
+pool_size = 10
+
+[output]
+max_rows = 1000
+colors = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+
 [performance]
 cache_size_mb = 64
 query_timeout_ms = 30000
@@ -228,6 +239,18 @@ memory_limit_mb = 256
 
 [logging]
 level = "info"
+format = "Pretty"
+
+[repl]
+enable_history = true
+enable_completion = true
+enable_colors = true
+show_timing = false
+page_size = 50
+enable_paging = true
+max_history_size = 1000
+prompt = "cqlite> "
+prompt_continuation = "    -> "
 
 default_database = "test.db"
 "#;
@@ -289,6 +312,7 @@ pub fn create_test_data_files(temp_dir: &TempDir) -> Result<(PathBuf, PathBuf, P
 }
 
 /// Extract timing information from CLI output
+#[allow(dead_code)]
 pub fn extract_timing_ms(output: &Output) -> Option<f64> {
     let stdout = get_stdout(output).ok()?;
 
@@ -329,12 +353,14 @@ pub fn cli_available() -> bool {
 }
 
 /// Performance measurement utilities
+#[allow(dead_code)]
 pub struct PerformanceMeasurement {
     pub start_time: std::time::Instant,
     pub end_time: Option<std::time::Instant>,
 }
 
 impl PerformanceMeasurement {
+    #[allow(dead_code)]
     pub fn start() -> Self {
         Self {
             start_time: std::time::Instant::now(),
@@ -342,14 +368,17 @@ impl PerformanceMeasurement {
         }
     }
 
+    #[allow(dead_code)]
     pub fn stop(&mut self) {
         self.end_time = Some(std::time::Instant::now());
     }
 
+    #[allow(dead_code)]
     pub fn duration(&self) -> Option<Duration> {
         self.end_time.map(|end| end.duration_since(self.start_time))
     }
 
+    #[allow(dead_code)]
     pub fn duration_ms(&self) -> Option<f64> {
         self.duration().map(|d| d.as_secs_f64() * 1000.0)
     }
@@ -377,6 +406,7 @@ impl TestValidator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn assert_success(&mut self, output: &Output, description: &str) {
         if command_succeeded(output) {
             self._passed += 1;
@@ -391,6 +421,7 @@ impl TestValidator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn assert_failure(&mut self, output: &Output, description: &str) {
         if command_failed(output) {
             self._passed += 1;
@@ -401,6 +432,7 @@ impl TestValidator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn assert_contains(&mut self, output: &Output, pattern: &str, description: &str) {
         match output_contains_all(output, &[pattern]) {
             Ok(true) => self._passed += 1,
@@ -417,10 +449,12 @@ impl TestValidator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn summary(&self) -> String {
         format!("Tests: {} passed, {} failed", self._passed, self._failed)
     }
 
+    #[allow(dead_code)]
     pub fn has_failures(&self) -> bool {
         self._failed > 0
     }
@@ -431,6 +465,7 @@ pub mod scenarios {
     use super::*;
 
     /// Test basic CLI help and version
+    #[allow(dead_code)]
     pub fn test_basic_cli_info() -> Result<()> {
         let mut validator = TestValidator::new();
 
@@ -456,6 +491,7 @@ pub mod scenarios {
     }
 
     /// Test all output formats
+    #[allow(dead_code)]
     pub fn test_output_formats(db_path: &Path) -> Result<()> {
         let mut validator = TestValidator::new();
         let formats = ["table", "json", "csv", "yaml"];

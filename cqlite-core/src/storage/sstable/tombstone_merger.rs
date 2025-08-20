@@ -3,6 +3,8 @@
 //! This module provides comprehensive tombstone handling for CQLite, implementing
 //! the Cassandra 5.0 deletion semantics with proper multi-generation merging.
 
+#![cfg(feature = "tombstones")]
+
 use crate::{
     Result,
     types::{RowKey, TableId, TombstoneInfo, TombstoneType, Value},
