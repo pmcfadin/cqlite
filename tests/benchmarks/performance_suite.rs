@@ -9,16 +9,17 @@
 //! - Query performance
 
 use cqlite_core::platform::Platform;
-use cqlite_core::storage::memtable::MemTable;
-use cqlite_core::storage::sstable::SSTableManager;
+// use cqlite_core::storage::memtable::MemTable; // TODO: Use when implementing memtable benchmarks
+// use cqlite_core::storage::sstable::SSTableManager; // TODO: Use when implementing SSTable benchmarks
 use cqlite_core::{Config, RowKey, StorageEngine, Value, types::TableId};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use std::collections::HashMap;
+// use std::collections::HashMap; // TODO: Use when implementing map benchmarks
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+// use std::time::{Duration, Instant}; // TODO: Use when implementing timing benchmarks
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
-use tokio::sync::{Barrier, RwLock};
+use tokio::sync::Barrier;
+// use tokio::sync::RwLock; // TODO: Use when implementing concurrent benchmarks
 
 // Test data generators
 fn generate_test_data(count: usize) -> Vec<(RowKey, Value)> {

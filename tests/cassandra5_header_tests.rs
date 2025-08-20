@@ -15,6 +15,7 @@ fn fixture_path() -> PathBuf {
 
 /// Basic SSTable header information extracted from parsing
 #[derive(Debug)]
+#[allow(dead_code)] // Test struct - not all fields used in current tests
 struct SstableHeader {
     format_identifier: String,
     version: u16,
