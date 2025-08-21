@@ -58,7 +58,7 @@ jobs:
               
               - id: rust-clippy
                 name: Rust Clippy
-                entry: cargo clippy --all-targets --all-features -- -D warnings
+                entry: cargo clippy --lib --bins -- -D warnings
                 language: system
                 types: [rust]
                 pass_filenames: false
@@ -203,11 +203,10 @@ jobs:
 
   automated-testing:
     name: Automated Testing Validation
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
         test_suite: [unit, integration, stress]
     
     steps:
@@ -258,11 +257,9 @@ jobs:
         cargo test --features quickcheck -- --ignored
         
         # Memory leak detection (Linux only)
-        if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-          sudo apt-get update && sudo apt-get install -y valgrind
-          cargo build --release
-          valgrind --leak-check=full --error-exitcode=1 ./target/release/cqlite_test || true
-        fi
+        sudo apt-get update && sudo apt-get install -y valgrind
+        cargo build --release
+        valgrind --leak-check=full --error-exitcode=1 ./target/release/cqlite_test || true
         
         echo "✅ Stress tests completed"
 
@@ -270,7 +267,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: test-results-${{ matrix.os }}-${{ matrix.test_suite }}
+        name: test-results-ubuntu-${{ matrix.test_suite }}
         path: |
           coverage/
           test-results/

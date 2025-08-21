@@ -1,13 +1,15 @@
 //! Comprehensive SSTable validator for testing reader/writer functionality
 //! and Cassandra 5+ 'oa' format specification compliance
 
+#[cfg(feature = "experimental")]
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "experimental")]
-use std::fs;
-#[cfg(feature = "experimental")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "experimental")]
+use cqlite_core::storage::sstable::writer::SSTableWriter;
 use cqlite_core::{
     Config, Result,
     platform::Platform,
@@ -15,8 +17,6 @@ use cqlite_core::{
 };
 #[cfg(feature = "experimental")]
 use cqlite_core::{RowKey, Value, storage::sstable::reader::SSTableReader, types::TableId};
-#[cfg(feature = "experimental")]
-use cqlite_core::storage::sstable::writer::SSTableWriter;
 
 use tempfile::TempDir;
 
@@ -889,7 +889,9 @@ impl SSTableValidator {
     // Fallback methods when experimental feature is not enabled
     #[cfg(not(feature = "experimental"))]
     pub async fn new() -> Result<Self> {
-        Err(cqlite_core::error::Error::unsupported_format("SSTableValidator requires experimental feature"))
+        Err(cqlite_core::error::Error::unsupported_format(
+            "SSTableValidator requires experimental feature",
+        ))
     }
 
     #[cfg(not(feature = "experimental"))]
@@ -997,7 +999,7 @@ pub async fn run_validation() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    // use super::*; // TODO: Remove when tests are implemented
+    use crate::SSTableValidator;
 
     #[tokio::test]
     #[cfg(feature = "experimental")]

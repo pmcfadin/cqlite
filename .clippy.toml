@@ -1,0 +1,19 @@
+# M1 Clippy Configuration - Issue #75
+# Right-sized strictness for M1 milestone
+# Focus on critical issues while allowing development flexibility
+
+avoid-breaking-exported-api = false
+msrv = "1.85.0"
+allow-unwrap-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
+# Reasonable cognitive complexity for M1
+cognitive-complexity-threshold = 30
+
+# Allow reasonable enum variant sizes during development
+enum-variant-size-threshold = 200
+
+# Allow longer functions during initial development
+too-many-lines-threshold = 100
