@@ -94,7 +94,34 @@ jobs:
         echo "✅ Code quality linting passed"
         echo "::endgroup::"
 
-    # Required Check 3: Unit tests (core crates only)
+    # Required Check 3: License and security compliance (cargo-deny)
+    - name: 🛡️ Validate licenses and security (cargo-deny)
+      run: |
+        echo "::group::License and Security Validation"
+        
+        # Install cargo-deny if not cached
+        if ! command -v cargo-deny &> /dev/null; then
+          echo "📦 Installing cargo-deny..."
+          cargo install cargo-deny --locked
+        fi
+        
+        # Run all cargo-deny checks
+        echo "📋 Checking licenses..."
+        cargo deny check licenses || { echo "❌ License validation failed"; exit 1; }
+        
+        echo "🔒 Checking security advisories..."
+        cargo deny check advisories || { echo "❌ Security advisory check failed"; exit 1; }
+        
+        echo "🚫 Checking banned dependencies..."
+        cargo deny check bans || { echo "❌ Banned dependency check failed"; exit 1; }
+        
+        echo "📦 Checking dependency sources..."
+        cargo deny check sources || { echo "❌ Source validation failed"; exit 1; }
+        
+        echo "✅ All license and security checks passed"
+        echo "::endgroup::"
+
+    # Required Check 4: Unit tests (core crates only)
     - name: 🧪 Run unit tests (core crates)
       run: |
         echo "::group::Core Crate Unit Tests"
@@ -112,7 +139,7 @@ jobs:
         echo "✅ Core crate unit tests passed"
         echo "::endgroup::"
 
-    # Required Check 4: Build verification
+    # Required Check 5: Build verification
     - name: 🔨 Build core library
       run: |
         echo "::group::Core Library Build"
