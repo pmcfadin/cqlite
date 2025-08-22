@@ -547,7 +547,7 @@ jobs:
 
     - name: 📤 Archive coverage results
       if: steps.coverage.outputs.coverage_failed != 'true'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: m1-coverage-report
         path: |
@@ -653,26 +653,5 @@ jobs:
         echo ""
         echo "::endgroup::"
 
-    - name: 🎯 Set Required Status Check
-      uses: actions/github-script@v7
-      if: always()
-      with:
-        script: |
-          const coreStatus = '${{ needs.m1-core-validation.result }}';
-          const parityStatus = '${{ needs.sstabledump-parity-m1.result }}';
-          const overallSuccess = coreStatus === 'success' && parityStatus === 'success';
-          
-          await github.rest.checks.create({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            name: 'M1 Minimal CI Pipeline',
-            head_sha: context.sha,
-            status: 'completed',
-            conclusion: overallSuccess ? 'success' : 'failure',
-            output: {
-              title: overallSuccess ? '✅ M1 Pipeline: All Required Checks Passed' : '❌ M1 Pipeline: Required Checks Failed',
-              summary: overallSuccess 
-                ? 'M1 Core Reading Library requirements satisfied. Environment health, Ubuntu build, rustfmt, clippy, core tests, build verification, and SSTableDump parity harness all executed successfully. Ready for M1 milestone integration.'
-                : 'M1 requirements not met. Review the pipeline output for specific failures in core validation or SSTableDump parity checks. Use the provided troubleshooting commands to resolve issues locally before re-submitting.'
-            }
-          });
+    # Note: Status check creation removed - GitHub Actions automatically reports job status
+    # The workflow status (success/failure) is already reported to GitHub without explicit check creation
