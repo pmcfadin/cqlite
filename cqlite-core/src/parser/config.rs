@@ -305,7 +305,11 @@ impl ParserConfig {
             backend: ParserBackend::Nom,
             timeout: Duration::from_secs(10),
             strict_validation: false,
-            features: vec![ParserFeature::Parallel, ParserFeature::Caching, ParserFeature::Streaming],
+            features: vec![
+                ParserFeature::Parallel,
+                ParserFeature::Caching,
+                ParserFeature::Streaming,
+            ],
             performance: PerformanceSettings {
                 optimization_level: 3,
                 enable_jit: true,

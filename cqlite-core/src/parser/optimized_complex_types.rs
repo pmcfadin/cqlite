@@ -8,7 +8,7 @@
 //! - Latency: <10ms additional latency for complex type queries
 
 use super::types::{CqlTypeId, parse_cql_value};
-use super::vint::{parse_vint_length, parse_vint};
+use super::vint::{parse_vint, parse_vint_length};
 use crate::types::Value;
 use nom::{IResult, bytes::complete::take, combinator::map_res, number::complete::be_u8};
 use std::collections::HashMap;
@@ -334,7 +334,7 @@ impl OptimizedComplexTypeParser {
                 let (new_input, key_data) = take(key_length as usize)(new_input)?;
                 let key = super::types::parse_cql_value_raw(key_data, key_type)?.1;
 
-                // Parse value with length prefix (same as regular map parser)  
+                // Parse value with length prefix (same as regular map parser)
                 let (new_input, value_length) = parse_vint(new_input)?;
                 if value_length < 0 {
                     return Err(nom::Err::Error(nom::error::Error::new(

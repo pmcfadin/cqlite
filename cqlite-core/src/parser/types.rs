@@ -132,7 +132,13 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
         }
         CqlTypeId::Blob => {
             // For test compatibility, if input is exactly the expected size without length prefix, return it as-is
-            if input.len() == 16 && input == &[0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F] {
+            if input.len() == 16
+                && input
+                    == &[
+                        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+                        0x0C, 0x0D, 0x0E, 0x0F,
+                    ]
+            {
                 return Ok((&[], Value::Blob(input.to_vec())));
             }
             // Try 4-byte big-endian length prefix first (for test compatibility)
