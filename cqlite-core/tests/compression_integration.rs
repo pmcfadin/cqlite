@@ -41,13 +41,13 @@ fn generate_test_matrix() -> Vec<CompressionTestCase> {
         (128 * 1024, "128KiB"),
     ];
 
-    let test_data_size = 1024 * 1024; // 1MB test data
+    let test_data_size: usize = 1024 * 1024; // 1MB test data
 
     let mut test_cases = Vec::new();
 
     for (algorithm, algo_name) in algorithms {
         for (chunk_size, size_name) in &chunk_sizes {
-            let expected_chunks = (test_data_size + chunk_size - 1) / chunk_size;
+            let expected_chunks = test_data_size.div_ceil(*chunk_size);
 
             test_cases.push(CompressionTestCase {
                 algorithm: algorithm.clone(),
@@ -205,7 +205,7 @@ fn create_compressed_test_data(
             CompressionAlgorithm::Zstd => {
                 #[cfg(feature = "zstd")]
                 {
-                    zstd::encode_all(&chunk_data[..], 3).map_err(|e| {
+                    zstd::encode_all(chunk_data, 3).map_err(|e| {
                         Error::InvalidFormat(format!("Zstd compression failed: {}", e))
                     })?
                 }
