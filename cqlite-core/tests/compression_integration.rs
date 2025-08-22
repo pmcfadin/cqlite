@@ -28,21 +28,26 @@ struct CompressionTestCase {
 
 /// Generate test matrix covering available algorithm × chunk size combinations (M1-compatible)
 fn generate_test_matrix() -> Vec<CompressionTestCase> {
-    let mut algorithms = vec![];
-
     // Only include algorithms that are actually compiled in (feature-gated)
     // This ensures M1 CI compatibility with default features
-    #[cfg(feature = "lz4")]
-    algorithms.push((CompressionAlgorithm::Lz4, "LZ4"));
+    #[allow(clippy::vec_init_then_push)]
+    let algorithms = {
+        let mut algos = Vec::new();
 
-    #[cfg(feature = "snappy")]
-    algorithms.push((CompressionAlgorithm::Snappy, "Snappy"));
+        #[cfg(feature = "lz4")]
+        algos.push((CompressionAlgorithm::Lz4, "LZ4"));
 
-    #[cfg(feature = "deflate")]
-    algorithms.push((CompressionAlgorithm::Deflate, "Deflate"));
+        #[cfg(feature = "snappy")]
+        algos.push((CompressionAlgorithm::Snappy, "Snappy"));
 
-    #[cfg(feature = "zstd")]
-    algorithms.push((CompressionAlgorithm::Zstd, "Zstd"));
+        #[cfg(feature = "deflate")]
+        algos.push((CompressionAlgorithm::Deflate, "Deflate"));
+
+        #[cfg(feature = "zstd")]
+        algos.push((CompressionAlgorithm::Zstd, "Zstd"));
+
+        algos
+    };
 
     let chunk_sizes = vec![
         (16 * 1024, "16KiB"),
