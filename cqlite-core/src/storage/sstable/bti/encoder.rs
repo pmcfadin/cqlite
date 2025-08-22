@@ -275,11 +275,8 @@ impl ByteComparableEncoder {
         self.buffer.push(type_prefixes::INTEGER);
 
         // Use two's complement transformation for proper ordering
-        let unsigned = if value >= 0 {
-            (value as u32) + 0x8000_0000
-        } else {
-            (value as u32) ^ 0xFFFF_FFFF
-        };
+        // Transform signed to unsigned preserving order: flip sign bit
+        let unsigned = (value as u32) ^ 0x8000_0000;
 
         self.buffer.extend_from_slice(&unsigned.to_be_bytes());
         Ok(())

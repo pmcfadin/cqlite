@@ -312,7 +312,9 @@ mod tests {
     fn test_parse_static_row() {
         use crate::parser::vint::encode_vint;
 
-        let mut state_machine = RowCellStateMachine::new();
+        let schema = create_test_schema();
+        let comparator = ComparatorType::Blob;
+        let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
 
         // Setup: parse header and partition key
         let mut data = Vec::new();

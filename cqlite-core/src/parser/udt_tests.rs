@@ -123,10 +123,8 @@ mod tests {
     fn serialize_value_for_test(value: &Value) -> Vec<u8> {
         match value {
             Value::Text(s) => {
-                let mut data = Vec::new();
-                data.extend_from_slice(&encode_vint(s.len() as i64));
-                data.extend_from_slice(s.as_bytes());
-                data
+                // For UDT fields, don't include length prefix as it's handled at the UDT level
+                s.as_bytes().to_vec()
             }
             Value::Integer(i) => i.to_be_bytes().to_vec(),
             Value::Boolean(b) => vec![if *b { 1 } else { 0 }],

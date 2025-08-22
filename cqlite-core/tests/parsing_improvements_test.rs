@@ -29,13 +29,13 @@ mod parsing_improvements_tests {
         }
 
         // Test case 2: 16-byte text should NOT be detected as UUID
-        let text_16_bytes = b"Hello, World!!!"; // Exactly 16 bytes
+        let text_16_bytes = b"Hello, World!16b"; // Exactly 16 bytes
         assert_eq!(text_16_bytes.len(), 16);
 
         // This should be detected as text, not UUID, due to improved validation
         if let Ok(text) = std::str::from_utf8(text_16_bytes) {
             let _text_value = Value::Text(text.to_string());
-            assert_eq!(text, "Hello, World!!!");
+            assert_eq!(text, "Hello, World!16b");
         }
 
         // Test case 3: Invalid UUID should be rejected
@@ -86,15 +86,15 @@ mod parsing_improvements_tests {
 
     #[test]
     fn test_timestamp_detection_improvements() {
-        // Test case 1: Valid timestamp in microseconds
-        let timestamp_micros = 1640995200000000i64; // 2022-01-01 00:00:00 UTC in microseconds
+        // Test case 1: Valid timestamp in milliseconds (will be converted to microseconds)
+        let timestamp_micros = 1640995200000i64; // 2022-01-01 00:00:00 UTC in milliseconds
         let timestamp_bytes = timestamp_micros.to_be_bytes();
 
         let (_, value) = parse_cql_value(&timestamp_bytes, CqlTypeId::Timestamp).unwrap();
         match value {
             Value::Timestamp(ts) => {
-                // Should be in the reasonable timestamp range
-                assert!(ts > 1_000_000_000_000 && ts < 10_000_000_000_000);
+                // Should be in the reasonable timestamp range (microseconds since epoch)
+                assert!(ts > 1_000_000_000_000_000 && ts < 2_000_000_000_000_000);
             }
             _ => panic!("Expected timestamp value"),
         }

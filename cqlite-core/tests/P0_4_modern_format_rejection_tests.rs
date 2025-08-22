@@ -236,17 +236,17 @@ fn create_mock_static_row_data_with_unknown_column() -> Vec<u8> {
     // Static row flag (bit 6 set to indicate static row present)
     data.push(0x40);
 
-    // Column count: 1 column (encoded as VInt)
-    data.push(0x01);
+    // Column count: 1 column (encoded as VInt - simple encoding for small numbers)
+    data.push(0x01); // VInt encoding of 1
 
-    // Column name length: 12 bytes for "unknown_type"
-    data.push(0x0C);
+    // Column name length: 12 bytes for "unknown_type" (encoded as VInt)
+    data.push(0x0C); // VInt encoding of 12
 
     // Column name: "unknown_type" - this would historically trigger blob fallback
     data.extend_from_slice(b"unknown_type");
 
-    // Value length: 16 bytes of arbitrary data
-    data.push(0x10);
+    // Value length: 16 bytes of arbitrary data (encoded as VInt)
+    data.push(0x10); // VInt encoding of 16
 
     // Value data: 16 bytes that cannot be parsed without schema
     // This is the kind of data that would force a blob fallback in legacy systems

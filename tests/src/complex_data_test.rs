@@ -676,7 +676,7 @@ pub async fn run_complex_data_tests() -> Result<()> {
     println!("🚀 Starting Complex Data Type Test Suite");
     println!("========================================");
 
-    let test_suite = ComplexDataTestSuite::new().await?;
+    let test_suite = crate::ComplexDataTestSuite::new().await?;
     let results = test_suite.run_tests().await?;
 
     results.print_summary();
@@ -692,26 +692,26 @@ pub async fn run_complex_data_tests() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ComplexDataTestSuite;
+    
 
     #[tokio::test]
     #[cfg(feature = "experimental")]
     async fn test_suite_creation() {
-        let suite = ComplexDataTestSuite::new().await.unwrap();
+        let suite = crate::ComplexDataTestSuite::new().await.unwrap();
         assert!(suite.test_dir_path().exists());
     }
 
     #[tokio::test]
     #[cfg(feature = "experimental")]
     async fn test_basic_data_types() {
-        let suite = ComplexDataTestSuite::new().await.unwrap();
+        let suite = crate::ComplexDataTestSuite::new().await.unwrap();
         suite.test_basic_data_types().await.unwrap();
     }
 
     #[tokio::test]
     #[cfg(feature = "experimental")]
     async fn test_unicode_data() {
-        let suite = ComplexDataTestSuite::new().await.unwrap();
+        let suite = crate::ComplexDataTestSuite::new().await.unwrap();
         suite.test_unicode_data().await.unwrap();
     }
 }

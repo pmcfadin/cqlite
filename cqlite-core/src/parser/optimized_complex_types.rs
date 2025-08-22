@@ -8,7 +8,7 @@
 //! - Latency: <10ms additional latency for complex type queries
 
 use super::types::{CqlTypeId, parse_cql_value};
-use super::vint::parse_vint_length;
+use super::vint::{parse_vint_length, parse_vint};
 use crate::types::Value;
 use nom::{IResult, bytes::complete::take, combinator::map_res, number::complete::be_u8};
 use std::collections::HashMap;
@@ -323,8 +323,27 @@ impl OptimizedComplexTypeParser {
             let chunk_end = (chunk_start + batch_size).min(count);
 
             for _ in chunk_start..chunk_end {
-                let (new_input, key) = parse_cql_value(remaining_input, key_type)?;
-                let (new_input, value) = parse_cql_value(new_input, value_type)?;
+                // Parse key with length prefix (same as regular map parser)
+                let (new_input, key_length) = parse_vint(remaining_input)?;
+                if key_length < 0 {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        remaining_input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+                let (new_input, key_data) = take(key_length as usize)(new_input)?;
+                let key = super::types::parse_cql_value_raw(key_data, key_type)?.1;
+
+                // Parse value with length prefix (same as regular map parser)  
+                let (new_input, value_length) = parse_vint(new_input)?;
+                if value_length < 0 {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        new_input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+                let (new_input, value_data) = take(value_length as usize)(new_input)?;
+                let value = super::types::parse_cql_value_raw(value_data, value_type)?.1;
 
                 map.push((key, value));
                 remaining_input = new_input;
@@ -556,13 +575,15 @@ mod tests {
         // Add key-value pairs
         // "key1" -> 42
         data.extend_from_slice(&encode_vint(4)); // key length
-        data.extend_from_slice(b"key1");
-        data.extend_from_slice(&42i32.to_be_bytes());
+        data.extend_from_slice(b"key1"); // key data
+        data.extend_from_slice(&encode_vint(4)); // value length (int is 4 bytes)
+        data.extend_from_slice(&42i32.to_be_bytes()); // value data
 
         // "key2" -> 84
         data.extend_from_slice(&encode_vint(4)); // key length
-        data.extend_from_slice(b"key2");
-        data.extend_from_slice(&84i32.to_be_bytes());
+        data.extend_from_slice(b"key2"); // key data
+        data.extend_from_slice(&encode_vint(4)); // value length (int is 4 bytes)
+        data.extend_from_slice(&84i32.to_be_bytes()); // value data
 
         let (_, result) = parser.parse_optimized_map(&data).unwrap();
         if let Value::Map(pairs) = result {

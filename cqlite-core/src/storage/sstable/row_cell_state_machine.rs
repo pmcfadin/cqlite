@@ -1223,6 +1223,31 @@ impl RowCellStateMachine {
             return Ok(0); // No bytes consumed, reprocess this data as clustering rows
         }
 
+        // For modern formats, check if we have schema before attempting to parse static columns
+        // This prevents blob fallback for unknown columns in modern formats
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                if self.schema.is_none() {
+                    return Err(Error::Schema(format!(
+                        "Blob fallback not allowed for static row parsing in modern format {:?}. Schema is required.",
+                        self.version
+                    )));
+                }
+            }
+            _ => {
+                // Legacy formats need schema when legacy-heuristics feature is disabled
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    if self.schema.is_none() {
+                        return Err(Error::Schema(format!(
+                            "Schema is required for parsing. Enable legacy-heuristics feature for schema-less blob fallback support."
+                        )));
+                    }
+                }
+                // With legacy-heuristics feature enabled, legacy formats can proceed without schema
+            }
+        }
+
         // Parse static column count (VInt)
         let (remaining, column_count) = parse_vint_length(&data[offset..])
             .map_err(|_| Error::corruption("Failed to parse static column count"))?;

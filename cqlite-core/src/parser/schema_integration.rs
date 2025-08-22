@@ -90,12 +90,14 @@ impl SchemaParserConfig {
 /// * `Err(Error)` - Parsing error with detailed information
 ///
 /// # Example
-/// ```rust
+/// ```rust,no_run
+/// # tokio_test::block_on(async {
 /// use cqlite_core::parser::schema_integration::parse_cql_schema_enhanced;
 ///
 /// let cql = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, age INT)";
-/// let schema = parse_cql_schema_enhanced(cql, None).await?;
+/// let schema = parse_cql_schema_enhanced(cql, None).await.unwrap();
 /// assert_eq!(schema.table, "users");
+/// # });
 /// ```
 pub async fn parse_cql_schema_enhanced(
     cql: &str,

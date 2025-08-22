@@ -983,7 +983,7 @@ pub async fn run_validation() -> Result<()> {
     println!("🚀 Starting SSTable Validation Suite");
     println!("=====================================");
 
-    let validator = SSTableValidator::new().await?;
+    let validator = crate::SSTableValidator::new().await?;
     let report = validator.run_full_validation().await?;
 
     println!("\n{}", report.detailed_report());
@@ -1001,19 +1001,19 @@ pub async fn run_validation() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::SSTableValidator;
+    
 
     #[tokio::test]
     #[cfg(feature = "experimental")]
     async fn test_validator_creation() {
-        let validator = SSTableValidator::new().await.unwrap();
+        let validator = crate::crate::SSTableValidator::new().await.unwrap();
         assert!(validator.test_dir_path().exists());
     }
 
     #[tokio::test]
     #[cfg(feature = "experimental")]
     async fn test_basic_validation() {
-        let validator = SSTableValidator::new().await.unwrap();
+        let validator = crate::SSTableValidator::new().await.unwrap();
         let result = validator.test_basic_write_read().await.unwrap();
         assert_eq!(
             result.status,
