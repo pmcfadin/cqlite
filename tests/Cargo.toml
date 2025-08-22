@@ -10,7 +10,7 @@ name = "cqlite_tests"
 path = "src/lib.rs"
 
 [dependencies]
-cqlite-core = { path = "../cqlite-core" }
+cqlite-core = { path = "../cqlite-core", features = [] }
 
 # Test dependencies
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util"] }
@@ -124,3 +124,4 @@ default = []
 benchmarks = []
 ci_zero_tolerance = []
 experimental = []
+legacy-heuristics = ["cqlite-core/legacy-heuristics"]
