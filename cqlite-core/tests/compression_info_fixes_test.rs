@@ -102,9 +102,7 @@ fn test_binary_format_alignment() {
         // Add padding to 4-byte boundary
         let current_len = 2 + len;
         let padding_needed = (4 - (current_len % 4)) % 4;
-        for _ in 0..padding_needed {
-            data.push(0x00);
-        }
+        data.extend(std::iter::repeat_n(0x00, padding_needed));
 
         // Add the rest of the data
         data.extend_from_slice(&[
