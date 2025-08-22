@@ -54,7 +54,9 @@ fn generate_test_matrix() -> Vec<CompressionTestCase> {
 
     // Ensure at least one compression algorithm is available
     if algorithms.is_empty() {
-        panic!("No compression algorithms available! Enable at least one compression feature (lz4, snappy, deflate, zstd)");
+        panic!(
+            "No compression algorithms available! Enable at least one compression feature (lz4, snappy, deflate, zstd)"
+        );
     }
 
     let mut test_cases = Vec::new();
