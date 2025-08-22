@@ -120,7 +120,7 @@ impl OptimizedComplexTypeParser {
 
     /// SIMD-optimized integer list parsing
     #[cfg(target_arch = "x86_64")]
-    fn parse_int_list_simd(&self, mut input: &[u8], count: usize) -> IResult<&[u8], Value> {
+    fn parse_int_list_simd<'a>(&self, mut input: &'a [u8], count: usize) -> IResult<&'a [u8], Value> {
         let mut elements = Vec::with_capacity(count);
         let mut remaining = count;
 
@@ -164,16 +164,18 @@ impl OptimizedComplexTypeParser {
     #[cfg(target_arch = "x86_64")]
     unsafe fn simd_bswap_epi32(&self, chunk: __m256i) -> __m256i {
         // AVX2 byte swap using shuffle
-        let shuffle_mask = _mm256_set_epi8(
-            12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11, 4,
-            5, 6, 7, 0, 1, 2, 3,
-        );
-        _mm256_shuffle_epi8(chunk, shuffle_mask)
+        unsafe {
+            let shuffle_mask = _mm256_set_epi8(
+                12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11, 4,
+                5, 6, 7, 0, 1, 2, 3,
+            );
+            _mm256_shuffle_epi8(chunk, shuffle_mask)
+        }
     }
 
     /// SIMD-optimized float list parsing
     #[cfg(target_arch = "x86_64")]
-    fn parse_float_list_simd(&self, mut input: &[u8], count: usize) -> IResult<&[u8], Value> {
+    fn parse_float_list_simd<'a>(&self, mut input: &'a [u8], count: usize) -> IResult<&'a [u8], Value> {
         let mut elements = Vec::with_capacity(count);
         let mut remaining = count;
 
@@ -216,7 +218,7 @@ impl OptimizedComplexTypeParser {
 
     /// SIMD-optimized big integer list parsing
     #[cfg(target_arch = "x86_64")]
-    fn parse_bigint_list_simd(&self, mut input: &[u8], count: usize) -> IResult<&[u8], Value> {
+    fn parse_bigint_list_simd<'a>(&self, mut input: &'a [u8], count: usize) -> IResult<&'a [u8], Value> {
         let mut elements = Vec::with_capacity(count);
         let mut remaining = count;
 
@@ -260,11 +262,13 @@ impl OptimizedComplexTypeParser {
     #[cfg(target_arch = "x86_64")]
     unsafe fn simd_bswap_epi64(&self, chunk: __m256i) -> __m256i {
         // AVX2 byte swap for 64-bit values
-        let shuffle_mask = _mm256_set_epi8(
-            8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0,
-            1, 2, 3, 4, 5, 6, 7,
-        );
-        _mm256_shuffle_epi8(chunk, shuffle_mask)
+        unsafe {
+            let shuffle_mask = _mm256_set_epi8(
+                8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0,
+                1, 2, 3, 4, 5, 6, 7,
+            );
+            _mm256_shuffle_epi8(chunk, shuffle_mask)
+        }
     }
 
     /// Sequential list parsing fallback
