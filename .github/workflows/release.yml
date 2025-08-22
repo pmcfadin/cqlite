@@ -30,24 +30,19 @@ jobs:
   build-cli:
     name: Build CLI
     needs: create-release
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
             exe_suffix: ""
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
             exe_suffix: ""
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - target: x86_64-pc-windows-msvc
             exe_suffix: ".exe"
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
             exe_suffix: ""
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             exe_suffix: ""
 
     steps:
@@ -60,23 +55,22 @@ jobs:
         override: true
         target: ${{ matrix.target }}
 
-    - name: Install cross (Linux ARM64)
-      if: matrix.target == 'aarch64-unknown-linux-gnu'
+    - name: Install cross
       run: cargo install cross
 
     - name: Build CLI
       run: |
-        if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-          cross build --package cqlite-cli --release --target ${{ matrix.target }}
-        else
+        if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
           cargo build --package cqlite-cli --release --target ${{ matrix.target }}
+        else
+          cross build --package cqlite-cli --release --target ${{ matrix.target }}
         fi
 
     - name: Create archive
       shell: bash
       run: |
         cd target/${{ matrix.target }}/release
-        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+        if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
           7z a ../../../cqlite-${{ matrix.target }}.zip cqlite${{ matrix.exe_suffix }}
         else
           tar czf ../../../cqlite-${{ matrix.target }}.tar.gz cqlite${{ matrix.exe_suffix }}
@@ -88,25 +82,22 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./cqlite-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
-        asset_name: cqlite-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
+        asset_path: ./cqlite-${{ matrix.target }}.${{ matrix.target == 'x86_64-pc-windows-msvc' && 'zip' || 'tar.gz' }}
+        asset_name: cqlite-${{ matrix.target }}.${{ matrix.target == 'x86_64-pc-windows-msvc' && 'zip' || 'tar.gz' }}
         asset_content_type: application/octet-stream
 
   build-ffi:
     name: Build FFI Libraries
     needs: create-release
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
             lib_name: libcqlite.so
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - target: x86_64-pc-windows-msvc
             lib_name: cqlite.dll
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
             lib_name: libcqlite.dylib
 
     steps:
@@ -119,8 +110,16 @@ jobs:
         override: true
         target: ${{ matrix.target }}
 
+    - name: Install cross
+      run: cargo install cross
+
     - name: Build FFI library
-      run: cargo build --package cqlite-ffi --release --target ${{ matrix.target }}
+      run: |
+        if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+          cargo build --package cqlite-ffi --release --target ${{ matrix.target }}
+        else
+          cross build --package cqlite-ffi --release --target ${{ matrix.target }}
+        fi
 
     - name: Generate C headers
       run: cargo run --package cqlite-ffi --bin cbindgen_gen
@@ -133,7 +132,7 @@ jobs:
         cp cqlite-ffi/include/*.h ffi-package/include/
         cp cqlite-ffi/README.md ffi-package/
         
-        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+        if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
           7z a cqlite-ffi-${{ matrix.target }}.zip ffi-package/*
         else
           tar czf cqlite-ffi-${{ matrix.target }}.tar.gz ffi-package
@@ -145,8 +144,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./cqlite-ffi-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
-        asset_name: cqlite-ffi-${{ matrix.target }}.${{ matrix.os == 'windows-latest' && 'zip' || 'tar.gz' }}
+        asset_path: ./cqlite-ffi-${{ matrix.target }}.${{ matrix.target == 'x86_64-pc-windows-msvc' && 'zip' || 'tar.gz' }}
+        asset_name: cqlite-ffi-${{ matrix.target }}.${{ matrix.target == 'x86_64-pc-windows-msvc' && 'zip' || 'tar.gz' }}
         asset_content_type: application/octet-stream
 
   build-wasm:
