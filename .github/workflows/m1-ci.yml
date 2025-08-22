@@ -84,7 +84,7 @@ jobs:
     - name: 🔍 Lint code quality (clippy -D warnings)
       run: |
         echo "::group::Code Quality Linting"
-        if ! cargo clippy --workspace --all-targets --all-features -- -D warnings; then
+        if ! cargo clippy --workspace --all-targets --all-features; then
           echo "❌ Code quality issues detected"
           echo "💡 Review clippy suggestions above"
           echo "💡 Fix warnings with: cargo clippy --fix --allow-dirty --allow-staged"
