@@ -26,14 +26,23 @@ struct CompressionTestCase {
     description: String,
 }
 
-/// Generate test matrix covering all algorithm × chunk size combinations
+/// Generate test matrix covering available algorithm × chunk size combinations (M1-compatible)
 fn generate_test_matrix() -> Vec<CompressionTestCase> {
-    let algorithms = vec![
-        (CompressionAlgorithm::Lz4, "LZ4"),
-        (CompressionAlgorithm::Snappy, "Snappy"),
-        (CompressionAlgorithm::Deflate, "Deflate"),
-        (CompressionAlgorithm::Zstd, "Zstd"),
-    ];
+    let mut algorithms = vec![];
+
+    // Only include algorithms that are actually compiled in (feature-gated)
+    // This ensures M1 CI compatibility with default features
+    #[cfg(feature = "lz4")]
+    algorithms.push((CompressionAlgorithm::Lz4, "LZ4"));
+
+    #[cfg(feature = "snappy")]
+    algorithms.push((CompressionAlgorithm::Snappy, "Snappy"));
+
+    #[cfg(feature = "deflate")]
+    algorithms.push((CompressionAlgorithm::Deflate, "Deflate"));
+
+    #[cfg(feature = "zstd")]
+    algorithms.push((CompressionAlgorithm::Zstd, "Zstd"));
 
     let chunk_sizes = vec![
         (16 * 1024, "16KiB"),
@@ -42,6 +51,11 @@ fn generate_test_matrix() -> Vec<CompressionTestCase> {
     ];
 
     let test_data_size: usize = 1024 * 1024; // 1MB test data
+
+    // Ensure at least one compression algorithm is available
+    if algorithms.is_empty() {
+        panic!("No compression algorithms available! Enable at least one compression feature (lz4, snappy, deflate, zstd)");
+    }
 
     let mut test_cases = Vec::new();
 
@@ -359,8 +373,9 @@ fn test_compression_matrix_positive() {
 
     println!("\n🚀 Running Compression Test Matrix - Positive Cases");
     println!(
-        "📊 Testing {} combinations (4 algorithms × 3 chunk sizes)",
-        test_matrix.len()
+        "📊 Testing {} combinations ({} available algorithms × 3 chunk sizes)",
+        test_matrix.len(),
+        test_matrix.len() / 3
     );
 
     for test_case in &test_matrix {
