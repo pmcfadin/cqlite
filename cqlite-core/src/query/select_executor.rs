@@ -109,7 +109,19 @@ impl SelectExecutor {
         // Execute the plan step by step
         let mut intermediate_results = Vec::new();
 
-        for step in &plan.execution_steps {
+        // If no execution steps are provided, add a default table scan
+        let execution_steps = if plan.execution_steps.is_empty() {
+            vec![ExecutionStep::SSTableScan {
+                table: context.table_id.clone(),
+                predicates: vec![],
+                projection: context.columns.iter().map(|c| c.name.clone()).collect(),
+                estimated_cost: 1.0,
+            }]
+        } else {
+            plan.execution_steps.clone()
+        };
+
+        for step in &execution_steps {
             match step {
                 ExecutionStep::SSTableScan {
                     table,

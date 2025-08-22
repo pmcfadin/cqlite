@@ -272,49 +272,71 @@ impl BulletproofReader {
     /// format specification. The magic number check and field interpretations
     /// should be verified against CEP-25 specification.
     pub fn parse_oa_header(&self, data: &[u8]) -> Result<OaFormatHeader> {
-        if data.len() < 8 {
+        if data.len() < 32 {
             return Err(Error::InvalidFormat(
-                "Insufficient data for 'oa' header".to_string(),
+                "OA header must be exactly 32 bytes".to_string(),
             ));
         }
 
-        // Read magic number (first 4 bytes) - EXPERIMENTAL: should be 0x6F61_0000 for 'oa' format
-        // This may not match the actual Big format magic number from CEP-25
+        // Read magic number (first 4 bytes) - should be 0x6F61_0000 for 'oa' format
         let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         if magic != 0x6F61_0000 {
-            warn!(
-                "EXPERIMENTAL: Magic number mismatch: expected 0x6F61_0000, got 0x{:08x}",
+            return Err(Error::InvalidFormat(format!(
+                "Invalid magic number: expected 0x6F61_0000, got 0x{:08x}",
                 magic
-            );
-            warn!("This may indicate Big format specification differences");
+            )));
         }
 
-        // Read format version (next 4 bytes)
-        let format_version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+        // Read format version (next 2 bytes, big-endian)
+        let format_version = u16::from_be_bytes([data[4], data[5]]) as u32;
         debug!("'oa' format version: {}", format_version);
 
-        let mut offset = 8;
+        // Validate version - only version 1 is supported
+        if format_version != 1 {
+            return Err(Error::InvalidFormat(format!(
+                "Unsupported OA format version: {}. Only version 1 is supported.",
+                format_version
+            )));
+        }
 
-        // Read partition count using VInt encoding
-        let (partition_count, vint_bytes) = self.read_vint(&data[offset..])?;
-        offset += vint_bytes;
+        // Read flags (4 bytes, big-endian) 
+        let _flags = u32::from_be_bytes([data[6], data[7], data[8], data[9]]);
+        
+        // For header parsing, we only parse the fixed 32-byte header
+        // VInt data parsing should be done separately if needed
+        if data.len() > 32 {
+            let mut offset = 32; // Skip the full 32-byte header
 
-        // Read additional metadata using VInt encoding
-        let (metadata_size, vint_bytes) = self.read_vint(&data[offset..])?;
-        offset += vint_bytes;
+            // Read partition count using VInt encoding if data is available
+            let (partition_count, vint_bytes) = self.read_vint(&data[offset..])?;
+            offset += vint_bytes;
 
-        debug!(
-            "Partition count: {}, metadata size: {}",
-            partition_count, metadata_size
-        );
+            // Read additional metadata using VInt encoding if data is available
+            let (metadata_size, vint_bytes) = self.read_vint(&data[offset..])?;
+            offset += vint_bytes;
 
-        Ok(OaFormatHeader {
-            magic_number: magic,
-            format_version,
-            partition_count,
-            metadata_size,
-            header_size: offset,
-        })
+            debug!(
+                "Partition count: {}, metadata size: {}",
+                partition_count, metadata_size
+            );
+
+            Ok(OaFormatHeader {
+                magic_number: magic,
+                format_version,
+                partition_count,
+                metadata_size,
+                header_size: offset,
+            })
+        } else {
+            // Only header data available
+            Ok(OaFormatHeader {
+                magic_number: magic,
+                format_version,
+                partition_count: 0,
+                metadata_size: 0,
+                header_size: 32,
+            })
+        }
     }
 
     /// Parse data blocks following the 'oa' header

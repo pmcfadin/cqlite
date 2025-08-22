@@ -12,11 +12,11 @@ use crate::storage::sstable::compression::{Compression, CompressionStats};
 use crate::storage::sstable::index::IndexEntry;
 use crate::{Config, Result, RowKey, Value, platform::Platform, types::TableId};
 
-/// Cassandra 5+ compatible SSTable format version ('oa' format)
-const CASSANDRA_FORMAT_VERSION: &[u8] = b"oa";
+/// Magic bytes for Cassandra OA format identification (4 bytes)
+const CASSANDRA_MAGIC: [u8; 4] = [0x6F, 0x61, 0x00, 0x00];
 
-/// Magic bytes for Cassandra SSTable file identification  
-const CASSANDRA_MAGIC: [u8; 4] = [0x5A, 0x5A, 0x5A, 0x5A];
+/// Cassandra OA format version (2 bytes, big-endian)
+const CASSANDRA_VERSION: [u8; 2] = [0x00, 0x01];
 
 /// CRC32 polynomial for checksumming
 const CRC32_POLYNOMIAL: u32 = 0xEDB88320;
@@ -148,11 +148,11 @@ impl SSTableWriter {
     async fn write_header(&mut self) -> Result<()> {
         let mut header = Vec::new();
 
-        // Cassandra magic bytes (4 bytes)
+        // Magic number: 0x6F610000 (4 bytes)
         header.extend_from_slice(&CASSANDRA_MAGIC);
 
-        // Cassandra format version ('oa' = 2 bytes)
-        header.extend_from_slice(CASSANDRA_FORMAT_VERSION);
+        // Version: 0x0001 (2 bytes, big-endian)
+        header.extend_from_slice(&CASSANDRA_VERSION);
 
         // Flags (4 bytes, big-endian)
         let mut flags = 0u32;
@@ -160,21 +160,14 @@ impl SSTableWriter {
             flags |= 0x01; // Compression enabled
         }
         if self.bloom_filter.is_some() {
-            flags |= 0x02; // Bloom filter enabled
+            flags |= 0x04; // Regular columns present
         }
         header.extend_from_slice(&flags.to_be_bytes());
 
-        // Partition count (8 bytes, big-endian) - will be updated in footer
-        header.extend_from_slice(&0u64.to_be_bytes()); // Placeholder
+        // Reserved (22 bytes, must be zero per spec)
+        header.extend_from_slice(&[0u8; 22]);
 
-        // Timestamp range (16 bytes, big-endian)
-        header.extend_from_slice(&self.created_at.to_be_bytes()); // Min timestamp
-        header.extend_from_slice(&self.created_at.to_be_bytes()); // Max timestamp (placeholder)
-
-        // Reserved bytes for Cassandra compatibility (7 bytes to reach 32-byte header)
-        header.extend_from_slice(&[0u8; 7]);
-
-        // Verify header is exactly 32 bytes as per Cassandra spec
+        // Verify header is exactly 32 bytes as per Cassandra OA spec
         assert_eq!(
             header.len(),
             32,
@@ -653,7 +646,7 @@ impl SSTableWriter {
             } else {
                 0
             },
-            write_throughput_estimate: if self.entry_count > 0 {
+            write_throughput_estimate: if self.entry_count > 0 && self.offset > 1024 {
                 // Estimate based on current performance
                 self.entry_count * 1_000_000 / (self.offset / 1024) // entries per MB
             } else {
@@ -706,8 +699,17 @@ impl SSTableWriter {
             return 0.0;
         }
 
-        let useful_data = self.compressed_size;
-        let total_size = self.offset;
+        let useful_data = if self.compressed_size > 0 {
+            self.compressed_size
+        } else {
+            // Use uncompressed size if compression hasn't been applied yet
+            self.uncompressed_size
+        };
+        let total_size = self.offset + self.current_block.len() as u64;
+
+        if total_size == 0 {
+            return 0.0;
+        }
 
         useful_data as f64 / total_size as f64
     }

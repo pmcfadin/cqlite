@@ -391,7 +391,8 @@ impl TombstoneMerger {
                     let filtered_elements: Vec<Value> = elements
                         .iter()
                         .filter(|element| {
-                            !element.is_tombstone() || !element.is_expired(self.current_time)
+                            // Keep element if it's not a tombstone
+                            !element.is_tombstone()
                         })
                         .cloned()
                         .collect();
@@ -672,21 +673,21 @@ mod tests {
 
     #[test]
     fn test_garbage_collection_identification() {
-        let merger = TombstoneMerger::with_time(10000);
+        let merger = TombstoneMerger::with_time(10_000_000); // 10 seconds in microseconds
 
         let tombstones = vec![
             GenerationValue {
-                value: Value::row_tombstone(1000),
+                value: Value::row_tombstone(1_000_000), // 1 second in microseconds
                 metadata: EntryMetadata {
-                    write_time: 1000,
+                    write_time: 1_000_000,
                     generation: 1,
                     ttl: None,
                 },
             },
             GenerationValue {
-                value: Value::cell_tombstone(5000),
+                value: Value::cell_tombstone(8_000_000), // 8 seconds in microseconds
                 metadata: EntryMetadata {
-                    write_time: 5000,
+                    write_time: 8_000_000,
                     generation: 2,
                     ttl: None,
                 },
@@ -698,9 +699,9 @@ mod tests {
             .identify_garbage_collectible_tombstones(tombstones, 3)
             .unwrap();
 
-        // Only the old tombstone should be collectible
+        // Only the old tombstone should be collectible (age: 9 seconds > 3 seconds grace)
         assert_eq!(collectible.len(), 1);
-        assert_eq!(collectible[0].metadata.write_time, 1000);
+        assert_eq!(collectible[0].metadata.write_time, 1_000_000);
     }
 
     #[test]
@@ -741,7 +742,7 @@ mod tests {
 
         let non_tombstone = Value::Integer(42);
         let tombstone = Value::row_tombstone(3000);
-        let ttl_tombstone = Value::ttl_tombstone(2000, 1000);
+        let ttl_tombstone = Value::ttl_tombstone(2000, 4000); // TTL that expires at 6000 > current time 5000
 
         // Test performance of fast path
         let start = std::time::Instant::now();
