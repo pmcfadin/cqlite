@@ -7,6 +7,15 @@ use crate::{Error, Result};
 use crc32fast::Hasher;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
+/// Binary format types for CompressionInfo.db
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FormatType {
+    /// Legacy format with 2-byte algorithm length
+    Legacy,
+    /// Modern format with 4-byte algorithm length
+    Modern,
+}
+
 /// CompressionInfo.db file content parsed from binary format
 #[derive(Debug, Clone)]
 pub struct CompressionInfo {
@@ -25,17 +34,280 @@ pub struct CompressionInfo {
 }
 
 impl CompressionInfo {
+    /// Auto-detect format and parse algorithm name length
+    fn detect_format_and_parse_length(
+        cursor: &mut Cursor<&[u8]>,
+        data: &[u8],
+    ) -> Result<(usize, FormatType)> {
+        if data.len() < 4 {
+            return Err(Error::InvalidFormat(
+                "Data too short for any format".to_string(),
+            ));
+        }
+
+        // Try reading as 2-byte length first (legacy format)
+        let mut len_bytes_2 = [0u8; 2];
+        cursor.read_exact(&mut len_bytes_2).map_err(|e| {
+            Error::InvalidFormat(format!("Failed to read potential 2-byte length: {}", e))
+        })?;
+        let len_2byte = u16::from_be_bytes(len_bytes_2) as usize;
+
+        // Read the next 2 bytes to form a 4-byte length
+        let mut len_bytes_next = [0u8; 2];
+        cursor.read_exact(&mut len_bytes_next).map_err(|e| {
+            Error::InvalidFormat(format!(
+                "Failed to read additional bytes for 4-byte length: {}",
+                e
+            ))
+        })?;
+
+        let len_4byte = u32::from_be_bytes([
+            len_bytes_2[0],
+            len_bytes_2[1],
+            len_bytes_next[0],
+            len_bytes_next[1],
+        ]) as usize;
+
+        // Reset cursor to beginning
+        cursor.set_position(0);
+
+        // Decision logic for format detection
+        if len_2byte > 0 && len_2byte <= 64 && len_2byte + 4 < data.len() {
+            // Check if the data at position 2 + len_2byte looks like valid chunk length
+            if data.len() >= 2 + len_2byte + 4 {
+                let chunk_len_pos = 2 + len_2byte;
+                // Account for padding to 4-byte boundary
+                let padded_pos = ((chunk_len_pos + 3) / 4) * 4;
+                if data.len() >= padded_pos + 4 {
+                    let chunk_len_bytes = &data[padded_pos..padded_pos + 4];
+                    let chunk_len = u32::from_be_bytes([
+                        chunk_len_bytes[0],
+                        chunk_len_bytes[1],
+                        chunk_len_bytes[2],
+                        chunk_len_bytes[3],
+                    ]);
+                    // Common chunk sizes: 4KB, 8KB, 16KB, 32KB, 64KB, 256KB, 1MB
+                    if matches!(
+                        chunk_len,
+                        4096 | 8192 | 16384 | 32768 | 65536 | 131072 | 262144 | 1048576
+                    ) {
+                        // Read as 2-byte length
+                        cursor.read_exact(&mut len_bytes_2).map_err(|e| {
+                            Error::InvalidFormat(format!(
+                                "Failed to read 2-byte algorithm length: {}",
+                                e
+                            ))
+                        })?;
+                        return Ok((len_2byte, FormatType::Legacy));
+                    }
+                }
+            }
+        }
+
+        if len_4byte > 0 && len_4byte <= 1024 && len_4byte + 8 < data.len() {
+            // Try 4-byte format
+            let mut len_bytes_4 = [0u8; 4];
+            cursor.read_exact(&mut len_bytes_4).map_err(|e| {
+                Error::InvalidFormat(format!("Failed to read 4-byte algorithm length: {}", e))
+            })?;
+            return Ok((len_4byte, FormatType::Modern));
+        }
+
+        // Default to legacy format if detection fails
+        cursor.read_exact(&mut len_bytes_2).map_err(|e| {
+            Error::InvalidFormat(format!("Failed to read algorithm length (fallback): {}", e))
+        })?;
+        Ok((len_2byte, FormatType::Legacy))
+    }
+
+    /// Parse algorithm name with validation
+    fn parse_algorithm_name(
+        cursor: &mut Cursor<&[u8]>,
+        algorithm_len: usize,
+        _format_type: FormatType,
+    ) -> Result<String> {
+        let mut algorithm_bytes = vec![0u8; algorithm_len];
+        cursor
+            .read_exact(&mut algorithm_bytes)
+            .map_err(|e| Error::InvalidFormat(format!("Failed to read algorithm name: {}", e)))?;
+
+        // Remove null terminators and trim whitespace
+        while algorithm_bytes.last() == Some(&0) {
+            algorithm_bytes.pop();
+        }
+
+        let algorithm = String::from_utf8(algorithm_bytes)
+            .map_err(|e| Error::InvalidFormat(format!("Invalid algorithm name encoding: {}", e)))?;
+
+        let algorithm = algorithm.trim().to_string();
+
+        if algorithm.is_empty() {
+            return Err(Error::InvalidFormat(
+                "Algorithm name is empty after processing".to_string(),
+            ));
+        }
+
+        Ok(algorithm)
+    }
+
+    /// Parse chunk offsets based on format type
+    fn parse_chunk_offsets(
+        cursor: &mut Cursor<&[u8]>,
+        chunk_count: usize,
+        format_type: FormatType,
+    ) -> Result<Vec<u64>> {
+        let mut chunk_offsets = Vec::with_capacity(chunk_count);
+
+        match format_type {
+            FormatType::Legacy => {
+                // Simple format: just 8-byte offsets
+                for i in 0..chunk_count {
+                    let mut offset_bytes = [0u8; 8];
+                    cursor.read_exact(&mut offset_bytes).map_err(|e| {
+                        Error::InvalidFormat(format!(
+                            "Failed to read chunk offset {} at position {}: {}",
+                            i,
+                            cursor.position(),
+                            e
+                        ))
+                    })?;
+                    let offset = u64::from_be_bytes(offset_bytes);
+                    chunk_offsets.push(offset);
+                }
+            }
+            FormatType::Modern => {
+                // Modern format might include: offset + compressed_size + uncompressed_size per chunk
+                for i in 0..chunk_count {
+                    // Read chunk offset (8 bytes)
+                    let mut offset_bytes = [0u8; 8];
+                    cursor.read_exact(&mut offset_bytes).map_err(|e| {
+                        Error::InvalidFormat(format!(
+                            "Failed to read modern chunk offset {} at position {}: {}",
+                            i,
+                            cursor.position(),
+                            e
+                        ))
+                    })?;
+                    let offset = u64::from_be_bytes(offset_bytes);
+                    chunk_offsets.push(offset);
+
+                    // Skip compressed size (4 bytes) and uncompressed size (4 bytes) for now
+                    // These could be stored separately if needed in the future
+                    let remaining = cursor.get_ref().len() - cursor.position() as usize;
+                    if remaining >= 8 {
+                        cursor.seek(SeekFrom::Current(8)).map_err(|e| {
+                            Error::InvalidFormat(format!(
+                                "Failed to skip chunk sizes for chunk {}: {}",
+                                i, e
+                            ))
+                        })?;
+                    }
+                }
+            }
+        }
+
+        Ok(chunk_offsets)
+    }
+
+    /// Parse CRC values with improved validation
+    fn parse_crcs(
+        cursor: &mut Cursor<&[u8]>,
+        data: &[u8],
+        chunk_count: usize,
+        calculated_crc: u32,
+    ) -> Result<(Vec<u32>, Option<u32>)> {
+        let mut chunk_crcs = Vec::with_capacity(chunk_count);
+        let remaining_before_crcs = data.len() - cursor.position() as usize;
+
+        // Check if we have enough space for chunk CRCs plus optional metadata CRC
+        let expected_crc_bytes = chunk_count * 4;
+        if remaining_before_crcs >= expected_crc_bytes + 4 {
+            // We have per-chunk CRCs
+            for i in 0..chunk_count {
+                if data.len() - (cursor.position() as usize) < 4 {
+                    break; // Not enough data left
+                }
+                let mut crc_bytes = [0u8; 4];
+                cursor.read_exact(&mut crc_bytes).map_err(|e| {
+                    Error::InvalidFormat(format!(
+                        "Failed to read chunk CRC {} at position {}: {}",
+                        i,
+                        cursor.position(),
+                        e
+                    ))
+                })?;
+                let chunk_crc = u32::from_be_bytes(crc_bytes);
+                chunk_crcs.push(chunk_crc);
+            }
+        }
+
+        // Check if there's a CRC32 at the end of the file
+        let mut crc32 = None;
+        let remaining = data.len() - cursor.position() as usize;
+        if remaining == 4 {
+            let mut crc_bytes = [0u8; 4];
+            cursor.read_exact(&mut crc_bytes).map_err(|e| {
+                Error::InvalidFormat(format!(
+                    "Failed to read metadata CRC32 at position {}: {}",
+                    cursor.position(),
+                    e
+                ))
+            })?;
+            let stored_crc = u32::from_be_bytes(crc_bytes);
+
+            // Validate CRC with detailed error reporting
+            if stored_crc != calculated_crc {
+                return Err(Error::InvalidFormat(format!(
+                    "CRC32 mismatch: stored=0x{:08x}, calculated=0x{:08x}, data_len={}, crc_position={}",
+                    stored_crc,
+                    calculated_crc,
+                    data.len(),
+                    cursor.position() - 4
+                )));
+            }
+            crc32 = Some(stored_crc);
+        } else if remaining > 4 {
+            // Multiple bytes remaining - might be additional metadata or padding
+            // For now, skip to end and see if last 4 bytes are CRC
+            if remaining >= 8 {
+                cursor.seek(SeekFrom::End(-4)).map_err(|e| {
+                    Error::InvalidFormat(format!("Failed to seek to potential CRC position: {}", e))
+                })?;
+                let mut crc_bytes = [0u8; 4];
+                if cursor.read_exact(&mut crc_bytes).is_ok() {
+                    let stored_crc = u32::from_be_bytes(crc_bytes);
+                    // Only accept if it matches calculated CRC
+                    if stored_crc == calculated_crc {
+                        crc32 = Some(stored_crc);
+                    }
+                }
+            }
+        }
+
+        Ok((chunk_crcs, crc32))
+    }
+
     /// Parse CompressionInfo.db file from binary data with CRC validation
     ///
-    /// Binary format (observed from hex analysis):
-    /// - 2 bytes: algorithm name length (big-endian)
-    /// - N bytes: algorithm name string
+    /// Binary format (supporting both 2-byte and 4-byte length formats):
+    /// Format 1 (legacy): 2 bytes length + name + padding + metadata
+    /// Format 2 (modern): 4 bytes length + name + metadata + chunk details
+    /// - Length field: algorithm name length (big-endian, 2 or 4 bytes)
+    /// - N bytes: algorithm name string (UTF-8)
     /// - 4 bytes: chunk length (default 16384 = 0x4000)
     /// - 8 bytes: total data length
     /// - 4 bytes: number of chunks
     /// - N * 8 bytes: chunk offsets (8 bytes each)
+    /// - Optional: N * 4 bytes: compressed sizes
+    /// - Optional: N * 4 bytes: uncompressed sizes
     /// - 4 bytes: CRC32 checksum (optional, at end of file)
     pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.is_empty() {
+            return Err(Error::InvalidFormat(
+                "Empty compression info data".to_string(),
+            ));
+        }
+
         let mut cursor = Cursor::new(data);
         let mut hasher = Hasher::new();
 
@@ -48,35 +320,34 @@ impl CompressionInfo {
         hasher.update(data_for_crc);
         let calculated_crc = hasher.finalize();
 
-        // Parse algorithm name length (2 bytes, big-endian)
-        let mut len_bytes = [0u8; 2];
-        cursor.read_exact(&mut len_bytes).map_err(|e| {
-            Error::InvalidFormat(format!("Failed to read algorithm name length: {}", e))
-        })?;
-        let algorithm_len = u16::from_be_bytes(len_bytes) as usize;
+        // Auto-detect format and parse algorithm name length
+        let (algorithm_len, format_type) = Self::detect_format_and_parse_length(&mut cursor, data)?;
 
-        if algorithm_len > 256 {
+        if algorithm_len == 0 {
+            return Err(Error::InvalidFormat(
+                "Algorithm name length is zero".to_string(),
+            ));
+        }
+
+        if algorithm_len > 1024 {
             return Err(Error::InvalidFormat(format!(
-                "Algorithm name too long: {}",
+                "Algorithm name too long: {} bytes (max 1024)",
                 algorithm_len
             )));
         }
 
-        // Parse algorithm name
-        let mut algorithm_bytes = vec![0u8; algorithm_len];
-        cursor
-            .read_exact(&mut algorithm_bytes)
-            .map_err(|e| Error::InvalidFormat(format!("Failed to read algorithm name: {}", e)))?;
-        let algorithm = String::from_utf8(algorithm_bytes)
-            .map_err(|e| Error::InvalidFormat(format!("Invalid algorithm name encoding: {}", e)))?;
+        // Parse algorithm name with robust validation
+        let algorithm = Self::parse_algorithm_name(&mut cursor, algorithm_len, format_type)?;
 
-        // Skip padding bytes if any (align to 4-byte boundary)
-        let current_pos = cursor.position();
-        let padding_needed = (4 - (current_pos % 4)) % 4;
-        if padding_needed > 0 {
-            cursor
-                .seek(SeekFrom::Current(padding_needed as i64))
-                .map_err(|e| Error::InvalidFormat(format!("Failed to skip padding: {}", e)))?;
+        // Handle padding based on format type
+        if format_type == FormatType::Legacy {
+            let current_pos = cursor.position();
+            let padding_needed = (4 - (current_pos % 4)) % 4;
+            if padding_needed > 0 {
+                cursor
+                    .seek(SeekFrom::Current(padding_needed as i64))
+                    .map_err(|e| Error::InvalidFormat(format!("Failed to skip padding: {}", e)))?;
+            }
         }
 
         // Parse chunk length (4 bytes, big-endian)
@@ -95,75 +366,47 @@ impl CompressionInfo {
 
         // Parse number of chunks (4 bytes, big-endian)
         let mut chunk_count_bytes = [0u8; 4];
-        cursor
-            .read_exact(&mut chunk_count_bytes)
-            .map_err(|e| Error::InvalidFormat(format!("Failed to read chunk count: {}", e)))?;
+        cursor.read_exact(&mut chunk_count_bytes).map_err(|e| {
+            Error::InvalidFormat(format!(
+                "Failed to read chunk count at offset {}: {}",
+                cursor.position(),
+                e
+            ))
+        })?;
         let chunk_count = u32::from_be_bytes(chunk_count_bytes) as usize;
 
         if chunk_count > 1_000_000 {
             return Err(Error::InvalidFormat(format!(
-                "Too many chunks: {}",
+                "Too many chunks: {} (max 1,000,000)",
                 chunk_count
             )));
         }
 
-        // Parse chunk offsets
-        let mut chunk_offsets = Vec::with_capacity(chunk_count);
-        for i in 0..chunk_count {
-            let mut offset_bytes = [0u8; 8];
-            cursor.read_exact(&mut offset_bytes).map_err(|e| {
-                Error::InvalidFormat(format!("Failed to read chunk offset {}: {}", i, e))
-            })?;
-            let offset = u64::from_be_bytes(offset_bytes);
-            chunk_offsets.push(offset);
+        if chunk_count == 0 {
+            return Err(Error::InvalidFormat(
+                "Chunk count cannot be zero".to_string(),
+            ));
         }
 
-        // Parse per-chunk CRC32 values (if present)
-        let mut chunk_crcs = Vec::with_capacity(chunk_count);
-        let remaining_before_crcs = data.len() - cursor.position() as usize;
+        // Parse chunk metadata based on format
+        let chunk_offsets = Self::parse_chunk_offsets(&mut cursor, chunk_count, format_type)?;
 
-        // Check if we have enough space for chunk CRCs plus optional metadata CRC
-        let expected_crc_bytes = chunk_count * 4;
-        if remaining_before_crcs >= expected_crc_bytes + 4 {
-            // We have per-chunk CRCs
-            for i in 0..chunk_count {
-                let mut crc_bytes = [0u8; 4];
-                cursor.read_exact(&mut crc_bytes).map_err(|e| {
-                    Error::InvalidFormat(format!("Failed to read chunk CRC {}: {}", i, e))
-                })?;
-                let chunk_crc = u32::from_be_bytes(crc_bytes);
-                chunk_crcs.push(chunk_crc);
-            }
-        }
+        // Parse optional chunk CRCs and metadata CRC with improved validation
+        let (chunk_crcs, crc32) = Self::parse_crcs(&mut cursor, data, chunk_count, calculated_crc)?;
 
-        // Check if there's a CRC32 at the end of the file
-        let mut crc32 = None;
-        let remaining = data.len() - cursor.position() as usize;
-        if remaining == 4 {
-            let mut crc_bytes = [0u8; 4];
-            cursor
-                .read_exact(&mut crc_bytes)
-                .map_err(|e| Error::InvalidFormat(format!("Failed to read CRC32: {}", e)))?;
-            let stored_crc = u32::from_be_bytes(crc_bytes);
-
-            // Validate CRC
-            if stored_crc != calculated_crc {
-                return Err(Error::InvalidFormat(format!(
-                    "CRC32 mismatch: stored={:08x}, calculated={:08x}",
-                    stored_crc, calculated_crc
-                )));
-            }
-            crc32 = Some(stored_crc);
-        }
-
-        Ok(CompressionInfo {
+        let compression_info = CompressionInfo {
             algorithm,
             chunk_length,
             data_length,
             chunk_offsets,
             crc32,
             chunk_crcs,
-        })
+        };
+
+        // Validate the parsed data
+        compression_info.validate()?;
+
+        Ok(compression_info)
     }
 
     /// Alternative parsing method for different CompressionInfo.db formats (legacy only)
@@ -337,7 +580,7 @@ impl CompressionInfo {
         hasher.finalize()
     }
 
-    /// Validate CRC32 for a specific chunk
+    /// Validate CRC32 for a specific chunk with enhanced error reporting
     pub fn validate_chunk_crc(&self, chunk_index: usize, chunk_data: &[u8]) -> Result<()> {
         // If we don't have per-chunk CRCs, skip validation (legacy format)
         if self.chunk_crcs.is_empty() {
@@ -347,8 +590,9 @@ impl CompressionInfo {
         // Check if we have a CRC for this chunk
         if chunk_index >= self.chunk_crcs.len() {
             return Err(Error::InvalidFormat(format!(
-                "No CRC available for chunk {}",
-                chunk_index
+                "No CRC available for chunk {} (have {} CRCs total)",
+                chunk_index,
+                self.chunk_crcs.len()
             )));
         }
 
@@ -360,8 +604,12 @@ impl CompressionInfo {
             let chunk_offset = self.chunk_offsets.get(chunk_index).unwrap_or(&0);
 
             return Err(Error::InvalidFormat(format!(
-                "CRC32 mismatch for chunk {} at offset 0x{:x}: stored=0x{:08x}, calculated=0x{:08x}",
-                chunk_index, chunk_offset, expected_crc, actual_crc
+                "CRC32 mismatch for chunk {} at offset 0x{:x}: expected=0x{:08x}, actual=0x{:08x}, data_len={}",
+                chunk_index,
+                chunk_offset,
+                expected_crc,
+                actual_crc,
+                chunk_data.len()
             )));
         }
 
