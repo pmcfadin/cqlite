@@ -299,9 +299,9 @@ impl BulletproofReader {
             )));
         }
 
-        // Read flags (4 bytes, big-endian) 
+        // Read flags (4 bytes, big-endian)
         let _flags = u32::from_be_bytes([data[6], data[7], data[8], data[9]]);
-        
+
         // For header parsing, we only parse the fixed 32-byte header
         // VInt data parsing should be done separately if needed
         if data.len() > 32 {
