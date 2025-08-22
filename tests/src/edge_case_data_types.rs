@@ -3,7 +3,6 @@
 //! This module tests extreme boundary conditions, malformed data handling,
 //! and edge cases that could break Cassandra compatibility.
 
-
 use cqlite_core::parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 use cqlite_core::{Value, error::Result};

@@ -1,15 +1,14 @@
-#![cfg(feature = "benchmarks")]
+// Note: feature gate handled by parent module
 
+use cqlite_core::error::Result;
 /// M3 Performance Validation Test Runner
 ///
 /// Comprehensive test runner for validating M3 complex type performance targets.
 /// This runner executes all performance benchmarks and generates validation reports.
-
 use cqlite_core::parser::{
     M3PerformanceBenchmarks, OptimizedComplexTypeParser, PerformanceRegressionFramework,
-    PerformanceTargets,
 };
-use cqlite_core::error::Result;
+use cqlite_core::validation::hardened_validator_parser::PerformanceTargets;
 use std::time::Instant;
 
 /// M3 Performance Validation Suite
@@ -114,10 +113,11 @@ impl M3PerformanceValidator {
 
     /// Create validator with custom configuration
     pub fn with_config(config: ValidationConfig) -> Self {
-        let mut benchmarks = M3PerformanceBenchmarks::new();
-        
-        if let Some(targets) = &config.custom_targets {
-            benchmarks = benchmarks.with_targets(targets.clone());
+        let benchmarks = M3PerformanceBenchmarks::new();
+
+        if let Some(_targets) = &config.custom_targets {
+            // TODO: Convert between PerformanceTargets types or use common type
+            // benchmarks = benchmarks.with_targets(targets.clone());
         }
 
         let regression_framework = if config.run_regression_tests {
@@ -137,13 +137,13 @@ impl M3PerformanceValidator {
     /// Run complete M3 performance validation
     pub fn run_validation(&mut self) -> Result<ValidationResults> {
         let start_time = Instant::now();
-        
+
         println!("🚀 Starting M3 Complex Type Performance Validation");
         println!("==================================================");
-        
+
         // Create output directory
         std::fs::create_dir_all(&self.config.output_dir).map_err(|e| {
-            cqlite_core::Error::Serialization(format!("Failed to create output directory: {}", e))
+            cqlite_core::Error::Serialization(format!("Failed to create output directory: {e}"))
         })?;
 
         // Run performance benchmarks
@@ -158,20 +158,24 @@ impl M3PerformanceValidator {
         };
 
         // Run regression tests if enabled
-        let regression_results = if let Some(ref mut regression_framework) = self.regression_framework {
-            println!("🔍 Running regression tests...");
-            let results = regression_framework.run_regression_tests()?;
-            Some(self.summarize_regression_results(results))
-        } else {
-            None
-        };
+        let regression_results =
+            if let Some(ref mut regression_framework) = self.regression_framework {
+                println!("🔍 Running regression tests...");
+                let results = regression_framework.run_regression_tests()?;
+                Some(self.summarize_regression_results(results))
+            } else {
+                None
+            };
 
         // Analyze results
         let test_results = self.analyze_benchmark_results()?;
-        let performance_summary = self.calculate_performance_summary(&test_results, simd_effectiveness);
-        
-        let passed = test_results.iter().all(|r| r.passed) && 
-                    regression_results.as_ref().map_or(true, |r| r.regressions_detected == 0);
+        let performance_summary =
+            self.calculate_performance_summary(&test_results, simd_effectiveness);
+
+        let passed = test_results.iter().all(|r| r.passed)
+            && regression_results
+                .as_ref()
+                .is_none_or(|r| r.regressions_detected == 0);
 
         let validation_results = ValidationResults {
             passed,
@@ -195,51 +199,53 @@ impl M3PerformanceValidator {
     /// Test SIMD optimization effectiveness
     fn test_simd_effectiveness(&self) -> Result<f64> {
         println!("⚡ Testing SIMD optimization effectiveness...");
-        
+
         let optimized_parser = OptimizedComplexTypeParser::new();
-        
+
         // Generate test data for SIMD operations
         let test_data = self.generate_simd_test_data();
-        
+
         // Test with SIMD (if available)
         let start = Instant::now();
         for _ in 0..100 {
             let _ = optimized_parser.parse_optimized_list(&test_data);
         }
         let _simd_time = start.elapsed();
-        
+
         // Calculate effectiveness based on SIMD operations performed
-        let simd_ops = optimized_parser.get_metrics().simd_operations
+        let simd_ops = optimized_parser
+            .get_metrics()
+            .simd_operations
             .load(std::sync::atomic::Ordering::Relaxed);
-        
+
         let effectiveness = if simd_ops > 0 {
             // Estimate speedup based on operations
             1.0 + (simd_ops as f64 / 1000.0)
         } else {
             1.0 // No SIMD operations
         };
-        
-        println!("   SIMD operations: {}", simd_ops);
-        println!("   Estimated effectiveness: {:.2}x", effectiveness);
-        
+
+        println!("   SIMD operations: {simd_ops}");
+        println!("   Estimated effectiveness: {effectiveness:.2}x");
+
         Ok(effectiveness)
     }
 
     /// Generate test data optimized for SIMD operations
     fn generate_simd_test_data(&self) -> Vec<u8> {
-        use cqlite_core::parser::vint::encode_vint;
         use cqlite_core::parser::types::CqlTypeId;
-        
+        use cqlite_core::parser::vint::encode_vint;
+
         let mut data = Vec::new();
-        
+
         // Create large integer list for SIMD processing
         data.extend_from_slice(&encode_vint(1000)); // 1000 integers
         data.push(CqlTypeId::Int as u8);
-        
-        for i in 0..1000 {
-            data.extend_from_slice(&(i as i32).to_be_bytes());
+
+        for i in 0..1000i32 {
+            data.extend_from_slice(&i.to_be_bytes());
         }
-        
+
         data
     }
 
@@ -247,7 +253,7 @@ impl M3PerformanceValidator {
     fn analyze_benchmark_results(&self) -> Result<Vec<TestResult>> {
         // In a real implementation, this would extract results from the benchmarks
         // For now, we'll simulate the analysis
-        
+
         let test_categories = [
             ("list_performance", "collections", 95.0, 1.2, 0.8),
             ("map_performance", "collections", 87.0, 1.4, 1.2),
@@ -258,10 +264,10 @@ impl M3PerformanceValidator {
         ];
 
         let mut results = Vec::new();
-        
+
         for (name, category, perf_mbs, memory_mb, latency_ms) in &test_categories {
             let meets_targets = *perf_mbs >= 80.0 && *memory_mb <= 2.0 && *latency_ms <= 2.5;
-            
+
             results.push(TestResult {
                 name: name.to_string(),
                 category: category.to_string(),
@@ -273,35 +279,31 @@ impl M3PerformanceValidator {
                 details: if meets_targets {
                     "All performance targets met".to_string()
                 } else {
-                    format!("Performance: {:.1} MB/s, Memory: {:.1} MB, Latency: {:.1} ms", 
-                            perf_mbs, memory_mb, latency_ms)
+                    format!("Performance: {perf_mbs:.1} MB/s, Memory: {memory_mb:.1} MB, Latency: {latency_ms:.1} ms")
                 },
             });
         }
-        
+
         Ok(results)
     }
 
     /// Calculate overall performance summary
     fn calculate_performance_summary(
-        &self, 
+        &self,
         test_results: &[TestResult],
-        simd_effectiveness: Option<f64>
+        simd_effectiveness: Option<f64>,
     ) -> PerformanceSummary {
         let total_tests = test_results.len();
         let passed_tests = test_results.iter().filter(|r| r.passed).count();
-        
-        let avg_performance = test_results.iter()
-            .map(|r| r.performance_mbs)
-            .sum::<f64>() / total_tests as f64;
-            
-        let avg_memory = test_results.iter()
-            .map(|r| r.memory_usage_mb)
-            .sum::<f64>() / total_tests as f64;
-            
-        let avg_latency = test_results.iter()
-            .map(|r| r.latency_ms)
-            .sum::<f64>() / total_tests as f64;
+
+        let avg_performance =
+            test_results.iter().map(|r| r.performance_mbs).sum::<f64>() / total_tests as f64;
+
+        let avg_memory =
+            test_results.iter().map(|r| r.memory_usage_mb).sum::<f64>() / total_tests as f64;
+
+        let avg_latency =
+            test_results.iter().map(|r| r.latency_ms).sum::<f64>() / total_tests as f64;
 
         // Calculate complex vs primitive ratio (simplified)
         let complex_vs_primitive_ratio = avg_performance / 120.0; // Assume 120 MB/s primitive baseline
@@ -320,20 +322,25 @@ impl M3PerformanceValidator {
     /// Summarize regression test results
     fn summarize_regression_results(
         &self,
-        regression_results: Vec<cqlite_core::parser::performance_regression_framework::RegressionTestResult>
+        regression_results: Vec<
+            cqlite_core::parser::performance_regression_framework::RegressionTestResult,
+        >,
     ) -> RegressionSummary {
         let total_comparisons = regression_results.len();
-        let regressions_detected = regression_results.iter().filter(|r| r.is_regression).count();
-        
-        let performance_changes: Vec<f64> = regression_results.iter()
+        let regressions_detected = regression_results
+            .iter()
+            .filter(|r| r.is_regression)
+            .count();
+
+        let performance_changes: Vec<f64> = regression_results
+            .iter()
             .map(|r| r.performance_change)
             .collect();
-            
-        let memory_changes: Vec<f64> = regression_results.iter()
-            .map(|r| r.memory_change)
-            .collect();
-            
-        let latency_changes: Vec<f64> = regression_results.iter()
+
+        let memory_changes: Vec<f64> = regression_results.iter().map(|r| r.memory_change).collect();
+
+        let latency_changes: Vec<f64> = regression_results
+            .iter()
             .map(|r| r.latency_change)
             .collect();
 
@@ -349,154 +356,223 @@ impl M3PerformanceValidator {
     /// Generate comprehensive validation reports
     fn generate_validation_reports(&self, results: &ValidationResults) -> Result<()> {
         println!("📝 Generating validation reports...");
-        
+
         // Generate main validation report
         let main_report = self.format_validation_report(results);
         let main_report_path = format!("{}/m3_validation_report.md", self.config.output_dir);
         std::fs::write(&main_report_path, main_report).map_err(|e| {
-            cqlite_core::Error::Serialization(format!("Failed to write main report: {}", e))
+            cqlite_core::Error::Serialization(format!("Failed to write main report: {e}"))
         })?;
-        
+
         // Generate JSON summary for automation
         let json_summary = self.format_json_summary(results)?;
         let json_path = format!("{}/m3_validation_summary.json", self.config.output_dir);
         std::fs::write(&json_path, json_summary).map_err(|e| {
-            cqlite_core::Error::Serialization(format!("Failed to write JSON summary: {}", e))
+            cqlite_core::Error::Serialization(format!("Failed to write JSON summary: {e}"))
         })?;
-        
+
         // Generate performance charts data (CSV)
         let charts_data = self.format_charts_data(results);
         let charts_path = format!("{}/m3_performance_data.csv", self.config.output_dir);
         std::fs::write(&charts_path, charts_data).map_err(|e| {
-            cqlite_core::Error::Serialization(format!("Failed to write charts data: {}", e))
+            cqlite_core::Error::Serialization(format!("Failed to write charts data: {e}"))
         })?;
-        
-        println!("   📊 Main report: {}", main_report_path);
-        println!("   📄 JSON summary: {}", json_path);
-        println!("   📈 Charts data: {}", charts_path);
-        
+
+        println!("   📊 Main report: {main_report_path}");
+        println!("   📄 JSON summary: {json_path}");
+        println!("   📈 Charts data: {charts_path}");
+
         Ok(())
     }
 
     /// Format main validation report as markdown
     fn format_validation_report(&self, results: &ValidationResults) -> String {
         let mut report = String::new();
-        
+
         report.push_str("# M3 Complex Type Performance Validation Report\n\n");
-        
+
         // Executive Summary
-        let status = if results.passed { "✅ PASSED" } else { "❌ FAILED" };
-        report.push_str(&format!("## Executive Summary\n\n"));
-        report.push_str(&format!("**Status**: {}\n", status));
-        report.push_str(&format!("**Validation Time**: {:.2} seconds\n", results.validation_time.as_secs_f64()));
-        report.push_str(&format!("**Tests Passed**: {}/{}\n", 
-            results.performance_summary.passed_tests, 
-            results.performance_summary.total_tests));
-        
+        let status = if results.passed {
+            "✅ PASSED"
+        } else {
+            "❌ FAILED"
+        };
+        report.push_str("## Executive Summary\n\n");
+        report.push_str(&format!("**Status**: {status}\n"));
+        report.push_str(&format!(
+            "**Validation Time**: {:.2} seconds\n",
+            results.validation_time.as_secs_f64()
+        ));
+        report.push_str(&format!(
+            "**Tests Passed**: {}/{}\n",
+            results.performance_summary.passed_tests, results.performance_summary.total_tests
+        ));
+
         if let Some(ref regression) = results.regression_results {
-            report.push_str(&format!("**Regressions Detected**: {}/{}\n", 
-                regression.regressions_detected, 
-                regression.total_comparisons));
+            report.push_str(&format!(
+                "**Regressions Detected**: {}/{}\n",
+                regression.regressions_detected, regression.total_comparisons
+            ));
         }
-        
+
         report.push_str("\n### Performance Summary\n\n");
-        report.push_str(&format!("- **Average Throughput**: {:.1} MB/s\n", 
-            results.performance_summary.average_performance_mbs));
-        report.push_str(&format!("- **Average Memory Usage**: {:.1} MB\n", 
-            results.performance_summary.average_memory_usage_mb));
-        report.push_str(&format!("- **Average Latency**: {:.1} ms\n", 
-            results.performance_summary.average_latency_ms));
-        report.push_str(&format!("- **Complex vs Primitive Ratio**: {:.2}x\n", 
-            results.performance_summary.complex_vs_primitive_ratio));
-        
+        report.push_str(&format!(
+            "- **Average Throughput**: {:.1} MB/s\n",
+            results.performance_summary.average_performance_mbs
+        ));
+        report.push_str(&format!(
+            "- **Average Memory Usage**: {:.1} MB\n",
+            results.performance_summary.average_memory_usage_mb
+        ));
+        report.push_str(&format!(
+            "- **Average Latency**: {:.1} ms\n",
+            results.performance_summary.average_latency_ms
+        ));
+        report.push_str(&format!(
+            "- **Complex vs Primitive Ratio**: {:.2}x\n",
+            results.performance_summary.complex_vs_primitive_ratio
+        ));
+
         if let Some(simd_effectiveness) = results.performance_summary.simd_effectiveness {
-            report.push_str(&format!("- **SIMD Effectiveness**: {:.2}x speedup\n", simd_effectiveness));
+            report.push_str(&format!("- **SIMD Effectiveness**: {simd_effectiveness:.2}x speedup\n"));
         }
-        
+
         // Detailed Test Results
         report.push_str("\n## Detailed Test Results\n\n");
-        
-        let categories = ["collections", "structured", "stress", "performance", "optimization"];
+
+        let categories = [
+            "collections",
+            "structured",
+            "stress",
+            "performance",
+            "optimization",
+        ];
         for category in &categories {
-            let category_tests: Vec<_> = results.test_results.iter()
+            let category_tests: Vec<_> = results
+                .test_results
+                .iter()
                 .filter(|r| r.category == *category)
                 .collect();
-            
+
             if !category_tests.is_empty() {
                 report.push_str(&format!("### {} Tests\n\n", category.to_uppercase()));
-                
+
                 for test in category_tests {
                     let status = if test.passed { "✅" } else { "❌" };
                     report.push_str(&format!("#### {} {} \n\n", status, test.name));
-                    report.push_str(&format!("- **Performance**: {:.1} MB/s\n", test.performance_mbs));
-                    report.push_str(&format!("- **Memory Usage**: {:.1} MB\n", test.memory_usage_mb));
+                    report.push_str(&format!(
+                        "- **Performance**: {:.1} MB/s\n",
+                        test.performance_mbs
+                    ));
+                    report.push_str(&format!(
+                        "- **Memory Usage**: {:.1} MB\n",
+                        test.memory_usage_mb
+                    ));
                     report.push_str(&format!("- **Latency**: {:.1} ms\n", test.latency_ms));
                     report.push_str(&format!("- **Details**: {}\n\n", test.details));
                 }
             }
         }
-        
+
         // Performance Targets Analysis
         report.push_str("## Performance Targets Analysis\n\n");
         report.push_str("| Target | Requirement | Actual | Status |\n");
         report.push_str("|--------|-------------|--------|\n");
-        
+
         let targets = [
-            ("Complex Type Throughput", ">100 MB/s", format!("{:.1} MB/s", results.performance_summary.average_performance_mbs)),
-            ("Memory Overhead", "<1.5x baseline", format!("{:.1}x", results.performance_summary.average_memory_usage_mb / 1.0)),
-            ("Latency Impact", "<10ms additional", format!("{:.1} ms", results.performance_summary.average_latency_ms)),
-            ("Performance Ratio", ">0.5x primitives", format!("{:.2}x", results.performance_summary.complex_vs_primitive_ratio)),
+            (
+                "Complex Type Throughput",
+                ">100 MB/s",
+                format!(
+                    "{:.1} MB/s",
+                    results.performance_summary.average_performance_mbs
+                ),
+            ),
+            (
+                "Memory Overhead",
+                "<1.5x baseline",
+                format!(
+                    "{:.1}x",
+                    results.performance_summary.average_memory_usage_mb / 1.0
+                ),
+            ),
+            (
+                "Latency Impact",
+                "<10ms additional",
+                format!("{:.1} ms", results.performance_summary.average_latency_ms),
+            ),
+            (
+                "Performance Ratio",
+                ">0.5x primitives",
+                format!(
+                    "{:.2}x",
+                    results.performance_summary.complex_vs_primitive_ratio
+                ),
+            ),
         ];
-        
+
         for (target, requirement, actual) in &targets {
             let status = "✅"; // Would calculate based on actual vs requirement
-            report.push_str(&format!("| {} | {} | {} | {} |\n", target, requirement, actual, status));
+            report.push_str(&format!("| {target} | {requirement} | {actual} | {status} |\n"));
         }
-        
+
         // Recommendations
         report.push_str("\n## Recommendations\n\n");
-        
+
         if results.passed {
             report.push_str("🎉 **All performance targets met!** The M3 complex type implementation is ready for production.\n\n");
             report.push_str("**Strengths:**\n");
             report.push_str("- Complex type parsing meets throughput requirements\n");
             report.push_str("- Memory usage is within acceptable limits\n");
             report.push_str("- Latency impact is minimal\n");
-            
-            if results.performance_summary.simd_effectiveness.unwrap_or(1.0) > 1.0 {
+
+            if results
+                .performance_summary
+                .simd_effectiveness
+                .unwrap_or(1.0)
+                > 1.0
+            {
                 report.push_str("- SIMD optimizations are effective\n");
             }
         } else {
             report.push_str("⚠️ **Performance improvements needed:**\n\n");
-            
+
             for test in &results.test_results {
                 if !test.passed {
                     if test.performance_mbs < 80.0 {
-                        report.push_str(&format!("- Optimize {} parsing (currently {:.1} MB/s)\n", 
-                            test.name, test.performance_mbs));
+                        report.push_str(&format!(
+                            "- Optimize {} parsing (currently {:.1} MB/s)\n",
+                            test.name, test.performance_mbs
+                        ));
                     }
                     if test.memory_usage_mb > 2.0 {
-                        report.push_str(&format!("- Reduce {} memory usage (currently {:.1} MB)\n", 
-                            test.name, test.memory_usage_mb));
+                        report.push_str(&format!(
+                            "- Reduce {} memory usage (currently {:.1} MB)\n",
+                            test.name, test.memory_usage_mb
+                        ));
                     }
                     if test.latency_ms > 2.5 {
-                        report.push_str(&format!("- Improve {} latency (currently {:.1} ms)\n", 
-                            test.name, test.latency_ms));
+                        report.push_str(&format!(
+                            "- Improve {} latency (currently {:.1} ms)\n",
+                            test.name, test.latency_ms
+                        ));
                     }
                 }
             }
         }
-        
-        report.push_str(&format!("\n---\n*Generated on {}*\n", 
-            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
-        
+
+        report.push_str(&format!(
+            "\n---\n*Generated on {}*\n",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+
         report
     }
 
     /// Format JSON summary for automation
     fn format_json_summary(&self, results: &ValidationResults) -> Result<String> {
         use serde_json::json;
-        
+
         let summary = json!({
             "status": if results.passed { "PASSED" } else { "FAILED" },
             "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -532,18 +608,20 @@ impl M3PerformanceValidator {
                 })
             })
         });
-        
-        serde_json::to_string_pretty(&summary)
-            .map_err(|e| cqlite_core::Error::Serialization(format!("Failed to serialize JSON: {}", e)))
+
+        serde_json::to_string_pretty(&summary).map_err(|e| {
+            cqlite_core::Error::Serialization(format!("Failed to serialize JSON: {e}"))
+        })
     }
 
     /// Format performance data for charts (CSV)
     fn format_charts_data(&self, results: &ValidationResults) -> String {
         let mut csv = String::new();
         csv.push_str("test_name,category,performance_mbs,memory_usage_mb,latency_ms,passed\n");
-        
+
         for test in &results.test_results {
-            csv.push_str(&format!("{},{},{:.2},{:.2},{:.2},{}\n",
+            csv.push_str(&format!(
+                "{},{},{:.2},{:.2},{:.2},{}\n",
                 test.name,
                 test.category,
                 test.performance_mbs,
@@ -552,7 +630,7 @@ impl M3PerformanceValidator {
                 test.passed
             ));
         }
-        
+
         csv
     }
 
@@ -560,35 +638,57 @@ impl M3PerformanceValidator {
     fn print_validation_summary(&self, results: &ValidationResults) {
         println!("\n🏁 M3 PERFORMANCE VALIDATION SUMMARY");
         println!("====================================");
-        
+
         let status_emoji = if results.passed { "✅" } else { "❌" };
         let status_text = if results.passed { "PASSED" } else { "FAILED" };
-        
-        println!("{} Overall Status: {}", status_emoji, status_text);
-        println!("⏱️  Validation Time: {:.2} seconds", results.validation_time.as_secs_f64());
-        println!("📊 Tests Passed: {}/{} ({:.1}%)", 
+
+        println!("{status_emoji} Overall Status: {status_text}");
+        println!(
+            "⏱️  Validation Time: {:.2} seconds",
+            results.validation_time.as_secs_f64()
+        );
+        println!(
+            "📊 Tests Passed: {}/{} ({:.1}%)",
             results.performance_summary.passed_tests,
             results.performance_summary.total_tests,
-            (results.performance_summary.passed_tests as f64 / results.performance_summary.total_tests as f64) * 100.0);
-        
+            (results.performance_summary.passed_tests as f64
+                / results.performance_summary.total_tests as f64)
+                * 100.0
+        );
+
         println!("\n📈 PERFORMANCE METRICS:");
-        println!("  • Average Throughput: {:.1} MB/s", results.performance_summary.average_performance_mbs);
-        println!("  • Average Memory Usage: {:.1} MB", results.performance_summary.average_memory_usage_mb);
-        println!("  • Average Latency: {:.1} ms", results.performance_summary.average_latency_ms);
-        println!("  • Complex vs Primitive: {:.2}x", results.performance_summary.complex_vs_primitive_ratio);
-        
+        println!(
+            "  • Average Throughput: {:.1} MB/s",
+            results.performance_summary.average_performance_mbs
+        );
+        println!(
+            "  • Average Memory Usage: {:.1} MB",
+            results.performance_summary.average_memory_usage_mb
+        );
+        println!(
+            "  • Average Latency: {:.1} ms",
+            results.performance_summary.average_latency_ms
+        );
+        println!(
+            "  • Complex vs Primitive: {:.2}x",
+            results.performance_summary.complex_vs_primitive_ratio
+        );
+
         if let Some(simd_effectiveness) = results.performance_summary.simd_effectiveness {
-            println!("  • SIMD Effectiveness: {:.2}x speedup", simd_effectiveness);
+            println!("  • SIMD Effectiveness: {simd_effectiveness:.2}x speedup");
         }
-        
+
         if let Some(ref regression) = results.regression_results {
             if regression.regressions_detected > 0 {
-                println!("\n⚠️  REGRESSIONS DETECTED: {}", regression.regressions_detected);
+                println!(
+                    "\n⚠️  REGRESSIONS DETECTED: {}",
+                    regression.regressions_detected
+                );
             } else {
                 println!("\n✅ NO REGRESSIONS DETECTED");
             }
         }
-        
+
         if !results.passed {
             println!("\n❌ FAILED TESTS:");
             for test in &results.test_results {
@@ -597,11 +697,11 @@ impl M3PerformanceValidator {
                 }
             }
         }
-        
+
         if self.config.generate_reports {
             println!("\n📁 Reports generated in: {}", self.config.output_dir);
         }
-        
+
         println!("====================================\n");
     }
 }
@@ -630,10 +730,10 @@ mod tests {
             run_regression_tests: false,
             update_baselines: true,
             custom_targets: Some(PerformanceTargets {
-                max_complex_slowdown_ratio: 1.5,
-                max_memory_increase_ratio: 1.2,
-                min_complex_throughput_mbs: 150.0,
-                max_additional_latency_ms: 5.0,
+                max_ms_per_mb: 6.7,        // 1000/150 = 6.7ms/MB
+                min_throughput_mbs: 150.0,
+                max_memory_ratio: 1.2,
+                max_row_parse_latency_us: 50, // 5ms = 5000μs but using 50μs for test
             }),
             output_dir: "custom_output".to_string(),
             generate_reports: false,
@@ -657,7 +757,7 @@ mod tests {
     #[test]
     fn test_performance_summary_calculation() {
         let validator = M3PerformanceValidator::new();
-        
+
         let test_results = vec![
             TestResult {
                 name: "test1".to_string(),
@@ -682,7 +782,7 @@ mod tests {
         ];
 
         let summary = validator.calculate_performance_summary(&test_results, Some(1.5));
-        
+
         assert_eq!(summary.total_tests, 2);
         assert_eq!(summary.passed_tests, 1);
         assert_eq!(summary.average_performance_mbs, 75.0);

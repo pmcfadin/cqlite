@@ -721,8 +721,8 @@ impl ValueExt for Value {
             Value::Frozen(f) => f.estimate_size(), // Recursive
             Value::Varint(data) => data.len(),
             Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + data
-            Value::Duration { .. } => 12, // 3 * 4 bytes
-            Value::Tombstone(_) => 8,              // Tombstone marker
+            Value::Duration { .. } => 12,                          // 3 * 4 bytes
+            Value::Tombstone(_) => 8,                              // Tombstone marker
         }
     }
 }

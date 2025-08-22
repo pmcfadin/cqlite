@@ -164,6 +164,11 @@ impl<R: Read + Seek> PartitionsParser<R> {
             // Load current node
             let current_node = self.load_node(navigator.current_offset)?;
 
+            // If this is a payload-only node (leaf), return its payload
+            if current_node.is_leaf() {
+                return Ok(current_node.get_payload().cloned());
+            }
+
             // Check if we have a payload at this level (for prefix matches)
             if let Some(payload) = current_node.get_payload() {
                 if key_pos >= encoded_key.len() {
@@ -171,7 +176,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
                 }
             }
 
-            // If we've consumed all key bytes and this is a leaf, we found it
+            // If we've consumed all key bytes, return any payload we have
             if key_pos >= encoded_key.len() {
                 return Ok(current_node.get_payload().cloned());
             }

@@ -7,8 +7,8 @@ use cqlite_core::{
     error::Error,
     parser::{SSTableParser, header::*},
 };
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 /// BTI format constants (based on Cassandra 5.0 implementation)
 const BTI_MAGIC: u32 = 0x42544900; // 'BTI\0'
@@ -200,18 +200,18 @@ impl BtiValidationSuite {
 
         fn parse_compression_info(input: &[u8]) -> IResult<&[u8], CompressionInfo> {
             use nom::{bytes::complete::take, number::complete::be_u32};
-            
+
             // Parse algorithm name
             let (input, algorithm_len) = be_u32(input)?;
             let (input, algorithm_bytes) = take(algorithm_len)(input)?;
             let algorithm = String::from_utf8_lossy(algorithm_bytes).into_owned();
-            
+
             // Parse chunk size
             let (input, chunk_size) = be_u32(input)?;
-            
+
             // Parse parameters count (currently ignored)
             let (input, _params_count) = be_u32(input)?;
-            
+
             Ok((
                 input,
                 CompressionInfo {
@@ -285,7 +285,7 @@ impl BtiValidationSuite {
                 let (input, key_len) = parse_vint_length(input)?;
                 let (input, key) = take(key_len)(input)?;
                 let (input, offset) = be_u64(input)?;
-                
+
                 // Only leaf nodes have length fields
                 let (input, length) = if node_type == BtiNodeType::Leaf {
                     let (input, len) = be_u32(input)?;
@@ -412,7 +412,10 @@ impl BtiValidationSuite {
             ]],
             clustering_keys: vec![vec![BtiTestValue::UDT({
                 let mut map = std::collections::HashMap::new();
-                map.insert("street".to_string(), BtiTestValue::Text("123 Main St".to_string()));
+                map.insert(
+                    "street".to_string(),
+                    BtiTestValue::Text("123 Main St".to_string()),
+                );
                 map.insert("city".to_string(), BtiTestValue::Text("Boston".to_string()));
                 map.insert("zipcode".to_string(), BtiTestValue::Integer(02101));
                 map

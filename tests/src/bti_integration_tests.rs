@@ -52,7 +52,7 @@ mod integration_tests {
         // TODO: Implement PartitionsParser::new once available
         // let _parser = PartitionsParser::new(file)?;
         drop(file); // Silence unused variable warning
-        
+
         // Test passes if parser creation succeeds
         Ok(())
     }

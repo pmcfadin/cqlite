@@ -233,7 +233,7 @@ impl MemoryBenchmarks {
 
         for i in 0..num_operations {
             // Simple LCG for pseudo-random numbers
-            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
             let offset = (seed as usize) % (data.len().saturating_sub(chunk_size));
 
             let _chunk = &data[offset..offset + chunk_size];
@@ -523,13 +523,13 @@ impl MemoryBenchmarks {
 
         // Calculate linear regression to find growth trend
         let n = samples.len() as f64;
-        let x_sum: f64 = (0..samples.len()).map(|i| i as f64).sum();
-        let y_sum: f64 = samples.iter().sum();
-        let xy_sum: f64 = samples.iter().enumerate().map(|(i, &y)| i as f64 * y).sum();
-        let x2_sum: f64 = (0..samples.len()).map(|i| (i as f64).powi(2)).sum();
+        let sum_x: f64 = (0..samples.len()).map(|i| i as f64).sum();
+        let sum_y: f64 = samples.iter().sum();
+        let sum_xy_product: f64 = samples.iter().enumerate().map(|(i, &y)| i as f64 * y).sum();
+        let sum_x2: f64 = (0..samples.len()).map(|i| (i as f64).powi(2)).sum();
 
         // Linear regression slope (growth rate)
-        let slope = (n * xy_sum - x_sum * y_sum) / (n * x2_sum - x_sum.powi(2));
+        let slope = (n * sum_xy_product - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2));
         slope
     }
 
@@ -564,10 +564,10 @@ impl MemoryBenchmarks {
     /// Check if system has sufficient memory for large tests
     fn has_sufficient_memory(&self, required_mb: f64) -> bool {
         let available_gb = self.get_available_memory_gb();
-        let required_gb = required_mb / 1024.0;
+        let required_gigabytes = required_mb / 1024.0;
 
         // Need at least 2x the required memory for safe testing
-        available_gb >= required_gb * 2.0
+        available_gb >= required_gigabytes * 2.0
     }
 
     /// Get available system memory in GB

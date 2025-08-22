@@ -1,4 +1,4 @@
-#![cfg(feature = "benchmarks")]
+// Feature flag handled at parent module level
 
 //! Performance Validation Framework
 //!

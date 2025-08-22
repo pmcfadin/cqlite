@@ -38,7 +38,6 @@ pub mod benchmarks;
 pub mod collection_benchmarks;
 #[cfg(test)]
 pub mod collection_tests;
-#[cfg(test)]
 // pub mod collection_udt_tests; // Commented out due to missing methods
 #[cfg(test)]
 pub mod collection_validation_tests;
@@ -60,6 +59,7 @@ pub mod vint;
 pub mod m3_performance_benchmarks;
 pub mod optimized_complex_types;
 pub mod performance_regression_framework;
+pub mod zero_copy_parser;
 
 // Re-export core trait abstractions
 pub use traits::{

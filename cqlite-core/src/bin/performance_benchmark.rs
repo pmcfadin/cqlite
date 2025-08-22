@@ -34,6 +34,13 @@ pub struct BenchmarkResult {
 }
 
 #[cfg(feature = "benchmarks")]
+impl Default for PerformanceBenchmarkRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "benchmarks")]
 impl PerformanceBenchmarkRunner {
     pub fn new() -> Self {
         Self {
@@ -325,7 +332,7 @@ impl PerformanceBenchmarkRunner {
         let mut passed_tests = 0;
         let total_tests = self.results.len();
 
-        for (_, result) in &self.results {
+        for result in self.results.values() {
             let status = if result.meets_target {
                 "✅ PASS"
             } else {

@@ -465,7 +465,7 @@ impl ZeroCopyBenchmarks {
                     data.extend_from_slice(&(8192u32).to_be_bytes()); // 8KB blob size
                     // Fill with pseudo-random binary data
                     for i in 0..2048 {
-                        data.extend_from_slice(&((i * 0x12345678) as u32).to_be_bytes());
+                        data.extend_from_slice(&((i * 0x1234_5678) as u32).to_be_bytes());
                     }
                 }
             }

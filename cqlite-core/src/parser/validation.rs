@@ -290,10 +290,10 @@ impl ParserValidator {
         let start_time = std::time::Instant::now();
 
         let boundaries = [
-            (63, 1),    // Max single byte
-            (64, 2),    // Min two byte
-            (16383, 2), // Max two byte
-            (16384, 3), // Min three byte
+            (63, 1),   // Max single byte (ZigZag: 63 -> 126, fits in 7 bits)
+            (64, 2),   // Min two byte (ZigZag: 64 -> 128, needs 8 bits)
+            (8191, 2), // Max two byte (ZigZag: 8191 -> 16382, fits in 14 bits)
+            (8192, 3), // Min three byte (ZigZag: 8192 -> 16384, needs 15 bits)
         ];
 
         let mut failures = Vec::new();

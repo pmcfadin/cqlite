@@ -990,13 +990,14 @@ impl SstableDumpValidator {
 
     async fn extract_sstables(&self) -> Result<Vec<PathBuf>> {
         info!("Extracting SSTables from Docker container");
-        let sstables = self.docker.extract_sstables("validator_test", "basic_types").await?;
-        
+        let sstables = self
+            .docker
+            .extract_sstables("validator_test", "basic_types")
+            .await?;
+
         // Convert Vec<String> to Vec<PathBuf>
-        let pathbufs = sstables.into_iter()
-            .map(PathBuf::from)
-            .collect();
-            
+        let pathbufs = sstables.into_iter().map(PathBuf::from).collect();
+
         Ok(pathbufs)
     }
 
@@ -1091,7 +1092,7 @@ impl SstableDumpValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_validator_creation() {
         let result = SstableDumpValidator::new().await;

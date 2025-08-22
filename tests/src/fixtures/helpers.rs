@@ -1,6 +1,5 @@
 //! Test helper utilities
 
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;

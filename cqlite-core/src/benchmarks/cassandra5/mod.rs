@@ -633,10 +633,10 @@ mod tests {
         assert!(monitor.average_usage_mb() >= 0.0);
     }
 
-    #[test]
-    fn test_precision_timer() {
+    #[tokio::test]
+    async fn test_precision_timer() {
         let timer = utils::PrecisionTimer::start();
-        std::thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         let elapsed = timer.elapsed_ms();
         assert!(elapsed >= 9.0); // Allow some variance

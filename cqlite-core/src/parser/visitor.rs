@@ -398,7 +398,7 @@ impl IdentifierCollector {
             identifiers: Vec::new(),
         }
     }
-    
+
     pub fn into_identifiers(self) -> Vec<CqlIdentifier> {
         self.identifiers
     }
@@ -434,18 +434,18 @@ impl CqlVisitor<()> for IdentifierCollector {
                 CqlSelectItem::Wildcard => {}
             }
         }
-        
+
         // Visit table reference - collect table name as identifier
         self.visit_identifier(&select.from.name)?;
         if let Some(keyspace) = &select.from.keyspace {
             self.visit_identifier(keyspace)?;
         }
-        
+
         // Visit WHERE clause
         if let Some(where_clause) = &select.where_clause {
             self.visit_expression(where_clause)?;
         }
-        
+
         Ok(())
     }
 
@@ -455,12 +455,12 @@ impl CqlVisitor<()> for IdentifierCollector {
         if let Some(keyspace) = &insert.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
-        
+
         // Visit column names
         for column in &insert.columns {
             self.visit_identifier(column)?;
         }
-        
+
         // Visit values
         match &insert.values {
             CqlInsertValues::Values(values) => {
@@ -470,7 +470,7 @@ impl CqlVisitor<()> for IdentifierCollector {
             }
             CqlInsertValues::Json(_) => {} // JSON doesn't contain identifiers
         }
-        
+
         Ok(())
     }
 
@@ -480,16 +480,16 @@ impl CqlVisitor<()> for IdentifierCollector {
         if let Some(keyspace) = &update.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
-        
+
         // Visit assignments
         for assignment in &update.assignments {
             self.visit_identifier(&assignment.column)?;
             self.visit_expression(&assignment.value)?;
         }
-        
+
         // Visit WHERE clause
         self.visit_expression(&update.where_clause)?;
-        
+
         Ok(())
     }
 
@@ -499,10 +499,10 @@ impl CqlVisitor<()> for IdentifierCollector {
         if let Some(keyspace) = &delete.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
-        
+
         // Visit WHERE clause
         self.visit_expression(&delete.where_clause)?;
-        
+
         Ok(())
     }
 
@@ -512,13 +512,13 @@ impl CqlVisitor<()> for IdentifierCollector {
         if let Some(keyspace) = &create.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
-        
+
         // Visit column definitions
         for column in &create.columns {
             self.visit_identifier(&column.name)?;
             self.visit_data_type(&column.data_type)?;
         }
-        
+
         // Visit primary key
         for pk_col in &create.primary_key.partition_key {
             self.visit_identifier(pk_col)?;
@@ -526,7 +526,7 @@ impl CqlVisitor<()> for IdentifierCollector {
         for ck_col in &create.primary_key.clustering_key {
             self.visit_identifier(ck_col)?;
         }
-        
+
         Ok(())
     }
 
@@ -574,7 +574,7 @@ impl CqlVisitor<()> for IdentifierCollector {
         if let Some(keyspace) = &alter.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
-        
+
         match &alter.operation {
             CqlAlterTableOp::AddColumn(column_def) => {
                 self.visit_identifier(&column_def.name)?;
@@ -593,7 +593,7 @@ impl CqlVisitor<()> for IdentifierCollector {
             }
             _ => {} // Other operations don't contain identifiers we care about
         }
-        
+
         Ok(())
     }
 
@@ -657,7 +657,10 @@ impl CqlVisitor<()> for IdentifierCollector {
                 self.visit_expression(object)?;
                 self.visit_identifier(field)?;
             }
-            CqlExpression::Case { when_clauses, else_clause } => {
+            CqlExpression::Case {
+                when_clauses,
+                else_clause,
+            } => {
                 for when_clause in when_clauses {
                     self.visit_expression(&when_clause.condition)?;
                     self.visit_expression(&when_clause.result)?;
@@ -666,7 +669,10 @@ impl CqlVisitor<()> for IdentifierCollector {
                     self.visit_expression(else_expr)?;
                 }
             }
-            CqlExpression::Cast { expression, target_type } => {
+            CqlExpression::Cast {
+                expression,
+                target_type,
+            } => {
                 self.visit_expression(expression)?;
                 self.visit_data_type(target_type)?;
             }

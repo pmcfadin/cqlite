@@ -116,7 +116,7 @@ impl SSTableManager {
         if !self.platform.fs().exists(&self.base_path).await? {
             return Ok(()); // No directory, no SSTables to load
         }
-        
+
         let mut dir_entries = match self.platform.fs().read_dir(&self.base_path).await {
             Ok(entries) => entries,
             Err(_) => return Ok(()), // Can't read directory, skip loading
@@ -130,7 +130,13 @@ impl SSTableManager {
                     if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                         let sstable_id = SSTableId::from_filename(filename);
                         // Try to open the SSTable reader, but don't fail if one file is problematic
-                        match reader::SSTableReader::open(&path, &self.config, self.platform.clone()).await {
+                        match reader::SSTableReader::open(
+                            &path,
+                            &self.config,
+                            self.platform.clone(),
+                        )
+                        .await
+                        {
                             Ok(reader) => {
                                 readers.insert(sstable_id, Arc::new(reader));
                             }
@@ -185,13 +191,15 @@ impl SSTableManager {
 
         Ok(sstable_id)
     }
-    
+
     #[cfg(not(feature = "experimental"))]
     pub async fn create_from_memtable(
         &self,
         _data: Vec<(TableId, RowKey, Value)>,
     ) -> Result<SSTableId> {
-        Err(crate::error::Error::unsupported_format("SSTable writing requires experimental feature"))
+        Err(crate::error::Error::unsupported_format(
+            "SSTable writing requires experimental feature",
+        ))
     }
 
     /// Get a value by key from all SSTables with proper tombstone merging
@@ -227,14 +235,14 @@ impl SSTableManager {
     #[cfg(not(feature = "tombstones"))]
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         let readers = self.readers.read().await;
-        
+
         // Return the first value found (simple strategy)
         for (_sstable_id, reader) in readers.iter() {
             if let Some(value) = reader.get(table_id, key).await? {
                 return Ok(Some(value));
             }
         }
-        
+
         Ok(None)
     }
 
@@ -442,14 +450,16 @@ impl SSTableManager {
 
         Ok(())
     }
-    
+
     #[cfg(not(feature = "experimental"))]
     pub async fn merge_sstables(
         &self,
         _source_ids: Vec<SSTableId>,
         _target_id: SSTableId,
     ) -> Result<()> {
-        Err(crate::error::Error::unsupported_format("SSTable merging requires experimental feature"))
+        Err(crate::error::Error::unsupported_format(
+            "SSTable merging requires experimental feature",
+        ))
     }
 }
 

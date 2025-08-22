@@ -696,12 +696,19 @@ impl SelectParser {
         let mut args = Vec::new();
 
         if self.current_token != Some(Token::RightParen) {
-            loop {
-                args.push(self.parse_select_expression()?);
-                if self.current_token == Some(Token::Comma) {
-                    self.advance()?;
-                } else {
-                    break;
+            // Special handling for COUNT(*) - the * should be treated as a wildcard
+            if self.current_token == Some(Token::Multiply) {
+                self.advance()?;
+                // For COUNT(*), we represent this as a wildcard column
+                args.push(SelectExpression::Column(ColumnRef::new("*".to_string())));
+            } else {
+                loop {
+                    args.push(self.parse_select_expression()?);
+                    if self.current_token == Some(Token::Comma) {
+                        self.advance()?;
+                    } else {
+                        break;
+                    }
                 }
             }
         }

@@ -69,16 +69,14 @@ async fn main() -> Result<()> {
         } else {
             1 // Fail if not zero-diff compliant
         }
+    } else if summary.passed_tests > 0 {
+        0
     } else {
-        if summary.passed_tests > 0 {
-            0
-        } else {
-            1 // Fail only if no tests passed
-        }
+        1 // Fail only if no tests passed
     };
 
     if verbose {
-        println!("Validation completed with exit code: {}", exit_code);
+        println!("Validation completed with exit code: {exit_code}");
     }
 
     std::process::exit(exit_code);

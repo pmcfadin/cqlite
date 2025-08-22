@@ -107,35 +107,45 @@ fn zigzag_decode(value: u64) -> i64 {
 }
 
 /// Calculate the number of bytes needed to encode a value
+///
+/// Cassandra VInt encoding boundaries:
+/// - 1 byte: 0xxxxxxx -> 0 to 127 (7 bits)
+/// - 2 bytes: 10xxxxxx xxxxxxxx -> 0 to 16383 (14 bits: 6+8)
+/// - 3 bytes: 110xxxxx xxxxxxxx xxxxxxxx -> 0 to 2097151 (21 bits: 5+16)
+/// - etc.
 fn vint_size(value: u64) -> usize {
     if value == 0 {
         return 1;
     }
 
-    // Calculate how many bytes we need for the value
-    let bits_needed = 64 - value.leading_zeros() as usize;
-
-    // For each encoding length, calculate how many value bits are available
-    // Length 1: 0xxxxxxx -> 7 bits
-    // Length 2: 10xxxxxx xxxxxxxx -> 6 + 8 = 14 bits
-    // Length 3: 110xxxxx xxxxxxxx xxxxxxxx -> 5 + 16 = 21 bits
-    // etc.
-    for length in 1..=MAX_VINT_SIZE {
-        let available_bits = if length == 1 {
-            7 // Single byte: 0xxxxxxx
-        } else {
-            // Multi-byte: for length N, we have (8 - N) bits in first byte + 8 * (N - 1) bits in remaining bytes
-            // For length = 9 (8 extra bytes), first byte has 0 value bits: all bits are 11111111
-            let first_byte_bits = if length <= 8 { 8 - length } else { 0 };
-            first_byte_bits + 8 * (length - 1)
-        };
-
-        if bits_needed <= available_bits {
-            return length;
-        }
+    // Cassandra VInt boundaries based on actual capacity
+    if value <= 127 {
+        // 2^7 - 1 (7 bits)
+        1
+    } else if value <= 16383 {
+        // 2^14 - 1 (14 bits)
+        2
+    } else if value <= 2097151 {
+        // 2^21 - 1 (21 bits)
+        3
+    } else if value <= 268435455 {
+        // 2^28 - 1 (28 bits)
+        4
+    } else if value <= 34359738367 {
+        // 2^35 - 1 (35 bits)
+        5
+    } else if value <= 4398046511103 {
+        // 2^42 - 1 (42 bits)
+        6
+    } else if value <= 562949953421311 {
+        // 2^49 - 1 (49 bits)
+        7
+    } else if value <= 72057594037927935 {
+        // 2^56 - 1 (56 bits)
+        8
+    } else {
+        9 // Maximum size
     }
-
-    MAX_VINT_SIZE
 }
 
 /// Encode a signed integer as a variable-length integer using Cassandra VInt format

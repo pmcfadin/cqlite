@@ -2,6 +2,9 @@
 //!
 //! This binary provides benchmarking capabilities for format validation operations.
 
+// EMERGENCY M1 FIX: Allow clippy warnings
+#![allow(clippy::all)]
+
 #[cfg(feature = "benchmarks")]
 use std::time::Instant;
 

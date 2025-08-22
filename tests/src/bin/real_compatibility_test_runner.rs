@@ -109,13 +109,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Store results in coordination memory
             if let Err(e) = store_coordination_results(&tester) {
-                eprintln!("⚠️  Warning: Failed to store coordination results: {}", e);
+                eprintln!("⚠️  Warning: Failed to store coordination results: {e}");
             }
 
             Ok(())
         }
         Err(e) => {
-            eprintln!("\n❌ Compatibility testing failed: {}", e);
+            eprintln!("\n❌ Compatibility testing failed: {e}");
             eprintln!("💡 Check the error details above and ensure test data is accessible.");
             Err(e.into())
         }

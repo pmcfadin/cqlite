@@ -17,7 +17,6 @@ use nom::{
     number::complete::{be_f32, be_f64, be_i32, be_i64, be_u8, be_u16, be_u32},
 };
 
-
 /// CQL type identifiers as they appear in the binary format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -146,9 +145,13 @@ pub fn parse_cql_value_raw(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], V
             if let Ok((remaining_after_length, text_length)) = parse_vint(input) {
                 if text_length >= 0 && remaining_after_length.len() == text_length as usize {
                     // Input has length prefix, use only the text data
-                    let text = String::from_utf8(remaining_after_length.to_vec()).map_err(|_| {
-                        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-                    })?;
+                    let text =
+                        String::from_utf8(remaining_after_length.to_vec()).map_err(|_| {
+                            nom::Err::Error(nom::error::Error::new(
+                                input,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        })?;
                     return Ok((&[], Value::Text(text)));
                 }
             }
@@ -157,11 +160,11 @@ pub fn parse_cql_value_raw(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], V
                 nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
             })?;
             Ok((&[], Value::Text(text)))
-        },
+        }
         CqlTypeId::Blob => {
             // For blob, use all input as blob data
             Ok((&[], Value::Blob(input.to_vec())))
-        },
+        }
         CqlTypeId::Uuid | CqlTypeId::Timeuuid => parse_uuid(input),
         CqlTypeId::Timestamp => parse_timestamp(input),
         CqlTypeId::Date => parse_date(input),
@@ -173,7 +176,7 @@ pub fn parse_cql_value_raw(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], V
         // Collections and complex types should not be called with raw parsing
         CqlTypeId::List | CqlTypeId::Set | CqlTypeId::Map | CqlTypeId::Udt | CqlTypeId::Tuple => {
             parse_cql_value(input, type_id) // Fallback to normal parsing
-        },
+        }
         CqlTypeId::Tombstone => parse_tombstone(input),
         CqlTypeId::Custom => {
             // Custom types require additional metadata, return as blob for now
@@ -348,7 +351,14 @@ pub fn parse_list(input: &[u8]) -> IResult<&[u8], Value> {
         } else {
             let (new_remaining, element_data) = take(element_length as usize)(remaining)?;
             remaining = new_remaining;
-            parse_cql_value_raw(element_data, element_type)?.1
+
+            // Handle nested collections correctly
+            match element_type {
+                CqlTypeId::List => parse_list(element_data)?.1,
+                CqlTypeId::Set => parse_set(element_data)?.1,
+                CqlTypeId::Map => parse_map(element_data)?.1,
+                _ => parse_cql_value_raw(element_data, element_type)?.1,
+            }
         };
 
         elements.push(element);
@@ -465,23 +475,52 @@ pub fn parse_udt_enhanced_with_registry<'a>(
     input: &'a [u8],
     registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
-    // First, try to parse the embedded schema to get the type name
-    let original_input = input;
+    // First, always try embedded schema parsing (most common in SSTable format)
+    match parse_udt(input) {
+        Ok((remaining, udt_value)) => {
+            // If we parsed successfully and have registry info, enhance with keyspace info
+            if let Value::Udt(ref udt) = udt_value {
+                if let Some(udt_def) = try_find_udt_in_any_keyspace(registry, &udt.type_name) {
+                    let mut enhanced_udt = udt.clone();
+                    enhanced_udt.keyspace = udt_def.keyspace.clone();
+                    return Ok((remaining, Value::Udt(enhanced_udt)));
+                }
+            }
+            Ok((remaining, udt_value))
+        }
+        Err(embedded_error) => {
+            // Embedded parsing failed, try to extract type name and use registry-based parsing
+            match parse_vint_length(input) {
+                Ok((after_type_name_len, type_name_length)) => {
+                    if let Ok((after_type_name, type_name_bytes)) =
+                        take::<_, _, nom::error::Error<&[u8]>>(type_name_length)(
+                            after_type_name_len,
+                        )
+                    {
+                        if let Ok(type_name) = String::from_utf8(type_name_bytes.to_vec()) {
+                            if let Some(udt_def) =
+                                try_find_udt_in_any_keyspace(registry, &type_name)
+                            {
+                                // Skip embedded schema and parse field values with registry definition
+                                if let Ok((after_schema, _)) =
+                                    skip_embedded_udt_schema(after_type_name)
+                                {
+                                    return parse_udt_with_schema_and_registry(
+                                        after_schema,
+                                        udt_def,
+                                        registry,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
 
-    // Parse UDT type name length and name
-    let (input, type_name_length) = parse_vint_length(input)?;
-    let (input, type_name_bytes) = take(type_name_length)(input)?;
-    let type_name = String::from_utf8(type_name_bytes.to_vec()).map_err(|_| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-    })?;
-
-    // Try to use registry first
-    if let Some(udt_def) = try_find_udt_in_any_keyspace(registry, &type_name) {
-        // Use registry-based parsing for better accuracy
-        parse_udt_with_schema_and_registry(original_input, udt_def, registry)
-    } else {
-        // Fallback to embedded schema parsing
-        parse_udt(original_input)
+            // All advanced parsing failed, return original error
+            Err(embedded_error)
+        }
     }
 }
 
@@ -615,16 +654,35 @@ pub fn parse_udt_with_registry<'a>(
     keyspace: &str,
     registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
-    // Try to resolve UDT with full dependency validation
-    match registry.resolve_udt_with_dependencies(keyspace, type_name) {
-        Ok(udt_def) => parse_udt_with_schema_and_registry(input, udt_def, registry),
+    // First, always try embedded schema parsing (which is the most common format in SSTable data)
+    match parse_udt(input) {
+        Ok((remaining, udt_value)) => {
+            // Successful embedded parsing - check if the type name matches
+            if let Value::Udt(ref udt) = udt_value {
+                if udt.type_name == type_name {
+                    // If we have registry info, update the keyspace if needed
+                    if registry.contains_udt(keyspace, type_name) {
+                        let mut updated_udt = udt.clone();
+                        updated_udt.keyspace = keyspace.to_string();
+                        return Ok((remaining, Value::Udt(updated_udt)));
+                    }
+                }
+            }
+            Ok((remaining, udt_value))
+        }
         Err(_) => {
-            // Fallback: try other keyspaces (for compatibility)
-            if let Some(udt_def) = try_find_udt_in_any_keyspace(registry, type_name) {
-                parse_udt_with_schema_and_registry(input, udt_def, registry)
-            } else {
-                // Last resort: embedded schema parsing
-                parse_udt(input)
+            // Embedded parsing failed, try registry-based parsing (raw field values)
+            match registry.resolve_udt_with_dependencies(keyspace, type_name) {
+                Ok(udt_def) => parse_udt_with_schema_and_registry(input, udt_def, registry),
+                Err(_) => {
+                    // Fallback: try other keyspaces (for compatibility)
+                    if let Some(udt_def) = try_find_udt_in_any_keyspace(registry, type_name) {
+                        parse_udt_with_schema_and_registry(input, udt_def, registry)
+                    } else {
+                        // Unable to parse - return the original embedded parsing error
+                        parse_udt(input)
+                    }
+                }
             }
         }
     }
@@ -645,6 +703,26 @@ fn try_find_udt_in_any_keyspace<'a>(
     }
 
     None
+}
+
+/// Skip over embedded UDT schema to get to the field values
+fn skip_embedded_udt_schema(input: &[u8]) -> IResult<&[u8], ()> {
+    // Parse field count
+    let (mut remaining, field_count) = parse_vint_length(input)?;
+
+    // Skip over field definitions (name + type for each field)
+    for _ in 0..field_count {
+        // Skip field name
+        let (new_remaining, field_name_length) = parse_vint_length(remaining)?;
+        let (new_remaining, _) = take(field_name_length)(new_remaining)?;
+
+        // Skip field type
+        let (new_remaining, _) = take(1usize)(new_remaining)?; // Type ID is 1 byte
+
+        remaining = new_remaining;
+    }
+
+    Ok((remaining, ()))
 }
 
 /// Create empty value for a CQL type
@@ -989,8 +1067,37 @@ pub fn parse_frozen_udt_with_registry<'a>(
     udt_def: &UdtTypeDef,
     registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
-    let (remaining, udt_value) = parse_udt_with_schema_and_registry(input, udt_def, registry)?;
-    Ok((remaining, Value::Frozen(Box::new(udt_value))))
+    // First try to parse with embedded schema (most common case)
+    match parse_udt(input) {
+        Ok((remaining, Value::Udt(udt_value))) => {
+            // Verify the type matches what we expect
+            if udt_value.type_name == udt_def.name {
+                let mut updated_udt = udt_value;
+                updated_udt.keyspace = udt_def.keyspace.clone();
+                return Ok((remaining, Value::Frozen(Box::new(Value::Udt(updated_udt)))));
+            }
+        }
+        _ => {}
+    }
+
+    // Fallback: try to skip embedded schema and parse with registry definition
+    if let Ok((after_type_name_len, type_name_length)) = parse_vint_length(input) {
+        if let Ok((after_type_name, _type_name_bytes)) =
+            take::<_, _, nom::error::Error<&[u8]>>(type_name_length)(after_type_name_len)
+        {
+            if let Ok((after_schema, _)) = skip_embedded_udt_schema(after_type_name) {
+                let (remaining, udt_value) =
+                    parse_udt_with_schema_and_registry(after_schema, udt_def, registry)?;
+                return Ok((remaining, Value::Frozen(Box::new(udt_value))));
+            }
+        }
+    }
+
+    // All parsing attempts failed
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Verify,
+    )))
 }
 
 /// Parse tuple value according to Cassandra format specification
@@ -1527,7 +1634,11 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
             result.extend_from_slice(&encode_vint(unscaled.len() as i64));
             result.extend_from_slice(unscaled);
         }
-        Value::Duration { months, days, nanos } => {
+        Value::Duration {
+            months,
+            days,
+            nanos,
+        } => {
             result.push(CqlTypeId::Duration as u8);
             result.extend_from_slice(&months.to_be_bytes());
             result.extend_from_slice(&days.to_be_bytes());

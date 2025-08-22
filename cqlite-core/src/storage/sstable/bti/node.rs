@@ -37,7 +37,7 @@ impl fmt::Display for BtiError {
             BtiError::InvalidNodeStructure(msg) => write!(f, "Invalid BTI node structure: {}", msg),
             BtiError::NavigationError(msg) => write!(f, "BTI navigation error: {}", msg),
             BtiError::InvalidNodeType(node_type) => {
-                write!(f, "Invalid BTI trie node type: 0x{:02x}", node_type)
+                write!(f, "Invalid BTI trie node type: 0x{:02X}", node_type)
             }
             BtiError::MaxDepthExceeded(depth) => {
                 write!(f, "BTI trie depth exceeded maximum: {}", depth)

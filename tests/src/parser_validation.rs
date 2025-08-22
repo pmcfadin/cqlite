@@ -56,9 +56,7 @@ fn create_mock_header() -> MockSSTableHeader {
         compression: MockCompressionInfo {
             algorithm: "LZ4".to_string(),
         },
-        stats: MockSSTableStats {
-            row_count: 100,
-        },
+        stats: MockSSTableStats { row_count: 100 },
         columns: vec![
             MockColumnInfo {
                 name: "id".to_string(),
@@ -361,8 +359,8 @@ mod header_validation_tests {
         let test_header_bytes = suite.generate_test_sstable_header();
 
         // Parse the header
-        let (remaining_input, header) = parse_sstable_header(&test_header_bytes)
-            .expect("Failed to parse test header");
+        let (remaining_input, header) =
+            parse_sstable_header(&test_header_bytes).expect("Failed to parse test header");
         let parsed_bytes = test_header_bytes.len() - remaining_input.len();
 
         assert_eq!(
@@ -674,7 +672,8 @@ mod integration_tests {
             // TODO: Implement parse_sstable_header function
             // Try to parse the header
             // match parse_sstable_header(&data) {
-            let result: Result<(&[u8], MockSSTableHeader), cqlite_core::Error> = Ok((data.as_slice(), create_mock_header()));
+            let result: Result<(&[u8], MockSSTableHeader), cqlite_core::Error> =
+                Ok((data.as_slice(), create_mock_header()));
             match result {
                 Ok((remaining_input, header)) => {
                     let parsed_bytes = data.len() - remaining_input.len();
@@ -713,9 +712,12 @@ mod integration_tests {
 
                             // Parse the serialized header
                             // TODO: Implement parse_sstable_header function
-                        // match parse_sstable_header(&serialized) {
-                        let reparse_result: Result<(&[u8], MockSSTableHeader), cqlite_core::Error> = Ok((serialized.as_slice(), create_mock_header()));
-                        match reparse_result {
+                            // match parse_sstable_header(&serialized) {
+                            let reparse_result: Result<
+                                (&[u8], MockSSTableHeader),
+                                cqlite_core::Error,
+                            > = Ok((serialized.as_slice(), create_mock_header()));
+                            match reparse_result {
                                 Ok((_, reparsed_header)) => {
                                     assert_eq!(reparsed_header.keyspace, header.keyspace);
                                     assert_eq!(reparsed_header.table_name, header.table_name);
@@ -795,7 +797,10 @@ mod performance_tests {
         // Generate test data
         let test_values: Vec<i64> = (0..10000).map(|i| i * 1000 - 5000000).collect();
 
-        let encoded_vints: Vec<Vec<u8>> = test_values.iter().map(|&v| cqlite_core::parser::vint::encode_vint(v)).collect();
+        let encoded_vints: Vec<Vec<u8>> = test_values
+            .iter()
+            .map(|&v| cqlite_core::parser::vint::encode_vint(v))
+            .collect();
 
         // Benchmark parsing
         let start = Instant::now();
@@ -834,7 +839,8 @@ mod performance_tests {
         for _ in 0..iterations {
             // TODO: Implement parse_sstable_header function
             // let result = parse_sstable_header(&test_header_bytes);
-            let result: Result<_, cqlite_core::Error> = Ok((test_header_bytes.as_slice(), create_mock_header()));
+            let result: Result<_, cqlite_core::Error> =
+                Ok((test_header_bytes.as_slice(), create_mock_header()));
             assert!(result.is_ok(), "Header parsing should succeed");
         }
 

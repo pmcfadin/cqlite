@@ -80,7 +80,7 @@ pub struct SSTableWriter {
 impl SSTableWriter {
     /// Create a new SSTable writer with Cassandra 5+ compatibility
     pub async fn create(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
-        let writer = platform.fs().create_file(path).await?;
+        let writer = std::fs::File::create(path)?;
         let compression = if config.storage.compression.enabled {
             let algorithm = match config.storage.compression.algorithm {
                 crate::config::CompressionAlgorithm::None => {
@@ -117,7 +117,7 @@ impl SSTableWriter {
             .as_micros() as u64;
 
         let mut writer = Self {
-            writer,
+            writer: Box::new(writer),
             config: config.clone(),
             platform,
             offset: 0,

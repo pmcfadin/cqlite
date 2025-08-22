@@ -12,8 +12,7 @@ use cqlite_core::{
     Config, Result,
     platform::Platform,
     storage::sstable::{
-        index_reader::IndexReader,
-        statistics_reader::StatisticsReader,
+        index_reader::IndexReader, statistics_reader::StatisticsReader,
         summary_reader::SummaryReader,
     },
 };
@@ -443,16 +442,19 @@ impl Issue35ValidationHarness {
 
         // Validate row header signature - Cassandra 5+ SSTable row headers typically start with:
         // - Length fields (4-8 bytes)
-        // - Timestamp data (8 bytes)  
+        // - Timestamp data (8 bytes)
         // - Row flags (1-2 bytes)
         // We validate basic structure patterns common to valid row headers
-        
+
         // Check for reasonable row header patterns:
         // 1. First 4 bytes should represent a reasonable size (not too large)
         let potential_size = u32::from_be_bytes([
-            header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]
+            header_bytes[0],
+            header_bytes[1],
+            header_bytes[2],
+            header_bytes[3],
         ]);
-        
+
         // Size should be reasonable (not larger than the remaining data)
         if potential_size as u64 > expected_size as u64 || potential_size == 0 {
             return Ok(false);
@@ -465,7 +467,7 @@ impl Issue35ValidationHarness {
             // Validate it's not all zeros or all 0xFF (common invalid patterns)
             let all_zero = timestamp_bytes.iter().all(|&b| b == 0);
             let all_ff = timestamp_bytes.iter().all(|&b| b == 0xFF);
-            
+
             if all_zero || all_ff {
                 return Ok(false); // Likely invalid timestamp
             }

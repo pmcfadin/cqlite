@@ -4,8 +4,8 @@
 
 use clap::{Arg, Command};
 use cqlite_tests::{
-    IntegrationTestConfig, IntegrationTestRunner,
-    run_performance_validation, run_quick_compatibility_check,
+    IntegrationTestConfig, IntegrationTestRunner, run_performance_validation,
+    run_quick_compatibility_check,
 };
 use std::process;
 
@@ -85,7 +85,7 @@ async fn main() {
             println!("⚡ Running performance validation...");
             run_performance_validation().await
         }
-        "full" | _ => {
+        "full" => {
             if matches.contains_id("format-tests")
                 || matches.contains_id("type-tests")
                 || matches.contains_id("compatibility-tests")
@@ -123,6 +123,23 @@ async fn main() {
                 let runner = IntegrationTestRunner::new(config);
                 runner.run_all_tests().await
             }
+        }
+        _ => {
+            // Default to full test suite for unknown modes
+            println!("🔬 Running full compatibility validation...");
+
+            let config = IntegrationTestConfig {
+                run_compatibility_tests: true,
+                run_format_tests: true,
+                run_type_tests: true,
+                run_performance_benchmarks: true,
+                run_stress_tests: stress_enabled,
+                detailed_reporting: detailed,
+                fail_fast,
+            };
+
+            let runner = IntegrationTestRunner::new(config);
+            runner.run_all_tests().await
         }
     };
 
@@ -183,6 +200,6 @@ mod tests {
     #[test]
     fn test_runner_compilation() {
         // Basic test to ensure the runner compiles
-        assert!(true);
+        // This test passes if compilation succeeds
     }
 }

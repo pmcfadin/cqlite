@@ -14,16 +14,16 @@ use tempfile::TempDir;
 /// - Error recovery and resilience
 /// - Performance under realistic workloads
 /// - Cross-platform compatibility
-
 #[cfg(all(test, feature = "integration-tests"))]
 mod e2e_tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     const CLI_BINARY: &str = "cqlite";
     const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Helper to run CLI with timeout
-    fn run_cli_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output> {
+    fn run_cli_with_timeout(args: &[&str], _timeout: Duration) -> Result<std::process::Output> {
         // For now, let's skip the timeout mechanism and just run the command
         // The test framework will handle timeouts at a higher level
         let mut cmd = Command::new("cargo");
@@ -32,14 +32,16 @@ mod e2e_tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        println!("Running command: cargo run --bin {} -- {:?}", CLI_BINARY, args);
-        
+        println!("Running command: cargo run --bin {CLI_BINARY} -- {args:?}");
+
         let output = cmd.output()?;
-        
-        println!("Command completed. stdout: {}, stderr: {}", 
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr));
-                
+
+        println!(
+            "Command completed. stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
         Ok(output)
     }
 
@@ -590,10 +592,10 @@ default_database = "default.db"
         )?;
 
         println!("Non-interactive test output: {output:?}");
-        
+
         // Verify the command succeeded
         assert!(output.status.success(), "Command should succeed");
-        
+
         Ok(())
     }
 

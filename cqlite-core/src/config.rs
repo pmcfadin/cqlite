@@ -530,21 +530,21 @@ impl Config {
     #[cfg(test)]
     pub fn test_config() -> Self {
         let mut config = Config::default();
-        
+
         // Disable background tasks that can cause test hangs
         config.storage.compaction.auto_compaction = false;
         config.performance.background_tasks.enable_stats = false;
         config.performance.background_tasks.enable_cleanup = false;
-        
+
         // Reduce timeouts for faster test execution
         config.query.max_execution_time = std::time::Duration::from_secs(1);
         config.storage.compaction.background_interval = std::time::Duration::from_secs(10);
-        
+
         // Smaller memory usage for tests
         config.memory.max_memory = 64 * 1024 * 1024; // 64MB
         config.storage.memtable_size_threshold = 1024 * 1024; // 1MB
         config.storage.max_sstable_size = 4 * 1024 * 1024; // 4MB
-        
+
         config
     }
 

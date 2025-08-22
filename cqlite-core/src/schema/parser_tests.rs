@@ -3,7 +3,10 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        schema::{Column, KeyColumn, ClusteringColumn, TableSchema, parser::SchemaParser, registry::ParsingContext},
+        schema::{
+            ClusteringColumn, Column, KeyColumn, TableSchema, parser::SchemaParser,
+            registry::ParsingContext,
+        },
         types::{ComparatorType, Value},
     };
     use std::collections::HashMap;
@@ -546,6 +549,9 @@ mod tests {
         data.extend_from_slice(b"john@example.com");
 
         let result = parser.parse_column_value("user_profiles", &data);
+        if let Err(e) = &result {
+            eprintln!("Error parsing UDT: {:?}", e);
+        }
         assert!(result.is_ok());
 
         let value = result.unwrap();

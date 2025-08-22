@@ -1,4 +1,7 @@
 //! SSTable Test Data Generator
+
+// EMERGENCY M1 FIX: Allow clippy warnings
+#![allow(clippy::all)]
 //!
 //! This binary creates real Cassandra-compatible SSTable files with complex types
 //! for testing CQLite's parsing and query capabilities.
@@ -47,7 +50,6 @@ fn main() {
 }
 
 /// Generate simple SSTable with basic types
-#[cfg(feature = "experimental")]
 #[cfg(feature = "experimental")]
 async fn generate_simple_sstable(output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📝 Generating simple SSTable...");

@@ -10,19 +10,16 @@
 //! - Iteration/order complete and correct across ranges
 
 use crate::bti_validation::{
-    BtiDatasetValidationResult, BtiPerformanceMetrics, BtiTestDataset, BtiTestValue, BtiTestValueOld,
-    BtiValidationError, BtiValidationErrorType, ByteComparableValidationResult,
-    RowsDecodingResult, TrieTraversalResult, ValidationStatus, SstableDumpParityResult,
+    BtiDatasetValidationResult, BtiPerformanceMetrics, BtiTestDataset, BtiTestValue,
+    BtiTestValueOld, BtiValidationError, BtiValidationErrorType, ByteComparableValidationResult,
+    RowsDecodingResult, SstableDumpParityResult, TrieTraversalResult, ValidationStatus,
 };
 use crate::validation::sstabledump_parity::{SStableDumpParityConfig, SStableDumpParityValidator};
 use cqlite_core::{
     error::{Error, Result},
     storage::sstable::bti::encoder::ByteComparableEncoder,
 };
-use std::{
-    path::PathBuf,
-    time::Instant,
-};
+use std::{path::PathBuf, time::Instant};
 
 /// Comprehensive BTI validation engine
 pub struct BtiComprehensiveValidator {
@@ -141,7 +138,9 @@ impl BtiComprehensiveValidator {
                     println!("  ⚠️ Dataset validation WARNING")
                 }
                 ValidationStatus::Failed => println!("  ❌ Dataset validation FAILED"),
-                ValidationStatus::PartiallyPassed => println!("  🟡 Dataset validation PARTIALLY PASSED"),
+                ValidationStatus::PartiallyPassed => {
+                    println!("  🟡 Dataset validation PARTIALLY PASSED")
+                }
                 ValidationStatus::Skipped => println!("  ⏭️ Dataset validation SKIPPED"),
             }
 
@@ -379,10 +378,8 @@ impl BtiComprehensiveValidator {
         };
 
         // Convert validation errors to strings
-        let _error_strings: Vec<String> = validation_errors.iter()
-            .map(|e| e.to_string())
-            .collect();
-        
+        let _error_strings: Vec<String> = validation_errors.iter().map(|e| e.to_string()).collect();
+
         // Determine overall status
         let default_parity_result = SstableDumpParityResult::default();
         let status = self.determine_validation_status(
@@ -390,7 +387,9 @@ impl BtiComprehensiveValidator {
             &trie_result,
             &rows_result,
             &byte_comparable_result,
-            sstabledump_parity_result.as_ref().unwrap_or(&default_parity_result),
+            sstabledump_parity_result
+                .as_ref()
+                .unwrap_or(&default_parity_result),
         );
 
         Ok(BtiDatasetValidationResult {
@@ -401,7 +400,8 @@ impl BtiComprehensiveValidator {
             trie_traversal_result: trie_result,
             rows_decoding_result: rows_result,
             byte_comparable_result,
-            sstabledump_parity_result: sstabledump_parity_result.unwrap_or_else(|| SstableDumpParityResult::default()),
+            sstabledump_parity_result: sstabledump_parity_result
+                .unwrap_or_else(|| SstableDumpParityResult::default()),
             performance_metrics,
             validation_errors: validation_errors.iter().map(|e| e.to_string()).collect(),
         })
@@ -528,8 +528,15 @@ impl BtiComprehensiveValidator {
                 .filter(|e| matches!(e.error_type, BtiValidationErrorType::RowsDecodingError))
                 .count()
                 == 0,
-            message: format!("Processed {} rows with {}% success rate", rows_processed, 
-                if total_rows > 0 { successful_decodings as f64 / total_rows as f64 * 100.0 } else { 100.0 }),
+            message: format!(
+                "Processed {} rows with {}% success rate",
+                rows_processed,
+                if total_rows > 0 {
+                    successful_decodings as f64 / total_rows as f64 * 100.0
+                } else {
+                    100.0
+                }
+            ),
             decoding_complete: errors
                 .iter()
                 .filter(|e| matches!(e.error_type, BtiValidationErrorType::RowsDecodingError))
@@ -627,8 +634,10 @@ impl BtiComprehensiveValidator {
 
         Ok(ByteComparableValidationResult {
             success: round_trip_successes == keys_tested && ordering_preserved_count == keys_tested,
-            message: format!("Validated {} keys with {}/{} round-trip successes", 
-                keys_tested, round_trip_successes, keys_tested),
+            message: format!(
+                "Validated {} keys with {}/{} round-trip successes",
+                keys_tested, round_trip_successes, keys_tested
+            ),
             round_trip_passed: round_trip_successes == keys_tested,
             keys_tested,
             cep25_compliance,
@@ -839,10 +848,7 @@ impl BtiComprehensiveValidator {
             if !result.validation_errors.is_empty() {
                 report.push_str("\\n#### Validation Errors:\\n");
                 for error in &result.validation_errors {
-                    report.push_str(&format!(
-                        "- {}\\n",
-                        error
-                    ));
+                    report.push_str(&format!("- {}\\n", error));
                 }
             }
             report.push_str("\\n");
@@ -893,10 +899,7 @@ impl BtiComprehensiveValidator {
         let avg_trie_time = if !self.performance_data.trie_operations.is_empty() {
             let avg = self.performance_data.trie_operations.iter().sum::<u64>()
                 / self.performance_data.trie_operations.len() as u64;
-            analysis.push_str(&format!(
-                "- **Average Trie Operation**: {}ms\\n",
-                avg
-            ));
+            analysis.push_str(&format!("- **Average Trie Operation**: {}ms\\n", avg));
             Some(avg)
         } else {
             None
@@ -1027,9 +1030,7 @@ impl BtiComprehensiveValidator {
         }
 
         // Check 5: SSTableDump parity (zero-diff)
-        let parity_validation = results.iter().all(|r| {
-            r.sstabledump_parity_result.success
-        });
+        let parity_validation = results.iter().all(|r| r.sstabledump_parity_result.success);
         if parity_validation {
             println!("✅ Zero-diff vs sstabledump parity: VALIDATED");
         } else {

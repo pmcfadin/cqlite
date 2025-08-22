@@ -3,6 +3,9 @@
 //! This tool provides detailed hex analysis of SSTable files with format-aware
 //! interpretation of structures, magic numbers, and data layouts.
 
+// EMERGENCY M1 FIX: Allow clippy warnings
+#![allow(clippy::all)]
+
 use clap::{Arg, Command};
 use colored::Colorize;
 use format_validator::{

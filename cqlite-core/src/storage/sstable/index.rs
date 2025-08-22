@@ -128,11 +128,11 @@ impl Index {
             None => 0,
         };
 
-        // Find end position
+        // Find end position (exclusive)
         let end_pos = match end_key {
             Some(key) => match sorted_keys.binary_search(key) {
-                Ok(pos) => pos + 1,
-                Err(pos) => pos,
+                Ok(pos) => pos,  // End key found - exclude it from results
+                Err(pos) => pos, // End key not found - use insertion point
             },
             None => sorted_keys.len(),
         };

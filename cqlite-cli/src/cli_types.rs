@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::cli::{InfoOutputFormat, OutputFormat, ImportFormat, ExportFormat};
+use crate::cli::{ExportFormat, ImportFormat, InfoOutputFormat, OutputFormat};
 
 #[derive(Parser)]
 #[command(name = "cqlite")]

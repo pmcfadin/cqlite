@@ -1,20 +1,36 @@
 use crate::cli_types::BenchCommands;
 use anyhow::Result;
+use chrono;
 use cqlite_core::Database;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::time::{Duration, Instant};
 use std::sync::Arc;
-use chrono;
+use std::time::{Duration, Instant};
 
 pub async fn handle_bench_command(database: &Database, command: BenchCommands) -> Result<()> {
     match command {
-        BenchCommands::Read { operations, concurrency, table: _ } => run_read_benchmark(database, operations as u64, concurrency as u32).await,
-        BenchCommands::Write { operations, concurrency, table: _ } => run_write_benchmark(database, operations as u64, concurrency as u32).await,
+        BenchCommands::Read {
+            operations,
+            concurrency,
+            table: _,
+        } => run_read_benchmark(database, operations as u64, concurrency as u32).await,
+        BenchCommands::Write {
+            operations,
+            concurrency,
+            table: _,
+        } => run_write_benchmark(database, operations as u64, concurrency as u32).await,
         BenchCommands::Mixed {
             operations,
             read_ratio,
             concurrency,
-        } => run_mixed_benchmark(database, (read_ratio * 100.0) as u8, operations as u64, concurrency as u32).await,
+        } => {
+            run_mixed_benchmark(
+                database,
+                (read_ratio * 100.0) as u8,
+                operations as u64,
+                concurrency as u32,
+            )
+            .await
+        }
     }
 }
 
@@ -22,7 +38,7 @@ async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Resu
     let _database = Arc::new(database.clone());
     println!("📚 Running read benchmark");
     println!("Operations: {}, Threads: {}", ops, threads);
-    
+
     // Create benchmark table if it doesn't exist
     let setup_result = setup_benchmark_table(&database).await;
     if let Err(e) = setup_result {
@@ -30,7 +46,7 @@ async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Resu
         println!("Using simple system queries instead...");
         return run_simple_read_benchmark(database, ops, threads).await;
     }
-    
+
     // Populate table with test data if empty
     match populate_benchmark_data(database, 1000).await {
         Ok(rows) => println!("✓ Benchmark table populated with {} rows", rows),
@@ -52,15 +68,18 @@ async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Resu
         // Single-threaded benchmark
         for i in 0..ops {
             let op_start = Instant::now();
-            
+
             // Perform different types of read operations
             let query = match i % 4 {
                 0 => "SELECT * FROM benchmark_table LIMIT 10".to_string(),
-                1 => format!("SELECT * FROM benchmark_table WHERE id = {}", (i % 1000) + 1),
+                1 => format!(
+                    "SELECT * FROM benchmark_table WHERE id = {}",
+                    (i % 1000) + 1
+                ),
                 2 => "SELECT COUNT(*) FROM benchmark_table".to_string(),
                 _ => "SELECT id, name FROM benchmark_table ORDER BY id LIMIT 5".to_string(),
             };
-            
+
             match database.execute(&query).await {
                 Ok(_) => {
                     successful_ops += 1;
@@ -71,10 +90,13 @@ async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Resu
                 }
                 Err(_) => failed_ops += 1,
             }
-            
+
             pb.inc(1);
             if i % 100 == 0 {
-                pb.set_message(format!("Read operation {} (success: {}, failed: {})", i, successful_ops, failed_ops));
+                pb.set_message(format!(
+                    "Read operation {} (success: {}, failed: {})",
+                    i, successful_ops, failed_ops
+                ));
             }
         }
     } else {
@@ -98,9 +120,15 @@ async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Resu
     println!("\n📊 Read Benchmark Results:");
     println!("  Total time: {:.2}s", duration.as_secs_f64());
     println!("  Total operations: {}", total_ops);
-    println!("  Successful operations: {} ({:.1}%)", successful_ops, success_rate);
+    println!(
+        "  Successful operations: {} ({:.1}%)",
+        successful_ops, success_rate
+    );
     println!("  Failed operations: {}", failed_ops);
-    println!("  Operations/sec: {:.2}", total_ops as f64 / duration.as_secs_f64());
+    println!(
+        "  Operations/sec: {:.2}",
+        total_ops as f64 / duration.as_secs_f64()
+    );
     println!("  Average latency: {:.2}ms", avg_latency.as_millis());
     if successful_ops > 0 {
         println!("  Min latency: {:.2}ms", min_latency.as_millis());
@@ -126,12 +154,12 @@ async fn run_simple_read_benchmark(database: &Database, ops: u64, _threads: u32)
 
     for i in 0..ops {
         let query = queries[i as usize % queries.len()];
-        
+
         match database.execute(query).await {
             Ok(_) => successful_ops += 1,
             Err(_) => {}
         }
-        
+
         pb.inc(1);
     }
 
@@ -141,8 +169,11 @@ async fn run_simple_read_benchmark(database: &Database, ops: u64, _threads: u32)
     println!("\n📊 Simple Read Benchmark Results:");
     println!("  Total time: {:.2}s", duration.as_secs_f64());
     println!("  Successful operations: {}/{}", successful_ops, ops);
-    println!("  Operations/sec: {:.2}", successful_ops as f64 / duration.as_secs_f64());
-    
+    println!(
+        "  Operations/sec: {:.2}",
+        successful_ops as f64 / duration.as_secs_f64()
+    );
+
     Ok(())
 }
 
@@ -150,7 +181,7 @@ async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Res
     let _database = Arc::new(database.clone());
     println!("✏️  Running write benchmark");
     println!("Operations: {}, Threads: {}", ops, threads);
-    
+
     // Create benchmark table if it doesn't exist
     let setup_result = setup_benchmark_table(&database).await;
     if let Err(e) = setup_result {
@@ -171,7 +202,7 @@ async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Res
         // Single-threaded benchmark
         for i in 0..ops {
             let op_start = Instant::now();
-            
+
             // Perform different types of write operations
             let query = match i % 3 {
                 0 => {
@@ -197,7 +228,7 @@ async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Res
                     format!("DELETE FROM benchmark_table WHERE id > {}", 2000000 + i)
                 }
             };
-            
+
             match database.execute(&query).await {
                 Ok(_) => {
                     successful_ops += 1;
@@ -208,10 +239,13 @@ async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Res
                 }
                 Err(_) => failed_ops += 1,
             }
-            
+
             pb.inc(1);
             if i % 50 == 0 {
-                pb.set_message(format!("Write operation {} (success: {}, failed: {})", i, successful_ops, failed_ops));
+                pb.set_message(format!(
+                    "Write operation {} (success: {}, failed: {})",
+                    i, successful_ops, failed_ops
+                ));
             }
         }
     } else {
@@ -235,9 +269,15 @@ async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Res
     println!("\n✏️  Write Benchmark Results:");
     println!("  Total time: {:.2}s", duration.as_secs_f64());
     println!("  Total operations: {}", total_ops);
-    println!("  Successful operations: {} ({:.1}%)", successful_ops, success_rate);
+    println!(
+        "  Successful operations: {} ({:.1}%)",
+        successful_ops, success_rate
+    );
     println!("  Failed operations: {}", failed_ops);
-    println!("  Operations/sec: {:.2}", total_ops as f64 / duration.as_secs_f64());
+    println!(
+        "  Operations/sec: {:.2}",
+        total_ops as f64 / duration.as_secs_f64()
+    );
     println!("  Average latency: {:.2}ms", avg_latency.as_millis());
     if successful_ops > 0 {
         println!("  Min latency: {:.2}ms", min_latency.as_millis());
@@ -248,14 +288,19 @@ async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Res
     Ok(())
 }
 
-async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, threads: u32) -> Result<()> {
+async fn run_mixed_benchmark(
+    database: &Database,
+    read_pct: u8,
+    ops: u64,
+    threads: u32,
+) -> Result<()> {
     let database = Arc::new(database.clone());
     println!("🔄 Running mixed benchmark");
     println!(
         "Operations: {}, Threads: {}, Read%: {}",
         ops, threads, read_pct
     );
-    
+
     // Create and populate benchmark table
     let setup_result = setup_benchmark_table(&database).await;
     if let Err(e) = setup_result {
@@ -263,7 +308,7 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
         println!("Using simplified mixed benchmark...");
         return run_simple_mixed_benchmark(&database, read_pct, ops, threads).await;
     }
-    
+
     match populate_benchmark_data(&database, 500).await {
         Ok(rows) => println!("✓ Benchmark table populated with {} rows", rows),
         Err(e) => println!("⚠️  Warning: Could not populate data: {}", e),
@@ -282,7 +327,7 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
         // Single-threaded mixed benchmark
         for i in 0..ops {
             let op_start = Instant::now();
-            
+
             // Determine operation type based on read percentage
             let is_read = (i * 100) % 100 < read_pct as u64;
 
@@ -310,7 +355,7 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
                     ),
                 }
             };
-            
+
             match database.execute(&query).await {
                 Ok(_) => {
                     successful_ops += 1;
@@ -334,11 +379,11 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
         }
     } else {
         // Multi-threaded mixed benchmark
-        use tokio::task::JoinSet;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Mutex;
-        
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tokio::task::JoinSet;
+
         let read_counter = Arc::new(AtomicU64::new(0));
         let write_counter = Arc::new(AtomicU64::new(0));
         let successful_counter = Arc::new(AtomicU64::new(0));
@@ -346,10 +391,10 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
         let read_latency_total = Arc::new(Mutex::new(Duration::ZERO));
         let write_latency_total = Arc::new(Mutex::new(Duration::ZERO));
         let pb_shared = Arc::new(Mutex::new(pb));
-        
+
         let ops_per_thread = ops / threads as u64;
         let mut tasks = JoinSet::new();
-        
+
         for thread_id in 0..threads {
             let database = database.clone();
             let read_counter = read_counter.clone();
@@ -359,15 +404,15 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
             let read_latency_total = read_latency_total.clone();
             let write_latency_total = write_latency_total.clone();
             let pb = pb_shared.clone();
-            
+
             tasks.spawn(async move {
                 for i in 0..ops_per_thread {
                     let op_start = Instant::now();
                     let thread_offset = thread_id as u64 * 1000000;
-                    
+
                     // Determine operation type
                     let is_read = (thread_id as u64 + i) * 100 % 100 < read_pct as u64;
-                    
+
                     let query = if is_read {
                         read_counter.fetch_add(1, Ordering::Relaxed);
                         format!("SELECT * FROM benchmark_table WHERE id = {} LIMIT 5", ((thread_id as u64 + i) % 500) + 1)
@@ -382,12 +427,12 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
                             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
                         )
                     };
-                    
+
                     match database.execute(&query).await {
                         Ok(_) => {
                             successful_counter.fetch_add(1, Ordering::Relaxed);
                             let latency = op_start.elapsed();
-                            
+
                             if is_read {
                                 if let Ok(mut total) = read_latency_total.lock() {
                                     *total += latency;
@@ -402,7 +447,7 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
                             failed_counter.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    
+
                     if let Ok(pb) = pb.lock() {
                         pb.inc(1);
                         if i % 50 == 0 {
@@ -414,15 +459,15 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
                 }
             });
         }
-        
+
         // Wait for all tasks to complete
         while let Some(_) = tasks.join_next().await {}
-        
+
         read_ops = read_counter.load(Ordering::Relaxed);
         write_ops = write_counter.load(Ordering::Relaxed);
         successful_ops = successful_counter.load(Ordering::Relaxed);
         failed_ops = failed_counter.load(Ordering::Relaxed);
-        
+
         if let Ok(total) = read_latency_total.lock() {
             read_latency = *total;
         }
@@ -453,9 +498,15 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
     println!("\n🔄 Mixed Benchmark Results:");
     println!("  Total time: {:.2}s", duration.as_secs_f64());
     println!("  Total operations: {} (target: {})", total_ops, ops);
-    println!("  Successful operations: {} ({:.1}%)", successful_ops, success_rate);
+    println!(
+        "  Successful operations: {} ({:.1}%)",
+        successful_ops, success_rate
+    );
     println!("  Failed operations: {}", failed_ops);
-    println!("  Operations/sec: {:.2}", total_ops as f64 / duration.as_secs_f64());
+    println!(
+        "  Operations/sec: {:.2}",
+        total_ops as f64 / duration.as_secs_f64()
+    );
     println!(
         "  Read operations: {} ({:.1}% of total, target: {}%)",
         read_ops,
@@ -468,10 +519,16 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
         write_ops as f64 / total_ops as f64 * 100.0
     );
     if read_ops > 0 {
-        println!("  Average read latency: {:.2}ms", avg_read_latency.as_millis());
+        println!(
+            "  Average read latency: {:.2}ms",
+            avg_read_latency.as_millis()
+        );
     }
     if write_ops > 0 {
-        println!("  Average write latency: {:.2}ms", avg_write_latency.as_millis());
+        println!(
+            "  Average write latency: {:.2}ms",
+            avg_write_latency.as_millis()
+        );
     }
     println!("  Concurrency: {} thread(s)", threads);
 
@@ -479,7 +536,12 @@ async fn run_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, thread
 }
 
 /// Simple mixed benchmark using system queries when benchmark table is not available
-async fn run_simple_mixed_benchmark(database: &Database, read_pct: u8, ops: u64, _threads: u32) -> Result<()> {
+async fn run_simple_mixed_benchmark(
+    database: &Database,
+    read_pct: u8,
+    ops: u64,
+    _threads: u32,
+) -> Result<()> {
     let pb = create_progress_bar(ops, "Simple mixed");
     let start = Instant::now();
     let mut read_ops = 0u64;
@@ -487,7 +549,7 @@ async fn run_simple_mixed_benchmark(database: &Database, read_pct: u8, ops: u64,
 
     for i in 0..ops {
         let is_read = (i * 100) % 100 < read_pct as u64;
-        
+
         if is_read {
             let _ = database.execute("SELECT COUNT(*) FROM system.tables").await;
             read_ops += 1;
@@ -497,7 +559,7 @@ async fn run_simple_mixed_benchmark(database: &Database, read_pct: u8, ops: u64,
             tokio::time::sleep(Duration::from_micros(200)).await;
             write_ops += 1;
         }
-        
+
         pb.inc(1);
     }
 
@@ -508,8 +570,11 @@ async fn run_simple_mixed_benchmark(database: &Database, read_pct: u8, ops: u64,
     println!("  Total time: {:.2}s", duration.as_secs_f64());
     println!("  Read operations: {}", read_ops);
     println!("  Write operations: {} (simulated)", write_ops);
-    println!("  Operations/sec: {:.2}", ops as f64 / duration.as_secs_f64());
-    
+    println!(
+        "  Operations/sec: {:.2}",
+        ops as f64 / duration.as_secs_f64()
+    );
+
     Ok(())
 }
 
@@ -537,17 +602,22 @@ async fn setup_benchmark_table(database: &Database) -> Result<()> {
             created_at timestamp
         )
     "#;
-    
-    database.execute(create_table_sql).await
+
+    database
+        .execute(create_table_sql)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to create benchmark table: {}", e))?;
-    
+
     Ok(())
 }
 
 /// Populate benchmark table with test data
 async fn populate_benchmark_data(database: &Database, num_rows: u64) -> Result<u64> {
     // Check if table already has data
-    match database.execute("SELECT COUNT(*) as count FROM benchmark_table").await {
+    match database
+        .execute("SELECT COUNT(*) as count FROM benchmark_table")
+        .await
+    {
         Ok(result) => {
             if let Some(row) = result.rows.first() {
                 if let Some(count_value) = row.get("count") {
@@ -562,15 +632,15 @@ async fn populate_benchmark_data(database: &Database, num_rows: u64) -> Result<u
         }
         Err(_) => {} // Continue with population
     }
-    
+
     println!("📦 Populating benchmark table with {} rows...", num_rows);
-    
+
     let mut inserted = 0;
     let batch_size = 50;
-    
+
     for batch_start in (0..num_rows).step_by(batch_size) {
         let batch_end = (batch_start + batch_size as u64).min(num_rows);
-        
+
         for i in batch_start..batch_end {
             let insert_sql = format!(
                 "INSERT INTO benchmark_table (id, name, value, created_at) VALUES ({}, 'user_{}', {}, '{}')",
@@ -579,18 +649,18 @@ async fn populate_benchmark_data(database: &Database, num_rows: u64) -> Result<u
                 i * 100,
                 chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
             );
-            
+
             match database.execute(&insert_sql).await {
                 Ok(_) => inserted += 1,
                 Err(_) => {} // Skip conflicts or errors
             }
         }
-        
+
         // Small delay to prevent overwhelming the database
         if batch_start % 200 == 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    
+
     Ok(inserted)
 }

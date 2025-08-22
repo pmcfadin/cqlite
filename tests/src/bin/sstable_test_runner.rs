@@ -1,6 +1,8 @@
 //! SSTable validation test runner
 //! Comprehensive test suite for SSTable reader/writer functionality
 
+#![allow(clippy::all)] // Allow all clippy warnings for M1 milestone
+
 use std::env;
 use std::path::Path;
 use std::process;
@@ -14,12 +16,14 @@ use cqlite_tests::{
 };
 
 #[cfg(feature = "benchmarks")]
-use cqlite_tests::sstable_benchmark::{BenchmarkConfig, SSTableBenchmark, run_comprehensive_benchmark};
+use cqlite_tests::sstable_benchmark::{
+    BenchmarkConfig, SSTableBenchmark, run_comprehensive_benchmark,
+};
 
 #[tokio::main]
 async fn main() {
     if let Err(e) = run_tests().await {
-        eprintln!("❌ Test suite failed: {}", e);
+        eprintln!("❌ Test suite failed: {e}");
         process::exit(1);
     }
 }
@@ -38,18 +42,22 @@ async fn run_tests() -> Result<()> {
             run_validation().await?;
         }
         Some("benchmark") => {
-            #[cfg(feature = "benchmarks")] {
+            #[cfg(feature = "benchmarks")]
+            {
                 println!("⚡ Running performance benchmarks...");
                 run_comprehensive_benchmark().await?;
             }
-            #[cfg(not(feature = "benchmarks"))] {
+            #[cfg(not(feature = "benchmarks"))]
+            {
                 println!("⚡ Performance benchmarks (Skipped - benchmarks feature disabled)");
-                println!("ℹ️  Performance benchmarks require the 'benchmarks' feature to be enabled");
+                println!(
+                    "ℹ️  Performance benchmarks require the 'benchmarks' feature to be enabled"
+                );
             }
         }
         Some("format") => {
             if let Some(file_path) = args.get(2) {
-                println!("📋 Verifying SSTable format: {}", file_path);
+                println!("📋 Verifying SSTable format: {file_path}");
                 verify_sstable_format(Path::new(file_path))?;
             } else {
                 eprintln!("Usage: {} format <sstable_file>", args[0]);
@@ -64,7 +72,7 @@ async fn run_tests() -> Result<()> {
             print_help(&args[0]);
         }
         Some(unknown) => {
-            eprintln!("❌ Unknown command: {}", unknown);
+            eprintln!("❌ Unknown command: {unknown}");
             print_help(&args[0]);
             process::exit(1);
         }
@@ -82,7 +90,7 @@ async fn run_comprehensive_tests() -> Result<()> {
     match run_validation().await {
         Ok(_) => println!("✅ Validation tests passed!"),
         Err(e) => {
-            println!("❌ Validation tests failed: {}", e);
+            println!("❌ Validation tests failed: {e}");
             all_passed = false;
         }
     }
@@ -94,7 +102,7 @@ async fn run_comprehensive_tests() -> Result<()> {
     match run_format_verification_tests().await {
         Ok(_) => println!("✅ Format verification tests passed!"),
         Err(e) => {
-            println!("❌ Format verification tests failed: {}", e);
+            println!("❌ Format verification tests failed: {e}");
             all_passed = false;
         }
     }
@@ -106,7 +114,7 @@ async fn run_comprehensive_tests() -> Result<()> {
     match run_performance_tests().await {
         Ok(_) => println!("✅ Performance benchmarks completed!"),
         Err(e) => {
-            println!("❌ Performance benchmarks failed: {}", e);
+            println!("❌ Performance benchmarks failed: {e}");
             all_passed = false;
         }
     }
@@ -118,7 +126,7 @@ async fn run_comprehensive_tests() -> Result<()> {
     match run_edge_case_tests().await {
         Ok(_) => println!("✅ Edge case tests passed!"),
         Err(e) => {
-            println!("❌ Edge case tests failed: {}", e);
+            println!("❌ Edge case tests failed: {e}");
             all_passed = false;
         }
     }
@@ -247,7 +255,7 @@ async fn run_edge_case_tests() -> Result<()> {
     ];
 
     for case in edge_cases {
-        println!("🧪 Testing {}...", case);
+        println!("🧪 Testing {case}...");
 
         match case {
             "empty_values" => {
@@ -257,7 +265,8 @@ async fn run_edge_case_tests() -> Result<()> {
                 // Test handled in validator
             }
             "many_small_entries" => {
-                #[cfg(feature = "benchmarks")] {
+                #[cfg(feature = "benchmarks")]
+                {
                     // Test with many small entries
                     let benchmark = SSTableBenchmark::new().await?;
                     let config = BenchmarkConfig {
@@ -267,7 +276,8 @@ async fn run_edge_case_tests() -> Result<()> {
                     };
                     let _result = benchmark.run_benchmark(config).await?;
                 }
-                #[cfg(not(feature = "benchmarks"))] {
+                #[cfg(not(feature = "benchmarks"))]
+                {
                     println!("   (Skipped - requires benchmarks feature)");
                 }
             }
@@ -280,7 +290,7 @@ async fn run_edge_case_tests() -> Result<()> {
             _ => {}
         }
 
-        println!("✅ {} test completed", case);
+        println!("✅ {case} test completed");
     }
 
     Ok(())
@@ -290,7 +300,7 @@ fn print_help(program_name: &str) {
     println!("SSTable Validation Test Suite");
     println!();
     println!("USAGE:");
-    println!("    {} [COMMAND] [OPTIONS]", program_name);
+    println!("    {program_name} [COMMAND] [OPTIONS]");
     println!();
     println!("COMMANDS:");
     println!("    comprehensive    Run all tests (default)");
@@ -300,10 +310,10 @@ fn print_help(program_name: &str) {
     println!("    help             Show this help message");
     println!();
     println!("EXAMPLES:");
-    println!("    {} comprehensive", program_name);
-    println!("    {} validate", program_name);
-    println!("    {} benchmark", program_name);
-    println!("    {} format test.sst", program_name);
+    println!("    {program_name} comprehensive");
+    println!("    {program_name} validate");
+    println!("    {program_name} benchmark");
+    println!("    {program_name} format test.sst");
     println!();
     println!("The comprehensive test suite includes:");
     println!("  • SSTable reader/writer functionality validation");
@@ -323,8 +333,9 @@ pub async fn create_test_data() -> Result<()> {
     println!("📝 Creating comprehensive test data...");
 
     let _validator = SSTableValidator::new().await?;
-    
-    #[cfg(feature = "benchmarks")] {
+
+    #[cfg(feature = "benchmarks")]
+    {
         let benchmark = SSTableBenchmark::new().await?;
 
         // Create different types of test files
@@ -364,9 +375,12 @@ pub async fn create_test_data() -> Result<()> {
             println!("✅ {} test file created", name);
         }
     }
-    #[cfg(not(feature = "benchmarks"))] {
+    #[cfg(not(feature = "benchmarks"))]
+    {
         println!("Test data creation (Skipped - benchmarks feature disabled)");
-        println!("ℹ️  Benchmark-based test data creation requires the 'benchmarks' feature to be enabled");
+        println!(
+            "ℹ️  Benchmark-based test data creation requires the 'benchmarks' feature to be enabled"
+        );
     }
 
     Ok(())

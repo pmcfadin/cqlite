@@ -2,14 +2,12 @@
 ///
 /// Standalone executable for running the complete CQLite integration test suite.
 /// This runner provides a CI/CD friendly interface with clear pass/fail results.
-
 use cqlite_tests::comprehensive_integration_test_suite::{
     ComprehensiveIntegrationTestSuite, IntegrationTestConfig, print_integration_test_results,
     run_comprehensive_integration_tests, run_quick_integration_tests,
 };
 use std::env;
 use std::path::PathBuf;
-use tokio;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,10 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("🎯 Test Mode: {}", test_mode);
+    println!("🎯 Test Mode: {test_mode}");
     println!("📁 Test Data: {}", test_data_path.display());
-    println!("⏱️  Timeout: {} seconds", timeout_seconds);
-    println!("🚨 Fail Fast: {}", fail_fast);
+    println!("⏱️  Timeout: {timeout_seconds} seconds");
+    println!("🚨 Fail Fast: {fail_fast}");
     println!();
 
     // Validate test data path
@@ -168,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             suite.run_all_tests().await
         }
         _ => {
-            eprintln!("❌ Error: Unknown test mode: {}", test_mode);
+            eprintln!("❌ Error: Unknown test mode: {test_mode}");
             eprintln!("💡 Valid modes: full, quick, real-only, performance-only, collections-only");
             return Err("Invalid state".into());
         }
@@ -205,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Print CI/CD friendly summary
             println!("\n📊 CI/CD Summary:");
-            println!("  • Exit Code: {}", exit_code);
+            println!("  • Exit Code: {exit_code}");
             println!(
                 "  • Success Rate: {:.1}%",
                 (results.passed_tests as f64 / results.total_tests as f64) * 100.0
@@ -226,7 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Generate machine-readable results for CI/CD
             if let Err(e) = generate_ci_results(&results) {
-                eprintln!("⚠️  Warning: Could not generate CI results file: {}", e);
+                eprintln!("⚠️  Warning: Could not generate CI results file: {e}");
             }
 
             if exit_code == 0 {
@@ -236,12 +234,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => {
-            eprintln!("💥 INTEGRATION TESTS FAILED: {}", e);
+            eprintln!("💥 INTEGRATION TESTS FAILED: {e}");
             eprintln!("⏱️  Execution time: {:.2}s", total_time.as_secs_f64());
 
             // Check if it's a timeout
             if total_time.as_secs() >= timeout_seconds {
-                eprintln!("⏰ Tests exceeded timeout of {} seconds", timeout_seconds);
+                eprintln!("⏰ Tests exceeded timeout of {timeout_seconds} seconds");
                 eprintln!("💡 Try running with --mode quick or increase --timeout");
             }
 
@@ -371,7 +369,7 @@ fn generate_ci_results(
         "FAIL"
     };
 
-    fs::write("integration_test_status.txt", format!("{}\n", status))?;
+    fs::write("integration_test_status.txt", format!("{status}\n"))?;
     println!("📄 CI status written to: integration_test_status.txt");
 
     Ok(())
@@ -420,7 +418,7 @@ fn generate_github_summary(
         );
 
         if let Err(e) = std::fs::write(&github_step_summary, summary) {
-            eprintln!("Warning: Could not write GitHub summary: {}", e);
+            eprintln!("Warning: Could not write GitHub summary: {e}");
         }
     }
 }

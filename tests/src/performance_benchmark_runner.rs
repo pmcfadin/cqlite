@@ -54,6 +54,22 @@ pub struct TestConfiguration {
     pub enable_profiling: bool,
     /// Target performance thresholds
     pub performance_targets: PerformanceTargets,
+    /// Whether to run benchmarks
+    pub run_benchmarks: bool,
+    /// Whether to run validation tests
+    pub run_validation: bool,
+    /// Whether to run regression tests
+    pub run_regression_tests: bool,
+    /// Whether to enable stress tests
+    pub enable_stress_tests: bool,
+    /// Maximum concurrent tests
+    pub max_concurrent_tests: usize,
+    /// Run validation suite tests
+    pub run_validation_suite: bool,
+    /// Run integration tests  
+    pub run_integration_tests: bool,
+    /// Run performance benchmarks
+    pub run_performance_benchmarks: bool,
 }
 
 /// Performance targets for validation
@@ -86,6 +102,15 @@ impl Default for BenchmarkRunnerConfig {
     }
 }
 
+impl BenchmarkRunnerConfig {
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: Self = toml::from_str(&content)
+            .map_err(|e| cqlite_core::Error::serialization(format!("TOML parse error: {}", e)))?;
+        Ok(config)
+    }
+}
+
 impl Default for TestConfiguration {
     fn default() -> Self {
         Self {
@@ -95,6 +120,14 @@ impl Default for TestConfiguration {
             performance_iterations: 1_000,
             enable_profiling: true,
             performance_targets: PerformanceTargets::default(),
+            run_benchmarks: true,
+            run_validation: true,
+            run_regression_tests: true,
+            enable_stress_tests: true,
+            max_concurrent_tests: 4,
+            run_validation_suite: true,
+            run_integration_tests: true,
+            run_performance_benchmarks: true,
         }
     }
 }
@@ -108,6 +141,16 @@ impl Default for PerformanceTargets {
             min_write_throughput_ops_sec: 10_000.0,
             min_read_throughput_ops_sec: 50_000.0,
         }
+    }
+}
+
+impl PerformanceTargets {
+    /// Load performance targets from a TOML file
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let targets: Self = toml::from_str(&content)
+            .map_err(|e| cqlite_core::Error::serialization(format!("TOML parse error: {}", e)))?;
+        Ok(targets)
     }
 }
 

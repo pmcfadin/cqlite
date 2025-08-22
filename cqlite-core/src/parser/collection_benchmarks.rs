@@ -216,7 +216,7 @@ impl CollectionBenchmarks {
                         1 => Value::Text(format!("field_{}", i)),
                         2 => Value::Boolean(i % 2 == 0),
                         3 => Value::Float(i as f64 * 3.14),
-                        4 => Value::BigInt(i as i64 * 1000000),
+                        4 => Value::BigInt(i as i64 * 1_000_000),
                         _ => {
                             let mut uuid = [0u8; 16];
                             uuid[0..4].copy_from_slice(&(i as u32).to_be_bytes());
@@ -354,7 +354,7 @@ impl CollectionBenchmarks {
         println!("  🏋️ Benchmarking Large Collections...");
 
         // Very large list (stress test)
-        let large_sizes = vec![10000, 50000, 100000];
+        let large_sizes = vec![10000, 50000, 100_000];
 
         for size in large_sizes {
             // Large string list

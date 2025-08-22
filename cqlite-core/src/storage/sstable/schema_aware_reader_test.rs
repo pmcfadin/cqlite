@@ -163,7 +163,11 @@ mod tests {
         let platform_clone = platform.clone();
         let _discovery_config = crate::schema::discovery::SchemaDiscoveryConfig::default();
         let registry_config = crate::schema::registry::SchemaRegistryConfig::default();
-        let registry = Arc::new(SchemaRegistry::new(registry_config, platform_clone, config_clone).await.unwrap());
+        let registry = Arc::new(
+            SchemaRegistry::new(registry_config, platform_clone, config_clone)
+                .await
+                .unwrap(),
+        );
 
         // This would normally fail without a proper SSTable file, but demonstrates the API
         let result = SchemaAwareReader::new(
@@ -175,7 +179,21 @@ mod tests {
         )
         .await;
 
-        // We expect this to fail since we don't have a real SSTable file
-        assert!(result.is_err());
+        // The SchemaAwareReader should now successfully handle the dummy file
+        // by creating a default reader with empty stats
+        match result {
+            Ok(reader) => {
+                // Verify the reader was created with expected schema
+                assert_eq!(reader.context().schema.keyspace, "test_ks");
+                assert_eq!(reader.context().schema.table, "test_table");
+                assert_eq!(reader.context().partition_comparators.len(), 1);
+                assert_eq!(reader.context().clustering_comparators.len(), 1);
+                assert_eq!(reader.context().column_comparators.len(), 3);
+            }
+            Err(e) => {
+                eprintln!("Unexpected error creating SchemaAwareReader: {:?}", e);
+                panic!("Expected SchemaAwareReader creation to succeed");
+            }
+        }
     }
 }

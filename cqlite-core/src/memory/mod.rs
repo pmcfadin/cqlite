@@ -355,7 +355,7 @@ impl MemoryManager {
             Value::Frozen(boxed_value) => self.estimate_value_size(boxed_value),
             Value::Varint(data) => data.len(),
             Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + unscaled data
-            Value::Duration { .. } => 12, // 3 * 4 bytes
+            Value::Duration { .. } => 12,                          // 3 * 4 bytes
             Value::Tombstone(_) => 16, // timestamp + type + optional TTL
         }
     }

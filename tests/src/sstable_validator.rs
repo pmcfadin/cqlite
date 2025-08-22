@@ -8,12 +8,14 @@ use std::sync::Arc;
 #[cfg(feature = "experimental")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(not(feature = "experimental"))]
+use cqlite_core::storage::sstable::validation::TestStatus;
 #[cfg(feature = "experimental")]
 use cqlite_core::storage::sstable::writer::SSTableWriter;
 use cqlite_core::{
     Config, Result,
     platform::Platform,
-    storage::sstable::validation::{CassandraValidationFramework, TestResult, TestStatus, ValidationReport},
+    storage::sstable::validation::{CassandraValidationFramework, TestResult, ValidationReport},
 };
 #[cfg(feature = "experimental")]
 use cqlite_core::{RowKey, Value, storage::sstable::reader::SSTableReader, types::TableId};

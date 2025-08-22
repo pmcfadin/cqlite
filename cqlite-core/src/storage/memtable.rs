@@ -304,7 +304,7 @@ impl MemTable {
             Some(Value::Varint(data)) => data.len(),
             Some(Value::Decimal { unscaled, .. }) => 4 + unscaled.len(), // scale + data
             Some(Value::Duration { .. }) => 12, // 3 * 4 bytes (months, days, nanos)
-            Some(Value::Tombstone(_)) => 16, // timestamp + type + optional TTL
+            Some(Value::Tombstone(_)) => 16,    // timestamp + type + optional TTL
         }
     }
 }

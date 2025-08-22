@@ -1,7 +1,6 @@
 //! File system abstraction
 
 use crate::{Result, error::Error};
-use std::io::Write;
 use std::path::Path;
 use tokio::fs;
 
@@ -42,14 +41,13 @@ impl FileSystem {
     }
 
     /// Create file
-    pub async fn create_file(&self, path: &Path) -> Result<Box<dyn Write + Send>> {
-        let file = std::fs::File::create(path).map_err(Error::from)?;
-        Ok(Box::new(file))
+    pub async fn create_file(&self, path: &Path) -> Result<tokio::fs::File> {
+        tokio::fs::File::create(path).await.map_err(Error::from)
     }
 
     /// Open file for reading
-    pub async fn open_file(&self, path: &Path) -> Result<std::fs::File> {
-        std::fs::File::open(path).map_err(Error::from)
+    pub async fn open_file(&self, path: &Path) -> Result<tokio::fs::File> {
+        tokio::fs::File::open(path).await.map_err(Error::from)
     }
 
     /// Read file contents

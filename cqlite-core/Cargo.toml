@@ -44,6 +44,8 @@ memmap2 = { workspace = true }
 
 # Parsing
 nom = "7.1"
+pest = "2.7"
+pest_derive = "2.7"
 hex = "0.4"
 bit-vec = "0.8"
 num_cpus = "1.0"

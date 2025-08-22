@@ -3,13 +3,12 @@
 //! Comprehensive tests for Cassandra 5+ SSTable format compatibility,
 //! including header parsing, data blocks, and metadata validation.
 
-
+use cqlite_core::error::Result;
+use cqlite_core::parser::SSTableParser;
 use cqlite_core::parser::header::{
     CassandraVersion, ColumnInfo, CompressionInfo, SSTABLE_MAGIC, SSTableHeader, SSTableStats,
     SUPPORTED_VERSION, parse_sstable_header, serialize_sstable_header,
 };
-use cqlite_core::parser::SSTableParser;
-use cqlite_core::error::Result;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 

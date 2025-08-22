@@ -5,9 +5,9 @@
 
 use cqlite_core::{
     Config, Database, Value,
-    parser::{complex_types::ComplexTypeParser},
+    parser::complex_types::ComplexTypeParser,
     platform::Platform,
-    storage::sstable::{reader::SSTableReader},
+    storage::sstable::reader::SSTableReader,
     types::{RowKey, TableId},
 };
 use std::path::{Path, PathBuf};
@@ -346,9 +346,7 @@ async fn validate_end_to_end_operations(
 
                 if success {
                     validation.successful_operations += 1;
-                    println!(
-                        "   ✓ {query} ({actual_records} records, {execution_time}ms)"
-                    );
+                    println!("   ✓ {query} ({actual_records} records, {execution_time}ms)");
                 } else {
                     println!(
                         "   ⚠ {query} (expected {expected_records}, got {actual_records} records, {execution_time}ms)"

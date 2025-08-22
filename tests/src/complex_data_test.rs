@@ -1,7 +1,6 @@
 //! Complex data type testing for SSTable operations
 //! Tests serialization and deserialization of various Cassandra data types
 
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -9,11 +8,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqlite_core::platform::Platform;
+#[cfg(feature = "experimental")]
+use cqlite_core::storage::sstable::writer::SSTableWriter;
 use cqlite_core::{Config, Result};
 #[cfg(feature = "experimental")]
 use cqlite_core::{RowKey, Value, storage::sstable::reader::SSTableReader, types::TableId};
-#[cfg(feature = "experimental")]
-use cqlite_core::storage::sstable::writer::SSTableWriter;
 
 use tempfile::TempDir;
 
@@ -693,7 +692,7 @@ pub async fn run_complex_data_tests() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    // use super::*; // TODO: Remove when tests are implemented
+    use crate::ComplexDataTestSuite;
 
     #[tokio::test]
     #[cfg(feature = "experimental")]

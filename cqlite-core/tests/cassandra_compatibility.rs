@@ -20,10 +20,10 @@ use cqlite_core::{Config, Result, RowKey, Value};
 #[tokio::test]
 async fn test_basic_cassandra_compatibility() -> Result<()> {
     let temp_dir = TempDir::new().map_err(|e| {
-        cqlite_core::error::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to create temp dir: {}", e),
-        ))
+        cqlite_core::error::Error::Io(std::io::Error::other(format!(
+            "Failed to create temp dir: {}",
+            e
+        )))
     })?;
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
@@ -83,15 +83,16 @@ async fn test_basic_cassandra_compatibility() -> Result<()> {
 #[tokio::test]
 async fn test_cassandra_compression_compatibility() -> Result<()> {
     let temp_dir = TempDir::new().map_err(|e| {
-        cqlite_core::error::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to create temp dir: {}", e),
-        ))
+        cqlite_core::error::Error::Io(std::io::Error::other(format!(
+            "Failed to create temp dir: {}",
+            e
+        )))
     })?;
 
     let mut compressed_config = Config::default();
     compressed_config.storage.compression.enabled = true;
-    compressed_config.storage.compression.algorithm = cqlite_core::config::CompressionAlgorithm::Lz4;
+    compressed_config.storage.compression.algorithm =
+        cqlite_core::config::CompressionAlgorithm::Lz4;
 
     let platform = Arc::new(Platform::new(&compressed_config).await?);
     let compressed_path = temp_dir.path().join("test_compressed.sst");
@@ -117,8 +118,7 @@ async fn test_cassandra_compression_compatibility() -> Result<()> {
 
     // Verify the compressed file is smaller than it would be uncompressed
     let metadata = std::fs::metadata(&compressed_path).map_err(|e| {
-        cqlite_core::error::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        cqlite_core::error::Error::Io(std::io::Error::other(
             format!("Failed to get file metadata: {}", e),
         ))
     })?;

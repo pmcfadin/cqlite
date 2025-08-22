@@ -11,7 +11,12 @@ use crate::types::Value;
 
 /// Helper function to assert that input buffer is fully consumed
 fn assert_fully_consumed(remaining: &[u8]) {
-    assert!(remaining.is_empty(), "Expected input to be fully consumed, but {} bytes remain: {:?}", remaining.len(), remaining);
+    assert!(
+        remaining.is_empty(),
+        "Expected input to be fully consumed, but {} bytes remain: {:?}",
+        remaining.len(),
+        remaining
+    );
 }
 
 /// Helper function for approximate floating point equality with default epsilon
@@ -474,13 +479,13 @@ mod tuple_tests {
         data.extend_from_slice(&encode_vint(4));
 
         // Field type definitions (all field types first)
-        data.push(CqlTypeId::Int as u8);       // Field 0: Integer
-        data.push(CqlTypeId::Varchar as u8);   // Field 1: String
-        data.push(CqlTypeId::Boolean as u8);   // Field 2: Boolean
-        data.push(CqlTypeId::Double as u8);    // Field 3: Double
+        data.push(CqlTypeId::Int as u8); // Field 0: Integer
+        data.push(CqlTypeId::Varchar as u8); // Field 1: String
+        data.push(CqlTypeId::Boolean as u8); // Field 2: Boolean
+        data.push(CqlTypeId::Double as u8); // Field 3: Double
 
         // Field values with 32-bit big-endian length prefixes
-        
+
         // Field 0: Integer 42
         let int_bytes = 42i32.to_be_bytes();
         data.extend_from_slice(&(int_bytes.len() as i32).to_be_bytes());

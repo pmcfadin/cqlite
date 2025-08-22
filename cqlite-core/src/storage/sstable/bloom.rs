@@ -63,7 +63,7 @@ impl BloomFilter {
         let hashes = self.calculate_hashes(key);
 
         for i in 0..self.hash_count {
-            let hash = hashes.0.wrapping_add(i as u64 * hashes.1);
+            let hash = hashes.0.wrapping_add((i as u64).wrapping_mul(hashes.1));
             let bit_index = (hash % self.bit_count) as usize;
             let word_index = bit_index / 64;
             let bit_offset = bit_index % 64;
@@ -79,7 +79,7 @@ impl BloomFilter {
         let hashes = self.calculate_hashes(key);
 
         for i in 0..self.hash_count {
-            let hash = hashes.0.wrapping_add(i as u64 * hashes.1);
+            let hash = hashes.0.wrapping_add((i as u64).wrapping_mul(hashes.1));
             let bit_index = (hash % self.bit_count) as usize;
             let word_index = bit_index / 64;
             let bit_offset = bit_index % 64;
@@ -175,8 +175,58 @@ impl BloomFilter {
         bincode::serialize(self).map_err(|e| Error::serialization(e.to_string()))
     }
 
-    /// Deserialize a bloom filter from bytes
+    /// Deserialize a bloom filter from bytes (Cassandra-compatible format)
     pub fn deserialize(data: &[u8]) -> Result<Self> {
+        if data.len() < 12 {
+            return Err(Error::serialization("Invalid bloom filter data: too short"));
+        }
+
+        // Read hash count (4 bytes, big-endian)
+        let hash_count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+        // Read bit count (8 bytes, big-endian)
+        let bit_count = u64::from_be_bytes([
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+        ]);
+
+        // Calculate expected word count
+        let word_count = (bit_count + 63) / 64;
+        let expected_size = 12 + (word_count as usize * 8);
+
+        if data.len() != expected_size {
+            return Err(Error::serialization(
+                "Invalid bloom filter data: incorrect size",
+            ));
+        }
+
+        // Read bit array (big-endian u64 words)
+        let mut bits = Vec::with_capacity(word_count as usize);
+        for i in 0..word_count {
+            let offset = 12 + (i as usize * 8);
+            let word = u64::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
+            ]);
+            bits.push(word);
+        }
+
+        Ok(Self {
+            bits,
+            hash_count,
+            bit_count,
+            expected_elements: 1000, // Default - not stored in Cassandra format
+            false_positive_rate: 0.01, // Default - not stored in Cassandra format
+        })
+    }
+
+    /// Legacy deserialize using bincode (kept for backward compatibility)
+    pub fn deserialize_legacy(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data).map_err(|e| Error::serialization(e.to_string()))
     }
 

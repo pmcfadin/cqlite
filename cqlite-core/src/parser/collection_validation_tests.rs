@@ -44,10 +44,18 @@ mod cassandra_format_tests {
             .unwrap();
         assert_eq!(list_col.data_type, "list<text>");
 
-        let set_col = _schema.columns.iter().find(|c| c.name == "set_col").unwrap();
+        let set_col = _schema
+            .columns
+            .iter()
+            .find(|c| c.name == "set_col")
+            .unwrap();
         assert_eq!(set_col.data_type, "set<int>");
 
-        let map_col = _schema.columns.iter().find(|c| c.name == "map_col").unwrap();
+        let map_col = _schema
+            .columns
+            .iter()
+            .find(|c| c.name == "map_col")
+            .unwrap();
         assert_eq!(map_col.data_type, "map<text, int>");
     }
 
@@ -283,6 +291,7 @@ mod cassandra_format_tests {
 #[cfg(test)]
 mod performance_tests {
     use super::*;
+    use crate::parser::vint::encode_vint;
 
     #[test]
     fn test_collection_parsing_performance() {
@@ -295,6 +304,8 @@ mod performance_tests {
         data.push(CqlTypeId::Int as u8);
 
         for i in 0..1000i32 {
+            // Add length for each element as VInt (4 bytes for int)
+            data.extend_from_slice(&encode_vint(4));
             data.extend_from_slice(&i.to_be_bytes());
         }
 

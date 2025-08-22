@@ -3,16 +3,15 @@
 //! This module creates and manages real Cassandra 5+ SSTable files for testing
 //! CQLite's compatibility and parsing accuracy.
 
-
 use cqlite_core::{
     Value,
     error::Result,
+    parser::SSTableParser,
     parser::header::{
         CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
         parse_sstable_header, serialize_sstable_header,
     },
     parser::types::serialize_cql_value,
-    parser::SSTableParser,
 };
 use std::collections::HashMap;
 use std::fs;

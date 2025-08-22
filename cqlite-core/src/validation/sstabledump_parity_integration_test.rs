@@ -283,12 +283,13 @@ fn test_major_discrepancy_detection() {
                     within_limits: true,
                     memory_efficiency_ratio: 0.45,
                 },
-                throughput_guardrails: crate::validation::sstabledump_parity::ThroughputGuardrails {
-                    throughput_mb_per_sec: 2.5,
-                    min_throughput_mb_per_sec: 0.5,
-                    meets_minimum: true,
-                    vs_sstabledump_ratio: 1.2,
-                },
+                throughput_guardrails:
+                    crate::validation::sstabledump_parity::ThroughputGuardrails {
+                        throughput_mb_per_sec: 2.5,
+                        min_throughput_mb_per_sec: 0.5,
+                        meets_minimum: true,
+                        vs_sstabledump_ratio: 1.2,
+                    },
             },
         },
         timestamp: chrono::Utc::now(),

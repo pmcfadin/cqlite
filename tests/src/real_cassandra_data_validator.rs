@@ -3,14 +3,13 @@
 //! This module provides validation against actual Cassandra 5+ SSTable files
 //! to ensure 100% format compatibility for complex types.
 
-
 use cqlite_core::schema::TableSchema;
 use cqlite_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use std::fs;
 #[cfg(test)]
 use tempfile::TempDir;
 

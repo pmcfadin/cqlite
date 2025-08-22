@@ -208,9 +208,12 @@ impl PreparedQuery {
         // 2. Have predictable execution patterns
         // 3. Don't involve complex aggregations
 
+        // For our simplified implementation, we consider TableScan cache-friendly too
         matches!(
             self.plan.plan_type,
-            super::planner::PlanType::PointLookup | super::planner::PlanType::IndexScan
+            super::planner::PlanType::PointLookup
+                | super::planner::PlanType::IndexScan
+                | super::planner::PlanType::TableScan
         )
     }
 

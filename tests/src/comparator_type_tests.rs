@@ -8,8 +8,8 @@
 //! - Ordering and equality semantics
 //! - Integration with SchemaRegistry and TableSchema
 
-use cqlite_core::types::{Value, UdtValue, UdtField, ComparatorType};
-use cqlite_core::schema::{CqlType, TableSchema, KeyColumn, ClusteringColumn, Column};
+use cqlite_core::schema::{ClusteringColumn, Column, CqlType, KeyColumn, TableSchema};
+use cqlite_core::types::{ComparatorType, UdtField, UdtValue, Value};
 use std::{cmp::Ordering, collections::HashMap};
 
 #[cfg(test)]

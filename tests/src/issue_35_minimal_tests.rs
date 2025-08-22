@@ -6,11 +6,7 @@
 //! - Zero-tolerance validation capability
 //! - Integration with live SSTableReader path
 
-use cqlite_core::{
-    Config, Result,
-    platform::Platform,
-    storage::sstable::SSTableReader,
-};
+use cqlite_core::{Config, Result, platform::Platform, storage::sstable::SSTableReader};
 use std::sync::Arc;
 use tempfile::TempDir;
 

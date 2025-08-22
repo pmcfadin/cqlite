@@ -3,7 +3,6 @@
 //! Provides comprehensive test data including CQL samples, expected schemas,
 //! error cases, and performance test data for thorough validation testing.
 
-
 use std::collections::HashMap;
 
 /// Collection of CQL test cases with expected outcomes

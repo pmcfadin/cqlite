@@ -5,7 +5,6 @@
 //! This module provides comprehensive performance benchmarking for complex type
 //! operations to ensure M3 meets or exceeds Cassandra 5+ performance expectations.
 
-
 use cqlite_core::types::{UdtValue, Value};
 use cqlite_core::{Error, Result};
 use serde::{Deserialize, Serialize};

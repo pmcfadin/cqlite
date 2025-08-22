@@ -237,6 +237,6 @@ async fn test_async_parser_interface() {
     }
 
     // Test validation
-    let valid = parser.validate_syntax("CREATE TABLE test (id INT PRIMARY KEY)");
-    assert!(valid || !valid); // Just checking it returns a bool
+    let _valid = parser.validate_syntax("CREATE TABLE test (id INT PRIMARY KEY)");
+    // Just checking it returns a bool - simplified logic
 }

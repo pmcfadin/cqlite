@@ -537,7 +537,7 @@ impl DockerManager {
             .ok_or_else(|| anyhow!("No container ID"))?;
 
         let data_dir = format!("/var/lib/cassandra/data/{}/{}-*/", keyspace, table);
-        
+
         let exec_config = CreateExecOptions {
             cmd: Some(vec!["find", &data_dir, "-name", "*.db", "-type", "f"]),
             attach_stdout: Some(true),

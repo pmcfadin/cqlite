@@ -39,7 +39,7 @@ fn benchmark_insert_operations(c: &mut Criterion) {
             b.iter(|| {
                 // TODO: Implement actual bulk insert
                 for i in 0..size {
-                    black_box(format!("INSERT INTO users VALUES ({}, 'User {}')", i, i));
+                    black_box(format!("INSERT INTO users VALUES ({i}, 'User {i}')"));
                 }
             });
         });

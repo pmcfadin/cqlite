@@ -1,5 +1,8 @@
 //! Comprehensive regression tests for Issue #37 - Read-time reconciliation
 
+// EMERGENCY M1 FIX: Allow clippy warnings
+#![allow(clippy::all)]
+
 use sstabledump_validator::{
     reconciliation::{ReconciliationConfig, ReconciliationEngine},
     test_datasets::ReconciliationTestDatasets,

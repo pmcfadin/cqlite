@@ -540,9 +540,8 @@ fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test with non-existent file
     let mut cmd = get_cli_command();
-    cmd.arg("info")
-        .arg("/non/existent/path");
-        // .timeout(config.timeout); // Removed timeout method call
+    cmd.arg("info").arg("/non/existent/path");
+    // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
     assert!(!output.status.success());
@@ -567,7 +566,7 @@ fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
         .arg("/tmp")
         .arg("--schema")
         .arg(&invalid_schema);
-        // .timeout(config.timeout); // Removed timeout method call
+    // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
     assert!(!output.status.success());
@@ -578,7 +577,7 @@ fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
         .arg("/tmp")
         .arg("--cassandra-version")
         .arg("99.99");
-        // .timeout(config.timeout); // Removed timeout method call
+    // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
     assert!(!output.status.success());
@@ -683,9 +682,8 @@ fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
         // Benchmark info command
         let start = std::time::Instant::now();
         let mut cmd = get_cli_command();
-        cmd.arg("info")
-            .arg(&sstable_dir);
-            // .timeout(Duration::from_secs(60)); // Removed timeout method call
+        cmd.arg("info").arg(&sstable_dir);
+        // .timeout(Duration::from_secs(60)); // Removed timeout method call
 
         let output = cmd.output()?;
         let info_duration = start.elapsed();
@@ -700,10 +698,8 @@ fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
         // Benchmark detailed info command
         let start = std::time::Instant::now();
         let mut cmd = get_cli_command();
-        cmd.arg("info")
-            .arg(&sstable_dir)
-            .arg("--detailed");
-            // .timeout(Duration::from_secs(60)); // Removed timeout method call
+        cmd.arg("info").arg(&sstable_dir).arg("--detailed");
+        // .timeout(Duration::from_secs(60)); // Removed timeout method call
 
         let detailed_output = cmd.output()?;
         let detailed_duration = start.elapsed();
@@ -760,7 +756,7 @@ fn test_complex_data_types() -> Result<(), Box<dyn std::error::Error>> {
                 .arg("json")
                 .arg("--limit")
                 .arg("3");
-                // .timeout(Duration::from_secs(45)); // Removed timeout method call
+            // .timeout(Duration::from_secs(45)); // Removed timeout method call
 
             let output = cmd.output()?;
 
@@ -812,32 +808,30 @@ fn test_corrupted_file_handling() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test CLI with corrupted file
     let mut cmd = get_cli_command();
-    cmd.arg("read-sstable")
-        .arg(&corrupted_file);
-        // .timeout(config.timeout); // Removed timeout method call
+    cmd.arg("read-sstable").arg(&corrupted_file);
+    // .timeout(config.timeout); // Removed timeout method call
 
     let output = cmd.output()?;
 
     // Check if the command executed (may succeed with placeholder message)
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     // Either should fail with error message, or succeed with placeholder message
-    let has_error = !output.status.success() && (
-        stderr.contains("Failed to open SSTable")
+    let has_error = !output.status.success()
+        && (stderr.contains("Failed to open SSTable")
             || stderr.contains("corruption")
             || stderr.contains("invalid")
-            || stderr.contains("magic number")
+            || stderr.contains("magic number"));
+
+    let has_placeholder = output.status.success()
+        && (stdout.contains("SSTable reading functionality needs to be updated")
+            || stdout.contains("Note:"));
+
+    assert!(
+        has_error || has_placeholder,
+        "Expected either error message or placeholder message. stdout: '{stdout}', stderr: '{stderr}'"
     );
-    
-    let has_placeholder = output.status.success() && (
-        stdout.contains("SSTable reading functionality needs to be updated")
-            || stdout.contains("Note:")
-    );
-    
-    assert!(has_error || has_placeholder, 
-        "Expected either error message or placeholder message. stdout: '{}', stderr: '{}'", 
-        stdout, stderr);
 
     Ok(())
 }
@@ -874,10 +868,8 @@ fn test_resource_management() -> Result<(), Box<dyn std::error::Error>> {
 
         // Test info command - should not consume excessive memory
         let mut cmd = get_cli_command();
-        cmd.arg("info")
-            .arg(&sstable_dir)
-            .arg("--detailed");
-            // .timeout(Duration::from_secs(120)); // Removed timeout method call
+        cmd.arg("info").arg(&sstable_dir).arg("--detailed");
+        // .timeout(Duration::from_secs(120)); // Removed timeout method call
 
         let output = cmd.output()?;
 

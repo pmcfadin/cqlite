@@ -550,7 +550,8 @@ mod tests {
 
         // Should now be failed status (failure takes priority)
         assert_eq!(report.overall_status, ValidationReportStatus::Failed);
-        assert_eq!(report.summary.success_rate, 33.333333333333336); // 1 out of 3 passed
+        // Use more tolerance for floating point comparison (1 out of 3 passed ≈ 33.33%)
+        assert!((report.summary.success_rate - 33.33333333333333).abs() < 0.000001);
     }
 
     #[test]

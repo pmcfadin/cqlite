@@ -555,7 +555,7 @@ pub mod utils {
 
     /// Convert pest parsing errors to ParserError
     #[cfg(feature = "pest")]
-    pub fn from_pest_error(error: pest::error::Error<pest::RuleType>) -> ParserError {
+    pub fn from_pest_error(error: Box<dyn std::error::Error>) -> ParserError {
         ParserError::backend("pest", format!("Parse error: {}", error))
     }
 
@@ -628,10 +628,7 @@ mod tests {
 
         let backend_err = ParserError::backend("nom", "Parse failed");
         assert!(matches!(backend_err, ParserError::BackendError { .. }));
-        assert!(!backend_err.is_recoverable()); // Wait, this should be true
-
-        // Fix the test
-        assert!(backend_err.is_recoverable());
+        assert!(backend_err.is_recoverable()); // Backend errors are recoverable
     }
 
     #[test]

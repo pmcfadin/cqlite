@@ -43,12 +43,26 @@ mod tests {
                 },
             ],
             clustering_keys: vec![],
-            columns: vec![Column {
-                name: "value".to_string(),
-                data_type: "text".to_string(),
-                nullable: true,
-                default: None,
-            }],
+            columns: vec![
+                Column {
+                    name: "pk_int".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                },
+                Column {
+                    name: "pk_text".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: false,
+                    default: None,
+                },
+                Column {
+                    name: "value".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+            ],
             comments: HashMap::new(),
         }
     }

@@ -433,9 +433,8 @@ pub fn extract_table_name(cql: &str) -> Result<(Option<String>, String)> {
                 if let Some(if_not_exists) = after_table.find("if not exists") {
                     let after_if = &after_table[if_not_exists + 13..];
                     return extract_simple_table_name(after_if);
-                } else {
-                    return extract_simple_table_name(after_table);
                 }
+                return extract_simple_table_name(after_table);
             }
 
             Err(Error::schema(

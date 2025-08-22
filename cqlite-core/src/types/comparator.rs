@@ -404,8 +404,16 @@ impl ComparatorType {
 
     fn compare_decimal(&self, left: &Value, right: &Value) -> Result<Ordering> {
         match (left, right) {
-            (Value::Decimal { scale: l_scale, unscaled: l_unscaled }, 
-             Value::Decimal { scale: r_scale, unscaled: r_unscaled }) => {
+            (
+                Value::Decimal {
+                    scale: l_scale,
+                    unscaled: l_unscaled,
+                },
+                Value::Decimal {
+                    scale: r_scale,
+                    unscaled: r_unscaled,
+                },
+            ) => {
                 // Compare by normalizing to same scale if needed
                 if l_scale == r_scale {
                     Ok(l_unscaled.cmp(r_unscaled))
@@ -425,8 +433,18 @@ impl ComparatorType {
 
     fn compare_duration(&self, left: &Value, right: &Value) -> Result<Ordering> {
         match (left, right) {
-            (Value::Duration { months: l_months, days: l_days, nanos: l_nanos },
-             Value::Duration { months: r_months, days: r_days, nanos: r_nanos }) => {
+            (
+                Value::Duration {
+                    months: l_months,
+                    days: l_days,
+                    nanos: l_nanos,
+                },
+                Value::Duration {
+                    months: r_months,
+                    days: r_days,
+                    nanos: r_nanos,
+                },
+            ) => {
                 // Compare months first
                 match l_months.cmp(r_months) {
                     Ordering::Equal => {

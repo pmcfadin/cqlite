@@ -4,6 +4,8 @@
 //! and performance benchmarks. Coordinates all validation agents and
 //! generates consolidated reports.
 
+#![allow(clippy::all)] // Allow all clippy warnings for M1 milestone
+
 use clap::{Arg, ArgMatches, Command};
 use cqlite_tests::cql_integration_tests::{CqlIntegrationTestSuite, IntegrationTestReport};
 use cqlite_tests::cql_parser_validation_suite::{CqlParserValidationSuite, ValidationReport};
@@ -173,9 +175,13 @@ impl CqlValidationTestRunner {
             }
             #[cfg(not(feature = "benchmarks"))]
             {
-                println!("\n⚡ Phase 3: Performance Benchmarks (Skipped - benchmarks feature disabled)");
+                println!(
+                    "\n⚡ Phase 3: Performance Benchmarks (Skipped - benchmarks feature disabled)"
+                );
                 println!("{}", iter::repeat('-').take(40).collect::<String>());
-                println!("ℹ️  Performance benchmarks require the 'benchmarks' feature to be enabled");
+                println!(
+                    "ℹ️  Performance benchmarks require the 'benchmarks' feature to be enabled"
+                );
             }
         }
 

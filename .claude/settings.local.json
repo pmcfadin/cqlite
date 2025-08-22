@@ -2,12 +2,7 @@
   "permissions": {
     "allow": [
       "mcp__ruv-swarm",
-      "mcp__claude-flow",
-      "Bash(cargo test:*)",
-      "Bash(cargo check:*)",
-      "Bash(sed:*)",
-      "Bash(grep:*)",
-      "WebSearch"
+      "mcp__claude-flow"
     ],
     "deny": []
   }

@@ -13,9 +13,9 @@ use crate::storage::sstable::writer::SSTableWriter;
 #[cfg(feature = "experimental")]
 use crate::types::TableId;
 use crate::{Config, platform::Platform};
+use crate::{Result, error::Error};
 #[cfg(feature = "experimental")]
 use crate::{RowKey, Value};
-use crate::{Result, error::Error};
 use std::sync::Arc;
 
 /// Validation framework for Cassandra compatibility
@@ -72,10 +72,12 @@ impl CassandraValidationFramework {
 
         Ok(report)
     }
-    
+
     #[cfg(not(feature = "experimental"))]
     pub async fn run_full_validation(&self) -> Result<ValidationReport> {
-        Err(Error::unsupported_format("Validation requires experimental feature"))
+        Err(Error::unsupported_format(
+            "Validation requires experimental feature",
+        ))
     }
 
     /// Validate header format against Cassandra specification
@@ -261,7 +263,7 @@ impl CassandraValidationFramework {
         let test_path = format!("{}/compression_{}_test.sst", self.test_dir, algorithm);
 
         let mut writer =
-            writer::SSTableWriter::create(Path::new(&test_path), &test_config, self.platform.clone())
+            SSTableWriter::create(Path::new(&test_path), &test_config, self.platform.clone())
                 .await?;
 
         // Add test data that should compress well
@@ -293,7 +295,7 @@ impl CassandraValidationFramework {
             )))
         }
     }
-    
+
     #[cfg(not(feature = "experimental"))]
     #[allow(dead_code)]
     async fn test_compression_algorithm(&self, algorithm: &str) -> Result<TestResult> {
@@ -366,7 +368,7 @@ impl CassandraValidationFramework {
         test_config.storage.bloom_filter_fp_rate = 0.01;
 
         let mut writer =
-            writer::SSTableWriter::create(Path::new(&test_path), &test_config, self.platform.clone())
+            SSTableWriter::create(Path::new(&test_path), &test_config, self.platform.clone())
                 .await?;
 
         // Add test entries

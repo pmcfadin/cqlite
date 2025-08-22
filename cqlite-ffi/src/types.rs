@@ -2,7 +2,6 @@
 //!
 //! This module contains type definitions for the FFI interface.
 
-
 /// Opaque database handle
 #[repr(C)]
 pub struct cqlite_db_t {

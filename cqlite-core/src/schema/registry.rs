@@ -524,10 +524,12 @@ impl SchemaRegistry {
         )
         .await
     }
-    
+
     #[cfg(not(feature = "experimental"))]
     pub async fn export_schema_json(&self, _keyspace: &str, _table: &str) -> Result<String> {
-        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
+        Err(crate::error::Error::unsupported_format(
+            "JSON export requires experimental feature",
+        ))
     }
 
     /// Export schema as JSON with custom configuration
@@ -551,7 +553,7 @@ impl SchemaRegistry {
         let exporter = crate::schema::json_exporter::JsonExporter::with_config(config.clone());
         exporter.export_table_schema(&schema)
     }
-    
+
     #[cfg(not(feature = "experimental"))]
     pub async fn export_schema_json_with_config<T>(
         &self,
@@ -559,7 +561,9 @@ impl SchemaRegistry {
         _table: &str,
         _config: &T,
     ) -> Result<String> {
-        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
+        Err(crate::error::Error::unsupported_format(
+            "JSON export requires experimental feature",
+        ))
     }
 
     /// Export schema as compact JSON (minimal format)
@@ -576,10 +580,16 @@ impl SchemaRegistry {
         self.export_schema_json_with_config(keyspace, table, &config)
             .await
     }
-    
+
     #[cfg(not(feature = "experimental"))]
-    pub async fn export_schema_json_compact(&self, _keyspace: &str, _table: &str) -> Result<String> {
-        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
+    pub async fn export_schema_json_compact(
+        &self,
+        _keyspace: &str,
+        _table: &str,
+    ) -> Result<String> {
+        Err(crate::error::Error::unsupported_format(
+            "JSON export requires experimental feature",
+        ))
     }
 
     /// Export schema for API documentation (OpenAPI-compatible format)
@@ -595,10 +605,16 @@ impl SchemaRegistry {
         self.export_schema_json_with_config(keyspace, table, &config)
             .await
     }
-    
+
     #[cfg(not(feature = "experimental"))]
-    pub async fn export_schema_json_openapi(&self, _keyspace: &str, _table: &str) -> Result<String> {
-        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
+    pub async fn export_schema_json_openapi(
+        &self,
+        _keyspace: &str,
+        _table: &str,
+    ) -> Result<String> {
+        Err(crate::error::Error::unsupported_format(
+            "JSON export requires experimental feature",
+        ))
     }
 
     /// Export schema for data pipeline tools
@@ -614,10 +630,16 @@ impl SchemaRegistry {
         self.export_schema_json_with_config(keyspace, table, &config)
             .await
     }
-    
+
     #[cfg(not(feature = "experimental"))]
-    pub async fn export_schema_json_pipeline(&self, _keyspace: &str, _table: &str) -> Result<String> {
-        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
+    pub async fn export_schema_json_pipeline(
+        &self,
+        _keyspace: &str,
+        _table: &str,
+    ) -> Result<String> {
+        Err(crate::error::Error::unsupported_format(
+            "JSON export requires experimental feature",
+        ))
     }
 
     /// Export multiple schemas as a JSON collection
@@ -629,13 +651,15 @@ impl SchemaRegistry {
         let exporter = crate::schema::json_exporter::JsonExporter::new();
         exporter.export_multiple_schemas(schema_infos)
     }
-    
+
     #[cfg(not(feature = "experimental"))]
     pub async fn export_multiple_schemas_json(
         &self,
         _schema_infos: &[SchemaInfo],
     ) -> Result<String> {
-        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
+        Err(crate::error::Error::unsupported_format(
+            "JSON export requires experimental feature",
+        ))
     }
 
     /// Export all schemas in a keyspace as JSON collection
@@ -665,10 +689,12 @@ impl SchemaRegistry {
 
         self.export_multiple_schemas_json(&schema_infos).await
     }
-    
+
     #[cfg(not(feature = "experimental"))]
     pub async fn export_keyspace_schemas_json(&self, _keyspace: &str) -> Result<String> {
-        Err(crate::error::Error::unsupported_format("JSON export requires experimental feature"))
+        Err(crate::error::Error::unsupported_format(
+            "JSON export requires experimental feature",
+        ))
     }
 
     /// Register UDT in the registry
@@ -1294,7 +1320,6 @@ impl SchemaRegistry {
         cql.push_str("\n);");
         cql
     }
-
 }
 
 /// Registry statistics

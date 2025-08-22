@@ -4,9 +4,8 @@
 //! to establish that the test infrastructure is working.
 
 use cqlite_core::error::Error;
-use cqlite_core::parser::{config::ParserConfig, SSTableParser};
+use cqlite_core::parser::{SSTableParser, config::ParserConfig};
 use cqlite_core::types::Value;
-
 
 /// Basic smoke test to verify the test framework loads
 #[test]

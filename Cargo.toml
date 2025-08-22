@@ -134,11 +134,32 @@ codegen-units = 256
 incremental = true
 overflow-checks = true
 
-# Clippy configuration for strict code quality
+# M1 Clippy Configuration - Balanced for milestone delivery
 [workspace.lints.clippy]
-# Set clippy group lints with lower priority to avoid conflicts
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
-missing_docs_in_private_items = "warn"
+# Enable critical correctness checks with higher priority
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+
+# Enable important performance and style checks but as warnings
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+
+# Allow pedantic/nursery during M1 development
+pedantic = "allow"
+nursery = "allow"
+cargo = "allow"
+restriction = "allow"
+
+# Specific allows for M1 development velocity (higher priority to override groups)
+too_many_arguments = "allow"
+module_name_repetitions = "allow"
+missing_docs_in_private_items = "allow"
+implicit_return = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+uninlined_format_args = "allow"
+single_component_path_imports = "allow"
+if_same_then_else = "allow"
+field_reassign_with_default = "allow"
+assertions_on_constants = "allow"

@@ -1,5 +1,3 @@
-#![cfg(feature = "benchmarks")]
-
 //! Parser performance benchmarks
 //!
 //! This module provides comprehensive benchmarking for all parser components
@@ -527,7 +525,7 @@ impl ParserBenchmarks {
             ),
             (
                 types::CqlTypeId::Timestamp,
-                crate::Value::Timestamp(1640995200000000),
+                crate::Value::Timestamp(1_640_995_200_000_000),
             ), // 2022-01-01
         ]
     }

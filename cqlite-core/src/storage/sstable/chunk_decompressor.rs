@@ -418,7 +418,7 @@ pub fn create_decompressor_from_file(
     let compression_data = std::fs::read(compression_info_path).map_err(|e| Error::Io(e))?;
 
     let compression_info = CompressionInfo::parse(&compression_data)
-        .or_else(|parse_err| {
+        .or_else(|_parse_err| {
             #[cfg(feature = "legacy-heuristics")]
             {
                 CompressionInfo::parse_alternative_format(&compression_data)
@@ -427,7 +427,7 @@ pub fn create_decompressor_from_file(
             {
                 Err(crate::error::Error::InvalidFormat(format!(
                     "Failed to parse CompressionInfo.db in standard format. Enable legacy-heuristics feature for fallback support. Original error: {}",
-                    parse_err
+                    _parse_err
                 )))
             }
         })?;

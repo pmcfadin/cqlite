@@ -4,9 +4,11 @@
 //! for Cassandra 5.0 byte-comparable key encoding used in BTI format.
 
 #[cfg(test)]
-use cqlite_core::types::{Value, UdtValue, UdtField};
+use cqlite_core::storage::sstable::bti::encoder::{
+    BatchEncoder, ByteComparableEncoder, EncoderConfig,
+};
 #[cfg(test)]
-use cqlite_core::storage::sstable::bti::encoder::{ByteComparableEncoder, BatchEncoder, EncoderConfig};
+use cqlite_core::types::{UdtField, UdtValue, Value};
 
 #[cfg(test)]
 mod bti_encoder_tests {
@@ -97,9 +99,9 @@ mod bti_encoder_tests {
             "a",
             "hello",
             "hello world",
-            "café",       // UTF-8 accented characters
-            "🚀",         // UTF-8 emoji
-            "你好",       // UTF-8 Chinese characters
+            "café", // UTF-8 accented characters
+            "🚀",   // UTF-8 emoji
+            "你好", // UTF-8 Chinese characters
             // Note: Removed embedded null test case as it requires special handling
             // TODO: Implement proper null byte handling in BTI encoding
             "a\x01b",     // Control character

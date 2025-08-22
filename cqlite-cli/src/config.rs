@@ -104,8 +104,7 @@ impl Default for LoggingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum LogFormat {
     Plain,
     Json,
@@ -243,7 +242,6 @@ impl Config {
         Ok(())
     }
 }
-
 
 impl Default for ReplConfig {
     fn default() -> Self {

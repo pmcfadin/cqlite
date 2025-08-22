@@ -7,7 +7,7 @@
 use clap::{Arg, Command};
 #[cfg(feature = "benchmarks")]
 use cqlite_tests::{
-    BenchmarkRunnerConfig, PerformanceBenchmarkRunner, TestConfiguration,
+    BenchmarkRunnerConfig, PerformanceBenchmarkRunner,
     performance_benchmark_runner::PerformanceTargets,
 };
 #[cfg(feature = "benchmarks")]
@@ -15,8 +15,6 @@ use std::path::PathBuf;
 #[cfg(feature = "benchmarks")]
 use std::process;
 #[cfg(feature = "benchmarks")]
-use tokio;
-
 #[cfg(feature = "benchmarks")]
 #[tokio::main]
 async fn main() {
@@ -98,7 +96,7 @@ async fn main() {
         .get_one::<PathBuf>("output")
         .cloned()
         .unwrap_or_else(|| PathBuf::from("./performance-reports"));
-    let threads = matches.get_one::<usize>("threads").copied().unwrap_or(4);
+    let _threads = matches.get_one::<usize>("threads").copied().unwrap_or(4);
     let benchmark_only = matches.get_flag("benchmark-only");
     let validation_only = matches.get_flag("validation-only");
     let enable_benchmarks = !matches.get_flag("skip-benchmarks");
@@ -112,15 +110,21 @@ async fn main() {
 
     // Create output directory
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
-        eprintln!("Error creating output directory: {}", e);
+        eprintln!("Error creating output directory: {e}");
         process::exit(1);
     }
 
     let mut config = if let Some(config_path) = config_file {
-        match BenchmarkRunnerConfig::from_file(config_path) {
-            Ok(config) => config,
+        match std::fs::read_to_string(config_path) {
+            Ok(content) => match toml::from_str::<BenchmarkRunnerConfig>(&content) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("Error parsing config file: {e}");
+                    process::exit(1);
+                }
+            },
             Err(e) => {
-                eprintln!("Error loading config file: {}", e);
+                eprintln!("Error reading config file: {e}");
                 process::exit(1);
             }
         }
@@ -129,58 +133,64 @@ async fn main() {
     };
 
     config.output_directory = output_dir;
-    config.num_threads = threads;
-    config.verbose = verbose;
 
     if let Some(targets_path) = targets_file {
-        match PerformanceTargets::from_file(targets_path) {
-            Ok(targets) => config.performance_targets = Some(targets),
+        match std::fs::read_to_string(targets_path) {
+            Ok(content) => match toml::from_str::<PerformanceTargets>(&content) {
+                Ok(targets) => {
+                    config.test_config.performance_targets = targets;
+                }
+                Err(e) => {
+                    eprintln!("Error parsing targets file: {e}");
+                    process::exit(1);
+                }
+            },
             Err(e) => {
-                eprintln!("Error loading targets file: {}", e);
+                eprintln!("Error reading targets file: {e}");
                 process::exit(1);
             }
         }
     }
 
-    let test_config = TestConfiguration {
-        run_benchmarks: enable_benchmarks && !validation_only,
-        run_validation: !benchmark_only,
-        run_regression_tests: !benchmark_only,
-        enable_stress_tests: true,
-        max_concurrent_tests: threads,
-    };
+    // Update config based on command line flags
+    config.enable_benchmarking = enable_benchmarks && !validation_only;
+    config.enable_validation = !benchmark_only;
+    config.enable_regression_testing = !benchmark_only;
 
     println!("🚀 Starting CQLite Performance Validation");
     println!("================================================");
     if verbose {
         println!("Configuration:");
         println!("  Output Directory: {:?}", config.output_directory);
-        println!("  Threads: {}", config.num_threads);
-        println!("  Benchmarks: {}", test_config.run_benchmarks);
-        println!("  Validation: {}", test_config.run_validation);
-        println!("  Regression Tests: {}", test_config.run_regression_tests);
+        println!("  Benchmarks: {}", config.enable_benchmarking);
+        println!("  Validation: {}", config.enable_validation);
+        println!("  Regression Tests: {}", config.enable_regression_testing);
         println!();
     }
 
-    let mut runner = PerformanceBenchmarkRunner::new(config);
+    let runner = PerformanceBenchmarkRunner::new(config);
 
-    match runner.run_with_config(test_config).await {
+    match runner.run_all_tests().await {
         Ok(results) => {
             println!("✅ Performance validation completed successfully");
             println!("📊 Results summary:");
-            println!("   Total tests: {}", results.total_tests);
-            println!("   Passed tests: {}", results.passed_tests);
-            println!("   Failed tests: {}", results.failed_tests);
-            println!("   Success rate: {:.1}%", results.success_rate * 100.0);
-            println!("   Overall runtime: {}ms", results.total_runtime_ms);
+            println!(
+                "   Total runtime: {:.2}s",
+                results.metadata.total_runtime_seconds
+            );
+            println!("   Overall grade: {}", results.summary.overall_grade);
+            println!(
+                "   Performance score: {}/100",
+                results.summary.performance_score
+            );
 
-            if !results.overall_success {
+            if results.summary.overall_grade == "F" {
                 println!("❌ Some performance tests failed or didn't meet targets");
                 process::exit(1);
             }
         }
         Err(e) => {
-            eprintln!("❌ Performance validation failed: {}", e);
+            eprintln!("❌ Performance validation failed: {e}");
             process::exit(1);
         }
     }

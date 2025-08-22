@@ -80,11 +80,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🚀 CQLite Integration Test Runner");
     println!("{}", "=".repeat(60));
-    println!("Test Type: {}", test_type);
-    println!("Timeout: {}s", timeout);
-    println!("Output Directory: {}", output_dir);
+    println!("Test Type: {test_type}");
+    println!("Timeout: {timeout}s");
+    println!("Output Directory: {output_dir}");
     if generate_fixtures {
-        println!("Generate Fixtures: {} records", fixture_count);
+        println!("Generate Fixtures: {fixture_count} records");
         println!("Compression: {}", !no_compression);
     }
     println!();
@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         _ => {
-            eprintln!("❌ Unknown test type: {}", test_type);
+            eprintln!("❌ Unknown test type: {test_type}");
             return Err("Invalid test type".into());
         }
     }
@@ -272,7 +272,7 @@ async fn run_cli_tests(timeout: u64, verbose: bool) -> Result<(), Box<dyn std::e
 
     let failed_count = results.iter().filter(|r| !r.success).count();
     if failed_count > 0 {
-        eprintln!("❌ {} CLI tests failed", failed_count);
+        eprintln!("❌ {failed_count} CLI tests failed");
         // Don't fail the entire suite for CLI issues since implementation may be incomplete
         println!("⚠️  CLI test failures may be due to incomplete implementation");
     } else {

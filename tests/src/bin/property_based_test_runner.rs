@@ -6,7 +6,7 @@
 /// and correctness across various Cassandra data types and edge cases.
 ///
 /// CRITICAL SUCCESS FACTOR: Command-line test execution MUST work reliably!
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -123,7 +123,7 @@ impl PropertyBasedTestRunner {
         let mut total_failures = 0;
 
         for test_name in test_names {
-            println!("🔍 Running: {}", test_name);
+            println!("🔍 Running: {test_name}");
 
             let result = match test_name {
                 "Serialization Round-trip" => self.test_serialization_roundtrip(),
@@ -157,14 +157,14 @@ impl PropertyBasedTestRunner {
                             result.execution_time.as_secs_f64()
                         );
                         if let Some(error) = &result.error_message {
-                            println!("  🐛 Error: {}", error);
+                            println!("  🐛 Error: {error}");
                         }
                     }
                     self.suite.results.push(result);
                 }
                 Err(e) => {
                     total_failures += 1;
-                    println!("  💥 {} failed to execute: {}", test_name, e);
+                    println!("  💥 {test_name} failed to execute: {e}");
                     self.suite.results.push(PropertyTestResult {
                         test_name: test_name.to_lowercase().replace(' ', "_"),
                         success: false,
@@ -310,7 +310,7 @@ impl PropertyBasedTestRunner {
         }
     }
 
-    pub fn save_results(&self, output_path: &PathBuf) -> Result<()> {
+    pub fn save_results(&self, output_path: &Path) -> Result<()> {
         let json_output = serde_json::to_string_pretty(&self.suite)
             .context("Failed to serialize test results")?;
 
@@ -377,9 +377,11 @@ fn main() -> Result<()> {
 
     let output_path = PathBuf::from(matches.get_one::<String>("output").unwrap());
 
-    let mut config = PropertyTestConfig::default();
-    config.cases = cases;
-    config.timeout = Duration::from_secs(timeout_secs);
+    let config = PropertyTestConfig {
+        cases,
+        timeout: Duration::from_secs(timeout_secs),
+        ..Default::default()
+    };
 
     // Create and run test runner
     let mut runner = PropertyBasedTestRunner::new(config);
@@ -391,7 +393,7 @@ fn main() -> Result<()> {
             std::process::exit(0);
         }
         Err(e) => {
-            eprintln!("❌ Property-based testing failed: {}", e);
+            eprintln!("❌ Property-based testing failed: {e}");
             runner.save_results(&output_path)?;
             std::process::exit(1);
         }

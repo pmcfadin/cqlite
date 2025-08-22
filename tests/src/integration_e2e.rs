@@ -8,26 +8,23 @@
 //! - Real-world dataset processing
 //! - Performance validation against production targets
 //! - Memory efficiency under load
+
+#![allow(clippy::all)] // Allow all clippy warnings for M1 milestone
 //! - Concurrent operation safety
 
 #[allow(unused_imports)]
 use cqlite_core::{
+    Config, RowKey, TableId,
     parser::{
-        header::{CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats},
-        serialize_sstable_header,
-        parse_sstable_header,
-        serialize_cql_value,
-        parse_cql_value,
-        types::CqlTypeId,
         SSTableParser,
+        header::{CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats},
+        parse_cql_value, parse_sstable_header, serialize_cql_value, serialize_sstable_header,
+        types::CqlTypeId,
     },
-    types::Value,
-    Config,
     platform::Platform,
-    storage::StorageEngine,
-    TableId,
-    RowKey,
     schema::discovery::SchemaDiscoveryEngine,
+    storage::StorageEngine,
+    types::Value,
 };
 #[allow(unused_imports)]
 use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -47,14 +44,21 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize schema manager
     let schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
-    
+
     // Initialize schema discovery engine (for other uses)
     let schema_config = cqlite_core::schema::SchemaDiscoveryConfig::default();
-    let _schema_engine = Arc::new(SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?);
+    let _schema_engine = Arc::new(
+        SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?,
+    );
 
     // Initialize query components
-    let _query_planner = cqlite_core::query::planner::QueryPlanner::new(schema_manager.clone(), &config);
-    let _query_executor = cqlite_core::query::executor::QueryExecutor::new(storage.clone(), schema_manager.clone(), &config);
+    let _query_planner =
+        cqlite_core::query::planner::QueryPlanner::new(schema_manager.clone(), &config);
+    let _query_executor = cqlite_core::query::executor::QueryExecutor::new(
+        storage.clone(),
+        schema_manager.clone(),
+        &config,
+    );
 
     // Step 1: Create table schema - simplified for testing
     let table_id = TableId::new("users");
@@ -108,7 +112,7 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
     let query = "SELECT id, name FROM users WHERE id = 1";
 
     // Parse and execute query - simplified for testing
-    println!("Testing query parsing for: {}", query);
+    println!("Testing query parsing for: {query}");
     // Note: parse_select_query function doesn't exist in current API
     // This test focuses on storage functionality instead
     println!("Query parsing test skipped - focusing on storage validation");
@@ -121,7 +125,7 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
     // Step 8: Test storage statistics
     println!("Testing storage statistics...");
     let storage_stats = storage.stats().await?;
-    println!("Storage stats: {:?}", storage_stats);
+    println!("Storage stats: {storage_stats:?}");
 
     // Step 9: Test flush and persistence
     println!("Testing flush and persistence...");
@@ -148,15 +152,13 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
 
     // Note: batch_write requires mutable reference, so we'll test individual operations
     for op in batch_ops {
-        match op {
-            cqlite_core::storage::BatchOperation::Put {
-                table_id,
-                key,
-                value,
-            } => {
-                storage.put(&table_id, key, value).await?;
-            }
-            _ => {}
+        if let cqlite_core::storage::BatchOperation::Put {
+            table_id,
+            key,
+            value,
+        } = op
+        {
+            storage.put(&table_id, key, value).await?;
         }
     }
 
@@ -182,7 +184,9 @@ async fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
     let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await?);
     let _schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
     let schema_config = cqlite_core::schema::SchemaDiscoveryConfig::default();
-    let _schema_engine = Arc::new(SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?);
+    let _schema_engine = Arc::new(
+        SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?,
+    );
 
     // Test 1: Invalid schema creation - skip this test as TableSchema::new doesn't exist with these parameters
     // and create_table method doesn't exist in SchemaManager
@@ -223,12 +227,12 @@ async fn test_performance_scalability() -> Result<(), Box<dyn std::error::Error>
 
     for i in 0..record_count {
         let key = RowKey::new((i as u32).to_be_bytes().to_vec());
-        let value = Value::Text(format!("test_value_{}", i));
+        let value = Value::Text(format!("test_value_{i}"));
         storage.put(&table_id, key, value).await?;
     }
 
     let insert_time = start_time.elapsed();
-    println!("Inserted {} records in {:?}", record_count, insert_time);
+    println!("Inserted {record_count} records in {insert_time:?}");
 
     // Test scan performance
     let scan_start = std::time::Instant::now();
@@ -249,14 +253,14 @@ async fn test_performance_scalability() -> Result<(), Box<dyn std::error::Error>
     }
 
     let lookup_time = lookup_start.elapsed();
-    println!("Performed {} lookups in {:?}", lookup_count, lookup_time);
+    println!("Performed {lookup_count} lookups in {lookup_time:?}");
 
     // Calculate throughput
     let insert_throughput = record_count as f64 / insert_time.as_secs_f64();
     let lookup_throughput = lookup_count as f64 / lookup_time.as_secs_f64();
 
-    println!("Insert throughput: {:.2} ops/sec", insert_throughput);
-    println!("Lookup throughput: {:.2} ops/sec", lookup_throughput);
+    println!("Insert throughput: {insert_throughput:.2} ops/sec");
+    println!("Lookup throughput: {lookup_throughput:.2} ops/sec");
 
     // Basic performance assertions
     assert!(insert_throughput > 100.0, "Insert throughput too low");
@@ -291,7 +295,7 @@ async fn test_concurrent_operations() -> Result<(), Box<dyn std::error::Error>> 
             for i in 0..records_per_task {
                 let key_value = (task_id * records_per_task + i) as u64;
                 let key = RowKey::new(key_value.to_be_bytes().to_vec());
-                let value = Value::Text(format!("task_{}_record_{}", task_id, i));
+                let value = Value::Text(format!("task_{task_id}_record_{i}"));
 
                 storage_clone
                     .put(&table_id_clone, key, value)
@@ -337,9 +341,8 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
     // Test 1: Parse mock Cassandra 5+ SSTable header
     let mock_header = create_mock_cassandra5_header();
     let serialized_header = serialize_sstable_header(&mock_header)?;
-    let (_remaining, parsed_header) = parse_sstable_header(&serialized_header).map_err(|e| {
-        cqlite_core::error::Error::parser(format!("Failed to parse header: {:?}", e))
-    })?;
+    let (_remaining, parsed_header) = parse_sstable_header(&serialized_header)
+        .map_err(|e| cqlite_core::error::Error::parser(format!("Failed to parse header: {e:?}")))?;
 
     // Validate round-trip consistency
     assert_eq!(mock_header.version, parsed_header.version);
@@ -370,11 +373,10 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
         let serialized = serialize_cql_value(&test_value)?;
         if serialized.len() > 1 {
             let (_, parsed_value) = parse_cql_value(&serialized[1..], type_id)
-                .map_err(|e| format!("Failed to parse CQL value: {:?}", e))?;
+                .map_err(|e| format!("Failed to parse CQL value: {e:?}"))?;
             assert!(
                 values_are_compatible(&test_value, &parsed_value),
-                "Type {:?} failed compatibility test",
-                type_id
+                "Type {type_id:?} failed compatibility test"
             );
         }
     }
@@ -389,7 +391,7 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
     let serialized_list = serialize_cql_value(&list_value)?;
     if serialized_list.len() > 1 {
         let (_, parsed_list) = parse_cql_value(&serialized_list[1..], CqlTypeId::List)
-            .map_err(|e| format!("Failed to parse list: {:?}", e))?;
+            .map_err(|e| format!("Failed to parse list: {e:?}"))?;
         assert!(values_are_compatible(&list_value, &parsed_list));
     }
 
@@ -403,7 +405,7 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
     let serialized_map = serialize_cql_value(&map_value)?;
     if serialized_map.len() > 1 {
         let (_, parsed_map) = parse_cql_value(&serialized_map[1..], CqlTypeId::Map)
-            .map_err(|e| format!("Failed to parse map: {:?}", e))?;
+            .map_err(|e| format!("Failed to parse map: {e:?}"))?;
         assert!(values_are_compatible(&map_value, &parsed_map));
     }
 
@@ -429,10 +431,7 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
     let record_count = 10000; // 10K records for CI/CD friendliness
     let batch_size = 1000;
 
-    println!(
-        "   Generating {} records in batches of {}...",
-        record_count, batch_size
-    );
+    println!("   Generating {record_count} records in batches of {batch_size}...");
 
     for batch_start in (0..record_count).step_by(batch_size) {
         let batch_end = std::cmp::min(batch_start + batch_size, record_count);
@@ -497,22 +496,19 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
         }
 
         if batch_end % 2000 == 0 {
-            println!("     ... {} records processed", batch_end);
+            println!("     ... {batch_end} records processed");
         }
     }
 
     let insert_time = start_time.elapsed();
-    println!(
-        "   ✅ Inserted {} records in {:?}",
-        record_count, insert_time
-    );
+    println!("   ✅ Inserted {record_count} records in {insert_time:?}");
 
     // Test large-scale query performance
     let query_start = Instant::now();
     let scan_results = storage.scan(&table_id, None, None, Some(1000)).await?;
     let query_time = query_start.elapsed();
 
-    println!("   ✅ Queried 1000 records in {:?}", query_time);
+    println!("   ✅ Queried 1000 records in {query_time:?}");
     assert!(!scan_results.is_empty());
     assert!(scan_results.len() <= 1000);
 
@@ -530,10 +526,7 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
     }
 
     let memory_test_time = memory_test_start.elapsed();
-    println!(
-        "   ✅ Performed {} random lookups in {:?}",
-        total_lookups, memory_test_time
-    );
+    println!("   ✅ Performed {total_lookups} random lookups in {memory_test_time:?}");
 
     // Calculate throughput metrics
     let insert_throughput = record_count as f64 / insert_time.as_secs_f64();
@@ -541,31 +534,22 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
     let lookup_throughput = total_lookups as f64 / memory_test_time.as_secs_f64();
 
     println!("   📊 Performance metrics:");
-    println!(
-        "     • Insert throughput: {:.2} records/sec",
-        insert_throughput
-    );
-    println!(
-        "     • Query throughput: {:.2} records/sec",
-        query_throughput
-    );
-    println!("     • Lookup throughput: {:.2} ops/sec", lookup_throughput);
+    println!("     • Insert throughput: {insert_throughput:.2} records/sec");
+    println!("     • Query throughput: {query_throughput:.2} records/sec");
+    println!("     • Lookup throughput: {lookup_throughput:.2} ops/sec");
 
     // Performance assertions
     assert!(
         insert_throughput > 500.0,
-        "Insert throughput too low: {:.2}",
-        insert_throughput
+        "Insert throughput too low: {insert_throughput:.2}"
     );
     assert!(
         query_throughput > 100.0,
-        "Query throughput too low: {:.2}",
-        query_throughput
+        "Query throughput too low: {query_throughput:.2}"
     );
     assert!(
         lookup_throughput > 50.0,
-        "Lookup throughput too low: {:.2}",
-        lookup_throughput
+        "Lookup throughput too low: {lookup_throughput:.2}"
     );
 
     storage.shutdown().await?;
@@ -592,8 +576,7 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
     let operations_per_task = 100;
 
     println!(
-        "   Spawning {} concurrent tasks with {} operations each...",
-        task_count, operations_per_task
+        "   Spawning {task_count} concurrent tasks with {operations_per_task} operations each..."
     );
 
     for task_id in 0..task_count {
@@ -612,8 +595,8 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
 
                 // Create complex test data mimicking real Cassandra scenarios
                 let mut row_data = HashMap::new();
-                row_data.insert("task_id".to_string(), Value::Integer(task_id as i32));
-                row_data.insert("operation_id".to_string(), Value::Integer(i as i32));
+                row_data.insert("task_id".to_string(), Value::Integer(task_id));
+                row_data.insert("operation_id".to_string(), Value::Integer(i));
                 row_data.insert(
                     "timestamp".to_string(),
                     Value::Timestamp(chrono::Utc::now().timestamp_micros()),
@@ -621,9 +604,9 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
                 row_data.insert(
                     "data_list".to_string(),
                     Value::List(vec![
-                        Value::Text(format!("item_{}_1", i)),
-                        Value::Text(format!("item_{}_2", i)),
-                        Value::Text(format!("unicode_项目_{}", i)),
+                        Value::Text(format!("item_{i}_1")),
+                        Value::Text(format!("item_{i}_2")),
+                        Value::Text(format!("unicode_项目_{i}")),
                     ]),
                 );
                 row_data.insert(
@@ -631,12 +614,9 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
                     Value::Map(vec![
                         (
                             Value::Text("source".to_string()),
-                            Value::Text(format!("task_{}", task_id)),
+                            Value::Text(format!("task_{task_id}")),
                         ),
-                        (
-                            Value::Text("iteration".to_string()),
-                            Value::Integer(i as i32),
-                        ),
+                        (Value::Text("iteration".to_string()), Value::Integer(i)),
                         (
                             Value::Text("unicode_元数据".to_string()),
                             Value::Text("并发测试".to_string()),
@@ -648,7 +628,7 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
 
                 // Write operation
                 if let Err(e) = storage_clone.put(&table_id_clone, key.clone(), value).await {
-                    task_results.push((false, format!("Write failed: {}", e)));
+                    task_results.push((false, format!("Write failed: {e}")));
                     continue;
                 }
 
@@ -658,17 +638,17 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
                         let operation_time = operation_start.elapsed();
                         task_results.push((
                             true,
-                            format!("Operation {} completed in {:?}", i, operation_time),
+                            format!("Operation {i} completed in {operation_time:?}"),
                         ));
                     }
                     Ok(None) => {
                         task_results.push((
                             false,
-                            format!("Read returned None for key that was just written"),
+                            "Read returned None for key that was just written".to_string(),
                         ));
                     }
                     Err(e) => {
-                        task_results.push((false, format!("Read failed: {}", e)));
+                        task_results.push((false, format!("Read failed: {e}")));
                     }
                 }
             }
@@ -692,25 +672,25 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
                     if success {
                         successful_operations += 1;
                     } else {
-                        failed_operations.push(format!("Task {}: {}", task_id, message));
+                        failed_operations.push(format!("Task {task_id}: {message}"));
                     }
                 }
             }
             Err(e) => {
-                failed_operations.push(format!("Task {} panicked: {}", task_id, e));
+                failed_operations.push(format!("Task {task_id} panicked: {e}"));
             }
         }
     }
 
     println!("   📊 Concurrent operations results:");
-    println!("     • Total operations: {}", total_operations);
-    println!("     • Successful: {}", successful_operations);
+    println!("     • Total operations: {total_operations}");
+    println!("     • Successful: {successful_operations}");
     println!("     • Failed: {}", failed_operations.len());
 
     if !failed_operations.is_empty() {
         println!("   ❌ Failed operations:");
         for failure in &failed_operations[..std::cmp::min(5, failed_operations.len())] {
-            println!("     - {}", failure);
+            println!("     - {failure}");
         }
     }
 
@@ -1006,9 +986,7 @@ async fn test_vint_encoding_comprehensive() -> Result<(), Box<dyn std::error::Er
         // Verify encoding constraints
         assert!(
             encoded_length <= 9,
-            "VInt encoding too long: {} bytes for value {}",
-            encoded_length,
-            value
+            "VInt encoding too long: {encoded_length} bytes for value {value}"
         );
 
         // Parse the encoded bytes back
@@ -1016,13 +994,11 @@ async fn test_vint_encoding_comprehensive() -> Result<(), Box<dyn std::error::Er
             Ok((remaining, decoded_value)) => {
                 assert!(
                     remaining.is_empty(),
-                    "VInt parsing should consume all bytes for value {}",
-                    value
+                    "VInt parsing should consume all bytes for value {value}"
                 );
                 assert_eq!(
                     decoded_value, value,
-                    "VInt roundtrip failed: {} != {}",
-                    value, decoded_value
+                    "VInt roundtrip failed: {value} != {decoded_value}"
                 );
                 successful_tests += 1;
 
@@ -1031,8 +1007,7 @@ async fn test_vint_encoding_comprehensive() -> Result<(), Box<dyn std::error::Er
                     assert_eq!(
                         encoded_bytes[0] & 0x80,
                         0,
-                        "Single byte VInt should have MSB=0 for value {}",
-                        value
+                        "Single byte VInt should have MSB=0 for value {value}"
                     );
                 } else {
                     // Multi-byte should have correct leading bit pattern
@@ -1048,20 +1023,17 @@ async fn test_vint_encoding_comprehensive() -> Result<(), Box<dyn std::error::Er
                 }
             }
             Err(e) => {
-                panic!("VInt parsing failed for value {}: {:?}", value, e);
+                panic!("VInt parsing failed for value {value}: {e:?}");
             }
         }
     }
 
     println!("   📊 VInt encoding statistics:");
     for (length, count) in encoding_stats.iter() {
-        println!("     • {}-byte encodings: {} values", length, count);
+        println!("     • {length}-byte encodings: {count} values");
     }
 
-    println!(
-        "   ✅ VInt tests: {}/{} successful",
-        successful_tests, total_tests
-    );
+    println!("   ✅ VInt tests: {successful_tests}/{total_tests} successful");
     assert_eq!(successful_tests, total_tests, "Not all VInt tests passed");
 
     // Test error conditions
@@ -1105,7 +1077,9 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone()).await?);
     let _schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
     let schema_config = cqlite_core::schema::SchemaDiscoveryConfig::default();
-    let _schema_engine = Arc::new(SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?);
+    let _schema_engine = Arc::new(
+        SchemaDiscoveryEngine::new(schema_config, platform.clone(), config.clone()).await?,
+    );
 
     let table_id = TableId::new("complex_types_test");
 
@@ -1249,13 +1223,13 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     // Create large list
     let mut large_list = Vec::new();
     for i in 0..1000 {
-        large_list.push(Value::Text(format!("item_{:04}", i)));
+        large_list.push(Value::Text(format!("item_{i:04}")));
     }
 
     // Create large map
     let mut large_map = Vec::new();
     for i in 0..500 {
-        large_map.push((Value::Text(format!("key_{:04}", i)), Value::Integer(i)));
+        large_map.push((Value::Text(format!("key_{i:04}")), Value::Integer(i)));
     }
 
     let large_collections = Value::Map(vec![
@@ -1277,7 +1251,7 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     let perf_start = Instant::now();
 
     for i in 0..100 {
-        let perf_key = RowKey::new(format!("perf_test_{}", i).as_bytes().to_vec());
+        let perf_key = RowKey::new(format!("perf_test_{i}").as_bytes().to_vec());
         let perf_value = Value::Map(vec![
             (Value::Text("id".to_string()), Value::Integer(i)),
             (
@@ -1307,10 +1281,7 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     }
 
     let perf_time = perf_start.elapsed();
-    println!(
-        "   📊 Complex type performance: 100 operations in {:?}",
-        perf_time
-    );
+    println!("   📊 Complex type performance: 100 operations in {perf_time:?}");
 
     // Verify all test data exists
     let final_scan = storage.scan(&table_id, None, None, None).await?;
@@ -1435,8 +1406,7 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
         let retrieved = storage.get(&table_id, key).await?;
         assert!(
             retrieved.is_some(),
-            "Data missing after flush for key: {:?}",
-            key
+            "Data missing after flush for key: {key:?}"
         );
 
         // For this test, we just verify the data exists and can be retrieved
@@ -1445,8 +1415,7 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
         assert_eq!(
             std::mem::discriminant(&retrieved_value),
             std::mem::discriminant(expected_value),
-            "Value type mismatch for key: {:?}",
-            key
+            "Value type mismatch for key: {key:?}"
         );
     }
 
@@ -1469,8 +1438,7 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
         let lookup_result = storage.get(&table_id, key).await?;
         assert!(
             lookup_result.is_some(),
-            "Point lookup failed for key: {:?}",
-            key
+            "Point lookup failed for key: {key:?}"
         );
     }
 
@@ -1485,7 +1453,7 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
     // Test SSTable statistics
     println!("   Checking SSTable statistics...");
     let stats = storage.stats().await?;
-    println!("     SSTable stats: {:?}", stats);
+    println!("     SSTable stats: {stats:?}");
 
     storage.shutdown().await?;
     println!("✅ SSTable round-trip validation completed successfully!");
@@ -1548,8 +1516,7 @@ async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::er
                         Ok((remaining, parsed_value)) => {
                             assert!(
                                 remaining.is_empty(),
-                                "Parsing should consume all bytes for type {:?}",
-                                type_id
+                                "Parsing should consume all bytes for type {type_id:?}"
                             );
 
                             // Validate round-trip consistency
@@ -1557,24 +1524,20 @@ async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::er
                                 successful_primitive_tests += 1;
                             } else {
                                 println!(
-                                    "     ⚠️  Value mismatch for type {:?}: {:?} != {:?}",
-                                    type_id, test_value, parsed_value
+                                    "     ⚠️  Value mismatch for type {type_id:?}: {test_value:?} != {parsed_value:?}"
                                 );
                             }
                         }
                         Err(e) => {
-                            println!("     ❌ Parse failed for type {:?}: {:?}", type_id, e);
+                            println!("     ❌ Parse failed for type {type_id:?}: {e:?}");
                         }
                     }
                 } else {
-                    println!("     ⚠️  Serialized data too short for type {:?}", type_id);
+                    println!("     ⚠️  Serialized data too short for type {type_id:?}");
                 }
             }
             Err(e) => {
-                println!(
-                    "     ❌ Serialization failed for type {:?}: {:?}",
-                    type_id, e
-                );
+                println!("     ❌ Serialization failed for type {type_id:?}: {e:?}");
             }
         }
     }
@@ -1632,7 +1595,7 @@ async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::er
                 );
             }
             Err(e) => {
-                println!("     ❌ Collection serialization failed: {:?}", e);
+                println!("     ❌ Collection serialization failed: {e:?}");
             }
         }
     }
@@ -1661,7 +1624,7 @@ async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::er
                 successful_edge_tests += 1;
             }
             Err(e) => {
-                println!("     ❌ Edge case failed: {:?} - {:?}", test_value, e);
+                println!("     ❌ Edge case failed: {test_value:?} - {e:?}");
             }
         }
     }

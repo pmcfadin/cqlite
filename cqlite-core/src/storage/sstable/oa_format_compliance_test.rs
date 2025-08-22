@@ -406,7 +406,8 @@ mod tests {
 
         let header = result.unwrap();
         assert_eq!(
-            0x6F610000, 0x6F610000, // header.magic_number would be private,
+            0x6F610000,
+            0x6F610000, // header.magic_number would be private,
             "Should correctly identify 'oa' format magic number"
         );
         assert_eq!(

@@ -3,11 +3,10 @@
 //! Comprehensive tests for SSTable format robustness, corruption handling,
 //! and extreme edge cases that could break Cassandra compatibility.
 
-
+use cqlite_core::error::Result;
 use cqlite_core::parser::header::*;
 use cqlite_core::parser::types::*;
 use cqlite_core::parser::vint::*;
-use cqlite_core::error::Result;
 
 /// Comprehensive SSTable corruption and robustness test suite
 pub struct SSTableCorruptionTests {

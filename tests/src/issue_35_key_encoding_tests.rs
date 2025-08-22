@@ -195,7 +195,10 @@ impl Issue35KeyEncodingTests {
                 Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             ),
             (ComparatorType::Boolean, Value::Boolean(true)),
-            (ComparatorType::Uuid, Value::Uuid(uuid::Uuid::new_v4().into_bytes())),
+            (
+                ComparatorType::Uuid,
+                Value::Uuid(uuid::Uuid::new_v4().into_bytes()),
+            ),
         ];
 
         for (comparator, value) in test_cases {

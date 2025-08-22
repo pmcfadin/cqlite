@@ -197,7 +197,11 @@ impl ByteComparableEncoder {
                 self.encode_blob(data)
             }
             Value::Decimal { scale: _, unscaled } => self.encode_blob(unscaled), // Treat decimal as blob for BTI
-            Value::Duration { months, days, nanos } => {
+            Value::Duration {
+                months,
+                days,
+                nanos,
+            } => {
                 // Encode duration as a composite key
                 self.buffer.push(type_prefixes::DURATION);
                 self.encode_int(*months)?;
@@ -620,14 +624,44 @@ impl ByteComparableDecoder {
             .collect::<Vec<_>>()
             .join(" ");
 
-        // Try to detect if it looks like text
+        // Try to detect if it looks like text (allow null bytes)
         if let Ok(text) = std::str::from_utf8(encoded) {
-            if text
+            // Check if most characters are printable (allow some control chars like null)
+            let printable_count = text
                 .chars()
-                .all(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
-            {
-                return format!("\"{}\" ({})", text.trim_end_matches('\0'), hex);
+                .filter(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+                .count();
+            let total_count = text.chars().count();
+
+            if total_count > 0 && (printable_count as f32 / total_count as f32) >= 0.7 {
+                let clean_text = text.trim_end_matches('\0').trim();
+                if !clean_text.is_empty() {
+                    return format!("\"{}\" ({})", clean_text, hex);
+                }
             }
+        }
+
+        // Try to extract text even from binary data that might contain readable strings
+        let mut text_parts = Vec::new();
+        let mut current_text = String::new();
+
+        for &byte in encoded {
+            if byte.is_ascii_graphic() || byte == b' ' {
+                current_text.push(byte as char);
+            } else if !current_text.is_empty() {
+                text_parts.push(current_text.clone());
+                current_text.clear();
+            }
+        }
+
+        if !current_text.is_empty() {
+            text_parts.push(current_text);
+        }
+
+        // If we found any readable text parts, include them
+        if !text_parts.is_empty() {
+            let text_content = text_parts.join(" ");
+            return format!("\"{}\" ({})", text_content, hex);
         }
 
         format!("0x{}", hex)
@@ -864,8 +898,12 @@ mod tests {
         let uuid1 = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let uuid2 = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
 
-        let encoded1 = encoder.encode_value(&Value::Uuid(*uuid1.as_bytes())).unwrap();
-        let encoded2 = encoder.encode_value(&Value::Uuid(*uuid2.as_bytes())).unwrap();
+        let encoded1 = encoder
+            .encode_value(&Value::Uuid(*uuid1.as_bytes()))
+            .unwrap();
+        let encoded2 = encoder
+            .encode_value(&Value::Uuid(*uuid2.as_bytes()))
+            .unwrap();
 
         assert!(encoded1 < encoded2);
     }
@@ -892,7 +930,11 @@ mod tests {
         let mut encoder = ByteComparableEncoder::new();
 
         let list1 = Value::List(vec![Value::Integer(1), Value::Integer(2)]);
-        let list2 = Value::List(vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        let list2 = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
 
         let encoded1 = encoder.encode_value(&list1).unwrap();
         let encoded2 = encoder.encode_value(&list2).unwrap();

@@ -571,7 +571,10 @@ impl HardenedValidatorParser {
 
         // In test environments or when no test data paths are configured, return empty list
         if self.config.test_data_paths.is_empty() {
-            log::debug!("No test data paths configured, skipping data generation for {}", version);
+            log::debug!(
+                "No test data paths configured, skipping data generation for {}",
+                version
+            );
             return Ok(Vec::new());
         }
 
@@ -582,7 +585,10 @@ impl HardenedValidatorParser {
         // Check if the Python script exists before trying to run it
         let script_path = "test-data/scripts/generate_comprehensive_test_data.py";
         if !std::path::Path::new(script_path).exists() {
-            log::warn!("Test data generation script not found at {}, skipping", script_path);
+            log::warn!(
+                "Test data generation script not found at {}, skipping",
+                script_path
+            );
             return Ok(Vec::new());
         }
 
@@ -611,31 +617,35 @@ impl HardenedValidatorParser {
     }
 
     /// Discover SSTable files in directory
-    fn discover_sstable_files<'a>(&'a self, dir: &'a Path) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>> {
+    fn discover_sstable_files<'a>(
+        &'a self,
+        dir: &'a Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
+    {
         Box::pin(async move {
-        let mut files = Vec::new();
+            let mut files = Vec::new();
 
-        if !dir.exists() {
-            return Ok(files);
-        }
+            if !dir.exists() {
+                return Ok(files);
+            }
 
-        let mut entries = tokio::fs::read_dir(dir).await?;
+            let mut entries = tokio::fs::read_dir(dir).await?;
 
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
 
-            if path.is_dir() {
-                // Recursively search subdirectories
-                files.extend(self.discover_sstable_files(&path).await?);
-            } else if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                // Look for SSTable data files
-                if filename.ends_with("-Data.db") {
-                    files.push(path);
+                if path.is_dir() {
+                    // Recursively search subdirectories
+                    files.extend(self.discover_sstable_files(&path).await?);
+                } else if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    // Look for SSTable data files
+                    if filename.ends_with("-Data.db") {
+                        files.push(path);
+                    }
                 }
             }
-        }
 
-        Ok(files)
+            Ok(files)
         })
     }
 
@@ -924,9 +934,12 @@ impl HardenedValidatorParser {
             (input, Value::Null)
         } else if value_len == 0 {
             // Empty value
-            (input, self.create_empty_value_for_type(type_id).map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?)
+            (
+                input,
+                self.create_empty_value_for_type(type_id).map_err(|_| {
+                    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+                })?,
+            )
         } else {
             // Parse actual value with enhanced type support
             let (input, value_data) = take(value_len as usize)(input)?;
@@ -971,8 +984,11 @@ impl HardenedValidatorParser {
 
             // Standard types with version-specific handling
             _ => {
-                let (_, value) = parse_cql_value(data, type_id)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse CQL value".to_string()))?;
+                let (_, value) = parse_cql_value(data, type_id).map_err(
+                    |_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to parse CQL value".to_string())
+                    },
+                )?;
                 Ok(value)
             }
         }
@@ -991,8 +1007,10 @@ impl HardenedValidatorParser {
 
     /// Parse mixed-type list (Cassandra 5.0+)
     fn parse_mixed_type_list(&self, data: &[u8]) -> Result<Value> {
-        let (mut remaining, element_count) = parse_vint(data)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse list element count".to_string()))?;
+        let (mut remaining, element_count) =
+            parse_vint(data).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                Error::corruption("Failed to parse list element count".to_string())
+            })?;
 
         if element_count as usize > self.config.memory_limits.max_collection_size {
             return Err(Error::corruption(format!(
@@ -1005,19 +1023,25 @@ impl HardenedValidatorParser {
 
         for _ in 0..element_count {
             // Each element has its own type information
-            let (new_remaining, element_type) = be_u8(remaining)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse element type".to_string()))?;
+            let (new_remaining, element_type) =
+                be_u8(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                    Error::corruption("Failed to parse element type".to_string())
+                })?;
 
             let type_id = CqlTypeId::try_from(element_type).map_err(|_| {
                 Error::corruption(format!("Unknown element type: {}", element_type))
             })?;
 
-            let (new_remaining, element_len) = be_i32(new_remaining)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse element length".to_string()))?;
+            let (new_remaining, element_len) =
+                be_i32(new_remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                    Error::corruption("Failed to parse element length".to_string())
+                })?;
 
             if element_len > 0 {
                 let (new_remaining, element_data) = take(element_len as usize)(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to read element data".to_string()))?;
+                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to read element data".to_string())
+                    })?;
 
                 let element_value =
                     self.parse_value_enhanced(element_data, type_id, CassandraVersion::V5_0)?;
@@ -1035,8 +1059,10 @@ impl HardenedValidatorParser {
 
     /// Parse homogeneous list (legacy versions)
     fn parse_homogeneous_list(&self, data: &[u8]) -> Result<Value> {
-        let (remaining, element_count) = parse_vint(data)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse list element count".to_string()))?;
+        let (remaining, element_count) =
+            parse_vint(data).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                Error::corruption("Failed to parse list element count".to_string())
+            })?;
 
         if element_count as usize > self.config.memory_limits.max_collection_size {
             return Err(Error::corruption(format!(
@@ -1050,8 +1076,10 @@ impl HardenedValidatorParser {
         }
 
         // Parse element type (same for all elements)
-        let (mut remaining, element_type) = be_u8(remaining)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse element type".to_string()))?;
+        let (mut remaining, element_type) =
+            be_u8(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                Error::corruption("Failed to parse element type".to_string())
+            })?;
 
         let type_id = CqlTypeId::try_from(element_type)
             .map_err(|_| Error::corruption(format!("Unknown element type: {}", element_type)))?;
@@ -1059,12 +1087,16 @@ impl HardenedValidatorParser {
         let mut elements = Vec::with_capacity(element_count as usize);
 
         for _ in 0..element_count {
-            let (new_remaining, element_len) = be_i32(remaining)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse element length".to_string()))?;
+            let (new_remaining, element_len) =
+                be_i32(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                    Error::corruption("Failed to parse element length".to_string())
+                })?;
 
             if element_len > 0 {
                 let (new_remaining, element_data) = take(element_len as usize)(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to read element data".to_string()))?;
+                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to read element data".to_string())
+                    })?;
 
                 let element_value =
                     self.parse_value_enhanced(element_data, type_id, CassandraVersion::V4_0)?;
@@ -1094,8 +1126,10 @@ impl HardenedValidatorParser {
 
     /// Parse map with enhanced support
     fn parse_map_enhanced(&self, data: &[u8], version: CassandraVersion) -> Result<Value> {
-        let (mut remaining, pair_count) = parse_vint(data)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse map pair count".to_string()))?;
+        let (mut remaining, pair_count) =
+            parse_vint(data).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                Error::corruption("Failed to parse map pair count".to_string())
+            })?;
 
         if pair_count as usize > self.config.memory_limits.max_collection_size {
             return Err(Error::corruption(format!(
@@ -1114,28 +1148,42 @@ impl HardenedValidatorParser {
             // Cassandra 5.0+ with mixed types
             for _ in 0..pair_count {
                 // Parse key type and data
-                let (new_remaining, key_type) = be_u8(remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse key type".to_string()))?;
+                let (new_remaining, key_type) =
+                    be_u8(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to parse key type".to_string())
+                    })?;
                 let key_type_id = CqlTypeId::try_from(key_type)
                     .map_err(|_| Error::corruption(format!("Unknown key type: {}", key_type)))?;
 
-                let (new_remaining, key_len) = be_i32(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse key length".to_string()))?;
-                let (new_remaining, key_data) = take(key_len as usize)(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to read key data".to_string()))?;
+                let (new_remaining, key_len) =
+                    be_i32(new_remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to parse key length".to_string())
+                    })?;
+                let (new_remaining, key_data) = take(key_len as usize)(new_remaining).map_err(
+                    |_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to read key data".to_string())
+                    },
+                )?;
                 let key = self.parse_value_enhanced(key_data, key_type_id, version)?;
 
                 // Parse value type and data
-                let (new_remaining, value_type) = be_u8(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse value type".to_string()))?;
+                let (new_remaining, value_type) =
+                    be_u8(new_remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to parse value type".to_string())
+                    })?;
                 let value_type_id = CqlTypeId::try_from(value_type).map_err(|_| {
                     Error::corruption(format!("Unknown value type: {}", value_type))
                 })?;
 
-                let (new_remaining, value_len) = be_i32(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse value length".to_string()))?;
-                let (new_remaining, value_data) = take(value_len as usize)(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to read value data".to_string()))?;
+                let (new_remaining, value_len) =
+                    be_i32(new_remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to parse value length".to_string())
+                    })?;
+                let (new_remaining, value_data) = take(value_len as usize)(new_remaining).map_err(
+                    |_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to read value data".to_string())
+                    },
+                )?;
                 let value = self.parse_value_enhanced(value_data, value_type_id, version)?;
 
                 pairs.push((key, value));
@@ -1143,10 +1191,14 @@ impl HardenedValidatorParser {
             }
         } else {
             // Legacy homogeneous maps
-            let (new_remaining, key_type) = be_u8(remaining)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse key type".to_string()))?;
-            let (new_remaining, value_type) = be_u8(new_remaining)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse value type".to_string()))?;
+            let (new_remaining, key_type) =
+                be_u8(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                    Error::corruption("Failed to parse key type".to_string())
+                })?;
+            let (new_remaining, value_type) =
+                be_u8(new_remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                    Error::corruption("Failed to parse value type".to_string())
+                })?;
 
             let key_type_id = CqlTypeId::try_from(key_type)
                 .map_err(|_| Error::corruption(format!("Unknown key type: {}", key_type)))?;
@@ -1157,17 +1209,27 @@ impl HardenedValidatorParser {
 
             for _ in 0..pair_count {
                 // Parse key
-                let (new_remaining, key_len) = be_i32(remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse key length".to_string()))?;
-                let (new_remaining, key_data) = take(key_len as usize)(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to read key data".to_string()))?;
+                let (new_remaining, key_len) =
+                    be_i32(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to parse key length".to_string())
+                    })?;
+                let (new_remaining, key_data) = take(key_len as usize)(new_remaining).map_err(
+                    |_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to read key data".to_string())
+                    },
+                )?;
                 let key = self.parse_value_enhanced(key_data, key_type_id, version)?;
 
                 // Parse value
-                let (new_remaining, value_len) = be_i32(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse value length".to_string()))?;
-                let (new_remaining, value_data) = take(value_len as usize)(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to read value data".to_string()))?;
+                let (new_remaining, value_len) =
+                    be_i32(new_remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to parse value length".to_string())
+                    })?;
+                let (new_remaining, value_data) = take(value_len as usize)(new_remaining).map_err(
+                    |_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to read value data".to_string())
+                    },
+                )?;
                 let value = self.parse_value_enhanced(value_data, value_type_id, version)?;
 
                 pairs.push((key, value));
@@ -1181,10 +1243,15 @@ impl HardenedValidatorParser {
     /// Parse UDT with enhanced support and registry lookup
     fn parse_udt_enhanced(&self, data: &[u8], version: CassandraVersion) -> Result<Value> {
         // First, try to parse type name to lookup in registry
-        let (remaining, type_name_len) = parse_vint(data)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse UDT type name length".to_string()))?;
-        let (remaining, type_name_data) = take(type_name_len as usize)(remaining)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to read UDT type name".to_string()))?;
+        let (remaining, type_name_len) =
+            parse_vint(data).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                Error::corruption("Failed to parse UDT type name length".to_string())
+            })?;
+        let (remaining, type_name_data) = take(type_name_len as usize)(remaining).map_err(
+            |_: nom::Err<nom::error::Error<&[u8]>>| {
+                Error::corruption("Failed to read UDT type name".to_string())
+            },
+        )?;
         let type_name = String::from_utf8(type_name_data.to_vec())
             .map_err(|_| Error::corruption("Invalid UTF-8 in UDT type name".to_string()))?;
 
@@ -1232,8 +1299,10 @@ impl HardenedValidatorParser {
 
         for field_def in &udt_def.fields {
             // Parse field length
-            let (new_remaining, field_len) = be_i32(remaining)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse UDT field length".to_string()))?;
+            let (new_remaining, field_len) =
+                be_i32(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                    Error::corruption("Failed to parse UDT field length".to_string())
+                })?;
 
             let field_value = if field_len == -1 {
                 // Null field
@@ -1244,7 +1313,9 @@ impl HardenedValidatorParser {
             } else {
                 // Field with data
                 let (_new_remaining_inner, field_data) = take(field_len as usize)(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to read UDT field data".to_string()))?;
+                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to read UDT field data".to_string())
+                    })?;
 
                 let type_id = self.cql_type_to_type_id(&field_def.field_type);
                 let value = self.parse_value_enhanced(field_data, type_id, version)?;
@@ -1259,8 +1330,11 @@ impl HardenedValidatorParser {
             remaining = if field_len <= 0 {
                 new_remaining
             } else {
-                let (new_remaining_outer, _) = take(field_len as usize)(new_remaining)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to skip UDT field data".to_string()))?;
+                let (new_remaining_outer, _) = take(field_len as usize)(new_remaining).map_err(
+                    |_: nom::Err<nom::error::Error<&[u8]>>| {
+                        Error::corruption("Failed to skip UDT field data".to_string())
+                    },
+                )?;
                 new_remaining_outer
             };
         }
@@ -1273,11 +1347,7 @@ impl HardenedValidatorParser {
     }
 
     /// Parse UDT with embedded schema (fallback)
-    fn parse_udt_embedded_schema(
-        &self,
-        data: &[u8],
-        _version: CassandraVersion,
-    ) -> Result<Value> {
+    fn parse_udt_embedded_schema(&self, data: &[u8], _version: CassandraVersion) -> Result<Value> {
         // Use existing embedded schema parser as fallback
         let (_, value) = crate::parser::types::parse_udt(data).map_err(|_| {
             Error::corruption("Failed to parse UDT with embedded schema".to_string())
@@ -1287,8 +1357,10 @@ impl HardenedValidatorParser {
 
     /// Parse tuple with enhanced support
     fn parse_tuple_enhanced(&self, data: &[u8], version: CassandraVersion) -> Result<Value> {
-        let (mut remaining, field_count) = parse_vint(data)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse tuple field count".to_string()))?;
+        let (mut remaining, field_count) =
+            parse_vint(data).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                Error::corruption("Failed to parse tuple field count".to_string())
+            })?;
 
         if field_count as usize > self.config.memory_limits.max_udt_fields {
             return Err(Error::corruption(format!(
@@ -1300,8 +1372,10 @@ impl HardenedValidatorParser {
         // Parse field type definitions
         let mut field_types = Vec::with_capacity(field_count as usize);
         for _ in 0..field_count {
-            let (new_remaining, field_type_id) = be_u8(remaining)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse tuple field type".to_string()))?;
+            let (new_remaining, field_type_id) =
+                be_u8(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                    Error::corruption("Failed to parse tuple field type".to_string())
+                })?;
             let type_id = CqlTypeId::try_from(field_type_id).map_err(|_| {
                 Error::corruption(format!("Unknown tuple field type: {}", field_type_id))
             })?;
@@ -1312,8 +1386,10 @@ impl HardenedValidatorParser {
         // Parse field values
         let mut fields = Vec::with_capacity(field_count as usize);
         for &field_type_id in &field_types {
-            let (new_remaining, field_len) = be_i32(remaining)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::corruption("Failed to parse tuple field length".to_string()))?;
+            let (new_remaining, field_len) =
+                be_i32(remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                    Error::corruption("Failed to parse tuple field length".to_string())
+                })?;
 
             let field_value = if field_len == -1 {
                 Value::Null
@@ -1332,10 +1408,11 @@ impl HardenedValidatorParser {
             remaining = if field_len <= 0 {
                 new_remaining
             } else {
-                let (new_remaining_outer, _) =
-                    take(field_len as usize)(new_remaining).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+                let (new_remaining_outer, _) = take(field_len as usize)(new_remaining).map_err(
+                    |_: nom::Err<nom::error::Error<&[u8]>>| {
                         Error::corruption("Failed to skip tuple field data".to_string())
-                    })?;
+                    },
+                )?;
                 new_remaining_outer
             };
         }
@@ -1496,10 +1573,8 @@ impl ComplexTypeTestResult {
 
 impl VersionSpecificParser {
     fn new(version: CassandraVersion) -> Result<Self> {
-        let format_handlers: HashMap<
-            String,
-            Box<dyn Fn(&[u8]) -> Result<Value> + Send + Sync>,
-        > = HashMap::new();
+        let format_handlers: HashMap<String, Box<dyn Fn(&[u8]) -> Result<Value> + Send + Sync>> =
+            HashMap::new();
 
         // Add version-specific format handlers
         match version {

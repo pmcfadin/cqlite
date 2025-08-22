@@ -5,7 +5,6 @@
 
 use clap::{Arg, Command};
 use std::process;
-use tokio;
 
 // use cqlite_core::memory_safety_tests::MemorySafetyTests;
 // use cqlite_core::memory_safety_runner::MemorySafetyRunner;

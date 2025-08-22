@@ -6,15 +6,13 @@
 //! Cassandra-scale workloads with acceptable performance characteristics.
 
 use cqlite_core::error::Result;
-use cqlite_core::parser::header::{
-    CassandraVersion, SSTableHeader, parse_sstable_header,
-};
+use cqlite_core::parser::header::{CassandraVersion, SSTableHeader, parse_sstable_header};
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
-use cqlite_core::{Config, RowKey, Value};
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::StorageEngine;
 use cqlite_core::types::TableId;
+use cqlite_core::{Config, RowKey, Value};
 use criterion::black_box;
 use std::collections::HashMap;
 use std::sync::Arc;

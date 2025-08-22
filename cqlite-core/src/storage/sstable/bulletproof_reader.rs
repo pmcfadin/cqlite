@@ -736,8 +736,7 @@ mod tests {
     #[test]
     fn test_vint_reading() {
         let reader = BulletproofReader {
-            info: SSTableInfo::from_path(&std::path::PathBuf::from("test-nb-1-big-Data.db"))
-                .unwrap(),
+            info: SSTableInfo::from_path(&std::path::PathBuf::from("nb-1-big-Data.db")).unwrap(),
             base_dir: std::path::PathBuf::new(),
             decompressor: None,
             data_reader: None,

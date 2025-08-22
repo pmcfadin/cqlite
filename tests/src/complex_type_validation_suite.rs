@@ -9,7 +9,6 @@
 //!
 //! All tests use REAL Cassandra SSTable data for 100% compatibility validation.
 
-
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::types::Value;
 use cqlite_core::{Error, Result};

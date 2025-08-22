@@ -340,18 +340,22 @@ pub async fn import_data(
     };
 
     // Try to validate target table exists, but don't fail if we can't verify
-    let table_check_query = format!(
-        "SELECT table_name FROM system.tables WHERE table_name = '{target_table}'"
-    );
+    let table_check_query =
+        format!("SELECT table_name FROM system.tables WHERE table_name = '{target_table}'");
     match database.execute(&table_check_query).await {
         Ok(result) if result.rows.is_empty() => {
-            println!("⚠️  Warning: Table '{}' not found in system catalog. Assuming it exists or will be created during import.", target_table);
+            println!(
+                "⚠️  Warning: Table '{}' not found in system catalog. Assuming it exists or will be created during import.",
+                target_table
+            );
         }
         Ok(_) => {
             println!("✓ Target table '{target_table}' found");
         }
         Err(_) => {
-            println!("⚠️  Warning: Could not verify table existence (system tables may not be implemented). Proceeding with import...");
+            println!(
+                "⚠️  Warning: Could not verify table existence (system tables may not be implemented). Proceeding with import..."
+            );
         }
     }
 
@@ -370,7 +374,8 @@ pub async fn import_data(
             _imported_rows = import_csv_data(database, file, &target_table, &table_columns).await?;
         }
         ImportFormat::Json => {
-            _imported_rows = import_json_data(database, file, &target_table, &table_columns).await?;
+            _imported_rows =
+                import_json_data(database, file, &target_table, &table_columns).await?;
         }
         ImportFormat::Parquet => {
             return Err(anyhow::anyhow!(
@@ -592,9 +597,7 @@ async fn execute_batch_statements(
 
 /// Get table columns for schema validation
 async fn get_table_columns(database: &Database, table: &str) -> Result<Vec<String>> {
-    let query = format!(
-        "SELECT column_name FROM system.columns WHERE table_name = '{table}'"
-    );
+    let query = format!("SELECT column_name FROM system.columns WHERE table_name = '{table}'");
     match database.execute(&query).await {
         Ok(result) => {
             let columns = result
@@ -1073,9 +1076,7 @@ pub async fn read_sstable(
         OutputFormat::Yaml => display_yaml_format(&parsed_rows)?,
     }
 
-    println!(
-        "\n✅ Processed {processed} entries, displayed {displayed} rows"
-    );
+    println!("\n✅ Processed {processed} entries, displayed {displayed} rows");
     println!("🎯 Data source: LIVE SSTable file (no mocking!)");
 
     Ok(())
@@ -1227,12 +1228,10 @@ fn load_schema_file(
             // Parse CQL schema
             parse_cql_schema(&schema_content).with_context(|| "Failed to parse CQL schema")
         }
-        _ => {
-            Err(anyhow::anyhow!(
-                "Unsupported schema file extension: .{}\nSupported formats: .json, .cql",
-                extension
-            ))
-        }
+        _ => Err(anyhow::anyhow!(
+            "Unsupported schema file extension: .{}\nSupported formats: .json, .cql",
+            extension
+        )),
     }
 }
 
@@ -2162,8 +2161,7 @@ pub async fn benchmark_sstable(
 
 /// Benchmark read operation (open and basic info)
 async fn benchmark_read_operation(sstable_path: &Path) -> Result<usize> {
-    let reader =
-        BulletproofReader::open(sstable_path).with_context(|| "Failed to open SSTable")?;
+    let reader = BulletproofReader::open(sstable_path).with_context(|| "Failed to open SSTable")?;
 
     let _info = reader.info();
     Ok(1) // Return 1 as we processed the file info

@@ -358,7 +358,7 @@ mod tests {
 
         let (_, header) = result.unwrap();
         assert_eq!(header.version, 4);
-        assert_eq!(header.statistics_kind, 0x26291b05);
+        assert_eq!(header.statistics_kind, 0x2629_1b05);
         assert_eq!(header.data_length, 44);
         assert_eq!(header.metadata1, 1);
         assert_eq!(header.metadata2, 101);
@@ -380,7 +380,7 @@ mod tests {
     fn test_statistics_data_extraction() {
         let header = StatisticsHeader {
             version: 4,
-            statistics_kind: 0x26291b05,
+            statistics_kind: 0x2629_1b05,
             data_length: 44,
             metadata1: 1,
             metadata2: 101, // This becomes our estimated row count

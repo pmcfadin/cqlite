@@ -13,6 +13,8 @@ use mockall::predicate::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[allow(unused_imports)]
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 // Removed test_case import - causing compilation issues
@@ -50,7 +52,7 @@ impl Default for TestFrameworkConfig {
 }
 
 /// Test result aggregator
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TestResults {
     pub unit_test_results: Vec<UnitTestResult>,
     pub integration_test_results: Vec<IntegrationTestResult>,
@@ -487,6 +489,7 @@ impl ComprehensiveTestFramework {
 }
 
 /// Test data manager for generating fixtures
+#[allow(dead_code)]
 pub struct TestDataManager {
     _base_path: PathBuf,
 }
@@ -542,15 +545,23 @@ impl TestDataManager {
 }
 
 /// Mock registry for managing test mocks
+#[allow(dead_code)]
 pub struct MockRegistry {
     _mocks: HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
 }
 
-impl MockRegistry {
-    pub fn new() -> Self {
+#[allow(clippy::derivable_impls)]
+impl Default for MockRegistry {
+    fn default() -> Self {
         Self {
             _mocks: HashMap::new(),
         }
+    }
+}
+
+impl MockRegistry {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub async fn setup_common_mocks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -848,7 +859,7 @@ impl Default for CoverageResults {
 
 #[cfg(test)]
 mod tests {
-    use super::{TestFrameworkConfig, ComprehensiveTestFramework, TestResults, CoverageResults};
+    use super::{ComprehensiveTestFramework, CoverageResults, TestFrameworkConfig, TestResults};
 
     #[tokio::test]
     async fn test_framework_initialization() {
@@ -860,7 +871,7 @@ mod tests {
     #[tokio::test]
     async fn test_framework_configuration() {
         let unit = true;
-        let integration = true; 
+        let integration = true;
         let e2e = true;
         let performance = true;
         let coverage = true;
@@ -897,19 +908,5 @@ mod tests {
         let framework = ComprehensiveTestFramework::new(config).unwrap();
         let success = framework.evaluate_overall_success(&results);
         assert_eq!(success, should_pass); // Direct logic - success should equal should_pass
-    }
-}
-
-impl Default for TestResults {
-    fn default() -> Self {
-        Self {
-            unit_test_results: Vec::new(),
-            integration_test_results: Vec::new(),
-            e2e_test_results: Vec::new(),
-            performance_test_results: Vec::new(),
-            coverage_results: CoverageResults::default(),
-            total_duration: Duration::default(),
-            overall_success: false,
-        }
     }
 }

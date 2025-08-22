@@ -343,7 +343,7 @@ pub fn serialize_sstable_header(header: &SSTableHeader) -> Result<Vec<u8>> {
 
     // Magic and version - handle different layouts for different Cassandra versions
     result.extend_from_slice(&header.cassandra_version.magic_number().to_be_bytes());
-    
+
     match header.cassandra_version {
         CassandraVersion::V5_0NewBig => {
             // For 'nb' format, add 25 bytes of padding before the version
@@ -513,9 +513,13 @@ mod tests {
         let (remaining, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
         assert_eq!(cassandra_version, CassandraVersion::V5_0NewBig);
         assert_eq!(version, SUPPORTED_VERSION);
-        
+
         // Verify that parser consumed the expected amount of data
-        assert!(remaining.is_empty(), "Parser should consume all data, but {} bytes remain", remaining.len());
+        assert!(
+            remaining.is_empty(),
+            "Parser should consume all data, but {} bytes remain",
+            remaining.len()
+        );
     }
 
     #[test]

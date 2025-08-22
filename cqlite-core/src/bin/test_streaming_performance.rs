@@ -6,7 +6,7 @@
 #[cfg(feature = "benchmarks")]
 use std::env;
 #[cfg(feature = "benchmarks")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "benchmarks")]
 use std::sync::Arc;
 #[cfg(feature = "benchmarks")]
@@ -120,7 +120,7 @@ async fn test_compression_algorithm_selection() -> Result<(), Box<dyn std::error
 
 #[cfg(feature = "benchmarks")]
 async fn test_streaming_reader_performance(
-    test_data_dir: &PathBuf,
+    test_data_dir: &Path,
     config: &Config,
     platform: Arc<Platform>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -190,7 +190,7 @@ async fn test_streaming_reader_performance(
 
 #[cfg(feature = "benchmarks")]
 async fn test_memory_usage_monitoring(
-    test_data_dir: &PathBuf,
+    test_data_dir: &Path,
     config: &Config,
     platform: Arc<Platform>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -255,7 +255,7 @@ async fn test_memory_usage_monitoring(
 
 #[cfg(feature = "benchmarks")]
 async fn test_large_file_handling(
-    test_data_dir: &PathBuf,
+    test_data_dir: &Path,
     config: &Config,
     platform: Arc<Platform>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -345,7 +345,7 @@ async fn test_large_file_handling(
 
 #[cfg(feature = "benchmarks")]
 async fn test_real_data_integration(
-    test_data_dir: &PathBuf,
+    test_data_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("  📋 Testing integration with real SSTable data...");
 

@@ -11,7 +11,7 @@ use cqlite_core::{
         nodes::{NodeRef, NodeType, TrieNode},
         parser::RowsParser,
     },
-    types::{Value, TombstoneInfo, TombstoneType},
+    types::{TombstoneInfo, TombstoneType, Value},
 };
 use std::io::Cursor;
 
@@ -298,9 +298,13 @@ impl BtiTddTestSuite {
         if data.is_empty() {
             return Err(Error::ParseError("Empty node data".to_string()));
         }
-        
+
         // Mock success for compilation
-        println!("Testing node type {:?} with {} bytes of data", expected_type, data.len());
+        println!(
+            "Testing node type {:?} with {} bytes of data",
+            expected_type,
+            data.len()
+        );
         Ok(())
     }
 

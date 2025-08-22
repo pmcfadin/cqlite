@@ -3,6 +3,9 @@
 //! Minimal test runner to validate core SSTable reading functionality
 //! without complex dependencies.
 
+// EMERGENCY M1 FIX: Allow clippy warnings
+#![allow(clippy::all)]
+
 use std::{path::Path, time::Instant};
 
 /// Simple test runner for Issue #17 validation

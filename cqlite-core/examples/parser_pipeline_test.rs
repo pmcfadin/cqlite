@@ -188,7 +188,10 @@ fn demonstrate_visitors(ast: &CqlCreateTable) -> Result<(), Box<dyn std::error::
     match validation_result {
         Ok(()) => {
             if validator.has_errors() {
-                println!("  ✗ Validation failed with {} errors:", validator.get_errors().len());
+                println!(
+                    "  ✗ Validation failed with {} errors:",
+                    validator.get_errors().len()
+                );
                 for error in validator.get_errors() {
                     println!("    ❌ {}", error);
                 }

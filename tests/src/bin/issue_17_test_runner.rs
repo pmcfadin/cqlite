@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
     if let Some(filter) = &specific_test_filter {
-        println!("   Test Filter: {}", filter);
+        println!("   Test Filter: {filter}");
     }
     println!();
 
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let test_report = match run_comprehensive_sstable_tests().await {
         Ok(report) => report,
         Err(e) => {
-            eprintln!("❌ Test suite execution failed: {}", e);
+            eprintln!("❌ Test suite execution failed: {e}");
             update_github_issue_status("failed").await?;
             return Err(e.into());
         }
@@ -140,7 +140,7 @@ fn print_usage() {
 
 async fn update_github_issue_status(status: &str) -> Result<(), Box<dyn std::error::Error>> {
     // In a real implementation, this would update the GitHub issue via API
-    println!("📝 Issue #17 status update: {}", status);
+    println!("📝 Issue #17 status update: {status}");
 
     match status {
         "in-progress" => {
@@ -156,7 +156,7 @@ async fn update_github_issue_status(status: &str) -> Result<(), Box<dyn std::err
             println!("   ⚠️  Requirements not met - additional work needed");
         }
         _ => {
-            println!("   📊 Status: {}", status);
+            println!("   📊 Status: {status}");
         }
     }
 
@@ -283,7 +283,7 @@ async fn generate_work_needed_report(
     }
 
     for (category, count) in failed_categories {
-        println!("   • {}: {} failing tests", category, count);
+        println!("   • {category}: {count} failing tests");
     }
 
     println!();
@@ -354,9 +354,7 @@ mod tests {
 
     #[test]
     fn test_github_summary_generation() {
-        use cqlite_tests::comprehensive_sstable_test_suite::{
-            TestSuiteReport,
-        };
+        use cqlite_tests::comprehensive_sstable_test_suite::TestSuiteReport;
         use std::time::Duration;
 
         let report = TestSuiteReport {

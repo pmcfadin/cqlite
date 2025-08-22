@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::row_cell_state_machine::*;
-    use crate::schema::{Column, ClusteringColumn, TableSchema};
+    use crate::schema::{ClusteringColumn, Column, TableSchema};
     use crate::types::{ComparatorType, Value};
     use std::collections::HashMap;
 
@@ -37,6 +37,43 @@ mod tests {
                 Column {
                     name: "tags".to_string(),
                     data_type: "list<text>".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                // Additional columns for failing tests
+                Column {
+                    name: "data".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                Column {
+                    name: "col1".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                Column {
+                    name: "col2".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                Column {
+                    name: "coordinates".to_string(),
+                    data_type: "tuple<double, double, text>".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                Column {
+                    name: "metadata".to_string(),
+                    data_type: "map<text, list<int>>".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                Column {
+                    name: "nested_data".to_string(),
+                    data_type: "blob".to_string(),
                     nullable: true,
                     default: None,
                 },
@@ -81,11 +118,13 @@ mod tests {
 
     /// Create a simple partition key
     fn create_simple_partition_key() -> Vec<u8> {
+        use crate::parser::vint::encode_vint;
+
         let mut data = Vec::new();
-        // Component count: 1 (vint encoded as 0x02 - zigzag encoding)
-        data.push(0x02);
-        // Component length: 3 bytes (vint encoded as 0x06)
-        data.push(0x06);
+        // Component count: 1 (vint)
+        data.extend(encode_vint(1));
+        // Component length: 3 bytes (vint)
+        data.extend(encode_vint(3));
         // Component data: "key"
         data.extend_from_slice(b"key");
         data
@@ -93,15 +132,17 @@ mod tests {
 
     /// Create a composite partition key
     fn create_composite_partition_key() -> Vec<u8> {
+        use crate::parser::vint::encode_vint;
+
         let mut data = Vec::new();
-        // Component count: 2 (vint encoded as 0x04)
-        data.push(0x04);
-        // First component length: 3 (vint encoded as 0x06)
-        data.push(0x06);
+        // Component count: 2 (vint)
+        data.extend(encode_vint(2));
+        // First component length: 3 (vint)
+        data.extend(encode_vint(3));
         // First component: "abc"
         data.extend_from_slice(b"abc");
-        // Second component length: 3 (vint encoded as 0x06)
-        data.push(0x06);
+        // Second component length: 3 (vint)
+        data.extend(encode_vint(3));
         // Second component: "xyz"
         data.extend_from_slice(b"xyz");
         data
@@ -109,22 +150,24 @@ mod tests {
 
     /// Create static row data
     fn create_static_row() -> Vec<u8> {
+        use crate::parser::vint::encode_vint;
+
         let mut data = Vec::new();
         // Static row flag: 0x40
         data.push(0x40);
         // Column count: 2 (vint)
-        data.push(0x04);
+        data.extend(encode_vint(2));
 
         // Column 1: name="static1", value="value1"
-        data.push(0x10); // name length: 8 (vint)
+        data.extend(encode_vint(7)); // name length: 7 (vint) - "static1" has 7 chars
         data.extend_from_slice(b"static1");
-        data.push(0x0C); // value length: 6 (vint)
+        data.extend(encode_vint(6)); // value length: 6 (vint) - "value1" has 6 chars
         data.extend_from_slice(b"value1");
 
         // Column 2: name="static2", value="value2"
-        data.push(0x10); // name length: 8 (vint)
+        data.extend(encode_vint(7)); // name length: 7 (vint) - "static2" has 7 chars
         data.extend_from_slice(b"static2");
-        data.push(0x0C); // value length: 6 (vint)
+        data.extend(encode_vint(6)); // value length: 6 (vint) - "value2" has 6 chars
         data.extend_from_slice(b"value2");
 
         data
@@ -132,30 +175,32 @@ mod tests {
 
     /// Create clustering rows with varying column masks
     fn create_clustering_rows_dense() -> Vec<u8> {
+        use crate::parser::vint::encode_vint;
+
         let mut data = Vec::new();
         // Row count: 1 (vint)
-        data.push(0x02);
+        data.extend(encode_vint(1));
 
         // Row 1:
         // Clustering key length: 4 (vint)
-        data.push(0x08);
+        data.extend(encode_vint(4));
         // Clustering key: "row1"
         data.extend_from_slice(b"row1");
         // Timestamp
         data.extend_from_slice(&100i64.to_be_bytes());
         // Column count: 2
-        data.push(0x04);
+        data.extend(encode_vint(2));
 
         // Column 1
-        data.push(0x08); // name length: 4
+        data.extend(encode_vint(4)); // name length: 4
         data.extend_from_slice(b"col1");
-        data.push(0x0A); // value length: 5
+        data.extend(encode_vint(5)); // value length: 5
         data.extend_from_slice(b"data1");
 
         // Column 2
-        data.push(0x08); // name length: 4
+        data.extend(encode_vint(4)); // name length: 4
         data.extend_from_slice(b"col2");
-        data.push(0x0A); // value length: 5
+        data.extend(encode_vint(5)); // value length: 5
         data.extend_from_slice(b"data2");
 
         data
@@ -163,25 +208,27 @@ mod tests {
 
     /// Create clustering rows with sparse columns
     fn create_clustering_rows_sparse() -> Vec<u8> {
+        use crate::parser::vint::encode_vint;
+
         let mut data = Vec::new();
         // Row count: 2 (vint)
-        data.push(0x04);
+        data.extend(encode_vint(2));
 
         // Row 1: Has 1 column
-        data.push(0x08); // key length: 4
+        data.extend(encode_vint(4)); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
-        data.push(0x02); // column count: 1
-        data.push(0x08); // name length: 4
+        data.extend(encode_vint(1)); // column count: 1
+        data.extend(encode_vint(4)); // name length: 4
         data.extend_from_slice(b"col1");
-        data.push(0x0A); // value length: 5
+        data.extend(encode_vint(5)); // value length: 5
         data.extend_from_slice(b"data1");
 
         // Row 2: Has 0 columns (null row)
-        data.push(0x08); // key length: 4
+        data.extend(encode_vint(4)); // key length: 4
         data.extend_from_slice(b"row2");
         data.extend_from_slice(&200i64.to_be_bytes());
-        data.push(0x00); // column count: 0
+        data.extend(encode_vint(0)); // column count: 0
 
         data
     }
@@ -263,6 +310,8 @@ mod tests {
 
     #[test]
     fn test_parse_static_row() {
+        use crate::parser::vint::encode_vint;
+
         let mut state_machine = RowCellStateMachine::new();
 
         // Setup: parse header and partition key
@@ -272,7 +321,7 @@ mod tests {
         data.extend(create_static_row());
 
         // Add empty clustering rows to complete
-        data.push(0x00); // 0 clustering rows
+        data.extend(encode_vint(0)); // 0 clustering rows
 
         let result = state_machine.process(&data);
         assert!(result.is_ok());
@@ -288,7 +337,9 @@ mod tests {
 
     #[test]
     fn test_parse_dense_clustering_rows() {
-        let mut state_machine = RowCellStateMachine::new();
+        let schema = create_test_schema();
+        let comparator = ComparatorType::Blob;
+        let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
 
         // Build complete row data
         let mut data = Vec::new();
@@ -298,6 +349,12 @@ mod tests {
 
         let result = state_machine.process(&data);
         assert!(result.is_ok());
+        if !state_machine.is_complete() {
+            eprintln!(
+                "DEBUG dense: State machine not complete: {}",
+                state_machine.debug_state()
+            );
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -310,7 +367,9 @@ mod tests {
 
     #[test]
     fn test_parse_sparse_clustering_rows() {
-        let mut state_machine = RowCellStateMachine::new();
+        let schema = create_test_schema();
+        let comparator = ComparatorType::Blob;
+        let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
 
         // Build complete row data
         let mut data = Vec::new();
@@ -320,6 +379,12 @@ mod tests {
 
         let result = state_machine.process(&data);
         assert!(result.is_ok());
+        if !state_machine.is_complete() {
+            eprintln!(
+                "DEBUG sparse: State machine not complete: {}",
+                state_machine.debug_state()
+            );
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -333,7 +398,9 @@ mod tests {
 
     #[test]
     fn test_complete_row_with_all_sections() {
-        let mut state_machine = RowCellStateMachine::new();
+        let schema = create_test_schema();
+        let comparator = ComparatorType::Blob;
+        let mut state_machine = RowCellStateMachine::with_schema(schema, comparator);
 
         // Build complete row with all sections
         let mut data = Vec::new();
@@ -646,6 +713,8 @@ mod tests {
     /// Test multi-component clustering key with schema awareness
     #[test]
     fn test_multi_component_clustering_keys() {
+        use crate::parser::vint::encode_vint;
+
         // Create schema with multi-component clustering
         let mut schema = create_test_schema();
         schema.clustering_keys = vec![
@@ -672,24 +741,30 @@ mod tests {
         data.extend(create_simple_partition_key());
 
         // Add clustering row with composite clustering key
-        data.push(0x02); // 1 clustering row
-        data.push(0x10); // key length: 8 (timestamp) + 4 (int) = 12, but encoded as 16 for vint
+        data.extend(encode_vint(1)); // 1 clustering row
+        data.extend(encode_vint(12)); // key length: 8 (timestamp) + 4 (int) = 12
         // Mock composite clustering key: timestamp + sequence
         data.extend_from_slice(&[
             0x00, 0x00, 0x01, 0x83, 0x8F, 0xA4, 0x32, 0x00, // timestamp (8 bytes)
             0x00, 0x00, 0x00, 0x01, // sequence = 1 (4 bytes)
         ]);
         data.extend_from_slice(&100i64.to_be_bytes());
-        data.push(0x02); // 1 column
+        data.extend(encode_vint(1)); // 1 column
 
         // Simple column
-        data.push(0x08); // name length: 4
+        data.extend(encode_vint(4)); // name length: 4
         data.extend_from_slice(b"data");
-        data.push(0x0A); // value length: 5
+        data.extend(encode_vint(5)); // value length: 5
         data.extend_from_slice(b"value");
 
         let result = state_machine.process(&data);
         assert!(result.is_ok());
+        if !state_machine.is_complete() {
+            eprintln!(
+                "DEBUG multi_component: State machine not complete: {}",
+                state_machine.debug_state()
+            );
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -704,6 +779,8 @@ mod tests {
     /// Test frozen vs non-frozen collections with schema
     #[test]
     fn test_frozen_vs_non_frozen_collections() {
+        use crate::parser::vint::encode_vint;
+
         // Create schema with both frozen and non-frozen collections
         let mut schema = create_test_schema();
         schema.columns.extend(vec![
@@ -730,22 +807,22 @@ mod tests {
         data.extend(create_simple_partition_key());
 
         // Add clustering row with both frozen and regular collections
-        data.push(0x02); // 1 clustering row
-        data.push(0x08); // key length: 4
+        data.extend(encode_vint(1)); // 1 clustering row
+        data.extend(encode_vint(4)); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
-        data.push(0x04); // 2 columns
+        data.extend(encode_vint(2)); // 2 columns
 
         // Frozen list column
-        data.push(0x16); // name length: 11
+        data.extend(encode_vint(11)); // name length: 11
         data.extend_from_slice(b"frozen_list");
-        data.push(0x0C); // value length: 6
+        data.extend(encode_vint(6)); // value length: 6
         data.extend_from_slice(&[0x00, 0x02, 0x41, 0x42, 0x43, 0x44]); // Mock frozen list data
 
         // Regular list column
-        data.push(0x18); // name length: 12
+        data.extend(encode_vint(12)); // name length: 12
         data.extend_from_slice(b"regular_list");
-        data.push(0x0C); // value length: 6
+        data.extend(encode_vint(6)); // value length: 6
         data.extend_from_slice(&[0x01, 0x02, 0x45, 0x46, 0x47, 0x48]); // Mock regular list data
 
         let result = state_machine.process(&data);
@@ -760,19 +837,23 @@ mod tests {
         assert!(row.clustering_rows[0].columns.contains_key("frozen_list"));
         assert!(row.clustering_rows[0].columns.contains_key("regular_list"));
 
-        // Both should be parsed as blobs until full collection parsers are implemented
-        // but the schema information is used to determine the approach
-        match (
-            &row.clustering_rows[0].columns["frozen_list"],
-            &row.clustering_rows[0].columns["regular_list"],
-        ) {
-            (Value::Blob(frozen_data), Value::Blob(regular_data)) => {
-                assert_eq!(frozen_data.len(), 6);
-                assert_eq!(regular_data.len(), 6);
-                // Different binary representations indicate different handling
-                assert_ne!(frozen_data, regular_data);
-            }
-            _ => panic!("Expected blob values for both collection types"),
+        // Both should be parsed appropriately based on schema
+        // frozen<list<text>> should be parsed as List (frozen)
+        // list<text> should be parsed as blob fallback (non-frozen)
+        assert!(row.clustering_rows[0].columns.contains_key("frozen_list"));
+        assert!(row.clustering_rows[0].columns.contains_key("regular_list"));
+
+        // Verify the actual parsing behavior:
+        // - frozen list gets parsed as List type
+        // - regular list falls back to blob
+        match &row.clustering_rows[0].columns["frozen_list"] {
+            Value::List(_) => {} // Expected for frozen<list<text>>
+            _ => panic!("Expected List value for frozen_list"),
+        }
+
+        match &row.clustering_rows[0].columns["regular_list"] {
+            Value::Blob(data) => assert_eq!(data.len(), 6), // Expected blob fallback
+            _ => panic!("Expected Blob value for regular_list"),
         }
     }
 
@@ -818,6 +899,12 @@ mod tests {
 
         let result = state_machine.process(&data);
         assert!(result.is_ok());
+        if !state_machine.is_complete() {
+            eprintln!(
+                "DEBUG complex_map: State machine not complete: {}",
+                state_machine.debug_state()
+            );
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();

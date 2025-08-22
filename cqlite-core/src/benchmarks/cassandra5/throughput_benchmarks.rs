@@ -530,7 +530,7 @@ impl ThroughputBenchmarks {
         let mut seed = 54321u64;
 
         for _ in 0..num_operations {
-            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
             let offset = (seed as usize) % (data.len().saturating_sub(chunk_size));
 
             let chunk = &data[offset..offset + chunk_size];

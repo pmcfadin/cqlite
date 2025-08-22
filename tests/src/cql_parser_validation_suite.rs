@@ -4,11 +4,10 @@
 //! to ensure correct parsing of various CREATE TABLE formats, type conversions,
 //! and error handling.
 
-
+use cqlite_core::Value;
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::{SSTableParser, types::CqlTypeId};
 use cqlite_core::schema::{CqlType, TableSchema, UdtRegistry};
-use cqlite_core::Value;
 use serde_json;
 use std::collections::HashMap;
 use std::fs;

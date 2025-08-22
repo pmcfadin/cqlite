@@ -9,7 +9,7 @@
 use cqlite_core::{
     error::{Error, Result},
     parser::header::CassandraVersion,
-    schema::{TableSchema, KeyColumn, Column},
+    schema::{Column, KeyColumn, TableSchema},
     storage::sstable::compression::CompressionInfo,
     storage::sstable::row_cell_state_machine::RowCellStateMachine,
     types::ComparatorType,
@@ -127,7 +127,8 @@ fn test_compression_info_no_alternative_format_modern() {
     {
         // TODO: Implement parse_alternative_format method or comment out until available
         // let alt_result = CompressionInfo::parse_alternative_format(&invalid_compression_data);
-        let _alt_result: cqlite_core::Result<CompressionInfo> = Err(Error::schema("Method not implemented".to_string()));
+        let _alt_result: cqlite_core::Result<CompressionInfo> =
+            Err(Error::schema("Method not implemented".to_string()));
         // This might succeed or fail, but the method should exist
         println!(
             "⚠️  Alternative format parsing is available with legacy-heuristics feature (use only for legacy support)"

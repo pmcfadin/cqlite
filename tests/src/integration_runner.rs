@@ -76,6 +76,9 @@ impl IntegrationTestRunner {
         let mut total_tests = 0;
         let mut passed_tests = 0;
         let mut compatibility_scores = Vec::new();
+        #[cfg(feature = "benchmarks")]
+        let mut performance_scores = Vec::new();
+        #[cfg(not(feature = "benchmarks"))]
         let performance_scores = Vec::new();
         let mut recommendations = Vec::new();
 

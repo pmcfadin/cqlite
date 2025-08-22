@@ -92,7 +92,7 @@ impl SchemaParser {
                 ))
             })?;
 
-        let column = self
+        let _column = self
             .context
             .schema
             .columns
@@ -100,7 +100,9 @@ impl SchemaParser {
             .find(|c| c.name == column_name)
             .ok_or_else(|| Error::Schema(format!("Column '{}' not found", column_name)))?;
 
-        let (value, _) = self.parse_value_with_comparator(data, comparator, &column.data_type)?;
+        // Use the provided comparator directly instead of re-parsing the type string
+        // This avoids issues with UDT types that may not be resolvable from string alone
+        let (value, _) = self.parse_value_with_provided_comparator(data, comparator)?;
         Ok(value)
     }
 
@@ -112,6 +114,17 @@ impl SchemaParser {
         type_str: &str,
     ) -> Result<(Value, usize)> {
         let cql_type = CqlType::parse(type_str)?;
+        self.parse_typed_value(data, &cql_type, comparator)
+    }
+
+    /// Parse a value using only the provided comparator (no type string parsing)
+    fn parse_value_with_provided_comparator(
+        &self,
+        data: &[u8],
+        comparator: &ComparatorType,
+    ) -> Result<(Value, usize)> {
+        // Convert the comparator back to a CqlType for parsing
+        let cql_type = self.comparator_to_cql_type(comparator)?;
         self.parse_typed_value(data, &cql_type, comparator)
     }
 
@@ -479,6 +492,64 @@ impl SchemaParser {
         }
 
         Ok(row)
+    }
+
+    /// Convert a ComparatorType back to CqlType for parsing
+    fn comparator_to_cql_type(&self, comparator: &ComparatorType) -> Result<CqlType> {
+        match comparator {
+            ComparatorType::Boolean => Ok(CqlType::Boolean),
+            ComparatorType::TinyInt => Ok(CqlType::TinyInt),
+            ComparatorType::SmallInt => Ok(CqlType::SmallInt),
+            ComparatorType::Int => Ok(CqlType::Int),
+            ComparatorType::BigInt => Ok(CqlType::BigInt),
+            ComparatorType::Float32 => Ok(CqlType::Float),
+            ComparatorType::Float => Ok(CqlType::Double),
+            ComparatorType::Text => Ok(CqlType::Text),
+            ComparatorType::Blob => Ok(CqlType::Blob),
+            ComparatorType::Timestamp => Ok(CqlType::Timestamp),
+            ComparatorType::Uuid => Ok(CqlType::Uuid),
+            ComparatorType::Varint => Ok(CqlType::Custom("varint".to_string())),
+            ComparatorType::Decimal => Ok(CqlType::Decimal),
+            ComparatorType::Duration => Ok(CqlType::Duration),
+            ComparatorType::Json => Ok(CqlType::Custom("json".to_string())),
+            ComparatorType::List(elem_comparator) => {
+                let elem_type = self.comparator_to_cql_type(elem_comparator)?;
+                Ok(CqlType::List(Box::new(elem_type)))
+            }
+            ComparatorType::Set(elem_comparator) => {
+                let elem_type = self.comparator_to_cql_type(elem_comparator)?;
+                Ok(CqlType::Set(Box::new(elem_type)))
+            }
+            ComparatorType::Map(key_comparator, val_comparator) => {
+                let key_type = self.comparator_to_cql_type(key_comparator)?;
+                let val_type = self.comparator_to_cql_type(val_comparator)?;
+                Ok(CqlType::Map(Box::new(key_type), Box::new(val_type)))
+            }
+            ComparatorType::Tuple(field_comparators) => {
+                let mut field_types = Vec::new();
+                for field_comparator in field_comparators {
+                    field_types.push(self.comparator_to_cql_type(field_comparator)?);
+                }
+                Ok(CqlType::Tuple(field_types))
+            }
+            ComparatorType::Udt {
+                type_name,
+                field_comparators,
+                ..
+            } => {
+                let mut fields = Vec::new();
+                for (field_name, field_comparator) in field_comparators {
+                    let field_type = self.comparator_to_cql_type(field_comparator)?;
+                    fields.push((field_name.clone(), field_type));
+                }
+                Ok(CqlType::Udt(type_name.clone(), fields))
+            }
+            ComparatorType::Frozen(inner_comparator) => {
+                let inner_type = self.comparator_to_cql_type(inner_comparator)?;
+                Ok(CqlType::Frozen(Box::new(inner_type)))
+            }
+            ComparatorType::Custom(type_name) => Ok(CqlType::Custom(type_name.clone())),
+        }
     }
 }
 

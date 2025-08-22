@@ -10,9 +10,7 @@
 //! - Overlapping write scenario resolution
 //! - Multi-generation value reconciliation
 
-use crate::parser::{
-    ParsedCell, ParsedData, ParsedPartition, ParsedRow, RangeTombstone,
-};
+use crate::parser::{ParsedCell, ParsedData, ParsedPartition, ParsedRow, RangeTombstone};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -156,7 +154,6 @@ impl ReconciliationEngine {
             config: ReconciliationConfig::default(),
         }
     }
-
 
     /// Create engine with custom configuration
     #[allow(dead_code)]

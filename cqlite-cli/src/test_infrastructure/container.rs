@@ -25,7 +25,10 @@ impl std::fmt::Debug for TestContainer {
             .field("config", &self.config)
             .field("temp_dir", &self.temp_dir)
             .field("database", &self.database)
-            .field("cleanup_handlers", &format!("{} cleanup handlers", self.cleanup_handlers.len()))
+            .field(
+                "cleanup_handlers",
+                &format!("{} cleanup handlers", self.cleanup_handlers.len()),
+            )
             .finish()
     }
 }

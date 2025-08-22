@@ -1,9 +1,12 @@
 use crate::cli_types::SchemaCommands;
 use anyhow::{Context, Result};
-use cqlite_core::{Database, schema::{TableSchema, Column, KeyColumn, ClusteringColumn, parse_cql_schema}};
+use cqlite_core::{
+    Database,
+    schema::{ClusteringColumn, Column, KeyColumn, TableSchema, parse_cql_schema},
+};
 use serde_json;
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 pub async fn handle_schema_command(database: &Database, command: SchemaCommands) -> Result<()> {
     match command {
@@ -19,7 +22,7 @@ async fn list_tables(_database: &Database) -> Result<()> {
     // TODO: Implement actual table listing from database
     println!("Tables in database:");
     println!("- users");
-    println!("- orders"); 
+    println!("- orders");
     println!("- products");
     println!("\nNote: Table listing not yet implemented");
 
@@ -41,11 +44,11 @@ async fn describe_table(_database: &Database, table: &str) -> Result<()> {
 
 async fn create_table_from_file(database: &Database, file: &Path) -> Result<()> {
     println!("Creating table from DDL file: {}", file.display());
-    
+
     // Read the DDL file
     let ddl_content = std::fs::read_to_string(file)
         .with_context(|| format!("Failed to read DDL file: {}", file.display()))?;
-    
+
     // Execute the CREATE TABLE statement
     match database.execute(&ddl_content).await {
         Ok(result) => {
@@ -76,7 +79,7 @@ async fn drop_table(database: &Database, table: &str, force: bool) -> Result<()>
     } else {
         println!("Force dropping table '{}'", table);
     }
-    
+
     let drop_sql = format!("DROP TABLE {}", table);
     match database.execute(&drop_sql).await {
         Ok(result) => {
@@ -99,7 +102,8 @@ async fn validate_schema(file_path: &Path) -> Result<()> {
     println!("Validating schema: {}", file_path.display());
 
     // Detect file format based on extension
-    let extension = file_path.extension()
+    let extension = file_path
+        .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("");
 
@@ -110,7 +114,7 @@ async fn validate_schema(file_path: &Path) -> Result<()> {
             // Try to auto-detect based on content
             let content = std::fs::read_to_string(file_path)
                 .with_context(|| format!("Failed to read schema file: {}", file_path.display()))?;
-            
+
             if content.trim_start().starts_with('{') {
                 println!("📝 Auto-detected JSON format");
                 validate_json_schema(file_path).await
@@ -122,9 +126,13 @@ async fn validate_schema(file_path: &Path) -> Result<()> {
                 println!("  - .json files: JSON schema format");
                 println!("  - .cql/.sql files: CQL DDL format");
                 println!("\nExample JSON schema:");
-                println!("{{\n  \"keyspace\": \"example\",\n  \"table\": \"users\",\n  \"partition_keys\": [{{\"name\": \"id\", \"type\": \"uuid\", \"position\": 0}}],\n  \"clustering_keys\": [],\n  \"columns\": [{{\"name\": \"id\", \"type\": \"uuid\", \"nullable\": false}}]\n}}");
+                println!(
+                    "{{\n  \"keyspace\": \"example\",\n  \"table\": \"users\",\n  \"partition_keys\": [{{\"name\": \"id\", \"type\": \"uuid\", \"position\": 0}}],\n  \"clustering_keys\": [],\n  \"columns\": [{{\"name\": \"id\", \"type\": \"uuid\", \"nullable\": false}}]\n}}"
+                );
                 println!("\nExample CQL DDL:");
-                println!("CREATE TABLE example.users (\n  id uuid PRIMARY KEY,\n  name text,\n  email text\n);");
+                println!(
+                    "CREATE TABLE example.users (\n  id uuid PRIMARY KEY,\n  name text,\n  email text\n);"
+                );
                 Err(anyhow::anyhow!("Unsupported file format"))
             }
         }
@@ -206,17 +214,35 @@ fn print_schema_details(schema: &TableSchema) {
 
     // Show column details
     for (i, column) in schema.columns.iter().enumerate() {
-        let nullable_str = if column.nullable { "nullable" } else { "not null" };
-        println!("  {}. {} ({}, {})", i + 1, column.name, column.data_type, nullable_str);
+        let nullable_str = if column.nullable {
+            "nullable"
+        } else {
+            "not null"
+        };
+        println!(
+            "  {}. {} ({}, {})",
+            i + 1,
+            column.name,
+            column.data_type,
+            nullable_str
+        );
     }
 
     if !schema.partition_keys.is_empty() {
-        let key_names: Vec<String> = schema.partition_keys.iter().map(|k| k.name.clone()).collect();
+        let key_names: Vec<String> = schema
+            .partition_keys
+            .iter()
+            .map(|k| k.name.clone())
+            .collect();
         println!("🔑 Partition keys: {}", key_names.join(", "));
     }
 
     if !schema.clustering_keys.is_empty() {
-        let clustering_names: Vec<String> = schema.clustering_keys.iter().map(|k| k.name.clone()).collect();
+        let clustering_names: Vec<String> = schema
+            .clustering_keys
+            .iter()
+            .map(|k| k.name.clone())
+            .collect();
         println!("🔗 Clustering keys: {}", clustering_names.join(", "));
     }
 }
@@ -225,20 +251,22 @@ fn print_schema_details(schema: &TableSchema) {
 #[allow(dead_code)]
 fn parse_cql_ddl(cql_content: &str) -> Result<TableSchema> {
     let cql_content = cql_content.trim().to_uppercase();
-    
+
     // Find CREATE TABLE statement
-    let create_table_start = cql_content.find("CREATE TABLE")
+    let create_table_start = cql_content
+        .find("CREATE TABLE")
         .ok_or_else(|| anyhow::anyhow!("No CREATE TABLE statement found"))?;
-    
+
     let table_part = &cql_content[create_table_start + 12..].trim(); // Skip "CREATE TABLE"
-    
+
     // Find the opening parenthesis
-    let paren_start = table_part.find('(')
+    let paren_start = table_part
+        .find('(')
         .ok_or_else(|| anyhow::anyhow!("Missing opening parenthesis in CREATE TABLE"))?;
-    
+
     // Extract table name part
     let table_name_part = &table_part[..paren_start].trim();
-    
+
     // Parse keyspace and table name
     let (keyspace, table_name) = if let Some(dot_pos) = table_name_part.find('.') {
         let keyspace = table_name_part[..dot_pos].trim().to_lowercase();
@@ -247,12 +275,12 @@ fn parse_cql_ddl(cql_content: &str) -> Result<TableSchema> {
     } else {
         ("default".to_string(), table_name_part.trim().to_lowercase())
     };
-    
+
     // Find the matching closing parenthesis
     let mut paren_depth = 0;
     let mut column_end = paren_start;
     let table_chars: Vec<char> = table_part.chars().collect();
-    
+
     for (i, &ch) in table_chars.iter().enumerate().skip(paren_start) {
         match ch {
             '(' => paren_depth += 1,
@@ -266,17 +294,17 @@ fn parse_cql_ddl(cql_content: &str) -> Result<TableSchema> {
             _ => {}
         }
     }
-    
+
     if paren_depth != 0 {
         return Err(anyhow::anyhow!("Unmatched parentheses in CREATE TABLE"));
     }
-    
+
     // Extract column definitions (between parentheses)
     let column_definitions = &table_part[paren_start + 1..column_end];
-    
+
     // Parse column definitions
     let (columns, partition_keys, clustering_keys) = parse_column_definitions(column_definitions)?;
-    
+
     let schema = TableSchema {
         keyspace,
         table: table_name,
@@ -285,30 +313,39 @@ fn parse_cql_ddl(cql_content: &str) -> Result<TableSchema> {
         columns,
         comments: HashMap::new(),
     };
-    
+
     // Validate the parsed schema
-    schema.validate().with_context(|| "Generated schema validation failed")?;
-    
+    schema
+        .validate()
+        .with_context(|| "Generated schema validation failed")?;
+
     Ok(schema)
 }
 
 /// Parse column definitions from CQL DDL
 #[allow(dead_code)]
-fn parse_column_definitions(definitions: &str) -> Result<(Vec<Column>, Vec<KeyColumn>, Vec<ClusteringColumn>)> {
+fn parse_column_definitions(
+    definitions: &str,
+) -> Result<(Vec<Column>, Vec<KeyColumn>, Vec<ClusteringColumn>)> {
     let mut columns = Vec::new();
     let mut partition_keys = Vec::new();
     let mut clustering_keys = Vec::new();
     let mut primary_key_found = false;
-    
+
     // Split by commas, but be careful with nested types like map<text, int>
     let column_parts = split_column_definitions(definitions)?;
-    
+
     for part in column_parts {
         let part = part.trim();
-        
+
         if part.to_uppercase().starts_with("PRIMARY KEY") {
             // Parse PRIMARY KEY (col1, col2, ...)
-            parse_primary_key_constraint(part, &columns, &mut partition_keys, &mut clustering_keys)?;
+            parse_primary_key_constraint(
+                part,
+                &columns,
+                &mut partition_keys,
+                &mut clustering_keys,
+            )?;
             primary_key_found = true;
         } else {
             // Parse column definition: name type [PRIMARY KEY]
@@ -316,20 +353,20 @@ fn parse_column_definitions(definitions: &str) -> Result<(Vec<Column>, Vec<KeyCo
             if column_parts.len() < 2 {
                 return Err(anyhow::anyhow!("Invalid column definition: {}", part));
             }
-            
+
             let column_name = column_parts[0].to_string();
             let column_type = column_parts[1].to_string();
             let is_primary_key = part.to_uppercase().contains("PRIMARY KEY");
-            
+
             let column = Column {
                 name: column_name.clone(),
                 data_type: column_type.clone(),
                 nullable: !is_primary_key, // Primary key columns are not nullable
                 default: None,
             };
-            
+
             columns.push(column);
-            
+
             // If this column is marked as PRIMARY KEY, add it as partition key
             if is_primary_key && !primary_key_found {
                 partition_keys.push(KeyColumn {
@@ -340,8 +377,8 @@ fn parse_column_definitions(definitions: &str) -> Result<(Vec<Column>, Vec<KeyCo
             }
         }
     }
-    
-    // If no PRIMARY KEY constraint was found and no inline PRIMARY KEY, 
+
+    // If no PRIMARY KEY constraint was found and no inline PRIMARY KEY,
     // assume first column is the primary key
     if partition_keys.is_empty() && !columns.is_empty() {
         let first_col = &columns[0];
@@ -350,13 +387,13 @@ fn parse_column_definitions(definitions: &str) -> Result<(Vec<Column>, Vec<KeyCo
             data_type: first_col.data_type.clone(),
             position: 0,
         });
-        
+
         // Update the first column to be non-nullable
         if let Some(col) = columns.get_mut(0) {
             col.nullable = false;
         }
     }
-    
+
     Ok((columns, partition_keys, clustering_keys))
 }
 
@@ -367,7 +404,7 @@ fn split_column_definitions(definitions: &str) -> Result<Vec<String>> {
     let mut current_part = String::new();
     let mut paren_depth = 0;
     let mut angle_depth = 0;
-    
+
     for ch in definitions.chars() {
         match ch {
             '(' => paren_depth += 1,
@@ -385,11 +422,11 @@ fn split_column_definitions(definitions: &str) -> Result<Vec<String>> {
         }
         current_part.push(ch);
     }
-    
+
     if !current_part.trim().is_empty() {
         parts.push(current_part.trim().to_string());
     }
-    
+
     Ok(parts)
 }
 
@@ -402,14 +439,15 @@ fn parse_primary_key_constraint(
     clustering_keys: &mut Vec<ClusteringColumn>,
 ) -> Result<()> {
     // Find the opening parenthesis after PRIMARY KEY
-    let paren_start = constraint.find('(')
+    let paren_start = constraint
+        .find('(')
         .ok_or_else(|| anyhow::anyhow!("Missing opening parenthesis in PRIMARY KEY"))?;
-    
+
     // Find the matching closing parenthesis
     let mut paren_depth = 0;
     let mut paren_end = paren_start;
     let constraint_chars: Vec<char> = constraint.chars().collect();
-    
+
     for (i, &ch) in constraint_chars.iter().enumerate().skip(paren_start) {
         match ch {
             '(' => paren_depth += 1,
@@ -423,14 +461,14 @@ fn parse_primary_key_constraint(
             _ => {}
         }
     }
-    
+
     if paren_depth != 0 {
         return Err(anyhow::anyhow!("Unmatched parentheses in PRIMARY KEY"));
     }
-    
+
     // Extract the key specification (inside parentheses)
     let key_spec = &constraint[paren_start + 1..paren_end].trim();
-    
+
     // Check if it's a composite primary key with partition and clustering keys
     // Format: ((partition_key1, partition_key2), clustering_key1, clustering_key2)
     if key_spec.trim_start().starts_with('(') && key_spec.contains("),") {
@@ -439,19 +477,25 @@ fn parse_primary_key_constraint(
     } else {
         // Simple primary key - all columns are partition keys
         let key_names: Vec<&str> = key_spec.split(',').map(|s| s.trim()).collect();
-        
+
         for (position, key_name) in key_names.iter().enumerate() {
-            let column = columns.iter()
+            let column = columns
+                .iter()
                 .find(|c| c.name == *key_name)
-                .ok_or_else(|| anyhow::anyhow!("Primary key column '{}' not found in column definitions", key_name))?;
-            
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Primary key column '{}' not found in column definitions",
+                        key_name
+                    )
+                })?;
+
             partition_keys.push(KeyColumn {
                 name: column.name.clone(),
                 data_type: column.data_type.clone(),
                 position,
             });
         }
-        
+
         Ok(())
     }
 }
@@ -467,7 +511,7 @@ fn parse_composite_primary_key(
     // Find the end of the partition key specification
     let mut paren_depth = 0;
     let mut partition_end = 0;
-    
+
     for (i, ch) in key_spec.char_indices() {
         match ch {
             '(' => paren_depth += 1,
@@ -481,42 +525,44 @@ fn parse_composite_primary_key(
             _ => {}
         }
     }
-    
+
     if partition_end == 0 {
         return Err(anyhow::anyhow!("Invalid composite primary key format"));
     }
-    
+
     // Extract partition keys (inside the first parentheses)
     let partition_spec = &key_spec[1..partition_end]; // Skip the opening '('
     let partition_names: Vec<&str> = partition_spec.split(',').map(|s| s.trim()).collect();
-    
+
     for (position, key_name) in partition_names.iter().enumerate() {
-        let column = columns.iter()
+        let column = columns
+            .iter()
             .find(|c| c.name == *key_name)
             .ok_or_else(|| anyhow::anyhow!("Partition key column '{}' not found", key_name))?;
-        
+
         partition_keys.push(KeyColumn {
             name: column.name.clone(),
             data_type: column.data_type.clone(),
             position,
         });
     }
-    
+
     // Extract clustering keys (after the first parentheses)
     let remaining = &key_spec[partition_end + 1..].trim();
     if remaining.starts_with(',') {
         let clustering_spec = &remaining[1..].trim(); // Skip the comma
         let clustering_names: Vec<&str> = clustering_spec.split(',').map(|s| s.trim()).collect();
-        
+
         for (position, key_name) in clustering_names.iter().enumerate() {
             if key_name.is_empty() {
                 continue;
             }
-            
-            let column = columns.iter()
+
+            let column = columns
+                .iter()
                 .find(|c| c.name == *key_name)
                 .ok_or_else(|| anyhow::anyhow!("Clustering key column '{}' not found", key_name))?;
-            
+
             clustering_keys.push(ClusteringColumn {
                 name: column.name.clone(),
                 data_type: column.data_type.clone(),
@@ -525,6 +571,6 @@ fn parse_composite_primary_key(
             });
         }
     }
-    
+
     Ok(())
 }

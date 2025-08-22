@@ -5,9 +5,8 @@
 //! Cassandra 5+ compatibility.
 
 use clap::{Arg, Command};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
-use tokio;
 
 // Import our validation modules
 use cqlite_tests::complex_type_validation_suite::{
@@ -97,7 +96,7 @@ async fn main() {
 
     // Ensure output directory exists
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
-        eprintln!("❌ Failed to create output directory: {}", e);
+        eprintln!("❌ Failed to create output directory: {e}");
         process::exit(1);
     }
 
@@ -106,8 +105,8 @@ async fn main() {
     println!("📂 Test Data: {}", test_data_dir.display());
     println!("📋 Schemas: {}", schema_dir.display());
     println!("📄 Reports: {}", output_dir.display());
-    println!("🎯 Cassandra Version: {}", cassandra_version);
-    println!("⚡ Mode: {}", mode);
+    println!("🎯 Cassandra Version: {cassandra_version}");
+    println!("⚡ Mode: {mode}");
     println!();
 
     let mut overall_success = true;
@@ -144,7 +143,7 @@ async fn main() {
                 run_performance_benchmarks(&output_dir, iterations, enable_stress).await;
         }
         _ => {
-            eprintln!("❌ Invalid mode: {}", mode);
+            eprintln!("❌ Invalid mode: {mode}");
             process::exit(1);
         }
     }
@@ -155,10 +154,7 @@ async fn main() {
 
     if overall_success {
         println!("✅ ALL VALIDATIONS PASSED!");
-        println!(
-            "🎯 M3 Complex Types: 100% Cassandra {} Compatible",
-            cassandra_version
-        );
+        println!("🎯 M3 Complex Types: 100% Cassandra {cassandra_version} Compatible");
         println!("📄 Detailed reports available in: {}", output_dir.display());
         process::exit(0);
     } else {
@@ -173,8 +169,8 @@ async fn main() {
 
 /// Run the complete complex type validation suite
 async fn run_validation_suite(
-    test_data_dir: &PathBuf,
-    output_dir: &PathBuf,
+    test_data_dir: &Path,
+    output_dir: &Path,
     enable_stress: bool,
     cassandra_version: &str,
 ) -> bool {
@@ -182,7 +178,7 @@ async fn run_validation_suite(
     println!("────────────────────────────────────────");
 
     let config = ComplexTypeValidationConfig {
-        test_data_dir: test_data_dir.clone(),
+        test_data_dir: test_data_dir.to_path_buf(),
         enable_performance_tests: true,
         enable_stress_tests: enable_stress,
         cassandra_version: cassandra_version.to_string(),
@@ -194,7 +190,7 @@ async fn run_validation_suite(
             Ok(results) => {
                 let report_path = output_dir.join("complex_type_validation_report.json");
                 if let Err(e) = suite.generate_report(&report_path) {
-                    eprintln!("⚠️  Failed to generate validation report: {}", e);
+                    eprintln!("⚠️  Failed to generate validation report: {e}");
                 }
 
                 let success = results.success;
@@ -215,12 +211,12 @@ async fn run_validation_suite(
                 success
             }
             Err(e) => {
-                eprintln!("❌ Validation suite failed: {}", e);
+                eprintln!("❌ Validation suite failed: {e}");
                 false
             }
         },
         Err(e) => {
-            eprintln!("❌ Failed to create validation suite: {}", e);
+            eprintln!("❌ Failed to create validation suite: {e}");
             false
         }
     }
@@ -228,17 +224,17 @@ async fn run_validation_suite(
 
 /// Run real Cassandra data validation
 async fn run_real_data_validation(
-    test_data_dir: &PathBuf,
-    schema_dir: &PathBuf,
-    output_dir: &PathBuf,
+    test_data_dir: &Path,
+    schema_dir: &Path,
+    output_dir: &Path,
     verbose: bool,
 ) -> bool {
     println!("💾 Running Real Cassandra Data Validation");
     println!("──────────────────────────────────────────");
 
     let config = RealDataValidationConfig {
-        sstable_dir: test_data_dir.clone(),
-        schema_dir: schema_dir.clone(),
+        sstable_dir: test_data_dir.to_path_buf(),
+        schema_dir: schema_dir.to_path_buf(),
         verbose_logging: verbose,
         ..Default::default()
     };
@@ -248,7 +244,7 @@ async fn run_real_data_validation(
             Ok(results) => {
                 let report_path = output_dir.join("real_data_validation_report.json");
                 if let Err(e) = validator.generate_report(&report_path) {
-                    eprintln!("⚠️  Failed to generate real data report: {}", e);
+                    eprintln!("⚠️  Failed to generate real data report: {e}");
                 }
 
                 let success = results.success;
@@ -273,12 +269,12 @@ async fn run_real_data_validation(
                 success
             }
             Err(e) => {
-                eprintln!("❌ Real data validation failed: {}", e);
+                eprintln!("❌ Real data validation failed: {e}");
                 false
             }
         },
         Err(e) => {
-            eprintln!("❌ Failed to create real data validator: {}", e);
+            eprintln!("❌ Failed to create real data validator: {e}");
             false
         }
     }
@@ -287,7 +283,7 @@ async fn run_real_data_validation(
 /// Run performance benchmarks
 #[cfg(feature = "benchmarks")]
 async fn run_performance_benchmarks(
-    output_dir: &PathBuf,
+    output_dir: &Path,
     iterations: usize,
     enable_stress: bool,
 ) -> bool {
@@ -309,13 +305,13 @@ async fn run_performance_benchmarks(
             let report_json = match serde_json::to_string_pretty(&results) {
                 Ok(json) => json,
                 Err(e) => {
-                    eprintln!("⚠️  Failed to serialize performance report: {}", e);
+                    eprintln!("⚠️  Failed to serialize performance report: {e}");
                     return false;
                 }
             };
 
             if let Err(e) = std::fs::write(&report_path, report_json) {
-                eprintln!("⚠️  Failed to write performance report: {}", e);
+                eprintln!("⚠️  Failed to write performance report: {e}");
             }
 
             let success = results.success;
@@ -337,7 +333,7 @@ async fn run_performance_benchmarks(
             success
         }
         Err(e) => {
-            eprintln!("❌ Performance benchmarks failed: {}", e);
+            eprintln!("❌ Performance benchmarks failed: {e}");
             false
         }
     }
@@ -346,7 +342,7 @@ async fn run_performance_benchmarks(
 /// Run performance benchmarks (fallback when benchmarks feature is disabled)
 #[cfg(not(feature = "benchmarks"))]
 async fn run_performance_benchmarks(
-    _output_dir: &PathBuf,
+    _output_dir: &Path,
     _iterations: usize,
     _enable_stress: bool,
 ) -> bool {
@@ -358,7 +354,7 @@ async fn run_performance_benchmarks(
 }
 
 /// Generate comprehensive validation summary
-fn _generate_comprehensive_summary(output_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn _generate_comprehensive_summary(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let summary_path = output_dir.join("VALIDATION_SUMMARY.md");
 
     let summary_content = format!(

@@ -623,7 +623,7 @@ impl Value {
             Value::Varint(data) => 4 + data.len(),
             Value::Decimal { scale: _, unscaled } => 4 + 4 + unscaled.len(), // scale + length + data
             Value::Duration { .. } => 12, // 3 * 4 bytes (months, days, nanos)
-            Value::Tombstone(_) => 16, // timestamp + type + optional TTL
+            Value::Tombstone(_) => 16,    // timestamp + type + optional TTL
         }
     }
 
@@ -847,8 +847,14 @@ impl fmt::Display for Value {
                 write!(f, "FROZEN({})", inner)
             }
             Value::Varint(data) => write!(f, "VARINT({:?})", data),
-            Value::Decimal { scale, unscaled } => write!(f, "DECIMAL(scale={}, unscaled={:?})", scale, unscaled),
-            Value::Duration { months, days, nanos } => write!(f, "DURATION({}M {}D {}ns)", months, days, nanos),
+            Value::Decimal { scale, unscaled } => {
+                write!(f, "DECIMAL(scale={}, unscaled={:?})", scale, unscaled)
+            }
+            Value::Duration {
+                months,
+                days,
+                nanos,
+            } => write!(f, "DURATION({}M {}D {}ns)", months, days, nanos),
             Value::Tombstone(info) => match info.tombstone_type {
                 TombstoneType::RowTombstone => write!(f, "TOMBSTONE(ROW@{})", info.deletion_time),
                 TombstoneType::CellTombstone => write!(f, "TOMBSTONE(CELL@{})", info.deletion_time),

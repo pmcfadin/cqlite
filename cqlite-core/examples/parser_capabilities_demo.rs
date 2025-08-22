@@ -101,7 +101,8 @@ fn test_enhanced_api() -> Result<(), Box<dyn std::error::Error>> {
         println!("✓ Fast API works: {}.{}", schema.keyspace, schema.table);
 
         // Syntax validation
-        let valid = validate_cql_schema_syntax("CREATE TABLE test (id UUID PRIMARY KEY)", None).await?;
+        let valid =
+            validate_cql_schema_syntax("CREATE TABLE test (id UUID PRIMARY KEY)", None).await?;
         println!("✓ Syntax validation works: {}", valid);
 
         Ok::<(), Box<dyn std::error::Error>>(())
@@ -344,7 +345,10 @@ fn test_configuration_system() -> Result<(), Box<dyn std::error::Error>> {
 
     // Performance-optimized configuration
     let perf_config = ParserConfig::fast();
-    println!("✓ Performance config created with features: {:?}", perf_config.features);
+    println!(
+        "✓ Performance config created with features: {:?}",
+        perf_config.features
+    );
 
     // Custom configuration
     let custom_config = ParserConfig::default()

@@ -23,6 +23,9 @@ use crate::{
     types::{ComparatorType, TableId},
 };
 
+#[cfg(feature = "legacy-heuristics")]
+use crate::types::UdtValue;
+
 use super::{
     bloom::BloomFilter,
     compression::{Compression, CompressionAlgorithm, CompressionInfo, CompressionReader},
@@ -1005,17 +1008,23 @@ impl SSTableReader {
         // must use metadata-driven compression detection.
 
         match header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0NewBig |
-            crate::parser::header::CassandraVersion::V5_0Bti => {
+            crate::parser::header::CassandraVersion::V5_0NewBig
+            | crate::parser::header::CassandraVersion::V5_0Bti
+            | crate::parser::header::CassandraVersion::V5_0Alpha
+            | crate::parser::header::CassandraVersion::V5_0Beta
+            | crate::parser::header::CassandraVersion::V5_0Release => {
                 // Modern formats should never use heuristics - this is an error
-                log::error!("Heuristic compression detection called for modern format: {:?}", header.cassandra_version);
+                log::error!(
+                    "Heuristic compression detection called for modern format: {:?}",
+                    header.cassandra_version
+                );
                 Ok(None)
             }
             crate::parser::header::CassandraVersion::Legacy => {
                 // For legacy formats, try to detect based on file patterns and entropy
                 // This is inherently unreliable and should be avoided when possible
                 log::warn!("Using unreliable heuristic compression detection for legacy format");
-                
+
                 // Basic heuristics for legacy formats only
                 // This is a fallback when metadata is completely unavailable
                 if header.compression.algorithm != "NONE" {
@@ -1026,7 +1035,10 @@ impl SSTableReader {
                         "ZSTD" => Ok(Some(CompressionAlgorithm::Zstd)),
                         "DEFLATE" => Ok(Some(CompressionAlgorithm::Deflate)),
                         _ => {
-                            log::warn!("Unknown compression algorithm in header: {}", header.compression.algorithm);
+                            log::warn!(
+                                "Unknown compression algorithm in header: {}",
+                                header.compression.algorithm
+                            );
                             Ok(None)
                         }
                     }
@@ -1845,8 +1857,8 @@ impl SSTableReader {
             let state_machine_result = if let Some(_schema) = self.get_table_schema() {
                 // Modern formats should use SchemaAwareReader with proper comparators
                 match self.header.cassandra_version {
-                    crate::parser::header::CassandraVersion::V5_0NewBig | 
-                    crate::parser::header::CassandraVersion::V5_0Bti => {
+                    crate::parser::header::CassandraVersion::V5_0NewBig
+                    | crate::parser::header::CassandraVersion::V5_0Bti => {
                         Err(Error::Schema(format!(
                             "Modern format {:?} requires SchemaAwareReader with proper comparators - \
                              basic reader with blob fallback is not allowed.",
@@ -1870,8 +1882,8 @@ impl SSTableReader {
             } else {
                 // No schema available - check format restrictions
                 match self.header.cassandra_version {
-                    crate::parser::header::CassandraVersion::V5_0NewBig | 
-                    crate::parser::header::CassandraVersion::V5_0Bti => {
+                    crate::parser::header::CassandraVersion::V5_0NewBig
+                    | crate::parser::header::CassandraVersion::V5_0Bti => {
                         Err(Error::Schema(format!(
                             "Schema is required for modern format {:?} - cannot use basic reader.",
                             self.header.cassandra_version
@@ -1891,7 +1903,7 @@ impl SSTableReader {
                     }
                 }
             };
-            
+
             let mut _state_machine: RowCellStateMachine = match state_machine_result {
                 Ok(sm) => sm,
                 Err(e) => return Err(e),
@@ -2152,8 +2164,8 @@ impl SSTableReader {
 
         // Modern formats should never reach this non-schema fallback path
         match self.header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0NewBig | 
-            crate::parser::header::CassandraVersion::V5_0Bti => {
+            crate::parser::header::CassandraVersion::V5_0NewBig
+            | crate::parser::header::CassandraVersion::V5_0Bti => {
                 return Err(Error::Schema(format!(
                     "Non-schema key parsing fallback not allowed for modern format {:?}. \
                      Use SchemaAwareReader with proper schema registry.",
@@ -2477,8 +2489,8 @@ impl SSTableReader {
 
         // Modern formats should never use blob fallback without schema
         match self.header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0NewBig | 
-            crate::parser::header::CassandraVersion::V5_0Bti => {
+            crate::parser::header::CassandraVersion::V5_0NewBig
+            | crate::parser::header::CassandraVersion::V5_0Bti => {
                 return Err(Error::Schema(format!(
                     "Blob fallback not allowed for value parsing in modern format {:?}. \
                      Use SchemaAwareReader with complete schema information.",
@@ -2831,8 +2843,8 @@ impl SSTableReader {
 
         // Modern formats should never use generic UDT fabrication without schema
         match self.header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0NewBig | 
-            crate::parser::header::CassandraVersion::V5_0Bti => {
+            crate::parser::header::CassandraVersion::V5_0NewBig
+            | crate::parser::header::CassandraVersion::V5_0Bti => {
                 return Err(Error::Schema(format!(
                     "Generic UDT fabrication not allowed for modern format {:?}. \
                      Use SchemaAwareReader with complete UDT schema information.",
@@ -2844,8 +2856,8 @@ impl SSTableReader {
                 #[cfg(feature = "legacy-heuristics")]
                 {
                     Ok(Value::Udt(UdtValue {
-                        keyspace: "unknown".to_string(), 
-                        type_name: "unknown".to_string(), 
+                        keyspace: "unknown".to_string(),
+                        type_name: "unknown".to_string(),
                         fields,
                     }))
                 }
@@ -2867,10 +2879,13 @@ impl SSTableReader {
     ) -> Option<String> {
         // Modern formats require SchemaAwareReader for proper column name extraction
         match self.header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0NewBig | 
-            crate::parser::header::CassandraVersion::V5_0Bti => {
+            crate::parser::header::CassandraVersion::V5_0NewBig
+            | crate::parser::header::CassandraVersion::V5_0Bti => {
                 // Modern formats should not use this placeholder implementation
-                log::error!("Column name extraction from key context requires SchemaAwareReader for modern format {:?}", self.header.cassandra_version);
+                log::error!(
+                    "Column name extraction from key context requires SchemaAwareReader for modern format {:?}",
+                    self.header.cassandra_version
+                );
                 None
             }
             _ => {
@@ -3232,14 +3247,21 @@ impl SSTableReader {
 
         // For modern formats, schema-driven digest is MANDATORY
         match self.header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0NewBig | 
-            crate::parser::header::CassandraVersion::V5_0Bti => {
+            crate::parser::header::CassandraVersion::V5_0NewBig
+            | crate::parser::header::CassandraVersion::V5_0Bti => {
                 // Modern formats require schema registry and must never use simple digest
                 if let Some(schema_registry) = &self.schema_registry {
-                    match schema_registry.get_parsing_context(&self.header.keyspace, &self.header.table_name).await {
+                    match schema_registry
+                        .get_parsing_context(&self.header.keyspace, &self.header.table_name)
+                        .await
+                    {
                         Ok(parsing_context) => {
-                            log::debug!("Using schema-driven Murmur3 digest for modern format {:?}", self.header.cassandra_version);
-                            return computer.compute_partition_key_digest(partition_key, &parsing_context);
+                            log::debug!(
+                                "Using schema-driven Murmur3 digest for modern format {:?}",
+                                self.header.cassandra_version
+                            );
+                            return computer
+                                .compute_partition_key_digest(partition_key, &parsing_context);
                         }
                         Err(e) => {
                             return Err(crate::error::Error::schema(format!(
@@ -3260,13 +3282,20 @@ impl SSTableReader {
             _ => {
                 // Legacy formats: try schema-driven first, fallback to simple digest if needed
                 if let Some(schema_registry) = &self.schema_registry {
-                    match schema_registry.get_parsing_context(&self.header.keyspace, &self.header.table_name).await {
+                    match schema_registry
+                        .get_parsing_context(&self.header.keyspace, &self.header.table_name)
+                        .await
+                    {
                         Ok(parsing_context) => {
                             log::debug!("Using schema-driven Murmur3 digest for legacy format");
-                            return computer.compute_partition_key_digest(partition_key, &parsing_context);
+                            return computer
+                                .compute_partition_key_digest(partition_key, &parsing_context);
                         }
                         Err(e) => {
-                            log::warn!("Failed to get parsing context for legacy format, falling back to simple digest: {}", e);
+                            log::warn!(
+                                "Failed to get parsing context for legacy format, falling back to simple digest: {}",
+                                e
+                            );
                             // Continue to legacy fallback below
                         }
                     }
@@ -3286,7 +3315,7 @@ impl SSTableReader {
             // For modern builds, reject simple digest to force schema-driven approach
             Err(crate::error::Error::validation(
                 "Schema-driven digest required for Index.db lookup in modern format. \
-                 Enable 'legacy-heuristics' feature only for legacy compatibility testing."
+                 Enable 'legacy-heuristics' feature only for legacy compatibility testing.",
             ))
         }
     }

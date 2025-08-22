@@ -10,8 +10,6 @@ mod tests {
     use crate::schema::{CqlType, UdtRegistry};
     use crate::types::{UdtField, UdtTypeDef, UdtValue, Value};
 
-    #[allow(dead_code)]
-
     /// Create a sample person UDT value for testing
     #[allow(dead_code)]
     fn create_sample_person_udt() -> UdtValue {

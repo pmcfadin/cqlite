@@ -16,12 +16,9 @@ use cqlite_core::{
     storage::sstable::{
         SSTableManager,
         bulletproof_reader::BulletproofReader,
-        reader::{
-            IntegrityStatus, SSTableReader,
-        },
+        reader::{IntegrityStatus, SSTableReader},
     },
 };
-
 
 /// Comprehensive test result reporting
 #[derive(Debug, Clone)]

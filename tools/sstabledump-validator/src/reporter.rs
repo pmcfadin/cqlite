@@ -237,7 +237,6 @@ impl ValidationReport {
         output
     }
 
-
     pub fn _format_as_json(&self) -> Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }

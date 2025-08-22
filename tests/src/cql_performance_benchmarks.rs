@@ -9,7 +9,10 @@ use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::SSTableParser;
 use cqlite_core::schema::{CqlType, TableSchema};
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 

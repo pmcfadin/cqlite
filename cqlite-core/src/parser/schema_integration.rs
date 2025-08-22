@@ -287,14 +287,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "M2+ feature; gated for M1"]
     async fn test_parse_cql_schema_enhanced() {
-        let cql = r#"
+        let cql = r"
             CREATE TABLE test_keyspace.users (
                 id UUID PRIMARY KEY,
                 name TEXT,
                 age INT,
                 email TEXT
             )
-        "#;
+        ";
 
         let schema = parse_cql_schema_enhanced(cql, None).await.unwrap();
 
