@@ -434,7 +434,9 @@ impl M3PerformanceValidator {
         ));
 
         if let Some(simd_effectiveness) = results.performance_summary.simd_effectiveness {
-            report.push_str(&format!("- **SIMD Effectiveness**: {simd_effectiveness:.2}x speedup\n"));
+            report.push_str(&format!(
+                "- **SIMD Effectiveness**: {simd_effectiveness:.2}x speedup\n"
+            ));
         }
 
         // Detailed Test Results
@@ -513,7 +515,9 @@ impl M3PerformanceValidator {
 
         for (target, requirement, actual) in &targets {
             let status = "✅"; // Would calculate based on actual vs requirement
-            report.push_str(&format!("| {target} | {requirement} | {actual} | {status} |\n"));
+            report.push_str(&format!(
+                "| {target} | {requirement} | {actual} | {status} |\n"
+            ));
         }
 
         // Recommendations
@@ -730,7 +734,7 @@ mod tests {
             run_regression_tests: false,
             update_baselines: true,
             custom_targets: Some(PerformanceTargets {
-                max_ms_per_mb: 6.7,        // 1000/150 = 6.7ms/MB
+                max_ms_per_mb: 6.7, // 1000/150 = 6.7ms/MB
                 min_throughput_mbs: 150.0,
                 max_memory_ratio: 1.2,
                 max_row_parse_latency_us: 50, // 5ms = 5000μs but using 50μs for test

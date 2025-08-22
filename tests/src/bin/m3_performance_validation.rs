@@ -214,10 +214,10 @@ fn parse_config(matches: &ArgMatches) -> Result<ValidationConfig, String> {
 
     let custom_targets = if matches.get_flag("strict") {
         Some(PerformanceTargets {
-            max_ms_per_mb: 8.0,            // Stricter: max 8ms per MB
-            min_throughput_mbs: 120.0,     // Stricter: 120 MB/s instead of 100
-            max_memory_ratio: 1.3,         // Stricter: 1.3x instead of 1.5x
-            max_row_parse_latency_us: 50,  // Stricter: 50μs instead of 100μs
+            max_ms_per_mb: 8.0,           // Stricter: max 8ms per MB
+            min_throughput_mbs: 120.0,    // Stricter: 120 MB/s instead of 100
+            max_memory_ratio: 1.3,        // Stricter: 1.3x instead of 1.5x
+            max_row_parse_latency_us: 50, // Stricter: 50μs instead of 100μs
         })
     } else {
         Some(PerformanceTargets {

@@ -118,9 +118,10 @@ async fn test_cassandra_compression_compatibility() -> Result<()> {
 
     // Verify the compressed file is smaller than it would be uncompressed
     let metadata = std::fs::metadata(&compressed_path).map_err(|e| {
-        cqlite_core::error::Error::Io(std::io::Error::other(
-            format!("Failed to get file metadata: {}", e),
-        ))
+        cqlite_core::error::Error::Io(std::io::Error::other(format!(
+            "Failed to get file metadata: {}",
+            e
+        )))
     })?;
 
     // With 100 entries of ~120 chars each, uncompressed should be >12KB
