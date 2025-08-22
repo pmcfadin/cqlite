@@ -441,7 +441,6 @@ impl Default for PRDTargets {
 /// Benchmark execution helper utilities
 pub mod utils {
     use super::*;
-    use std::process::{Command, Stdio};
 
     /// Measure memory usage during operation
     pub struct MemoryMonitor {
@@ -494,7 +493,7 @@ pub mod utils {
 
     #[cfg(target_os = "macos")]
     fn get_memory_usage_macos() -> f64 {
-        use std::process;
+        use std::process::{self, Command, Stdio};
 
         let pid = process::id();
         let output = Command::new("ps")
