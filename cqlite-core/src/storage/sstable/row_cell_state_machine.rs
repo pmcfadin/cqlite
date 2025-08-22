@@ -244,6 +244,29 @@ impl RowCellStateMachine {
 
     /// Process input data and advance the state machine
     pub fn process(&mut self, data: &[u8]) -> Result<usize> {
+        // For modern formats, ensure schema is available before processing
+        match self.version {
+            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                if self.schema.is_none() {
+                    return Err(Error::Schema(format!(
+                        "Schema is required for modern format {:?}. Blob fallback is disabled.",
+                        self.version
+                    )));
+                }
+            }
+            _ => {
+                // Legacy formats need schema when legacy-heuristics feature is disabled
+                #[cfg(not(feature = "legacy-heuristics"))]
+                {
+                    if self.schema.is_none() {
+                        return Err(Error::Schema(
+                            "Schema is required for parsing. Enable legacy-heuristics feature for schema-less blob fallback support.".to_string()
+                        ));
+                    }
+                }
+            }
+        }
+
         let mut consumed = 0;
 
         while consumed < data.len() && !self.is_complete() && !self.has_error() {
@@ -263,7 +286,8 @@ impl RowCellStateMachine {
                 Err(e) => {
                     self.state = State::Error(e.to_string());
                     self.error_message = Some(e.to_string());
-                    break;
+                    // Return the error immediately for schema errors in modern formats
+                    return Err(e);
                 }
             }
         }
