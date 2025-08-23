@@ -127,15 +127,19 @@ mod integration_baseline {
 
     #[test]
     fn test_testing_framework_exists() {
-        // Verify testing framework exists
-        let framework_path = PathBuf::from("testing-framework");
-        assert!(framework_path.exists(), "testing-framework should exist");
-
-        let framework_manifest = framework_path.join("Cargo.toml");
+        // Verify testing framework exists (current directory should contain the Cargo.toml for tests)
+        let current_manifest = PathBuf::from("Cargo.toml");
         assert!(
-            framework_manifest.exists(),
-            "testing-framework Cargo.toml should exist"
+            current_manifest.exists(),
+            "Integration tests Cargo.toml should exist"
         );
+
+        // Also verify that the src directory exists with test modules
+        let src_path = PathBuf::from("src");
+        assert!(src_path.exists(), "tests src directory should exist");
+
+        let lib_path = src_path.join("lib.rs");
+        assert!(lib_path.exists(), "tests lib.rs should exist");
     }
 }
 

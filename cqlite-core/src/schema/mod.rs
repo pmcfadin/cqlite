@@ -818,9 +818,38 @@ impl CqlType {
         }
 
         // Handle UDT types - format: udt_name or keyspace.udt_name
-        if type_str
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        // But first check if it's not a primitive type in uppercase
+        let lowercase_type = type_str.to_lowercase();
+        let is_primitive = matches!(
+            lowercase_type.as_str(),
+            "boolean"
+                | "bool"
+                | "tinyint"
+                | "smallint"
+                | "int"
+                | "integer"
+                | "bigint"
+                | "long"
+                | "float"
+                | "double"
+                | "decimal"
+                | "text"
+                | "varchar"
+                | "ascii"
+                | "blob"
+                | "timestamp"
+                | "date"
+                | "time"
+                | "uuid"
+                | "timeuuid"
+                | "inet"
+                | "duration"
+        );
+
+        if !is_primitive
+            && type_str
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
             && !type_str.chars().all(|c| c.is_ascii_lowercase())
         {
             // This might be a UDT name - store as custom type for now
