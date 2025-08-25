@@ -50,12 +50,12 @@ mod tests {
         // Range 1: start_token, end_token (VInt encoded)
         // Use smaller values that fit in single-byte VInt encoding
         let start_token_1 = crate::parser::vint::encode_vint(32); // Small positive value
-        let end_token_1 = crate::parser::vint::encode_vint(63);   // Another small value
+        let end_token_1 = crate::parser::vint::encode_vint(63); // Another small value
         data.extend_from_slice(&start_token_1);
         data.extend_from_slice(&end_token_1);
         // Range 2
         let start_token_2 = crate::parser::vint::encode_vint(64); // Will use 2 bytes
-        let end_token_2 = crate::parser::vint::encode_vint(127);  // Will use 2 bytes
+        let end_token_2 = crate::parser::vint::encode_vint(127); // Will use 2 bytes
         data.extend_from_slice(&start_token_2);
         data.extend_from_slice(&end_token_2);
 
@@ -362,14 +362,14 @@ mod tests {
         // Find the start of token coverage section after the partition count and timestamps
         let reader = BulletproofReader::new();
         let mut offset = 0;
-        
+
         // Skip partition count VInt
         let (_, partition_vint_consumed) = reader.read_vint(&metadata[offset..]).unwrap();
         offset += partition_vint_consumed;
-        
+
         // Skip min timestamp (8 bytes) and max timestamp (8 bytes)
         offset += 16;
-        
+
         let token_section = &metadata[offset..];
 
         // Parse and verify token range count using VInt
@@ -381,7 +381,7 @@ mod tests {
 
         // Verify token ranges follow VInt encoding
         let mut token_offset = 0;
-        
+
         // Skip the range count VInt
         let (_, range_count_consumed) = reader.read_vint(&token_section[token_offset..]).unwrap();
         token_offset += range_count_consumed;
@@ -397,10 +397,14 @@ mod tests {
 
             let (start_value, consumed) = start_result.unwrap();
             token_offset += consumed;
-            
+
             // Verify the expected start token values (32 for range 0, 64 for range 1)
             let expected_start = if range_idx == 0 { 32 } else { 64 };
-            assert_eq!(start_value, expected_start, "Start token value mismatch for range {}", range_idx);
+            assert_eq!(
+                start_value, expected_start,
+                "Start token value mismatch for range {}",
+                range_idx
+            );
 
             // Parse end token
             let end_result = reader.read_vint(&token_section[token_offset..]);
@@ -412,10 +416,14 @@ mod tests {
 
             let (end_value, consumed) = end_result.unwrap();
             token_offset += consumed;
-            
+
             // Verify the expected end token values (63 for range 0, 127 for range 1)
             let expected_end = if range_idx == 0 { 63 } else { 127 };
-            assert_eq!(end_value, expected_end, "End token value mismatch for range {}", range_idx);
+            assert_eq!(
+                end_value, expected_end,
+                "End token value mismatch for range {}",
+                range_idx
+            );
         }
     }
 
