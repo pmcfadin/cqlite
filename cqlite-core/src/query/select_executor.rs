@@ -207,6 +207,8 @@ impl SelectExecutor {
             if let Value::Map(map) = value {
                 for (col_name, col_value) in map {
                     if let Value::Text(name) = col_name {
+                        // For empty projection (SELECT *), include ALL columns
+                        // For specific projection, only include requested columns
                         if projection.is_empty() || projection.contains(&name) {
                             row_values.insert(name, col_value);
                         }
@@ -926,14 +928,8 @@ impl SelectExecutor {
 
         match &statement.select_clause {
             SelectClause::All => {
-                // Get all columns from schema
-                columns.push(ColumnInfo {
-                    name: "*".to_string(),
-                    data_type: crate::types::DataType::Text,
-                    nullable: true,
-                    position: 0,
-                    table_name: None,
-                });
+                // For SELECT *, we'll handle this dynamically when processing rows
+                // Don't add any specific columns here - this will be expanded later
             }
             SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
                 for (i, expr) in exprs.iter().enumerate() {

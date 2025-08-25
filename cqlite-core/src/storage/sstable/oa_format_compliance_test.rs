@@ -31,7 +31,9 @@ mod tests {
         let mut data = Vec::new();
 
         // Partition Count (VInt encoding per spec)
-        data.push(0x64); // 100 partitions
+        // Use proper VInt encoding for value 100
+        let partition_count_vint = crate::parser::vint::encode_vint(100);
+        data.extend_from_slice(&partition_count_vint);
 
         // Min Timestamp (8 bytes, signed, microseconds since epoch, big-endian)
         let min_timestamp = 1640995200000000i64; // 2022-01-01 00:00:00 UTC
@@ -42,13 +44,20 @@ mod tests {
         data.extend_from_slice(&max_timestamp.to_be_bytes());
 
         // Token Coverage Array (as per 'oa' format enhancement)
-        data.push(0x02); // 2 token ranges (VInt)
+        // Use proper VInt encoding for value 2
+        let token_range_count_vint = crate::parser::vint::encode_vint(2);
+        data.extend_from_slice(&token_range_count_vint);
         // Range 1: start_token, end_token (VInt encoded)
-        data.extend_from_slice(&[0xC0, 0x80]); // Start token as VInt
-        data.extend_from_slice(&[0xC0, 0xFF]); // End token as VInt
+        // Use smaller values that fit in single-byte VInt encoding
+        let start_token_1 = crate::parser::vint::encode_vint(32); // Small positive value
+        let end_token_1 = crate::parser::vint::encode_vint(63);   // Another small value
+        data.extend_from_slice(&start_token_1);
+        data.extend_from_slice(&end_token_1);
         // Range 2
-        data.extend_from_slice(&[0xC1, 0x00]); // Start token as VInt  
-        data.extend_from_slice(&[0xC1, 0x7F]); // End token as VInt
+        let start_token_2 = crate::parser::vint::encode_vint(64); // Will use 2 bytes
+        let end_token_2 = crate::parser::vint::encode_vint(127);  // Will use 2 bytes
+        data.extend_from_slice(&start_token_2);
+        data.extend_from_slice(&end_token_2);
 
         // Compression Info Offset (8 bytes, big-endian)
         let compression_offset = 1024u64;
@@ -197,13 +206,13 @@ mod tests {
         let vint_test_cases = vec![
             // (bytes, expected_value, expected_length, description)
             (vec![0x00], 0i64, 1, "Zero value"),
-            (vec![0x01], 1i64, 1, "Single byte positive"),
-            (vec![0x3F], 63i64, 1, "Maximum single byte positive"),
-            (vec![0xC0, 0x40], 64i64, 2, "Two byte encoding start"),
-            (vec![0xC0, 0x7F], 127i64, 2, "Two byte positive"),
-            (vec![0xFF], -1i64, 1, "Single byte negative"),
-            (vec![0xC0], -64i64, 2, "Two byte negative boundary"),
-            (vec![0xBF, 0xBF], -65i64, 2, "Two byte negative"),
+            (vec![0x02], 1i64, 1, "Single byte positive"),
+            (vec![0x7E], 63i64, 1, "Maximum single byte positive"),
+            (vec![0x80, 0x80], 64i64, 2, "Two byte encoding start"),
+            (vec![0x80, 0xFE], 127i64, 2, "Two byte positive"),
+            (vec![0x01], -1i64, 1, "Single byte negative"),
+            (vec![0x7F], -64i64, 1, "Two byte negative boundary"),
+            (vec![0x80, 0x81], -65i64, 2, "Two byte negative"),
         ];
 
         for (bytes, expected_value, expected_length, description) in vint_test_cases {
@@ -290,15 +299,22 @@ mod tests {
             result.is_ok(),
             "Should handle oversized input by reading first 32 bytes"
         );
+
+        // Verify that oversized input is handled correctly by only reading the header portion
+        let header = result.unwrap();
+        assert_eq!(
+            header.format_version, 0x0001,
+            "Version should still be correctly parsed from oversized input"
+        );
     }
 
     #[test]
     fn test_timestamp_format_compliance() {
         let metadata = create_spec_compliant_metadata();
 
-        // Extract timestamps (after partition count VInt)
-        let min_timestamp_bytes = &metadata[1..9];
-        let max_timestamp_bytes = &metadata[9..17];
+        // Extract timestamps (after partition count VInt - now 2 bytes)
+        let min_timestamp_bytes = &metadata[2..10];
+        let max_timestamp_bytes = &metadata[10..18];
 
         // Verify big-endian encoding
         let min_timestamp = i64::from_be_bytes(min_timestamp_bytes.try_into().unwrap());
@@ -335,48 +351,71 @@ mod tests {
             partition_count, 100,
             "Should correctly parse partition count"
         );
-        assert_eq!(consumed, 1, "Partition count should consume 1 byte");
+        // VInt encoding of 100 requires 2 bytes (ZigZag: 100 -> 200 -> 0x80, 0xC8)
+        assert_eq!(consumed, 2, "Partition count VInt should consume 2 bytes");
     }
 
     #[test]
     fn test_token_coverage_format() {
         let metadata = create_spec_compliant_metadata();
 
-        // Token coverage starts after: partition_count(1) + min_timestamp(8) + max_timestamp(8) = 17 bytes
-        let token_section = &metadata[17..];
+        // Find the start of token coverage section after the partition count and timestamps
+        let reader = BulletproofReader::new();
+        let mut offset = 0;
+        
+        // Skip partition count VInt
+        let (_, partition_vint_consumed) = reader.read_vint(&metadata[offset..]).unwrap();
+        offset += partition_vint_consumed;
+        
+        // Skip min timestamp (8 bytes) and max timestamp (8 bytes)
+        offset += 16;
+        
+        let token_section = &metadata[offset..];
 
-        // First byte should be token range count
+        // Parse and verify token range count using VInt
+        let (token_range_count, _) = reader.read_vint(token_section).unwrap();
         assert_eq!(
-            token_section[0], 0x02,
+            token_range_count, 2,
             "Should have 2 token ranges as specified"
         );
 
         // Verify token ranges follow VInt encoding
-        let reader = BulletproofReader::new();
-        let mut offset = 1; // Skip range count
+        let mut token_offset = 0;
+        
+        // Skip the range count VInt
+        let (_, range_count_consumed) = reader.read_vint(&token_section[token_offset..]).unwrap();
+        token_offset += range_count_consumed;
 
         for range_idx in 0..2 {
             // Parse start token
-            let start_result = reader.read_vint(&token_section[offset..]);
+            let start_result = reader.read_vint(&token_section[token_offset..]);
             assert!(
                 start_result.is_ok(),
                 "Should parse start token for range {}",
                 range_idx
             );
 
-            let (_, consumed) = start_result.unwrap();
-            offset += consumed;
+            let (start_value, consumed) = start_result.unwrap();
+            token_offset += consumed;
+            
+            // Verify the expected start token values (32 for range 0, 64 for range 1)
+            let expected_start = if range_idx == 0 { 32 } else { 64 };
+            assert_eq!(start_value, expected_start, "Start token value mismatch for range {}", range_idx);
 
             // Parse end token
-            let end_result = reader.read_vint(&token_section[offset..]);
+            let end_result = reader.read_vint(&token_section[token_offset..]);
             assert!(
                 end_result.is_ok(),
                 "Should parse end token for range {}",
                 range_idx
             );
 
-            let (_, consumed) = end_result.unwrap();
-            offset += consumed;
+            let (end_value, consumed) = end_result.unwrap();
+            token_offset += consumed;
+            
+            // Verify the expected end token values (63 for range 0, 127 for range 1)
+            let expected_end = if range_idx == 0 { 63 } else { 127 };
+            assert_eq!(end_value, expected_end, "End token value mismatch for range {}", range_idx);
         }
     }
 

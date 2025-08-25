@@ -28,6 +28,7 @@ use super::{
     compression_info::CompressionInfo,
     format_detector::{SSTableComponent, SSTableFormat, SSTableInfo},
 };
+use crate::parser::vint::parse_vint;
 use crate::{Error, Result};
 
 /// Bulletproof SSTable reader with automatic format detection
@@ -288,7 +289,7 @@ impl BulletproofReader {
         }
 
         // Read format version (next 2 bytes, big-endian)
-        let format_version = u16::from_be_bytes([data[4], data[5]]) as u32;
+        let format_version = u16::from_be_bytes([data[4], data[5]]);
         debug!("'oa' format version: {}", format_version);
 
         // Validate version - only version 1 is supported
@@ -442,34 +443,20 @@ impl BulletproofReader {
         Ok((entry, offset))
     }
 
-    /// Read Variable Length Integer (VInt) from data
+    /// Read Variable Length Integer (VInt) from data using Cassandra format
     pub fn read_vint(&self, data: &[u8]) -> Result<(u64, usize)> {
-        if data.is_empty() {
-            return Err(Error::InvalidFormat("Empty data for VInt".to_string()));
-        }
-
-        let mut result = 0u64;
-        let mut bytes_read = 0;
-
-        for (i, &byte) in data.iter().enumerate() {
-            if i >= 10 {
-                // VInt should not exceed 10 bytes for u64
-                return Err(Error::InvalidFormat("VInt too long".to_string()));
+        match parse_vint(data) {
+            Ok((remaining, value)) => {
+                let bytes_consumed = data.len() - remaining.len();
+                // VInts in SSTable can be negative (ZigZag encoded), but we return as u64
+                // The caller needs to interpret the sign appropriately
+                Ok((value as u64, bytes_consumed))
             }
-
-            bytes_read += 1;
-
-            if byte & 0x80 == 0 {
-                // Most significant bit is 0, this is the last byte
-                result = (result << 7) | (byte as u64);
-                break;
-            } else {
-                // Most significant bit is 1, more bytes follow
-                result = (result << 7) | ((byte & 0x7F) as u64);
-            }
+            Err(nom_error) => Err(Error::InvalidFormat(format!(
+                "VInt parsing failed: {:?}",
+                nom_error
+            ))),
         }
-
-        Ok((result, bytes_read))
     }
 
     /// Read legacy varint format for backwards compatibility
@@ -637,7 +624,7 @@ pub struct OaFormatHeader {
     #[allow(dead_code)]
     pub magic_number: u32,
     /// Format version (interpretation may not match Big format spec)
-    pub format_version: u32,
+    pub format_version: u16,
     /// Number of partitions in this SSTable (experimental field interpretation)
     partition_count: u64,
     /// Size of metadata section (experimental field interpretation)
@@ -765,13 +752,15 @@ mod tests {
         };
 
         // Test simple VInt (single byte)
-        let data = [0x05]; // Value 5
+        // Value 5 ZigZag-encodes to 10 (0x0A)
+        let data = [0x0A]; // Value 5 in ZigZag VInt encoding
         let (value, bytes_read) = reader.read_vint(&data).unwrap();
         assert_eq!(value, 5);
         assert_eq!(bytes_read, 1);
 
         // Test multi-byte VInt
-        let data = [0x81, 0x00]; // Value 128 in VInt encoding
+        // Value 128 ZigZag-encodes to 256, which needs [0x81, 0x00]
+        let data = [0x81, 0x00]; // Value 128 in ZigZag VInt encoding (256 raw -> 128 decoded)
         let (value, bytes_read) = reader.read_vint(&data).unwrap();
         assert_eq!(value, 128);
         assert_eq!(bytes_read, 2);

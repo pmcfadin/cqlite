@@ -818,7 +818,9 @@ mod tests {
 
     #[test]
     fn test_type_details_generation() {
-        let exporter = JsonExporter::new();
+        let mut config = JsonExportConfig::default();
+        config.include_documentation = true;
+        let exporter = JsonExporter::with_config(config);
         let collection_types = HashMap::new();
 
         let type_details = exporter

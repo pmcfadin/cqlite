@@ -106,7 +106,7 @@ path = "src/bin/sstabledump_parity_validator.rs"
 
 
 [features]
-default = ["lz4", "metrics"]
+default = ["all-compression", "metrics", "experimental"]
 
 # Compression features - properly feature-gated
 lz4 = ["dep:lz4_flex"]
@@ -126,13 +126,13 @@ legacy-heuristics = []
 # CI zero tolerance - treat warnings as errors
 ci_zero_tolerance = []
 
-# M1 testing remediation feature flags (not enabled by default)
+# M1 testing remediation feature flags
 antlr = []            # CQL/ANTLR parser work (M2+)
 state_machine = []    # query/state orchestration (M2+)
 events = []           # validation/event recording (M2+)
 tombstones = []       # tombstone/GC logic (M3+)
 benchmarks = []       # opt-in perf runs
-experimental = []     # umbrella for WIP tests
+experimental = []     # SSTable writing and other M1 functionality (enabled by default)
 
 [lints]
 workspace = true
