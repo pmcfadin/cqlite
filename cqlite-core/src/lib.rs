@@ -303,16 +303,19 @@ mod tests {
 
         assert_eq!(result.rows_affected, 1);
 
-        // Query data (disabled for testing INSERT fix)
-        // let result = db
-        //     .execute("SELECT * FROM users WHERE id = 1")
-        //     .await
-        //     .unwrap();
-        //
-        // #[cfg(debug_assertions)]
-        // eprintln!("DEBUG: Test SELECT assertion - rows.len(): {}", result.rows.len());
-        //
-        // assert_eq!(result.rows.len(), 1);
+        // Query data - Re-enabled for QA debugging
+        let result = db
+            .execute("SELECT * FROM users WHERE id = 1")
+            .await
+            .unwrap();
+
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "DEBUG: Test SELECT assertion - rows.len(): {}",
+            result.rows.len()
+        );
+
+        assert_eq!(result.rows.len(), 1, "SELECT should return 1 row");
 
         db.close().await.unwrap();
     }

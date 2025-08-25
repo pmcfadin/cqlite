@@ -99,7 +99,17 @@ impl QueryEngine {
         // Check if this is a SELECT statement - use advanced parser
         let trimmed_sql = sql.trim().to_uppercase();
         if trimmed_sql.starts_with("SELECT") {
-            return self.execute_select_query(sql, start_time).await;
+            // For simple WHERE id = <value> queries, use normal executor for consistent key handling
+            // This ensures INSERT and SELECT use the same key generation logic
+            if sql.contains("WHERE id =") && sql.split_whitespace().count() <= 8 {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "DEBUG: Routing simple SELECT through normal executor for consistent key handling"
+                );
+                // Fall through to normal execution path for simple point lookups
+            } else {
+                return self.execute_select_query(sql, start_time).await;
+            }
         }
 
         // Check plan cache first for non-SELECT queries

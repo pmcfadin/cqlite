@@ -315,10 +315,24 @@ impl QueryPlanner {
 
         let _table_stats = self.get_table_statistics(table).await?;
 
+        // Convert INSERT VALUES into conditions for the executor to use
+        let mut conditions = Vec::new();
+
+        // Match columns with their corresponding values
+        for (i, column) in query.columns.iter().enumerate() {
+            if i < query.values.len() {
+                conditions.push(Condition {
+                    column: column.clone(),
+                    operator: ComparisonOperator::Equal,
+                    value: query.values[i].clone(),
+                });
+            }
+        }
+
         let steps = vec![ExecutionStep {
             step_type: StepType::Insert, // Insert operation
             columns: query.columns.clone(),
-            conditions: vec![], // No conditions needed for INSERT
+            conditions, // Pass the INSERT values as conditions
             cost: self.cost_model.row_scan_cost,
             parallelization: ParallelizationInfo {
                 can_parallelize: false,

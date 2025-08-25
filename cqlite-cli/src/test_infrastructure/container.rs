@@ -224,10 +224,31 @@ impl TestDatabase {
 
     /// Execute a query against the test database
     pub async fn execute_query(&self, query: &str) -> TestResult<Vec<String>> {
-        // This is a placeholder - implement actual query execution
-        // based on your database API
-        println!("Executing query: {}", query);
-        Ok(vec!["query_result".to_string()])
+        // Execute the query using the actual database engine
+        match self.database.execute(query).await {
+            Ok(result) => {
+                // Convert QueryResult to Vec<String> for test compatibility
+                if result.rows.is_empty() && result.rows_affected > 0 {
+                    // DML query (INSERT, UPDATE, DELETE)
+                    Ok(vec![format!("{} rows affected", result.rows_affected)])
+                } else if !result.rows.is_empty() {
+                    // SELECT query with results
+                    let mut results = Vec::new();
+                    for row in &result.rows {
+                        let row_str = format!("{:?}", row.values);
+                        results.push(row_str);
+                    }
+                    Ok(results)
+                } else {
+                    // Empty result set
+                    Ok(vec!["Empty result set".to_string()])
+                }
+            }
+            Err(e) => {
+                println!("Query execution failed: {}", e);
+                Err(format!("Query execution failed: {}", e).into())
+            }
+        }
     }
 
     /// Load schema from file

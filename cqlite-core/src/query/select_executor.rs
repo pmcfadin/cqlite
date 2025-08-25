@@ -196,14 +196,8 @@ impl SelectExecutor {
             // Create QueryRow from the scanned data
             let mut row_values = HashMap::new();
 
-            // Add key to row values (assuming primary key column is "id")
-            if projection.is_empty() || projection.contains(&"id".to_string()) {
-                row_values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
-            }
-
             // Add value columns based on projection
-            // Note: This is simplified - in a real implementation, you'd parse the value
-            // according to the table schema
+            // Deserialize Value::Map stored by INSERT operations
             if let Value::Map(map) = value {
                 for (col_name, col_value) in map {
                     if let Value::Text(name) = col_name {
@@ -213,6 +207,13 @@ impl SelectExecutor {
                             row_values.insert(name, col_value);
                         }
                     }
+                }
+            } else {
+                // Fallback for non-map values - treat as generic data
+                row_values.insert("data".to_string(), value);
+                // Also add a key-based id for compatibility
+                if projection.is_empty() || projection.contains(&"id".to_string()) {
+                    row_values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
                 }
             }
 

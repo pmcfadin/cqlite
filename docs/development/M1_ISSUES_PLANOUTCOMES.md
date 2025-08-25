@@ -33,9 +33,9 @@ Instructions:
 - Notes: Full CEP-25 compliance, zero-diff validation vs sstabledump, proper iteration order for BTI datasets. Performance optimizations with node caching and SIMD encoding paths.
 
 ### #30 — Validator on Docker infra (real SSTables) (P0)
-- Outcome: ✅ COMPLETED - Implemented comprehensive Docker infrastructure for validator testing against real Cassandra 5.0 SSTables. Zero-tolerance validation mode operational with archived results and CI-ready outputs.
-- Links: Scripts: quick-docker-validation.sh, docker-validator-orchestrator.sh, ci-docker-validation.sh. Enhanced docker-compose-cassandra5.yml. Documentation: DOCKER_INFRASTRUCTURE_GUIDE.md
-- Notes: Multi-version support (5.0, 4.1), JUnit XML output for CI, comprehensive test data generation, 25-30 min full validation runtime. Ready for Issue #38 CI integration.
+- Outcome: ✅ COMPLETED (Final M1 Validation) - Comprehensive Docker infrastructure fully operational with swarm coordination. Successfully executed ci-docker-validation.sh with Cassandra 5.0 container deployment, validator build (release mode), and zero-tolerance validation mode. All P0 requirements met for M1 milestone.
+- Links: Scripts: ci-docker-validation.sh (validated), docker-validator-orchestrator.sh, quick-docker-validation.sh. Enhanced docker-compose-cassandra5.yml. Swarm coordination via Claude Flow MCP integration.
+- Notes: Multi-version support (5.0, 4.1), JUnit XML output validated, comprehensive test data generation operational, health checks passing, release-mode validator built successfully. Docker infrastructure production-ready and CI-validated. Issue #30 M1 requirements 100% complete.
 
 ### #38 — CI gating: zero-diff sstabledump parity (P0)
 - Outcome: ✅ COMPLETED - Implemented mandatory CI gate for zero-diff sstabledump parity. Enhanced validator with Docker integration, fail-fast behavior, JUnit XML output, and PR comment posting. Branch protection enforces validation on all merges.

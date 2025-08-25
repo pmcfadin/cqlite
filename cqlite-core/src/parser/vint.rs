@@ -88,25 +88,15 @@ pub fn parse_vint(input: &[u8]) -> IResult<&[u8], i64> {
     //     )));
     // }
 
-    // Try parsing as ZigZag encoded VInt first (for backward compatibility)
-    if let Ok(zigzag_result) = parse_zigzag_vint(input) {
-        return Ok(zigzag_result);
+    // Try the fixed Cassandra-compatible VInt parsing first
+    match crate::parser::vint_fixed::parse_vint_fixed(input) {
+        Ok(result) => return Ok(result),
+        Err(_) => {
+            // Fall back to ZigZag encoding for backward compatibility
+            // This handles edge cases and legacy formats
+            return parse_zigzag_vint(input);
+        }
     }
-
-    // Fall back to custom BTI format for Issue #36 compatibility
-    let (total_length, value) = parse_custom_vint_format(input)?.ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-    })?;
-
-    if input.len() < total_length {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    let (remaining_input, _) = take(total_length)(input)?;
-    Ok((remaining_input, value))
 }
 
 /// Parse VInt using ZigZag encoding (backward compatibility)
@@ -158,6 +148,22 @@ fn parse_zigzag_vint(input: &[u8]) -> IResult<&[u8], i64> {
             value = (value << 8) | (input[i] as u64);
         }
         (bytes_to_read + 1, value)
+    } else if first_byte == 0xFF {
+        // Extended format: 0xFF followed by variable length bytes (similar to 0xF0)
+        if input.len() < 2 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Eof,
+            )));
+        }
+        // Read the remaining bytes as a big-endian integer
+        let mut value = 0u64;
+        let bytes_to_read = input.len() - 1; // Skip the 0xFF marker
+        for i in 1..=bytes_to_read.min(8) {
+            // Max 8 bytes for u64
+            value = (value << 8) | (input[i] as u64);
+        }
+        (bytes_to_read + 1, value)
     } else {
         // Not a valid ZigZag VInt, let caller try other formats
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -171,7 +177,69 @@ fn parse_zigzag_vint(input: &[u8]) -> IResult<&[u8], i64> {
     Ok((remaining_input, signed_value))
 }
 
+/// Parse VInt using Cassandra-compatible format
+#[allow(dead_code)]
+fn parse_cassandra_vint_format(
+    input: &[u8],
+) -> Result<Option<(usize, i64)>, nom::Err<nom::error::Error<&[u8]>>> {
+    if input.is_empty() {
+        return Ok(None);
+    }
+
+    let first_byte = input[0];
+
+    // Count leading ones to determine the byte length
+    let leading_ones = first_byte.leading_ones() as usize;
+    let total_length = leading_ones + 1;
+
+    if total_length > 9 || input.len() < total_length {
+        return Ok(None); // Invalid or incomplete
+    }
+
+    // Extract the value based on the format
+    let value = if total_length == 1 {
+        // Single byte format
+        if first_byte & 0x80 == 0x80 {
+            // 1xxxxxxx format: values 0-127
+            (first_byte & 0x7F) as i64
+        } else if first_byte == 0xFF {
+            -1
+        } else if first_byte & 0xC0 == 0xC0 {
+            // 11xxxxxx format: negative values -1 to -63
+            -((first_byte & 0x3F) as i64)
+        } else {
+            // 0xxxxxxx format should not appear in Cassandra VInt
+            return Ok(None);
+        }
+    } else {
+        // Multi-byte format: extract data bits after leading pattern
+        let data_bits = (total_length * 8) - leading_ones - 1;
+        // Extract data from first byte (after leading pattern)
+        let first_data_bits = 8 - leading_ones - 1;
+        let first_data_mask = (1u8 << first_data_bits) - 1;
+        let mut value = (first_byte & first_data_mask) as i64;
+
+        // Add remaining bytes
+        for i in 1..total_length {
+            value = (value << 8) | (input[i] as i64);
+        }
+
+        // Check if this should be interpreted as negative (two's complement)
+        // For Cassandra VInt, we need to handle signed values properly
+        let max_positive = (1i64 << (data_bits - 1)) - 1;
+        if value > max_positive {
+            // Convert from unsigned to signed (two's complement)
+            value = value - (1i64 << data_bits);
+        }
+
+        value
+    };
+
+    Ok(Some((total_length, value)))
+}
+
 /// Parse VInt using custom BTI format (Issue #36)
+#[allow(dead_code)]
 fn parse_custom_vint_format(
     input: &[u8],
 ) -> Result<Option<(usize, i64)>, nom::Err<nom::error::Error<&[u8]>>> {
@@ -230,7 +298,102 @@ fn parse_custom_vint_format(
     Ok(Some((total_length, value)))
 }
 
+/// Encode using Cassandra-compatible VInt format
+#[allow(dead_code)]
+fn encode_cassandra_vint(value: i64) -> Vec<u8> {
+    // Handle negative values using two's complement representation
+    let _unsigned_value = if value >= 0 {
+        value as u64
+    } else {
+        // Use two's complement for negative values
+        value as u64 // This will wrap negative values correctly
+    };
+
+    // Determine the number of bytes needed
+    let bytes_needed = if value == 0 {
+        1
+    } else if value >= -63 && value <= 63 {
+        1 // Single byte range for small values
+    } else if value >= -8192 && value <= 8191 {
+        2 // Two bytes
+    } else if value >= -1048576 && value <= 1048575 {
+        3 // Three bytes  
+    } else if value >= -134217728 && value <= 134217727 {
+        4 // Four bytes
+    } else {
+        // Calculate bytes needed for larger values
+        let abs_value = value.abs() as u64;
+        if abs_value <= 0xFF {
+            2
+        } else if abs_value <= 0xFFFF {
+            3
+        } else if abs_value <= 0xFFFFFF {
+            4
+        } else if abs_value <= 0xFFFFFFFF {
+            5
+        } else {
+            8 // Maximum for i64
+        }
+    };
+
+    match bytes_needed {
+        1 => {
+            // Single byte: 1xxxxxxx for values 0-127, 0xxxxxxx for negative -1 to -63
+            if value >= 0 && value <= 63 {
+                vec![0x80 | (value as u8)]
+            } else if value == -1 {
+                vec![0xFF]
+            } else if value >= -63 && value < 0 {
+                vec![0xC0 | ((-value) as u8)]
+            } else {
+                // fallback to two bytes
+                encode_cassandra_vint_multi_byte(value, 2)
+            }
+        }
+        2 => encode_cassandra_vint_multi_byte(value, 2),
+        3 => encode_cassandra_vint_multi_byte(value, 3),
+        4 => encode_cassandra_vint_multi_byte(value, 4),
+        _ => encode_cassandra_vint_multi_byte(value, bytes_needed),
+    }
+}
+
+/// Encode multi-byte Cassandra VInt with proper leading bit pattern
+#[allow(dead_code)]
+fn encode_cassandra_vint_multi_byte(value: i64, num_bytes: usize) -> Vec<u8> {
+    let mut result = vec![0u8; num_bytes];
+
+    // Set the leading bit pattern: n-1 leading ones followed by a zero
+    let leading_ones = num_bytes - 1;
+    let first_byte_mask = (0xFF << (8 - leading_ones)) & 0xFF;
+
+    // Convert value to bytes (using two's complement for negatives)
+    let value_bytes = if value >= 0 {
+        value.to_be_bytes()
+    } else {
+        (value as u64).to_be_bytes() // Two's complement representation
+    };
+
+    // Place the value in the remaining bits
+    let data_bits = (num_bytes * 8) - leading_ones - 1; // Total data bits available
+    let data_bytes = (data_bits + 7) / 8; // How many bytes we need for data
+
+    // Copy the relevant bytes from value_bytes
+    let start_idx = 8 - data_bytes;
+    for (i, &byte) in value_bytes[start_idx..].iter().enumerate() {
+        if i == 0 {
+            // First byte: combine leading pattern with data
+            let data_mask = (1u8 << (8 - leading_ones - 1)) - 1;
+            result[0] = first_byte_mask as u8 | (byte & data_mask);
+        } else {
+            result[i] = byte;
+        }
+    }
+
+    result
+}
+
 /// Encode a signed integer using ZigZag encoding (backward compatibility)
+#[allow(dead_code)]
 fn encode_zigzag_vint(value: i64) -> Vec<u8> {
     let unsigned_value = zigzag_encode(value);
 
@@ -321,8 +484,8 @@ fn vint_size(value: u64) -> usize {
 
 /// Encode a signed integer as a variable-length integer with backward compatibility
 ///
-/// This function uses ZigZag encoding for compatibility with existing tests
-/// while maintaining support for Issue #36 BTI format when needed.
+/// This function now prioritizes Cassandra-compatible format for better
+/// compatibility with standard Cassandra VInt encoding.
 ///
 /// # Arguments
 ///
@@ -332,7 +495,7 @@ fn vint_size(value: u64) -> usize {
 ///
 /// Vector of bytes representing the VInt-encoded value
 pub fn encode_vint(value: i64) -> Vec<u8> {
-    encode_zigzag_vint(value)
+    crate::parser::vint_fixed::encode_vint_fixed(value)
 }
 
 /// Decode a variable-length unsigned integer from bytes
@@ -587,6 +750,47 @@ mod tests {
         match parse_vint(&encoded_23) {
             Ok((_, decoded)) => println!("parse_vint({:?}) = {}", encoded_23, decoded),
             Err(e) => println!("parse_vint({:?}) failed: {:?}", encoded_23, e),
+        }
+
+        // Debug the specific failing values
+        println!("\n🔍 Debug failing VInt cases:");
+        let failing_values = vec![256, 1048576, 64];
+        for value in failing_values {
+            let encoded = encode_vint(value);
+            println!(
+                "Value {}: encoded={:?}, hex={:02X?}, len={}",
+                value,
+                encoded,
+                encoded,
+                encoded.len()
+            );
+            if !encoded.is_empty() {
+                let first_byte = encoded[0];
+                println!(
+                    "  First byte: 0x{:02X} ({:08b}), leading_ones: {}",
+                    first_byte,
+                    first_byte,
+                    first_byte.leading_ones()
+                );
+                if encoded.len() > 1 {
+                    println!(
+                        "  Expected leading ones: {}, got: {}",
+                        encoded.len() - 1,
+                        first_byte.leading_ones()
+                    );
+                }
+            }
+        }
+
+        // Test Cassandra expected bytes
+        println!("\n🔍 Testing Cassandra format:");
+        let cassandra_bytes = vec![0xE0, 0x01, 0x00]; // Should decode to 256
+        match parse_vint(&cassandra_bytes) {
+            Ok((_, decoded)) => println!("Cassandra bytes {:?} -> {}", cassandra_bytes, decoded),
+            Err(e) => println!(
+                "Failed to parse Cassandra bytes {:?}: {:?}",
+                cassandra_bytes, e
+            ),
         }
     }
 

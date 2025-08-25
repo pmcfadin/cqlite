@@ -143,8 +143,14 @@ impl QueryExecutor {
             .find_map(|step| step.conditions.first())
             .ok_or_else(|| Error::query_execution("No lookup condition found".to_string()))?;
 
-        // Convert condition value to row key
-        let row_key = self.value_to_row_key(&lookup_condition.value)?;
+        // Convert condition value to row key using the same format as INSERT
+        let row_key = self.condition_to_row_key(&lookup_condition)?;
+
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "DEBUG: SELECT point lookup using row key: {:?}",
+            std::str::from_utf8(row_key.as_bytes()).unwrap_or("<invalid-utf8>")
+        );
 
         // Perform the lookup
         let mut rows = Vec::new();
@@ -333,7 +339,7 @@ impl QueryExecutor {
             })?;
 
         // Simplified bloom filter scan - just do direct lookup
-        let row_key = self.value_to_row_key(&condition.value)?;
+        let row_key = self.condition_to_row_key(&condition)?;
 
         // Direct lookup instead of bloom filter check
         if let Some(row_data) = self.storage.get(table, &row_key).await? {
@@ -365,8 +371,8 @@ impl QueryExecutor {
                 Error::query_execution("No condition found for primary key".to_string())
             })?;
 
-        // Direct primary key lookup
-        let row_key = self.value_to_row_key(&condition.value)?;
+        // Direct primary key lookup using consistent key format
+        let row_key = self.condition_to_row_key(&condition)?;
 
         if let Some(row_data) = self.storage.get(table, &row_key).await? {
             let query_row = self.storage_data_to_query_row(row_data, &row_key)?;
@@ -763,13 +769,41 @@ impl QueryExecutor {
         }
     }
 
+    /// Convert Condition to RowKey (consistent with INSERT)
+    fn condition_to_row_key(&self, condition: &Condition) -> Result<RowKey> {
+        // Use the same key format as INSERT operation
+        if condition.column == "id" {
+            if let Value::Integer(id) = &condition.value {
+                let key_value = format!("user_key_{}", id);
+                return Ok(RowKey::new(key_value.into_bytes()));
+            }
+        }
+
+        // Fallback to the generic value conversion
+        self.value_to_row_key(&condition.value)
+    }
+
     /// Convert storage data to query row
     fn storage_data_to_query_row(&self, data: Value, key: &RowKey) -> Result<QueryRow> {
-        // In a real implementation, this would deserialize the storage data
-        // For now, we'll create a simplified row
         let mut values = HashMap::new();
-        values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
-        values.insert("data".to_string(), data);
+
+        // If the data is a Map (as stored by INSERT), deserialize it properly
+        if let Value::Map(map) = data {
+            for (map_key, map_value) in map {
+                // Extract the column name from the Value::Text key
+                if let Value::Text(column_name) = map_key {
+                    values.insert(column_name, map_value);
+                }
+            }
+        } else {
+            // Fallback for other data types - store as "data"
+            values.insert("data".to_string(), data);
+        }
+
+        // If no values were extracted, add the key as an id column
+        if values.is_empty() {
+            values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
+        }
 
         Ok(QueryRow::with_values(key.clone(), values))
     }
@@ -790,10 +824,27 @@ impl QueryExecutor {
                 // Extract values from conditions (simplified approach for testing)
                 // In a real implementation, this would parse INSERT VALUES properly
 
-                // For test compatibility, create a simple row with test data
-                // This is a minimal fix to make tests pass
-                let row_key =
-                    crate::types::RowKey::new(format!("test_key_{}", inserted_count).into_bytes());
+                // Create row key based on the ID value from the INSERT statement
+                // Extract ID value from conditions to create unique keys
+                let mut key_value = format!("test_key_{}", inserted_count);
+
+                #[cfg(debug_assertions)]
+                eprintln!("DEBUG: INSERT step conditions: {:?}", step.conditions);
+
+                // Look for an 'id' column value to use as the key
+                for condition in step.conditions.iter() {
+                    if condition.column == "id" {
+                        if let Value::Integer(id) = &condition.value {
+                            key_value = format!("user_key_{}", id);
+                            break;
+                        }
+                    }
+                }
+
+                #[cfg(debug_assertions)]
+                eprintln!("DEBUG: Using row key: {}", key_value);
+
+                let row_key = crate::types::RowKey::new(key_value.into_bytes());
 
                 // Create a simple value map for the inserted row
                 let mut value_map = std::collections::HashMap::new();

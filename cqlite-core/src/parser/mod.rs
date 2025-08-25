@@ -54,6 +54,7 @@ pub mod types;
 pub mod udt_tests;
 pub mod validation;
 pub mod vint;
+pub mod vint_fixed;
 
 // M3 Performance Optimization Modules
 pub mod m3_performance_benchmarks;

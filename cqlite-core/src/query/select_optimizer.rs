@@ -281,11 +281,18 @@ impl SelectOptimizer {
         }
 
         // Step 9: Plan final projection
-        let final_columns = self.extract_final_projection(&statement.select_clause);
-        let project_step = ExecutionStep::Project {
-            columns: final_columns,
-        };
-        plan.execution_steps.push(project_step);
+        // Only add projection step if not SELECT * (which should be handled by SSTable scan)
+        match &statement.select_clause {
+            SelectClause::All => {
+                // SELECT * - don't add projection step, let SSTable scan handle all columns
+            }
+            SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
+                let project_step = ExecutionStep::Project {
+                    columns: exprs.clone(),
+                };
+                plan.execution_steps.push(project_step);
+            }
+        }
 
         // Step 10: Plan parallelization
         plan.parallelization = self.plan_parallelization(&plan, &table_stats).await?;
@@ -543,6 +550,7 @@ impl SelectOptimizer {
     }
 
     /// Extract final projection columns
+    #[allow(dead_code)]
     fn extract_final_projection(&self, select_clause: &SelectClause) -> Vec<SelectExpression> {
         match select_clause {
             SelectClause::All => vec![SelectExpression::Column(ColumnRef::new("*"))],
