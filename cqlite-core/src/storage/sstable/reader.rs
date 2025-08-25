@@ -230,6 +230,45 @@ pub struct SSTableReader {
 }
 
 impl SSTableReader {
+    /// Check if a value appears to be ASCII corruption
+    fn is_ascii_corruption_value(value: u32) -> bool {
+        // Check for known corrupted values
+        match value {
+            2959239534 | 1684108385 => return true, // "bin" and "data"
+            _ => {}
+        }
+
+        // Convert to bytes and check if they look like ASCII text
+        let bytes = value.to_be_bytes();
+        let ascii_count = bytes.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count();
+
+        // If 3 or more bytes are printable ASCII, likely corruption
+        ascii_count >= 3
+    }
+
+    /// Detect ASCII corruption in header buffer
+    fn detect_ascii_header_corruption(header: &[u8]) -> bool {
+        if header.len() < 4 {
+            return false;
+        }
+
+        // Check for common ASCII corruption patterns in header
+        let chunk = &header[0..4];
+        let ascii_patterns = [
+            b"data", b"node", b"temp", b"logs", b"meta", b"home", b"root",
+        ];
+
+        for pattern in &ascii_patterns {
+            if chunk == *pattern {
+                return true;
+            }
+        }
+
+        // Check if all 4 bytes are printable ASCII
+        let ascii_count = chunk.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count();
+        ascii_count >= 3
+    }
+
     /// Open an SSTable file for reading
     pub async fn open(path: &Path, _config: &Config, platform: Arc<Platform>) -> Result<Self> {
         let file = File::open(path).await?;
@@ -1488,12 +1527,20 @@ impl SSTableReader {
             return Ok(None); // EOF
         };
 
-        // Validate block size to prevent memory issues
+        // Validate block size to prevent memory issues and detect corruption
         if compressed_size > 64 * 1024 * 1024 {
             // 64MB limit
             return Err(Error::corruption(format!(
                 "Block size too large: {} bytes (limit: 64MB)",
                 compressed_size
+            )));
+        }
+
+        // Detect ASCII corruption patterns in block size
+        if Self::is_ascii_corruption_value(compressed_size) {
+            return Err(Error::corruption(format!(
+                "Block size appears to be ASCII corruption: {} (0x{:08x}) - likely misaligned file reading",
+                compressed_size, compressed_size
             )));
         }
 
@@ -1597,6 +1644,15 @@ impl SSTableReader {
                 }
             }
         };
+
+        // Check for ASCII corruption before parsing the header
+        if Self::detect_ascii_header_corruption(&header_buffer) {
+            return Err(Error::corruption(format!(
+                "BTI block header appears to contain ASCII corruption at position {}: {:?}",
+                current_pos,
+                String::from_utf8_lossy(&header_buffer[0..4])
+            )));
+        }
 
         let compressed_size = u32::from_be_bytes([
             header_buffer[0],
@@ -3044,7 +3100,13 @@ impl SSTableReader {
         if let Some(index_reader) = &self.index_reader {
             // Compute the proper key digest for Index.db lookup
             // Index.db stores key digests, not raw partition key bytes
-            let key_digest = self.compute_partition_key_digest(partition_key).await?;
+            let key_digest = match self.compute_partition_key_digest(partition_key).await {
+                Ok(digest) => digest,
+                Err(e) => {
+                    log::warn!("Failed to compute partition key digest: {}", e);
+                    return Ok(None);
+                }
+            };
 
             // Use spec-compliant Index.db reader for partition lookup
             if let Some(entry) = index_reader.lookup_partition(&key_digest) {
@@ -3054,7 +3116,14 @@ impl SSTableReader {
                     entry.data_size
                 );
                 return Ok(Some((entry.data_offset, entry.data_size)));
+            } else {
+                log::debug!(
+                    "Partition not found in Index.db for key digest (len={})",
+                    key_digest.len()
+                );
             }
+        } else {
+            log::debug!("No Index.db reader available for partition lookup");
         }
         Ok(None)
     }

@@ -115,7 +115,7 @@ mod integration_baseline {
     #[test]
     fn test_cqlite_core_exists() {
         // Verify core module exists
-        let core_path = PathBuf::from("cqlite-core");
+        let core_path = PathBuf::from("../cqlite-core");
         assert!(core_path.exists(), "cqlite-core directory should exist");
 
         let core_manifest = core_path.join("Cargo.toml");

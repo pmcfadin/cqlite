@@ -182,7 +182,7 @@ impl ParserValidationSuite {
         use std::collections::HashMap;
 
         let header = SSTableHeader {
-            cassandra_version: cqlite_core::parser::header::CassandraVersion::V5_0Release,
+            cassandra_version: cqlite_core::parser::header::CassandraVersion::Legacy,
             version: SUPPORTED_VERSION,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "cqlite_test".to_string(),
@@ -487,10 +487,17 @@ mod type_validation_tests {
             assert_eq!(parsed as u8, byte_val);
         }
 
-        // Test invalid type ID
+        // Test valid Tombstone type ID
+        assert_eq!(
+            CqlTypeId::try_from(0xFF).unwrap(),
+            CqlTypeId::Tombstone,
+            "0xFF should be valid Tombstone type ID"
+        );
+
+        // Test invalid type ID (0x99 is not defined)
         assert!(
-            CqlTypeId::try_from(0xFF).is_err(),
-            "Should reject invalid type ID"
+            CqlTypeId::try_from(0x99).is_err(),
+            "Should reject invalid type ID 0x99"
         );
     }
 
@@ -516,13 +523,13 @@ mod type_validation_tests {
         // Float values
         let float_data = (3.14f32).to_be_bytes();
         let (_, value) = parse_float(&float_data).expect("Failed to parse float");
-        if let Value::Float(f) = value {
+        if let Value::Float32(f) = value {
             assert!(
                 (f - 3.14).abs() < 0.01,
                 "Float value should be approximately 3.14"
             );
         } else {
-            panic!("Expected Float value");
+            panic!("Expected Float32 value");
         }
 
         // UUID values
