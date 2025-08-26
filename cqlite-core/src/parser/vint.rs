@@ -495,7 +495,97 @@ fn vint_size(value: u64) -> usize {
 ///
 /// Vector of bytes representing the VInt-encoded value
 pub fn encode_vint(value: i64) -> Vec<u8> {
+    encode_vint_zigzag(value)
+}
+
+/// Encode VInt using original ZigZag format for backward compatibility
+pub fn encode_vint_zigzag(value: i64) -> Vec<u8> {
+    let unsigned_value = zigzag_encode(value);
+
+    if unsigned_value <= 0x7F {
+        // Single byte: 0xxxxxxx
+        vec![unsigned_value as u8]
+    } else if unsigned_value <= 0x3FFF {
+        // Two bytes: 10xxxxxx xxxxxxxx
+        let byte0 = 0x80 | ((unsigned_value >> 8) & 0x3F) as u8;
+        let byte1 = (unsigned_value & 0xFF) as u8;
+        vec![byte0, byte1]
+    } else if unsigned_value <= 0x1FFFFF {
+        // Three bytes: 110xxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xC0 | ((unsigned_value >> 16) & 0x1F) as u8;
+        let byte1 = ((unsigned_value >> 8) & 0xFF) as u8;
+        let byte2 = (unsigned_value & 0xFF) as u8;
+        vec![byte0, byte1, byte2]
+    } else if unsigned_value <= 0xFFFFFFF {
+        // Four bytes: 1110xxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xE0 | ((unsigned_value >> 24) & 0x0F) as u8;
+        let byte1 = ((unsigned_value >> 16) & 0xFF) as u8;
+        let byte2 = ((unsigned_value >> 8) & 0xFF) as u8;
+        let byte3 = (unsigned_value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3]
+    } else if unsigned_value <= 0x7FFFFFFFF {
+        // Five bytes: 11110xxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xF0 | ((unsigned_value >> 32) & 0x07) as u8;
+        let byte1 = ((unsigned_value >> 24) & 0xFF) as u8;
+        let byte2 = ((unsigned_value >> 16) & 0xFF) as u8;
+        let byte3 = ((unsigned_value >> 8) & 0xFF) as u8;
+        let byte4 = (unsigned_value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3, byte4]
+    } else if unsigned_value <= 0x3FFFFFFFFFF {
+        // Six bytes: 111110xx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xF8 | ((unsigned_value >> 40) & 0x03) as u8;
+        let byte1 = ((unsigned_value >> 32) & 0xFF) as u8;
+        let byte2 = ((unsigned_value >> 24) & 0xFF) as u8;
+        let byte3 = ((unsigned_value >> 16) & 0xFF) as u8;
+        let byte4 = ((unsigned_value >> 8) & 0xFF) as u8;
+        let byte5 = (unsigned_value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3, byte4, byte5]
+    } else if unsigned_value <= 0x1FFFFFFFFFFFF {
+        // Seven bytes: 1111110x xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xFC | ((unsigned_value >> 48) & 0x01) as u8;
+        let byte1 = ((unsigned_value >> 40) & 0xFF) as u8;
+        let byte2 = ((unsigned_value >> 32) & 0xFF) as u8;
+        let byte3 = ((unsigned_value >> 24) & 0xFF) as u8;
+        let byte4 = ((unsigned_value >> 16) & 0xFF) as u8;
+        let byte5 = ((unsigned_value >> 8) & 0xFF) as u8;
+        let byte6 = (unsigned_value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3, byte4, byte5, byte6]
+    } else if unsigned_value <= 0xFFFFFFFFFFFFFF {
+        // Eight bytes: 11111110 xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xFE;
+        let byte1 = ((unsigned_value >> 48) & 0xFF) as u8;
+        let byte2 = ((unsigned_value >> 40) & 0xFF) as u8;
+        let byte3 = ((unsigned_value >> 32) & 0xFF) as u8;
+        let byte4 = ((unsigned_value >> 24) & 0xFF) as u8;
+        let byte5 = ((unsigned_value >> 16) & 0xFF) as u8;
+        let byte6 = ((unsigned_value >> 8) & 0xFF) as u8;
+        let byte7 = (unsigned_value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7]
+    } else {
+        // Nine bytes: 11111111 xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xFF;
+        let byte1 = ((unsigned_value >> 56) & 0xFF) as u8;
+        let byte2 = ((unsigned_value >> 48) & 0xFF) as u8;
+        let byte3 = ((unsigned_value >> 40) & 0xFF) as u8;
+        let byte4 = ((unsigned_value >> 32) & 0xFF) as u8;
+        let byte5 = ((unsigned_value >> 24) & 0xFF) as u8;
+        let byte6 = ((unsigned_value >> 16) & 0xFF) as u8;
+        let byte7 = ((unsigned_value >> 8) & 0xFF) as u8;
+        let byte8 = (unsigned_value & 0xFF) as u8;
+        vec![
+            byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7, byte8,
+        ]
+    }
+}
+
+/// Encode VInt using Cassandra-compatible format for Issue #17 requirements
+pub fn encode_vint_cassandra(value: i64) -> Vec<u8> {
     crate::parser::vint_fixed::encode_vint_fixed(value)
+}
+
+/// Parse VInt using Cassandra-compatible format for Issue #17 requirements
+pub fn parse_vint_cassandra(input: &[u8]) -> IResult<&[u8], i64> {
+    crate::parser::vint_fixed::parse_vint_fixed(input)
 }
 
 /// Decode a variable-length unsigned integer from bytes
@@ -561,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_vint_single_byte_encoding() {
-        // Test small values that fit in single byte
+        // Test small values that fit in single byte (original ZigZag format)
         for i in 0..=63 {
             let encoded = encode_vint(i);
             assert_eq!(encoded.len(), 1, "Value {} should encode to 1 byte", i);
@@ -676,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_vint_format_compliance() {
-        // Test specific bit patterns to ensure Cassandra compliance
+        // Test specific bit patterns to ensure format compliance
 
         // Single byte: 0xxxxxxx
         let encoded = encode_vint(0);
@@ -827,12 +917,12 @@ mod tests {
         let max_single = 63;
         let encoded = encode_vint(max_single);
         assert_eq!(encoded.len(), 1);
-        assert_eq!(encoded[0] & 0x80, 0);
+        assert_eq!(encoded[0] & 0x80, 0); // Original format has leading 0
 
         // Test minimum two-byte value
         let min_double = 64;
         let encoded = encode_vint(min_double);
         assert_eq!(encoded.len(), 2);
-        assert_eq!(encoded[0] & 0xC0, 0x80);
+        assert_eq!(encoded[0] & 0xC0, 0x80); // Two-byte format starts with 10
     }
 }

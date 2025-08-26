@@ -261,12 +261,13 @@ mod vint_validation_tests {
         ];
 
         for (value, expected_bytes) in test_cases {
-            // Test encoding
-            let encoded = encode_vint(value);
+            // Test encoding with Cassandra-compatible format
+            let encoded = encode_vint_cassandra(value);
             println!("Testing VInt encoding: {} -> {:?}", value, encoded);
 
             // Test decoding
-            let (remaining, decoded) = parse_vint(&encoded).expect("Failed to parse VInt");
+            let (remaining, decoded) =
+                parse_vint_cassandra(&encoded).expect("Failed to parse VInt");
             assert!(remaining.is_empty(), "Should consume all bytes");
             assert_eq!(decoded, value, "VInt roundtrip failed for value {}", value);
 
@@ -276,7 +277,7 @@ mod vint_validation_tests {
                 // Note: Our implementation might differ slightly in multi-byte encoding
                 // but should maintain semantic compatibility
                 let (_, test_decoded) =
-                    parse_vint(&expected_bytes).expect("Failed to parse expected bytes");
+                    parse_vint_cassandra(&expected_bytes).expect("Failed to parse expected bytes");
                 assert_eq!(
                     test_decoded, value,
                     "Expected bytes should decode to same value"
