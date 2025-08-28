@@ -28,7 +28,7 @@ test-data/
 │   ├── export-sstables.sh
 │   ├── validate-data.sh
 │   └── cleanup.sh
-├── generated/            # .gitignored
+├── logs/                 # .gitignored (generator logs and stats)
 └── datasets/             # optional (real fixtures, cassandra5/bti)
 ```
 
@@ -116,7 +116,7 @@ This README doubles as a light PRD for the test-data suite.
    docker build -f docker/Dockerfile.data-generator -t cqlite-data-gen .
    docker run --rm \
      -e PYTHONUNBUFFERED=1 \
-     -v "$(pwd)/generated:/generated" \
+     -v "$(pwd)/logs:/logs" \
      --add-host host.docker.internal:host-gateway \
      cqlite-data-gen python3 /scripts/generate_comprehensive_test_data.py \
        --version 5.0 --host host.docker.internal --port 9046 --scale SMALL
@@ -238,14 +238,14 @@ Validation helpers exist, but are currently geared toward 3.x/4.x. Cassandra 5.0
 ### Manual Validation (recommended for 5.0 now)
 
 ```bash
-# Check generated data sizes
-du -sh test-data/generated/v*/
+# Check datasets sizes
+du -sh test-data/datasets/
 
 # Count SSTable files
-find test-data/generated -name "*.db" | wc -l
+find test-data/datasets/sstables -name "*.db" | wc -l
 
 # Validate with CQLite (adjust path to one of the exported Data.db files)
-cqlite info test-data/generated/v5.0/sstables/test_basic/simple_table/na-1-big-Data.db
+cqlite info test-data/datasets/sstables/test_basic/simple_table/na-1-big-Data.db
 ```
 
 ## 🔄 CI/CD Integration

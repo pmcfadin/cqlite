@@ -35,7 +35,7 @@ COPY schemas/ /schemas/
 RUN chmod +x /scripts/*.sh /scripts/*.py
 
 # Create output directory
-RUN mkdir -p /generated
+RUN mkdir -p /logs
 
 # Set environment variables
 ENV PYTHONPATH=/app

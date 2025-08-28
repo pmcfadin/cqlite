@@ -39,7 +39,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('/generated/data_generation.log')
+        logging.FileHandler('/logs/data_generation.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -1158,7 +1158,7 @@ class CassandraTestDataGenerator:
         }
         
         # Save statistics to file
-        stats_file = f"/generated/v{self.version}/generation_statistics.json"
+        stats_file = f"/logs/generation_statistics_v{self.version}.json"
         os.makedirs(os.path.dirname(stats_file), exist_ok=True)
         
         with open(stats_file, 'w') as f:

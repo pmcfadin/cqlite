@@ -42,7 +42,7 @@ services:
     volumes:
       - ../scripts:/opt/scripts:ro
       - ../schemas:/opt/schemas:ro
-      - ../generated/v5.0:/opt/generated
+      - ../logs:/opt/logs
     tmpfs:
       - /var/lib/cassandra
       - /tmp/cassandra
@@ -79,7 +79,7 @@ services:
     volumes:
       - ../scripts:/scripts:ro
       - ../schemas:/schemas:ro
-      - ../generated/v5.0:/generated
+      - ../logs:/logs
     networks:
       - cqlite-test-network
 
