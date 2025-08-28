@@ -1,0 +1,8 @@
+# Curated core schema set applied by default in start-clean.sh
+basic-types.cql
+collections.cql
+time-series.cql
+wide-rows.cql
+
+
+

@@ -42,7 +42,7 @@ CREATE TYPE IF NOT EXISTS company (
     name TEXT,
     headquarters FROZEN<address>,
     employees LIST<FROZEN<person>>,
-    departments MAP<TEXT, LIST<FROZEN<person>>>
+    departments MAP<TEXT, FROZEN<LIST<FROZEN<person>>>>
 );
 
 -- Complex collection test table
@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS udt_tests (
     
     -- Nested UDT collections
     person_addresses MAP<FROZEN<person>, FROZEN<address>>,
-    company_employees MAP<FROZEN<company>, LIST<FROZEN<person>>>,
+    company_employees MAP<FROZEN<company>, FROZEN<LIST<FROZEN<person>>>>,
     
     -- UDTs with nulls and partial data
     partial_person FROZEN<person>,
@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS time_series_complex (
     -- Complex measurement data
     scalar_value DOUBLE,
     vector_value LIST<DOUBLE>,
-    matrix_value MAP<TEXT, LIST<DOUBLE>>,
+    matrix_value MAP<TEXT, FROZEN<LIST<DOUBLE>>>,
     
     -- Metadata with complex types
     sensor_info FROZEN<MAP<TEXT, TEXT>>,
@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS static_complex (
     
     -- Regular complex columns
     row_data FROZEN<person>,
-    row_collections MAP<TEXT, LIST<INT>>,
+    row_collections MAP<TEXT, FROZEN<LIST<INT>>>,
     
     PRIMARY KEY (partition_key, clustering_key)
 );
@@ -201,10 +201,7 @@ CREATE TABLE IF NOT EXISTS counters_complex (
     -- Counters
     hit_count COUNTER,
     miss_count COUNTER,
-    error_count COUNTER,
-    
-    -- Complex metadata (separate table needed for counters)
-    timestamp_created TIMESTAMP
+    error_count COUNTER
 );
 
 -- Metadata table for counters (counters can't mix with other types)

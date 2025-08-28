@@ -1,6 +1,5 @@
 # CQLite Enhanced Docker-based Cassandra 5+ Data Generation System
-# Issue #17: Comprehensive Cassandra data generation and validation
-# Enhanced support for Cassandra 5.0+ with complex data patterns
+
 
 services:
   # Cassandra 5.0 - Latest version with new features (Enhanced for Issue #30)
@@ -41,13 +40,12 @@ services:
       - "7203:7199"   # JMX
       - "9164:9160"   # Thrift (for compatibility)
     volumes:
-      - cassandra-5-0-data:/var/lib/cassandra
       - ../scripts:/opt/scripts:ro
       - ../schemas:/opt/schemas:ro
       - ../generated/v5.0:/opt/generated
-      - ./cassandra-5-config:/etc/cassandra:ro
-      # Add temp directory for SSTable operations
-      - cassandra-5-0-temp:/tmp/cassandra
+    tmpfs:
+      - /var/lib/cassandra
+      - /tmp/cassandra
     healthcheck:
       test: ["CMD-SHELL", "cqlsh -e 'SELECT cluster_name FROM system.local;' && nodetool status | grep -q 'UN'"]
       interval: 30s
@@ -68,133 +66,20 @@ services:
     networks:
       - cqlite-test-network
 
-  # Legacy Cassandra 4.1 for compatibility testing
-  cassandra-4-1:
-    image: cassandra:4.1
-    container_name: cqlite-cassandra-4-1-compat
-    hostname: cassandra-4-1-compat
-    environment:
-      - CASSANDRA_CLUSTER_NAME=cqlite-test-4-1-compat
-      - CASSANDRA_DC=datacenter1
-      - CASSANDRA_RACK=rack1
-      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
-      - CASSANDRA_START_RPC=true
-      - CASSANDRA_RPC_ADDRESS=0.0.0.0
-      - CASSANDRA_AUTHENTICATOR=AllowAllAuthenticator
-      - CASSANDRA_AUTHORIZER=AllowAllAuthorizer
-      - CASSANDRA_AUTO_BOOTSTRAP=false
-      - MAX_HEAP_SIZE=1G
-      - HEAP_NEWSIZE=200m
-    ports:
-      - "9047:9042"   # CQL port
-      - "7005:7000"   # Inter-node communication
-      - "7204:7199"   # JMX
-    volumes:
-      - cassandra-4-1-compat-data:/var/lib/cassandra
-      - ../scripts:/opt/scripts
-      - ../schemas:/opt/schemas
-      - ../generated/v4.1-compat:/opt/generated
-    healthcheck:
-      test: ["CMD-SHELL", "cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1"]
-      interval: 30s
-      timeout: 15s
-      retries: 8
-      start_period: 120s
-    networks:
-      - cqlite-test-network
-
-  # Enhanced data generator service with Issue #17 requirements
-  enhanced-data-generator:
-    image: python:3.11-slim-bullseye
-    container_name: cqlite-enhanced-data-generator
+  # Data generator container for issuing type-correct inserts
+  data-generator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.data-generator
+    container_name: cqlite-data-generator
     depends_on:
-      cassandra-5-0:
-        condition: service_healthy
-      cassandra-4-1:
-        condition: service_healthy
-    volumes:
-      - ../scripts:/opt/scripts
-      - ../schemas:/opt/schemas
-      - ../generated:/opt/generated
-      - ./enhanced-configs:/opt/configs
-    working_dir: /opt/scripts
+      - cassandra-5-0
     environment:
-      - CASSANDRA_5_0_HOST=cassandra-5-0
-      - CASSANDRA_4_1_HOST=cassandra-4-1-compat
-      - CASSANDRA_PORT=9042
-      - TEST_DATA_SCALE=COMPREHENSIVE
-      - GENERATE_ALL_PATTERNS=true
-      - ISSUE_17_MODE=true
-      - EDGE_CASE_GENERATION=true
-      - COMPLEX_TYPE_GENERATION=true
-      - UDT_GENERATION=true
-      - LARGE_DATA_GENERATION=true
-      - REAL_WORLD_PATTERNS=true
-    command: /opt/scripts/enhanced-data-generator.sh
-    networks:
-      - cqlite-test-network
-
-  # Schema export service - extracts complete schema definitions
-  schema-exporter:
-    image: python:3.11-slim-bullseye
-    container_name: cqlite-schema-exporter
-    depends_on:
-      enhanced-data-generator:
-        condition: service_completed_successfully
+      - PYTHONUNBUFFERED=1
     volumes:
-      - ../scripts:/opt/scripts
-      - ../generated:/opt/generated
-    working_dir: /opt/scripts
-    environment:
-      - CASSANDRA_5_0_HOST=cassandra-5-0
-      - CASSANDRA_4_1_HOST=cassandra-4-1-compat
-      - CASSANDRA_PORT=9042
-      - OUTPUT_DIR=/opt/generated
-    command: /opt/scripts/export-schemas.sh
-    networks:
-      - cqlite-test-network
-
-  # SSTable export service with enhanced metadata
-  enhanced-sstable-exporter:
-    image: python:3.11-slim-bullseye
-    container_name: cqlite-enhanced-sstable-exporter
-    depends_on:
-      schema-exporter:
-        condition: service_completed_successfully
-    volumes:
-      - ../scripts:/opt/scripts
-      - ../generated:/opt/generated
-      - cassandra-5-0-data:/var/lib/cassandra-5-0:ro
-      - cassandra-4-1-compat-data:/var/lib/cassandra-4-1-compat:ro
-    working_dir: /opt/scripts
-    environment:
-      - SOURCE_DATA_DIR=/var/lib
-      - OUTPUT_DIR=/opt/generated
-      - ENHANCED_METADATA=true
-      - EXTRACT_STATISTICS=true
-      - GENERATE_MANIFESTS=true
-    command: /opt/scripts/enhanced-export-sstables.sh
-    networks:
-      - cqlite-test-network
-
-  # Data validation service for Issue #17
-  data-validator:
-    image: python:3.11-slim-bullseye
-    container_name: cqlite-data-validator
-    depends_on:
-      enhanced-sstable-exporter:
-        condition: service_completed_successfully
-    volumes:
-      - ../scripts:/opt/scripts
-      - ../generated:/opt/generated
-    working_dir: /opt/scripts
-    environment:
-      - VALIDATION_MODE=COMPREHENSIVE
-      - ISSUE_17_VALIDATION=true
-      - CASSANDRA_5_0_HOST=cassandra-5-0
-      - CASSANDRA_4_1_HOST=cassandra-4-1-compat
-      - OUTPUT_DIR=/opt/generated
-    command: /opt/scripts/validate-generated-data.sh
+      - ../scripts:/scripts:ro
+      - ../schemas:/schemas:ro
+      - ../generated/v5.0:/generated
     networks:
       - cqlite-test-network
 
@@ -204,11 +89,3 @@ networks:
     ipam:
       config:
         - subnet: 172.26.0.0/16
-
-volumes:
-  cassandra-5-0-data:
-    driver: local
-  cassandra-4-1-compat-data:
-    driver: local
-  cassandra-5-0-temp:
-    driver: local

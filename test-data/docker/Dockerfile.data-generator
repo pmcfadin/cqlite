@@ -22,7 +22,6 @@ RUN pip install --no-cache-dir \
     pyyaml==6.0 \
     click==8.1.7 \
     tqdm==4.66.1 \
-    psutil==5.9.6 \
     jsonschema==4.19.1
 
 # Create working directory

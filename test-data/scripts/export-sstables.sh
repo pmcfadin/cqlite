@@ -12,7 +12,7 @@ SOURCE_DATA_DIR="${SOURCE_DATA_DIR:-/var/lib}"
 OUTPUT_DIR="${OUTPUT_DIR:-/opt/generated}"
 
 # Cassandra versions to export
-VERSIONS=("3.7" "3.11" "4.0" "4.1")
+VERSIONS=("5.0" "4.1" "4.0" "3.11" "3.7")
 
 # Colors for output
 RED='\033[0;31m'
@@ -69,63 +69,48 @@ create_output_structure() {
 # Extract SSTable files from Cassandra data directory
 extract_sstables() {
     local version=$1
-    local source_dir="$SOURCE_DATA_DIR/cassandra-$version/data"
     local output_dir="$OUTPUT_DIR/v$version/sstables"
     
     log_info "Extracting SSTables for Cassandra $version..."
     
-    if [ ! -d "$source_dir" ]; then
-        log_warning "Source directory $source_dir not found for version $version"
+    # Detect Cassandra data directory (prefer standard path inside container)
+    local source_dir=""
+    for cand in \
+        "$SOURCE_DATA_DIR/cassandra/data" \
+        "$SOURCE_DATA_DIR/cassandra-$version/data" \
+        "$SOURCE_DATA_DIR/cassandra-$version-compat/data"; do
+        if [ -d "$cand" ]; then
+            source_dir="$cand"
+            break
+        fi
+    done
+    
+    if [ -z "$source_dir" ]; then
+        log_warning "No Cassandra data directory found for version $version under $SOURCE_DATA_DIR"
         return 1
     fi
     
-    # Find and copy SSTable files
-    local files_copied=0
-    
-    # Process each keyspace
-    for keyspace_dir in "$source_dir"/test_*; do
+    # Copy entire table directories to preserve exact Cassandra layout
+    local dirs_copied=0
+    for keyspace_dir in "$source_dir"/*; do
         if [ -d "$keyspace_dir" ]; then
             keyspace_name=$(basename "$keyspace_dir")
+            mkdir -p "$output_dir/$keyspace_name"
             log_info "Processing keyspace: $keyspace_name"
             
-            mkdir -p "$output_dir/$keyspace_name"
-            
-            # Process each table in the keyspace
             for table_dir in "$keyspace_dir"/*; do
                 if [ -d "$table_dir" ]; then
-                    table_name=$(basename "$table_dir")
-                    log_info "  Processing table: $table_name"
-                    
-                    mkdir -p "$output_dir/$keyspace_name/$table_name"
-                    
-                    # Find and copy all SSTable files
-                    local table_files=0
-                    find "$table_dir" -name "*.db" -type f | while read -r sstable_file; do
-                        local file_name=$(basename "$sstable_file")
-                        local file_size=$(stat -c%s "$sstable_file")
-                        
-                        # Copy the SSTable file
-                        cp "$sstable_file" "$output_dir/$keyspace_name/$table_name/"
-                        
-                        # Also copy associated files (index, filter, statistics, etc.)
-                        local base_name="${file_name%-*}"
-                        find "$(dirname "$sstable_file")" -name "$base_name-*" -type f | while read -r associated_file; do
-                            cp "$associated_file" "$output_dir/$keyspace_name/$table_name/" 2>/dev/null || true
-                        done
-                        
-                        table_files=$((table_files + 1))
-                        files_copied=$((files_copied + 1))
-                        
-                        log_info "    Copied: $file_name ($file_size bytes)"
-                    done
-                    
-                    log_info "  Copied $table_files SSTable files for table $table_name"
+                    local table_base
+                    table_base=$(basename "$table_dir")
+                    log_info "  Preserving table directory: $table_base"
+                    cp -a "$table_dir" "$output_dir/$keyspace_name/" 2>/dev/null || true
+                    dirs_copied=$((dirs_copied + 1))
                 fi
             done
         fi
     done
     
-    log_success "Extracted $files_copied SSTable files for Cassandra $version"
+    log_success "Preserved $dirs_copied table directories for Cassandra $version"
     return 0
 }
 
@@ -409,6 +394,19 @@ main() {
         
         # Extract SSTables
         if extract_sstables "$version"; then
+            # Verify required companion files exist
+            missing=0
+            base_verify_dir="$OUTPUT_DIR/v$version/sstables"
+            for req in Data.db Index.db Summary.db Statistics.db TOC.txt; do
+                if ! find "$base_verify_dir" -type f -name "*-$req" | grep -q . ; then
+                    log_warning "Missing expected file type: $req under $base_verify_dir"
+                    missing=1
+                fi
+            done
+            if [ $missing -ne 0 ]; then
+                log_error "Export verification failed for v$version: missing file types"
+                exit 1
+            fi
             # Generate metadata
             generate_metadata "$version"
             

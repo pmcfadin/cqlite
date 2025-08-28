@@ -25,10 +25,10 @@ CREATE TABLE IF NOT EXISTS collection_table (
 -- Nested collections (maps with collection values)
 CREATE TABLE IF NOT EXISTS nested_collections_table (
     id UUID PRIMARY KEY,
-    tags_by_category MAP<TEXT, SET<TEXT>>,
-    scores_by_game MAP<TEXT, LIST<INT>>,
-    user_preferences MAP<TEXT, MAP<TEXT, TEXT>>,
-    time_series_data MAP<DATE, LIST<TIMESTAMP>>
+    tags_by_category MAP<TEXT, FROZEN<SET<TEXT>>>,
+    scores_by_game MAP<TEXT, FROZEN<LIST<INT>>>,
+    user_preferences MAP<TEXT, FROZEN<MAP<TEXT, TEXT>>>,
+    time_series_data MAP<DATE, FROZEN<LIST<TIMESTAMP>>>
 ) WITH compression = {'class': 'LZ4Compressor'}
   AND compaction = {'class': 'LeveledCompactionStrategy'};
 
@@ -55,15 +55,15 @@ CREATE TYPE IF NOT EXISTS address_type (
 CREATE TYPE IF NOT EXISTS contact_info (
     email TEXT,
     phone TEXT,
-    address address_type
+    address FROZEN<address_type>
 );
 
 CREATE TABLE IF NOT EXISTS collections_with_udts (
     user_id UUID PRIMARY KEY,
-    addresses LIST<address_type>,
-    contacts SET<contact_info>,
-    locations_visited MAP<DATE, address_type>,
-    emergency_contacts MAP<TEXT, contact_info>
+    addresses LIST<FROZEN<address_type>>,
+    contacts SET<FROZEN<contact_info>>,
+    locations_visited MAP<DATE, FROZEN<address_type>>,
+    emergency_contacts MAP<TEXT, FROZEN<contact_info>>
 ) WITH compression = {'class': 'LZ4Compressor'}
   AND compaction = {'class': 'LeveledCompactionStrategy'};
 

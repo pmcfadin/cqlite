@@ -93,7 +93,6 @@ CREATE TABLE IF NOT EXISTS static_columns_table (
     partition_key UUID,
     clustering_key TIMESTAMP,
     static_data TEXT STATIC,
-    static_count COUNTER STATIC,
     row_data TEXT,
     row_value INT,
     PRIMARY KEY (partition_key, clustering_key)

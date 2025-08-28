@@ -1,71 +1,137 @@
-# CQLite Docker-based Test Data Generation
+# CQLite Docker-based Test Data Generation (Cassandra 5–focused)
 
 **Issue #18**: Comprehensive Docker-based test data generation system for CQLite SSTable compatibility testing.
 
 ## 🎯 Overview
 
-This system generates comprehensive test data using Docker-based Cassandra instances across multiple versions to create various SSTable files for testing, validation, and development purposes.
+This system generates comprehensive test data using a Docker-based Cassandra setup, with primary support for Cassandra 5.0 (aligned with the PRD’s v1.0 scope to read Cassandra 5 SSTables). Legacy scripts for 3.x/4.x remain, but multi-version compose stacks have been removed. We only support Cassandra 5.
 
 ## 🐳 Supported Cassandra Versions
 
-- **Cassandra 3.7** - Legacy version support
-- **Cassandra 3.11** - Stable legacy version  
-- **Cassandra 4.0** - Modern version with new features
-- **Cassandra 4.1** - Latest supported version
+- **Cassandra 5.0** — Primary, actively supported
 
 ## 📁 Directory Structure
 
 ```
 test-data/
 ├── docker/
-│   └── docker-compose.yml          # Multi-version Docker setup
-├── scripts/
-│   ├── generate-all-test-data.sh   # Master data generation script
-│   ├── export-sstables.sh          # SSTable export automation
-│   ├── cleanup.sh                  # Environment cleanup
-│   └── validate-data.sh            # Data quality validation
+│   ├── docker-compose-cassandra5.yml
+│   └── Dockerfile.data-generator
 ├── schemas/
-│   ├── basic-types.cql             # Fundamental CQL data types
-│   ├── collections.cql             # SET, LIST, MAP collections
-│   ├── time-series.cql             # Time-based data with TTLs
-│   └── wide-rows.cql               # Wide partitions and tables
-└── generated/
-    ├── v3.7/                       # Cassandra 3.7 test data
-    ├── v3.11/                      # Cassandra 3.11 test data
-    ├── v4.0/                       # Cassandra 4.0 test data
-    └── v4.1/                       # Cassandra 4.1 test data
+│   ├── basic-types.cql
+│   ├── collections.cql
+│   ├── time-series.cql
+│   └── wide-rows.cql
+├── scripts/
+│   ├── compose-guard.sh
+│   ├── generate_comprehensive_test_data.py
+│   ├── export-sstables.sh
+│   ├── validate-data.sh
+│   └── cleanup.sh
+├── generated/            # .gitignored
+└── datasets/             # optional (real fixtures, cassandra5/bti)
 ```
+
+Only core items are shown above. Internal/legacy assets (e.g., additional configs, older helpers) are kept but omitted here for clarity.
+
+## 📐 Design Intent (PRD snapshot)
+
+This README doubles as a light PRD for the test-data suite.
+
+- Goals
+  - Cassandra 5 only; high-fidelity SSTables covering core CQL types and patterns.
+  - One simple dev workflow: start clean → generate → flush+count+export → shutdown.
+  - Export preserves Cassandra directory layout; metadata.yml summarizes counts and schema.
+
+- Developer flows
+  1) Start clean
+     - Bring up `cassandra-5-0`, wait healthy, apply all `.cql` schemas.
+  2) Generate data
+     - From `scripts/`, generate N rows for all or selected table groups; type-correct random-ish values.
+  3) Flush + Count + Export
+     - `nodetool flush`; per-table `SELECT count(*) ALLOW FILTERING` → write `datasets/metadata.yml`.
+     - Destructive export to `datasets/sstables/`, preserving directory tree.
+  4) Shutdown clean
+     - Stop and remove volumes so the next run is clean.
+
+- Scripts (current + planned)
+  - `compose-guard.sh` (current): start + health-check.
+  - `start-clean.sh` (planned): compose-guard + apply schemas.
+  - `generate.sh` (planned): run generator with ROWS/TABLES/SCALE flags via `docker exec`.
+  - `export.sh` (planned): flush → count → metadata.yml → destructive export.
+  - `shutdown-clean.sh` (planned): `down -v`.
+
+- Generator contract (planned extensions)
+  - Flags: `--version 5.0`, `--host`, `--port`, `--scale`, optional `--rows-per-table N`, `--tables groupA,groupB`.
+  - Behavior: type-correct values for UUID/TIMESTAMP/INET/DECIMAL/collections/UDTs; non-zero exit on error.
+
+- Acceptance criteria
+  - Start-clean in <2 minutes; schemas applied without manual steps.
+  - Generate 10 / 1,000 / 1,000,000 rows per selected group without errors.
+  - Export includes Data/Index/Filter/Statistics/Summary/TOC for all SSTables.
+  - `datasets/metadata.yml` present with counts matching `SELECT count(*)`.
+  - Re-running export replaces prior export cleanly; shutdown resets volumes.
+
+## 📜 Schema Files
+
+- `schemas/basic-types.cql`
+  - Primitive types, composite/multi-partition examples, compression variants (Snappy/Deflate/Uncompressed).
+- `schemas/collections.cql`
+  - SET/LIST/MAP basics, nested collections, large collections, UDT-in-collections.
+- `schemas/time-series.cql`
+  - Time-window compaction, TTL usage, clustered time buckets (sensor data, app metrics, user activity, finance).
+- `schemas/wide-rows.cql`
+  - Wide partitions with many clustering columns, many-columns table, large blobs, chat/messages patterns.
+- `schemas/hardened_validator_test_schema.cql`
+  - Extended UDTs and complex/nested types for parser/validator coverage (cross-version exercises).
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- Python 3.9+ (for data generation scripts)
+- Docker and Docker Compose (v2: `docker compose`)
+- Python 3.9+ (to run the generator locally, or build the generator image)
 - 8GB+ available disk space
 - 4GB+ available RAM
 
 ### Generate Test Data
 
-1. **Start the generation process:**
+1. **Start Cassandra 5.0 (clean) and apply schemas:**
    ```bash
-   cd test-data/docker
-   docker-compose up
+   # From repo root
+   bash test-data/scripts/start-clean.sh
    ```
 
-2. **Wait for completion** (typically 15-30 minutes depending on data scale)
-
-3. **Validate the generated data:**
+2. **Generate data using the generator container:**
    ```bash
-   cd ../scripts
-   ./validate-data.sh
+   # Examples
+   SCALE=SMALL test-data/scripts/generate.sh
+   ROWS=1000 SCALE=MEDIUM test-data/scripts/generate.sh
+   ROWS=1000000 TABLES=collections test-data/scripts/generate.sh
+   ```
+
+   Optional: Use the containerized generator instead of local Python.
+   ```bash
+   cd test-data
+   docker build -f docker/Dockerfile.data-generator -t cqlite-data-gen .
+   docker run --rm \
+     -e PYTHONUNBUFFERED=1 \
+     -v "$(pwd)/generated:/generated" \
+     --add-host host.docker.internal:host-gateway \
+     cqlite-data-gen python3 /scripts/generate_comprehensive_test_data.py \
+       --version 5.0 --host host.docker.internal --port 9046 --scale SMALL
+   ```
+
+3. **Export SSTables + metadata**
+   ```bash
+   test-data/scripts/export.sh
    ```
 
 ### Cleanup
 
 ```bash
 cd test-data/scripts
-./cleanup.sh --all
+test-data/scripts/shutdown-clean.sh
 ```
 
 ## 📊 Generated Data Types
@@ -133,44 +199,43 @@ Generated data includes all major compression types:
 
 ## 🔧 Advanced Usage
 
-### Generate Specific Versions Only
+### Run only the generator with custom settings
 
 ```bash
-# Generate only Cassandra 4.1 data
-cd test-data/docker
-docker-compose up cassandra-4-1 test-data-generator sstable-exporter
+# Example: LARGE scale against local Cassandra 5 (port mapped to 9046)
+python3 scripts/generate_comprehensive_test_data.py \
+  --version 5.0 --host 127.0.0.1 --port 9046 --scale LARGE
 ```
 
 ### Custom Data Scale
 
 ```bash
-export TEST_DATA_SCALE=LARGE
-cd test-data/docker
-docker-compose up
+# Prefer the --scale flag on the generator CLI (SMALL/MEDIUM/COMPREHENSIVE/LARGE)
+python3 scripts/generate_comprehensive_test_data.py --version 5.0 --scale COMPREHENSIVE --port 9046
 ```
 
 ### Selective Data Generation
 
-Modify the data generation script to focus on specific schemas:
+Modify the generator or schema set to focus on specific areas:
 
 ```bash
-# Edit generate-all-test-data.sh
-# Comment out unwanted data generation calls
-./scripts/generate-all-test-data.sh
+# Option A: Edit scripts/generate_comprehensive_test_data.py to skip certain table groups
+# Option B: Temporarily trim schemas/ to the desired .cql files and rerun
+# (Legacy) generate-all-test-data.sh is for 3.x/4.x flows and not required for 5.0
 ```
 
 ## 📋 Validation & Quality Assurance
 
 ### Automated Validation
 
-The validation script checks:
+Validation helpers exist, but are currently geared toward 3.x/4.x. Cassandra 5.0 validation is being updated. The checks include:
 - ✅ Directory structure completeness
 - ✅ SSTable file integrity  
 - ✅ Metadata file validity
 - ✅ Expected data volumes
 - ✅ File format correctness
 
-### Manual Validation
+### Manual Validation (recommended for 5.0 now)
 
 ```bash
 # Check generated data sizes
@@ -179,8 +244,8 @@ du -sh test-data/generated/v*/
 # Count SSTable files
 find test-data/generated -name "*.db" | wc -l
 
-# Validate with CQLite
-cqlite info test-data/generated/v4.1/sstables/test_basic/simple_table/na-1-big-Data.db
+# Validate with CQLite (adjust path to one of the exported Data.db files)
+cqlite info test-data/generated/v5.0/sstables/test_basic/simple_table/na-1-big-Data.db
 ```
 
 ## 🔄 CI/CD Integration
