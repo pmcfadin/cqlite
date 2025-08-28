@@ -1,0 +1,318 @@
+name: docker
+services:
+  cassandra-4-1:
+    container_name: cqlite-cassandra-4-1-compat
+    environment:
+      CASSANDRA_AUTHENTICATOR: AllowAllAuthenticator
+      CASSANDRA_AUTHORIZER: AllowAllAuthorizer
+      CASSANDRA_AUTO_BOOTSTRAP: "false"
+      CASSANDRA_CLUSTER_NAME: cqlite-test-4-1-compat
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_RACK: rack1
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_START_RPC: "true"
+      HEAP_NEWSIZE: 200m
+      MAX_HEAP_SIZE: 1G
+    hostname: cassandra-4-1-compat
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1
+      timeout: 15s
+      interval: 30s
+      retries: 8
+      start_period: 2m0s
+    image: cassandra:4.1
+    networks:
+      cqlite-test-network: null
+    ports:
+      - mode: ingress
+        target: 9042
+        published: "9047"
+        protocol: tcp
+      - mode: ingress
+        target: 7000
+        published: "7005"
+        protocol: tcp
+      - mode: ingress
+        target: 7199
+        published: "7204"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: cassandra-4-1-compat-data
+        target: /var/lib/cassandra
+        volume: {}
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/schemas
+        target: /opt/schemas
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated/v4.1-compat
+        target: /opt/generated
+        bind:
+          create_host_path: true
+  cassandra-5-0:
+    container_name: cqlite-cassandra-5-0
+    deploy:
+      resources:
+        limits:
+          cpus: 2
+          memory: "4294967296"
+        reservations:
+          cpus: 1
+          memory: "2147483648"
+    environment:
+      CASSANDRA_AUTHENTICATOR: AllowAllAuthenticator
+      CASSANDRA_AUTHORIZER: AllowAllAuthorizer
+      CASSANDRA_AUTO_BOOTSTRAP: "false"
+      CASSANDRA_BATCH_SIZE_FAIL_THRESHOLD_IN_KB: "1024"
+      CASSANDRA_BATCH_SIZE_WARN_THRESHOLD_IN_KB: "128"
+      CASSANDRA_BROADCAST_ADDRESS: cassandra-5-0
+      CASSANDRA_CLUSTER_NAME: cqlite-test-5-0
+      CASSANDRA_COMPACTION_THROUGHPUT_MB_PER_SEC: "64"
+      CASSANDRA_CONCURRENT_READS: "32"
+      CASSANDRA_CONCURRENT_WRITES: "32"
+      CASSANDRA_COUNTER_WRITE_REQUEST_TIMEOUT_IN_MS: "15000"
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_LISTEN_ADDRESS: cassandra-5-0
+      CASSANDRA_MEMTABLE_ALLOCATION_TYPE: heap_buffers
+      CASSANDRA_RACK: rack1
+      CASSANDRA_RANGE_REQUEST_TIMEOUT_IN_MS: "15000"
+      CASSANDRA_READ_REQUEST_TIMEOUT_IN_MS: "15000"
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_START_RPC: "true"
+      CASSANDRA_WRITE_REQUEST_TIMEOUT_IN_MS: "15000"
+      HEAP_NEWSIZE: 600m
+      MAX_HEAP_SIZE: 3G
+    hostname: cassandra-5-0
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cqlsh -e 'SELECT cluster_name FROM system.local;' && nodetool status | grep -q 'UN'
+      timeout: 30s
+      interval: 30s
+      retries: 15
+      start_period: 5m0s
+    image: cassandra:5.0
+    networks:
+      cqlite-test-network: null
+    ports:
+      - mode: ingress
+        target: 9042
+        published: "9046"
+        protocol: tcp
+      - mode: ingress
+        target: 7000
+        published: "7004"
+        protocol: tcp
+      - mode: ingress
+        target: 7199
+        published: "7203"
+        protocol: tcp
+      - mode: ingress
+        target: 9160
+        published: "9164"
+        protocol: tcp
+    restart: unless-stopped
+    volumes:
+      - type: volume
+        source: cassandra-5-0-data
+        target: /var/lib/cassandra
+        volume: {}
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/schemas
+        target: /opt/schemas
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated/v5.0
+        target: /opt/generated
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/docker/cassandra-5-config
+        target: /etc/cassandra
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: volume
+        source: cassandra-5-0-temp
+        target: /tmp/cassandra
+        volume: {}
+  data-validator:
+    command:
+      - /opt/scripts/validate-generated-data.sh
+    container_name: cqlite-data-validator
+    depends_on:
+      enhanced-sstable-exporter:
+        condition: service_completed_successfully
+        required: true
+    environment:
+      CASSANDRA_4_1_HOST: cassandra-4-1-compat
+      CASSANDRA_5_0_HOST: cassandra-5-0
+      ISSUE_17_VALIDATION: "true"
+      OUTPUT_DIR: /opt/generated
+      VALIDATION_MODE: COMPREHENSIVE
+    image: python:3.11-slim-bullseye
+    networks:
+      cqlite-test-network: null
+    volumes:
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated
+        target: /opt/generated
+        bind:
+          create_host_path: true
+    working_dir: /opt/scripts
+  enhanced-data-generator:
+    command:
+      - /opt/scripts/enhanced-data-generator.sh
+    container_name: cqlite-enhanced-data-generator
+    depends_on:
+      cassandra-4-1:
+        condition: service_healthy
+        required: true
+      cassandra-5-0:
+        condition: service_healthy
+        required: true
+    environment:
+      CASSANDRA_4_1_HOST: cassandra-4-1-compat
+      CASSANDRA_5_0_HOST: cassandra-5-0
+      CASSANDRA_PORT: "9042"
+      COMPLEX_TYPE_GENERATION: "true"
+      EDGE_CASE_GENERATION: "true"
+      GENERATE_ALL_PATTERNS: "true"
+      ISSUE_17_MODE: "true"
+      LARGE_DATA_GENERATION: "true"
+      REAL_WORLD_PATTERNS: "true"
+      TEST_DATA_SCALE: COMPREHENSIVE
+      UDT_GENERATION: "true"
+    image: python:3.11-slim-bullseye
+    networks:
+      cqlite-test-network: null
+    volumes:
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/schemas
+        target: /opt/schemas
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated
+        target: /opt/generated
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/docker/enhanced-configs
+        target: /opt/configs
+        bind:
+          create_host_path: true
+    working_dir: /opt/scripts
+  enhanced-sstable-exporter:
+    command:
+      - /opt/scripts/enhanced-export-sstables.sh
+    container_name: cqlite-enhanced-sstable-exporter
+    depends_on:
+      schema-exporter:
+        condition: service_completed_successfully
+        required: true
+    environment:
+      ENHANCED_METADATA: "true"
+      EXTRACT_STATISTICS: "true"
+      GENERATE_MANIFESTS: "true"
+      OUTPUT_DIR: /opt/generated
+      SOURCE_DATA_DIR: /var/lib
+    image: python:3.11-slim-bullseye
+    networks:
+      cqlite-test-network: null
+    volumes:
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated
+        target: /opt/generated
+        bind:
+          create_host_path: true
+      - type: volume
+        source: cassandra-5-0-data
+        target: /var/lib/cassandra-5-0
+        read_only: true
+        volume: {}
+      - type: volume
+        source: cassandra-4-1-compat-data
+        target: /var/lib/cassandra-4-1-compat
+        read_only: true
+        volume: {}
+    working_dir: /opt/scripts
+  schema-exporter:
+    command:
+      - /opt/scripts/export-schemas.sh
+    container_name: cqlite-schema-exporter
+    depends_on:
+      enhanced-data-generator:
+        condition: service_completed_successfully
+        required: true
+    environment:
+      CASSANDRA_4_1_HOST: cassandra-4-1-compat
+      CASSANDRA_5_0_HOST: cassandra-5-0
+      CASSANDRA_PORT: "9042"
+      OUTPUT_DIR: /opt/generated
+    image: python:3.11-slim-bullseye
+    networks:
+      cqlite-test-network: null
+    volumes:
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated
+        target: /opt/generated
+        bind:
+          create_host_path: true
+    working_dir: /opt/scripts
+networks:
+  cqlite-test-network:
+    name: docker_cqlite-test-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.26.0.0/16
+volumes:
+  cassandra-4-1-compat-data:
+    name: docker_cassandra-4-1-compat-data
+    driver: local
+  cassandra-5-0-data:
+    name: docker_cassandra-5-0-data
+    driver: local
+  cassandra-5-0-temp:
+    name: docker_cassandra-5-0-temp
+    driver: local

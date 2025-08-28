@@ -126,3 +126,4 @@ claude-flow.bat
 claude-flow.ps1
 hive-mind-prompt-*.txt
 /test-data/datasets/
+/test-data/generated/

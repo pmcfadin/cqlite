@@ -1,0 +1,345 @@
+name: docker
+services:
+  cassandra-3-7:
+    container_name: cqlite-cassandra-3-7
+    environment:
+      CASSANDRA_AUTHENTICATOR: AllowAllAuthenticator
+      CASSANDRA_AUTHORIZER: AllowAllAuthorizer
+      CASSANDRA_AUTO_BOOTSTRAP: "false"
+      CASSANDRA_CLUSTER_NAME: cqlite-test-3-7
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_RACK: rack1
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_START_RPC: "true"
+      HEAP_NEWSIZE: 200m
+      MAX_HEAP_SIZE: 1G
+    hostname: cassandra-3-7
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1
+      timeout: 15s
+      interval: 30s
+      retries: 8
+      start_period: 2m0s
+    image: cassandra:3.7
+    networks:
+      cqlite-test-network: null
+    ports:
+      - mode: ingress
+        target: 9042
+        published: "9042"
+        protocol: tcp
+      - mode: ingress
+        target: 7000
+        published: "7000"
+        protocol: tcp
+      - mode: ingress
+        target: 7199
+        published: "7199"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: cassandra-3-7-data
+        target: /var/lib/cassandra
+        volume: {}
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/schemas
+        target: /opt/schemas
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated/v3.7
+        target: /opt/generated
+        bind:
+          create_host_path: true
+  cassandra-3-11:
+    container_name: cqlite-cassandra-3-11
+    environment:
+      CASSANDRA_AUTHENTICATOR: AllowAllAuthenticator
+      CASSANDRA_AUTHORIZER: AllowAllAuthorizer
+      CASSANDRA_AUTO_BOOTSTRAP: "false"
+      CASSANDRA_CLUSTER_NAME: cqlite-test-3-11
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_RACK: rack1
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_START_RPC: "true"
+      HEAP_NEWSIZE: 200m
+      MAX_HEAP_SIZE: 1G
+    hostname: cassandra-3-11
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1
+      timeout: 15s
+      interval: 30s
+      retries: 8
+      start_period: 2m0s
+    image: cassandra:3.11
+    networks:
+      cqlite-test-network: null
+    ports:
+      - mode: ingress
+        target: 9042
+        published: "9043"
+        protocol: tcp
+      - mode: ingress
+        target: 7000
+        published: "7001"
+        protocol: tcp
+      - mode: ingress
+        target: 7199
+        published: "7200"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: cassandra-3-11-data
+        target: /var/lib/cassandra
+        volume: {}
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/schemas
+        target: /opt/schemas
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated/v3.11
+        target: /opt/generated
+        bind:
+          create_host_path: true
+  cassandra-4-0:
+    container_name: cqlite-cassandra-4-0
+    environment:
+      CASSANDRA_AUTHENTICATOR: AllowAllAuthenticator
+      CASSANDRA_AUTHORIZER: AllowAllAuthorizer
+      CASSANDRA_AUTO_BOOTSTRAP: "false"
+      CASSANDRA_CLUSTER_NAME: cqlite-test-4-0
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_RACK: rack1
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_START_RPC: "true"
+      HEAP_NEWSIZE: 200m
+      MAX_HEAP_SIZE: 1G
+    hostname: cassandra-4-0
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1
+      timeout: 15s
+      interval: 30s
+      retries: 8
+      start_period: 2m0s
+    image: cassandra:4.0
+    networks:
+      cqlite-test-network: null
+    ports:
+      - mode: ingress
+        target: 9042
+        published: "9044"
+        protocol: tcp
+      - mode: ingress
+        target: 7000
+        published: "7002"
+        protocol: tcp
+      - mode: ingress
+        target: 7199
+        published: "7201"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: cassandra-4-0-data
+        target: /var/lib/cassandra
+        volume: {}
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/schemas
+        target: /opt/schemas
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated/v4.0
+        target: /opt/generated
+        bind:
+          create_host_path: true
+  cassandra-4-1:
+    container_name: cqlite-cassandra-4-1
+    environment:
+      CASSANDRA_AUTHENTICATOR: AllowAllAuthenticator
+      CASSANDRA_AUTHORIZER: AllowAllAuthorizer
+      CASSANDRA_AUTO_BOOTSTRAP: "false"
+      CASSANDRA_CLUSTER_NAME: cqlite-test-4-1
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_RACK: rack1
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_START_RPC: "true"
+      HEAP_NEWSIZE: 200m
+      MAX_HEAP_SIZE: 1G
+    hostname: cassandra-4-1
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cqlsh -e 'SELECT cluster_name FROM system.local;' || exit 1
+      timeout: 15s
+      interval: 30s
+      retries: 8
+      start_period: 2m0s
+    image: cassandra:4.1
+    networks:
+      cqlite-test-network: null
+    ports:
+      - mode: ingress
+        target: 9042
+        published: "9045"
+        protocol: tcp
+      - mode: ingress
+        target: 7000
+        published: "7003"
+        protocol: tcp
+      - mode: ingress
+        target: 7199
+        published: "7202"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: cassandra-4-1-data
+        target: /var/lib/cassandra
+        volume: {}
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/schemas
+        target: /opt/schemas
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated/v4.1
+        target: /opt/generated
+        bind:
+          create_host_path: true
+  sstable-exporter:
+    command:
+      - /opt/scripts/export-sstables.sh
+    container_name: cqlite-sstable-exporter
+    depends_on:
+      test-data-generator:
+        condition: service_completed_successfully
+        required: true
+    environment:
+      OUTPUT_DIR: /opt/generated
+      SOURCE_DATA_DIR: /var/lib
+    image: python:3.9-slim-bullseye
+    networks:
+      cqlite-test-network: null
+    volumes:
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated
+        target: /opt/generated
+        bind:
+          create_host_path: true
+      - type: volume
+        source: cassandra-3-7-data
+        target: /var/lib/cassandra-3-7
+        read_only: true
+        volume: {}
+      - type: volume
+        source: cassandra-3-11-data
+        target: /var/lib/cassandra-3-11
+        read_only: true
+        volume: {}
+      - type: volume
+        source: cassandra-4-0-data
+        target: /var/lib/cassandra-4-0
+        read_only: true
+        volume: {}
+      - type: volume
+        source: cassandra-4-1-data
+        target: /var/lib/cassandra-4-1
+        read_only: true
+        volume: {}
+    working_dir: /opt/scripts
+  test-data-generator:
+    command:
+      - /opt/scripts/generate-all-test-data.sh
+    container_name: cqlite-test-data-generator
+    depends_on:
+      cassandra-3-7:
+        condition: service_healthy
+        required: true
+      cassandra-3-11:
+        condition: service_healthy
+        required: true
+      cassandra-4-0:
+        condition: service_healthy
+        required: true
+      cassandra-4-1:
+        condition: service_healthy
+        required: true
+    environment:
+      CASSANDRA_3_7_HOST: cassandra-3-7
+      CASSANDRA_3_11_HOST: cassandra-3-11
+      CASSANDRA_4_0_HOST: cassandra-4-0
+      CASSANDRA_4_1_HOST: cassandra-4-1
+      CASSANDRA_PORT: "9042"
+      GENERATE_ALL_PATTERNS: "true"
+      TEST_DATA_SCALE: COMPREHENSIVE
+    image: python:3.9-slim-bullseye
+    networks:
+      cqlite-test-network: null
+    volumes:
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/scripts
+        target: /opt/scripts
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/schemas
+        target: /opt/schemas
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /Users/patrick/local_projects/cqlite/test-data/generated
+        target: /opt/generated
+        bind:
+          create_host_path: true
+    working_dir: /opt/scripts
+networks:
+  cqlite-test-network:
+    name: docker_cqlite-test-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+volumes:
+  cassandra-3-7-data:
+    name: docker_cassandra-3-7-data
+  cassandra-3-11-data:
+    name: docker_cassandra-3-11-data
+  cassandra-4-0-data:
+    name: docker_cassandra-4-0-data
+  cassandra-4-1-data:
+    name: docker_cassandra-4-1-data
