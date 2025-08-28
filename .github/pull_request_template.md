@@ -34,7 +34,7 @@
 ### Test Environment
 - OS: <!-- e.g., Ubuntu 22.04, macOS 14.0, Windows 11 -->
 - Rust version: <!-- e.g., 1.75.0 -->
-- Test data: <!-- If applicable, describe test SSTable files or schemas used -->
+- Test data: <!-- MUST use canonical real data under test-data/datasets; reference metadata.yml and test-data/schemas/ -->
 
 ### Tests Run
 - [ ] Unit tests (`cargo test`)
