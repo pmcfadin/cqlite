@@ -1,10 +1,10 @@
 //! Minimal dataset helpers for Issue #78
-//! 
+//!
 //! Provides simple functions to resolve canonical dataset paths from metadata.yml
 
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 /// Error type for dataset operations
 #[derive(Debug, thiserror::Error)]
@@ -70,16 +70,16 @@ pub fn load_metadata() -> Result<Metadata, DatasetError> {
 /// Load metadata.yml from specified root path
 pub fn load_metadata_at(root: &Path) -> Result<Metadata, DatasetError> {
     let metadata_path = root.join("metadata.yml");
-    
+
     if !metadata_path.exists() {
         return Err(DatasetError::MetadataNotFound {
             path: metadata_path.to_string_lossy().to_string(),
         });
     }
-    
+
     let content = fs::read_to_string(metadata_path)?;
     let metadata: Metadata = serde_yaml::from_str(&content)?;
-    
+
     Ok(metadata)
 }
 
@@ -90,9 +90,13 @@ pub fn resolve_table_to_sstable_path(keyspace: &str, table: &str) -> Result<Path
 }
 
 /// Resolve table to SSTable path under specified root/sstables/
-pub fn resolve_table_to_sstable_path_at(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, DatasetError> {
+pub fn resolve_table_to_sstable_path_at(
+    root: &Path,
+    keyspace: &str,
+    table: &str,
+) -> Result<PathBuf, DatasetError> {
     let metadata = load_metadata_at(root)?;
-    
+
     // Verify table exists in metadata
     let mut found = false;
     for ks in &metadata.keyspaces {
@@ -105,37 +109,37 @@ pub fn resolve_table_to_sstable_path_at(root: &Path, keyspace: &str, table: &str
             }
         }
     }
-    
+
     if !found {
         let available = list_tables_at(root, None)?
             .into_iter()
             .map(|t| format!("{}.{}", t.keyspace, t.table))
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         return Err(DatasetError::DatasetNotFound {
             keyspace: keyspace.to_string(),
             table: table.to_string(),
             available,
         });
     }
-    
+
     // Look for directory under root/sstables/keyspace/
     let sstables_dir = root.join("sstables").join(keyspace);
-    
+
     if !sstables_dir.exists() {
         return Err(DatasetError::DirectoryNotFound {
             path: sstables_dir.to_string_lossy().to_string(),
         });
     }
-    
+
     // Find table directory (format: table-{hash})
     let entries = fs::read_dir(&sstables_dir)?;
-    
+
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        
+
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with(&format!("{}-", table)) {
@@ -147,7 +151,7 @@ pub fn resolve_table_to_sstable_path_at(root: &Path, keyspace: &str, table: &str
             }
         }
     }
-    
+
     Err(DatasetError::DirectoryNotFound {
         path: format!("{}/{}-*", sstables_dir.to_string_lossy(), table),
     })
@@ -159,17 +163,20 @@ pub fn list_tables(keyspace_filter: Option<&str>) -> Result<Vec<TableInfo>, Data
 }
 
 /// List tables from specified root, optionally filtered by keyspace  
-pub fn list_tables_at(root: &Path, keyspace_filter: Option<&str>) -> Result<Vec<TableInfo>, DatasetError> {
+pub fn list_tables_at(
+    root: &Path,
+    keyspace_filter: Option<&str>,
+) -> Result<Vec<TableInfo>, DatasetError> {
     let metadata = load_metadata_at(root)?;
     let mut tables = Vec::new();
-    
+
     for keyspace in &metadata.keyspaces {
         if let Some(filter) = keyspace_filter {
             if keyspace.name != filter {
                 continue;
             }
         }
-        
+
         for table in &keyspace.tables {
             tables.push(TableInfo {
                 keyspace: keyspace.name.clone(),
@@ -178,18 +185,18 @@ pub fn list_tables_at(root: &Path, keyspace_filter: Option<&str>) -> Result<Vec<
             });
         }
     }
-    
+
     Ok(tables)
 }
 
 /// Check if a directory contains SSTable files
 fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
     let entries = fs::read_dir(dir)?;
-    
+
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        
+
         if path.is_file() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.ends_with("-Data.db") {
@@ -198,7 +205,7 @@ fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
             }
         }
     }
-    
+
     Ok(false)
 }
 
@@ -211,29 +218,25 @@ mod tests {
 
     fn create_test_metadata(datasets_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(datasets_root)?;
-        
+
         let metadata = Metadata {
-            keyspaces: vec![
-                Keyspace {
-                    name: "test_basic".to_string(),
-                    tables: vec![
-                        Table {
-                            name: "simple_table".to_string(),
-                            row_count: 1000,
-                        },
-                    ],
-                },
-            ],
+            keyspaces: vec![Keyspace {
+                name: "test_basic".to_string(),
+                tables: vec![Table {
+                    name: "simple_table".to_string(),
+                    row_count: 1000,
+                }],
+            }],
         };
-        
+
         let metadata_content = serde_yaml::to_string(&metadata)?;
         fs::write(datasets_root.join("metadata.yml"), metadata_content)?;
-        
+
         // Create sstables directory structure
         let sstables_dir = datasets_root.join("sstables/test_basic/simple_table-abc123def456");
         fs::create_dir_all(&sstables_dir)?;
         fs::write(sstables_dir.join("nb-1-big-Data.db"), "test data")?;
-        
+
         Ok(())
     }
 
@@ -241,9 +244,9 @@ mod tests {
     fn test_load_metadata() {
         let temp_dir = TempDir::new().unwrap();
         let datasets_root = temp_dir.path().join("datasets");
-        
+
         create_test_metadata(&datasets_root).unwrap();
-        
+
         let metadata = load_metadata_at(&datasets_root).unwrap();
         assert_eq!(metadata.keyspaces.len(), 1);
         assert_eq!(metadata.keyspaces[0].name, "test_basic");
@@ -255,10 +258,11 @@ mod tests {
     fn test_resolve_table_to_sstable_path() {
         let temp_dir = TempDir::new().unwrap();
         let datasets_root = temp_dir.path().join("datasets");
-        
+
         create_test_metadata(&datasets_root).unwrap();
-        
-        let path = resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "simple_table").unwrap();
+
+        let path =
+            resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "simple_table").unwrap();
         assert!(path.ends_with("simple_table-abc123def456"));
         assert!(path.exists());
     }
@@ -267,18 +271,18 @@ mod tests {
     fn test_list_tables() {
         let temp_dir = TempDir::new().unwrap();
         let datasets_root = temp_dir.path().join("datasets");
-        
+
         create_test_metadata(&datasets_root).unwrap();
-        
+
         let tables = list_tables_at(&datasets_root, None).unwrap();
         assert_eq!(tables.len(), 1);
         assert_eq!(tables[0].keyspace, "test_basic");
         assert_eq!(tables[0].table, "simple_table");
         assert_eq!(tables[0].row_count, 1000);
-        
+
         let filtered = list_tables_at(&datasets_root, Some("test_basic")).unwrap();
         assert_eq!(filtered.len(), 1);
-        
+
         let empty = list_tables_at(&datasets_root, Some("nonexistent")).unwrap();
         assert_eq!(empty.len(), 0);
     }
@@ -287,9 +291,9 @@ mod tests {
     fn test_table_not_found() {
         let temp_dir = TempDir::new().unwrap();
         let datasets_root = temp_dir.path().join("datasets");
-        
+
         create_test_metadata(&datasets_root).unwrap();
-        
+
         let result = resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "nonexistent");
         assert!(result.is_err());
         assert!(matches!(result, Err(DatasetError::DatasetNotFound { .. })));
