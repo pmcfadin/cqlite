@@ -36,7 +36,7 @@ pub struct Keyspace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     pub name: String,
-    pub row_count: u32,
+    pub row_count: u64,
 }
 
 /// Root metadata structure
@@ -50,12 +50,26 @@ pub struct Metadata {
 pub struct TableInfo {
     pub keyspace: String,
     pub table: String,
-    pub row_count: u32,
+    pub row_count: u64,
 }
 
-/// Load metadata.yml from test-data/datasets/
+/// Get the datasets root directory, checking CQLITE_DATASETS_ROOT env var first
+fn get_datasets_root() -> PathBuf {
+    if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
+        PathBuf::from(root)
+    } else {
+        PathBuf::from("test-data/datasets")
+    }
+}
+
+/// Load metadata.yml from datasets root
 pub fn load_metadata() -> Result<Metadata, DatasetError> {
-    let metadata_path = Path::new("test-data/datasets/metadata.yml");
+    load_metadata_at(&get_datasets_root())
+}
+
+/// Load metadata.yml from specified root path
+pub fn load_metadata_at(root: &Path) -> Result<Metadata, DatasetError> {
+    let metadata_path = root.join("metadata.yml");
     
     if !metadata_path.exists() {
         return Err(DatasetError::MetadataNotFound {
@@ -69,10 +83,15 @@ pub fn load_metadata() -> Result<Metadata, DatasetError> {
     Ok(metadata)
 }
 
-/// Resolve table to SSTable path under test-data/datasets/sstables/
+/// Resolve table to SSTable path under datasets/sstables/
 /// This is the main function required by Issue #78
 pub fn resolve_table_to_sstable_path(keyspace: &str, table: &str) -> Result<PathBuf, DatasetError> {
-    let metadata = load_metadata()?;
+    resolve_table_to_sstable_path_at(&get_datasets_root(), keyspace, table)
+}
+
+/// Resolve table to SSTable path under specified root/sstables/
+pub fn resolve_table_to_sstable_path_at(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, DatasetError> {
+    let metadata = load_metadata_at(root)?;
     
     // Verify table exists in metadata
     let mut found = false;
@@ -88,7 +107,7 @@ pub fn resolve_table_to_sstable_path(keyspace: &str, table: &str) -> Result<Path
     }
     
     if !found {
-        let available = list_tables(None)?
+        let available = list_tables_at(root, None)?
             .into_iter()
             .map(|t| format!("{}.{}", t.keyspace, t.table))
             .collect::<Vec<_>>()
@@ -101,8 +120,8 @@ pub fn resolve_table_to_sstable_path(keyspace: &str, table: &str) -> Result<Path
         });
     }
     
-    // Look for directory under test-data/datasets/sstables/keyspace/
-    let sstables_dir = Path::new("test-data/datasets/sstables").join(keyspace);
+    // Look for directory under root/sstables/keyspace/
+    let sstables_dir = root.join("sstables").join(keyspace);
     
     if !sstables_dir.exists() {
         return Err(DatasetError::DirectoryNotFound {
@@ -136,7 +155,12 @@ pub fn resolve_table_to_sstable_path(keyspace: &str, table: &str) -> Result<Path
 
 /// List tables, optionally filtered by keyspace
 pub fn list_tables(keyspace_filter: Option<&str>) -> Result<Vec<TableInfo>, DatasetError> {
-    let metadata = load_metadata()?;
+    list_tables_at(&get_datasets_root(), keyspace_filter)
+}
+
+/// List tables from specified root, optionally filtered by keyspace  
+pub fn list_tables_at(root: &Path, keyspace_filter: Option<&str>) -> Result<Vec<TableInfo>, DatasetError> {
+    let metadata = load_metadata_at(root)?;
     let mut tables = Vec::new();
     
     for keyspace in &metadata.keyspaces {
@@ -185,9 +209,8 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
-    fn create_test_metadata(temp_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let datasets_dir = temp_dir.join("test-data/datasets");
-        fs::create_dir_all(&datasets_dir)?;
+    fn create_test_metadata(datasets_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        fs::create_dir_all(datasets_root)?;
         
         let metadata = Metadata {
             keyspaces: vec![
@@ -204,10 +227,10 @@ mod tests {
         };
         
         let metadata_content = serde_yaml::to_string(&metadata)?;
-        fs::write(datasets_dir.join("metadata.yml"), metadata_content)?;
+        fs::write(datasets_root.join("metadata.yml"), metadata_content)?;
         
         // Create sstables directory structure
-        let sstables_dir = datasets_dir.join("sstables/test_basic/simple_table-abc123def456");
+        let sstables_dir = datasets_root.join("sstables/test_basic/simple_table-abc123def456");
         fs::create_dir_all(&sstables_dir)?;
         fs::write(sstables_dir.join("nb-1-big-Data.db"), "test data")?;
         
@@ -217,70 +240,58 @@ mod tests {
     #[test]
     fn test_load_metadata() {
         let temp_dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let datasets_root = temp_dir.path().join("datasets");
         
-        create_test_metadata(temp_dir.path()).unwrap();
+        create_test_metadata(&datasets_root).unwrap();
         
-        let metadata = load_metadata().unwrap();
+        let metadata = load_metadata_at(&datasets_root).unwrap();
         assert_eq!(metadata.keyspaces.len(), 1);
         assert_eq!(metadata.keyspaces[0].name, "test_basic");
         assert_eq!(metadata.keyspaces[0].tables.len(), 1);
         assert_eq!(metadata.keyspaces[0].tables[0].name, "simple_table");
-        
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
     fn test_resolve_table_to_sstable_path() {
         let temp_dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let datasets_root = temp_dir.path().join("datasets");
         
-        create_test_metadata(temp_dir.path()).unwrap();
+        create_test_metadata(&datasets_root).unwrap();
         
-        let path = resolve_table_to_sstable_path("test_basic", "simple_table").unwrap();
+        let path = resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "simple_table").unwrap();
         assert!(path.ends_with("simple_table-abc123def456"));
         assert!(path.exists());
-        
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
     fn test_list_tables() {
         let temp_dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let datasets_root = temp_dir.path().join("datasets");
         
-        create_test_metadata(temp_dir.path()).unwrap();
+        create_test_metadata(&datasets_root).unwrap();
         
-        let tables = list_tables(None).unwrap();
+        let tables = list_tables_at(&datasets_root, None).unwrap();
         assert_eq!(tables.len(), 1);
         assert_eq!(tables[0].keyspace, "test_basic");
         assert_eq!(tables[0].table, "simple_table");
         assert_eq!(tables[0].row_count, 1000);
         
-        let filtered = list_tables(Some("test_basic")).unwrap();
+        let filtered = list_tables_at(&datasets_root, Some("test_basic")).unwrap();
         assert_eq!(filtered.len(), 1);
         
-        let empty = list_tables(Some("nonexistent")).unwrap();
+        let empty = list_tables_at(&datasets_root, Some("nonexistent")).unwrap();
         assert_eq!(empty.len(), 0);
-        
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
     fn test_table_not_found() {
         let temp_dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let datasets_root = temp_dir.path().join("datasets");
         
-        create_test_metadata(temp_dir.path()).unwrap();
+        create_test_metadata(&datasets_root).unwrap();
         
-        let result = resolve_table_to_sstable_path("test_basic", "nonexistent");
+        let result = resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "nonexistent");
         assert!(result.is_err());
         assert!(matches!(result, Err(DatasetError::DatasetNotFound { .. })));
-        
-        std::env::set_current_dir(original_dir).unwrap();
     }
 }
