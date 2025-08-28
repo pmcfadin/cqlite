@@ -260,6 +260,13 @@ The system includes a comprehensive GitHub Actions workflow (`.github/workflows/
 4. **Tests integration** with CQLite
 5. **Creates releases** for main branch
 
+### CI Gate: Real datasets only
+
+- Tests must use the canonical Cassandra 5 corpus under `test-data/datasets/`.
+- CI fetches a versioned dataset release asset and caches it to `test-data/datasets`.
+- Local parity: fetch with `test-data/scripts/fetch-datasets.sh` (uses `datasets-v1` by default).
+- Do not commit datasets to git; do not use synthetic or alternate fixture paths.
+
 ### Workflow Triggers
 
 - Push to main/develop branches
