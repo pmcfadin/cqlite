@@ -26,6 +26,9 @@ anyhow = { workspace = true }
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
 
+# YAML parsing for metadata.yml (Issue #78)
+serde_yaml = "0.9"
+
 # Compression and checksums - feature-gated
 lz4_flex = { workspace = true, optional = true }
 snap = { workspace = true, optional = true }
