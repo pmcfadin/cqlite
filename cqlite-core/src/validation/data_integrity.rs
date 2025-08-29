@@ -6,10 +6,11 @@
 use super::reports::{ValidationSection, ValidationSectionStatus};
 use crate::error::{Error, Result};
 use crate::storage::sstable::reader::SSTableReader;
+use crate::testing::{list_tables, resolve_table_to_sstable_path};
 use crate::types::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::fs;
 
@@ -44,8 +45,8 @@ pub struct IntegrityConfig {
     pub max_file_size: u64,
     /// Timeout for individual validation (seconds)
     pub validation_timeout: u64,
-    /// Test data directories
-    pub test_data_paths: Vec<PathBuf>,
+    /// Use canonical datasets for testing (replaces hardcoded test_data_paths)
+    pub use_canonical_datasets: bool,
 }
 
 impl Default for IntegrityConfig {
@@ -58,10 +59,7 @@ impl Default for IntegrityConfig {
             enable_corruption_detection: true,
             max_file_size: 100 * 1024 * 1024, // 100MB
             validation_timeout: 30,
-            test_data_paths: vec![
-                PathBuf::from("test-data/sstables"),
-                PathBuf::from("test-env/cassandra5/data"),
-            ],
+            use_canonical_datasets: true,
         }
     }
 }
@@ -164,16 +162,30 @@ impl DataIntegrityValidator {
         let mut all_checks = Vec::new();
         let mut total_bytes = 0u64;
 
-        // Validate all test data paths
-        for path in &self.config.test_data_paths {
-            if path.exists() {
-                let checks = self.validate_directory(path).await?;
-                for check in checks {
-                    total_bytes += check.bytes_validated;
-                    all_checks.push(check);
+        // Validate using canonical datasets
+        if self.config.use_canonical_datasets {
+            match list_tables(None) {
+                Ok(tables) => {
+                    for table_info in tables {
+                        match resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table) {
+                            Ok(sstable_path) => {
+                                let checks = self.validate_sstable_file(&sstable_path).await?;
+                                for check in checks {
+                                    total_bytes += check.bytes_validated;
+                                    all_checks.push(check);
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to resolve SSTable path for {}.{}: {}", 
+                                    table_info.keyspace, table_info.table, e);
+                            }
+                        }
+                    }
                 }
-            } else {
-                log::warn!("Test data path does not exist: {}", path.display());
+                Err(e) => {
+                    log::error!("Failed to list canonical dataset tables: {}", e);
+                    return Err(Error::storage(format!("Cannot access canonical datasets: {}", e)));
+                }
             }
         }
 

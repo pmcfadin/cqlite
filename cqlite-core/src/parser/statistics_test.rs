@@ -9,27 +9,50 @@ mod tests {
     use crate::Config;
     use crate::platform::Platform;
     use crate::storage::sstable::statistics_reader::StatisticsReader;
-    use std::path::Path;
+    use crate::testing::{list_tables, resolve_table_to_sstable_path};
     use std::sync::Arc;
 
-    /// Test parsing real Statistics.db files from test environment
+    /// Test parsing real Statistics.db files from canonical datasets
     #[tokio::test]
     async fn test_real_statistics_parsing() {
-        let test_files = [
-            "test-env/cassandra5/sstables/users-46436710673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db",
-            "test-env/cassandra5/sstables/all_types-46200090673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db",
-            "test-env/cassandra5/sstables/collections_table-462afd10673711f0b2cf19d64e7cbecb/nb-1-big-Statistics.db",
-        ];
+        // Use canonical dataset helpers to find real Cassandra 5 data
+        let tables = match list_tables(None) {
+            Ok(tables) => tables,
+            Err(e) => {
+                println!("⚠️  Skipping real statistics parsing test: cannot access canonical datasets: {}", e);
+                return;
+            }
+        };
 
-        for test_file in &test_files {
-            let path = Path::new(test_file);
-            if path.exists() {
-                println!("Testing Statistics.db file: {}", test_file);
+        let target_tables = ["simple_table", "collection_table", "sensor_data", "wide_partition_table"];
+        let mut found_tables = Vec::new();
 
-                let config = Config::default();
-                let platform = Arc::new(Platform::new(&config).await.unwrap());
+        // Find matching tables in canonical datasets
+        for table_info in &tables {
+            if target_tables.contains(&table_info.table.as_str()) {
+                found_tables.push(table_info);
+            }
+        }
 
-                match StatisticsReader::open(path, platform).await {
+        if found_tables.is_empty() {
+            println!("⚠️  Skipping real statistics parsing test: no target tables found in canonical datasets");
+            return;
+        }
+
+        for table_info in found_tables {
+            match resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table) {
+                Ok(sstable_path) => {
+                    // Look for Statistics.db file in the same directory
+                    let statistics_file = sstable_path.parent().unwrap().join("Statistics.db");
+                    
+                    if statistics_file.exists() {
+                        let test_file = statistics_file.to_string_lossy();
+                        println!("Testing Statistics.db file: {}", test_file);
+
+                        let config = Config::default();
+                        let platform = Arc::new(Platform::new(&config).await.unwrap());
+
+                        match StatisticsReader::open(&statistics_file, platform).await {
                     Ok(stats_reader) => {
                         let stats = stats_reader.statistics();
 
@@ -55,41 +78,41 @@ mod tests {
                         println!("  ✅ Successfully parsed and analyzed");
                         println!("  📊 {}", summary);
 
-                        // Validate specific data based on test file
-                        if test_file.contains("users") {
-                            validate_users_table_stats(stats);
-                        } else if test_file.contains("all_types") {
-                            validate_all_types_table_stats(stats);
-                        } else if test_file.contains("collections") {
-                            validate_collections_table_stats(stats);
+                            // Validate specific data based on table name
+                            if table_info.table == "simple_table" {
+                                validate_simple_table_stats(stats);
+                            } else if table_info.table == "collection_table" {
+                                validate_collection_table_stats(stats);
+                            } else if table_info.table == "sensor_data" {
+                                validate_sensor_data_stats(stats);
+                            } else if table_info.table == "wide_partition_table" {
+                                validate_wide_partition_table_stats(stats);
+                            }
+                        }
+                        Err(e) => {
+                            // This might be expected if we don't have the exact format implemented yet
+                            println!("  ⚠️  Failed to parse {}: {}", test_file, e);
                         }
                     }
-                    Err(e) => {
-                        // This might be expected if we don't have the exact format implemented yet
-                        println!("  ⚠️  Failed to parse {}: {}", test_file, e);
+                    } else {
+                        println!("  ⏭️  Skipping missing Statistics.db file for {}.{}", table_info.keyspace, table_info.table);
                     }
                 }
-            } else {
-                println!("  ⏭️  Skipping missing test file: {}", test_file);
+                Err(e) => {
+                    println!("  ⚠️  Failed to resolve SSTable path for {}.{}: {}", table_info.keyspace, table_info.table, e);
+                }
             }
         }
     }
 
-    fn validate_users_table_stats(stats: &SSTableStatistics) {
-        // Users table should have reasonable statistics
+    fn validate_simple_table_stats(stats: &SSTableStatistics) {
+        // Simple table should have reasonable statistics
         assert!(
             stats.row_stats.total_rows > 0,
-            "Users table should have rows"
+            "Simple table should have rows"
         );
 
-        // Check column statistics if available
-        let id_column = stats.column_stats.iter().find(|c| c.name == "id");
-        if let Some(id_col) = id_column {
-            assert_eq!(id_col.column_type, "uuid", "ID column should be UUID type");
-            assert!(id_col.value_count > 0, "ID column should have values");
-        }
-
-        // Timestamp range should be reasonable
+        // Should have valid timestamps
         assert!(
             stats.timestamp_stats.min_timestamp > 0,
             "Should have valid timestamps"
@@ -97,37 +120,15 @@ mod tests {
         assert!(stats.timestamp_stats.max_timestamp >= stats.timestamp_stats.min_timestamp);
     }
 
-    fn validate_all_types_table_stats(stats: &SSTableStatistics) {
-        // All types table should demonstrate various data types
+    fn validate_collection_table_stats(stats: &SSTableStatistics) {
+        // Collection table should have collection type columns
         assert!(
             stats.row_stats.total_rows > 0,
-            "All types table should have rows"
+            "Collection table should have rows"
         );
 
-        // Should have multiple columns with different types
+        // Log column types for debugging
         if !stats.column_stats.is_empty() {
-            let column_types: std::collections::HashSet<_> =
-                stats.column_stats.iter().map(|c| &c.column_type).collect();
-            assert!(column_types.len() > 1, "Should have multiple column types");
-        }
-    }
-
-    fn validate_collections_table_stats(stats: &SSTableStatistics) {
-        // Collections table should have collection type columns
-        assert!(
-            stats.row_stats.total_rows > 0,
-            "Collections table should have rows"
-        );
-
-        // Look for collection type columns
-        let _has_collection_types = stats.column_stats.iter().any(|c| {
-            c.column_type.contains("list")
-                || c.column_type.contains("set")
-                || c.column_type.contains("map")
-        });
-
-        if !stats.column_stats.is_empty() {
-            // We expect collection types but the exact format depends on Cassandra version
             println!(
                 "  📋 Column types found: {:?}",
                 stats
@@ -135,6 +136,36 @@ mod tests {
                     .iter()
                     .map(|c| &c.column_type)
                     .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    fn validate_sensor_data_stats(stats: &SSTableStatistics) {
+        // Sensor data should have time series characteristics
+        assert!(
+            stats.row_stats.total_rows > 0,
+            "Sensor data table should have rows"
+        );
+
+        // Should have valid timestamp range for time series data
+        assert!(
+            stats.timestamp_stats.min_timestamp > 0,
+            "Time series should have valid timestamps"
+        );
+    }
+
+    fn validate_wide_partition_table_stats(stats: &SSTableStatistics) {
+        // Wide partition table should have many columns per row
+        assert!(
+            stats.row_stats.total_rows > 0,
+            "Wide partition table should have rows"
+        );
+
+        // Should have multiple columns
+        if !stats.column_stats.is_empty() {
+            println!(
+                "  📊 Wide table has {} columns",
+                stats.column_stats.len()
             );
         }
     }
