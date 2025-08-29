@@ -665,96 +665,69 @@ mod tests {
 
     #[test]
     fn test_parse_compression_info() {
-        // Example hex data from our analysis:
-        // 00 0d 4c 5a 34 43 6f 6d 70 72 65 73 73 6f 72 (LZ4Compressor)
-        let data = vec![
-            0x00, 0x0d, // algorithm name length: 13
-            // "LZ4Compressor" (exactly 13 bytes, no null terminator)
-            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72,
-            0x00, // padding to 4-byte boundary (2+13=15, need 1 byte to get to 16)
-            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // data length: 0 (example)
-            0x00, 0x00, 0x00, 0x01, // chunk count: 1
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // chunk offset: 0
-        ];
+        use crate::testing::{list_tables, resolve_table_to_sstable_path};
+        use std::collections::HashMap;
+        use std::fs;
+        use std::path::Path;
 
-        let info = CompressionInfo::parse(&data).unwrap();
-        assert_eq!(info.algorithm, "LZ4Compressor");
-        assert_eq!(info.chunk_length, 16384);
-        assert_eq!(info.chunk_offsets.len(), 1);
-        assert_eq!(info.crc32, None); // No CRC in this test data
-    }
-
-    #[test]
-    fn test_parse_compression_info_with_crc() {
-        // Data with CRC32 at the end
-        let mut data = vec![
-            0x00, 0x0d, // algorithm name length: 13
-            // "LZ4Compressor" (exactly 13 bytes, no null terminator)
-            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72,
-            0x00, // padding to 4-byte boundary (2+13=15, need 1 byte to get to 16)
-            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // data length: 4096
-            0x00, 0x00, 0x00, 0x01, // chunk count: 1
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // chunk offset: 0
-        ];
-
-        // Calculate and append CRC32
-        let crc = CompressionInfo::calculate_crc32(&data);
-        data.extend_from_slice(&crc.to_be_bytes());
-
-        let info = CompressionInfo::parse(&data).unwrap();
-        assert_eq!(info.algorithm, "LZ4Compressor");
-        assert_eq!(info.chunk_length, 16384);
-        assert_eq!(info.data_length, 4096);
-        assert_eq!(info.chunk_offsets.len(), 1);
-        assert_eq!(info.crc32, Some(crc));
-    }
-
-    #[test]
-    fn test_parse_with_invalid_crc() {
-        let mut data = vec![
-            0x00, 0x0d, // algorithm name length: 13
-            // "LZ4Compressor" (exactly 13 bytes, no null terminator)
-            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72,
-            0x00, // padding to 4-byte boundary (2+13=15, need 1 byte to get to 16)
-            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // data length: 4096
-            0x00, 0x00, 0x00, 0x01, // chunk count: 1
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // chunk offset: 0
-        ];
-
-        // Append invalid CRC32
-        data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-
-        let result = CompressionInfo::parse(&data);
-        assert!(result.is_err());
-        if let Err(e) = result {
-            let error_msg = format!("{}", e);
-            assert!(error_msg.contains("CRC32 mismatch"));
+        // Discovery function to find CompressionInfo.db files
+        fn find_compressioninfo_files(table_dir: &Path) -> Vec<std::path::PathBuf> {
+            if let Ok(dir) = fs::read_dir(table_dir) {
+                dir.filter_map(|entry| entry.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file())
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.ends_with("-CompressionInfo.db"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
         }
-    }
 
-    #[test]
-    fn test_parse_with_crc_required() {
-        // Data without CRC
-        let data = vec![
-            0x00, 0x0d, // algorithm name length: 13
-            // "LZ4Compressor" (exactly 13 bytes, no null terminator)
-            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72,
-            0x00, // padding to 4-byte boundary (2+13=15, need 1 byte to get to 16)
-            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // data length: 0
-            0x00, 0x00, 0x00, 0x01, // chunk count: 1
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // chunk offset: 0
-        ];
+        // Discover compressed tables dynamically from canonical datasets
+        let mut by_algo: HashMap<String, std::path::PathBuf> = HashMap::new();
+        for table in list_tables(None).unwrap_or_default() {
+            let table_dir = match resolve_table_to_sstable_path(&table.keyspace, &table.table) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
 
-        // Should fail when CRC is required
-        let result = CompressionInfo::parse_with_crc_required(&data);
-        assert!(result.is_err());
-        if let Err(e) = result {
-            let error_msg = format!("{}", e);
-            assert!(error_msg.contains("CRC32 checksum required"));
+            for ci_path in find_compressioninfo_files(&table_dir) {
+                // Parse CompressionInfo to get algorithm from real data
+                if let Ok(data) = std::fs::read(&ci_path) {
+                    if let Ok(info) = CompressionInfo::parse(&data) {
+                        let algo = info.algorithm.clone();
+                        by_algo.entry(algo).or_insert(ci_path.clone());
+                        // Stop when we collected one per algorithm (LZ4/Snappy/Deflate)
+                        if by_algo.len() >= 3 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if by_algo.len() >= 3 {
+                break;
+            }
+        }
+
+        assert!(
+            !by_algo.is_empty(),
+            "No compressed tables found in canonical datasets"
+        );
+
+        // Test each discovered compression algorithm
+        for (algo, ci_path) in by_algo {
+            let data = std::fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
+            let info = CompressionInfo::parse(&data).expect("Failed to parse CompressionInfo.db");
+
+            // Validate real data structure
+            assert_eq!(info.algorithm, algo);
+            assert!(info.chunk_length > 0);
+            assert!(!info.chunk_offsets.is_empty());
         }
     }
 

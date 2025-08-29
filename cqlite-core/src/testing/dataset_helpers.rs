@@ -58,7 +58,7 @@ fn get_datasets_root() -> PathBuf {
     if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
         PathBuf::from(root)
     } else {
-        PathBuf::from("test-data/datasets")
+        PathBuf::from("../test-data/datasets")
     }
 }
 

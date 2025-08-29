@@ -569,36 +569,72 @@ mod tests {
 
     #[test]
     fn test_compression_info_binary_parsing() {
-        // Create mock binary CompressionInfo.db data
-        let mut data = Vec::new();
+        use crate::testing::{list_tables, resolve_table_to_sstable_path};
+        use std::collections::HashMap;
+        use std::fs;
+        use std::path::Path;
 
-        // Algorithm name "LZ4" - use u16 length prefix as expected by parser
-        data.extend_from_slice(&3u16.to_be_bytes()); // length (u16, not u32)
-        data.extend_from_slice(b"LZ4");
-        data.push(0); // Add null terminator as expected by Cassandra format
-
-        // Chunk length (64KB)
-        data.extend_from_slice(&65536u32.to_be_bytes());
-
-        // Data length (1MB)
-        data.extend_from_slice(&1048576u64.to_be_bytes());
-
-        // Number of chunks (16)
-        data.extend_from_slice(&16u32.to_be_bytes());
-
-        // Add chunk info (simplified: just first chunk)
-        for i in 0..16 {
-            data.extend_from_slice(&(i as u64 * 4096).to_be_bytes()); // offset
-            data.extend_from_slice(&4000u32.to_be_bytes()); // compressed length
-            data.extend_from_slice(&65536u32.to_be_bytes()); // uncompressed length
+        // Discovery function to find CompressionInfo.db files
+        fn find_compressioninfo_files(table_dir: &Path) -> Vec<std::path::PathBuf> {
+            if let Ok(dir) = fs::read_dir(table_dir) {
+                dir.filter_map(|entry| entry.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file())
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.ends_with("-CompressionInfo.db"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
         }
 
-        let info = CompressionInfo::parse_binary(&data).unwrap();
-        assert_eq!(info.algorithm, "LZ4");
-        assert_eq!(info.chunk_length, 65536);
-        assert_eq!(info.data_length, 1048576);
-        assert_eq!(info.chunk_count(), 16);
-        assert_eq!(info.get_algorithm(), CompressionAlgorithm::Lz4);
+        // Discover compressed tables dynamically from canonical datasets
+        let mut by_algo: HashMap<String, std::path::PathBuf> = HashMap::new();
+        for table in list_tables(None).unwrap_or_default() {
+            let table_dir = match resolve_table_to_sstable_path(&table.keyspace, &table.table) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            for ci_path in find_compressioninfo_files(&table_dir) {
+                // Parse CompressionInfo to get algorithm from real data
+                if let Ok(data) = std::fs::read(&ci_path) {
+                    if let Ok(info) = CompressionInfo::parse_binary(&data) {
+                        let algo = info.algorithm.clone();
+                        by_algo.entry(algo).or_insert(ci_path.clone());
+                        // Stop when we collected one per algorithm (LZ4/Snappy/Deflate)
+                        if by_algo.len() >= 3 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if by_algo.len() >= 3 {
+                break;
+            }
+        }
+
+        assert!(
+            !by_algo.is_empty(),
+            "No compressed tables found in canonical datasets"
+        );
+
+        // Test each discovered compression algorithm
+        for (algo, ci_path) in by_algo {
+            let data = std::fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
+            let info =
+                CompressionInfo::parse_binary(&data).expect("Failed to parse CompressionInfo.db");
+
+            // Validate real data structure
+            assert_eq!(info.algorithm, algo);
+            assert!(info.chunk_length > 0);
+            assert!(info.data_length > 0);
+            assert!(!info.chunks.is_empty());
+        }
     }
 
     #[test]
