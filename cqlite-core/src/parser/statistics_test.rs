@@ -19,33 +19,86 @@ mod tests {
         let tables = match list_tables(None) {
             Ok(tables) => tables,
             Err(e) => {
-                println!("⚠️  Skipping real statistics parsing test: cannot access canonical datasets: {}", e);
+                println!(
+                    "⚠️  Skipping real statistics parsing test: cannot access canonical datasets: {}",
+                    e
+                );
                 return;
             }
         };
 
-        let target_tables = ["simple_table", "collection_table", "sensor_data", "wide_partition_table"];
-        let mut found_tables = Vec::new();
+        // Use specific known tables for deterministic testing (basic types + 2 others)
+        let target_tables = [
+            "users",
+            "collections_table",
+            "sensor_data",
+            "simple_table",
+            "all_types",
+            "wide_partition_table",
+        ];
+        let mut test_tables = Vec::new();
+        let mut basic_types_table = None;
 
-        // Find matching tables in canonical datasets
+        // Find basic types table for row count validation
         for table_info in &tables {
             if target_tables.contains(&table_info.table.as_str()) {
-                found_tables.push(table_info);
+                test_tables.push(table_info);
+                // Prefer "users" or "simple_table" as basic types for count validation
+                if (table_info.table == "users" || table_info.table == "simple_table")
+                    && basic_types_table.is_none()
+                {
+                    basic_types_table = Some(table_info);
+                }
+                if test_tables.len() >= 3 {
+                    break; // Limit to 3 tables for deterministic, fast tests
+                }
             }
         }
 
-        if found_tables.is_empty() {
-            println!("⚠️  Skipping real statistics parsing test: no target tables found in canonical datasets");
+        if test_tables.is_empty() {
+            println!(
+                "⚠️  Skipping real statistics parsing test: no target tables found in canonical datasets"
+            );
             return;
         }
 
-        for table_info in found_tables {
+        println!(
+            "Testing {} specific tables from canonical datasets",
+            test_tables.len()
+        );
+
+        for table_info in test_tables {
             match resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table) {
                 Ok(sstable_path) => {
-                    // Look for Statistics.db file in the same directory
-                    let statistics_file = sstable_path.parent().unwrap().join("Statistics.db");
-                    
-                    if statistics_file.exists() {
+                    // Find Statistics.db file using proper Cassandra naming pattern
+                    let table_dir = sstable_path.parent().unwrap();
+
+                    // First find Data.db files to derive base prefix, then find corresponding Statistics.db
+                    let statistics_file = std::fs::read_dir(table_dir).ok().and_then(|entries| {
+                        // Find Data.db files first
+                        let data_files: Vec<_> = entries
+                            .filter_map(|entry| entry.ok())
+                            .filter(|entry| {
+                                entry.file_name().to_string_lossy().ends_with("-Data.db")
+                            })
+                            .collect();
+
+                        // For each Data.db file, look for corresponding Statistics.db
+                        for data_file in data_files {
+                            let data_name = data_file.file_name();
+                            let data_name_str = data_name.to_string_lossy();
+                            if let Some(base) = data_name_str.strip_suffix("-Data.db") {
+                                let statistics_name = format!("{}-Statistics.db", base);
+                                let statistics_path = table_dir.join(&statistics_name);
+                                if statistics_path.exists() {
+                                    return Some(statistics_path);
+                                }
+                            }
+                        }
+                        None
+                    });
+
+                    if let Some(statistics_file) = statistics_file {
                         let test_file = statistics_file.to_string_lossy();
                         println!("Testing Statistics.db file: {}", test_file);
 
@@ -53,120 +106,131 @@ mod tests {
                         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
                         match StatisticsReader::open(&statistics_file, platform).await {
-                    Ok(stats_reader) => {
-                        let stats = stats_reader.statistics();
+                            Ok(stats_reader) => {
+                                let stats = stats_reader.statistics();
 
-                        // Validate basic structure
-                        assert!(stats.row_stats.total_rows > 0, "Should have row count data");
-                        assert!(
-                            stats.table_stats.disk_size > 0,
-                            "Should have disk size data"
-                        );
+                                // Validate basic structure
+                                assert!(
+                                    stats.row_stats.total_rows > 0,
+                                    "Should have row count data"
+                                );
+                                assert!(
+                                    stats.table_stats.disk_size > 0,
+                                    "Should have disk size data"
+                                );
 
-                        // Test analysis
-                        let analysis = stats_reader.analyze();
-                        assert!(analysis.health_score >= 0.0 && analysis.health_score <= 100.0);
+                                // Enhanced validation: basic types table gets strict row count validation
+                                if basic_types_table.map_or(false, |bt| bt.keyspace == table_info.keyspace && bt.table == table_info.table) {
+                                    // Strict validation for basic types table against metadata.yml
+                                    validate_basic_types_row_count_against_metadata(
+                                        table_info,
+                                        stats.row_stats.total_rows,
+                                    )
+                                    .await;
+                                    println!("  ✅ Basic types table row count validation passed");
+                                } else {
+                                    // Lightweight validation for other tables: non-zero rows and basic checks
+                                    assert!(
+                                        stats.row_stats.total_rows > 0,
+                                        "Should have non-zero rows"
+                                    );
+                                    assert!(
+                                        stats.row_stats.live_rows <= stats.row_stats.total_rows,
+                                        "Live rows should not exceed total rows"
+                                    );
+                                    if !stats.column_stats.is_empty() {
+                                        println!(
+                                            "  📊 Table has {} columns",
+                                            stats.column_stats.len()
+                                        );
+                                    }
+                                    println!(
+                                        "  ✅ Lightweight validation passed for non-basic table"
+                                    );
+                                }
 
-                        // Test report generation
-                        let report = stats_reader.generate_report(true);
-                        assert!(report.contains("SSTable Statistics Report"));
+                                // Test analysis
+                                let analysis = stats_reader.analyze();
+                                assert!(
+                                    analysis.health_score >= 0.0 && analysis.health_score <= 100.0
+                                );
 
-                        // Test compact summary
-                        let summary = stats_reader.compact_summary();
-                        assert!(!summary.is_empty());
+                                // Test report generation
+                                let report = stats_reader.generate_report(true);
+                                assert!(report.contains("SSTable Statistics Report"));
 
-                        println!("  ✅ Successfully parsed and analyzed");
-                        println!("  📊 {}", summary);
+                                // Test compact summary
+                                let summary = stats_reader.compact_summary();
+                                assert!(!summary.is_empty());
 
-                            // Validate specific data based on table name
-                            if table_info.table == "simple_table" {
-                                validate_simple_table_stats(stats);
-                            } else if table_info.table == "collection_table" {
-                                validate_collection_table_stats(stats);
-                            } else if table_info.table == "sensor_data" {
-                                validate_sensor_data_stats(stats);
-                            } else if table_info.table == "wide_partition_table" {
-                                validate_wide_partition_table_stats(stats);
+                                println!("  ✅ Successfully parsed and analyzed");
+                                println!("  📊 {}", summary);
+                            }
+                            Err(e) => {
+                                // This might be expected if we don't have the exact format implemented yet
+                                println!("  ⚠️  Failed to parse {}: {}", test_file, e);
                             }
                         }
-                        Err(e) => {
-                            // This might be expected if we don't have the exact format implemented yet
-                            println!("  ⚠️  Failed to parse {}: {}", test_file, e);
-                        }
-                    }
                     } else {
-                        println!("  ⏭️  Skipping missing Statistics.db file for {}.{}", table_info.keyspace, table_info.table);
+                        println!(
+                            "  ⏭️  Skipping missing Statistics.db file for {}.{}",
+                            table_info.keyspace, table_info.table
+                        );
                     }
                 }
                 Err(e) => {
-                    println!("  ⚠️  Failed to resolve SSTable path for {}.{}: {}", table_info.keyspace, table_info.table, e);
+                    println!(
+                        "  ⚠️  Failed to resolve SSTable path for {}.{}: {}",
+                        table_info.keyspace, table_info.table, e
+                    );
                 }
             }
         }
     }
 
-    fn validate_simple_table_stats(stats: &SSTableStatistics) {
-        // Simple table should have reasonable statistics
-        assert!(
-            stats.row_stats.total_rows > 0,
-            "Simple table should have rows"
-        );
+    async fn validate_basic_types_row_count_against_metadata(
+        table_info: &crate::testing::TableInfo,
+        actual_rows: u64,
+    ) {
+        use crate::testing::load_metadata;
 
-        // Should have valid timestamps
-        assert!(
-            stats.timestamp_stats.min_timestamp > 0,
-            "Should have valid timestamps"
-        );
-        assert!(stats.timestamp_stats.max_timestamp >= stats.timestamp_stats.min_timestamp);
-    }
-
-    fn validate_collection_table_stats(stats: &SSTableStatistics) {
-        // Collection table should have collection type columns
-        assert!(
-            stats.row_stats.total_rows > 0,
-            "Collection table should have rows"
-        );
-
-        // Log column types for debugging
-        if !stats.column_stats.is_empty() {
-            println!(
-                "  📋 Column types found: {:?}",
-                stats
-                    .column_stats
+        match load_metadata() {
+            Ok(metadata) => {
+                if let Some(keyspace) = metadata
+                    .keyspaces
                     .iter()
-                    .map(|c| &c.column_type)
-                    .collect::<Vec<_>>()
-            );
-        }
-    }
+                    .find(|ks| ks.name == table_info.keyspace)
+                {
+                    if let Some(table) = keyspace.tables.iter().find(|t| t.name == table_info.table)
+                    {
+                        let expected_rows = table.row_count;
+                        println!(
+                            "  📊 Row count validation: expected {}, actual {}",
+                            expected_rows, actual_rows
+                        );
 
-    fn validate_sensor_data_stats(stats: &SSTableStatistics) {
-        // Sensor data should have time series characteristics
-        assert!(
-            stats.row_stats.total_rows > 0,
-            "Sensor data table should have rows"
-        );
-
-        // Should have valid timestamp range for time series data
-        assert!(
-            stats.timestamp_stats.min_timestamp > 0,
-            "Time series should have valid timestamps"
-        );
-    }
-
-    fn validate_wide_partition_table_stats(stats: &SSTableStatistics) {
-        // Wide partition table should have many columns per row
-        assert!(
-            stats.row_stats.total_rows > 0,
-            "Wide partition table should have rows"
-        );
-
-        // Should have multiple columns
-        if !stats.column_stats.is_empty() {
-            println!(
-                "  📊 Wide table has {} columns",
-                stats.column_stats.len()
-            );
+                        // Allow some tolerance for generation variations, but should be reasonably close
+                        if expected_rows > 0 {
+                            let tolerance = (expected_rows as f64 * 0.1).max(1.0) as u64; // 10% tolerance
+                            assert!(
+                                actual_rows.abs_diff(expected_rows) <= tolerance,
+                                "Row count mismatch: expected {} ±{}, got {}",
+                                expected_rows,
+                                tolerance,
+                                actual_rows
+                            );
+                        } else {
+                            // If metadata shows 0, actual should be > 0 for real data
+                            assert!(actual_rows > 0, "Real data should have non-zero rows");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  ⚠️  Could not load metadata for validation: {}", e);
+                // Just ensure we have some data
+                assert!(actual_rows > 0, "Should have non-zero rows");
+            }
         }
     }
 

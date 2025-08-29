@@ -25,7 +25,6 @@ anyhow = { workspace = true }
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
-serde_yaml = "0.9"
 
 # YAML parsing for metadata.yml (Issue #78)
 serde_yaml = "0.9"
