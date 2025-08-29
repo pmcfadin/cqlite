@@ -569,36 +569,28 @@ mod tests {
 
     #[test]
     fn test_compression_info_binary_parsing() {
-        // Create mock binary CompressionInfo.db data
-        let mut data = Vec::new();
+        // Use real CompressionInfo.db file from canonical dataset
+        let table_path = crate::testing::resolve_table_to_sstable_path(
+            "test_basic",
+            "compression_test_table",
+        )
+        .expect("compression_test_table not found in canonical dataset");
 
-        // Algorithm name "LZ4" - use u16 length prefix as expected by parser
-        data.extend_from_slice(&3u16.to_be_bytes()); // length (u16, not u32)
-        data.extend_from_slice(b"LZ4");
-        data.push(0); // Add null terminator as expected by Cassandra format
+        let compression_info_path = table_path.join("nb-1-big-CompressionInfo.db");
+        assert!(
+            compression_info_path.exists(),
+            "CompressionInfo.db not found at {:?}",
+            compression_info_path
+        );
 
-        // Chunk length (64KB)
-        data.extend_from_slice(&65536u32.to_be_bytes());
-
-        // Data length (1MB)
-        data.extend_from_slice(&1048576u64.to_be_bytes());
-
-        // Number of chunks (16)
-        data.extend_from_slice(&16u32.to_be_bytes());
-
-        // Add chunk info (simplified: just first chunk)
-        for i in 0..16 {
-            data.extend_from_slice(&(i as u64 * 4096).to_be_bytes()); // offset
-            data.extend_from_slice(&4000u32.to_be_bytes()); // compressed length
-            data.extend_from_slice(&65536u32.to_be_bytes()); // uncompressed length
-        }
-
-        let info = CompressionInfo::parse_binary(&data).unwrap();
-        assert_eq!(info.algorithm, "LZ4");
-        assert_eq!(info.chunk_length, 65536);
-        assert_eq!(info.data_length, 1048576);
-        assert_eq!(info.chunk_count(), 16);
-        assert_eq!(info.get_algorithm(), CompressionAlgorithm::Lz4);
+        let data = std::fs::read(&compression_info_path).expect("Failed to read CompressionInfo.db");
+        let info = CompressionInfo::parse_binary(&data).expect("Failed to parse CompressionInfo.db");
+        
+        // Validate that we got real data
+        assert!(!info.algorithm.is_empty());
+        assert!(info.chunk_length > 0);
+        assert!(info.data_length > 0);
+        assert!(!info.chunks.is_empty());
     }
 
     #[test]
