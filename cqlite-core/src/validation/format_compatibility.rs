@@ -4,10 +4,9 @@
 //! It validates format version compatibility and ensures proper handling across versions.
 
 use crate::error::{Error, Result};
-use crate::testing::{list_tables, resolve_table_to_sstable_path};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs;
@@ -66,21 +65,25 @@ pub struct CompatibilityConfig {
     pub min_supported_version: String,
     /// Maximum supported version
     pub max_supported_version: String,
-    /// Use canonical datasets for testing (replaces hardcoded version_test_data)
-    pub use_canonical_datasets: bool,
+    /// Test data directories for different versions
+    pub version_test_data: HashMap<String, PathBuf>,
     /// Compatibility test timeout (seconds)
     pub test_timeout: u64,
 }
 
 impl Default for CompatibilityConfig {
     fn default() -> Self {
+        let mut version_test_data = HashMap::new();
+        version_test_data.insert("5.0".to_string(), PathBuf::from("test-data/cassandra-5.0"));
+        version_test_data.insert("5.1".to_string(), PathBuf::from("test-data/cassandra-5.1"));
+
         Self {
             enable_version_testing: true,
             enable_backward_compatibility: false, // No backward compatibility needed - only Cassandra 5+
             enable_forward_compatibility: true, // Forward compatibility within Cassandra 5.x versions
             min_supported_version: "5.0".to_string(),
             max_supported_version: "5.1".to_string(),
-            use_canonical_datasets: true,
+            version_test_data,
             test_timeout: 30,
         }
     }
@@ -351,27 +354,20 @@ impl FormatValidator {
         let _start_time = Instant::now();
         let mut checks = Vec::new();
 
-        // Use canonical datasets for version validation
-        if self.config.use_canonical_datasets {
-            match list_tables(None) {
-                Ok(tables) => {
-                    for table_info in tables {
-                        match resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table) {
-                            Ok(sstable_path) => {
-                                let version_checks = self.validate_version_files(version, &sstable_path.parent().unwrap()).await?;
-                                checks.extend(version_checks);
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to resolve SSTable path for {}.{}: {}", 
-                                    table_info.keyspace, table_info.table, e);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!("Failed to access canonical datasets for version {}: {}", version, e);
-                }
+        // Find test data for this version
+        if let Some(test_data_path) = self.config.version_test_data.get(version) {
+            if test_data_path.exists() {
+                let version_checks = self.validate_version_files(version, test_data_path).await?;
+                checks.extend(version_checks);
+            } else {
+                log::warn!(
+                    "Test data path for version {} does not exist: {}",
+                    version,
+                    test_data_path.display()
+                );
             }
+        } else {
+            log::warn!("No test data path configured for version {}", version);
         }
 
         // If no test data, create synthetic compatibility checks
