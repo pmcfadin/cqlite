@@ -128,3 +128,6 @@ hive-mind-prompt-*.txt
 /test-data/datasets/
 /test-data/generated/
 /test-data/logs/
+
+# Claude Flow metrics and temporary files
+.claude-flow/
