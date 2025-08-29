@@ -569,28 +569,72 @@ mod tests {
 
     #[test]
     fn test_compression_info_binary_parsing() {
-        // Use real CompressionInfo.db file from canonical dataset
-        let table_path = crate::testing::resolve_table_to_sstable_path(
-            "test_basic",
-            "compression_test_table",
-        )
-        .expect("compression_test_table not found in canonical dataset");
+        use crate::testing::{list_tables, resolve_table_to_sstable_path};
+        use std::collections::HashMap;
+        use std::fs;
+        use std::path::Path;
 
-        let compression_info_path = table_path.join("nb-1-big-CompressionInfo.db");
+        // Discovery function to find CompressionInfo.db files
+        fn find_compressioninfo_files(table_dir: &Path) -> Vec<std::path::PathBuf> {
+            if let Ok(dir) = fs::read_dir(table_dir) {
+                dir.filter_map(|entry| entry.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file())
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.ends_with("-CompressionInfo.db"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+
+        // Discover compressed tables dynamically from canonical datasets
+        let mut by_algo: HashMap<String, std::path::PathBuf> = HashMap::new();
+        for table in list_tables(None).unwrap_or_default() {
+            let table_dir = match resolve_table_to_sstable_path(&table.keyspace, &table.table) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            for ci_path in find_compressioninfo_files(&table_dir) {
+                // Parse CompressionInfo to get algorithm from real data
+                if let Ok(data) = std::fs::read(&ci_path) {
+                    if let Ok(info) = CompressionInfo::parse_binary(&data) {
+                        let algo = info.algorithm.clone();
+                        by_algo.entry(algo).or_insert(ci_path.clone());
+                        // Stop when we collected one per algorithm (LZ4/Snappy/Deflate)
+                        if by_algo.len() >= 3 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if by_algo.len() >= 3 {
+                break;
+            }
+        }
+
         assert!(
-            compression_info_path.exists(),
-            "CompressionInfo.db not found at {:?}",
-            compression_info_path
+            !by_algo.is_empty(),
+            "No compressed tables found in canonical datasets"
         );
 
-        let data = std::fs::read(&compression_info_path).expect("Failed to read CompressionInfo.db");
-        let info = CompressionInfo::parse_binary(&data).expect("Failed to parse CompressionInfo.db");
-        
-        // Validate that we got real data
-        assert!(!info.algorithm.is_empty());
-        assert!(info.chunk_length > 0);
-        assert!(info.data_length > 0);
-        assert!(!info.chunks.is_empty());
+        // Test each discovered compression algorithm
+        for (algo, ci_path) in by_algo {
+            let data = std::fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
+            let info =
+                CompressionInfo::parse_binary(&data).expect("Failed to parse CompressionInfo.db");
+
+            // Validate real data structure
+            assert_eq!(info.algorithm, algo);
+            assert!(info.chunk_length > 0);
+            assert!(info.data_length > 0);
+            assert!(!info.chunks.is_empty());
+        }
     }
 
     #[test]

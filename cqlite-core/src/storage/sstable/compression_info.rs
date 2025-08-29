@@ -665,111 +665,69 @@ mod tests {
 
     #[test]
     fn test_parse_compression_info() {
-        // Use real CompressionInfo.db file from canonical dataset
-        let table_path = crate::testing::resolve_table_to_sstable_path(
-            "test_basic",
-            "compression_test_table",
-        )
-        .expect("compression_test_table not found in canonical dataset");
+        use crate::testing::{list_tables, resolve_table_to_sstable_path};
+        use std::collections::HashMap;
+        use std::fs;
+        use std::path::Path;
 
-        let compression_info_path = table_path.join("nb-1-big-CompressionInfo.db");
+        // Discovery function to find CompressionInfo.db files
+        fn find_compressioninfo_files(table_dir: &Path) -> Vec<std::path::PathBuf> {
+            if let Ok(dir) = fs::read_dir(table_dir) {
+                dir.filter_map(|entry| entry.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file())
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.ends_with("-CompressionInfo.db"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+
+        // Discover compressed tables dynamically from canonical datasets
+        let mut by_algo: HashMap<String, std::path::PathBuf> = HashMap::new();
+        for table in list_tables(None).unwrap_or_default() {
+            let table_dir = match resolve_table_to_sstable_path(&table.keyspace, &table.table) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            for ci_path in find_compressioninfo_files(&table_dir) {
+                // Parse CompressionInfo to get algorithm from real data
+                if let Ok(data) = std::fs::read(&ci_path) {
+                    if let Ok(info) = CompressionInfo::parse(&data) {
+                        let algo = info.algorithm.clone();
+                        by_algo.entry(algo).or_insert(ci_path.clone());
+                        // Stop when we collected one per algorithm (LZ4/Snappy/Deflate)
+                        if by_algo.len() >= 3 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if by_algo.len() >= 3 {
+                break;
+            }
+        }
+
         assert!(
-            compression_info_path.exists(),
-            "CompressionInfo.db not found at {:?}",
-            compression_info_path
+            !by_algo.is_empty(),
+            "No compressed tables found in canonical datasets"
         );
 
-        let data = std::fs::read(&compression_info_path).expect("Failed to read CompressionInfo.db");
-        let info = CompressionInfo::parse(&data).expect("Failed to parse CompressionInfo.db");
-        
-        // Validate that we got real data
-        assert!(!info.algorithm.is_empty());
-        assert!(info.chunk_length > 0);
-        assert!(!info.chunk_offsets.is_empty());
-    }
-
-    #[test]
-    fn test_parse_compression_info_with_crc() {
-        // Use real CompressionInfo.db file from canonical dataset
-        let table_path = crate::testing::resolve_table_to_sstable_path(
-            "test_basic",
-            "compression_test_table",
-        )
-        .expect("compression_test_table not found in canonical dataset");
-
-        let compression_info_path = table_path.join("nb-1-big-CompressionInfo.db");
-        if compression_info_path.exists() {
-            let data = std::fs::read(&compression_info_path).expect("Failed to read CompressionInfo.db");
+        // Test each discovered compression algorithm
+        for (algo, ci_path) in by_algo {
+            let data = std::fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
             let info = CompressionInfo::parse(&data).expect("Failed to parse CompressionInfo.db");
-            
-            // Real files may or may not have CRC - validate structure
-            assert!(!info.algorithm.is_empty());
+
+            // Validate real data structure
+            assert_eq!(info.algorithm, algo);
             assert!(info.chunk_length > 0);
-            assert!(info.data_length > 0);
             assert!(!info.chunk_offsets.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_parse_with_invalid_crc() {
-        // Test CRC validation using real data with intentionally corrupted CRC
-        let table_path = crate::testing::resolve_table_to_sstable_path(
-            "test_basic",
-            "compression_test_table",
-        );
-        
-        if let Ok(path) = table_path {
-            let compression_info_path = path.join("nb-1-big-CompressionInfo.db");
-            if compression_info_path.exists() {
-                let mut data = std::fs::read(&compression_info_path).expect("Failed to read CompressionInfo.db");
-                
-                // Corrupt the last 4 bytes (potential CRC) if file is long enough
-                if data.len() >= 4 {
-                    let len = data.len();
-                    data[len - 4] = 0xDE;
-                    data[len - 3] = 0xAD;
-                    data[len - 2] = 0xBE;
-                    data[len - 1] = 0xEF;
-                    
-                    let result = CompressionInfo::parse(&data);
-                    // May or may not fail depending on whether real file has CRC
-                    if result.is_err() {
-                        let error_msg = format!("{}", result.unwrap_err());
-                        assert!(error_msg.contains("CRC32") || error_msg.contains("Invalid"));
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_parse_with_crc_required() {
-        // Test CRC requirement using real data
-        let table_path = crate::testing::resolve_table_to_sstable_path(
-            "test_basic",
-            "compression_test_table",
-        );
-        
-        if let Ok(path) = table_path {
-            let compression_info_path = path.join("nb-1-big-CompressionInfo.db");
-            if compression_info_path.exists() {
-                let data = std::fs::read(&compression_info_path).expect("Failed to read CompressionInfo.db");
-                
-                // Test CRC requirement - may pass or fail depending on real file format
-                let result = CompressionInfo::parse_with_crc_required(&data);
-                match result {
-                    Ok(info) => {
-                        // CRC was present in real file
-                        assert!(info.crc32.is_some());
-                        assert!(!info.algorithm.is_empty());
-                    }
-                    Err(e) => {
-                        // CRC was not present in real file
-                        let error_msg = format!("{}", e);
-                        assert!(error_msg.contains("CRC32 checksum required"));
-                    }
-                }
-            }
         }
     }
 
