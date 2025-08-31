@@ -241,24 +241,11 @@ pub use cql_test_data_fixtures::{
     TypeTestCase,
 };
 
-// Issue #35 specific validation modules
-// Main working tests:
-pub mod issue_35_key_encoding_tests;
-pub mod issue_35_minimal_tests;
-
-// Shared test support utilities
-pub mod support;
+// Index, Summary, and Statistics validation modules are in tests/integration/
 
 // Issue #28a - Removal of header heuristics and blob fallbacks
 #[cfg(test)]
 pub mod issue_28a_heuristics_removal_tests;
-
-// Re-enabled modules for Issue #35
-#[cfg(test)]
-pub mod issue_35_live_integration_tests;
-#[cfg(test)]
-pub mod issue_35_sstabledump_validation;
-pub mod issue_35_validation_tests;
 #[cfg(test)]
 pub mod wide_partition_test_generator;
 
