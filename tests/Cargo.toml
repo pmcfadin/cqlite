@@ -106,6 +106,10 @@ path = "src/bin/issue_17_test_runner.rs"
 name = "integration_e2e"
 path = "src/integration_e2e.rs"
 
+[[test]]
+name = "index_summary_statistics_smoke"
+path = "integration/index_summary_statistics_smoke.rs"
+
 # Cassandra 5 compatibility tests
 [[test]]
 name = "cassandra5_header_tests"
