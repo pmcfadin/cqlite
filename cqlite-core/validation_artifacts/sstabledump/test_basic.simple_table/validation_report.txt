@@ -1,0 +1,48 @@
+Statistics.db Validation Report
+================================
+Table: test_basic.simple_table
+Statistics file found: true
+Checksum valid: false
+Basic invariants valid: true
+Row count matches metadata: false
+Parse time: 0ms
+Total validation time: 0ms
+
+Errors:
+Row count mismatch: Statistics.db=101, metadata.yml=1000, difference=89.9% (tolerance=5%)
+
+Detailed Statistics:
+# SSTable Statistics Report
+
+## Overview
+- **Total Rows**: 101
+- **Live Data**: 89.11%
+- **Compression Efficiency**: 66.67%
+- **Time Range**: 1.0 days
+- **Largest Partition**: 0.04 MB
+- **Health Score**: 92.0/100
+
+## Row Statistics
+- Total rows: 101
+- Live rows: 90
+- Tombstones: 10
+- Partitions: 10
+- Average rows per partition: 10.0
+
+## Timestamp Range
+- From: 2025-08-30 22:14:51 UTC
+- To: 2025-08-31 22:14:51 UTC
+
+## Compression
+- Algorithm: LZ4
+- Original size: 0.06 MB
+- Compressed size: 0.04 MB
+- Ratio: 66.67%
+- Speed: 150.0 MB/s (compress), 300.0 MB/s (decompress)
+
+## Partition Distribution
+- Average size: 4.30 KB
+- Range: 0.43 KB - 0.04 MB
+- Large partitions (>1MB): 5.0%
+
+

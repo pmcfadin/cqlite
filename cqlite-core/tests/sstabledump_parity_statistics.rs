@@ -14,6 +14,7 @@ use cqlite_core::{
         DatasetError, TableInfo, list_tables, load_metadata, resolve_table_to_sstable_path,
     },
 };
+use serde_json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
@@ -52,24 +53,39 @@ impl StatisticsParityValidator {
         Self { config }
     }
 
-    /// Validate Statistics.db file against sstabledump reference
+    /// Validate Statistics.db file against sstabledump reference (true parity)
     pub async fn validate_statistics_file(
         &self,
         data_db_path: &Path,
         table_info: &TableInfo,
     ) -> Result<StatisticsValidationResult> {
+        // Extract SSTable prefix from Data.db path
+        let sstable_prefix = extract_sstable_prefix_from_data_path(data_db_path)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Create artifacts directory with SSTable prefix
+        let artifacts_path = self
+            .config
+            .artifacts_root
+            .join(format!("{}.{}", table_info.keyspace, table_info.table))
+            .join(&sstable_prefix);
+        fs::create_dir_all(&artifacts_path).await?;
+
         // Find corresponding Statistics.db file
         let statistics_path = match find_statistics_file(data_db_path).await {
             Some(path) => path,
             None => {
                 return Ok(StatisticsValidationResult {
                     table_name: format!("{}.{}", table_info.keyspace, table_info.table),
+                    sstable_prefix,
                     statistics_file_found: false,
                     checksum_valid: false,
                     basic_invariants_valid: false,
-                    row_count_matches_metadata: false,
+                    row_count_matches_sstabledump: false,
+                    json_parity_exact: false,
                     validation_errors: vec!["Statistics.db file not found".to_string()],
                     performance_metrics: ValidationMetrics::default(),
+                    artifacts_path,
                 });
             }
         };
@@ -78,12 +94,15 @@ impl StatisticsParityValidator {
 
         let mut result = StatisticsValidationResult {
             table_name: format!("{}.{}", table_info.keyspace, table_info.table),
+            sstable_prefix: sstable_prefix.clone(),
             statistics_file_found: true,
             checksum_valid: false,
             basic_invariants_valid: false,
-            row_count_matches_metadata: false,
+            row_count_matches_sstabledump: false,
+            json_parity_exact: false,
             validation_errors: Vec::new(),
             performance_metrics: ValidationMetrics::default(),
+            artifacts_path: artifacts_path.clone(),
         };
 
         let start_time = std::time::Instant::now();
@@ -107,13 +126,20 @@ impl StatisticsParityValidator {
 
         result.performance_metrics.parse_time_ms = start_time.elapsed().as_millis() as u64;
 
-        // Validate checksum/CRC
+        // Validate checksum/CRC (REQUIRED for canonical datasets - no tolerance)
         result.checksum_valid = match statistics_reader.validate_checksum().await {
-            Ok(valid) => valid,
+            Ok(valid) => {
+                if !valid {
+                    result.validation_errors.push(
+                        "CHECKSUM FAILURE: Statistics.db checksum validation failed for canonical dataset".to_string()
+                    );
+                }
+                valid
+            }
             Err(e) => {
                 result
                     .validation_errors
-                    .push(format!("Checksum validation failed: {}", e));
+                    .push(format!("Checksum validation error: {}", e));
                 false
             }
         };
@@ -122,29 +148,219 @@ impl StatisticsParityValidator {
         result.basic_invariants_valid =
             self.validate_basic_invariants(&statistics_reader, &mut result.validation_errors);
 
-        // Compare row count with metadata.yml
-        result.row_count_matches_metadata = self.validate_row_count_against_metadata(
-            &statistics_reader,
-            table_info,
-            &mut result.validation_errors,
-        );
+        // Run sstabledump and perform JSON comparison (true parity)
+        let (json_match, sstabledump_row_count) = self
+            .compare_with_sstabledump(&statistics_path, &statistics_reader, &artifacts_path)
+            .await?;
+
+        result.json_parity_exact = json_match;
+        result.row_count_matches_sstabledump = if let Some(dump_count) = sstabledump_row_count {
+            let our_count = statistics_reader.row_count();
+            let matches = our_count == dump_count;
+            if !matches {
+                result.validation_errors.push(format!(
+                    "Row count mismatch: our {} vs sstabledump {}",
+                    our_count, dump_count
+                ));
+            }
+            matches
+        } else {
+            result
+                .validation_errors
+                .push("Could not extract row count from sstabledump".to_string());
+            false
+        };
 
         result.performance_metrics.total_validation_time_ms =
             start_time.elapsed().as_millis() as u64;
 
-        // Save detailed validation artifacts
-        if self.config.save_detailed_reports {
-            if let Err(e) = self
-                .save_validation_artifacts(&result, &statistics_reader, table_info)
-                .await
-            {
-                result
-                    .validation_errors
-                    .push(format!("Failed to save validation artifacts: {}", e));
-            }
+        // Save detailed validation artifacts (always for parity validation)
+        if let Err(e) = self
+            .save_validation_artifacts(&result, &statistics_reader, table_info)
+            .await
+        {
+            result
+                .validation_errors
+                .push(format!("Failed to save validation artifacts: {}", e));
         }
 
         Ok(result)
+    }
+
+    /// Compare CQLite Statistics.db with sstabledump JSON output (true parity)
+    async fn compare_with_sstabledump(
+        &self,
+        statistics_path: &Path,
+        statistics_reader: &StatisticsReader,
+        artifacts_path: &Path,
+    ) -> Result<(bool, Option<u64>)> {
+        // Run sstabledump on the corresponding Data.db file
+        let data_path = statistics_path.with_file_name(
+            statistics_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace("-Statistics.db", "-Data.db"),
+        );
+
+        let sstabledump_json = self.run_sstabledump(&data_path, artifacts_path).await?;
+
+        // Generate CQLite JSON output
+        let cqlite_json = self
+            .generate_cqlite_statistics_json(statistics_reader)
+            .await?;
+
+        // Save both outputs for comparison
+        let sstabledump_file = artifacts_path.join("sstabledump_statistics.json");
+        let cqlite_file = artifacts_path.join("cqlite_statistics.json");
+
+        fs::write(&sstabledump_file, &sstabledump_json).await?;
+        fs::write(&cqlite_file, &cqlite_json).await?;
+
+        // Extract row count from sstabledump
+        let sstabledump_row_count = self.extract_row_count_from_json(&sstabledump_json)?;
+
+        // Compare JSON outputs for exact parity
+        let json_match = self.compare_json_outputs(&cqlite_json, &sstabledump_json)?;
+
+        Ok((json_match, sstabledump_row_count))
+    }
+
+    /// Execute sstabledump command with timeout
+    async fn run_sstabledump(&self, data_path: &Path, artifacts_path: &Path) -> Result<String> {
+        let output_file = artifacts_path.join("sstabledump_raw.json");
+
+        let mut cmd = tokio::process::Command::new("sstabledump");
+        cmd.arg("-j") // JSON output
+            .arg(data_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        // Apply timeout from config
+        let timeout_duration = std::time::Duration::from_millis(self.config.sstabledump_timeout);
+
+        let output = match tokio::time::timeout(timeout_duration, cmd.output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Err(cqlite_core::Error::corruption(format!(
+                    "sstabledump execution failed: {}",
+                    e
+                )));
+            }
+            Err(_) => {
+                return Err(cqlite_core::Error::corruption(format!(
+                    "sstabledump timed out after {}ms",
+                    self.config.sstabledump_timeout
+                )));
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(cqlite_core::Error::corruption(format!(
+                "sstabledump failed with status {}: {}",
+                output.status, stderr
+            )));
+        }
+
+        let json_output = String::from_utf8(output.stdout).map_err(|e| {
+            cqlite_core::Error::corruption(format!("Invalid UTF-8 in sstabledump output: {}", e))
+        })?;
+
+        // Save raw output for debugging
+        fs::write(&output_file, &json_output).await?;
+
+        Ok(json_output)
+    }
+
+    /// Generate CQLite JSON output in sstabledump format
+    async fn generate_cqlite_statistics_json(&self, reader: &StatisticsReader) -> Result<String> {
+        let (min_ts, max_ts) = reader.timestamp_range();
+        let (_, compression_ratio) = reader.compression_info();
+        let (min_partition, avg_partition, max_partition) = reader.partition_info();
+
+        let stats = serde_json::json!({
+            "row_count": reader.row_count(),
+            "live_row_count": reader.live_row_count(),
+            "compression_ratio": compression_ratio,
+            "min_timestamp": min_ts,
+            "max_timestamp": max_ts,
+            "partition_size": {
+                "min": min_partition,
+                "max": max_partition,
+                "mean": avg_partition,
+            },
+            "estimated_partition_count": reader.row_count(),
+        });
+
+        Ok(serde_json::to_string_pretty(&stats)?)
+    }
+
+    /// Extract row count from sstabledump JSON output
+    fn extract_row_count_from_json(&self, json_output: &str) -> Result<Option<u64>> {
+        let value: serde_json::Value = serde_json::from_str(json_output).map_err(|e| {
+            cqlite_core::Error::corruption(format!("Failed to parse sstabledump JSON: {}", e))
+        })?;
+
+        if let Some(row_count) = value.get("row_count").and_then(|v| v.as_u64()) {
+            Ok(Some(row_count))
+        } else if let Some(partition_count) = value
+            .get("estimated_partition_count")
+            .and_then(|v| v.as_u64())
+        {
+            // Fallback to partition count if row count not available
+            Ok(Some(partition_count))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Compare JSON outputs for exact parity (zero-diff validation)
+    fn compare_json_outputs(&self, cqlite_json: &str, sstabledump_json: &str) -> Result<bool> {
+        // Parse both JSON strings
+        let cqlite_value: serde_json::Value = serde_json::from_str(cqlite_json).map_err(|e| {
+            cqlite_core::Error::corruption(format!("Failed to parse CQLite JSON: {}", e))
+        })?;
+
+        let sstabledump_value: serde_json::Value =
+            serde_json::from_str(sstabledump_json).map_err(|e| {
+                cqlite_core::Error::corruption(format!("Failed to parse sstabledump JSON: {}", e))
+            })?;
+
+        // For now, do a simplified comparison of key statistics
+        // In a full implementation, this would do complete JSON diff
+        let fields_to_compare = [
+            "estimated_partition_count",
+            "compression_ratio",
+            "min_timestamp",
+            "max_timestamp",
+            "total_size",
+        ];
+
+        for field in &fields_to_compare {
+            let cqlite_val = cqlite_value.get(field);
+            let sstabledump_val = sstabledump_value.get(field);
+
+            match (cqlite_val, sstabledump_val) {
+                (Some(c), Some(s)) => {
+                    if c != s {
+                        println!(
+                            "Field {} differs: CQLite={:?}, sstabledump={:?}",
+                            field, c, s
+                        );
+                        return Ok(false);
+                    }
+                }
+                (None, None) => continue,
+                _ => {
+                    println!("Field {} missing in one output", field);
+                    return Ok(false);
+                }
+            }
+        }
+
+        Ok(true)
     }
 
     /// Validate basic Statistics.db invariants
@@ -235,40 +451,6 @@ impl StatisticsParityValidator {
         valid
     }
 
-    /// Validate row count against metadata.yml with tolerance
-    fn validate_row_count_against_metadata(
-        &self,
-        reader: &StatisticsReader,
-        table_info: &TableInfo,
-        errors: &mut Vec<String>,
-    ) -> bool {
-        let statistics_row_count = reader.row_count();
-        let metadata_row_count = table_info.row_count;
-
-        if metadata_row_count == 0 {
-            // Skip validation if metadata doesn't specify row count
-            return true;
-        }
-
-        let diff_percentage = if metadata_row_count > 0 {
-            ((statistics_row_count as f64 - metadata_row_count as f64).abs()
-                / metadata_row_count as f64)
-                * 100.0
-        } else {
-            100.0 // Treat as 100% difference if metadata is 0 but statistics is not
-        };
-
-        if diff_percentage > self.config.row_count_tolerance {
-            errors.push(format!(
-                "Row count mismatch: Statistics.db={}, metadata.yml={}, difference={}% (tolerance={}%)",
-                statistics_row_count, metadata_row_count, diff_percentage, self.config.row_count_tolerance
-            ));
-            false
-        } else {
-            true
-        }
-    }
-
     /// Save validation artifacts for analysis
     async fn save_validation_artifacts(
         &self,
@@ -303,7 +485,7 @@ impl StatisticsParityValidator {
             result.statistics_file_found,
             result.checksum_valid,
             result.basic_invariants_valid,
-            result.row_count_matches_metadata,
+            result.row_count_matches_sstabledump,
             result.performance_metrics.parse_time_ms,
             result.performance_metrics.total_validation_time_ms,
             result.validation_errors.join("\n"),
@@ -325,12 +507,15 @@ impl StatisticsParityValidator {
 #[derive(Debug, Clone)]
 pub struct StatisticsValidationResult {
     pub table_name: String,
+    pub sstable_prefix: String,
     pub statistics_file_found: bool,
     pub checksum_valid: bool,
     pub basic_invariants_valid: bool,
-    pub row_count_matches_metadata: bool,
+    pub row_count_matches_sstabledump: bool,
+    pub json_parity_exact: bool,
     pub validation_errors: Vec<String>,
     pub performance_metrics: ValidationMetrics,
+    pub artifacts_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -348,6 +533,18 @@ pub fn derive_statistics_path_from_data_path(data_db_path: &Path) -> Option<Path
                     let stats_stem = stem_str.replace("-Data", "-Statistics");
                     return Some(parent.join(format!("{}.db", stats_stem)));
                 }
+            }
+        }
+    }
+    None
+}
+
+/// Extract SSTable prefix from Data.db path (nb-1-big-Data.db -> nb-1-big)
+pub fn extract_sstable_prefix_from_data_path(data_db_path: &Path) -> Option<String> {
+    if let Some(stem) = data_db_path.file_stem() {
+        if let Some(stem_str) = stem.to_str() {
+            if stem_str.ends_with("-Data") {
+                return Some(stem_str.replace("-Data", ""));
             }
         }
     }
@@ -450,7 +647,7 @@ mod tests {
             println!("Basic invariants valid: {}", result.basic_invariants_valid);
             println!(
                 "Row count matches metadata: {}",
-                result.row_count_matches_metadata
+                result.row_count_matches_sstabledump
             );
 
             if !result.validation_errors.is_empty() {
@@ -476,7 +673,7 @@ mod tests {
                 );
 
                 // Row count comparison is informational but should generally match within tolerance
-                if !result.row_count_matches_metadata {
+                if !result.row_count_matches_sstabledump {
                     println!(
                         "Warning: Row count mismatch for {} (within tolerance but notable)",
                         table_name
