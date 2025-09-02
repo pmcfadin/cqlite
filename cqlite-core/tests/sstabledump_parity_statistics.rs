@@ -217,7 +217,7 @@ impl StatisticsParityValidator {
 
         fs::write(&sstabledump_file, &sstabledump_json).await?;
         fs::write(&cqlite_file, &cqlite_json).await?;
-        
+
         // Generate and save diff for zero-diff validation
         let diff_content = self.generate_json_diff(&cqlite_json, &sstabledump_json)?;
         let diff_file = artifacts_path.join("statistics_diff.txt");
@@ -516,14 +516,14 @@ impl StatisticsParityValidator {
     /// Generate detailed diff between CQLite and sstabledump JSON outputs
     fn generate_json_diff(&self, cqlite_json: &str, sstabledump_json: &str) -> Result<String> {
         use serde_json::Value;
-        
+
         let cqlite_val: Value = serde_json::from_str(cqlite_json)?;
         let sstabledump_val: Value = serde_json::from_str(sstabledump_json)?;
-        
+
         let mut diff_lines = Vec::new();
         diff_lines.push("=== JSON Parity Diff Report ===".to_string());
         diff_lines.push("".to_string());
-        
+
         // Compare all fields systematically
         let all_keys: std::collections::BTreeSet<String> = cqlite_val
             .as_object()
@@ -535,15 +535,15 @@ impl StatisticsParityValidator {
                     .unwrap_or(&serde_json::Map::new())
                     .keys(),
             )
-            .map(|k| k.clone())
+            .cloned()
             .collect();
-        
+
         let mut differences_found = false;
-        
+
         for key in all_keys {
             let cqlite_val_field = cqlite_val.get(&key);
             let sstabledump_val_field = sstabledump_val.get(&key);
-            
+
             match (cqlite_val_field, sstabledump_val_field) {
                 (Some(c), Some(s)) => {
                     if c != s {
@@ -567,16 +567,16 @@ impl StatisticsParityValidator {
                 (None, None) => unreachable!(),
             }
         }
-        
+
         if !differences_found {
             diff_lines.insert(1, "✅ PERFECT PARITY: All fields match exactly".to_string());
         } else {
             diff_lines.insert(1, "❌ PARITY FAILURE: Differences detected".to_string());
         }
-        
+
         diff_lines.push("".to_string());
         diff_lines.push("=== End Diff Report ===".to_string());
-        
+
         Ok(diff_lines.join("\n"))
     }
 }

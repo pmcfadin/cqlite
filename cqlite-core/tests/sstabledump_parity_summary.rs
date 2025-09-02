@@ -102,8 +102,12 @@ async fn test_summary_db_sstabledump_parity() -> Result<()> {
     // No fallbacks - only test explicit deterministic tables from metadata.yml
     if test_count == 0 {
         // Skip with clear message if no deterministic tables available
-        println!("⚠️ No deterministic tables (simple_table, sensor_data, wide_partition_table) found in canonical datasets");
-        println!("   This test requires explicit deterministic tables from metadata.yml - skipping to avoid nondeterministic coverage");
+        println!(
+            "⚠️ No deterministic tables (simple_table, sensor_data, wide_partition_table) found in canonical datasets"
+        );
+        println!(
+            "   This test requires explicit deterministic tables from metadata.yml - skipping to avoid nondeterministic coverage"
+        );
         return Ok(());
     }
 
