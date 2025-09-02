@@ -1,0 +1,13 @@
+{
+  "compression_ratio": 0.6666666666666666,
+  "estimated_partition_count": 101,
+  "live_row_count": 90,
+  "max_timestamp": 1756768566050543,
+  "min_timestamp": 1756682166050543,
+  "partition_size": {
+    "max": 44000,
+    "mean": 4400.0,
+    "min": 440
+  },
+  "row_count": 101
+}

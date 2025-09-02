@@ -1,0 +1,14 @@
+{
+  "keyspace": "test_timeseries",
+  "table": "sensor_data",
+  "index_file_path": "../test-data/datasets/sstables/test_timeseries/sensor_data-00e11940844411f0b5165fec1d067df8/nb-1-big-Index.db",
+  "partition_count": 0,
+  "promoted_index_count": 0,
+  "key_digest_matches": [],
+  "offset_matches": [],
+  "perfect_parity": false,
+  "timestamp": "2025-09-01T23:14:36.428710Z",
+  "errors": [
+    "Parser failed but file is valid (size: 217 bytes). Format may need updates for real C5 data."
+  ]
+}

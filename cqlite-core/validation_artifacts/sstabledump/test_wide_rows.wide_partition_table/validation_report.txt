@@ -4,12 +4,13 @@ Table: test_wide_rows.wide_partition_table
 Statistics file found: true
 Checksum valid: false
 Basic invariants valid: true
-Row count matches metadata: true
+Row count matches metadata: false
 Parse time: 0ms
-Total validation time: 0ms
+Total validation time: 4ms
 
 Errors:
-
+CHECKSUM FAILURE: Statistics.db checksum validation failed for canonical dataset
+Row count mismatch: our 101 vs sstabledump 1000
 
 Detailed Statistics:
 # SSTable Statistics Report
@@ -30,8 +31,8 @@ Detailed Statistics:
 - Average rows per partition: 10.0
 
 ## Timestamp Range
-- From: 2025-08-30 22:14:51 UTC
-- To: 2025-08-31 22:14:51 UTC
+- From: 2025-08-31 23:16:06 UTC
+- To: 2025-09-01 23:16:06 UTC
 
 ## Compression
 - Algorithm: LZ4

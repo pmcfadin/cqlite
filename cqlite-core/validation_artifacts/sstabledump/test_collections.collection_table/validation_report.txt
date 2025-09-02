@@ -1,6 +1,6 @@
 Statistics.db Validation Report
 ================================
-Table: test_basic.simple_table
+Table: test_collections.collection_table
 Statistics file found: true
 Checksum valid: false
 Basic invariants valid: true

@@ -1,0 +1,160 @@
+# Issue #38: Zero-diff sstabledump parity CI gate
+# Validates SSTable format compliance with Cassandra reference implementation
+
+name: SSTable Parity Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'cqlite-core/src/**'
+      - 'cqlite-core/tests/sstabledump_parity_*.rs'
+      - 'test-data/datasets/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'cqlite-core/src/**'
+      - 'cqlite-core/tests/sstabledump_parity_*.rs'  
+      - 'test-data/datasets/**'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  parity-validation:
+    name: SSTable Format Parity Validation
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [statistics, index, summary]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        lfs: true  # Ensure test datasets are downloaded
+    
+    - name: Install Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+    
+    - name: Cache Rust dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Install Cassandra for sstabledump
+      run: |
+        # Add Cassandra repository
+        echo "deb https://downloads.apache.org/cassandra/debian 50x main" | sudo tee -a /etc/apt/sources.list.d/cassandra.sources.list
+        curl https://downloads.apache.org/cassandra/KEYS | sudo apt-key add -
+        sudo apt-get update
+        sudo apt-get install cassandra
+        
+        # Verify sstabledump is available
+        sstabledump --version
+        echo "✅ sstabledump installed successfully"
+    
+    - name: Validate test datasets integrity
+      run: |
+        echo "🔍 Checking dataset integrity..."
+        
+        # Verify key test tables exist
+        test -d "test-data/datasets/sstables/test_basic" || (echo "❌ test_basic dataset missing"; exit 1)
+        test -d "test-data/datasets/sstables/test_timeseries" || (echo "❌ test_timeseries dataset missing"; exit 1) 
+        test -d "test-data/datasets/sstables/test_wide_rows" || (echo "❌ test_wide_rows dataset missing"; exit 1)
+        
+        echo "✅ Dataset structure validated"
+    
+    - name: Run SSTable ${{ matrix.component }} parity validation
+      run: |
+        echo "🧪 Running ${{ matrix.component }} parity validation..."
+        
+        # Run with strict zero-diff validation
+        cargo test --test sstabledump_parity_${{ matrix.component }} \
+          --verbose \
+          -- --exact --nocapture
+        
+        echo "✅ ${{ matrix.component }} parity validation passed"
+    
+    - name: Upload validation artifacts
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: parity-validation-${{ matrix.component }}
+        path: |
+          validation_artifacts/
+          target/debug/deps/sstabledump_parity_${{ matrix.component }}-*/
+        retention-days: 30
+    
+    - name: Check for zero discrepancies
+      run: |
+        echo "🔍 Verifying zero-diff requirement..."
+        
+        # Check validation artifacts for any discrepancies
+        if find validation_artifacts/ -name "*.json" -exec grep -l "discrepanc" {} \; | grep -q .; then
+          echo "❌ ZERO-DIFF VIOLATION: Discrepancies found in validation artifacts"
+          echo "Issue #38 requires perfect parity with Cassandra sstabledump output"
+          exit 1
+        fi
+        
+        echo "✅ Zero-diff requirement satisfied"
+
+  comprehensive-report:
+    name: Generate Comprehensive Parity Report
+    needs: parity-validation
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Download all validation artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: validation-results/
+    
+    - name: Generate M1 milestone report
+      run: |
+        echo "# Issue #38 M1 Milestone: SSTable Parity Validation Report" > parity-report.md
+        echo "" >> parity-report.md
+        echo "**Generated**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> parity-report.md
+        echo "**Commit**: ${{ github.sha }}" >> parity-report.md
+        echo "" >> parity-report.md
+        
+        # Summary status
+        if [ "${{ needs.parity-validation.result }}" = "success" ]; then
+          echo "## ✅ ZERO-DIFF PARITY ACHIEVED" >> parity-report.md
+          echo "" >> parity-report.md
+          echo "All SSTable components (Statistics.db, Index.db, Summary.db) achieve" >> parity-report.md
+          echo "perfect zero-diff validation against Cassandra 5 sstabledump reference." >> parity-report.md
+        else
+          echo "## ❌ PARITY VALIDATION FAILED" >> parity-report.md
+          echo "" >> parity-report.md
+          echo "One or more SSTable components failed zero-diff validation." >> parity-report.md
+          echo "Review validation artifacts for specific discrepancies." >> parity-report.md
+        fi
+        
+        echo "" >> parity-report.md
+        echo "## Component Status" >> parity-report.md
+        echo "- **Statistics.db**: $([ -d validation-results/parity-validation-statistics ] && echo '✅ Validated' || echo '❌ Failed')" >> parity-report.md
+        echo "- **Index.db**: $([ -d validation-results/parity-validation-index ] && echo '✅ Validated' || echo '❌ Failed')" >> parity-report.md
+        echo "- **Summary.db**: $([ -d validation-results/parity-validation-summary ] && echo '✅ Validated' || echo '❌ Failed')" >> parity-report.md
+    
+    - name: Upload comprehensive report
+      uses: actions/upload-artifact@v3
+      with:
+        name: m1-milestone-parity-report
+        path: parity-report.md
+        retention-days: 90

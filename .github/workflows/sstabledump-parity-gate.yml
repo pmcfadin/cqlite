@@ -1,0 +1,229 @@
+name: SSTableDump Parity Gate (Issue #38)
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main, develop ]
+
+# This is the mandatory zero-diff parity gate for M1 milestone
+# ANY parity failure will block merges - no exceptions
+
+jobs:
+  sstabledump-parity:
+    name: Zero-Diff SSTableDump Parity Validation
+    runs-on: ubuntu-latest
+    
+    services:
+      cassandra:
+        image: cassandra:5.0
+        env:
+          MAX_HEAP_SIZE: 1G
+          HEAP_NEWSIZE: 256m
+        ports:
+          - 9042:9042
+        options: >-
+          --health-cmd "cqlsh -e 'DESCRIBE KEYSPACES'"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Setup Java 17 (for sstabledump)
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Download and setup Cassandra tools
+        run: |
+          CASSANDRA_VERSION="5.0.2"
+          wget -q "https://archive.apache.org/dist/cassandra/$CASSANDRA_VERSION/apache-cassandra-$CASSANDRA_VERSION-bin.tar.gz"
+          tar -xzf "apache-cassandra-$CASSANDRA_VERSION-bin.tar.gz"
+          
+          # Create sstabledump wrapper
+          mkdir -p ~/.local/bin
+          cat > ~/.local/bin/sstabledump << 'EOF'
+          #!/bin/bash
+          export CASSANDRA_HOME="$(pwd)/apache-cassandra-5.0.2"
+          exec java -cp "$CASSANDRA_HOME/lib/*" org.apache.cassandra.tools.SSTableDump "$@"
+          EOF
+          chmod +x ~/.local/bin/sstabledump
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Verify sstabledump installation
+        run: |
+          sstabledump --help || echo "sstabledump installation check failed"
+
+      - name: Fetch canonical test datasets
+        run: |
+          # Download test datasets if not present
+          if [[ ! -d "test-data/datasets" ]]; then
+            echo "Downloading canonical test datasets..."
+            # This should be replaced with actual dataset download logic
+            # For now, assume datasets are in the repo or fetched separately
+            mkdir -p test-data/datasets
+          fi
+
+      - name: Build CQLite
+        run: |
+          cargo build --release
+          cargo test --no-run --release
+
+      - name: Run Statistics.db Parity Tests
+        id: statistics_parity
+        run: |
+          echo "::group::Statistics.db Parity Validation"
+          cargo test --release --test sstabledump_parity_statistics -- --nocapture
+          echo "::endgroup::"
+
+      - name: Run Index.db Parity Tests  
+        id: index_parity
+        run: |
+          echo "::group::Index.db Parity Validation"
+          cargo test --release --test sstabledump_parity_index -- --nocapture
+          echo "::endgroup::"
+
+      - name: Run Summary.db Parity Tests
+        id: summary_parity
+        run: |
+          echo "::group::Summary.db Parity Validation"
+          cargo test --release --test sstabledump_parity_summary -- --nocapture
+          echo "::endgroup::"
+
+      - name: Generate JUnit Test Reports
+        if: always()
+        run: |
+          # Convert test output to JUnit XML format
+          cargo test --release --test sstabledump_parity_statistics -- --format json > statistics_results.json || true
+          cargo test --release --test sstabledump_parity_index -- --format json > index_results.json || true  
+          cargo test --release --test sstabledump_parity_summary -- --format json > summary_results.json || true
+          
+          # Generate summary report
+          cat > parity_summary.md << 'EOF'
+          # SSTableDump Parity Validation Results
+          
+          ## Test Status
+          - Statistics.db: ${{ steps.statistics_parity.outcome }}
+          - Index.db: ${{ steps.index_parity.outcome }}  
+          - Summary.db: ${{ steps.summary_parity.outcome }}
+          
+          ## Validation Criteria
+          This is a **zero-tolerance** validation gate. Any difference between CQLite parsing and sstabledump output will fail the build and block merges.
+          
+          ## Next Steps
+          If parity validation fails:
+          1. Check the detailed logs above for specific differences
+          2. Fix the parsing logic in CQLite to match sstabledump exactly
+          3. Re-run tests locally: `cargo test --test sstabledump_parity_*`
+          4. Ensure all tests pass before pushing
+          EOF
+
+      - name: Upload Test Artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: parity-test-results
+          path: |
+            *_results.json
+            parity_summary.md
+            validation_artifacts/
+          retention-days: 30
+
+      - name: Comment on PR (Success)
+        if: success() && github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const summary = `## ✅ SSTableDump Parity Validation PASSED
+            
+            All SSTable format parsing is **perfectly compatible** with Cassandra sstabledump:
+            - ✅ Statistics.db: Zero differences detected
+            - ✅ Index.db: Zero differences detected  
+            - ✅ Summary.db: Zero differences detected
+            
+            This PR maintains perfect CQLite-Cassandra parity as required by Issue #38.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Comment on PR (Failure)
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const summary = `## ❌ SSTableDump Parity Validation FAILED
+            
+            **This PR introduces SSTable format compatibility issues** and cannot be merged.
+            
+            ### Parity Failures Detected:
+            - Statistics.db: ${{ steps.statistics_parity.outcome }}
+            - Index.db: ${{ steps.index_parity.outcome }}
+            - Summary.db: ${{ steps.summary_parity.outcome }}
+            
+            ### Required Actions:
+            1. **Review detailed logs** in the failed CI steps above
+            2. **Fix parsing differences** between CQLite and sstabledump
+            3. **Run tests locally**: \`cargo test --test sstabledump_parity_*\`
+            4. **Ensure zero differences** before pushing again
+            
+            ### Debugging Steps:
+            \`\`\`bash
+            # Install sstabledump locally
+            ./scripts/install-sstabledump.sh
+            
+            # Run parity validation  
+            cargo test --test sstabledump_parity_statistics -- --nocapture
+            \`\`\`
+            
+            This is a **mandatory parity gate** - all differences must be resolved for M1 milestone completion.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      # CRITICAL: This step ensures ANY parity failure blocks the merge
+      - name: Fail build on parity differences
+        if: |
+          steps.statistics_parity.outcome != 'success' ||
+          steps.index_parity.outcome != 'success' ||
+          steps.summary_parity.outcome != 'success'
+        run: |
+          echo "❌ MANDATORY PARITY GATE FAILURE"
+          echo "   One or more SSTable components failed zero-diff validation"
+          echo "   This PR cannot be merged until all parity issues are resolved"
+          echo ""
+          echo "Statistics.db: ${{ steps.statistics_parity.outcome }}"
+          echo "Index.db: ${{ steps.index_parity.outcome }}"
+          echo "Summary.db: ${{ steps.summary_parity.outcome }}"
+          echo ""
+          echo "Issue #38 requires perfect CQLite-Cassandra parity for M1 milestone"
+          exit 1
