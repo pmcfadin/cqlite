@@ -28,7 +28,7 @@ jobs:
         components: llvm-tools-preview
         
     - name: Cache dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -43,7 +43,7 @@ jobs:
       run: cargo install cargo-llvm-cov
       
     - name: Restore datasets-v1 cache (same as ci.yml)
-      uses: actions/cache/restore@v3
+      uses: actions/cache/restore@v4
       with:
         path: |
           test-data/datasets/
@@ -101,7 +101,7 @@ jobs:
         echo "![Coverage](https://img.shields.io/badge/coverage-${COVERAGE}%25-${COLOR})" > validation_artifacts/coverage/badges/coverage.md
         
     - name: Upload Coverage Reports
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: coverage-${{ matrix.coverage-type }}-reports
         path: validation_artifacts/coverage/
