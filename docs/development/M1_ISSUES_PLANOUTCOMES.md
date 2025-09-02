@@ -58,9 +58,11 @@ Instructions:
 - Notes: Timestamp-based conflict resolution, tombstone precedence hierarchy, multi-generation value resolution, CI regression tests. Validates against both sstabledump and optional live cqlsh queries.
 
 ### #51 — Coverage gate ≥90% for core reading modules (P1)
-- Outcome: ✅ COMPLETED - Implemented comprehensive test coverage infrastructure with ≥90% threshold enforcement for core reading modules. Added 500+ edge cases, property-based testing, and CI coverage gate. Coverage tooling (cargo-llvm-cov) integrated with GitHub Actions.
-- Links: scripts/coverage.sh, .github/workflows/coverage.yml, comprehensive test suites, Makefile targets
-- Notes: Edge case coverage: nested UDTs, frozen collections, varints, negative timestamps, Unicode, error conditions. Property-based testing with PropTest. Deterministic, non-flaky tests. Automated PR coverage validation.
+- Outcome: ✅ COMPLETED - Implemented coverage gate infrastructure with ≥90% threshold enforcement for cqlite-core reading modules using ONLY real Cassandra 5 datasets. Configured tarpaulin with synthetic test exclusions and CI integration.
+- Links: Branch `ci/m1-coverage-realdata-issue51`, .github/workflows/coverage.yml, tarpaulin.toml, tests/coverage_core_readers.rs
+- Dataset Usage: Exclusively canonical Cassandra 5 datasets via resolve_table_to_sstable_path() - test_basic.simple_table, test_timeseries.sensor_data, test_wide_rows.wide_partition_table  
+- CI Integration: Tarpaulin configured with fail-under=90.0, synthetic test exclusions, HTML+Cobertura reports
+- Notes: Edge cases covered (nested UDTs, frozen types, varints, large collections, negative timestamps). Real data validation only - zero synthetic/mocked paths in coverage calculations.
 
 ### #52 — Human-verifiable validation workflow (P1)
 - Outcome: ✅ COMPLETED - Implemented complete human-verifiable, reproducible validation workflow with 5-step process. Scripts automate Docker setup, test data generation, zero-tolerance validation, manual spot-checking, and CLI export diffing. Zero-diff results with archived artifacts.

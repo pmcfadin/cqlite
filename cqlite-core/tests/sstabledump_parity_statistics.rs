@@ -248,7 +248,8 @@ impl StatisticsParityValidator {
                     println!("⚠️ sstabledump not available - using placeholder output for testing");
                     return Ok(format!(
                         "{{\"row_count\": {}, \"estimated_partition_count\": {}}}",
-                        1000, 1000  // Reasonable defaults for testing
+                        1000,
+                        1000 // Reasonable defaults for testing
                     ));
                 }
                 return Err(cqlite_core::Error::corruption(format!(
@@ -267,11 +268,14 @@ impl StatisticsParityValidator {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // For testing environments where sstabledump may not work properly
-            println!("⚠️ sstabledump failed (status: {}) - using placeholder for testing: {}", 
-                    output.status, stderr);
+            println!(
+                "⚠️ sstabledump failed (status: {}) - using placeholder for testing: {}",
+                output.status, stderr
+            );
             return Ok(format!(
                 "{{\"row_count\": {}, \"estimated_partition_count\": {}}}",
-                1000, 1000  // Reasonable defaults for testing
+                1000,
+                1000 // Reasonable defaults for testing
             ));
         }
 
@@ -587,7 +591,7 @@ mod tests {
             ("test_basic", "simple_table"),
             ("test_timeseries", "sensor_data"),
             ("test_wide_rows", "wide_partition_table"),
-            ("test_collections", "collection_table"),  // Additional real table
+            ("test_collections", "collection_table"), // Additional real table
         ];
 
         let validator = StatisticsParityValidator::new(StatisticsParityConfig::default());
@@ -680,7 +684,7 @@ mod tests {
                     );
                     // Don't fail test but note the issue
                 }
-                
+
                 // Basic invariants must always be valid for real datasets
                 assert!(
                     result.basic_invariants_valid,
@@ -703,9 +707,14 @@ mod tests {
             if !result.statistics_file_found || !result.basic_invariants_valid {
                 all_passed = false;
             }
-            
+
             // Additional validation for real datasets
-            if result.statistics_file_found && result.validation_errors.iter().any(|e| e.contains("STRICT")) {
+            if result.statistics_file_found
+                && result
+                    .validation_errors
+                    .iter()
+                    .any(|e| e.contains("STRICT"))
+            {
                 println!("Note: Strict validation issues detected for {}", table_name);
             }
         }
