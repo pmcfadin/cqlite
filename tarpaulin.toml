@@ -1,7 +1,7 @@
 # Tarpaulin Configuration for M1 Coverage Gate (Issue #51)
 # Enforces ≥90% coverage for core reading modules using ONLY real Cassandra 5 datasets
 
-[tool.tarpaulin.core_reading_focus]
+[core_reading_focus]
 # Enforce ≥90% threshold - CI will fail below this  
 fail-under = 90.0
 
@@ -25,7 +25,7 @@ out = ["Html", "Cobertura", "Lcov"]
 # Generate coverage reports in validation_artifacts directory
 output-dir = "validation_artifacts/coverage"
 
-[tool.tarpaulin.comprehensive]
+[comprehensive]
 # Full coverage analysis (informational)
 fail-under = 80.0
 packages = ["cqlite-core", "cqlite-cli"]
