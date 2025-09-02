@@ -2,11 +2,20 @@
 # Enforces ≥90% coverage for core reading modules using ONLY real Cassandra 5 datasets
 
 [core_reading_focus]
-# Enforce ≥90% threshold - CI will fail below this  
-fail-under = 90.0
+# Enforce ≥95% threshold - CI will fail below this (per PRD requirements)  
+fail-under = 95.0
 
 # Target only core reading packages
 packages = ["cqlite-core"]
+
+# Include filters to focus on read-path modules (storage, parser, parity readers)
+include = [
+    "cqlite-core/src/storage/sstable/*",
+    "cqlite-core/src/parser/*", 
+    "cqlite-core/src/reader/*",
+    "cqlite-core/src/format/*",
+    "cqlite-core/src/validation/*"
+]
 
 # Exclude synthetic/mocked test paths from coverage (per issue comment)
 exclude = [

@@ -217,6 +217,11 @@ impl StatisticsParityValidator {
 
         fs::write(&sstabledump_file, &sstabledump_json).await?;
         fs::write(&cqlite_file, &cqlite_json).await?;
+        
+        // Generate and save diff for zero-diff validation
+        let diff_content = self.generate_json_diff(&cqlite_json, &sstabledump_json)?;
+        let diff_file = artifacts_path.join("statistics_diff.txt");
+        fs::write(&diff_file, &diff_content).await?;
 
         // Extract row count from sstabledump
         let sstabledump_row_count = self.extract_row_count_from_json(&sstabledump_json)?;
@@ -507,6 +512,73 @@ impl StatisticsParityValidator {
 
         Ok(())
     }
+
+    /// Generate detailed diff between CQLite and sstabledump JSON outputs
+    fn generate_json_diff(&self, cqlite_json: &str, sstabledump_json: &str) -> Result<String> {
+        use serde_json::Value;
+        
+        let cqlite_val: Value = serde_json::from_str(cqlite_json)?;
+        let sstabledump_val: Value = serde_json::from_str(sstabledump_json)?;
+        
+        let mut diff_lines = Vec::new();
+        diff_lines.push("=== JSON Parity Diff Report ===".to_string());
+        diff_lines.push("".to_string());
+        
+        // Compare all fields systematically
+        let all_keys: std::collections::BTreeSet<String> = cqlite_val
+            .as_object()
+            .unwrap_or(&serde_json::Map::new())
+            .keys()
+            .chain(
+                sstabledump_val
+                    .as_object()
+                    .unwrap_or(&serde_json::Map::new())
+                    .keys(),
+            )
+            .map(|k| k.clone())
+            .collect();
+        
+        let mut differences_found = false;
+        
+        for key in all_keys {
+            let cqlite_val_field = cqlite_val.get(&key);
+            let sstabledump_val_field = sstabledump_val.get(&key);
+            
+            match (cqlite_val_field, sstabledump_val_field) {
+                (Some(c), Some(s)) => {
+                    if c != s {
+                        diff_lines.push(format!("DIFF [{}]:", key));
+                        diff_lines.push(format!("  CQLite:    {:?}", c));
+                        diff_lines.push(format!("  sstabledump: {:?}", s));
+                        diff_lines.push("".to_string());
+                        differences_found = true;
+                    } else {
+                        diff_lines.push(format!("MATCH [{}]: {:?}", key, c));
+                    }
+                }
+                (Some(c), None) => {
+                    diff_lines.push(format!("MISSING in sstabledump [{}]: {:?}", key, c));
+                    differences_found = true;
+                }
+                (None, Some(s)) => {
+                    diff_lines.push(format!("MISSING in CQLite [{}]: {:?}", key, s));
+                    differences_found = true;
+                }
+                (None, None) => unreachable!(),
+            }
+        }
+        
+        if !differences_found {
+            diff_lines.insert(1, "✅ PERFECT PARITY: All fields match exactly".to_string());
+        } else {
+            diff_lines.insert(1, "❌ PARITY FAILURE: Differences detected".to_string());
+        }
+        
+        diff_lines.push("".to_string());
+        diff_lines.push("=== End Diff Report ===".to_string());
+        
+        Ok(diff_lines.join("\n"))
+    }
 }
 
 /// Result of Statistics.db validation
@@ -666,15 +738,12 @@ mod tests {
 
             // Assert critical invariants for real C5 datasets
             if result.statistics_file_found {
-                // For real Cassandra 5 datasets, checksums should be valid
-                // but we handle gracefully in case of test environment issues
-                if !result.checksum_valid {
-                    println!(
-                        "Warning: Checksum validation failed for {} - investigating...",
-                        table_name
-                    );
-                    // Don't fail test but note the issue
-                }
+                // For real Cassandra 5 datasets, checksums MUST be valid (hard assertion)
+                assert!(
+                    result.checksum_valid,
+                    "CHECKSUM FAILURE: Statistics.db checksum validation failed for canonical dataset {} - this is a hard failure in CI mode",
+                    table_name
+                );
 
                 // Basic invariants must always be valid for real datasets
                 assert!(

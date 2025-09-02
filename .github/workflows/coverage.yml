@@ -12,7 +12,7 @@ env:
 
 jobs:
   coverage-gate:
-    name: Coverage Gate ≥90% (Core Reading Modules)
+    name: Coverage Gate ≥95% (Core Reading Modules - PRD Compliant)
     runs-on: ubuntu-latest
     
     strategy:
@@ -42,6 +42,16 @@ jobs:
     - name: Install llvm-cov (validation)
       run: cargo install cargo-llvm-cov
       
+    - name: Restore datasets-v1 cache (same as ci.yml)
+      uses: actions/cache/restore@v3
+      with:
+        path: |
+          test-data/datasets/
+          validation_artifacts/sstabledump/
+        key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+        restore-keys: |
+          datasets-v1-
+        
     - name: Fetch canonical datasets
       run: |
         if [ ! -d "test-data/datasets" ]; then
@@ -50,14 +60,19 @@ jobs:
           mkdir -p test-data/datasets/sstables
         fi
         
-    - name: Run Core Reading Coverage (≥90% ENFORCED)
+    - name: Format and Lint Check
+      run: |
+        cargo fmt --all --check
+        cargo clippy --all-targets --all-features -- -D warnings
+    
+    - name: Run Core Reading Coverage (≥95% ENFORCED - PRD Compliant)
       if: matrix.coverage-type == 'core-reading'
       run: |
         mkdir -p validation_artifacts/coverage
         cargo tarpaulin \
           --config core_reading_focus \
           --timeout 300 \
-          --fail-under 90 \
+          --fail-under 95 \
           --verbose
           
     - name: Run Comprehensive Coverage (Informational)
@@ -76,9 +91,9 @@ jobs:
         mkdir -p validation_artifacts/coverage/badges
         # Extract coverage percentage from tarpaulin output
         COVERAGE=$(grep -oP '\d+\.\d+%' validation_artifacts/coverage/tarpaulin-report.html | head -1 | sed 's/%//')
-        if (( $(echo "$COVERAGE >= 90" | bc -l) )); then
+        if (( $(echo "$COVERAGE >= 95" | bc -l) )); then
           COLOR="brightgreen"
-        elif (( $(echo "$COVERAGE >= 80" | bc -l) )); then  
+        elif (( $(echo "$COVERAGE >= 90" | bc -l) )); then  
           COLOR="yellow"
         else
           COLOR="red"
@@ -95,6 +110,7 @@ jobs:
     - name: Coverage Gate Status
       if: matrix.coverage-type == 'core-reading'
       run: |
-        echo "✅ Core reading modules coverage gate passed (≥90%)"
+        echo "✅ Core reading modules coverage gate passed (≥95% PRD compliant)"
         echo "📊 Using ONLY real Cassandra 5 datasets from test-data/datasets/"
         echo "🚫 Synthetic/mocked test paths excluded from coverage"
+        echo "🔍 Read-path modules: storage/sstable/*, parser/*, parity readers measured"
