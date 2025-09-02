@@ -243,13 +243,10 @@ impl StatisticsParityValidator {
         let output = match tokio::time::timeout(timeout_duration, cmd.output()).await {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
-                // Handle case where sstabledump is not available - return placeholder for CI
+                // sstabledump is required for canonical dataset validation
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    println!("⚠️ sstabledump not available - using placeholder output for testing");
-                    return Ok(format!(
-                        "{{\"row_count\": {}, \"estimated_partition_count\": {}}}",
-                        1000,
-                        1000 // Reasonable defaults for testing
+                    return Err(cqlite_core::Error::corruption(
+                        "sstabledump is required for canonical dataset parity validation - install Cassandra tools",
                     ));
                 }
                 return Err(cqlite_core::Error::corruption(format!(
@@ -267,16 +264,10 @@ impl StatisticsParityValidator {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // For testing environments where sstabledump may not work properly
-            println!(
-                "⚠️ sstabledump failed (status: {}) - using placeholder for testing: {}",
+            return Err(cqlite_core::Error::corruption(format!(
+                "sstabledump failed for canonical dataset validation (status: {}): {}",
                 output.status, stderr
-            );
-            return Ok(format!(
-                "{{\"row_count\": {}, \"estimated_partition_count\": {}}}",
-                1000,
-                1000 // Reasonable defaults for testing
-            ));
+            )));
         }
 
         let json_output = String::from_utf8(output.stdout).map_err(|e| {

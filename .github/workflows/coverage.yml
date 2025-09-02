@@ -53,10 +53,10 @@ jobs:
     - name: Run Core Reading Coverage (≥90% ENFORCED)
       if: matrix.coverage-type == 'core-reading'
       run: |
+        mkdir -p validation_artifacts/coverage
         cargo tarpaulin \
           --config core_reading_focus \
           --timeout 300 \
-          --output-dir target/coverage/core \
           --fail-under 90 \
           --verbose
           
@@ -73,9 +73,9 @@ jobs:
     - name: Generate Coverage Badge
       if: matrix.coverage-type == 'core-reading'
       run: |
-        mkdir -p target/coverage/badges
+        mkdir -p validation_artifacts/coverage/badges
         # Extract coverage percentage from tarpaulin output
-        COVERAGE=$(grep -oP '\d+\.\d+%' target/coverage/core/tarpaulin-report.html | head -1 | sed 's/%//')
+        COVERAGE=$(grep -oP '\d+\.\d+%' validation_artifacts/coverage/tarpaulin-report.html | head -1 | sed 's/%//')
         if (( $(echo "$COVERAGE >= 90" | bc -l) )); then
           COLOR="brightgreen"
         elif (( $(echo "$COVERAGE >= 80" | bc -l) )); then  
@@ -83,13 +83,13 @@ jobs:
         else
           COLOR="red"
         fi
-        echo "![Coverage](https://img.shields.io/badge/coverage-${COVERAGE}%25-${COLOR})" > target/coverage/badges/coverage.md
+        echo "![Coverage](https://img.shields.io/badge/coverage-${COVERAGE}%25-${COLOR})" > validation_artifacts/coverage/badges/coverage.md
         
     - name: Upload Coverage Reports
       uses: actions/upload-artifact@v3
       with:
         name: coverage-${{ matrix.coverage-type }}-reports
-        path: target/coverage/
+        path: validation_artifacts/coverage/
         retention-days: 30
         
     - name: Coverage Gate Status

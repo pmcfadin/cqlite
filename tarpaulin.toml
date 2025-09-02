@@ -2,19 +2,16 @@
 # Enforces ≥90% coverage for core reading modules using ONLY real Cassandra 5 datasets
 
 [tool.tarpaulin.core_reading_focus]
-# Core reading modules that MUST maintain ≥90% coverage
-include = [
-    "src/sstable/data_reader.rs",
-    "src/sstable/index_reader.rs", 
-    "src/sstable/statistics_reader.rs",
-    "src/sstable/summary_reader.rs",
-    "src/sstable/compression_info.rs"
-]
+# Enforce ≥90% threshold - CI will fail below this  
+fail-under = 90.0
+
+# Target only core reading packages
+packages = ["cqlite-core"]
 
 # Exclude synthetic/mocked test paths from coverage (per issue comment)
 exclude = [
     "**/tests/**",
-    "**/*test*.rs",
+    "**/*test*.rs", 
     "**/synthetic/**",
     "**/mock/**",
     "**/fixtures/**",
@@ -22,14 +19,11 @@ exclude = [
     "target/**"
 ]
 
-# Enforce ≥90% threshold - CI will fail below this
-fail-under = 90.0
-
 # Output formats for CI integration
 out = ["Html", "Cobertura", "Lcov"]
 
-# Target only core reading packages
-packages = ["cqlite-core"]
+# Generate coverage reports in validation_artifacts directory
+output-dir = "validation_artifacts/coverage"
 
 [tool.tarpaulin.comprehensive]
 # Full coverage analysis (informational)

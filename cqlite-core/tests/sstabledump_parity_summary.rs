@@ -492,20 +492,18 @@ async fn run_sstabledump_summary(sstable_path: &Path) -> Result<String> {
                     "⚠️ sstabledump failed for real C5 data (status: {}): {}",
                     output.status, stderr
                 );
-                // Return placeholder for real C5 testing when sstabledump fails
-                Ok(format!(
-                    "Summary fallback for real C5:\ntoken: -1000000000000000000 offset: 0\ntoken: 1000000000000000000 offset: 4096\n"
-                ))
+                return Err(cqlite_core::Error::corruption(format!(
+                    "sstabledump failed for Summary.db parity validation (status: {}): {}",
+                    output.status, stderr
+                )));
             }
         }
         Err(e) => {
-            // sstabledump not available - handle gracefully for real C5 testing
+            // sstabledump is required for Summary.db parity validation
             if e.kind() == std::io::ErrorKind::NotFound {
-                println!("⚠️ sstabledump not found - using placeholder for real C5 testing");
-                // Return realistic placeholder for real C5 datasets
-                Ok(format!(
-                    "Summary entries for real C5 dataset:\ntoken: -9223372036854775808 offset: 0\ntoken: 0 offset: 1024\ntoken: 9223372036854775807 offset: 2048\n"
-                ))
+                return Err(cqlite_core::Error::corruption(
+                    "sstabledump is required for Summary.db parity validation - install Cassandra tools",
+                ));
             } else {
                 log::warn!("sstabledump execution error: {} - skipping comparison", e);
                 Err(cqlite_core::Error::internal(format!(

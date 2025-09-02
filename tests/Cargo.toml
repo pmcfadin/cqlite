@@ -130,6 +130,3 @@ ci_zero_tolerance = []
 experimental = []
 legacy-heuristics = ["cqlite-core/legacy-heuristics"]
 
-[[test]]
-name = "coverage_core_readers"
-path = "coverage_core_readers.rs"
