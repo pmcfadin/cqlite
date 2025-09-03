@@ -55,12 +55,7 @@ pub enum Token {
     Avg,
     Min,
     Max,
-    Inner,
-    Left,
-    Right,
-    Full,
-    Join,
-    On,
+    // JOIN operations are NOT supported in Cassandra CQL
     Is,
     Null,
     Contains,
@@ -383,12 +378,7 @@ impl Tokenizer {
                         "AVG" => Token::Avg,
                         "MIN" => Token::Min,
                         "MAX" => Token::Max,
-                        "INNER" => Token::Inner,
-                        "LEFT" => Token::Left,
-                        "RIGHT" => Token::Right,
-                        "FULL" => Token::Full,
-                        "JOIN" => Token::Join,
-                        "ON" => Token::On,
+                        // JOIN operations are NOT supported in Cassandra CQL
                         "IS" => Token::Is,
                         "NULL" => Token::Null,
                         "CONTAINS" => Token::Contains,
@@ -724,13 +714,25 @@ impl SelectParser {
 
     /// Parse FROM clause
     fn parse_from_clause(&mut self) -> Result<FromClause> {
+        // Cassandra CQL only supports single table queries - NO JOINS
         if let Some(Token::Identifier(table_name)) = self.current_token.clone() {
             self.advance()?;
 
-            // Check for alias
+            // Check for optional table alias (Cassandra CQL does support aliases)
             if let Some(Token::Identifier(alias)) = self.current_token.clone() {
-                self.advance()?;
-                Ok(FromClause::TableAlias(TableId::new(table_name), alias))
+                // Ensure it's not a reserved keyword that would indicate invalid syntax
+                let alias_upper = alias.to_uppercase();
+                if alias_upper != "WHERE"
+                    && alias_upper != "GROUP"
+                    && alias_upper != "ORDER"
+                    && alias_upper != "HAVING"
+                    && alias_upper != "LIMIT"
+                {
+                    self.advance()?;
+                    Ok(FromClause::TableAlias(TableId::new(table_name), alias))
+                } else {
+                    Ok(FromClause::Table(TableId::new(table_name)))
+                }
             } else {
                 Ok(FromClause::Table(TableId::new(table_name)))
             }
@@ -918,9 +920,27 @@ impl SelectParser {
         let mut columns = Vec::new();
 
         loop {
-            if let Some(Token::Identifier(col_name)) = self.current_token.clone() {
+            if let Some(Token::Identifier(name)) = self.current_token.clone() {
                 self.advance()?;
-                columns.push(ColumnRef::new(col_name));
+
+                // Check for qualified column name (table.column)
+                if self.current_token == Some(Token::Dot) {
+                    self.advance()?; // consume dot
+                    if let Some(Token::Identifier(column_name)) = self.current_token.clone() {
+                        self.advance()?;
+                        columns.push(ColumnRef {
+                            table: Some(name),
+                            column: column_name,
+                        });
+                    } else {
+                        return Err(Error::sql_parse(
+                            "Expected column name after dot in GROUP BY",
+                        ));
+                    }
+                } else {
+                    // Simple column name
+                    columns.push(ColumnRef::new(name));
+                }
             } else {
                 return Err(Error::sql_parse("Expected column name in GROUP BY"));
             }

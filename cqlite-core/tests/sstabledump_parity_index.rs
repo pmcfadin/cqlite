@@ -289,17 +289,21 @@ async fn validate_table_index_parity(
 
     // Generate sstabledump output for comparison
     let sstabledump_output = run_sstabledump_on_data(&data_file, config).await?;
-    
+
     // Check if this is placeholder data (sstabledump not available)
-    let is_placeholder = sstabledump_output.contains("c5_test_digest") || sstabledump_output.contains("test_digest");
-    
+    let is_placeholder =
+        sstabledump_output.contains("c5_test_digest") || sstabledump_output.contains("test_digest");
+
     if is_placeholder {
         // For M1: Successful parsing of real C5 data is sufficient when sstabledump is not available
         println!("📊 Using placeholder comparison - focusing on successful parsing for M1");
         validation_result.perfect_parity = true; // Parsing succeeded, which is the M1 goal
         validation_result.key_digest_matches = vec![true; partition_entries.len()];
         validation_result.offset_matches = vec![true; partition_entries.len()];
-        println!("✅ Successfully parsed {} partition entries from real C5 Index.db", partition_entries.len());
+        println!(
+            "✅ Successfully parsed {} partition entries from real C5 Index.db",
+            partition_entries.len()
+        );
     } else {
         // Parse sstabledump output and compare with our results for true parity
         let parity_result = compare_index_outputs(partition_entries, &sstabledump_output).await?;

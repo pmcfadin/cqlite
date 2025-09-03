@@ -8,11 +8,7 @@ use crate::{
     error::{Error, Result},
     platform::Platform,
 };
-use nom::{
-    IResult,
-    bytes::complete::take,
-    number::complete::be_u16,
-};
+use nom::{IResult, bytes::complete::take, number::complete::be_u16};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -201,7 +197,7 @@ pub struct IndexStatistics {
 fn parse_index_data(input: &[u8]) -> IResult<&[u8], IndexData> {
     // Parse all partition key digests - no header in real C5 format
     let (remaining, partition_entries) = parse_all_partition_keys(input)?;
-    
+
     // Build lookup table
     let mut key_lookup = HashMap::new();
     for (index, entry) in partition_entries.iter().enumerate() {
@@ -230,7 +226,7 @@ fn parse_index_data(input: &[u8]) -> IResult<&[u8], IndexData> {
 fn parse_all_partition_keys(input: &[u8]) -> IResult<&[u8], Vec<PartitionIndexEntry>> {
     let mut entries = Vec::new();
     let mut remaining = input;
-    
+
     // Parse entries until we consume all input
     while !remaining.is_empty() {
         match parse_simple_partition_key(remaining) {
@@ -244,7 +240,7 @@ fn parse_all_partition_keys(input: &[u8]) -> IResult<&[u8], Vec<PartitionIndexEn
             }
         }
     }
-    
+
     Ok((remaining, entries))
 }
 
@@ -253,13 +249,13 @@ fn parse_simple_partition_key(input: &[u8]) -> IResult<&[u8], PartitionIndexEntr
     // Real Cassandra 5 format: 00 10 followed by 16-byte key digest
     let (input, _marker) = be_u16(input)?; // Should be 0x0010
     let (input, key_digest) = take(16_u8)(input)?; // Fixed 16-byte key digest
-    
+
     Ok((
         input,
         PartitionIndexEntry {
             key_digest: key_digest.to_vec(),
-            data_offset: 0,     // Not available in this simple format
-            data_size: 0,       // Not available in this simple format
+            data_offset: 0,       // Not available in this simple format
+            data_size: 0,         // Not available in this simple format
             promoted_index: None, // Not available in this simple format
         },
     ))
@@ -282,9 +278,12 @@ mod tests {
 
         let (_, entry) = parse_simple_partition_key(&data).unwrap();
 
-        assert_eq!(entry.key_digest, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(
+            entry.key_digest,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
         assert_eq!(entry.data_offset, 0); // Not available in simple format
-        assert_eq!(entry.data_size, 0);   // Not available in simple format
+        assert_eq!(entry.data_size, 0); // Not available in simple format
         assert!(entry.promoted_index.is_none());
     }
 
@@ -293,8 +292,7 @@ mod tests {
         let data = vec![
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1 (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            0x00, 0x10, // marker = 0x0010
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x00, 0x10, // marker = 0x0010
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2 (16 bytes)
             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
         ];
@@ -302,7 +300,16 @@ mod tests {
         let (_, entries) = parse_all_partition_keys(&data).unwrap();
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].key_digest, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-        assert_eq!(entries[1].key_digest, vec![0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20]);
+        assert_eq!(
+            entries[0].key_digest,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+        assert_eq!(
+            entries[1].key_digest,
+            vec![
+                0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+                0x1F, 0x20
+            ]
+        );
     }
 }

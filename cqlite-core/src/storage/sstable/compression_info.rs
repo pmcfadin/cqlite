@@ -716,7 +716,9 @@ mod tests {
 
         if by_algo.is_empty() {
             // Skip test if no compressed tables available - this is acceptable for test environments
-            println!("⚠️ No compressed tables found in canonical datasets - skipping real data validation");
+            println!(
+                "⚠️ No compressed tables found in canonical datasets - skipping real data validation"
+            );
             return;
         }
 

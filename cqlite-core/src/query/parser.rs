@@ -129,18 +129,30 @@ impl QueryParser {
         let mut columns = Vec::new();
         let mut values = Vec::new();
 
-        // Extract table name
-        if let Some(table_part) = self.extract_between(sql, "INTO", "(") {
-            let table_name = table_part.trim();
-            table = Some(TableId::new(table_name));
-        }
+        // Check if this is explicit column syntax: INSERT INTO table (columns) VALUES (...)
+        if sql.contains("(") && sql.find("(").unwrap() < sql.find("VALUES").unwrap_or(sql.len()) {
+            // Explicit column syntax
+            // Extract table name
+            if let Some(table_part) = self.extract_between(sql, "INTO", "(") {
+                let table_name = table_part.trim();
+                table = Some(TableId::new(table_name));
+            }
 
-        // Extract columns
-        if let Some(columns_part) = self.extract_between(sql, "(", ")") {
-            columns = columns_part
-                .split(',')
-                .map(|col| col.trim().to_string())
-                .collect();
+            // Extract columns
+            if let Some(columns_part) = self.extract_between(sql, "(", ")") {
+                columns = columns_part
+                    .split(',')
+                    .map(|col| col.trim().to_string())
+                    .collect();
+            }
+        } else {
+            // Implicit column syntax: INSERT INTO table VALUES (...)
+            // Extract table name (between INTO and VALUES)
+            if let Some(table_part) = self.extract_between(sql, "INTO", "VALUES") {
+                let table_name = table_part.trim();
+                table = Some(TableId::new(table_name));
+            }
+            // columns will remain empty - executor should use table schema
         }
 
         // Extract values

@@ -620,7 +620,9 @@ mod tests {
 
         if by_algo.is_empty() {
             // Skip test if no compressed tables available - this is acceptable for test environments
-            println!("⚠️ No compressed tables found in canonical datasets - skipping binary parsing validation");
+            println!(
+                "⚠️ No compressed tables found in canonical datasets - skipping binary parsing validation"
+            );
             return;
         }
 
@@ -634,7 +636,10 @@ mod tests {
             assert_eq!(info.algorithm, algo);
             // Some real datasets might have zero chunk_length - handle gracefully
             if info.chunk_length == 0 {
-                println!("⚠️ Found CompressionInfo with zero chunk_length for {} - skipping validation", algo);
+                println!(
+                    "⚠️ Found CompressionInfo with zero chunk_length for {} - skipping validation",
+                    algo
+                );
                 continue;
             }
             assert!(info.chunk_length > 0);
