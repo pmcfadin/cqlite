@@ -45,7 +45,7 @@ jobs:
         override: true
     
     - name: Cache Rust dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -89,7 +89,7 @@ jobs:
     
     - name: Upload validation artifacts
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: parity-validation-${{ matrix.component }}
         path: |
@@ -153,7 +153,7 @@ jobs:
         echo "- **Summary.db**: $([ -d validation-results/parity-validation-summary ] && echo '✅ Validated' || echo '❌ Failed')" >> parity-report.md
     
     - name: Upload comprehensive report
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: m1-milestone-parity-report
         path: parity-report.md
