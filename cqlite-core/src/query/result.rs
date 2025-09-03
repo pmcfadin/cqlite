@@ -262,7 +262,7 @@ impl QueryResult {
     }
 
     /// Create result iterator
-    pub fn iter(&self) -> std::slice::Iter<QueryRow> {
+    pub fn iter(&self) -> std::slice::Iter<'_, QueryRow> {
         self.rows.iter()
     }
 }
