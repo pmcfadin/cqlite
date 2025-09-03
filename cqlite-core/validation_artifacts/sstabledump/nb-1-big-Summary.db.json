@@ -1,0 +1,14 @@
+{
+  "file_path": "../test-data/datasets/sstables/test_collections/collection_table-873126e0847911f0bbb243b4cea4aaca/nb-1-big-Summary.db",
+  "entry_count": 0,
+  "token_range": [
+    0,
+    0
+  ],
+  "tokens_monotonic": true,
+  "sampling_rate_valid": true,
+  "sstabledump_parity": "ComparisonFailed",
+  "discrepancies": [
+    "Summary.db parsing failed: Data corruption: Failed to parse Summary.db: Error(Error { input: [241, 47, 81, 237, 79, 169, 156, 3, 199, 156, 144, 167, 80, 198, 0, 0, 0, 0, 0, 0, 0, 0, 206, 174, 147, 161, 202, 197, 69, 69, 163, 250, 70, 152, 243, 62, 176, 98, 222, 10, 0, 0, 0, 0, 0, 0, 131, 185, 186, 163, 48, 31, 74, 9, 187, 241, 128, 198, 56, 133, 200, 164, 222, 21, 0, 0, 0, 0, 0, 0, 115, 0, 135, 190, 100, 66, 70, 123, 139, 83, 123, 113, 63, 198, 46, 103, 222, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 37, 71, 241, 47, 81, 237, 79, 169, 156, 3, 199, 156, 144, 167, 80, 198, 0, 0, 0, 16, 252, 252, 41, 148, 78, 179, 64, 192, 185, 228, 255, 67, 28, 18, 222, 173], code: Eof })"
+  ]
+}
