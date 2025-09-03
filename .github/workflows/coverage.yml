@@ -52,6 +52,21 @@ jobs:
         restore-keys: |
           datasets-v1-
         
+    - name: Download Cassandra 5 Datasets (if cache miss)
+      run: |
+        DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "📦 Cache miss - downloading real Cassandra 5 datasets from release..."
+          mkdir -p test-data
+          gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
+          tar -xzf /tmp/cassandra5-small.tar.gz -C .
+          echo "✅ Cassandra 5 datasets extracted to test-data/datasets/"
+        else
+          echo "✅ Cache hit - using cached Cassandra 5 datasets"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
     - name: Verify Real Cassandra 5 Datasets
       run: |
         echo "🔍 Verifying real Cassandra 5 SSTable datasets are available..."
@@ -63,7 +78,7 @@ jobs:
         
         if [ "$DB_COUNT" -eq 0 ]; then
           echo "❌ CRITICAL: No real Cassandra 5 datasets found"
-          echo "❌ Expected: Real SSTable files committed to repository in test-data/"
+          echo "❌ Expected: Real SSTable files from datasets-v1 release"
           echo "❌ This workflow requires REAL data - no synthetic/mock data allowed"
           exit 1
         fi
