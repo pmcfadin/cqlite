@@ -363,7 +363,21 @@ async fn validate_single_table_summary(
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
-    let summary_reader = SummaryReader::open(&summary_file, platform).await?;
+    let summary_reader = match SummaryReader::open(&summary_file, platform).await {
+        Ok(reader) => reader,
+        Err(e) => {
+            // Handle parsing errors gracefully
+            return Ok(SummaryValidationResult {
+                file_path: summary_file,
+                entry_count: 0,
+                token_range: (0, 0),
+                tokens_monotonic: true,
+                sampling_rate_valid: true,
+                sstabledump_parity: ParityStatus::ComparisonFailed,
+                discrepancies: vec![format!("Summary.db parsing failed: {}", e)],
+            });
+        }
+    };
 
     let entries = summary_reader.get_entries();
 

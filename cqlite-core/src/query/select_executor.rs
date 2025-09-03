@@ -165,8 +165,8 @@ impl SelectExecutor {
         let total_rows = intermediate_results.len() as u64;
         Ok(QueryResult {
             rows: intermediate_results,
-            rows_affected: 0,
-            execution_time_ms: 0, // Will be set by the engine
+            rows_affected: total_rows, // Use actual number of rows returned
+            execution_time_ms: 0,      // Will be set by the engine
             metadata: crate::query::result::QueryMetadata {
                 columns: context.columns,
                 total_rows: Some(total_rows),
@@ -205,7 +205,9 @@ impl SelectExecutor {
                         // For specific projection, only include requested columns
                         if projection.is_empty() || projection.contains(&name) {
                             row_values.insert(name, col_value);
+                        } else {
                         }
+                    } else {
                     }
                 }
             } else {
@@ -248,10 +250,11 @@ impl SelectExecutor {
         for predicate in predicates {
             if let Some(column_value) = row.values.get(&predicate.column) {
                 let matches = match &predicate.operation {
-                    super::select_optimizer::SSTableFilterOp::Equal => predicate
-                        .values
-                        .first()
-                        .map_or(false, |v| column_value == v),
+                    super::select_optimizer::SSTableFilterOp::Equal => {
+                        predicate.values.first().map_or(false, |v| {
+                            self.values_equal(column_value, v).unwrap_or(false)
+                        })
+                    }
                     super::select_optimizer::SSTableFilterOp::In => {
                         predicate.values.contains(column_value)
                     }
@@ -291,6 +294,34 @@ impl SelectExecutor {
         Ok(true)
     }
 
+    /// Compare two values for equality, handling cross-type comparisons
+    fn values_equal(&self, a: &Value, b: &Value) -> Result<bool> {
+        match (a, b) {
+            // Same type comparisons
+            (Value::Integer(a), Value::Integer(b)) => Ok(a == b),
+            (Value::BigInt(a), Value::BigInt(b)) => Ok(a == b),
+            (Value::Float(a), Value::Float(b)) => Ok(a == b),
+            (Value::Text(a), Value::Text(b)) => Ok(a == b),
+            (Value::Boolean(a), Value::Boolean(b)) => Ok(a == b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a == b),
+
+            // Cross-type numeric comparisons
+            (Value::Integer(a), Value::BigInt(b)) => Ok(*a as i64 == *b),
+            (Value::BigInt(a), Value::Integer(b)) => Ok(*a == *b as i64),
+            (Value::Float(a), Value::Integer(b)) => Ok(*a == *b as f64),
+            (Value::Integer(a), Value::Float(b)) => Ok(*a as f64 == *b),
+            (Value::Float(a), Value::BigInt(b)) => Ok(*a == *b as f64),
+            (Value::BigInt(a), Value::Float(b)) => Ok(*a as f64 == *b),
+
+            // Null comparisons
+            (Value::Null, Value::Null) => Ok(true),
+            (Value::Null, _) | (_, Value::Null) => Ok(false),
+
+            // Different types
+            _ => Ok(false),
+        }
+    }
+
     /// Compare two values for ordering
     fn compare_values(&self, a: &Value, b: &Value) -> Result<i32> {
         match (a, b) {
@@ -302,9 +333,33 @@ impl SelectExecutor {
             (Value::Text(a), Value::Text(b)) => Ok(a.cmp(b) as i32),
             (Value::Boolean(a), Value::Boolean(b)) => Ok(a.cmp(b) as i32),
             (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a.cmp(b) as i32),
-            _ => Err(Error::query_execution(
-                "Cannot compare incompatible types".to_string(),
-            )),
+            // Handle Float vs BigInt comparisons
+            (Value::Float(a), Value::BigInt(b)) => {
+                Ok(a.partial_cmp(&(*b as f64))
+                    .unwrap_or(std::cmp::Ordering::Equal) as i32)
+            }
+            (Value::BigInt(a), Value::Float(b)) => Ok((*a as f64)
+                .partial_cmp(b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                as i32),
+            // Handle Float vs Integer comparisons
+            (Value::Float(a), Value::Integer(b)) => {
+                Ok(a.partial_cmp(&(*b as f64))
+                    .unwrap_or(std::cmp::Ordering::Equal) as i32)
+            }
+            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64)
+                .partial_cmp(b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                as i32),
+            // Handle Integer vs BigInt comparisons
+            (Value::Integer(a), Value::BigInt(b)) => Ok((*a as i64).cmp(b) as i32),
+            (Value::BigInt(a), Value::Integer(b)) => Ok(a.cmp(&(*b as i64)) as i32),
+            _ => {
+                eprintln!("DEBUG: Cannot compare {:?} with {:?}", a, b);
+                Err(Error::query_execution(
+                    "Cannot compare incompatible types".to_string(),
+                ))
+            }
         }
     }
 
@@ -359,11 +414,11 @@ impl SelectExecutor {
         match (&comp.operator, &comp.right) {
             (ComparisonOperator::Equal, ComparisonRightSide::Value(right_expr)) => {
                 let right_value = self.evaluate_select_expression(right_expr, row)?;
-                Ok(left_value == right_value)
+                Ok(self.values_equal(&left_value, &right_value)?)
             }
             (ComparisonOperator::NotEqual, ComparisonRightSide::Value(right_expr)) => {
                 let right_value = self.evaluate_select_expression(right_expr, row)?;
-                Ok(left_value != right_value)
+                Ok(!self.values_equal(&left_value, &right_value)?)
             }
             (ComparisonOperator::LessThan, ComparisonRightSide::Value(right_expr)) => {
                 let right_value = self.evaluate_select_expression(right_expr, row)?;
@@ -424,9 +479,19 @@ impl SelectExecutor {
                 self.evaluate_arithmetic(&arith.operator, left, right)
             }
             SelectExpression::Aliased(expr, _) => self.evaluate_select_expression(expr, row),
-            _ => Err(Error::query_execution(
-                "Unsupported expression type in row evaluation".to_string(),
-            )),
+            SelectExpression::Aggregate(_) => {
+                // Aggregate expressions should not be evaluated at row level
+                // They should only be processed during the aggregation step
+                Err(Error::query_execution(
+                    "Aggregate expressions should be processed during aggregation step, not row evaluation".to_string(),
+                ))
+            }
+            SelectExpression::Function(_) => {
+                // Function expressions not yet implemented
+                Err(Error::query_execution(
+                    "Function expressions not yet implemented".to_string(),
+                ))
+            }
         }
     }
 
@@ -622,15 +687,22 @@ impl SelectExecutor {
 
             // Update each aggregate
             for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
-                let column_value = row
-                    .values
-                    .get(&agg_comp.column)
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let column_value = if agg_comp.column == "*" {
+                    // COUNT(*) - always count the row regardless of column values
+                    Value::Integer(1)
+                } else {
+                    row.values
+                        .get(&agg_comp.column)
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                };
 
                 match &mut group_aggregates[i] {
                     AggregateValue::Count(count) => {
-                        *count += 1;
+                        // For COUNT(*), always increment. For COUNT(column), only increment if not null
+                        if agg_comp.column == "*" || !column_value.is_null() {
+                            *count += 1;
+                        }
                     }
                     AggregateValue::Sum(sum) => {
                         if let Some(num_val) = column_value.as_f64() {
@@ -799,7 +871,7 @@ impl SelectExecutor {
 
         Ok(QueryResult {
             rows: vec![row],
-            rows_affected: 0,
+            rows_affected: 1, // Constant queries return 1 row
             execution_time_ms: 0,
             metadata: crate::query::result::QueryMetadata {
                 columns,
@@ -916,10 +988,7 @@ impl SelectExecutor {
         match from_clause {
             FromClause::Table(table_id) | FromClause::TableAlias(table_id, _) => {
                 Ok(table_id.clone())
-            }
-            FromClause::Join(_) => Err(Error::query_execution(
-                "JOINs not yet supported".to_string(),
-            )),
+            } // JOIN operations are not supported in Cassandra CQL
         }
     }
 

@@ -14,20 +14,20 @@ fn deserialize_cql_value(serialized: &[u8], expected_type: CqlTypeId) -> crate::
     if serialized.is_empty() {
         return Ok(Value::Null);
     }
-    
+
     // First byte should be the type ID
     let actual_type = serialized[0];
     if actual_type != expected_type as u8 {
         return Err(crate::Error::corruption(format!(
-            "Type mismatch: expected {:?}, got {}", 
+            "Type mismatch: expected {:?}, got {}",
             expected_type, actual_type
         )));
     }
-    
+
     // Parse the value data (skip the type prefix)
     let (_, value) = parse_cql_value(&serialized[1..], expected_type)
         .map_err(|e| crate::Error::sql_parse(format!("Parse error: {:?}", e)))?;
-    
+
     Ok(value)
 }
 
@@ -286,6 +286,7 @@ impl CollectionBenchmarks {
     }
 
     /// Benchmark nested collections (realistic complex scenarios)
+    #[allow(dead_code)]
     fn benchmark_nested_collections(&mut self) -> crate::Result<()> {
         println!("  🪆 Benchmarking Nested Collections...");
 
@@ -453,7 +454,7 @@ impl CollectionBenchmarks {
         // Parse the full serialized value with type prefix
         let result = deserialize_cql_value(&serialized, type_id);
         let parse_time = parse_start.elapsed();
-        
+
         // Ensure parsing succeeded
         let _parsed_value = result?;
 
