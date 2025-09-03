@@ -52,16 +52,24 @@ jobs:
         restore-keys: |
           datasets-v1-
         
-    - name: Fetch canonical datasets
+    - name: Verify Real Cassandra 5 Datasets
       run: |
-        if [ ! -d "test-data/datasets" ]; then
-          echo "Fetching canonical Cassandra 5 datasets..."
-          # This would fetch from GitHub releases in real CI
-          mkdir -p test-data/datasets/sstables
+        echo "🔍 Verifying real Cassandra 5 SSTable datasets are available..."
+        echo "📁 Repository test data structure:"
+        ls -la test-data/ || echo "❌ test-data directory missing"
+        
+        DB_COUNT=$(find test-data -name '*.db' | wc -l)
+        echo "📊 Found $DB_COUNT real Cassandra 5 SSTable files"
+        
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "❌ CRITICAL: No real Cassandra 5 datasets found"
+          echo "❌ Expected: Real SSTable files committed to repository in test-data/"
+          echo "❌ This workflow requires REAL data - no synthetic/mock data allowed"
+          exit 1
         fi
-        # Ensure test data is available by copying from repository
-        echo "✅ Test data directory exists: $(ls -la test-data/ 2>/dev/null || echo 'test-data not found')"
-        echo "✅ Datasets available: $(find test-data -name '*.db' | wc -l) SSTable files found"
+        
+        echo "✅ Real Cassandra 5 datasets verified: $DB_COUNT SSTable files available"
+        echo "🎯 Ready for coverage analysis with authentic data"
         
     - name: Format and Lint Check
       run: |
@@ -72,44 +80,38 @@ jobs:
       if: matrix.coverage-type == 'core-reading'
       run: |
         mkdir -p validation_artifacts/coverage
-        # Check if we have test data before running coverage
+        # Verify real Cassandra 5 test data is available - FAIL if missing
         DB_COUNT=$(find test-data -name '*.db' | wc -l)
-        if [ "$DB_COUNT" -gt 0 ]; then
-          echo "📊 Running coverage with $DB_COUNT SSTable test files"
-          cargo tarpaulin \
-            --config core_reading_focus \
-            --timeout 300 \
-            --fail-under 95 \
-            --verbose
-        else
-          echo "⚠️ No test data found, running basic tests to check functionality"
-          cargo test --lib --bins --tests --no-fail-fast
-          echo "✅ Tests passed, but coverage skipped due to missing test data"
-          # Create a placeholder coverage report
-          echo "Coverage: N/A (test data missing)" > validation_artifacts/coverage/coverage-summary.txt
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "❌ CRITICAL: No real Cassandra 5 SSTable files found in test-data/"
+          echo "❌ Coverage requires REAL data - no fallbacks, no synthetic data"
+          echo "❌ Expected: SSTable files from actual Cassandra 5 datasets"
+          exit 1
         fi
+        echo "📊 Running coverage with $DB_COUNT real Cassandra 5 SSTable files"
+        cargo tarpaulin \
+          --config core_reading_focus \
+          --timeout 300 \
+          --fail-under 95 \
+          --verbose
           
     - name: Run Comprehensive Coverage (Informational)
       if: matrix.coverage-type == 'comprehensive' 
       run: |
-        # Check if we have test data before running coverage
+        # Verify real Cassandra 5 test data is available - FAIL if missing
         DB_COUNT=$(find test-data -name '*.db' | wc -l)
-        if [ "$DB_COUNT" -gt 0 ]; then
-          echo "📊 Running comprehensive coverage with $DB_COUNT SSTable test files"
-          cargo tarpaulin \
-            --config comprehensive \
-            --timeout 600 \
-            --output-dir target/coverage/comprehensive \
-            --fail-under 80 \
-            --verbose
-        else
-          echo "⚠️ No test data found, running basic tests for comprehensive coverage"
-          cargo test --all --no-fail-fast
-          echo "✅ Comprehensive tests passed, but coverage skipped due to missing test data"
-          # Create placeholder coverage
-          mkdir -p target/coverage/comprehensive
-          echo "Coverage: N/A (test data missing)" > target/coverage/comprehensive/coverage-summary.txt
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "❌ CRITICAL: No real Cassandra 5 SSTable files found in test-data/"
+          echo "❌ Comprehensive coverage requires REAL data - no fallbacks"
+          exit 1
         fi
+        echo "📊 Running comprehensive coverage with $DB_COUNT real Cassandra 5 SSTable files"
+        cargo tarpaulin \
+          --config comprehensive \
+          --timeout 600 \
+          --output-dir target/coverage/comprehensive \
+          --fail-under 80 \
+          --verbose
           
     - name: Generate Coverage Badge
       if: matrix.coverage-type == 'core-reading'
