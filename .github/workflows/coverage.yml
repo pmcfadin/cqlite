@@ -54,15 +54,26 @@ jobs:
         
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
+        echo "🔍 Checking for existing datasets..."
+        ls -la test-data/ || echo "📁 test-data directory does not exist"
+        
         DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+        echo "📊 Current dataset count: $DB_COUNT SSTable files"
+        
         if [ "$DB_COUNT" -eq 0 ]; then
-          echo "📦 Cache miss - downloading real Cassandra 5 datasets from release..."
+          echo "📦 No datasets found - downloading real Cassandra 5 datasets from release..."
           mkdir -p test-data
+          echo "🔍 Downloading cassandra5-small.tar.gz from datasets-v1 release..."
           gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
+          echo "📦 Extracting datasets..."
           tar -xzf /tmp/cassandra5-small.tar.gz -C .
-          echo "✅ Cassandra 5 datasets extracted to test-data/datasets/"
+          
+          # Verify extraction
+          NEW_DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+          echo "✅ Extraction complete - now have $NEW_DB_COUNT SSTable files"
+          ls -la test-data/datasets/ || echo "❌ Datasets directory missing after extraction"
         else
-          echo "✅ Cache hit - using cached Cassandra 5 datasets"
+          echo "✅ Cache hit - using cached Cassandra 5 datasets ($DB_COUNT files)"
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
