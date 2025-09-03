@@ -66,11 +66,14 @@ jobs:
           echo "🔍 Downloading cassandra5-small.tar.gz from datasets-v1 release..."
           gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
           echo "📦 Extracting datasets..."
-          tar -xzf /tmp/cassandra5-small.tar.gz -C .
+          tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
           
           # Verify extraction
           NEW_DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
           echo "✅ Extraction complete - now have $NEW_DB_COUNT SSTable files"
+          echo "📁 Contents of test-data/:"
+          ls -la test-data/
+          echo "📁 Contents of test-data/datasets/:"
           ls -la test-data/datasets/ || echo "❌ Datasets directory missing after extraction"
         else
           echo "✅ Cache hit - using cached Cassandra 5 datasets ($DB_COUNT files)"
