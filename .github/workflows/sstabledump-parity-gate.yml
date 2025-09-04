@@ -6,6 +6,12 @@ on:
   push:
     branches: [ main, develop ]
 
+# Permissions for automated PR commenting
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
 # This is the mandatory zero-diff parity gate for M1 milestone
 # ANY parity failure will block merges - no exceptions
 
@@ -40,7 +46,7 @@ jobs:
           toolchain: stable
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -49,6 +55,32 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      # Dataset cache and download for parity tests
+      - name: Restore datasets-v1 cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            test-data/datasets/
+          key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+          restore-keys: |
+            datasets-v1-
+        
+      - name: Download Cassandra 5 Datasets (if cache miss)
+        run: |
+          DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+          if [ "$DB_COUNT" -eq 0 ]; then
+            echo "📦 Downloading real Cassandra 5 datasets from release..."
+            mkdir -p test-data
+            gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
+            tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+            DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+            echo "✅ Downloaded $DB_COUNT SSTable files for parity tests"
+          else
+            echo "✅ Using cached datasets ($DB_COUNT SSTable files)"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Java 17 (for sstabledump)
         uses: actions/setup-java@v3
@@ -142,7 +174,7 @@ jobs:
 
       - name: Upload Test Artifacts
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: parity-test-results
           path: |

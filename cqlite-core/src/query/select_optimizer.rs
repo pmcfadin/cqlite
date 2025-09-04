@@ -8,7 +8,7 @@
 //! - Parallel execution planning
 
 use super::select_ast::*;
-use crate::{Error, Result, TableId, Value, schema::SchemaManager, storage::StorageEngine};
+use crate::{Result, TableId, Value, schema::SchemaManager, storage::StorageEngine};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -281,16 +281,20 @@ impl SelectOptimizer {
         }
 
         // Step 9: Plan final projection
-        // Only add projection step if not SELECT * (which should be handled by SSTable scan)
+        // Only add projection step if not SELECT * and not using aggregation
+        // (aggregation step handles its own projection)
         match &statement.select_clause {
             SelectClause::All => {
                 // SELECT * - don't add projection step, let SSTable scan handle all columns
             }
             SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
-                let project_step = ExecutionStep::Project {
-                    columns: exprs.clone(),
-                };
-                plan.execution_steps.push(project_step);
+                // Don't add projection step for aggregation queries - the aggregation step handles projection
+                if !statement.requires_aggregation() {
+                    let project_step = ExecutionStep::Project {
+                        columns: exprs.clone(),
+                    };
+                    plan.execution_steps.push(project_step);
+                }
             }
         }
 
@@ -305,10 +309,7 @@ impl SelectOptimizer {
         match from_clause {
             FromClause::Table(table_id) | FromClause::TableAlias(table_id, _) => {
                 Ok(table_id.clone())
-            }
-            FromClause::Join(_) => Err(Error::query_execution(
-                "JOINs not yet supported".to_string(),
-            )),
+            } // JOIN operations are not supported in Cassandra CQL
         }
     }
 
@@ -440,7 +441,7 @@ impl SelectOptimizer {
     /// Extract projection columns
     fn extract_projection_columns(&self, select_clause: &SelectClause) -> Vec<String> {
         match select_clause {
-            SelectClause::All => vec!["*".to_string()],
+            SelectClause::All => vec![], // Empty projection for SELECT * means include all columns
             SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => exprs
                 .iter()
                 .filter_map(|expr| self.extract_column_name(expr))
@@ -501,18 +502,28 @@ impl SelectOptimizer {
         if let SelectClause::Columns(exprs) = &statement.select_clause {
             for expr in exprs {
                 if let SelectExpression::Aggregate(agg) = expr {
-                    if let Some(col_name) = agg
+                    let (column, alias) = if agg.args.is_empty() ||
+                        agg.args.iter().any(|arg| matches!(arg, SelectExpression::Column(col_ref) if col_ref.column == "*")) {
+                        // COUNT(*) or other functions with no args
+                        ("*".to_string(), format!("{:?}(*)", agg.function))
+                    } else if let Some(col_name) = agg
                         .args
                         .first()
                         .and_then(|arg| self.extract_column_name(arg))
                     {
-                        aggregates.push(AggregateComputation {
-                            function: agg.function.clone(),
-                            column: col_name.clone(),
-                            alias: format!("{:?}_{}", agg.function, col_name),
-                            distinct: agg.distinct,
-                        });
-                    }
+                        // Regular column-based aggregates
+                        (col_name.clone(), format!("{:?}_{}", agg.function, col_name))
+                    } else {
+                        // Fallback
+                        ("*".to_string(), format!("{:?}", agg.function))
+                    };
+
+                    aggregates.push(AggregateComputation {
+                        function: agg.function.clone(),
+                        column,
+                        alias,
+                        distinct: agg.distinct,
+                    });
                 }
             }
         }

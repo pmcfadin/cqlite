@@ -1,0 +1,175 @@
+name: Coverage Gate (M1 Issue #51)
+
+on:
+  push:
+    branches: [ main, develop, ci/m1-coverage-realdata-issue51 ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage-gate:
+    name: Coverage Gate ≥95% (Core Reading Modules - PRD Compliant)
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        coverage-type: [core-reading, comprehensive]
+        
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+        
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: coverage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Install tarpaulin
+      run: cargo install cargo-tarpaulin
+      
+    - name: Install llvm-cov (validation)
+      run: cargo install cargo-llvm-cov
+      
+    - name: Restore datasets-v1 cache (same as ci.yml)
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          test-data/datasets/
+          validation_artifacts/sstabledump/
+        key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+        restore-keys: |
+          datasets-v1-
+        
+    - name: Download Cassandra 5 Datasets (if cache miss)
+      run: |
+        echo "🔍 Checking for existing datasets..."
+        ls -la test-data/ || echo "📁 test-data directory does not exist"
+        
+        DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+        echo "📊 Current dataset count: $DB_COUNT SSTable files"
+        
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "📦 No datasets found - downloading real Cassandra 5 datasets from release..."
+          mkdir -p test-data
+          echo "🔍 Downloading cassandra5-small.tar.gz from datasets-v1 release..."
+          gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
+          echo "📦 Extracting datasets..."
+          tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+          
+          # Verify extraction
+          NEW_DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+          echo "✅ Extraction complete - now have $NEW_DB_COUNT SSTable files"
+          echo "📁 Contents of test-data/:"
+          ls -la test-data/
+          echo "📁 Contents of test-data/datasets/:"
+          ls -la test-data/datasets/ || echo "❌ Datasets directory missing after extraction"
+        else
+          echo "✅ Cache hit - using cached Cassandra 5 datasets ($DB_COUNT files)"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Verify Real Cassandra 5 Datasets
+      run: |
+        echo "🔍 Verifying real Cassandra 5 SSTable datasets are available..."
+        echo "📁 Repository test data structure:"
+        ls -la test-data/ || echo "❌ test-data directory missing"
+        
+        DB_COUNT=$(find test-data -name '*.db' | wc -l)
+        echo "📊 Found $DB_COUNT real Cassandra 5 SSTable files"
+        
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "❌ CRITICAL: No real Cassandra 5 datasets found"
+          echo "❌ Expected: Real SSTable files from datasets-v1 release"
+          echo "❌ This workflow requires REAL data - no synthetic/mock data allowed"
+          exit 1
+        fi
+        
+        echo "✅ Real Cassandra 5 datasets verified: $DB_COUNT SSTable files available"
+        echo "🎯 Ready for coverage analysis with authentic data"
+        
+    - name: Format and Lint Check
+      run: |
+        cargo fmt --all --check
+        cargo clippy --all-targets --all-features -- -D warnings
+    
+    - name: Run Core Reading Coverage (≥95% ENFORCED - PRD Compliant)
+      if: matrix.coverage-type == 'core-reading'
+      run: |
+        mkdir -p validation_artifacts/coverage
+        # Verify real Cassandra 5 test data is available - FAIL if missing
+        DB_COUNT=$(find test-data -name '*.db' | wc -l)
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "❌ CRITICAL: No real Cassandra 5 SSTable files found in test-data/"
+          echo "❌ Coverage requires REAL data - no fallbacks, no synthetic data"
+          echo "❌ Expected: SSTable files from actual Cassandra 5 datasets"
+          exit 1
+        fi
+        echo "📊 Running coverage with $DB_COUNT real Cassandra 5 SSTable files"
+        cargo tarpaulin \
+          --config core_reading_focus \
+          --timeout 300 \
+          --fail-under 95 \
+          --verbose
+          
+    - name: Run Comprehensive Coverage (Informational)
+      if: matrix.coverage-type == 'comprehensive' 
+      run: |
+        mkdir -p validation_artifacts/coverage
+        mkdir -p target/coverage/comprehensive
+        # Verify real Cassandra 5 test data is available - FAIL if missing
+        DB_COUNT=$(find test-data -name '*.db' | wc -l)
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "❌ CRITICAL: No real Cassandra 5 SSTable files found in test-data/"
+          echo "❌ Comprehensive coverage requires REAL data - no fallbacks"
+          exit 1
+        fi
+        echo "📊 Running comprehensive coverage with $DB_COUNT real Cassandra 5 SSTable files"
+        cargo tarpaulin \
+          --config comprehensive \
+          --timeout 600 \
+          --output-dir target/coverage/comprehensive \
+          --fail-under 80 \
+          --verbose
+          
+    - name: Generate Coverage Badge
+      if: matrix.coverage-type == 'core-reading'
+      run: |
+        mkdir -p validation_artifacts/coverage/badges
+        # Extract coverage percentage from tarpaulin output
+        COVERAGE=$(grep -oP '\d+\.\d+%' validation_artifacts/coverage/tarpaulin-report.html | head -1 | sed 's/%//')
+        if (( $(echo "$COVERAGE >= 95" | bc -l) )); then
+          COLOR="brightgreen"
+        elif (( $(echo "$COVERAGE >= 90" | bc -l) )); then  
+          COLOR="yellow"
+        else
+          COLOR="red"
+        fi
+        echo "![Coverage](https://img.shields.io/badge/coverage-${COVERAGE}%25-${COLOR})" > validation_artifacts/coverage/badges/coverage.md
+        
+    - name: Upload Coverage Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-${{ matrix.coverage-type }}-reports
+        path: validation_artifacts/coverage/
+        retention-days: 30
+        
+    - name: Coverage Gate Status
+      if: matrix.coverage-type == 'core-reading'
+      run: |
+        echo "✅ Core reading modules coverage gate passed (≥95% PRD compliant)"
+        echo "📊 Using ONLY real Cassandra 5 datasets from test-data/datasets/"
+        echo "🚫 Synthetic/mocked test paths excluded from coverage"
+        echo "🔍 Read-path modules: storage/sstable/*, parser/*, parity readers measured"

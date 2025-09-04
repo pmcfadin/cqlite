@@ -373,7 +373,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
     }
 
     /// Iterator over all partitions in the index
-    pub fn iterate_partitions(&mut self) -> BtiResult<PartitionIterator<R>> {
+    pub fn iterate_partitions(&mut self) -> BtiResult<PartitionIterator<'_, R>> {
         PartitionIterator::new(self)
     }
 
@@ -543,7 +543,7 @@ impl<R: Read + Seek> RowsParser<R> {
     }
 
     /// Iterator over all rows in the index
-    pub fn iterate_rows(&mut self) -> BtiResult<RowIterator<R>> {
+    pub fn iterate_rows(&mut self) -> BtiResult<RowIterator<'_, R>> {
         RowIterator::new(self)
     }
 

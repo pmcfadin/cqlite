@@ -442,7 +442,12 @@ impl QueryEngine {
     /// Update execution statistics
     fn update_execution_stats(&self, result: &mut QueryResult, start_time: Instant) {
         let execution_time = start_time.elapsed();
-        result.execution_time_ms = execution_time.as_millis() as u64;
+        // Ensure any non-zero execution time is at least 1ms for reporting
+        result.execution_time_ms = if execution_time.is_zero() {
+            0
+        } else {
+            std::cmp::max(1, execution_time.as_millis() as u64)
+        };
 
         // Update global statistics
         let mut stats = self.stats.write();

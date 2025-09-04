@@ -45,18 +45,44 @@ jobs:
         override: true
     
     - name: Cache Rust dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
           target/
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    # Dataset cache and download for parity validation
+    - name: Restore datasets-v1 cache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          test-data/datasets/
+        key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+        restore-keys: |
+          datasets-v1-
+        
+    - name: Download Cassandra 5 Datasets (if cache miss)
+      run: |
+        DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "📦 Downloading real Cassandra 5 datasets from release..."
+          mkdir -p test-data
+          gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
+          tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+          DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+          echo "✅ Downloaded $DB_COUNT SSTable files for parity validation"
+        else
+          echo "✅ Using cached datasets ($DB_COUNT SSTable files)"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Install Cassandra for sstabledump
       run: |
         # Add Cassandra repository
-        echo "deb https://downloads.apache.org/cassandra/debian 50x main" | sudo tee -a /etc/apt/sources.list.d/cassandra.sources.list
+        echo "deb https://downloads.apache.org/cassandra/debian 5.0 main" | sudo tee -a /etc/apt/sources.list.d/cassandra.sources.list
         curl https://downloads.apache.org/cassandra/KEYS | sudo apt-key add -
         sudo apt-get update
         sudo apt-get install cassandra
@@ -89,7 +115,7 @@ jobs:
     
     - name: Upload validation artifacts
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: parity-validation-${{ matrix.component }}
         path: |
@@ -153,7 +179,7 @@ jobs:
         echo "- **Summary.db**: $([ -d validation-results/parity-validation-summary ] && echo '✅ Validated' || echo '❌ Failed')" >> parity-report.md
     
     - name: Upload comprehensive report
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: m1-milestone-parity-report
         path: parity-report.md

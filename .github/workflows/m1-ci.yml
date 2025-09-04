@@ -44,6 +44,32 @@ jobs:
         restore-keys: |
           m1-core-
 
+    # Dataset cache and download for integration tests
+    - name: Restore datasets-v1 cache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          test-data/datasets/
+        key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+        restore-keys: |
+          datasets-v1-
+        
+    - name: Download Cassandra 5 Datasets (if cache miss)
+      run: |
+        DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "📦 Downloading real Cassandra 5 datasets from release..."
+          mkdir -p test-data
+          gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
+          tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+          DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+          echo "✅ Downloaded $DB_COUNT SSTable files for integration tests"
+        else
+          echo "✅ Using cached datasets ($DB_COUNT SSTable files)"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     # Pre-flight Environment Health Check
     - name: 🏥 Environment Health Check
       run: |
@@ -205,6 +231,32 @@ jobs:
         key: m1-parity-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           m1-parity-
+
+    # Dataset cache and download for parity validation
+    - name: Restore datasets-v1 cache  
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          test-data/datasets/
+        key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+        restore-keys: |
+          datasets-v1-
+        
+    - name: Download Cassandra 5 Datasets (if cache miss)
+      run: |
+        DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+        if [ "$DB_COUNT" -eq 0 ]; then
+          echo "📦 Downloading real Cassandra 5 datasets from release..."
+          mkdir -p test-data
+          gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
+          tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+          DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
+          echo "✅ Downloaded $DB_COUNT SSTable files for parity validation"
+        else
+          echo "✅ Using cached datasets ($DB_COUNT SSTable files)"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     # Enhanced validator detection with fallback strategy
     - name: 🔍 Check for SSTableDump validator

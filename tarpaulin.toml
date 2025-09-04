@@ -1,0 +1,48 @@
+# Tarpaulin Configuration for M1 Coverage Gate (Issue #51)
+# Enforces ≥90% coverage for core reading modules using ONLY real Cassandra 5 datasets
+
+[core_reading_focus]
+# Enforce ≥95% threshold - CI will fail below this (per PRD requirements)  
+fail-under = 95.0
+
+# Target only core reading packages
+packages = ["cqlite-core"]
+
+# Include filters to focus on read-path modules (storage, parser, parity readers)
+include = [
+    "cqlite-core/src/storage/sstable/*",
+    "cqlite-core/src/parser/*", 
+    "cqlite-core/src/reader/*",
+    "cqlite-core/src/format/*",
+    "cqlite-core/src/validation/*"
+]
+
+# Exclude synthetic/mocked test paths from coverage (per issue comment)
+exclude = [
+    "**/tests/**",
+    "**/*test*.rs", 
+    "**/synthetic/**",
+    "**/mock/**",
+    "**/fixtures/**",
+    "examples/**",
+    "target/**"
+]
+
+# Output formats for CI integration
+out = ["Html", "Cobertura", "Lcov"]
+
+# Generate coverage reports in validation_artifacts directory
+output-dir = "validation_artifacts/coverage"
+
+[comprehensive]
+# Full coverage analysis (informational)
+fail-under = 80.0
+packages = ["cqlite-core", "cqlite-cli"]
+exclude = [
+    "**/tests/**",
+    "**/*test*.rs", 
+    "**/synthetic/**",
+    "**/mock/**",
+    "examples/**",
+    "target/**"
+]

@@ -140,37 +140,14 @@ pub enum ArithmeticOperator {
     Modulo,
 }
 
-/// FROM clause
+/// FROM clause - Cassandra CQL only supports single table queries
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FromClause {
     /// Single table
     Table(TableId),
-    /// Table with alias
+    /// Table with alias (Cassandra CQL supports table aliases)
     TableAlias(TableId, String),
-    /// JOIN operations (for future implementation)
-    Join(JoinExpression),
-}
-
-/// JOIN expressions (for future implementation)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JoinExpression {
-    /// Left table/join
-    pub left: Box<FromClause>,
-    /// JOIN type
-    pub join_type: JoinType,
-    /// Right table
-    pub right: Box<FromClause>,
-    /// JOIN condition
-    pub condition: WhereExpression,
-}
-
-/// Types of JOINs
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum JoinType {
-    Inner,
-    LeftOuter,
-    RightOuter,
-    FullOuter,
+    // NOTE: JOIN operations are NOT supported in Cassandra CQL
 }
 
 /// Advanced WHERE expression tree
