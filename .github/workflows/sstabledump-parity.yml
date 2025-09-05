@@ -79,19 +79,9 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
-    - name: Install Cassandra for sstabledump
-      run: |
-        # Add Cassandra repository
-        echo "deb https://downloads.apache.org/cassandra/debian 5.0 main" | sudo tee -a /etc/apt/sources.list.d/cassandra.sources.list
-        curl https://downloads.apache.org/cassandra/KEYS | sudo apt-key add -
-        sudo apt-get update
-        sudo apt-get install cassandra
-        
-        # Verify sstabledump is available
-        sstabledump --version
-        echo "✅ sstabledump installed successfully"
+    # Removed external tool installation - Rust-only parity using precomputed references (Issue #89)
     
-    - name: Validate test datasets integrity
+    - name: Validate test datasets and references integrity
       run: |
         echo "🔍 Checking dataset integrity..."
         
@@ -100,17 +90,33 @@ jobs:
         test -d "test-data/datasets/sstables/test_timeseries" || (echo "❌ test_timeseries dataset missing"; exit 1) 
         test -d "test-data/datasets/sstables/test_wide_rows" || (echo "❌ test_wide_rows dataset missing"; exit 1)
         
-        echo "✅ Dataset structure validated"
+        echo "🔎 Checking precomputed references (JSONL, Statistics) exist for deterministic tables..."
+        REQUIRED_TABLES=(
+          "test_basic/simple_table"
+          "test_timeseries/sensor_data"
+          "test_wide_rows/wide_partition_table"
+          "test_collections/collection_table"
+        )
+        for T in "${REQUIRED_TABLES[@]}"; do
+          DIR=$(find test-data/datasets/sstables/"$T"-* -maxdepth 1 -type d | head -n1)
+          if [ -z "$DIR" ]; then echo "❌ Missing table directory for $T"; exit 1; fi
+          DATA=$(find "$DIR" -name "*-Data.db" | head -n1)
+          if [ -z "$DATA" ]; then echo "❌ Missing Data.db in $DIR"; exit 1; fi
+          PREFIX=${DATA%-Data.db}
+          test -s "${PREFIX}-Data.db.jsonl" || (echo "❌ Missing Data JSONL: ${PREFIX}-Data.db.jsonl"; exit 1)
+          test -s "${PREFIX}-Statistics.db.txt" || (echo "❌ Missing Statistics: ${PREFIX}-Statistics.db.txt"; exit 1)
+          echo "✅ References found for $T"
+        done
+
+        echo "✅ Dataset structure and references validated"
     
-    - name: Run SSTable ${{ matrix.component }} parity validation
+    - name: Run Rust-only parity validation (${{ matrix.component }})
+      env:
+        CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        STRICT_PARITY: 1
       run: |
-        echo "🧪 Running ${{ matrix.component }} parity validation..."
-        
-        # Run with strict zero-diff validation
-        cargo test --test sstabledump_parity_${{ matrix.component }} \
-          --verbose \
-          -- --exact --nocapture
-        
+        echo "🧪 Running ${{ matrix.component }} parity validation (Rust-only references)..."
+        cargo test --test sstabledump_parity_${{ matrix.component }} -- --exact --nocapture
         echo "✅ ${{ matrix.component }} parity validation passed"
     
     - name: Upload validation artifacts

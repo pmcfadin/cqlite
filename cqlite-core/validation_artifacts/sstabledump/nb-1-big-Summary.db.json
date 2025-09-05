@@ -1,5 +1,5 @@
 {
-  "file_path": "../test-data/datasets/sstables/test_collections/collection_table-873126e0847911f0bbb243b4cea4aaca/nb-1-big-Summary.db",
+  "file_path": "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-db3c3b9089e111f083a7cf754256a948/nb-1-big-Summary.db",
   "entry_count": 0,
   "token_range": [
     0,
@@ -9,6 +9,6 @@
   "sampling_rate_valid": true,
   "sstabledump_parity": "ComparisonFailed",
   "discrepancies": [
-    "Summary.db parsing failed: Data corruption: Failed to parse Summary.db: Error(Error { input: [241, 47, 81, 237, 79, 169, 156, 3, 199, 156, 144, 167, 80, 198, 0, 0, 0, 0, 0, 0, 0, 0, 206, 174, 147, 161, 202, 197, 69, 69, 163, 250, 70, 152, 243, 62, 176, 98, 222, 10, 0, 0, 0, 0, 0, 0, 131, 185, 186, 163, 48, 31, 74, 9, 187, 241, 128, 198, 56, 133, 200, 164, 222, 21, 0, 0, 0, 0, 0, 0, 115, 0, 135, 190, 100, 66, 70, 123, 139, 83, 123, 113, 63, 198, 46, 103, 222, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 37, 71, 241, 47, 81, 237, 79, 169, 156, 3, 199, 156, 144, 167, 80, 198, 0, 0, 0, 16, 252, 252, 41, 148, 78, 179, 64, 192, 185, 228, 255, 67, 28, 18, 222, 173], code: Eof })"
+    "Summary.db parsing failed: Data corruption: Failed to parse Summary.db: Error(Error { input: [218, 1, 131, 128, 72, 162, 134, 248, 201, 48, 146, 158, 195, 193, 0, 0, 0, 0, 0, 0, 0, 0, 113, 26, 142, 143, 152, 114, 70, 244, 145, 141, 241, 104, 248, 196, 63, 34, 219, 10, 0, 0, 0, 0, 0, 0, 192, 156, 54, 5, 251, 37, 64, 114, 165, 21, 21, 244, 145, 101, 201, 162, 219, 21, 0, 0, 0, 0, 0, 0, 107, 127, 221, 60, 139, 154, 79, 211, 148, 85, 147, 74, 238, 241, 218, 213, 219, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 32, 63, 218, 1, 131, 128, 72, 162, 134, 248, 201, 48, 146, 158, 195, 193, 0, 0, 0, 16, 112, 9, 165, 180, 232, 233, 75, 177, 133, 148, 54, 224, 33, 89, 92, 151], code: Eof })"
   ]
 }

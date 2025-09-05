@@ -7,16 +7,21 @@ COMPOSE="$ROOT/docker/docker-compose-cassandra5.yml"
 DATASETS_DIR="$ROOT/datasets"
 META="$DATASETS_DIR/metadata.yml"
 
+. "$ROOT/scripts/container_env.sh"
+
+# Export for compose providers that read COMPOSE_FILE env
+export COMPOSE_FILE="$COMPOSE"
+
 # Ensure a clean export directory
 rm -rf "$DATASETS_DIR"
 mkdir -p "$DATASETS_DIR"
 
 # Flush to SSTables
-docker compose -f "$COMPOSE" exec -T cassandra-5-0 nodetool flush
+compose_exec_nontty cassandra-5-0 nodetool flush
 
 # Produce metadata.yml with counts and columns using generator container (has pyyaml + cassandra-driver)
 # Write YAML to stdout and redirect to host file
-docker compose -f "$COMPOSE" run --rm --no-deps data-generator python3 - <<'PY' > "$META"
+compose_run_nontty data-generator python3 - <<'PY' > "$META"
 import yaml
 from cassandra.cluster import Cluster
 from cassandra.query import SimpleStatement
@@ -57,10 +62,10 @@ for ks in keyspaces:
 print(yaml.safe_dump(info, sort_keys=False))
 PY
 
-# Destructive export of data directory tree via tar stream (more reliable than docker cp)
+# Destructive export of data directory tree via tar stream (more reliable than container cp)
 rm -rf "$DATASETS_DIR/sstables" "$DATASETS_DIR/data"
 # Stream from container /var/lib/cassandra/data → host $DATASETS_DIR/data, then rename to sstables
-if docker compose -f "$COMPOSE" exec -T cassandra-5-0 bash -lc 'tar -C /var/lib/cassandra -cf - data' | tar -C "$DATASETS_DIR" -xf -; then
+if compose_exec_nontty cassandra-5-0 bash -lc 'tar -C /var/lib/cassandra -cf - data' | tar -C "$DATASETS_DIR" -xf -; then
   mv "$DATASETS_DIR/data" "$DATASETS_DIR/sstables"
   echo "[export] Exported SSTables to $DATASETS_DIR/sstables and wrote $META"
 else
@@ -68,14 +73,24 @@ else
   exit 1
 fi
 
-# Generate sstabledump reference JSONs for Index/Summary/Statistics for each Data.db
-SSTDUMP_WRAPPER="$ROOT/../scripts/sstabledump-docker.sh"
-if [ ! -x "$SSTDUMP_WRAPPER" ]; then
-  echo "[export] ERROR: sstabledump wrapper not found or not executable: $SSTDUMP_WRAPPER" >&2
-  exit 1
+# Generate Cassandra tool references for each Data.db
+echo "[export] Generating Cassandra tool references (Data dump, Summary, Statistics) ..."
+
+# Detect tool availability in image
+SUMMARY_TOOL="/opt/cassandra/tools/bin/sstablesummary"
+SUMMARY_AVAILABLE="$($ENGINE_CMD run --rm docker.io/library/cassandra:5.0 bash -lc "test -x '$SUMMARY_TOOL' && echo yes || echo no" || true)"
+if [ "$SUMMARY_AVAILABLE" != "yes" ]; then
+  echo "[export] NOTE: sstablesummary not found in image; Summary generation will be skipped"
 fi
 
-echo "[export] Generating sstabledump reference JSONs (Index/Summary/Statistics) ..."
+# Mount root once to avoid per-dir mount issues
+MOUNT_ROOT="$DATASETS_DIR/sstables"
+
+# Podman rootless often needs UID/GID remap for bind mounts
+VOLUME_FLAGS=""
+if [ "${ENGINE_CMD:-}" = "podman" ]; then
+  VOLUME_FLAGS=":U"
+fi
 
 # Iterate all *-Data.db files under exported sstables
 while IFS= read -r -d '' DATA_FILE; do
@@ -83,40 +98,64 @@ while IFS= read -r -d '' DATA_FILE; do
   BASE="$(basename "$DATA_FILE")"
   PREFIX_NAME="${BASE%-Data.db}"
 
-  INDEX_JSON="$DIR/${PREFIX_NAME}-Index.db.json"
-  SUMMARY_JSON="$DIR/${PREFIX_NAME}-Summary.db.json"
-  STATS_JSON="$DIR/${PREFIX_NAME}-Statistics.db.json"
+  DATA_JSONL="$DIR/${PREFIX_NAME}-Data.db.jsonl"
+  SUMMARY_TXT="$DIR/${PREFIX_NAME}-Summary.db.txt"
+  STATS_TXT="$DIR/${PREFIX_NAME}-Statistics.db.txt"
 
-  echo "[export]  • $BASE → ${PREFIX_NAME}-{Index,Summary,Statistics}.db.json"
+  echo "[export]  • $BASE → ${PREFIX_NAME}-{Data.db.jsonl, Summary.db.txt, Statistics.db.txt}"
 
-  # Index: include keys and index info, JSON output
-  if ! "$SSTDUMP_WRAPPER" "$DATA_FILE" -k -i -j > "${INDEX_JSON}.tmp"; then
-    echo "[export] ERROR: Failed to generate Index reference for $DATA_FILE" >&2
+  # Compute relative path from mount root for stable container pathing
+  REL_PATH=$(python3 - "$DATA_FILE" "$MOUNT_ROOT" <<'PY'
+import os, sys
+print(os.path.relpath(sys.argv[1], sys.argv[2]))
+PY
+)
+
+  # Data dump (JSON lines by partition)
+  CMD_OUTPUT=$($ENGINE_CMD run --rm -v "$MOUNT_ROOT:/data$VOLUME_FLAGS" docker.io/library/cassandra:5.0 \
+    bash -lc '"/opt/cassandra/tools/bin/sstabledump" "/data/'"$REL_PATH"'" -l') || true
+  if [ -z "$CMD_OUTPUT" ]; then
+    echo "[export] ERROR: Failed to generate Data dump for $DATA_FILE" >&2
     exit 1
   fi
-  mv "${INDEX_JSON}.tmp" "$INDEX_JSON"
+  printf "%s" "$CMD_OUTPUT" > "$DATA_JSONL"
 
-  # Summary: decoded summary with JSON output
-  if ! "$SSTDUMP_WRAPPER" "$DATA_FILE" -d -s -j > "${SUMMARY_JSON}.tmp"; then
-    echo "[export] ERROR: Failed to generate Summary reference for $DATA_FILE" >&2
-    exit 1
-  fi
-  mv "${SUMMARY_JSON}.tmp" "$SUMMARY_JSON"
-
-  # Statistics: JSON output (statistics included by default in JSON)
-  if ! "$SSTDUMP_WRAPPER" "$DATA_FILE" -j > "${STATS_JSON}.tmp"; then
-    echo "[export] ERROR: Failed to generate Statistics reference for $DATA_FILE" >&2
-    exit 1
-  fi
-  mv "${STATS_JSON}.tmp" "$STATS_JSON"
-
-  # Basic sanity: ensure files are non-empty
-  for f in "$INDEX_JSON" "$SUMMARY_JSON" "$STATS_JSON"; do
-    if [ ! -s "$f" ]; then
-      echo "[export] ERROR: Reference JSON is empty or missing: $f" >&2
+  # Summary (text) if available
+  if [ "$SUMMARY_AVAILABLE" = "yes" ]; then
+    CMD_OUTPUT=$($ENGINE_CMD run --rm -v "$MOUNT_ROOT:/data$VOLUME_FLAGS" docker.io/library/cassandra:5.0 \
+      bash -lc '"/opt/cassandra/tools/bin/sstablesummary" "/data/'"$REL_PATH"'"') || true
+    if [ -z "$CMD_OUTPUT" ]; then
+      echo "[export] ERROR: Failed to generate Summary for $DATA_FILE" >&2
       exit 1
     fi
-  done
+    printf "%s" "$CMD_OUTPUT" > "$SUMMARY_TXT"
+  else
+    : # Skip summary
+  fi
+
+  # Statistics (text)
+  CMD_OUTPUT=$($ENGINE_CMD run --rm -v "$MOUNT_ROOT:/data$VOLUME_FLAGS" docker.io/library/cassandra:5.0 \
+    bash -lc '"/opt/cassandra/tools/bin/sstablemetadata" "/data/'"$REL_PATH"'"') || true
+  if [ -z "$CMD_OUTPUT" ]; then
+    echo "[export] ERROR: Failed to generate Statistics for $DATA_FILE" >&2
+    exit 1
+  fi
+  printf "%s" "$CMD_OUTPUT" > "$STATS_TXT"
+
+  # Basic sanity: ensure files are non-empty
+  # Sanity: ensure outputs are non-empty (Summary optional)
+  if [ ! -s "$DATA_JSONL" ]; then
+    echo "[export] ERROR: Data dump output is empty: $DATA_JSONL" >&2
+    exit 1
+  fi
+  if [ ! -s "$STATS_TXT" ]; then
+    echo "[export] ERROR: Statistics output is empty: $STATS_TXT" >&2
+    exit 1
+  fi
+  if [ "$SUMMARY_AVAILABLE" = "yes" ] && [ ! -s "$SUMMARY_TXT" ]; then
+    echo "[export] ERROR: Summary output is empty: $SUMMARY_TXT" >&2
+    exit 1
+  fi
 done < <(find "$DATASETS_DIR/sstables" -type f -name "*-Data.db" -print0)
 
 echo "[export] Completed generating sstabledump reference JSONs."

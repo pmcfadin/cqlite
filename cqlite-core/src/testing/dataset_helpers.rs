@@ -209,6 +209,55 @@ fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
     Ok(false)
 }
 
+// === Issue #89: Reference path derivation and parsers ===
+
+/// Given a path to a Data.db file, derive sibling reference paths produced by export.sh
+pub fn derive_reference_paths_from_data_db(data_db: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let file_name = data_db.file_name()?.to_str()?;
+    if !file_name.ends_with("-Data.db") {
+        return None;
+    }
+    let prefix = &file_name[..file_name.len() - "-Data.db".len()];
+    let dir = data_db.parent()?;
+    let data_jsonl = dir.join(format!("{}-Data.db.jsonl", prefix));
+    let stats_txt = dir.join(format!("{}-Statistics.db.txt", prefix));
+    let summary_txt = dir.join(format!("{}-Summary.db.txt", prefix));
+    Some((data_jsonl, stats_txt, summary_txt))
+}
+
+/// Stream JSONL rows from sstabledump output file, yielding serde_json::Value for each line
+pub fn read_jsonl_rows(
+    path: &Path,
+) -> Result<impl Iterator<Item = serde_json::Value>, DatasetError> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let iter = reader
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok());
+    Ok(iter)
+}
+
+/// Parse sstablemetadata text to a simple key->value map for assertions
+pub fn parse_sstablemetadata_text(
+    path: &Path,
+) -> Result<std::collections::HashMap<String, String>, DatasetError> {
+    let content = std::fs::read_to_string(path)?;
+    let mut map = std::collections::HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    Ok(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

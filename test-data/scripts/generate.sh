@@ -4,6 +4,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE="$ROOT/docker/docker-compose-cassandra5.yml"
+. "$ROOT/scripts/container_env.sh"
+
+# Export for compose providers that read COMPOSE_FILE env
+export COMPOSE_FILE="$COMPOSE"
 
 # Environment-driven options
 ROWS="${ROWS:-}"
@@ -14,6 +18,6 @@ args=(python3 /scripts/generate_comprehensive_test_data.py --version 5.0 --host 
 [[ -n "$ROWS" ]] && args+=(--rows-per-table "$ROWS")
 [[ -n "$TABLES" ]] && args+=(--tables "$TABLES")
 
-docker compose -f "$COMPOSE" run --rm --no-deps data-generator "${args[@]}"
+compose_run_nontty data-generator "${args[@]}"
 
 

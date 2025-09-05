@@ -5,6 +5,10 @@ shopt -s extglob
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE="$ROOT/docker/docker-compose-cassandra5.yml"
+. "$ROOT/scripts/container_env.sh"
+
+# Export for compose providers that read COMPOSE_FILE env
+export COMPOSE_FILE="$COMPOSE"
 
 # Bring up Cassandra 5 and wait until healthy
 bash "$ROOT/scripts/compose-guard.sh" --compose-file "$COMPOSE" --service cassandra-5-0
@@ -24,7 +28,7 @@ if [[ "$SCHEMA_SET" == "core" && -f "$CORE_LIST_FILE" ]]; then
     [[ -z "$fname" ]] && continue
     if [[ -f "$ROOT/schemas/$fname" ]]; then
       echo "[start-clean] Applying schema: $fname"
-      docker compose -f "$COMPOSE" exec -T cassandra-5-0 cqlsh -f "/opt/schemas/${fname}" </dev/null
+      compose_exec_nontty cassandra-5-0 cqlsh -f "/opt/schemas/${fname}" </dev/null
     else
       echo "[start-clean] Skipping missing schema listed in core.list: $fname" >&2
     fi
@@ -33,7 +37,7 @@ else
   for schema in "$ROOT/schemas"/*.cql; do
     [ -f "$schema" ] || continue
     echo "[start-clean] Applying schema: $(basename "$schema")"
-    docker compose -f "$COMPOSE" exec -T cassandra-5-0 cqlsh -f "/opt/schemas/$(basename "$schema")" </dev/null
+    compose_exec_nontty cassandra-5-0 cqlsh -f "/opt/schemas/$(basename "$schema")" </dev/null
   done
 fi
 

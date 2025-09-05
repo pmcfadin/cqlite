@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-# CQLite: Docker Compose guard for Cassandra 5 service
+# CQLite: Container Compose guard for Cassandra 5 service (Podman/Docker)
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/container_env.sh"
 # Ensures the specified compose stack is up and service is healthy.
 #
 # Usage:
@@ -32,25 +33,28 @@ done
 
 [[ -f "$COMPOSE_FILE" ]] || fail "Compose file not found: $COMPOSE_FILE"
 
+# Ensure compose provider sees the specified file
+export COMPOSE_FILE="$COMPOSE_FILE"
+
 # Bring up the requested service
 log "Bringing up service '$SERVICE_NAME' using compose file: $COMPOSE_FILE"
-docker compose -f "$COMPOSE_FILE" up -d "$SERVICE_NAME"
+$COMPOSE_CMD -f "$COMPOSE_FILE" up -d "$SERVICE_NAME"
 
 start_ts=$(date +%s)
 
 log "Waiting for Cassandra service health (timeout=${TIMEOUT_SECS}s, interval=${INTERVAL_SECS}s)"
 while true; do
-  # Quick existence check
-  if ! docker compose -f "$COMPOSE_FILE" ps "$SERVICE_NAME" | grep -E "Up|running" >/dev/null 2>&1; then
+  # Quick existence check (provider-agnostic)
+  if ! $COMPOSE_CMD -f "$COMPOSE_FILE" ps | grep -E "\b$SERVICE_NAME\b" | grep -E "Up|running|Started|healthy" >/dev/null 2>&1; then
     log "Service not reported as running yet"
   else
-    # If Docker health reports healthy, accept and proceed
-    if docker compose -f "$COMPOSE_FILE" ps "$SERVICE_NAME" | grep -qi "(healthy)"; then
+    # If health marker present in ps output, accept and proceed
+    if $COMPOSE_CMD -f "$COMPOSE_FILE" ps | grep -E "\b$SERVICE_NAME\b" | grep -qi "(healthy)"; then
       log "Service '$SERVICE_NAME' reports Docker health: healthy"
       break
     fi
     # Health check via cqlsh + nodetool
-    if docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE_NAME" sh -lc \
+    if compose_exec_nontty "$SERVICE_NAME" sh -lc \
       "cqlsh -e \"SELECT cluster_name FROM system.local;\" >/dev/null 2>&1 && nodetool status | grep -q 'UN'"; then
       log "Service '$SERVICE_NAME' is healthy (cqlsh OK, nodetool UN)"
       break
