@@ -100,11 +100,24 @@ jobs:
         for T in "${REQUIRED_TABLES[@]}"; do
           DIR=$(find test-data/datasets/sstables/"$T"-* -maxdepth 1 -type d | head -n1)
           if [ -z "$DIR" ]; then echo "❌ Missing table directory for $T"; exit 1; fi
-          DATA=$(find "$DIR" -name "*-Data.db" | head -n1)
+          # Prefer real files; ignore AppleDouble and dotfiles
+          DATA=$(find "$DIR" -type f -name "*-Data.db" ! -name "._*" | head -n1)
           if [ -z "$DATA" ]; then echo "❌ Missing Data.db in $DIR"; exit 1; fi
           PREFIX=${DATA%-Data.db}
-          test -s "${PREFIX}-Data.db.jsonl" || (echo "❌ Missing Data JSONL: ${PREFIX}-Data.db.jsonl"; exit 1)
-          test -s "${PREFIX}-Statistics.db.txt" || (echo "❌ Missing Statistics: ${PREFIX}-Statistics.db.txt"; exit 1)
+          # Also ignore AppleDouble files for references
+          JSONL="${PREFIX}-Data.db.jsonl"
+          STATS="${PREFIX}-Statistics.db.txt"
+          if [ ! -s "$JSONL" ]; then
+            # try without accidental AppleDouble prefix
+            ALT_JSONL=$(basename "$JSONL")
+            if [ -s "$DIR/$ALT_JSONL" ]; then JSONL="$DIR/$ALT_JSONL"; fi
+          fi
+          if [ ! -s "$STATS" ]; then
+            ALT_STATS=$(basename "$STATS")
+            if [ -s "$DIR/$ALT_STATS" ]; then STATS="$DIR/$ALT_STATS"; fi
+          fi
+          test -s "$JSONL" || (echo "❌ Missing Data JSONL: $JSONL"; exit 1)
+          test -s "$STATS" || (echo "❌ Missing Statistics: $STATS"; exit 1)
           echo "✅ References found for $T"
         done
 
@@ -153,7 +166,7 @@ jobs:
       uses: actions/checkout@v4
     
     - name: Download all validation artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: validation-results/
     
