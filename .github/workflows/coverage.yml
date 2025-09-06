@@ -107,40 +107,43 @@ jobs:
     
     - name: Run Core Reading Coverage (≥95% ENFORCED - PRD Compliant)
       if: matrix.coverage-type == 'core-reading'
+      env:
+        CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+      working-directory: cqlite-core
       run: |
-        mkdir -p validation_artifacts/coverage
+        mkdir -p ../validation_artifacts/coverage
         # Verify real Cassandra 5 test data is available - FAIL if missing
-        DB_COUNT=$(find test-data -name '*.db' | wc -l)
+        DB_COUNT=$(find "$CQLITE_DATASETS_ROOT" -name '*.db' | wc -l)
         if [ "$DB_COUNT" -eq 0 ]; then
           echo "❌ CRITICAL: No real Cassandra 5 SSTable files found in test-data/"
-          echo "❌ Coverage requires REAL data - no fallbacks, no synthetic data"
-          echo "❌ Expected: SSTable files from actual Cassandra 5 datasets"
           exit 1
         fi
         echo "📊 Running coverage with $DB_COUNT real Cassandra 5 SSTable files"
         cargo tarpaulin \
-          --config core_reading_focus \
           --timeout 300 \
           --fail-under 95 \
+          --out Html \
+          --output-dir ../validation_artifacts/coverage \
           --verbose
           
     - name: Run Comprehensive Coverage (Informational)
       if: matrix.coverage-type == 'comprehensive' 
+      env:
+        CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+      working-directory: cqlite-core
       run: |
-        mkdir -p validation_artifacts/coverage
-        mkdir -p target/coverage/comprehensive
+        mkdir -p ../validation_artifacts/coverage
         # Verify real Cassandra 5 test data is available - FAIL if missing
-        DB_COUNT=$(find test-data -name '*.db' | wc -l)
+        DB_COUNT=$(find "$CQLITE_DATASETS_ROOT" -name '*.db' | wc -l)
         if [ "$DB_COUNT" -eq 0 ]; then
-          echo "❌ CRITICAL: No real Cassandra 5 SSTable files found in test-data/"
-          echo "❌ Comprehensive coverage requires REAL data - no fallbacks"
+          echo "❌ CRITICAL: No real Cassandra 5 SSTable files found"
           exit 1
         fi
         echo "📊 Running comprehensive coverage with $DB_COUNT real Cassandra 5 SSTable files"
         cargo tarpaulin \
-          --config comprehensive \
           --timeout 600 \
-          --output-dir target/coverage/comprehensive \
+          --out Html \
+          --output-dir ../validation_artifacts/coverage \
           --fail-under 80 \
           --verbose
           
