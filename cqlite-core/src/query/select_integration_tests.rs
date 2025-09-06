@@ -123,7 +123,7 @@ mod tests {
             println!("INFO: Skipping test_aggregation_functions in CI environment");
             return;
         }
-        use tokio::time::{timeout, Duration};
+        use tokio::time::{Duration, timeout};
         let (db, _temp_dir) = create_test_database().await;
 
         // Create table
@@ -146,31 +146,43 @@ mod tests {
             .unwrap();
 
         // Test COUNT
-        let result = timeout(Duration::from_secs(5), db.execute("SELECT COUNT(*) FROM sales"))
-            .await
-            .expect("COUNT aggregation timed out")
-            .unwrap();
+        let result = timeout(
+            Duration::from_secs(5),
+            db.execute("SELECT COUNT(*) FROM sales"),
+        )
+        .await
+        .expect("COUNT aggregation timed out")
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
 
         // Test SUM
-        let result = timeout(Duration::from_secs(5), db.execute("SELECT SUM(amount) FROM sales"))
-            .await
-            .expect("SUM aggregation timed out")
-            .unwrap();
+        let result = timeout(
+            Duration::from_secs(5),
+            db.execute("SELECT SUM(amount) FROM sales"),
+        )
+        .await
+        .expect("SUM aggregation timed out")
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
 
         // Test AVG
-        let result = timeout(Duration::from_secs(5), db.execute("SELECT AVG(amount) FROM sales"))
-            .await
-            .expect("AVG aggregation timed out")
-            .unwrap();
+        let result = timeout(
+            Duration::from_secs(5),
+            db.execute("SELECT AVG(amount) FROM sales"),
+        )
+        .await
+        .expect("AVG aggregation timed out")
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
 
         // Test aggregate functions (Cassandra 5 compliant - no mixing with non-aggregates)
-        let result = timeout(Duration::from_secs(5), db.execute("SELECT COUNT(*) FROM sales"))
-            .await
-            .expect("COUNT aggregation (2) timed out")
-            .unwrap();
+        let result = timeout(
+            Duration::from_secs(5),
+            db.execute("SELECT COUNT(*) FROM sales"),
+        )
+        .await
+        .expect("COUNT aggregation (2) timed out")
+        .unwrap();
         assert_eq!(result.rows.len(), 1); // COUNT returns single row
     }
 
