@@ -65,8 +65,8 @@ jobs:
           mkdir -p test-data
           echo "🔍 Downloading cassandra5-small-with-refs-v2.tar.gz from datasets-v2 release..."
           gh release download datasets-v2 --pattern "cassandra5-small-with-refs-v2.tar.gz" --dir /tmp
-          echo "📦 Extracting datasets..."
-          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C test-data
+          echo "📦 Extracting datasets to repo root..."
+          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C .
           
           # Verify extraction
           NEW_DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
