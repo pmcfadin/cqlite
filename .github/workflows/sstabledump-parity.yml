@@ -90,6 +90,49 @@ jobs:
         test -d "test-data/datasets/sstables/test_timeseries" || (echo "❌ test_timeseries dataset missing"; exit 1) 
         test -d "test-data/datasets/sstables/test_wide_rows" || (echo "❌ test_wide_rows dataset missing"; exit 1)
         
+        echo "🔧 Generating missing references (JSONL, Statistics) on-the-fly if absent..."
+        REQUIRED_TABLES=(
+          "test_basic/simple_table"
+          "test_timeseries/sensor_data"
+          "test_wide_rows/wide_partition_table"
+          "test_collections/collection_table"
+        )
+        for T in "${REQUIRED_TABLES[@]}"; do
+          echo "🔍 Searching for table: $T"
+          DIR=$(find test-data/datasets/sstables/"$T"-* -maxdepth 1 -type d | head -n1)
+          if [ -z "$DIR" ]; then echo "❌ Missing table directory for $T"; exit 1; fi
+          echo "🔍 Files in $DIR before filtering:"
+          ls -la "$DIR"
+          DATA=$(find "$DIR" -type f -name "*-Data.db" ! -name "._*" | head -n1)
+          if [ -z "$DATA" ]; then echo "❌ Missing Data.db in $DIR"; exit 1; fi
+          echo "✅ Selected Data file: $DATA"
+          PREFIX=${DATA%-Data.db}
+          JSONL="${PREFIX}-Data.db.jsonl"
+          STATS="${PREFIX}-Statistics.db.txt"
+          echo "🔍 Looking for reference files:"
+          echo "  Expected JSONL: $JSONL"
+          echo "  Expected Stats: $STATS"
+          if [ ! -s "$JSONL" ]; then
+            echo "⚠️ Expected JSONL not found, generating via Cassandra tools..."
+            docker run --rm -v "$(dirname "$DATA"):/data" docker.io/library/cassandra:5.0 \
+              bash -lc '"/opt/cassandra/tools/bin/sstabledump" "/data/'"$(basename "$DATA")"'" -l > "/data/'"$(basename "$JSONL")"'"' || true
+            if [ ! -s "$JSONL" ]; then
+              echo "❌ Failed to generate JSONL for $DATA"
+              exit 1
+            fi
+          fi
+          if [ ! -s "$STATS" ]; then
+            echo "⚠️ Expected Statistics not found, generating via Cassandra tools..."
+            docker run --rm -v "$(dirname "$DATA"):/data" docker.io/library/cassandra:5.0 \
+              bash -lc '"/opt/cassandra/tools/bin/sstablemetadata" "/data/'"$(basename "$DATA")"'" > "/data/'"$(basename "$STATS")"'"' || true
+            if [ ! -s "$STATS" ]; then
+              echo "❌ Failed to generate Statistics for $DATA"
+              exit 1
+            fi
+          fi
+          echo "✅ References present for $T"
+        done
+
         echo "🔎 Checking precomputed references (JSONL, Statistics) exist for deterministic tables..."
         REQUIRED_TABLES=(
           "test_basic/simple_table"
