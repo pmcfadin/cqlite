@@ -61,7 +61,7 @@ jobs:
           echo "📦 Downloading real Cassandra 5 datasets from release..."
           mkdir -p test-data
           gh release download datasets-v2 --pattern "cassandra5-small-with-refs-v2.tar.gz" --dir /tmp
-          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C test-data
+          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C .
           DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
           echo "✅ Downloaded $DB_COUNT SSTable files for integration tests"
         else
@@ -256,7 +256,7 @@ jobs:
           echo "📦 Downloading real Cassandra 5 datasets from release..."
           mkdir -p test-data
           gh release download datasets-v2 --pattern "cassandra5-small-with-refs-v2.tar.gz" --dir /tmp
-          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C test-data
+          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C .
           DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
           echo "✅ Downloaded $DB_COUNT SSTable files for parity validation"
         else
