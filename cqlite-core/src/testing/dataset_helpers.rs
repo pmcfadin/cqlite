@@ -290,6 +290,47 @@ pub fn derive_reference_paths_from_data_db(data_db: &Path) -> Option<(PathBuf, P
     Some((data_jsonl, stats_txt, summary_txt))
 }
 
+/// Derive a companion SSTable file path (e.g., Index.db, Summary.db) from a Data.db path
+///
+/// This function handles cases where files might have different naming patterns or UUIDs
+/// by searching for any valid companion file if the expected one doesn't exist.
+pub fn derive_companion_file(data_file: &Path, companion_type: &str) -> Option<PathBuf> {
+    let data_name = data_file.file_name()?.to_str()?;
+    if !data_name.ends_with("-Data.db") {
+        return None;
+    }
+
+    let prefix = &data_name[..data_name.len() - "-Data.db".len()];
+    let dir = data_file.parent()?;
+
+    // First, try exact naming pattern
+    let expected_companion = dir.join(format!("{}-{}", prefix, companion_type));
+    if expected_companion.exists() {
+        return Some(expected_companion);
+    }
+
+    // Otherwise, search for any valid companion file in the directory
+    let companion_suffix = format!("-{}", companion_type);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                // Skip AppleDouble files
+                if should_ignore_file(name) {
+                    continue;
+                }
+
+                // Look for any file with the companion suffix
+                if name.ends_with(&companion_suffix) {
+                    return Some(entry.path());
+                }
+            }
+        }
+    }
+
+    // Return expected path as fallback (for error messages)
+    Some(expected_companion)
+}
+
 /// Stream JSONL rows from sstabledump output file, yielding serde_json::Value for each line
 pub fn read_jsonl_rows(
     path: &Path,

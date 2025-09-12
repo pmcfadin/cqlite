@@ -5,8 +5,8 @@
 //! for real Cassandra 5 data access with deterministic test tables.
 
 use cqlite_core::testing::dataset_helpers::{
-    derive_reference_paths_from_data_db, list_tables, resolve_table_to_sstable_path,
-    should_ignore_file,
+    derive_companion_file as derive_companion_file_helper, derive_reference_paths_from_data_db,
+    list_tables, resolve_table_to_sstable_path, should_ignore_file,
 };
 use cqlite_core::{
     Config, Result, platform::Platform, storage::sstable::summary_reader::SummaryReader,
@@ -169,7 +169,10 @@ async fn test_summary_token_range_iteration_monotonic() -> Result<()> {
             .map_err(|e| cqlite_core::Error::corruption(format!("Dataset error: {e}")))?;
 
         let data_file = find_data_file(&sstable_dir)?;
-        let summary_file = derive_companion_file(&data_file, "Summary.db")?;
+        let summary_file =
+            derive_companion_file_helper(&data_file, "Summary.db").ok_or_else(|| {
+                cqlite_core::Error::corruption("Could not derive Summary.db path".to_string())
+            })?;
 
         if !summary_file.exists() {
             log::warn!(
@@ -264,7 +267,10 @@ async fn test_summary_entry_ordering_and_coverage() -> Result<()> {
             .map_err(|e| cqlite_core::Error::corruption(format!("Dataset error: {e}")))?;
 
         let data_file = find_data_file(&sstable_dir)?;
-        let summary_file = derive_companion_file(&data_file, "Summary.db")?;
+        let summary_file =
+            derive_companion_file_helper(&data_file, "Summary.db").ok_or_else(|| {
+                cqlite_core::Error::corruption("Could not derive Summary.db path".to_string())
+            })?;
 
         if !summary_file.exists() {
             continue;
@@ -350,7 +356,9 @@ async fn validate_single_table_summary(
         .map_err(|e| cqlite_core::Error::corruption(format!("Dataset error: {e}")))?;
 
     let data_file = find_data_file(&sstable_dir)?;
-    let summary_file = derive_companion_file(&data_file, "Summary.db")?;
+    let summary_file = derive_companion_file_helper(&data_file, "Summary.db").ok_or_else(|| {
+        cqlite_core::Error::corruption("Could not derive Summary.db path".to_string())
+    })?;
 
     if !summary_file.exists() {
         return Ok(SummaryValidationResult {
@@ -629,57 +637,29 @@ fn find_data_file(sstable_dir: &Path) -> Result<PathBuf> {
     ))
 }
 
-/// Derive companion file from Data.db prefix
-/// nb-1-big-Data.db → nb-1-big-Summary.db, etc.
-fn derive_companion_file(data_file: &Path, companion_type: &str) -> Result<PathBuf> {
-    let data_name = data_file
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| cqlite_core::Error::corruption("Invalid Data.db filename".to_string()))?;
-
-    if !data_name.ends_with("-Data.db") {
-        return Err(cqlite_core::Error::corruption(
-            "File is not a *-Data.db file".to_string(),
-        ));
-    }
-
-    // Extract prefix: "nb-1-big-Data.db" → "nb-1-big"
-    let prefix = &data_name[..data_name.len() - "-Data.db".len()];
-    let companion_name = format!("{prefix}-{companion_type}");
-
-    let companion_path = data_file
-        .parent()
-        .ok_or_else(|| {
-            cqlite_core::Error::corruption("Data.db has no parent directory".to_string())
-        })?
-        .join(companion_name);
-
-    Ok(companion_path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_derive_companion_file() {
+    fn test_derive_companion_file_helper() {
         let data_path = PathBuf::from("/test/nb-1-big-Data.db");
 
-        let summary_path = derive_companion_file(&data_path, "Summary.db").unwrap();
+        let summary_path = derive_companion_file_helper(&data_path, "Summary.db").unwrap();
         assert_eq!(summary_path, PathBuf::from("/test/nb-1-big-Summary.db"));
 
-        let index_path = derive_companion_file(&data_path, "Index.db").unwrap();
+        let index_path = derive_companion_file_helper(&data_path, "Index.db").unwrap();
         assert_eq!(index_path, PathBuf::from("/test/nb-1-big-Index.db"));
 
-        let stats_path = derive_companion_file(&data_path, "Statistics.db").unwrap();
+        let stats_path = derive_companion_file_helper(&data_path, "Statistics.db").unwrap();
         assert_eq!(stats_path, PathBuf::from("/test/nb-1-big-Statistics.db"));
     }
 
     #[test]
-    fn test_derive_companion_file_invalid() {
+    fn test_derive_companion_file_helper_invalid() {
         let invalid_path = PathBuf::from("/test/not-data-file.db");
-        let result = derive_companion_file(&invalid_path, "Summary.db");
-        assert!(result.is_err());
+        let result = derive_companion_file_helper(&invalid_path, "Summary.db");
+        assert!(result.is_none());
     }
 
     #[test]

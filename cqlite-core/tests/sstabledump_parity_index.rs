@@ -15,8 +15,9 @@ use cqlite_core::{
     platform::Platform,
     storage::sstable::index_reader::IndexReader,
     testing::dataset_helpers::{
-        derive_reference_paths_from_data_db, list_tables, load_metadata, read_jsonl_rows,
-        resolve_table_to_sstable_path, should_ignore_file,
+        derive_companion_file as derive_companion_file_helper, derive_reference_paths_from_data_db,
+        list_tables, load_metadata, read_jsonl_rows, resolve_table_to_sstable_path,
+        should_ignore_file,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -756,29 +757,13 @@ fn find_data_file(sstable_dir: &Path) -> CqliteResult<PathBuf> {
 /// Derive companion file from Data.db prefix
 /// nb-1-big-Data.db → nb-1-big-Index.db
 fn derive_companion_file(data_file: &Path, companion_type: &str) -> CqliteResult<PathBuf> {
-    let data_name = data_file
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| cqlite_core::Error::corruption("Invalid Data.db filename".to_string()))?;
-
-    if !data_name.ends_with("-Data.db") {
-        return Err(cqlite_core::Error::corruption(
-            "File is not a *-Data.db file".to_string(),
-        ));
-    }
-
-    // Extract prefix: "nb-1-big-Data.db" → "nb-1-big"
-    let prefix = &data_name[..data_name.len() - "-Data.db".len()];
-    let companion_name = format!("{prefix}-{companion_type}");
-
-    let companion_path = data_file
-        .parent()
-        .ok_or_else(|| {
-            cqlite_core::Error::corruption("Data.db has no parent directory".to_string())
-        })?
-        .join(companion_name);
-
-    Ok(companion_path)
+    derive_companion_file_helper(data_file, companion_type).ok_or_else(|| {
+        cqlite_core::Error::corruption(format!(
+            "Could not derive {} path from Data.db: {}",
+            companion_type,
+            data_file.display()
+        ))
+    })
 }
 
 /// Integration test for simple_table Index.db validation
