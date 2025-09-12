@@ -98,8 +98,19 @@ jobs:
           "test_collections/collection_table"
         )
         for T in "${REQUIRED_TABLES[@]}"; do
-          DIR=$(find test-data/datasets/sstables -path "*/$T-*" -maxdepth 2 -type d | head -n1)
-          if [ -z "$DIR" ]; then echo "❌ Missing table directory for $T"; exit 1; fi
+          # More robust search - find any directory matching the table name pattern
+          echo "🔍 Searching for table: $T"
+          DIR=$(find test-data/datasets/sstables -path "*/$T-*" -type d | head -n1)
+          if [ -z "$DIR" ]; then
+            # Debug what's actually available
+            echo "❌ No directory found for $T, searching for alternatives..."
+            echo "Available directories in $(dirname "test-data/datasets/sstables/$T"):"
+            ls -la "test-data/datasets/sstables/$(dirname "$T")/" | head -10
+            echo "All directories containing $(basename "$T"):"
+            find test-data/datasets/sstables -name "*$(basename "$T")*" -type d | head -5
+            echo "❌ Missing table directory for $T"
+            exit 1
+          fi
           # Prefer real files; ignore AppleDouble and dotfiles
           DATA=$(find "$DIR" -type f -name "*-Data.db" ! -name "._*" | head -n1)
           if [ -z "$DATA" ]; then echo "❌ Missing Data.db in $DIR"; exit 1; fi
