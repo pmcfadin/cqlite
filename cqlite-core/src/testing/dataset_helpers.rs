@@ -199,6 +199,10 @@ fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
 
         if path.is_file() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                // Skip AppleDouble files (macOS metadata files with ._ prefix)
+                if name.starts_with("._") {
+                    continue;
+                }
                 if name.ends_with("-Data.db") {
                     return Ok(true);
                 }

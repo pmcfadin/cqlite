@@ -739,6 +739,10 @@ fn find_data_file(sstable_dir: &Path) -> CqliteResult<PathBuf> {
         let path = entry.path();
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            // Skip AppleDouble files (macOS metadata files with ._ prefix)
+            if name.starts_with("._") {
+                continue;
+            }
             if name.ends_with("-Data.db") {
                 return Ok(path);
             }

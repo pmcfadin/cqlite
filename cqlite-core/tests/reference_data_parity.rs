@@ -59,6 +59,10 @@ async fn test_data_jsonl_vs_statistics_row_counts() -> CqliteResult<()> {
         while let Some(entry) = read.next_entry().await? {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                // Skip AppleDouble files (macOS metadata files with ._ prefix)
+                if name.starts_with("._") {
+                    continue;
+                }
                 if !name.ends_with("-Data.db") {
                     continue;
                 }
