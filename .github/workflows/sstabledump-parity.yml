@@ -98,7 +98,7 @@ jobs:
           "test_collections/collection_table"
         )
         for T in "${REQUIRED_TABLES[@]}"; do
-          DIR=$(find test-data/datasets/sstables/"$T"-* -maxdepth 1 -type d | head -n1)
+          DIR=$(find test-data/datasets/sstables -path "*/$T-*" -maxdepth 2 -type d | head -n1)
           if [ -z "$DIR" ]; then echo "❌ Missing table directory for $T"; exit 1; fi
           # Prefer real files; ignore AppleDouble and dotfiles
           DATA=$(find "$DIR" -type f -name "*-Data.db" ! -name "._*" | head -n1)
