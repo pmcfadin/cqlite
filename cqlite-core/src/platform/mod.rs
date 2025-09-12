@@ -109,9 +109,24 @@ mod tests {
         assert!(now_millis > 0);
         assert!(now_secs > 0);
 
-        // Check relationships
-        assert!(now_micros / 1000 >= now_millis);
-        assert!(now_millis / 1000 >= now_secs);
+        // Check relationships with tolerance for timing differences
+        // Allow for small variations due to multiple system calls
+        let micros_to_millis = now_micros / 1000;
+        let millis_to_secs = now_millis / 1000;
+
+        // Allow 1ms tolerance for timing variations
+        assert!(
+            micros_to_millis >= now_millis - 1,
+            "micros_to_millis ({}) should be close to now_millis ({})",
+            micros_to_millis,
+            now_millis
+        );
+        assert!(
+            millis_to_secs >= now_secs - 1,
+            "millis_to_secs ({}) should be close to now_secs ({})",
+            millis_to_secs,
+            now_secs
+        );
     }
 
     #[tokio::test]

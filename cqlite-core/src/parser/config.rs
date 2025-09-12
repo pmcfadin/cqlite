@@ -313,6 +313,7 @@ impl ParserConfig {
             performance: PerformanceSettings {
                 optimization_level: 3,
                 enable_jit: true,
+                worker_threads: (num_cpus::get() as u32).max(2), // Ensure at least 2 threads for parallel feature
                 ..Default::default()
             },
             ..Default::default()
