@@ -106,6 +106,8 @@ jobs:
           DATA=$(find "$DIR" -type f -name "*-Data.db" ! -name "._*" | head -n1)
           if [ -z "$DATA" ]; then echo "❌ Missing Data.db in $DIR"; exit 1; fi
           echo "✅ Selected Data file: $DATA"
+          # Compute absolute mount source for docker bind (dirname may be relative)
+          MOUNT_SRC="$(cd "$(dirname "$DATA")" && pwd)"
           PREFIX=${DATA%-Data.db}
           JSONL="${PREFIX}-Data.db.jsonl"
           STATS="${PREFIX}-Statistics.db.txt"
@@ -114,7 +116,7 @@ jobs:
           echo "  Expected Stats: $STATS"
           if [ ! -s "$JSONL" ]; then
             echo "⚠️ Expected JSONL not found, generating via Cassandra tools..."
-            docker run --rm -v "$(dirname "$DATA"):/data" docker.io/library/cassandra:5.0 \
+            docker run --rm -v "$MOUNT_SRC:/data" docker.io/library/cassandra:5.0 \
               bash -lc '"/opt/cassandra/tools/bin/sstabledump" "/data/'"$(basename "$DATA")"'" -l > "/data/'"$(basename "$JSONL")"'"' || true
             if [ ! -s "$JSONL" ]; then
               echo "❌ Failed to generate JSONL for $DATA"
@@ -123,7 +125,7 @@ jobs:
           fi
           if [ ! -s "$STATS" ]; then
             echo "⚠️ Expected Statistics not found, generating via Cassandra tools..."
-            docker run --rm -v "$(dirname "$DATA"):/data" docker.io/library/cassandra:5.0 \
+            docker run --rm -v "$MOUNT_SRC:/data" docker.io/library/cassandra:5.0 \
               bash -lc '"/opt/cassandra/tools/bin/sstablemetadata" "/data/'"$(basename "$DATA")"'" > "/data/'"$(basename "$STATS")"'"' || true
             if [ ! -s "$STATS" ]; then
               echo "❌ Failed to generate Statistics for $DATA"
