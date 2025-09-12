@@ -510,7 +510,7 @@ keyspaces:
       kind: regular
       type: int
   - name: time_bucketed_counters
-    row_count: 41
+    row_count: 40
     columns:
     - column_name: error_count
       kind: regular

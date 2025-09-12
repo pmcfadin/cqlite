@@ -1,0 +1,69 @@
+SSTable: /data/test_wide_rows/chat_messages-56f22740902711f0a7e2a33d4c609114/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 09/12/2025 22:25:48 (1757715948132183)
+Maximum timestamp: 09/12/2025 22:25:48 (1757715948463635)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 09/12/2025 22:25:48 (1757715948)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.SnappyCompressor
+Compression ratio: 0.7501102362204725
+TTL min: 0
+TTL max: 0
+First token: -8962216717526475427 (331d6204-6d86-486c-9fd7-9b1c70757ade)
+Last token: 7744163403956361134 (958d4d3d-90ba-4b6b-916b-20b7e975b5de)
+Covered clusterings: [2025-09-12T22:25:48.463Z:6ebf3836-9027-11f0-bdad-2ea3cebf19ee, 2025-09-12T22:25:48.132Z:6e8ca3b2-9027-11f0-bdad-2ea3cebf19ee]
+Estimated droppable tombstones: 0.295
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 32dfdef0-bea4-4b28-b053-95b4a20c86c7
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1757715844337, position=163855)=CommitLogPosition(segmentId=1757715844337, position=2827134)}
+totalColumnsSet: 450
+totalRows: 50
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1757715960 (09/12/2025 22:26:00) |   177 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   258 (258 B)  |     2 (  4) OO.
+   310 (310 B)  |    24 ( 48) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   372 (372 B)  |    19 ( 38) OOOOOOOOOOOOOOOOOOOOOOOo
+   446 (446 B)  |     5 ( 10) OOOOOO
+   Percentiles
+   50th      310 (310 B)
+   75th      372 (372 B)
+   95th      446 (446 B)
+   98th      446 (446 B)
+   99th      446 (446 B)
+   Min       216 (216 B)
+   Max       446 (446 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   12      |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      12
+   75th      12
+   95th      12
+   98th      12
+   99th      12
+   Min       11
+   Max       12
+Local token space coverage: NaN
+Estimated cardinality: 50
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/12/2025 22:25:48 (1757715948)
+EncodingStats minTimestamp: 09/12/2025 22:25:48 (1757715948132183)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: [org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType), org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimeUUIDType)]
+StaticColumns: 
+RegularColumns: message_content:org.apache.cassandra.db.marshal.UTF8Type, thread_id:org.apache.cassandra.db.marshal.UUIDType, metadata:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.UTF8Type), attachments:org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type), user_id:org.apache.cassandra.db.marshal.UUIDType, edited_at:org.apache.cassandra.db.marshal.TimestampType, reactions:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UUIDType))), reply_count:org.apache.cassandra.db.marshal.Int32Type, username:org.apache.cassandra.db.marshal.UTF8Type
+IsTransient: false
