@@ -229,6 +229,10 @@ fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
 // === Issue #89: Reference path derivation and parsers ===
 
 /// Given a path to a Data.db file, derive sibling reference paths produced by export.sh
+///
+/// This function first tries to find files with exact naming patterns, then falls back to searching
+/// for any valid reference files in the directory. This handles cases where CI datasets have
+/// different UUIDs or naming patterns than expected.
 pub fn derive_reference_paths_from_data_db(data_db: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let file_name = data_db.file_name()?.to_str()?;
     if !file_name.ends_with("-Data.db") {
@@ -236,9 +240,53 @@ pub fn derive_reference_paths_from_data_db(data_db: &Path) -> Option<(PathBuf, P
     }
     let prefix = &file_name[..file_name.len() - "-Data.db".len()];
     let dir = data_db.parent()?;
-    let data_jsonl = dir.join(format!("{}-Data.db.jsonl", prefix));
-    let stats_txt = dir.join(format!("{}-Statistics.db.txt", prefix));
-    let summary_txt = dir.join(format!("{}-Summary.db.txt", prefix));
+
+    // First, try exact naming patterns
+    let expected_jsonl = dir.join(format!("{}-Data.db.jsonl", prefix));
+    let expected_stats = dir.join(format!("{}-Statistics.db.txt", prefix));
+    let expected_summary = dir.join(format!("{}-Summary.db.txt", prefix));
+
+    // If all expected files exist, return them
+    if expected_jsonl.exists() && expected_stats.exists() && expected_summary.exists() {
+        return Some((expected_jsonl, expected_stats, expected_summary));
+    }
+
+    // Otherwise, search for any valid reference files in the directory
+    let mut found_jsonl = None;
+    let mut found_stats = None;
+    let mut found_summary = None;
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                // Skip AppleDouble files
+                if should_ignore_file(name) {
+                    continue;
+                }
+
+                // Look for any JSONL reference file
+                if found_jsonl.is_none() && name.ends_with("-Data.db.jsonl") {
+                    found_jsonl = Some(entry.path());
+                }
+
+                // Look for any Statistics reference file
+                if found_stats.is_none() && name.ends_with("-Statistics.db.txt") {
+                    found_stats = Some(entry.path());
+                }
+
+                // Look for any Summary reference file
+                if found_summary.is_none() && name.ends_with("-Summary.db.txt") {
+                    found_summary = Some(entry.path());
+                }
+            }
+        }
+    }
+
+    // Return found files, or expected paths as fallback
+    let data_jsonl = found_jsonl.unwrap_or(expected_jsonl);
+    let stats_txt = found_stats.unwrap_or(expected_stats);
+    let summary_txt = found_summary.unwrap_or(expected_summary);
+
     Some((data_jsonl, stats_txt, summary_txt))
 }
 
