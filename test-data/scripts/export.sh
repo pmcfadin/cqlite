@@ -92,7 +92,19 @@ if [ "$SUMMARY_AVAILABLE" != "yes" ]; then
 fi
 
 # Mount root once to avoid per-dir mount issues (ensure absolute path for Docker)
-MOUNT_ROOT="$(cd "$DATASETS_DIR/sstables" && pwd)"
+# Prefer python abspath for portability
+MOUNT_ROOT="$(python3 - <<'PY'
+import os,sys
+path = os.path.join(os.environ.get('DATASETS_DIR',''), 'sstables')
+print(os.path.abspath(path))
+PY
+)"
+
+# Validate mount root exists and is absolute
+if [ ! -d "$MOUNT_ROOT" ] || [[ "$MOUNT_ROOT" != /* ]]; then
+  echo "[export] ERROR: Invalid mount root: $MOUNT_ROOT" >&2
+  exit 1
+fi
 
 # Podman rootless often needs UID/GID remap for bind mounts
 VOLUME_FLAGS=""
