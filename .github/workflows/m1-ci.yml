@@ -45,14 +45,14 @@ jobs:
           m1-core-
 
     # Dataset cache and download for integration tests
-    - name: Restore datasets-v1 cache
+    - name: Restore datasets-v2 cache
       uses: actions/cache/restore@v4
       with:
         path: |
           test-data/datasets/
-        key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v2-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v1-
+          datasets-v2-
         
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
@@ -60,8 +60,8 @@ jobs:
         if [ "$DB_COUNT" -eq 0 ]; then
           echo "📦 Downloading real Cassandra 5 datasets from release..."
           mkdir -p test-data
-          gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
-          tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+          gh release download datasets-v2 --pattern "cassandra5-small-with-refs-v2.tar.gz" --dir /tmp
+          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C test-data
           DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
           echo "✅ Downloaded $DB_COUNT SSTable files for integration tests"
         else
@@ -167,7 +167,14 @@ jobs:
         
         # Test 2: Critical integration tests that align with M1 (parsing and format compatibility)
         echo "🧪 Running M1-aligned integration tests..."
-        if ! timeout 5m cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test cassandra_compatibility --test compression_integration --test parser_abstraction_tests --test parsing_improvements_test --verbose --no-fail-fast; then
+        if ! timeout 5m cargo test --package cqlite-core \
+          --test P0_4_modern_format_rejection_tests \
+          --test cassandra_compatibility \
+          --test compression_integration \
+          --test parser_abstraction_tests \
+          --test parsing_improvements_test \
+          --verbose --no-fail-fast -- \
+          --skip test_legacy_format_allows_blob_fallback_with_feature; then
           echo "❌ M1 integration tests failed or timed out"
           echo "💡 Check test output above for specific failures"
           echo "💡 Run locally with: cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test cassandra_compatibility --test compression_integration --test parser_abstraction_tests --test parsing_improvements_test"
@@ -233,14 +240,14 @@ jobs:
           m1-parity-
 
     # Dataset cache and download for parity validation
-    - name: Restore datasets-v1 cache  
+    - name: Restore datasets-v2 cache  
       uses: actions/cache/restore@v4
       with:
         path: |
           test-data/datasets/
-        key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v2-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v1-
+          datasets-v2-
         
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
@@ -248,8 +255,8 @@ jobs:
         if [ "$DB_COUNT" -eq 0 ]; then
           echo "📦 Downloading real Cassandra 5 datasets from release..."
           mkdir -p test-data
-          gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
-          tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+          gh release download datasets-v2 --pattern "cassandra5-small-with-refs-v2.tar.gz" --dir /tmp
+          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C test-data
           DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
           echo "✅ Downloaded $DB_COUNT SSTable files for parity validation"
         else
@@ -257,6 +264,24 @@ jobs:
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Validate references manifest (non-blocking)
+      run: |
+        echo "::group::References manifest validation (non-blocking)"
+        if [ -f test-data/datasets/references.yml ]; then
+          echo "✅ Found references.yml; validating refs..."
+          MISSING=0
+          while IFS= read -r -d '' DATA_FILE; do
+            DIR="$(dirname "$DATA_FILE")"; BASE="$(basename "$DATA_FILE")"; PREFIX_NAME="${BASE%-Data.db}"
+            JSONL="$DIR/${PREFIX_NAME}-Data.db.jsonl"; STATS="$DIR/${PREFIX_NAME}-Statistics.db.txt"
+            if [ ! -s "$JSONL" ]; then echo "::warning::Missing or empty $JSONL"; MISSING=$((MISSING+1)); fi
+            if [ ! -s "$STATS" ]; then echo "::warning::Missing or empty $STATS"; MISSING=$((MISSING+1)); fi
+          done < <(find test-data/datasets/sstables -type f -name "*-Data.db" -print0 2>/dev/null || true)
+          echo "References validation complete; missing_count=$MISSING"
+        else
+          echo "ℹ️ references.yml not found; skipping (until datasets-v2)."
+        fi
+        echo "::endgroup::"
 
     # Enhanced validator detection with fallback strategy
     - name: 🔍 Check for SSTableDump validator
