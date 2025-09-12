@@ -142,11 +142,19 @@ fn test_migration_from_legacy_script_patterns() {
 
     // Test the error handling when no metadata exists (replaces manual directory checks)
     let result = load_metadata();
-    assert!(result.is_err(), "expected error when metadata.yml is absent at {:?}", datasets_root);
+    assert!(
+        result.is_err(),
+        "expected error when metadata.yml is absent at {:?}",
+        datasets_root
+    );
 
     // Test table listing when no data exists (graceful fallback)
     let result = list_tables(None);
-    assert!(result.is_err(), "expected error when metadata.yml is absent at {:?}", datasets_root);
+    assert!(
+        result.is_err(),
+        "expected error when metadata.yml is absent at {:?}",
+        datasets_root
+    );
 
     unsafe {
         env::remove_var("CQLITE_DATASETS_ROOT");
