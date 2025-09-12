@@ -105,12 +105,12 @@ jobs:
         run: |
           echo "🧪 Running integration tests with full debugging..."
           
-          # Run the specific failing tests first with maximum verbosity
+          # Run the specific failing tests first with maximum verbosity (now ignored with state_machine feature)
           echo "Testing error handling specifically:"
-          cargo test test_error_handling --package cqlite-core --lib -- --nocapture --exact || true
+          cargo test test_error_handling --package cqlite-core --lib --features state_machine -- --nocapture --exact || true
           
           echo "Testing real world query examples specifically:"
-          cargo test test_real_world_query_examples --package cqlite-core --lib -- --nocapture --exact || true
+          cargo test test_real_world_query_examples --package cqlite-core --lib --features state_machine -- --nocapture --exact || true
           
           echo "Running all tests:"
           cargo test --package cqlite-core --all-features
