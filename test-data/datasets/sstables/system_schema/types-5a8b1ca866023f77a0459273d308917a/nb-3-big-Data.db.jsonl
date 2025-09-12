@@ -1,0 +1,1 @@
+{"table kind":"REGULAR","partition":{"key":["test_collections"],"position":30},"rows":[{"type":"row","position":30,"clustering":["contact_info"],"liveness_info":{"tstamp":"2025-09-04T22:52:39.038Z"},"cells":[{"name":"field_names","value":["email", "phone", "address"]},{"name":"field_types","value":["text", "text", "frozen<address_type>"]}]}]}

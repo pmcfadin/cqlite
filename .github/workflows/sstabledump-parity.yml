@@ -111,21 +111,43 @@ jobs:
             echo "❌ Missing table directory for $T"
             exit 1
           fi
-          # Prefer real files; ignore AppleDouble and dotfiles
-          DATA=$(find "$DIR" -type f -name "*-Data.db" ! -name "._*" | head -n1)
-          if [ -z "$DATA" ]; then echo "❌ Missing Data.db in $DIR"; exit 1; fi
+          # BULLETPROOF AppleDouble filtering - explicitly exclude all AppleDouble files
+          echo "🔍 Files in $DIR before filtering:"
+          ls -la "$DIR" | grep -E "\.(db|jsonl|txt)$" || echo "No matching files"
+          
+          # Find Data.db files, excluding AppleDouble files completely
+          DATA=$(find "$DIR" -type f -name "*-Data.db" ! -name "._*" ! -path "*/._*" | grep -v "^\._" | head -n1)
+          if [ -z "$DATA" ]; then 
+            echo "❌ No valid Data.db found in $DIR (after AppleDouble filtering)"
+            echo "Available .db files:"
+            find "$DIR" -name "*.db" | head -10
+            exit 1
+          fi
+          
+          echo "✅ Selected Data file: $DATA"
           PREFIX=${DATA%-Data.db}
-          # Also ignore AppleDouble files for references
+          
+          # Build reference paths with bulletproof AppleDouble exclusion
           JSONL="${PREFIX}-Data.db.jsonl"
           STATS="${PREFIX}-Statistics.db.txt"
-          if [ ! -s "$JSONL" ]; then
-            # try without accidental AppleDouble prefix
-            ALT_JSONL=$(basename "$JSONL")
-            if [ -s "$DIR/$ALT_JSONL" ]; then JSONL="$DIR/$ALT_JSONL"; fi
+          
+          # Verify reference files exist and are NOT AppleDouble files
+          if [ ! -s "$JSONL" ] || [[ "$(basename "$JSONL")" =~ ^\._.*$ ]]; then
+            echo "🔍 JSONL issue - checking for alternatives..."
+            ALT_JSONL=$(find "$DIR" -name "*-Data.db.jsonl" ! -name "._*" ! -path "*/._*" | grep -v "^\._" | head -n1)
+            if [ -n "$ALT_JSONL" ] && [ -s "$ALT_JSONL" ]; then 
+              JSONL="$ALT_JSONL"
+              echo "✅ Found alternative JSONL: $JSONL"
+            fi
           fi
-          if [ ! -s "$STATS" ]; then
-            ALT_STATS=$(basename "$STATS")
-            if [ -s "$DIR/$ALT_STATS" ]; then STATS="$DIR/$ALT_STATS"; fi
+          
+          if [ ! -s "$STATS" ] || [[ "$(basename "$STATS")" =~ ^\._.*$ ]]; then
+            echo "🔍 Stats issue - checking for alternatives..."
+            ALT_STATS=$(find "$DIR" -name "*-Statistics.db.txt" ! -name "._*" ! -path "*/._*" | grep -v "^\._" | head -n1)
+            if [ -n "$ALT_STATS" ] && [ -s "$ALT_STATS" ]; then 
+              STATS="$ALT_STATS"
+              echo "✅ Found alternative Stats: $STATS"
+            fi
           fi
           test -s "$JSONL" || (echo "❌ Missing Data JSONL: $JSONL"; exit 1)
           test -s "$STATS" || (echo "❌ Missing Statistics: $STATS"; exit 1)

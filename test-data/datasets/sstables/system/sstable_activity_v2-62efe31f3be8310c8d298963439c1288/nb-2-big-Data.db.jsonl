@@ -1,0 +1,8 @@
+{"table kind":"REGULAR","partition":{"key":["system","table_estimates","2"],"position":45,"deletion_info":{"marked_deleted":"2025-09-04T23:42:23.278001Z","local_delete_time":"2025-09-04T23:42:23Z"}},"rows":[]}
+{"table kind":"REGULAR","partition":{"key":["system","size_estimates","2"],"position":90,"deletion_info":{"marked_deleted":"2025-09-04T23:42:23.272Z","local_delete_time":"2025-09-04T23:42:23Z"}},"rows":[]}
+{"table kind":"REGULAR","partition":{"key":["system","table_estimates","4"],"position":136,"deletion_info":{"marked_deleted":"2025-09-04T23:42:23.279Z","local_delete_time":"2025-09-04T23:42:23Z"}},"rows":[]}
+{"table kind":"REGULAR","partition":{"key":["system","size_estimates","1"],"position":181,"deletion_info":{"marked_deleted":"2025-09-04T23:42:23.270001Z","local_delete_time":"2025-09-04T23:42:23Z"}},"rows":[]}
+{"table kind":"REGULAR","partition":{"key":["system","table_estimates","3"],"position":227,"deletion_info":{"marked_deleted":"2025-09-04T23:42:23.278003Z","local_delete_time":"2025-09-04T23:42:23Z"}},"rows":[]}
+{"table kind":"REGULAR","partition":{"key":["system","size_estimates","4"],"position":272,"deletion_info":{"marked_deleted":"2025-09-04T23:42:23.273002Z","local_delete_time":"2025-09-04T23:42:23Z"}},"rows":[]}
+{"table kind":"REGULAR","partition":{"key":["system","table_estimates","1"],"position":318,"deletion_info":{"marked_deleted":"2025-09-04T23:42:23.279002Z","local_delete_time":"2025-09-04T23:42:23Z"}},"rows":[]}
+{"table kind":"REGULAR","partition":{"key":["system","size_estimates","3"],"position":363,"deletion_info":{"marked_deleted":"2025-09-04T23:42:23.273Z","local_delete_time":"2025-09-04T23:42:23Z"}},"rows":[]}

@@ -1,5 +1,5 @@
 {
-  "file_path": "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-db3c3b9089e111f083a7cf754256a948/nb-1-big-Summary.db",
+  "file_path": "../test-data/datasets/sstables/test_collections/collection_table-db3c3b9089e111f083a7cf754256a948/nb-1-big-Summary.db",
   "entry_count": 0,
   "token_range": [
     0,

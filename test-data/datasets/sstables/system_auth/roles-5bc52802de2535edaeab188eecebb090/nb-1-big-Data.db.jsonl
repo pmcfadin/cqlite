@@ -1,0 +1,1 @@
+{"table kind":"REGULAR","partition":{"key":["cassandra"],"position":23},"rows":[{"type":"row","position":23,"liveness_info":{"tstamp":"1970-01-01T00:00:00Z"},"cells":[{"name":"can_login","value":true},{"name":"is_superuser","value":true},{"name":"salted_hash","value":"$2a$10$w5aLYa87s1/G3.c0tKLdVOeuqhIHGArkPAl57LeER0xko0ZzNJtK."}]}]}

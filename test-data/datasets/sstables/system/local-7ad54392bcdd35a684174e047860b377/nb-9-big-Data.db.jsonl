@@ -1,0 +1,1 @@
+{"table kind":"REGULAR","partition":{"key":["local"],"position":19},"rows":[{"type":"row","position":19,"liveness_info":{"tstamp":"2025-09-04T22:52:41.759Z"},"cells":[{"name":"schema_version","value":"9f56c862-64d7-3b40-a957-b522ff624ee5"}]}]}
