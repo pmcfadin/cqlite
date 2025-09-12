@@ -12,7 +12,7 @@ use cqlite_core::{
     storage::sstable::statistics_reader::StatisticsReader,
     testing::dataset_helpers::{
         DatasetError, TableInfo, derive_reference_paths_from_data_db, list_tables, load_metadata,
-        parse_sstablemetadata_text, resolve_table_to_sstable_path,
+        parse_sstablemetadata_text, resolve_table_to_sstable_path, should_ignore_file,
     },
 };
 use serde_json;
@@ -86,7 +86,7 @@ impl StatisticsParityValidator {
                     while let Ok(Some(e)) = rd.next_entry().await {
                         let path = e.path();
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with("._") {
+                            if should_ignore_file(name) {
                                 continue;
                             }
                             if name.ends_with("-Statistics.db") {

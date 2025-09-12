@@ -8,7 +8,7 @@ use cqlite_core::{
     storage::sstable::statistics_reader::StatisticsReader,
     testing::dataset_helpers::{
         DatasetError, derive_reference_paths_from_data_db, list_tables, read_jsonl_rows,
-        resolve_table_to_sstable_path,
+        resolve_table_to_sstable_path, should_ignore_file,
     },
 };
 use std::path::PathBuf;
@@ -59,8 +59,7 @@ async fn test_data_jsonl_vs_statistics_row_counts() -> CqliteResult<()> {
         while let Some(entry) = read.next_entry().await? {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                // Skip AppleDouble files (macOS metadata files with ._ prefix)
-                if name.starts_with("._") {
+                if should_ignore_file(name) {
                     continue;
                 }
                 if !name.ends_with("-Data.db") {

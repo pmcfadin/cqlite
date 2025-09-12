@@ -1,6 +1,11 @@
 //! Minimal dataset helpers for Issue #78
 //!
 //! Provides simple functions to resolve canonical dataset paths from metadata.yml
+//!
+//! ## AppleDouble File Handling
+//! This module includes robust filtering for AppleDouble files (macOS metadata files
+//! with ._ prefix) to prevent CI test failures. All file iteration functions use
+//! should_ignore_file() to consistently filter these metadata files.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -189,6 +194,15 @@ pub fn list_tables_at(
     Ok(tables)
 }
 
+/// Check if a filename should be ignored (AppleDouble or other metadata files)
+/// 
+/// AppleDouble files are macOS metadata files with ._ prefix that should be
+/// ignored when scanning for SSTable files to prevent CI test failures.
+pub fn should_ignore_file(filename: &str) -> bool {
+    // Filter AppleDouble files (macOS metadata with ._ prefix)
+    filename.starts_with("._")
+}
+
 /// Check if a directory contains SSTable files
 fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
     let entries = fs::read_dir(dir)?;
@@ -199,8 +213,7 @@ fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
 
         if path.is_file() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                // Skip AppleDouble files (macOS metadata files with ._ prefix)
-                if name.starts_with("._") {
+                if should_ignore_file(name) {
                     continue;
                 }
                 if name.ends_with("-Data.db") {

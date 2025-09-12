@@ -16,7 +16,7 @@ use cqlite_core::{
     storage::sstable::index_reader::IndexReader,
     testing::dataset_helpers::{
         derive_reference_paths_from_data_db, list_tables, load_metadata, read_jsonl_rows,
-        resolve_table_to_sstable_path,
+        resolve_table_to_sstable_path, should_ignore_file,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -739,8 +739,7 @@ fn find_data_file(sstable_dir: &Path) -> CqliteResult<PathBuf> {
         let path = entry.path();
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            // Skip AppleDouble files (macOS metadata files with ._ prefix)
-            if name.starts_with("._") {
+            if should_ignore_file(name) {
                 continue;
             }
             if name.ends_with("-Data.db") {

@@ -300,6 +300,10 @@ impl ParserConfig {
     }
 
     /// Create a fast configuration optimized for performance
+    /// 
+    /// This configuration enables parallel processing which requires a minimum of 2 worker threads.
+    /// The thread count is automatically set to max(available_cpus, 2) to ensure compatibility
+    /// with the parallel feature even in single-core CI environments.
     pub fn fast() -> Self {
         Self {
             backend: ParserBackend::Nom,
@@ -313,7 +317,9 @@ impl ParserConfig {
             performance: PerformanceSettings {
                 optimization_level: 3,
                 enable_jit: true,
-                worker_threads: (num_cpus::get() as u32).max(2), // Ensure at least 2 threads for parallel feature
+                // Ensure at least 2 threads for parallel feature compatibility
+                // This prevents validation failures in single-core CI environments
+                worker_threads: (num_cpus::get() as u32).max(2),
                 ..Default::default()
             },
             ..Default::default()
@@ -502,6 +508,11 @@ impl ParserConfig {
             return Err("Worker threads must be greater than 0".to_string());
         }
 
+        // Validate buffer sizes are reasonable
+        if self.performance.stream_buffer_size < 1024 {
+            return Err("Stream buffer size should be at least 1KB for efficiency".to_string());
+        }
+
         if self.performance.optimization_level > 3 {
             return Err("Optimization level must be 0-3".to_string());
         }
@@ -513,7 +524,7 @@ impl ParserConfig {
 
         // Check feature compatibility
         if self.has_feature(&ParserFeature::Parallel) && self.performance.worker_threads == 1 {
-            return Err("Parallel parsing requires more than 1 worker thread".to_string());
+            return Err("Parallel parsing requires at least 2 worker threads. Use ParserConfig::fast() for automatic thread count adjustment.".to_string());
         }
 
         if self.has_feature(&ParserFeature::Streaming)

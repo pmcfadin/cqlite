@@ -53,66 +53,20 @@ jobs:
           test -f test-data/datasets/metadata.yml
           find test-data/datasets/sstables -name "*-Data.db" | head -n 1
 
-      - name: Comprehensive Environment Diagnosis
+      - name: Validate environment
         run: |
-          echo "🔍 COMPREHENSIVE CI ENVIRONMENT DIAGNOSIS"
-          echo "=========================================="
-          
-          echo "📁 Working Directory Structure:"
-          pwd
-          ls -la
-          
-          echo "📊 Dataset Directory Analysis:"
-          echo "test-data structure:"
-          find test-data -type f -name "*.db" | head -20 || echo "No .db files found"
-          echo "Total .db files: $(find test-data -name '*.db' | wc -l)"
-          
-          echo "🏗️ Rust Environment:"
+          echo "🔧 Environment validation"
           rustc --version
           cargo --version
-          echo "RUST_LOG: ${RUST_LOG:-not set}"
-          
-          echo "🧪 Test Environment Paths:"
-          echo "Current PATH: $PATH"
-          echo "HOME: $HOME"
-          echo "TMPDIR: ${TMPDIR:-not set}"
-          
-          echo "💾 Available Disk Space:"
-          df -h . || echo "df not available"
-          
-          echo "🔧 Integration Test Specific Checks:"
-          echo "Looking for test database creation paths..."
-          if [ -d "test-env" ]; then
-            echo "test-env directory exists:"
-            find test-env -name "*.db" | head -10 || echo "No .db files in test-env"
-          else
-            echo "test-env directory does not exist"
-          fi
-          
-          echo "🌍 Environment Variables:"
-          env | grep -E "(RUST|CARGO|TEST)" | sort || echo "No relevant env vars"
-          
-          echo "📋 Memory and Process Info:"
-          free -h 2>/dev/null || echo "free command not available"
-          ps aux | head -5 || echo "ps command not available"
-          
-          echo "✅ Environment diagnosis complete"
+          # Quick validation that datasets are available
+          echo "Dataset files: $(find test-data -name '*.db' | wc -l)"
 
-      - name: Run tests with enhanced debugging
+      - name: Run tests
         env:
           RUST_LOG: debug
           RUST_BACKTRACE: full
         run: |
-          echo "🧪 Running integration tests with full debugging..."
-          
-          # Run the specific failing tests first with maximum verbosity (now ignored with state_machine feature)
-          echo "Testing error handling specifically:"
-          cargo test test_error_handling --package cqlite-core --lib --features state_machine -- --nocapture --exact || true
-          
-          echo "Testing real world query examples specifically:"
-          cargo test test_real_world_query_examples --package cqlite-core --lib --features state_machine -- --nocapture --exact || true
-          
-          echo "Running all tests:"
+          echo "🧪 Running tests..."
           cargo test --package cqlite-core --all-features
 
 

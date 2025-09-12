@@ -5,7 +5,7 @@
 //! for real Cassandra 5 data access with deterministic test tables.
 
 use cqlite_core::testing::dataset_helpers::{
-    derive_reference_paths_from_data_db, list_tables, resolve_table_to_sstable_path,
+    derive_reference_paths_from_data_db, list_tables, resolve_table_to_sstable_path, should_ignore_file,
 };
 use cqlite_core::{
     Config, Result, platform::Platform, storage::sstable::summary_reader::SummaryReader,
@@ -614,8 +614,7 @@ fn find_data_file(sstable_dir: &Path) -> Result<PathBuf> {
         let path = entry.path();
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            // Skip AppleDouble files (macOS metadata files with ._ prefix)
-            if name.starts_with("._") {
+            if should_ignore_file(name) {
                 continue;
             }
             if name.ends_with("-Data.db") {
