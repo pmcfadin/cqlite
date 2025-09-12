@@ -76,6 +76,14 @@ fi
 # Generate Cassandra tool references for each Data.db
 echo "[export] Generating Cassandra tool references (Data dump, Summary, Statistics) ..."
 
+# Initialize references manifest (refs_version v2)
+REF_MANIFEST="$DATASETS_DIR/references.yml"
+{
+  echo "refs_version: 2"
+  echo "generated_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  echo "tables:"
+} > "$REF_MANIFEST"
+
 # Detect tool availability in image
 SUMMARY_TOOL="/opt/cassandra/tools/bin/sstablesummary"
 SUMMARY_AVAILABLE="$($ENGINE_CMD run --rm docker.io/library/cassandra:5.0 bash -lc "test -x '$SUMMARY_TOOL' && echo yes || echo no" || true)"
@@ -83,8 +91,8 @@ if [ "$SUMMARY_AVAILABLE" != "yes" ]; then
   echo "[export] NOTE: sstablesummary not found in image; Summary generation will be skipped"
 fi
 
-# Mount root once to avoid per-dir mount issues
-MOUNT_ROOT="$DATASETS_DIR/sstables"
+# Mount root once to avoid per-dir mount issues (ensure absolute path for Docker)
+MOUNT_ROOT="$(cd "$DATASETS_DIR/sstables" && pwd)"
 
 # Podman rootless often needs UID/GID remap for bind mounts
 VOLUME_FLAGS=""
@@ -97,6 +105,11 @@ while IFS= read -r -d '' DATA_FILE; do
   DIR="$(dirname "$DATA_FILE")"
   BASE="$(basename "$DATA_FILE")"
   PREFIX_NAME="${BASE%-Data.db}"
+
+  # Derive keyspace and table from directory structure: sstables/<keyspace>/<table>-<hash>
+  KEYSPACE="$(basename "$(dirname "$DIR")")"
+  TABLE_DIR_NAME="$(basename "$DIR")"
+  TABLE="${TABLE_DIR_NAME%%-*}"
 
   DATA_JSONL="$DIR/${PREFIX_NAME}-Data.db.jsonl"
   SUMMARY_TXT="$DIR/${PREFIX_NAME}-Summary.db.txt"
@@ -156,6 +169,23 @@ PY
     echo "[export] ERROR: Summary output is empty: $SUMMARY_TXT" >&2
     exit 1
   fi
+
+  # Append entry to references manifest
+  GEN_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  printf -- "  - keyspace: %s\n" "$KEYSPACE" >> "$REF_MANIFEST"
+  printf -- "    table: %s\n" "$TABLE" >> "$REF_MANIFEST"
+  printf -- "    sstable_dir: \"%s\"\n" "$DIR" >> "$REF_MANIFEST"
+  printf -- "    prefix: %s\n" "$PREFIX_NAME" >> "$REF_MANIFEST"
+  printf -- "    references:\n" >> "$REF_MANIFEST"
+  printf -- "      data_jsonl:\n        present: %s\n        path: \"%s\"\n" "true" "$DATA_JSONL" >> "$REF_MANIFEST"
+  printf -- "      statistics_txt:\n        present: %s\n        path: \"%s\"\n" "true" "$STATS_TXT" >> "$REF_MANIFEST"
+  if [ "$SUMMARY_AVAILABLE" = "yes" ]; then
+    SUM_PRESENT=true
+  else
+    SUM_PRESENT=false
+  fi
+  printf -- "      summary_txt:\n        present: %s\n        path: \"%s\"\n" "$SUM_PRESENT" "$SUMMARY_TXT" >> "$REF_MANIFEST"
+  printf -- "    generated_at: %s\n" "$GEN_TS" >> "$REF_MANIFEST"
 done < <(find "$DATASETS_DIR/sstables" -type f -name "*-Data.db" -print0)
 
 echo "[export] Completed generating sstabledump reference JSONs."
