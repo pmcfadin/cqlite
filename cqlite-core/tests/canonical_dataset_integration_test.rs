@@ -58,9 +58,18 @@ keyspaces:
 
     // Test 1: Load metadata using canonical helper
     let metadata = load_metadata().expect("Failed to load metadata");
-    assert_eq!(metadata.keyspaces.len(), 2);
-    assert_eq!(metadata.keyspaces[0].name, "test_basic");
-    assert_eq!(metadata.keyspaces[0].tables.len(), 2);
+    // Be resilient to ordering differences across serde/yaml implementations
+    let ks_names: std::collections::HashSet<_> =
+        metadata.keyspaces.iter().map(|k| k.name.as_str()).collect();
+    assert!(ks_names.contains("test_basic"));
+    assert!(ks_names.contains("system_test"));
+    // Ensure test_basic has the expected number of tables
+    let test_basic = metadata
+        .keyspaces
+        .iter()
+        .find(|k| k.name == "test_basic")
+        .expect("missing test_basic keyspace");
+    assert_eq!(test_basic.tables.len(), 2);
 
     // Test 2: List all tables using canonical helper (replaces manual directory traversal)
     let tables = list_tables(None).expect("Failed to list tables");
@@ -125,17 +134,19 @@ fn test_migration_from_legacy_script_patterns() {
     // )
 
     // AFTER: Use canonical dataset helpers with configurable root
+    // Ensure we don't inherit any pre-existing root
     unsafe {
+        env::remove_var("CQLITE_DATASETS_ROOT");
         env::set_var("CQLITE_DATASETS_ROOT", &datasets_root);
     }
 
     // Test the error handling when no metadata exists (replaces manual directory checks)
     let result = load_metadata();
-    assert!(result.is_err());
+    assert!(result.is_err(), "expected error when metadata.yml is absent at {:?}", datasets_root);
 
     // Test table listing when no data exists (graceful fallback)
     let result = list_tables(None);
-    assert!(result.is_err());
+    assert!(result.is_err(), "expected error when metadata.yml is absent at {:?}", datasets_root);
 
     unsafe {
         env::remove_var("CQLITE_DATASETS_ROOT");
