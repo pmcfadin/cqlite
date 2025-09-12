@@ -300,7 +300,7 @@ impl ParserConfig {
     }
 
     /// Create a fast configuration optimized for performance
-    /// 
+    ///
     /// This configuration enables parallel processing which requires a minimum of 2 worker threads.
     /// The thread count is automatically set to max(available_cpus, 2) to ensure compatibility
     /// with the parallel feature even in single-core CI environments.

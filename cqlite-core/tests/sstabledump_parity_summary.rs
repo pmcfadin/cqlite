@@ -5,7 +5,8 @@
 //! for real Cassandra 5 data access with deterministic test tables.
 
 use cqlite_core::testing::dataset_helpers::{
-    derive_reference_paths_from_data_db, list_tables, resolve_table_to_sstable_path, should_ignore_file,
+    derive_reference_paths_from_data_db, list_tables, resolve_table_to_sstable_path,
+    should_ignore_file,
 };
 use cqlite_core::{
     Config, Result, platform::Platform, storage::sstable::summary_reader::SummaryReader,

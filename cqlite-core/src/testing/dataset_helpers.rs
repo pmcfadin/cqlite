@@ -195,7 +195,7 @@ pub fn list_tables_at(
 }
 
 /// Check if a filename should be ignored (AppleDouble or other metadata files)
-/// 
+///
 /// AppleDouble files are macOS metadata files with ._ prefix that should be
 /// ignored when scanning for SSTable files to prevent CI test failures.
 pub fn should_ignore_file(filename: &str) -> bool {
