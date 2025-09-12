@@ -125,28 +125,42 @@ jobs:
           fi
           
           echo "✅ Selected Data file: $DATA"
-          PREFIX=${DATA%-Data.db}
           
-          # Build reference paths with bulletproof AppleDouble exclusion
+          # Build reference paths from the selected data file
+          PREFIX=${DATA%-Data.db}
           JSONL="${PREFIX}-Data.db.jsonl"
           STATS="${PREFIX}-Statistics.db.txt"
           
-          # Verify reference files exist and are NOT AppleDouble files
-          if [ ! -s "$JSONL" ] || [[ "$(basename "$JSONL")" =~ ^\._.*$ ]]; then
-            echo "🔍 JSONL issue - checking for alternatives..."
-            ALT_JSONL=$(find "$DIR" -name "*-Data.db.jsonl" ! -name "._*" ! -path "*/._*" | grep -v "^\._" | head -n1)
+          echo "🔍 Looking for reference files:"
+          echo "  Expected JSONL: $JSONL"
+          echo "  Expected Stats: $STATS"
+          
+          # Check if expected reference files exist
+          if [ ! -s "$JSONL" ]; then
+            echo "⚠️ Expected JSONL not found, searching for alternatives..."
+            echo "Available JSONL files in $DIR:"
+            find "$DIR" -name "*.jsonl" ! -name "._*" | head -5
+            ALT_JSONL=$(find "$DIR" -name "*-Data.db.jsonl" ! -name "._*" | head -n1)
             if [ -n "$ALT_JSONL" ] && [ -s "$ALT_JSONL" ]; then 
               JSONL="$ALT_JSONL"
-              echo "✅ Found alternative JSONL: $JSONL"
+              echo "✅ Using alternative JSONL: $JSONL"
+            else
+              echo "❌ No valid JSONL files found in $DIR"
+              exit 1
             fi
           fi
           
-          if [ ! -s "$STATS" ] || [[ "$(basename "$STATS")" =~ ^\._.*$ ]]; then
-            echo "🔍 Stats issue - checking for alternatives..."
-            ALT_STATS=$(find "$DIR" -name "*-Statistics.db.txt" ! -name "._*" ! -path "*/._*" | grep -v "^\._" | head -n1)
+          if [ ! -s "$STATS" ]; then
+            echo "⚠️ Expected Stats not found, searching for alternatives..."
+            echo "Available Stats files in $DIR:"
+            find "$DIR" -name "*Statistics*" ! -name "._*" | head -5
+            ALT_STATS=$(find "$DIR" -name "*-Statistics.db.txt" ! -name "._*" | head -n1)
             if [ -n "$ALT_STATS" ] && [ -s "$ALT_STATS" ]; then 
               STATS="$ALT_STATS"
-              echo "✅ Found alternative Stats: $STATS"
+              echo "✅ Using alternative Stats: $STATS"
+            else
+              echo "❌ No valid Stats files found in $DIR"  
+              exit 1
             fi
           fi
           test -s "$JSONL" || (echo "❌ Missing Data JSONL: $JSONL"; exit 1)
