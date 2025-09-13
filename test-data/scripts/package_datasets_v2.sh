@@ -63,47 +63,5 @@ if [ ! -f "$DATASETS_DIR/references.yml" ]; then
   echo "⚠️ references.yml not found; ensure export.sh generated it before packaging" >&2
 fi
 
-echo "📦 Creating AppleDouble-safe tarball: $ARCHIVE_PATH"
-export COPYFILE_DISABLE=1
-
-# Ensure parent dir exists
-mkdir -p "$(dirname "$ARCHIVE_PATH")"
-
-# Stage into a temporary directory with desired layout: test-data/datasets
-STAGING_DIR="$(mktemp -d)"
-trap 'rm -rf "$STAGING_DIR"' EXIT
-mkdir -p "$STAGING_DIR/test-data"
-cp -R "$DATASETS_DIR" "$STAGING_DIR/test-data/datasets"
-
-# Create tar.gz from staging root (BSD tar compatible)
-tar --exclude '._*' --exclude '.DS_Store' \
-  -C "$STAGING_DIR" -czf "$ARCHIVE_PATH" \
-  test-data/datasets
-
-echo "✅ Archive created: $ARCHIVE_PATH"
-
-echo "🔐 Computing SHA256..."
-if command -v shasum >/dev/null 2>&1; then
-  shasum -a 256 "$ARCHIVE_PATH" | tee "${ARCHIVE_PATH}.sha256"
-else
-  sha256sum "$ARCHIVE_PATH" | tee "${ARCHIVE_PATH}.sha256"
-fi
-
-echo "✅ SHA256 written to ${ARCHIVE_PATH}.sha256"
-
-cat <<EOF
-
-Next steps:
-1) Create GitHub release and upload asset:
-   gh release create ${RELEASE_TAG:-<release-tag>} "$ARCHIVE_PATH" \
-     --title "
-${RELEASE_TAG:-<release-tag>}" \
-     --notes "Canonical Cassandra 5 datasets with precomputed refs (JSONL, Statistics).\n\nSHA256:\n\n$(cat "${ARCHIVE_PATH}.sha256")"
-
-2) Update CI env values:
-   DATASET_TAG=${RELEASE_TAG:-<release-tag>}
-   DATASET_ASSET=$(basename "$ARCHIVE_PATH")
-   DATASET_SHA256=<paste sha256>
-EOF
-
-
+echo "⚠️ package_datasets_v2.sh is deprecated. Use package_datasets.sh with --type full|refs"
+echo "   Example: test-data/scripts/package_datasets.sh --type refs --suffix v2"
