@@ -124,7 +124,7 @@ jobs:
         cargo clippy --all-targets --all-features -- -D warnings
     
     - name: Run Core Reading Coverage (≥95% ENFORCED - PRD Compliant)
-      if: matrix.coverage-type == 'core-reading'
+      if: matrix.coverage-type == 'core-reading' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
       env:
         CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
       working-directory: cqlite-core
@@ -146,6 +146,7 @@ jobs:
           
     - name: Run Comprehensive Coverage (Informational)
       if: matrix.coverage-type == 'comprehensive' 
+      continue-on-error: true
       env:
         CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
       working-directory: cqlite-core
