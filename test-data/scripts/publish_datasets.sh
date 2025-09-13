@@ -85,14 +85,14 @@ echo "✅ Published $ASSET_NAME to release $TAG"
 cat <<EOF
 
 CI configuration hints:
-- DATASET_TAG=$TAG
-- DATASET_ASSET=$ASSET_NAME
-- DATASET_SHA256=(value from ${SHA256_PATH})
+- DATASET_TAG=${TAG}
+- DATASET_ASSET=${ASSET_NAME}
+- DATASET_SHA256=$(cut -d ' ' -f1 "${SHA256_PATH}")
 
 Download example in CI:
-  gh release download "$DATASET_TAG" --pattern "$DATASET_ASSET" --dir /tmp
-  echo "\${DATASET_SHA256}  /tmp/\${DATASET_ASSET}" | sha256sum -c -
-  tar -xzf /tmp/"\${DATASET_ASSET}" -C .
+  gh release download "${TAG}" --pattern "${ASSET_NAME}" --dir /tmp
+  echo "$(cut -d ' ' -f1 "${SHA256_PATH}")  /tmp/${ASSET_NAME}" | sha256sum -c -
+  tar -xzf /tmp/"${ASSET_NAME}" -C .
 
 EOF
 
