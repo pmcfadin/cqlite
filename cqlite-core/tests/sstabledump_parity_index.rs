@@ -220,13 +220,43 @@ async fn validate_table_index_parity(
         table_info.keyspace, table_info.table
     );
 
+    // Accept reference-only directories (no Data.db) by falling back to reference files later
     let sstable_dir = resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table)
         .map_err(|e| {
             cqlite_core::Error::corruption(format!("Failed to resolve table path: {e}"))
         })?;
 
     // Find Data.db and derive Index.db
-    let data_file = find_data_file(&sstable_dir)?;
+    // Try to find Data.db; if not present, attempt to derive from references by locating any JSONL
+    let data_file = match find_data_file(&sstable_dir) {
+        Ok(p) => p,
+        Err(_) => {
+            // Look for any *-Data.db.jsonl and reconstruct the Data.db path prefix
+            let mut jsonl_candidate: Option<PathBuf> = None;
+            if let Ok(entries) = std::fs::read_dir(&sstable_dir) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if should_ignore_file(name) {
+                            continue;
+                        }
+                        if name.ends_with("-Data.db.jsonl") {
+                            jsonl_candidate = Some(entry.path());
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(jsonl) = jsonl_candidate {
+                let stem = jsonl.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let prefix = &stem[..stem.len() - ".jsonl".len()];
+                sstable_dir.join(prefix)
+            } else {
+                return Err(cqlite_core::Error::corruption(
+                    "No *-Data.db or JSONL reference found to derive prefix".to_string(),
+                ));
+            }
+        }
+    };
     let index_file = derive_companion_file(&data_file, "Index.db")?;
 
     if !index_file.exists() {

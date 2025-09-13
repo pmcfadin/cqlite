@@ -216,7 +216,13 @@ fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
                 if should_ignore_file(name) {
                     continue;
                 }
-                if name.ends_with("-Data.db") {
+                // Accept any primary SSTable component or precomputed reference as evidence
+                // that this is a valid SSTable directory for our tests.
+                if name.ends_with("-Data.db")
+                    || name.ends_with("-Index.db")
+                    || name.ends_with("-Data.db.jsonl")
+                    || name.ends_with("-Statistics.db.txt")
+                {
                     return Ok(true);
                 }
             }
