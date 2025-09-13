@@ -2,9 +2,7 @@
 //! This test replaces usage of non-canonical paths like "tests/test-data/real-cassandra"
 //! with the new canonical dataset helpers from Issue #78
 
-use cqlite_core::testing::{
-    list_tables_at, load_metadata_at, resolve_table_to_sstable_path_at,
-};
+use cqlite_core::testing::{list_tables_at, load_metadata_at, resolve_table_to_sstable_path_at};
 use std::fs;
 use tempfile::TempDir;
 
@@ -80,12 +78,9 @@ keyspaces:
     assert!(table_names.contains(&"system_test.keyspaces".to_string()));
 
     // Test 3: Resolve table to SSTable path (replaces hardcoded path construction)
-    let simple_table_path = resolve_table_to_sstable_path_at(
-        &datasets_root,
-        "test_basic",
-        "simple_table",
-    )
-    .expect("Failed to resolve simple_table path");
+    let simple_table_path =
+        resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "simple_table")
+            .expect("Failed to resolve simple_table path");
     assert!(simple_table_path.exists());
     assert!(simple_table_path.ends_with("simple_table-abc123def456"));
 
@@ -99,12 +94,12 @@ keyspaces:
     assert!(users_path.join("nb-1-big-Data.db").exists());
 
     // Test 5: Filter tables by keyspace (replaces manual filtering)
-    let basic_tables =
-        list_tables_at(&datasets_root, Some("test_basic")).expect("Failed to list test_basic tables");
+    let basic_tables = list_tables_at(&datasets_root, Some("test_basic"))
+        .expect("Failed to list test_basic tables");
     assert_eq!(basic_tables.len(), 2);
 
-    let system_tables =
-        list_tables_at(&datasets_root, Some("system_test")).expect("Failed to list system_test tables");
+    let system_tables = list_tables_at(&datasets_root, Some("system_test"))
+        .expect("Failed to list system_test tables");
     assert_eq!(system_tables.len(), 1);
     assert_eq!(system_tables[0].table, "keyspaces");
 
