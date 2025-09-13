@@ -138,23 +138,65 @@ pub fn resolve_table_to_sstable_path_at(
         });
     }
 
-    // Find table directory (format: table-{hash})
-    let entries = fs::read_dir(&sstables_dir)?;
+    // Find table directories (format: table-{hash}) and prefer one with Data.db
+    let mut data_db_candidate: Option<PathBuf> = None;
+    let mut index_db_candidate: Option<PathBuf> = None;
+    let mut any_candidate: Option<PathBuf> = None;
 
-    for entry in entries {
+    for entry in fs::read_dir(&sstables_dir)? {
         let entry = entry?;
         let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if !name.starts_with(&format!("{}-", table)) {
+                continue;
+            }
+        }
 
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with(&format!("{}-", table)) {
-                    // Verify this directory has SSTable files
-                    if has_sstable_files(&path)? {
-                        return Ok(path);
+        // Scan the directory to classify candidates
+        let mut has_data = false;
+        let mut has_index = false;
+        let mut has_any = false;
+        if let Ok(files) = fs::read_dir(&path) {
+            for f in files.flatten() {
+                if let Some(fname) = f.file_name().to_str() {
+                    if should_ignore_file(fname) {
+                        continue;
+                    }
+                    if fname.ends_with("-Data.db") {
+                        has_data = true;
+                        has_any = true;
+                        break;
+                    } else if fname.ends_with("-Index.db") {
+                        has_index = true;
+                        has_any = true;
+                    } else if fname.ends_with("-Data.db.jsonl")
+                        || fname.ends_with("-Statistics.db.txt")
+                        || fname.ends_with("-Summary.db.txt")
+                    {
+                        has_any = true;
                     }
                 }
             }
         }
+
+        if has_data {
+            data_db_candidate = Some(path);
+            // Highest priority met; we can stop searching further
+            break;
+        }
+        if has_index && index_db_candidate.is_none() {
+            index_db_candidate = Some(path.clone());
+        }
+        if has_any && any_candidate.is_none() {
+            any_candidate = Some(path.clone());
+        }
+    }
+
+    if let Some(p) = data_db_candidate.or(index_db_candidate).or(any_candidate) {
+        return Ok(p);
     }
 
     Err(DatasetError::DirectoryNotFound {
