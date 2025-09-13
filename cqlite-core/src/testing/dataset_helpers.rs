@@ -370,6 +370,54 @@ pub fn parse_sstablemetadata_text(
     Ok(map)
 }
 
+// === references.yml support (Issue #89 deterministic selection) ===
+
+#[derive(Debug, Clone, Deserialize)]
+struct RefManifest {
+    #[allow(dead_code)]
+    refs_version: Option<u32>,
+    #[allow(dead_code)]
+    generated_at: Option<String>,
+    tables: Vec<RefEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RefEntry {
+    keyspace: String,
+    table: String,
+    #[allow(dead_code)]
+    sstable_dir: String,
+    #[allow(dead_code)]
+    prefix: String,
+}
+
+/// Load references.yml if present
+pub fn load_references_manifest_at(root: &Path) -> Option<RefManifest> {
+    let path = root.join("references.yml");
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_yaml::from_str::<RefManifest>(&content).ok()
+}
+
+/// Resolve a stable table directory using references.yml when available.
+/// We normalize absolute paths inside the manifest by replacing their root
+/// with the provided datasets root.
+pub fn resolve_table_dir_via_manifest(root: &Path, keyspace: &str, table: &str) -> Option<PathBuf> {
+    let manifest = load_references_manifest_at(root)?;
+    let entry = manifest
+        .tables
+        .into_iter()
+        .find(|e| e.keyspace == keyspace && e.table == table)?;
+
+    // Extract the hashed directory basename from the recorded path
+    let hashed_dir_name = std::path::Path::new(&entry.sstable_dir)
+        .file_name()
+        .and_then(|n| n.to_str())?
+        .to_string();
+
+    let normalized = root.join("sstables").join(keyspace).join(hashed_dir_name);
+    Some(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

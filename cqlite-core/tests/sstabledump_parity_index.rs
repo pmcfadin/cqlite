@@ -221,10 +221,19 @@ async fn validate_table_index_parity(
     );
 
     // Accept reference-only directories (no Data.db) by falling back to reference files later
-    let mut sstable_dir = resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table)
-        .map_err(|e| {
-            cqlite_core::Error::corruption(format!("Failed to resolve table path: {e}"))
-        })?;
+    // Prefer references.yml deterministic mapping when present
+    let root = std::env::var("CQLITE_DATASETS_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../test-data/datasets"));
+    let mut sstable_dir = cqlite_core::testing::dataset_helpers::resolve_table_dir_via_manifest(
+        &root,
+        &table_info.keyspace,
+        &table_info.table,
+    )
+    .unwrap_or_else(|| {
+        resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table)
+            .expect("Failed to resolve table path via metadata.yml")
+    });
 
     // Prefer a sibling hashed directory that actually contains Index.db
     if !dir_contains_index_db(&sstable_dir)? {
