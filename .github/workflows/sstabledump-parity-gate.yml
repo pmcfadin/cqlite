@@ -184,6 +184,12 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Index.db Parity Validation"
+          COUNT=$(find test-data/datasets -name '*-Index.db' | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ℹ️ No Index.db files present in datasets; skipping Index.db parity tests"
+            echo "::endgroup::"
+            exit 0
+          fi
           cargo test --release --test sstabledump_parity_index -- --nocapture
           echo "::endgroup::"
 
