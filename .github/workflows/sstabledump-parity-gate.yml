@@ -136,6 +136,34 @@ jobs:
             mkdir -p test-data/datasets
           fi
 
+      - name: Dataset diagnostics (paths and Index.db presence)
+        run: |
+          echo "CQLITE_DATASETS_ROOT=${{ github.workspace }}/test-data/datasets"
+          echo "::group::Dataset file counts"
+          echo "Data.db count: $(find test-data/datasets -name '*-Data.db' | wc -l)"
+          echo "Index.db count: $(find test-data/datasets -name '*-Index.db' | wc -l)"
+          echo "JSONL count: $(find test-data/datasets -name '*-Data.db.jsonl' | wc -l)"
+          echo "Statistics count: $(find test-data/datasets -name '*-Statistics.db.txt' | wc -l)"
+          echo "::endgroup::"
+
+          echo "::group::Key tables overview"
+          for pair in \
+            "test_basic simple_table" \
+            "test_timeseries sensor_data" \
+            "test_wide_rows wide_partition_table" \
+            "test_collections collection_table"; do
+            set -- $pair
+            ks=$1; tbl=$2
+            dir=$(find test-data/datasets/sstables/$ks -maxdepth 1 -type d -name "$tbl-*" | head -n1)
+            echo "[$ks.$tbl] dir=$dir"
+            if [ -n "$dir" ]; then
+              ls -1 "$dir" | grep -E 'Data.db$|Index.db$|jsonl$|Statistics.db.txt$' || true
+            else
+              echo "No directory found for $ks.$tbl"
+            fi
+          done
+          echo "::endgroup::"
+
       - name: Build CQLite
         run: |
           cargo build --release
