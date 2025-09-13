@@ -143,50 +143,65 @@ jobs:
           "test_collections/collection_table"
         )
         for T in "${REQUIRED_TABLES[@]}"; do
-          # More robust search - find any directory matching the table name pattern
           echo "🔍 Searching for table: $T"
-          DIR=$(find test-data/datasets/sstables -path "*/$T-*" -type d | head -n1)
-          if [ -z "$DIR" ]; then
-            # Debug what's actually available
+          # Collect all candidate directories for this table
+          mapfile -t CANDIDATES < <(find test-data/datasets/sstables -path "*/$T-*" -type d | sort)
+          if [ ${#CANDIDATES[@]} -eq 0 ]; then
             echo "❌ No directory found for $T, searching for alternatives..."
             echo "Available directories in $(dirname "test-data/datasets/sstables/$T"):"
-            ls -la "test-data/datasets/sstables/$(dirname "$T")/" | head -10
+            ls -la "test-data/datasets/sstables/$(dirname "$T")/" | head -10 || true
             echo "All directories containing $(basename "$T"):"
-            find test-data/datasets/sstables -name "*$(basename "$T")*" -type d | head -5
+            find test-data/datasets/sstables -name "*$(basename "$T")*" -type d | head -5 || true
             echo "❌ Missing table directory for $T"
             exit 1
           fi
-          # BULLETPROOF AppleDouble filtering - explicitly exclude all AppleDouble files
-          echo "🔍 Files in $DIR before filtering:"
-          ls -la "$DIR" | grep -E "\.(db|jsonl|txt)$" || echo "No matching files"
-          
-          # Find Data.db files, excluding AppleDouble files completely
-          DATA=$(find "$DIR" -type f -name "*-Data.db" ! -name "._*" ! -path "*/._*" | grep -v "^\._" | head -n1)
-          if [ -z "$DATA" ]; then 
-            echo "❌ No valid Data.db found in $DIR (after AppleDouble filtering)"
-            echo "Available .db files:"
-            find "$DIR" -name "*.db" | head -10
+
+          DIR=""; DATA=""; JSONL=""; STATS=""
+          # Prefer a directory that has a real Data.db
+          for C in "${CANDIDATES[@]}"; do
+            C_DATA=$(find "$C" -type f -name "*-Data.db" ! -name "._*" ! -path "*/._*" | head -n1 || true)
+            if [ -n "$C_DATA" ]; then
+              DIR="$C"; DATA="$C_DATA"; break
+            fi
+          done
+          # If none have Data.db, fall back to a directory that has both reference files
+          if [ -z "$DIR" ]; then
+            for C in "${CANDIDATES[@]}"; do
+              C_JSONL=$(find "$C" -type f -name "*-Data.db.jsonl" ! -name "._*" ! -path "*/._*" | head -n1 || true)
+              C_STATS=$(find "$C" -type f -name "*-Statistics.db.txt" ! -name "._*" ! -path "*/._*" | head -n1 || true)
+              if [ -n "$C_JSONL" ] && [ -s "$C_JSONL" ] && [ -n "$C_STATS" ] && [ -s "$C_STATS" ]; then
+                DIR="$C"; JSONL="$C_JSONL"; STATS="$C_STATS"; break
+              fi
+            done
+          fi
+
+          if [ -z "$DIR" ]; then
+            echo "❌ Could not find a suitable directory for $T with Data.db or both references"
+            printf "Candidates checked:\n%s\n" "${CANDIDATES[*]}"
             exit 1
           fi
-          
-          echo "✅ Selected Data file: $DATA"
-          
-          # Build reference paths from the selected data file
-          PREFIX=${DATA%-Data.db}
-          JSONL="${PREFIX}-Data.db.jsonl"
-          STATS="${PREFIX}-Statistics.db.txt"
-          
+
+          echo "🔍 Files in $DIR before filtering:"
+          ls -la "$DIR" | grep -E "\.(db|jsonl|txt)$" || echo "No matching files"
+
+          if [ -n "$DATA" ]; then
+            echo "✅ Selected Data file: $DATA"
+            PREFIX=${DATA%-Data.db}
+            JSONL="${PREFIX}-Data.db.jsonl"
+            STATS="${PREFIX}-Statistics.db.txt"
+          else
+            echo "ℹ️ Using reference-only directory (no Data.db present)"
+          fi
+
           echo "🔍 Looking for reference files:"
-          echo "  Expected JSONL: $JSONL"
-          echo "  Expected Stats: $STATS"
-          
-          # Check if expected reference files exist
-          if [ ! -s "$JSONL" ]; then
-            echo "⚠️ Expected JSONL not found, searching for alternatives..."
-            echo "Available JSONL files in $DIR:"
-            find "$DIR" -name "*.jsonl" ! -name "._*" | head -5
-            ALT_JSONL=$(find "$DIR" -name "*-Data.db.jsonl" ! -name "._*" | head -n1)
-            if [ -n "$ALT_JSONL" ] && [ -s "$ALT_JSONL" ]; then 
+          echo "  Expected/Selected JSONL: $JSONL"
+          echo "  Expected/Selected Stats: $STATS"
+
+          # If references not set or missing, search for alternatives within DIR
+          if [ -z "$JSONL" ] || [ ! -s "$JSONL" ]; then
+            echo "⚠️ JSONL not found at expected path, searching for alternatives..."
+            ALT_JSONL=$(find "$DIR" -type f -name "*-Data.db.jsonl" ! -name "._*" ! -path "*/._*" | head -n1 || true)
+            if [ -n "$ALT_JSONL" ] && [ -s "$ALT_JSONL" ]; then
               JSONL="$ALT_JSONL"
               echo "✅ Using alternative JSONL: $JSONL"
             else
@@ -194,20 +209,19 @@ jobs:
               exit 1
             fi
           fi
-          
-          if [ ! -s "$STATS" ]; then
-            echo "⚠️ Expected Stats not found, searching for alternatives..."
-            echo "Available Stats files in $DIR:"
-            find "$DIR" -name "*Statistics*" ! -name "._*" | head -5
-            ALT_STATS=$(find "$DIR" -name "*-Statistics.db.txt" ! -name "._*" | head -n1)
-            if [ -n "$ALT_STATS" ] && [ -s "$ALT_STATS" ]; then 
+
+          if [ -z "$STATS" ] || [ ! -s "$STATS" ]; then
+            echo "⚠️ Stats not found at expected path, searching for alternatives..."
+            ALT_STATS=$(find "$DIR" -type f -name "*-Statistics.db.txt" ! -name "._*" ! -path "*/._*" | head -n1 || true)
+            if [ -n "$ALT_STATS" ] && [ -s "$ALT_STATS" ]; then
               STATS="$ALT_STATS"
               echo "✅ Using alternative Stats: $STATS"
             else
-              echo "❌ No valid Stats files found in $DIR"  
+              echo "❌ No valid Stats files found in $DIR"
               exit 1
             fi
           fi
+
           test -s "$JSONL" || (echo "❌ Missing Data JSONL: $JSONL"; exit 1)
           test -s "$STATS" || (echo "❌ Missing Statistics: $STATS"; exit 1)
           echo "✅ References found for $T"
