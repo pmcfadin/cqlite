@@ -160,7 +160,7 @@ validation_artifacts/sstabledump/<keyspace.table>/
 ### CI Integration
 - Tests placed in `cqlite-core/tests/` for automatic pickup
 - No workflow changes required
-- Relies on existing `datasets-v1` cache
+- Relies on unified `datasets-v2` full dataset cache
 - Fast-fail behavior prevents hanging builds
 
 ## Error Handling Strategy
