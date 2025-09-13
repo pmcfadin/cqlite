@@ -61,12 +61,13 @@ jobs:
         echo "📊 Current dataset count: $DB_COUNT SSTable files"
         
         if [ "$DB_COUNT" -eq 0 ]; then
-          echo "📦 No datasets found - downloading real Cassandra 5 datasets from release..."
+          echo "📦 No datasets found - downloading full Cassandra 5 datasets from release..."
           mkdir -p test-data
-          echo "🔍 Downloading cassandra5-small-with-refs-v2.tar.gz from datasets-v2 release..."
-          gh release download datasets-v2 --pattern "cassandra5-small-with-refs-v2.tar.gz" --dir /tmp
+          echo "🔍 Downloading cassandra5-small-full.tar.gz from datasets-v2 release..."
+          gh release download datasets-v2 --pattern "cassandra5-small-full.tar.gz" --dir /tmp
+          echo "4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b  /tmp/cassandra5-small-full.tar.gz" | sha256sum -c -
           echo "📦 Extracting datasets to repo root..."
-          tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C .
+          tar -xzf /tmp/cassandra5-small-full.tar.gz -C .
           
           # Verify extraction
           NEW_DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)

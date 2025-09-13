@@ -9,8 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v2
-  DATASET_ASSET: cassandra5-small-with-refs-v2.tar.gz
-  DATASET_SHA256: 7f607a4f60a6a7467b15f015220e75f5f3c411e765f473d60c870bf08d21ccc9
+  DATASET_ASSET: cassandra5-small-full.tar.gz
+  DATASET_SHA256: 4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b
 
 jobs:
   test:

@@ -70,10 +70,11 @@ jobs:
         run: |
           DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
           if [ "$DB_COUNT" -eq 0 ]; then
-            echo "📦 Downloading real Cassandra 5 datasets from release..."
+            echo "📦 Downloading real Cassandra 5 datasets from release (full)..."
             mkdir -p test-data
-            gh release download datasets-v2 --pattern "cassandra5-small-with-refs-v2.tar.gz" --dir /tmp
-            tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C test-data
+            gh release download datasets-v2 --pattern "cassandra5-small-full.tar.gz" --dir /tmp
+            echo "4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b  /tmp/cassandra5-small-full.tar.gz" | sha256sum -c -
+            tar -xzf /tmp/cassandra5-small-full.tar.gz -C test-data
             DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
             echo "✅ Downloaded $DB_COUNT SSTable files for parity tests"
           else
@@ -184,11 +185,11 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Index.db Parity Validation"
+          # With full dataset, Index.db must be present; assert instead of skip
           COUNT=$(find test-data/datasets -name '*-Index.db' | wc -l)
           if [ "$COUNT" -eq 0 ]; then
-            echo "ℹ️ No Index.db files present in datasets; skipping Index.db parity tests"
-            echo "::endgroup::"
-            exit 0
+            echo "❌ Expected Index.db files in full dataset but found 0"
+            exit 1
           fi
           cargo test --release --test sstabledump_parity_index -- --nocapture
           echo "::endgroup::"
