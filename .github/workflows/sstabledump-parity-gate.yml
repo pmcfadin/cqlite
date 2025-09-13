@@ -143,6 +143,8 @@ jobs:
 
       - name: Run Statistics.db Parity Tests
         id: statistics_parity
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Statistics.db Parity Validation"
           cargo test --release --test sstabledump_parity_statistics -- --nocapture
@@ -150,6 +152,8 @@ jobs:
 
       - name: Run Index.db Parity Tests  
         id: index_parity
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Index.db Parity Validation"
           cargo test --release --test sstabledump_parity_index -- --nocapture
@@ -157,6 +161,8 @@ jobs:
 
       - name: Run Summary.db Parity Tests
         id: summary_parity
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Summary.db Parity Validation"
           cargo test --release --test sstabledump_parity_summary -- --nocapture
