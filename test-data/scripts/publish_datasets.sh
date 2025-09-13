@@ -55,7 +55,7 @@ esac
 echo "📦 Building dataset archive ($TYPE) with fixed name: $ASSET_NAME"
 
 # Build the archive using the unified packager with fixed filename and explicit type
-ASSET_PATH="${REPO_ROOT}/../${ASSET_NAME}"
+ASSET_PATH="${REPO_ROOT}/${ASSET_NAME}"
 DATASET_TYPE="$TYPE" \
   ASSET_NAME="$ASSET_NAME" \
   "$REPO_ROOT/test-data/scripts/package_datasets.sh" --type "$TYPE" --asset-name "$ASSET_NAME" --tag "$TAG"
