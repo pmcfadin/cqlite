@@ -245,34 +245,7 @@ pub fn should_ignore_file(filename: &str) -> bool {
     filename.starts_with("._")
 }
 
-/// Check if a directory contains SSTable files
-fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
-    let entries = fs::read_dir(dir)?;
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if should_ignore_file(name) {
-                    continue;
-                }
-                // Accept any primary SSTable component or precomputed reference as evidence
-                // that this is a valid SSTable directory for our tests.
-                if name.ends_with("-Data.db")
-                    || name.ends_with("-Index.db")
-                    || name.ends_with("-Data.db.jsonl")
-                    || name.ends_with("-Statistics.db.txt")
-                {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
+// (removed) has_sstable_files: no longer needed after prioritized directory resolution
 
 // === Issue #89: Reference path derivation and parsers ===
 
