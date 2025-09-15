@@ -36,7 +36,7 @@ mod e2e_tests {
         let mut child = cmd.spawn()?;
 
         loop {
-            if let Some(status) = child.try_wait()? {
+            if child.try_wait()?.is_some() {
                 // Process finished; collect output by re-running the command as output() loses the child
                 // Instead, capture by spawning with output initially; but we spawned to allow polling.
                 // Workaround: since we used spawn, we need to manually read from pipes.
