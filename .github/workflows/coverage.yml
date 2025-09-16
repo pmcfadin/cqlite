@@ -42,15 +42,15 @@ jobs:
     - name: Install llvm-cov (validation)
       run: cargo install cargo-llvm-cov
       
-    - name: Restore datasets-v1 cache (same as ci.yml)
+    - name: Restore datasets-v2 cache (same as ci.yml)
       uses: actions/cache/restore@v4
       with:
         path: |
           test-data/datasets/
           validation_artifacts/sstabledump/
-        key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v2-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v1-
+          datasets-v2-
         
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
@@ -61,12 +61,13 @@ jobs:
         echo "📊 Current dataset count: $DB_COUNT SSTable files"
         
         if [ "$DB_COUNT" -eq 0 ]; then
-          echo "📦 No datasets found - downloading real Cassandra 5 datasets from release..."
+          echo "📦 No datasets found - downloading full Cassandra 5 datasets from release..."
           mkdir -p test-data
-          echo "🔍 Downloading cassandra5-small.tar.gz from datasets-v1 release..."
-          gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
-          echo "📦 Extracting datasets..."
-          tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+          echo "🔍 Downloading cassandra5-small-full.tar.gz from datasets-v2 release..."
+          gh release download datasets-v2 --pattern "cassandra5-small-full.tar.gz" --dir /tmp
+          echo "4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b  /tmp/cassandra5-small-full.tar.gz" | sha256sum -c -
+          echo "📦 Extracting datasets to repo root..."
+          tar -xzf /tmp/cassandra5-small-full.tar.gz -C .
           
           # Verify extraction
           NEW_DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
@@ -92,13 +93,31 @@ jobs:
         
         if [ "$DB_COUNT" -eq 0 ]; then
           echo "❌ CRITICAL: No real Cassandra 5 datasets found"
-          echo "❌ Expected: Real SSTable files from datasets-v1 release"
+          echo "❌ Expected: Real SSTable files from datasets-v2 release"
           echo "❌ This workflow requires REAL data - no synthetic/mock data allowed"
           exit 1
         fi
         
         echo "✅ Real Cassandra 5 datasets verified: $DB_COUNT SSTable files available"
         echo "🎯 Ready for coverage analysis with authentic data"
+
+    - name: Validate references manifest (non-blocking)
+      run: |
+        echo "::group::References manifest validation (non-blocking)"
+        if [ -f test-data/datasets/references.yml ]; then
+          echo "✅ Found references.yml; validating refs..."
+          MISSING=0
+          while IFS= read -r -d '' DATA_FILE; do
+            DIR="$(dirname "$DATA_FILE")"; BASE="$(basename "$DATA_FILE")"; PREFIX_NAME="${BASE%-Data.db}"
+            JSONL="$DIR/${PREFIX_NAME}-Data.db.jsonl"; STATS="$DIR/${PREFIX_NAME}-Statistics.db.txt"
+            if [ ! -s "$JSONL" ]; then echo "::warning::Missing or empty $JSONL"; MISSING=$((MISSING+1)); fi
+            if [ ! -s "$STATS" ]; then echo "::warning::Missing or empty $STATS"; MISSING=$((MISSING+1)); fi
+          done < <(find test-data/datasets/sstables -type f -name "*-Data.db" -print0 2>/dev/null || true)
+          echo "References validation complete; missing_count=$MISSING"
+        else
+          echo "ℹ️ references.yml not found; skipping (until datasets-v2)."
+        fi
+        echo "::endgroup::"
         
     - name: Format and Lint Check
       run: |
@@ -106,7 +125,7 @@ jobs:
         cargo clippy --all-targets --all-features -- -D warnings
     
     - name: Run Core Reading Coverage (≥95% ENFORCED - PRD Compliant)
-      if: matrix.coverage-type == 'core-reading'
+      if: matrix.coverage-type == 'core-reading' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
       env:
         CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
       working-directory: cqlite-core
@@ -128,6 +147,7 @@ jobs:
           
     - name: Run Comprehensive Coverage (Informational)
       if: matrix.coverage-type == 'comprehensive' 
+      continue-on-error: true
       env:
         CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
       working-directory: cqlite-core

@@ -2,8 +2,7 @@
 //! This test replaces usage of non-canonical paths like "tests/test-data/real-cassandra"
 //! with the new canonical dataset helpers from Issue #78
 
-use cqlite_core::testing::{list_tables, load_metadata, resolve_table_to_sstable_path};
-use std::env;
+use cqlite_core::testing::{list_tables_at, load_metadata_at, resolve_table_to_sstable_path_at};
 use std::fs;
 use tempfile::TempDir;
 
@@ -51,19 +50,23 @@ keyspaces:
     fs::write(simple_table_dir.join("nb-1-big-Index.db"), "test index").unwrap();
     fs::write(users_dir.join("nb-1-big-Data.db"), "user data").unwrap();
 
-    // Set environment variable to point to our test datasets
-    unsafe {
-        env::set_var("CQLITE_DATASETS_ROOT", &datasets_root);
-    }
+    // Test 1: Load metadata using canonical helper (explicit root)
+    let metadata = load_metadata_at(&datasets_root).expect("Failed to load metadata");
+    // Be resilient to ordering differences across serde/yaml implementations
+    let ks_names: std::collections::HashSet<_> =
+        metadata.keyspaces.iter().map(|k| k.name.as_str()).collect();
+    assert!(ks_names.contains("test_basic"));
+    assert!(ks_names.contains("system_test"));
+    // Ensure test_basic has the expected number of tables
+    let test_basic = metadata
+        .keyspaces
+        .iter()
+        .find(|k| k.name == "test_basic")
+        .expect("missing test_basic keyspace");
+    assert_eq!(test_basic.tables.len(), 2);
 
-    // Test 1: Load metadata using canonical helper
-    let metadata = load_metadata().expect("Failed to load metadata");
-    assert_eq!(metadata.keyspaces.len(), 2);
-    assert_eq!(metadata.keyspaces[0].name, "test_basic");
-    assert_eq!(metadata.keyspaces[0].tables.len(), 2);
-
-    // Test 2: List all tables using canonical helper (replaces manual directory traversal)
-    let tables = list_tables(None).expect("Failed to list tables");
+    // Test 2: List all tables using canonical helper at explicit root
+    let tables = list_tables_at(&datasets_root, None).expect("Failed to list tables");
     assert_eq!(tables.len(), 3);
 
     let table_names: Vec<String> = tables
@@ -75,13 +78,14 @@ keyspaces:
     assert!(table_names.contains(&"system_test.keyspaces".to_string()));
 
     // Test 3: Resolve table to SSTable path (replaces hardcoded path construction)
-    let simple_table_path = resolve_table_to_sstable_path("test_basic", "simple_table")
-        .expect("Failed to resolve simple_table path");
+    let simple_table_path =
+        resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "simple_table")
+            .expect("Failed to resolve simple_table path");
     assert!(simple_table_path.exists());
     assert!(simple_table_path.ends_with("simple_table-abc123def456"));
 
-    let users_path =
-        resolve_table_to_sstable_path("test_basic", "users").expect("Failed to resolve users path");
+    let users_path = resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "users")
+        .expect("Failed to resolve users path");
     assert!(users_path.exists());
     assert!(users_path.ends_with("users-def456abc123"));
 
@@ -90,22 +94,20 @@ keyspaces:
     assert!(users_path.join("nb-1-big-Data.db").exists());
 
     // Test 5: Filter tables by keyspace (replaces manual filtering)
-    let basic_tables = list_tables(Some("test_basic")).expect("Failed to list test_basic tables");
+    let basic_tables = list_tables_at(&datasets_root, Some("test_basic"))
+        .expect("Failed to list test_basic tables");
     assert_eq!(basic_tables.len(), 2);
 
-    let system_tables =
-        list_tables(Some("system_test")).expect("Failed to list system_test tables");
+    let system_tables = list_tables_at(&datasets_root, Some("system_test"))
+        .expect("Failed to list system_test tables");
     assert_eq!(system_tables.len(), 1);
     assert_eq!(system_tables[0].table, "keyspaces");
 
     // Test 6: Handle table not found (replaces manual error handling)
-    let result = resolve_table_to_sstable_path("test_basic", "nonexistent");
+    let result = resolve_table_to_sstable_path_at(&datasets_root, "test_basic", "nonexistent");
     assert!(result.is_err());
 
-    // Clean up environment variable
-    unsafe {
-        env::remove_var("CQLITE_DATASETS_ROOT");
-    }
+    // No environment variables used; nothing to clean up
 }
 
 #[test]
@@ -124,22 +126,25 @@ fn test_migration_from_legacy_script_patterns() {
     //     "tests/integration/test-data"
     // )
 
-    // AFTER: Use canonical dataset helpers with configurable root
-    unsafe {
-        env::set_var("CQLITE_DATASETS_ROOT", &datasets_root);
-    }
+    // AFTER: Use canonical dataset helpers with explicit root (no env var)
 
     // Test the error handling when no metadata exists (replaces manual directory checks)
-    let result = load_metadata();
-    assert!(result.is_err());
+    let result = load_metadata_at(&datasets_root);
+    assert!(
+        result.is_err(),
+        "expected error when metadata.yml is absent at {:?}",
+        datasets_root
+    );
 
     // Test table listing when no data exists (graceful fallback)
-    let result = list_tables(None);
-    assert!(result.is_err());
+    let result = list_tables_at(&datasets_root, None);
+    assert!(
+        result.is_err(),
+        "expected error when metadata.yml is absent at {:?}",
+        datasets_root
+    );
 
-    unsafe {
-        env::remove_var("CQLITE_DATASETS_ROOT");
-    }
+    // No environment variables used in this test
 }
 
 #[cfg(test)]
@@ -176,13 +181,12 @@ keyspaces:
         fs::create_dir_all(&table_dir).unwrap();
         fs::write(table_dir.join("nb-1-big-Data.db"), "test").unwrap();
 
-        unsafe {
-            env::set_var("CQLITE_DATASETS_ROOT", datasets_root);
-        }
+        // No environment variables used; pass root explicitly
 
         // Now use canonical helpers instead of hardcoded paths:
-        let canonical_path = resolve_table_to_sstable_path("test_keyspace", "users")
-            .expect("Should find canonical path");
+        let canonical_path =
+            resolve_table_to_sstable_path_at(datasets_root, "test_keyspace", "users")
+                .expect("Should find canonical path");
 
         // Verify we get the same functional result but through canonical means
         assert!(canonical_path.exists());
@@ -191,8 +195,6 @@ keyspaces:
         // This replaces all the manual path construction and directory traversal
         // from the legacy script with a single, reliable canonical helper call
 
-        unsafe {
-            env::remove_var("CQLITE_DATASETS_ROOT");
-        }
+        // No environment variables used in this test
     }
 }

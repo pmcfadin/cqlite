@@ -220,13 +220,59 @@ async fn validate_table_index_parity(
         table_info.keyspace, table_info.table
     );
 
-    let sstable_dir = resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table)
-        .map_err(|e| {
-            cqlite_core::Error::corruption(format!("Failed to resolve table path: {e}"))
-        })?;
+    // Accept reference-only directories (no Data.db) by falling back to reference files later
+    // Prefer references.yml deterministic mapping when present
+    let root = std::env::var("CQLITE_DATASETS_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../test-data/datasets"));
+    let mut sstable_dir = cqlite_core::testing::dataset_helpers::resolve_table_dir_via_manifest(
+        &root,
+        &table_info.keyspace,
+        &table_info.table,
+    )
+    .unwrap_or_else(|| {
+        resolve_table_to_sstable_path(&table_info.keyspace, &table_info.table)
+            .expect("Failed to resolve table path via metadata.yml")
+    });
+
+    // Prefer a sibling hashed directory that actually contains Index.db
+    if !dir_contains_index_db(&sstable_dir)? {
+        if let Some(alt) = find_alternate_dir_with_index_db(&sstable_dir, &table_info.table)? {
+            sstable_dir = alt;
+        }
+    }
 
     // Find Data.db and derive Index.db
-    let data_file = find_data_file(&sstable_dir)?;
+    // Try to find Data.db; if not present, attempt to derive from references by locating any JSONL
+    let data_file = match find_data_file(&sstable_dir) {
+        Ok(p) => p,
+        Err(_) => {
+            // Look for any *-Data.db.jsonl and reconstruct the Data.db path prefix
+            let mut jsonl_candidate: Option<PathBuf> = None;
+            if let Ok(entries) = std::fs::read_dir(&sstable_dir) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if should_ignore_file(name) {
+                            continue;
+                        }
+                        if name.ends_with("-Data.db.jsonl") {
+                            jsonl_candidate = Some(entry.path());
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(jsonl) = jsonl_candidate {
+                let stem = jsonl.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let prefix = &stem[..stem.len() - ".jsonl".len()];
+                sstable_dir.join(prefix)
+            } else {
+                return Err(cqlite_core::Error::corruption(
+                    "No *-Data.db or JSONL reference found to derive prefix".to_string(),
+                ));
+            }
+        }
+    };
     let index_file = derive_companion_file(&data_file, "Index.db")?;
 
     if !index_file.exists() {
@@ -764,6 +810,56 @@ fn derive_companion_file(data_file: &Path, companion_type: &str) -> CqliteResult
             data_file.display()
         ))
     })
+}
+
+/// Check whether a table directory contains an Index.db
+fn dir_contains_index_db(sstable_dir: &Path) -> CqliteResult<bool> {
+    let entries = std::fs::read_dir(sstable_dir).map_err(|e| {
+        cqlite_core::Error::corruption(format!("Failed to read SSTable directory: {e}"))
+    })?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|e| cqlite_core::Error::corruption(format!("Directory entry error: {e}")))?;
+        let path = entry.path();
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if should_ignore_file(name) {
+                continue;
+            }
+            if name.ends_with("-Index.db") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Find a sibling hashed directory for the same table that has an Index.db
+fn find_alternate_dir_with_index_db(
+    preferred_dir: &Path,
+    table: &str,
+) -> CqliteResult<Option<PathBuf>> {
+    let keyspace_dir = preferred_dir.parent().ok_or_else(|| {
+        cqlite_core::Error::corruption("Invalid SSTable directory structure".to_string())
+    })?;
+    let entries = std::fs::read_dir(keyspace_dir)
+        .map_err(|e| cqlite_core::Error::corruption(format!("Failed to read keyspace dir: {e}")))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|e| cqlite_core::Error::corruption(format!("Directory entry error: {e}")))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if !name.starts_with(&format!("{}-", table)) {
+                continue;
+            }
+        }
+        if dir_contains_index_db(&path)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 /// Integration test for simple_table Index.db validation

@@ -57,23 +57,25 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # Dataset cache and download for parity tests
-      - name: Restore datasets-v1 cache
+      - name: Restore datasets-v2 cache
         uses: actions/cache/restore@v4
         with:
           path: |
             test-data/datasets/
-          key: datasets-v1-${{ hashFiles('test-data/**/*.md') }}
+          key: datasets-v2-${{ hashFiles('test-data/**/*.md') }}
           restore-keys: |
-            datasets-v1-
+            datasets-v2-
         
       - name: Download Cassandra 5 Datasets (if cache miss)
         run: |
           DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
           if [ "$DB_COUNT" -eq 0 ]; then
-            echo "📦 Downloading real Cassandra 5 datasets from release..."
+            echo "📦 Downloading real Cassandra 5 datasets from release (full)..."
             mkdir -p test-data
-            gh release download datasets-v1 --pattern "cassandra5-small.tar.gz" --dir /tmp
-            tar -xzf /tmp/cassandra5-small.tar.gz -C test-data
+            gh release download datasets-v2 --pattern "cassandra5-small-full.tar.gz" --dir /tmp
+            echo "4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b  /tmp/cassandra5-small-full.tar.gz" | sha256sum -c -
+            rm -rf test-data/datasets
+            tar -xzf /tmp/cassandra5-small-full.tar.gz -C .
             DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
             echo "✅ Downloaded $DB_COUNT SSTable files for parity tests"
           else
@@ -81,6 +83,24 @@ jobs:
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate references manifest (non-blocking)
+        run: |
+          echo "::group::References manifest validation (non-blocking)"
+          if [ -f test-data/datasets/references.yml ]; then
+            echo "✅ Found references.yml; validating refs..."
+            MISSING=0
+            while IFS= read -r -d '' DATA_FILE; do
+              DIR="$(dirname "$DATA_FILE")"; BASE="$(basename "$DATA_FILE")"; PREFIX_NAME="${BASE%-Data.db}"
+              JSONL="$DIR/${PREFIX_NAME}-Data.db.jsonl"; STATS="$DIR/${PREFIX_NAME}-Statistics.db.txt"
+              if [ ! -s "$JSONL" ]; then echo "::warning::Missing or empty $JSONL"; MISSING=$((MISSING+1)); fi
+              if [ ! -s "$STATS" ]; then echo "::warning::Missing or empty $STATS"; MISSING=$((MISSING+1)); fi
+            done < <(find test-data/datasets/sstables -type f -name "*-Data.db" -print0 2>/dev/null || true)
+            echo "References validation complete; missing_count=$MISSING"
+          else
+            echo "ℹ️ references.yml not found; skipping (until datasets-v2)."
+          fi
+          echo "::endgroup::"
 
       - name: Setup Java 17 (for sstabledump)
         uses: actions/setup-java@v3
@@ -118,6 +138,34 @@ jobs:
             mkdir -p test-data/datasets
           fi
 
+      - name: Dataset diagnostics (paths and Index.db presence)
+        run: |
+          echo "CQLITE_DATASETS_ROOT=${{ github.workspace }}/test-data/datasets"
+          echo "::group::Dataset file counts"
+          echo "Data.db count: $(find test-data/datasets -name '*-Data.db' | wc -l)"
+          echo "Index.db count: $(find test-data/datasets -name '*-Index.db' | wc -l)"
+          echo "JSONL count: $(find test-data/datasets -name '*-Data.db.jsonl' | wc -l)"
+          echo "Statistics count: $(find test-data/datasets -name '*-Statistics.db.txt' | wc -l)"
+          echo "::endgroup::"
+
+          echo "::group::Key tables overview"
+          for pair in \
+            "test_basic simple_table" \
+            "test_timeseries sensor_data" \
+            "test_wide_rows wide_partition_table" \
+            "test_collections collection_table"; do
+            set -- $pair
+            ks=$1; tbl=$2
+            dir=$(find test-data/datasets/sstables/$ks -maxdepth 1 -type d -name "$tbl-*" | head -n1)
+            echo "[$ks.$tbl] dir=$dir"
+            if [ -n "$dir" ]; then
+              ls -1 "$dir" | grep -E 'Data.db$|Index.db$|jsonl$|Statistics.db.txt$' || true
+            else
+              echo "No directory found for $ks.$tbl"
+            fi
+          done
+          echo "::endgroup::"
+
       - name: Build CQLite
         run: |
           cargo build --release
@@ -125,6 +173,8 @@ jobs:
 
       - name: Run Statistics.db Parity Tests
         id: statistics_parity
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Statistics.db Parity Validation"
           cargo test --release --test sstabledump_parity_statistics -- --nocapture
@@ -132,13 +182,23 @@ jobs:
 
       - name: Run Index.db Parity Tests  
         id: index_parity
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Index.db Parity Validation"
+          # With full dataset, Index.db must be present; assert instead of skip
+          COUNT=$(find test-data/datasets -name '*-Index.db' | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "❌ Expected Index.db files in full dataset but found 0"
+            exit 1
+          fi
           cargo test --release --test sstabledump_parity_index -- --nocapture
           echo "::endgroup::"
 
       - name: Run Summary.db Parity Tests
         id: summary_parity
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Summary.db Parity Validation"
           cargo test --release --test sstabledump_parity_summary -- --nocapture

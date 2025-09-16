@@ -138,23 +138,65 @@ pub fn resolve_table_to_sstable_path_at(
         });
     }
 
-    // Find table directory (format: table-{hash})
-    let entries = fs::read_dir(&sstables_dir)?;
+    // Find table directories (format: table-{hash}) and prefer one with Data.db
+    let mut data_db_candidate: Option<PathBuf> = None;
+    let mut index_db_candidate: Option<PathBuf> = None;
+    let mut any_candidate: Option<PathBuf> = None;
 
-    for entry in entries {
+    for entry in fs::read_dir(&sstables_dir)? {
         let entry = entry?;
         let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if !name.starts_with(&format!("{}-", table)) {
+                continue;
+            }
+        }
 
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with(&format!("{}-", table)) {
-                    // Verify this directory has SSTable files
-                    if has_sstable_files(&path)? {
-                        return Ok(path);
+        // Scan the directory to classify candidates
+        let mut has_data = false;
+        let mut has_index = false;
+        let mut has_any = false;
+        if let Ok(files) = fs::read_dir(&path) {
+            for f in files.flatten() {
+                if let Some(fname) = f.file_name().to_str() {
+                    if should_ignore_file(fname) {
+                        continue;
+                    }
+                    if fname.ends_with("-Data.db") {
+                        has_data = true;
+                        has_any = true;
+                        break;
+                    } else if fname.ends_with("-Index.db") {
+                        has_index = true;
+                        has_any = true;
+                    } else if fname.ends_with("-Data.db.jsonl")
+                        || fname.ends_with("-Statistics.db.txt")
+                        || fname.ends_with("-Summary.db.txt")
+                    {
+                        has_any = true;
                     }
                 }
             }
         }
+
+        if has_data {
+            data_db_candidate = Some(path);
+            // Highest priority met; we can stop searching further
+            break;
+        }
+        if has_index && index_db_candidate.is_none() {
+            index_db_candidate = Some(path.clone());
+        }
+        if has_any && any_candidate.is_none() {
+            any_candidate = Some(path.clone());
+        }
+    }
+
+    if let Some(p) = data_db_candidate.or(index_db_candidate).or(any_candidate) {
+        return Ok(p);
     }
 
     Err(DatasetError::DirectoryNotFound {
@@ -203,28 +245,7 @@ pub fn should_ignore_file(filename: &str) -> bool {
     filename.starts_with("._")
 }
 
-/// Check if a directory contains SSTable files
-fn has_sstable_files(dir: &Path) -> Result<bool, DatasetError> {
-    let entries = fs::read_dir(dir)?;
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if should_ignore_file(name) {
-                    continue;
-                }
-                if name.ends_with("-Data.db") {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
+// (removed) has_sstable_files: no longer needed after prioritized directory resolution
 
 // === Issue #89: Reference path derivation and parsers ===
 
@@ -362,6 +383,54 @@ pub fn parse_sstablemetadata_text(
         }
     }
     Ok(map)
+}
+
+// === references.yml support (Issue #89 deterministic selection) ===
+
+#[derive(Debug, Clone, Deserialize)]
+struct RefManifest {
+    #[allow(dead_code)]
+    refs_version: Option<u32>,
+    #[allow(dead_code)]
+    generated_at: Option<String>,
+    tables: Vec<RefEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RefEntry {
+    keyspace: String,
+    table: String,
+    #[allow(dead_code)]
+    sstable_dir: String,
+    #[allow(dead_code)]
+    prefix: String,
+}
+
+/// Load references.yml if present
+pub fn load_references_manifest_at(root: &Path) -> Option<RefManifest> {
+    let path = root.join("references.yml");
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_yaml::from_str::<RefManifest>(&content).ok()
+}
+
+/// Resolve a stable table directory using references.yml when available.
+/// We normalize absolute paths inside the manifest by replacing their root
+/// with the provided datasets root.
+pub fn resolve_table_dir_via_manifest(root: &Path, keyspace: &str, table: &str) -> Option<PathBuf> {
+    let manifest = load_references_manifest_at(root)?;
+    let entry = manifest
+        .tables
+        .into_iter()
+        .find(|e| e.keyspace == keyspace && e.table == table)?;
+
+    // Extract the hashed directory basename from the recorded path
+    let hashed_dir_name = std::path::Path::new(&entry.sstable_dir)
+        .file_name()
+        .and_then(|n| n.to_str())?
+        .to_string();
+
+    let normalized = root.join("sstables").join(keyspace).join(hashed_dir_name);
+    Some(normalized)
 }
 
 #[cfg(test)]
