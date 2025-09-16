@@ -141,6 +141,7 @@ jobs:
         cargo tarpaulin \
           --timeout 300 \
           --fail-under 95 \
+          --packages cqlite-core \
           --out Html \
           --output-dir ../validation_artifacts/coverage \
           --verbose
@@ -162,6 +163,8 @@ jobs:
         echo "📊 Running comprehensive coverage with $DB_COUNT real Cassandra 5 SSTable files"
         cargo tarpaulin \
           --timeout 600 \
+          --packages cqlite-core \
+          --packages cqlite-cli \
           --out Html \
           --output-dir ../validation_artifacts/coverage \
           --fail-under 80 \
