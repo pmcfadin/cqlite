@@ -61,7 +61,7 @@ jobs:
           echo "📦 Downloading real Cassandra 5 datasets from release (refs-only for Rust-only CI)..."
           mkdir -p test-data
           gh release download datasets-v2 --pattern "cassandra5-small-refs-only-v2.tar.gz" --dir /tmp
-          echo "c5dc67ebacdacda60da8d2fb2c0888e4e436612f12722eea0d1d1ff5441aea06  /tmp/cassandra5-small-refs-only-v2.tar.gz" | sha256sum -c -
+          echo "1cfd054d7236132417fc93e91d17f660bbb96f6c5562f19ddc5c12e50bfbf2df  /tmp/cassandra5-small-refs-only-v2.tar.gz" | sha256sum -c -
           rm -rf test-data/datasets
           tar -xzf /tmp/cassandra5-small-refs-only-v2.tar.gz -C .
           JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
@@ -258,7 +258,7 @@ jobs:
           echo "📦 Downloading real Cassandra 5 datasets from release (refs-only for Rust-only CI)..."
           mkdir -p test-data
           gh release download datasets-v2 --pattern "cassandra5-small-refs-only-v2.tar.gz" --dir /tmp
-          echo "c5dc67ebacdacda60da8d2fb2c0888e4e436612f12722eea0d1d1ff5441aea06  /tmp/cassandra5-small-refs-only-v2.tar.gz" | sha256sum -c -
+          echo "1cfd054d7236132417fc93e91d17f660bbb96f6c5562f19ddc5c12e50bfbf2df  /tmp/cassandra5-small-refs-only-v2.tar.gz" | sha256sum -c -
           rm -rf test-data/datasets
           tar -xzf /tmp/cassandra5-small-refs-only-v2.tar.gz -C .
           JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)

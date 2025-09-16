@@ -94,7 +94,7 @@ cp -R "$DATASETS_DIR" "$STAGING_DIR/test-data/datasets"
 if [[ "$DATASET_TYPE" == "refs" ]]; then
   echo "🔧 Producing refs-only archive (JSONL + Statistics). Removing .db files..."
   find "$STAGING_DIR/test-data/datasets/sstables" -type f \
-    \( -name "*-Data.db" -o -name "*-Index.db" -o -name "*-Summary.db" -o -name "*-Filter.db" -o -name "*-CompressionInfo.db" -o -name "*-TOC.txt" -o -name "*-Digest.crc32" \) \
+    \( -name "*-Data.db" -o -name "*-Index.db" -o -name "*-Summary.db" -o -name "*-Filter.db" -o -name "*-CompressionInfo.db" -o -name "*-Statistics.db" -o -name "*-CRC.db" -o -name "*-TOC.txt" -o -name "*-Digest.crc32" \) \
     -print -delete || true
 else
   echo "🔧 Producing full archive (includes .db files and references if present)"

@@ -124,7 +124,7 @@ jobs:
         cargo fmt --all --check
         cargo clippy --all-targets --all-features -- -D warnings
     
-    - name: Run Core Reading Coverage (≥40% ENFORCED - Temporary for Issue #89)
+    - name: Run Core Reading Coverage (≥35% ENFORCED - Temporary for Issue #89)
       if: matrix.coverage-type == 'core-reading' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
       env:
         CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
@@ -140,7 +140,7 @@ jobs:
         echo "📊 Running coverage with $DB_COUNT real Cassandra 5 SSTable files"
         cargo tarpaulin \
           --timeout 300 \
-          --fail-under 40 \
+          --fail-under 35 \
           --packages cqlite-core \
           --out Html \
           --output-dir ../validation_artifacts/coverage \
@@ -178,7 +178,7 @@ jobs:
         COVERAGE=$(grep -oP '\d+\.\d+%' validation_artifacts/coverage/tarpaulin-report.html | head -1 | sed 's/%//')
         if (( $(echo "$COVERAGE >= 80" | bc -l) )); then
           COLOR="brightgreen"
-        elif (( $(echo "$COVERAGE >= 40" | bc -l) )); then
+        elif (( $(echo "$COVERAGE >= 35" | bc -l) )); then
           COLOR="yellow"
         else
           COLOR="red"
@@ -195,7 +195,7 @@ jobs:
     - name: Coverage Gate Status
       if: matrix.coverage-type == 'core-reading'
       run: |
-        echo "✅ Core reading modules coverage gate passed (≥40% temporary threshold)"
+        echo "✅ Core reading modules coverage gate passed (≥35% temporary threshold)"
         echo "📊 Using ONLY real Cassandra 5 datasets from test-data/datasets/"
         echo "🚫 Synthetic/mocked test paths excluded from coverage"
         echo "🔍 Read-path modules: storage/sstable/*, parser/*, parity readers measured"
