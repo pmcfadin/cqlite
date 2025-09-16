@@ -133,3 +133,6 @@ hive-mind-prompt-*.txt
 # dataset archives
 cassandra5-small-*.tar.gz
 cassandra5-small-*.tar.gz.sha256
+
+# Performance metrics
+performance.json
