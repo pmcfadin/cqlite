@@ -56,18 +56,18 @@ jobs:
         
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
-        DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
-        if [ "$DB_COUNT" -eq 0 ]; then
-          echo "📦 Downloading real Cassandra 5 datasets from release (full)..."
+        JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
+        if [ "$JSONL_COUNT" -eq 0 ]; then
+          echo "📦 Downloading real Cassandra 5 datasets from release (refs-only for Rust-only CI)..."
           mkdir -p test-data
-          gh release download datasets-v2 --pattern "cassandra5-small-full.tar.gz" --dir /tmp
-          echo "4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b  /tmp/cassandra5-small-full.tar.gz" | sha256sum -c -
+          gh release download datasets-v2 --pattern "cassandra5-small-refs-only-v2.tar.gz" --dir /tmp
+          echo "c5dc67ebacdacda60da8d2fb2c0888e4e436612f12722eea0d1d1ff5441aea06  /tmp/cassandra5-small-refs-only-v2.tar.gz" | sha256sum -c -
           rm -rf test-data/datasets
-          tar -xzf /tmp/cassandra5-small-full.tar.gz -C .
-          DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
-          echo "✅ Downloaded $DB_COUNT SSTable files for integration tests"
+          tar -xzf /tmp/cassandra5-small-refs-only-v2.tar.gz -C .
+          JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
+          echo "✅ Downloaded $JSONL_COUNT reference files for Rust-only CI"
         else
-          echo "✅ Using cached datasets ($DB_COUNT SSTable files)"
+          echo "✅ Using cached datasets ($JSONL_COUNT reference files)"
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -253,38 +253,54 @@ jobs:
         
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
-        DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
-        if [ "$DB_COUNT" -eq 0 ]; then
-          echo "📦 Downloading real Cassandra 5 datasets from release (full)..."
+        JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
+        if [ "$JSONL_COUNT" -eq 0 ]; then
+          echo "📦 Downloading real Cassandra 5 datasets from release (refs-only for Rust-only CI)..."
           mkdir -p test-data
-          gh release download datasets-v2 --pattern "cassandra5-small-full.tar.gz" --dir /tmp
-          echo "4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b  /tmp/cassandra5-small-full.tar.gz" | sha256sum -c -
+          gh release download datasets-v2 --pattern "cassandra5-small-refs-only-v2.tar.gz" --dir /tmp
+          echo "c5dc67ebacdacda60da8d2fb2c0888e4e436612f12722eea0d1d1ff5441aea06  /tmp/cassandra5-small-refs-only-v2.tar.gz" | sha256sum -c -
           rm -rf test-data/datasets
-          tar -xzf /tmp/cassandra5-small-full.tar.gz -C .
-          DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
-          echo "✅ Downloaded $DB_COUNT SSTable files for parity validation"
+          tar -xzf /tmp/cassandra5-small-refs-only-v2.tar.gz -C .
+          JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
+          echo "✅ Downloaded $JSONL_COUNT reference files for parity validation"
         else
-          echo "✅ Using cached datasets ($DB_COUNT SSTable files)"
+          echo "✅ Using cached datasets ($JSONL_COUNT reference files)"
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Validate references manifest (non-blocking)
+    - name: Validate references manifest (strict - fail fast)
       run: |
-        echo "::group::References manifest validation (non-blocking)"
-        if [ -f test-data/datasets/references.yml ]; then
-          echo "✅ Found references.yml; validating refs..."
-          MISSING=0
-          while IFS= read -r -d '' DATA_FILE; do
-            DIR="$(dirname "$DATA_FILE")"; BASE="$(basename "$DATA_FILE")"; PREFIX_NAME="${BASE%-Data.db}"
-            JSONL="$DIR/${PREFIX_NAME}-Data.db.jsonl"; STATS="$DIR/${PREFIX_NAME}-Statistics.db.txt"
-            if [ ! -s "$JSONL" ]; then echo "::warning::Missing or empty $JSONL"; MISSING=$((MISSING+1)); fi
-            if [ ! -s "$STATS" ]; then echo "::warning::Missing or empty $STATS"; MISSING=$((MISSING+1)); fi
-          done < <(find test-data/datasets/sstables -type f -name "*-Data.db" -print0 2>/dev/null || true)
-          echo "References validation complete; missing_count=$MISSING"
-        else
-          echo "ℹ️ references.yml not found; skipping (until datasets-v2)."
+        echo "::group::References manifest validation (strict - fail fast)"
+        if [ ! -f test-data/datasets/references.yml ]; then
+          echo "❌ CRITICAL: references.yml not found in refs-only dataset"
+          echo "This violates Issue #89 requirements for precomputed references"
+          exit 1
         fi
+
+        echo "✅ Found references.yml; validating all reference files..."
+        MISSING=0
+        while IFS= read -r -d '' JSONL_FILE; do
+          if [ ! -s "$JSONL_FILE" ]; then
+            echo "❌ Missing or empty reference file: $JSONL_FILE"
+            MISSING=$((MISSING+1))
+          fi
+        done < <(find test-data/datasets -name "*.jsonl" -print0 2>/dev/null || true)
+
+        while IFS= read -r -d '' STATS_FILE; do
+          if [ ! -s "$STATS_FILE" ]; then
+            echo "❌ Missing or empty statistics file: $STATS_FILE"
+            MISSING=$((MISSING+1))
+          fi
+        done < <(find test-data/datasets -name "*-Statistics.db.txt" -print0 2>/dev/null || true)
+
+        if [ "$MISSING" -gt 0 ]; then
+          echo "❌ CRITICAL: $MISSING reference files are missing or empty"
+          echo "Issue #89 requires all references to be precomputed - CI cannot proceed"
+          exit 1
+        fi
+
+        echo "✅ All reference files present and valid for Rust-only CI"
         echo "::endgroup::"
 
     # Enhanced validator detection with fallback strategy

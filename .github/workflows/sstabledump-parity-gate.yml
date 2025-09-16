@@ -68,46 +68,65 @@ jobs:
         
       - name: Download Cassandra 5 Datasets (if cache miss)
         run: |
-          DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
-          if [ "$DB_COUNT" -eq 0 ]; then
-            echo "📦 Downloading real Cassandra 5 datasets from release (with refs v2)..."
+          JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
+          if [ "$JSONL_COUNT" -eq 0 ]; then
+            echo "📦 Downloading real Cassandra 5 datasets from release (refs-only for Issue #89)..."
             mkdir -p test-data
-            gh release download datasets-v2 --pattern "cassandra5-small-with-refs-v2.tar.gz" --dir /tmp
-            echo "7f607a4f60a6a7467b15f015220e75f5f3c411e765f473d60c870bf08d21ccc9  /tmp/cassandra5-small-with-refs-v2.tar.gz" | sha256sum -c -
+            gh release download datasets-v2 --pattern "cassandra5-small-refs-only-v2.tar.gz" --dir /tmp
+            echo "c5dc67ebacdacda60da8d2fb2c0888e4e436612f12722eea0d1d1ff5441aea06  /tmp/cassandra5-small-refs-only-v2.tar.gz" | sha256sum -c -
             rm -rf test-data/datasets
-            tar -xzf /tmp/cassandra5-small-with-refs-v2.tar.gz -C .
-            DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
-            echo "✅ Downloaded $DB_COUNT SSTable files for parity tests"
+            tar -xzf /tmp/cassandra5-small-refs-only-v2.tar.gz -C .
+            JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
+            echo "✅ Downloaded $JSONL_COUNT reference files for parity tests"
           else
-            echo "✅ Using cached datasets ($DB_COUNT SSTable files)"
+            echo "✅ Using cached datasets ($JSONL_COUNT reference files)"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate references manifest (strict with datasets-v2)
+      - name: Validate references manifest (strict - Issue #89)
         run: |
-          echo "::group::References manifest validation (strict with datasets-v2)"
-          if [ -f test-data/datasets/references.yml ]; then
-            echo "✅ Found references.yml; validating refs..."
-            MISSING=0
-            while IFS= read -r -d '' DATA_FILE; do
-              DIR="$(dirname "$DATA_FILE")"; BASE="$(basename "$DATA_FILE")"; PREFIX_NAME="${BASE%-Data.db}"
-              JSONL="$DIR/${PREFIX_NAME}-Data.db.jsonl"; STATS="$DIR/${PREFIX_NAME}-Statistics.db.txt"
-              if [ ! -s "$JSONL" ]; then echo "::error::Missing or empty $JSONL"; MISSING=$((MISSING+1)); fi
-              if [ ! -s "$STATS" ]; then echo "::error::Missing or empty $STATS"; MISSING=$((MISSING+1)); fi
-            done < <(find test-data/datasets/sstables -type f -name "*-Data.db" -print0 2>/dev/null || true)
-            echo "References validation complete; missing_count=$MISSING"
-            if [ "$MISSING" -gt 0 ]; then
-              echo "❌ CRITICAL: $MISSING reference files are missing from datasets-v2"
-              echo "This violates the datasets-v2 specification - all references must be precomputed"
-              exit 1
-            fi
-            echo "✅ All reference files present and valid"
-          else
-            echo "❌ CRITICAL: references.yml not found in datasets-v2"
-            echo "datasets-v2 must include precomputed references manifest"
+          echo "::group::References manifest validation (strict - Issue #89)"
+          if [ ! -f test-data/datasets/references.yml ]; then
+            echo "❌ CRITICAL: references.yml not found in refs-only dataset"
+            echo "This violates Issue #89 requirements for precomputed references"
             exit 1
           fi
+
+          echo "✅ Found references.yml; validating all reference files for refs-only CI..."
+          MISSING=0
+
+          # Check JSONL files
+          while IFS= read -r -d '' JSONL_FILE; do
+            if [ ! -s "$JSONL_FILE" ]; then
+              echo "❌ Missing or empty JSONL reference: $JSONL_FILE"
+              MISSING=$((MISSING+1))
+            fi
+          done < <(find test-data/datasets -name "*.jsonl" -print0 2>/dev/null || true)
+
+          # Check Statistics files
+          while IFS= read -r -d '' STATS_FILE; do
+            if [ ! -s "$STATS_FILE" ]; then
+              echo "❌ Missing or empty Statistics reference: $STATS_FILE"
+              MISSING=$((MISSING+1))
+            fi
+          done < <(find test-data/datasets -name "*-Statistics.db.txt" -print0 2>/dev/null || true)
+
+          if [ "$MISSING" -gt 0 ]; then
+            echo "❌ CRITICAL: $MISSING reference files are missing from refs-only dataset"
+            echo "Issue #89 requires all references to be precomputed - CI cannot proceed"
+            exit 1
+          fi
+
+          # Verify no .db files are present (refs-only enforcement)
+          DB_COUNT=$(find test-data/datasets -name "*.db" 2>/dev/null | wc -l)
+          if [ "$DB_COUNT" -gt 0 ]; then
+            echo "❌ CRITICAL: Found $DB_COUNT .db files in refs-only dataset"
+            echo "Issue #89 refs-only CI should not contain SSTable .db files"
+            exit 1
+          fi
+
+          echo "✅ All reference files present and valid for refs-only CI (Issue #89)"
           echo "::endgroup::"
 
       - name: Setup Java 17 (for sstabledump)
@@ -146,14 +165,15 @@ jobs:
             mkdir -p test-data/datasets
           fi
 
-      - name: Dataset diagnostics (paths and Index.db presence)
+      - name: Dataset diagnostics (refs-only validation)
         run: |
           echo "CQLITE_DATASETS_ROOT=${{ github.workspace }}/test-data/datasets"
-          echo "::group::Dataset file counts"
-          echo "Data.db count: $(find test-data/datasets -name '*-Data.db' | wc -l)"
-          echo "Index.db count: $(find test-data/datasets -name '*-Index.db' | wc -l)"
+          echo "::group::Refs-only dataset file counts (Issue #89)"
+          echo "Data.db count: $(find test-data/datasets -name '*-Data.db' | wc -l) (should be 0 for refs-only)"
+          echo "Index.db count: $(find test-data/datasets -name '*-Index.db' | wc -l) (should be 0 for refs-only)"
           echo "JSONL count: $(find test-data/datasets -name '*-Data.db.jsonl' | wc -l)"
           echo "Statistics count: $(find test-data/datasets -name '*-Statistics.db.txt' | wc -l)"
+          echo "Summary count: $(find test-data/datasets -name '*-Summary.db.txt' | wc -l)"
           echo "::endgroup::"
 
           echo "::group::Key tables overview"
@@ -188,19 +208,23 @@ jobs:
           cargo test --release --test sstabledump_parity_statistics -- --nocapture
           echo "::endgroup::"
 
-      - name: Run Index.db Parity Tests  
+      - name: Run Index.db Parity Tests (Skipped for refs-only)
         id: index_parity
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
-          echo "::group::Index.db Parity Validation"
-          # With full dataset, Index.db must be present; assert instead of skip
+          echo "::group::Index.db Parity Validation (Skipped for Issue #89)"
+          # Issue #89: refs-only datasets don't include Index.db files
           COUNT=$(find test-data/datasets -name '*-Index.db' | wc -l)
           if [ "$COUNT" -eq 0 ]; then
-            echo "❌ Expected Index.db files in full dataset but found 0"
+            echo "✅ No Index.db files found in refs-only dataset (expected for Issue #89)"
+            echo "⏸️ Index.db parity tests skipped for Rust-only CI"
+            echo "💡 Full Index.db validation runs with complete datasets in other workflows"
+            exit 0
+          else
+            echo "❌ Unexpected Index.db files found in refs-only dataset"
             exit 1
           fi
-          cargo test --release --test sstabledump_parity_index -- --nocapture
           echo "::endgroup::"
 
       - name: Run Summary.db Parity Tests
