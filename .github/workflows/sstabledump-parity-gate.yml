@@ -40,6 +40,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Dataset provenance gate - Issue #79
+      - name: 🛡️ Dataset Provenance Gate (Issue #79)
+        run: |
+          echo "::group::Dataset Provenance Validation"
+          echo "🔍 Running dataset provenance gate (Issue #79)..."
+
+          # Create the provenance script if it doesn't exist
+          mkdir -p ci/scripts
+          if [ ! -f ci/scripts/ensure_real_dataset.sh ]; then
+            echo "❌ CRITICAL: Dataset provenance script not found"
+            echo "This is a hard M1 gate - synthetic/mock datasets are not allowed"
+            exit 1
+          fi
+
+          # Check workflow for synthetic dataset usage
+          ci/scripts/ensure_real_dataset.sh "${{ github.workspace }}/test-data/datasets cassandra5-small-refs-only-v2 parity validation"
+
+          echo "✅ Dataset provenance gate passed - no synthetic/mock datasets detected"
+          echo "::endgroup::"
+
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -205,6 +225,11 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Statistics.db Parity Validation"
+
+          # Dataset provenance check before running parity tests
+          echo "🛡️ Pre-test dataset provenance validation..."
+          ci/scripts/ensure_real_dataset.sh "$CQLITE_DATASETS_ROOT sstabledump_parity_statistics"
+
           cargo test --release --test sstabledump_parity_statistics -- --nocapture
           echo "::endgroup::"
 
@@ -233,6 +258,11 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
           echo "::group::Summary.db Parity Validation"
+
+          # Dataset provenance check before running parity tests
+          echo "🛡️ Pre-test dataset provenance validation..."
+          ci/scripts/ensure_real_dataset.sh "$CQLITE_DATASETS_ROOT sstabledump_parity_summary"
+
           cargo test --release --test sstabledump_parity_summary -- --nocapture
           echo "::endgroup::"
 

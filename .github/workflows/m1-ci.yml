@@ -368,16 +368,35 @@ jobs:
         
         echo "::endgroup::"
 
+    # Dataset provenance gate - Issue #79
+    - name: 🛡️ Dataset Provenance Gate (Issue #79)
+      run: |
+        echo "::group::Dataset Provenance Validation (Issue #79)"
+        echo "🔍 Running hard M1 gate for dataset provenance..."
+
+        # Ensure the provenance script exists
+        if [ ! -f ci/scripts/ensure_real_dataset.sh ]; then
+          echo "❌ CRITICAL: Dataset provenance script not found"
+          echo "This is a hard M1 gate - synthetic/mock datasets are not allowed"
+          exit 1
+        fi
+
+        # Check for synthetic dataset usage in M1 CI context
+        ci/scripts/ensure_real_dataset.sh "${{ github.workspace }}/test-data/datasets m1-cassandra-parity validator sstabledump"
+
+        echo "✅ Dataset provenance gate passed - M1 CI using real datasets only"
+        echo "::endgroup::"
+
     # Issue #38 Integration: Real Docker Cassandra Parity Check
     - name: 🔄 Run SSTableDump Parity Check (Issue #38 Integration)
       id: parity_check
       run: |
         echo "::group::SSTableDump Parity Validation (Issue #38)"
-        
+
         VALIDATOR_EXISTS="${{ steps.check_validator.outputs.validator_exists }}"
         VALIDATOR_BUILT="${{ steps.build_validator.outputs.build_success }}"
         VALIDATOR_READY="${{ steps.build_validator.outputs.validator_ready }}"
-        
+
         echo "🔄 Running enhanced parity validation for M1 with Issue #38 integration..."
         echo "📊 Validator status: exists=$VALIDATOR_EXISTS, built=$VALIDATOR_BUILT, ready=$VALIDATOR_READY"
         
