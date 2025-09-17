@@ -375,7 +375,7 @@ impl PreparedQueryBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))]
 mod tests {
     use super::*;
     use crate::Config;

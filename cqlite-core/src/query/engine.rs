@@ -519,7 +519,7 @@ pub struct AnalyzeResult {
     pub cache_hit_ratio: f64,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))]
 mod tests {
     use super::*;
     use crate::Config;

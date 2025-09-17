@@ -10,22 +10,30 @@
 //! - Result set management
 //! - REVOLUTIONARY SELECT parser for direct SSTable access
 
+#[cfg(feature = "state_machine")]
 pub mod engine;
 pub mod executor;
 pub mod parser;
 pub mod planner;
+#[cfg(feature = "state_machine")]
 pub mod prepared;
 pub mod result;
 
 // Advanced SELECT query components
+#[cfg(feature = "state_machine")]
 pub mod select_ast;
+#[cfg(feature = "state_machine")]
 pub mod select_demo;
+#[cfg(feature = "state_machine")]
 pub mod select_executor;
 #[cfg(feature = "state_machine")]
 pub mod select_integration_tests;
+#[cfg(feature = "state_machine")]
 pub mod select_optimizer;
+#[cfg(feature = "state_machine")]
 pub mod select_parser;
 
+#[cfg(feature = "state_machine")]
 pub use engine::{
     AnalyzeResult, CacheStats, ExplainResult, QueryCacheEntry, QueryEngine as AdvancedQueryEngine,
 };
@@ -34,6 +42,7 @@ pub use executor::{
 };
 pub use parser::QueryParser;
 pub use planner::{ExecutionStep, IndexSelection, PlanType, QueryHints, QueryPlan, QueryPlanner};
+#[cfg(feature = "state_machine")]
 pub use prepared::{
     ExecutionHints, ParameterMetadata, PreparedQuery, PreparedQueryBuilder, PreparedQueryStats,
 };
@@ -42,9 +51,13 @@ pub use result::{
 };
 
 // Re-export advanced SELECT components
+#[cfg(feature = "state_machine")]
 pub use select_ast::*;
+#[cfg(feature = "state_machine")]
 pub use select_executor::SelectExecutor;
+#[cfg(feature = "state_machine")]
 pub use select_optimizer::{OptimizedQueryPlan, SelectOptimizer};
+#[cfg(feature = "state_machine")]
 pub use select_parser::{SelectParser, parse_select};
 
 use std::collections::HashMap;
@@ -77,6 +90,7 @@ pub struct QueryEngine {
     advanced_engine: AdvancedQueryEngine,
 }
 
+#[cfg(feature = "state_machine")]
 impl QueryEngine {
     /// Create a new query engine
     pub fn new(
@@ -235,7 +249,7 @@ pub enum SortDirection {
     Desc,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))]
 mod tests {
     use super::*;
     use crate::platform::Platform;

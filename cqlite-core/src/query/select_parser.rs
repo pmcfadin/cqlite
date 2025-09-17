@@ -1007,7 +1007,7 @@ pub fn parse_select(sql: &str) -> Result<SelectStatement> {
     parser.parse_select_statement()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))]
 mod tests {
     use super::*;
 
