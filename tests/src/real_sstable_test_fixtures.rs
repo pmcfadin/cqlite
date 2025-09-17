@@ -8,14 +8,18 @@ use cqlite_core::{
     error::Result,
     parser::SSTableParser,
     parser::header::{
-        CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
-        parse_sstable_header, serialize_sstable_header,
+        ColumnInfo, parse_sstable_header,
     },
     parser::types::serialize_cql_value,
 };
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(feature = "unit-tests-only")]
+use cqlite_core::parser::header::{serialize_sstable_header, CassandraVersion, CompressionInfo, SSTableHeader, SSTableStats};
+#[cfg(feature = "unit-tests-only")]
+use std::path::Path;
 
 /// SSTable test fixture configuration
 #[derive(Debug, Clone)]
@@ -106,10 +110,13 @@ impl SSTableTestFixtureGenerator {
     async fn generate_simple_types_fixture(&self) -> Result<SSTableTestFixture> {
         println!("  • Generating simple types fixture...");
 
+        #[cfg(feature = "unit-tests-only")]
         let fixture_name = "simple_types_sstable";
+        #[cfg(feature = "unit-tests-only")]
         let file_path = self.output_dir.join(format!("{}.db", fixture_name));
 
         // Define schema for simple types
+        #[cfg(feature = "unit-tests-only")]
         let columns = vec![
             ColumnInfo {
                 name: "id".to_string(),
@@ -202,6 +209,7 @@ impl SSTableTestFixtureGenerator {
         ];
 
         // Create SSTable header
+        #[cfg(feature = "unit-tests-only")]
         let header = SSTableHeader {
             cassandra_version: CassandraVersion::V5_0Release,
             version: 1,
@@ -252,41 +260,45 @@ impl SSTableTestFixtureGenerator {
         {
             self.write_mock_sstable(&file_path, &header, &sstable_data)
                 .await?;
+
+            // Create test queries
+            let test_queries = vec![
+                "SELECT * FROM simple_types LIMIT 10".to_string(),
+                "SELECT id, text_col FROM simple_types WHERE int_col > 500".to_string(),
+                "SELECT COUNT(*) FROM simple_types".to_string(),
+                "SELECT boolean_col, AVG(float_col) FROM simple_types GROUP BY boolean_col"
+                    .to_string(),
+            ];
+
+            Ok(SSTableTestFixture {
+                name: fixture_name.to_string(),
+                file_path,
+                expected_schema: columns,
+                expected_record_count: self.config.record_count,
+                test_queries,
+                expected_data_samples: test_data_samples.into_iter().take(10).collect(), // First 10 for testing
+            })
         }
         #[cfg(not(feature = "unit-tests-only"))]
         {
-            return Err(cqlite_core::error::Error::Io(std::io::Error::new(
+            Err(cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Mock SSTable generation disabled: use real datasets only (Issue #80).\nEnable 'unit-tests-only' feature for unit testing with mocks.",
-            )));
+            )))
         }
-
-        // Create test queries
-        let test_queries = vec![
-            "SELECT * FROM simple_types LIMIT 10".to_string(),
-            "SELECT id, text_col FROM simple_types WHERE int_col > 500".to_string(),
-            "SELECT COUNT(*) FROM simple_types".to_string(),
-            "SELECT boolean_col, AVG(float_col) FROM simple_types GROUP BY boolean_col".to_string(),
-        ];
-
-        Ok(SSTableTestFixture {
-            name: fixture_name.to_string(),
-            file_path,
-            expected_schema: columns,
-            expected_record_count: self.config.record_count,
-            test_queries,
-            expected_data_samples: test_data_samples.into_iter().take(10).collect(), // First 10 for testing
-        })
     }
 
     /// Generate fixture with collection types (lists, sets, maps)
     async fn generate_collections_fixture(&self) -> Result<SSTableTestFixture> {
         println!("  • Generating collections fixture...");
 
+        #[cfg(feature = "unit-tests-only")]
         let fixture_name = "collections_sstable";
+        #[cfg(feature = "unit-tests-only")]
         let file_path = self.output_dir.join(format!("{}.db", fixture_name));
 
         // Define schema for collections
+        #[cfg(feature = "unit-tests-only")]
         let columns = vec![
             ColumnInfo {
                 name: "id".to_string(),
@@ -331,6 +343,7 @@ impl SSTableTestFixtureGenerator {
         ];
 
         // Create SSTable header
+        #[cfg(feature = "unit-tests-only")]
         let header = SSTableHeader {
             cassandra_version: CassandraVersion::V5_0Release,
             version: 1,
@@ -380,40 +393,43 @@ impl SSTableTestFixtureGenerator {
         {
             self.write_mock_sstable(&file_path, &header, &sstable_data)
                 .await?;
+
+            // Create test queries
+            let test_queries = vec![
+                "SELECT * FROM collections LIMIT 5".to_string(),
+                "SELECT id, text_list FROM collections WHERE id IS NOT NULL".to_string(),
+                "SELECT text_to_int_map FROM collections LIMIT 10".to_string(),
+            ];
+
+            Ok(SSTableTestFixture {
+                name: fixture_name.to_string(),
+                file_path,
+                expected_schema: columns,
+                expected_record_count: self.config.record_count,
+                test_queries,
+                expected_data_samples: test_data_samples.into_iter().take(5).collect(),
+            })
         }
         #[cfg(not(feature = "unit-tests-only"))]
         {
-            return Err(cqlite_core::error::Error::Io(std::io::Error::new(
+            Err(cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Mock SSTable generation disabled: use real datasets only (Issue #80).\nEnable 'unit-tests-only' feature for unit testing with mocks.",
-            )));
+            )))
         }
-
-        // Create test queries
-        let test_queries = vec![
-            "SELECT * FROM collections LIMIT 5".to_string(),
-            "SELECT id, text_list FROM collections WHERE id IS NOT NULL".to_string(),
-            "SELECT text_to_int_map FROM collections LIMIT 10".to_string(),
-        ];
-
-        Ok(SSTableTestFixture {
-            name: fixture_name.to_string(),
-            file_path,
-            expected_schema: columns,
-            expected_record_count: self.config.record_count,
-            test_queries,
-            expected_data_samples: test_data_samples.into_iter().take(5).collect(),
-        })
     }
 
     /// Generate fixture with large data for streaming tests
     async fn generate_large_data_fixture(&self) -> Result<SSTableTestFixture> {
         println!("  • Generating large data fixture...");
 
+        #[cfg(feature = "unit-tests-only")]
         let fixture_name = "large_data_sstable";
+        #[cfg(feature = "unit-tests-only")]
         let file_path = self.output_dir.join(format!("{}.db", fixture_name));
 
         // Define schema for large data
+        #[cfg(feature = "unit-tests-only")]
         let columns = vec![
             ColumnInfo {
                 name: "id".to_string(),
@@ -450,6 +466,7 @@ impl SSTableTestFixtureGenerator {
         ];
 
         // Create SSTable header
+        #[cfg(feature = "unit-tests-only")]
         let header = SSTableHeader {
             cassandra_version: CassandraVersion::V5_0Release,
             version: 1,
@@ -499,65 +516,75 @@ impl SSTableTestFixtureGenerator {
         {
             self.write_mock_sstable(&file_path, &header, &sstable_data)
                 .await?;
+
+            // Create test queries
+            let test_queries = vec![
+                "SELECT id, LENGTH(large_text) FROM large_data".to_string(),
+                "SELECT id FROM large_data WHERE large_text IS NOT NULL LIMIT 3".to_string(),
+                "SELECT COUNT(*) FROM large_data".to_string(),
+            ];
+
+            Ok(SSTableTestFixture {
+                name: fixture_name.to_string(),
+                file_path,
+                expected_schema: columns,
+                expected_record_count: self.config.record_count / 10,
+                test_queries,
+                expected_data_samples: test_data_samples.into_iter().take(3).collect(),
+            })
         }
         #[cfg(not(feature = "unit-tests-only"))]
         {
-            return Err(cqlite_core::error::Error::Io(std::io::Error::new(
+            Err(cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Mock SSTable generation disabled: use real datasets only (Issue #80).\nEnable 'unit-tests-only' feature for unit testing with mocks.",
-            )));
+            )))
         }
-
-        // Create test queries
-        let test_queries = vec![
-            "SELECT id, LENGTH(large_text) FROM large_data".to_string(),
-            "SELECT id FROM large_data WHERE large_text IS NOT NULL LIMIT 3".to_string(),
-            "SELECT COUNT(*) FROM large_data".to_string(),
-        ];
-
-        Ok(SSTableTestFixture {
-            name: fixture_name.to_string(),
-            file_path,
-            expected_schema: columns,
-            expected_record_count: self.config.record_count / 10,
-            test_queries,
-            expected_data_samples: test_data_samples.into_iter().take(3).collect(),
-        })
     }
 
     /// Generate fixture with user-defined types (placeholder)
     async fn generate_udt_fixture(&self) -> Result<SSTableTestFixture> {
         println!("  • Generating UDT fixture (placeholder)...");
 
-        let fixture_name = "udt_sstable";
-        let file_path = self.output_dir.join(format!("{}.db", fixture_name));
+        #[cfg(feature = "unit-tests-only")]
+        {
+            let fixture_name = "udt_sstable";
+            let file_path = self.output_dir.join(format!("{}.db", fixture_name));
 
-        // Placeholder - UDT support not yet implemented
-        let columns = vec![ColumnInfo {
-            name: "id".to_string(),
-            column_type: "uuid".to_string(),
-            is_primary_key: true,
-            key_position: Some(0),
-            is_static: false,
-            is_clustering: false,
-        }];
+            // Placeholder - UDT support not yet implemented
+            let columns = vec![ColumnInfo {
+                name: "id".to_string(),
+                column_type: "uuid".to_string(),
+                is_primary_key: true,
+                key_position: Some(0),
+                is_static: false,
+                is_clustering: false,
+            }];
 
-        // Create empty file as placeholder
-        fs::write(&file_path, b"").map_err(|e| {
-            cqlite_core::error::Error::Io(std::io::Error::new(
+            // Create empty file as placeholder
+            fs::write(&file_path, b"").map_err(|e| {
+                cqlite_core::error::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to write UDT fixture: {}", e),
+                ))
+            })?;
+
+            Ok(SSTableTestFixture {
+                name: fixture_name.to_string(),
+                file_path,
+                expected_schema: columns,
+                expected_record_count: 0,
+                test_queries: vec!["SELECT * FROM udt_table LIMIT 1".to_string()],
+                expected_data_samples: vec![],
+            })
+        }
+        #[cfg(not(feature = "unit-tests-only"))]
+        {
+            Err(cqlite_core::error::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to write UDT fixture: {}", e),
-            ))
-        })?;
-
-        Ok(SSTableTestFixture {
-            name: fixture_name.to_string(),
-            file_path,
-            expected_schema: columns,
-            expected_record_count: 0,
-            test_queries: vec!["SELECT * FROM udt_table LIMIT 1".to_string()],
-            expected_data_samples: vec![],
-        })
+                "Mock SSTable generation disabled: use real datasets only (Issue #80).\nEnable 'unit-tests-only' feature for unit testing with mocks.",
+            )))
+        }
     }
 
     // Helper methods for data generation
