@@ -1,0 +1,66 @@
+SSTable: /data/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-46-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 09/16/2025 22:13:58 (1758060838204999)
+Maximum timestamp: 09/16/2025 22:13:58 (1758060838205000)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 09/16/2025 22:13:58 (1758060838)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.8448275862068966
+TTL min: 0
+TTL max: 0
+First token: 6373092934915529048 (test_wide_rows)
+Last token: 6373092934915529048 (test_wide_rows)
+Covered clusterings: [multi_metric_timeseries, multi_metric_timeseries]
+Estimated droppable tombstones: 0.05
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=170790)=CommitLogPosition(segmentId=1758060774809, position=178325)}
+totalColumnsSet: 19
+totalRows: 1
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1758060840 (09/16/2025 22:14:00) |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   535 (535 B)  |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      535 (535 B)
+   75th      535 (535 B)
+   95th      535 (535 B)
+   98th      535 (535 B)
+   99th      535 (535 B)
+   Min       447 (447 B)
+   Max       535 (535 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   20      |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      20
+   75th      20
+   95th      20
+   98th      20
+   99th      20
+   Min       18
+   Max       20
+Local token space coverage: NaN
+Estimated cardinality: 1
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/16/2025 22:13:58 (1758060838)
+EncodingStats minTimestamp: 09/16/2025 22:13:58 (1758060838204999)
+KeyType: org.apache.cassandra.db.marshal.UTF8Type
+ClusteringTypes: [org.apache.cassandra.db.marshal.UTF8Type]
+StaticColumns: 
+RegularColumns: speculative_retry:org.apache.cassandra.db.marshal.UTF8Type, gc_grace_seconds:org.apache.cassandra.db.marshal.Int32Type, crc_check_chance:org.apache.cassandra.db.marshal.DoubleType, read_repair:org.apache.cassandra.db.marshal.UTF8Type, min_index_interval:org.apache.cassandra.db.marshal.Int32Type, bloom_filter_fp_chance:org.apache.cassandra.db.marshal.DoubleType, flags:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type)), dclocal_read_repair_chance:org.apache.cassandra.db.marshal.DoubleType, caching:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.UTF8Type)), default_time_to_live:org.apache.cassandra.db.marshal.Int32Type, read_repair_chance:org.apache.cassandra.db.marshal.DoubleType, max_index_interval:org.apache.cassandra.db.marshal.Int32Type, extensions:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.BytesType)), additional_write_policy:org.apache.cassandra.db.marshal.UTF8Type, compaction:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.UTF8Type)), comment:org.apache.cassandra.db.marshal.UTF8Type, id:org.apache.cassandra.db.marshal.UUIDType, compression:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.UTF8Type)), memtable_flush_period_in_ms:org.apache.cassandra.db.marshal.Int32Type
+IsTransient: false

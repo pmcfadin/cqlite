@@ -1,0 +1,1213 @@
+keyspaces:
+- name: test_basic
+  tables:
+  - name: composite_key_table
+    row_count: 100
+    columns:
+    - column_name: clustering_key1
+      kind: clustering
+      type: timestamp
+    - column_name: clustering_key2
+      kind: clustering
+      type: text
+    - column_name: data
+      kind: regular
+      type: text
+    - column_name: partition_key
+      kind: partition_key
+      type: uuid
+    - column_name: value
+      kind: regular
+      type: int
+  - name: compression_test_table
+    row_count: 100
+    columns:
+    - column_name: compressed_json
+      kind: regular
+      type: text
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: large_text
+      kind: regular
+      type: text
+    - column_name: random_data
+      kind: regular
+      type: blob
+    - column_name: repeated_data
+      kind: regular
+      type: text
+  - name: counters
+    row_count: 5
+    columns:
+    - column_name: id
+      kind: partition_key
+      type: text
+    - column_name: like_count
+      kind: regular
+      type: counter
+    - column_name: share_count
+      kind: regular
+      type: counter
+    - column_name: total_interactions
+      kind: regular
+      type: counter
+    - column_name: view_count
+      kind: regular
+      type: counter
+  - name: multi_partition_table
+    row_count: 100
+    columns:
+    - column_name: category
+      kind: clustering
+      type: text
+    - column_name: item_id
+      kind: clustering
+      type: timeuuid
+    - column_name: metadata
+      kind: regular
+      type: text
+    - column_name: name
+      kind: regular
+      type: text
+    - column_name: tenant_id
+      kind: partition_key
+      type: uuid
+    - column_name: user_id
+      kind: partition_key
+      type: uuid
+    - column_name: value
+      kind: regular
+      type: bigint
+  - name: simple_table
+    row_count: 1000
+    columns:
+    - column_name: account_balance
+      kind: regular
+      type: decimal
+    - column_name: active
+      kind: regular
+      type: boolean
+    - column_name: age
+      kind: regular
+      type: int
+    - column_name: ascii_field
+      kind: regular
+      type: ascii
+    - column_name: birth_date
+      kind: regular
+      type: date
+    - column_name: created
+      kind: regular
+      type: timestamp
+    - column_name: description
+      kind: regular
+      type: blob
+    - column_name: duration_val
+      kind: regular
+      type: duration
+    - column_name: height
+      kind: regular
+      type: float
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: ip_address
+      kind: regular
+      type: inet
+    - column_name: medium_number
+      kind: regular
+      type: smallint
+    - column_name: name
+      kind: regular
+      type: text
+    - column_name: salary
+      kind: regular
+      type: bigint
+    - column_name: session_id
+      kind: regular
+      type: timeuuid
+    - column_name: small_number
+      kind: regular
+      type: tinyint
+    - column_name: varchar_field
+      kind: regular
+      type: text
+    - column_name: weight
+      kind: regular
+      type: double
+    - column_name: work_time
+      kind: regular
+      type: time
+  - name: static_columns_table
+    row_count: 100
+    columns:
+    - column_name: clustering_key
+      kind: clustering
+      type: timestamp
+    - column_name: partition_key
+      kind: partition_key
+      type: uuid
+    - column_name: row_data
+      kind: regular
+      type: text
+    - column_name: row_value
+      kind: regular
+      type: int
+    - column_name: static_data
+      kind: static
+      type: text
+  - name: ttl_test_table
+    row_count: 100
+    columns:
+    - column_name: expiring_value
+      kind: regular
+      type: int
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: session_info
+      kind: regular
+      type: text
+    - column_name: temporary_data
+      kind: regular
+      type: text
+  - name: uncompressed_table
+    row_count: 100
+    columns:
+    - column_name: data
+      kind: regular
+      type: text
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: timestamp_val
+      kind: regular
+      type: timestamp
+    - column_name: value
+      kind: regular
+      type: int
+- name: test_collections
+  tables:
+  - name: collection_clustering_table
+    row_count: 50
+    columns:
+    - column_name: clustering_key
+      kind: clustering
+      type: frozen<list<text>>
+    - column_name: data
+      kind: regular
+      type: text
+    - column_name: partition_key
+      kind: partition_key
+      type: uuid
+    - column_name: value
+      kind: regular
+      type: int
+  - name: collection_table
+    row_count: 500
+    columns:
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: metadata_map
+      kind: regular
+      type: map<text, bigint>
+    - column_name: numbers_set
+      kind: regular
+      type: set<int>
+    - column_name: ordered_values
+      kind: regular
+      type: list<timestamp>
+    - column_name: properties
+      kind: regular
+      type: map<text, text>
+    - column_name: scores
+      kind: regular
+      type: list<int>
+    - column_name: tags
+      kind: regular
+      type: set<text>
+  - name: collections_with_udts
+    row_count: 50
+    columns:
+    - column_name: addresses
+      kind: regular
+      type: list<frozen<address_type>>
+    - column_name: contacts
+      kind: regular
+      type: set<frozen<contact_info>>
+    - column_name: emergency_contacts
+      kind: regular
+      type: map<text, frozen<contact_info>>
+    - column_name: locations_visited
+      kind: regular
+      type: map<date, frozen<address_type>>
+    - column_name: user_id
+      kind: partition_key
+      type: uuid
+  - name: empty_collections_table
+    row_count: 50
+    columns:
+    - column_name: empty_set
+      kind: regular
+      type: set<text>
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: null_list
+      kind: regular
+      type: list<int>
+    - column_name: optional_tags
+      kind: regular
+      type: set<text>
+    - column_name: sparse_map
+      kind: regular
+      type: map<text, text>
+  - name: frozen_collections_table
+    row_count: 50
+    columns:
+    - column_name: frozen_properties
+      kind: regular
+      type: frozen<map<text, text>>
+    - column_name: frozen_scores
+      kind: regular
+      type: frozen<list<int>>
+    - column_name: frozen_tags
+      kind: regular
+      type: frozen<set<text>>
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: regular_tags
+      kind: regular
+      type: set<text>
+  - name: large_collections_table
+    row_count: 50
+    columns:
+    - column_name: clustering_key
+      kind: clustering
+      type: int
+    - column_name: giant_map
+      kind: regular
+      type: map<text, blob>
+    - column_name: huge_set
+      kind: regular
+      type: set<text>
+    - column_name: massive_list
+      kind: regular
+      type: list<uuid>
+    - column_name: partition_key
+      kind: partition_key
+      type: uuid
+  - name: nested_collections_table
+    row_count: 50
+    columns:
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: scores_by_game
+      kind: regular
+      type: map<text, frozen<list<int>>>
+    - column_name: tags_by_category
+      kind: regular
+      type: map<text, frozen<set<text>>>
+    - column_name: time_series_data
+      kind: regular
+      type: map<date, frozen<list<timestamp>>>
+    - column_name: user_preferences
+      kind: regular
+      type: map<text, frozen<map<text, text>>>
+  - name: typed_collections_table
+    row_count: 50
+    columns:
+    - column_name: blob_list
+      kind: regular
+      type: list<blob>
+    - column_name: boolean_map
+      kind: regular
+      type: map<text, boolean>
+    - column_name: decimal_set
+      kind: regular
+      type: set<decimal>
+    - column_name: id
+      kind: partition_key
+      type: uuid
+    - column_name: inet_map
+      kind: regular
+      type: map<text, inet>
+    - column_name: timestamp_list
+      kind: regular
+      type: list<timestamp>
+    - column_name: uuid_set
+      kind: regular
+      type: set<uuid>
+- name: test_timeseries
+  tables:
+  - name: app_metrics
+    row_count: 200
+    columns:
+    - column_name: application_id
+      kind: partition_key
+      type: text
+    - column_name: metric_name
+      kind: partition_key
+      type: text
+    - column_name: tags
+      kind: regular
+      type: map<text, text>
+    - column_name: timestamp
+      kind: clustering
+      type: timestamp
+    - column_name: unit
+      kind: regular
+      type: text
+    - column_name: value
+      kind: regular
+      type: double
+  - name: event_store
+    row_count: 200
+    columns:
+    - column_name: aggregate_id
+      kind: partition_key
+      type: uuid
+    - column_name: created_at
+      kind: regular
+      type: timestamp
+    - column_name: event_data
+      kind: regular
+      type: text
+    - column_name: event_id
+      kind: regular
+      type: timeuuid
+    - column_name: event_type
+      kind: regular
+      type: text
+    - column_name: metadata
+      kind: regular
+      type: map<text, text>
+    - column_name: version
+      kind: clustering
+      type: bigint
+  - name: log_entries
+    row_count: 200
+    columns:
+    - column_name: correlation_id
+      kind: regular
+      type: uuid
+    - column_name: hour_bucket
+      kind: partition_key
+      type: timestamp
+    - column_name: line_number
+      kind: regular
+      type: int
+    - column_name: log_id
+      kind: clustering
+      type: timeuuid
+    - column_name: log_level
+      kind: partition_key
+      type: text
+    - column_name: message
+      kind: regular
+      type: text
+    - column_name: service_name
+      kind: partition_key
+      type: text
+    - column_name: source_file
+      kind: regular
+      type: text
+    - column_name: stack_trace
+      kind: regular
+      type: text
+    - column_name: thread_name
+      kind: regular
+      type: text
+  - name: sensor_data
+    row_count: 2000
+    columns:
+    - column_name: battery_level
+      kind: regular
+      type: tinyint
+    - column_name: humidity
+      kind: regular
+      type: float
+    - column_name: location
+      kind: regular
+      type: text
+    - column_name: pressure
+      kind: regular
+      type: double
+    - column_name: sensor_id
+      kind: partition_key
+      type: uuid
+    - column_name: status
+      kind: regular
+      type: text
+    - column_name: temperature
+      kind: regular
+      type: float
+    - column_name: timestamp
+      kind: clustering
+      type: timestamp
+  - name: stock_prices
+    row_count: 200
+    columns:
+    - column_name: adjusted_close
+      kind: regular
+      type: decimal
+    - column_name: close_price
+      kind: regular
+      type: decimal
+    - column_name: high_price
+      kind: regular
+      type: decimal
+    - column_name: low_price
+      kind: regular
+      type: decimal
+    - column_name: open_price
+      kind: regular
+      type: decimal
+    - column_name: symbol
+      kind: partition_key
+      type: text
+    - column_name: timestamp
+      kind: clustering
+      type: timestamp
+    - column_name: trading_day
+      kind: partition_key
+      type: date
+    - column_name: volume
+      kind: regular
+      type: bigint
+  - name: tick_data
+    row_count: 200
+    columns:
+    - column_name: ask_price
+      kind: regular
+      type: decimal
+    - column_name: bid_price
+      kind: regular
+      type: decimal
+    - column_name: exchange
+      kind: partition_key
+      type: text
+    - column_name: minute_bucket
+      kind: partition_key
+      type: timestamp
+    - column_name: price
+      kind: regular
+      type: decimal
+    - column_name: symbol
+      kind: partition_key
+      type: text
+    - column_name: tick_id
+      kind: clustering
+      type: timeuuid
+    - column_name: trade_type
+      kind: regular
+      type: text
+    - column_name: volume
+      kind: regular
+      type: int
+  - name: time_bucketed_counters
+    row_count: 41
+    columns:
+    - column_name: error_count
+      kind: regular
+      type: counter
+    - column_name: metric_name
+      kind: partition_key
+      type: text
+    - column_name: success_count
+      kind: regular
+      type: counter
+    - column_name: time_bucket
+      kind: clustering
+      type: timestamp
+    - column_name: total_count
+      kind: regular
+      type: counter
+  - name: user_activity
+    row_count: 200
+    columns:
+    - column_name: activity_date
+      kind: partition_key
+      type: date
+    - column_name: activity_time
+      kind: clustering
+      type: timestamp
+    - column_name: activity_type
+      kind: regular
+      type: text
+    - column_name: duration_ms
+      kind: regular
+      type: int
+    - column_name: metadata
+      kind: regular
+      type: map<text, text>
+    - column_name: page_url
+      kind: regular
+      type: text
+    - column_name: session_id
+      kind: regular
+      type: uuid
+    - column_name: user_id
+      kind: partition_key
+      type: uuid
+  - name: user_sessions
+    row_count: 200
+    columns:
+    - column_name: device_info
+      kind: regular
+      type: map<text, text>
+    - column_name: ip_address
+      kind: regular
+      type: inet
+    - column_name: is_active
+      kind: regular
+      type: boolean
+    - column_name: last_activity
+      kind: regular
+      type: timestamp
+    - column_name: session_id
+      kind: partition_key
+      type: uuid
+    - column_name: start_time
+      kind: regular
+      type: timestamp
+    - column_name: user_agent
+      kind: regular
+      type: text
+    - column_name: user_id
+      kind: regular
+      type: uuid
+- name: test_wide_rows
+  tables:
+  - name: chat_messages
+    row_count: 50
+    columns:
+    - column_name: attachments
+      kind: regular
+      type: list<text>
+    - column_name: channel_id
+      kind: partition_key
+      type: uuid
+    - column_name: edited_at
+      kind: regular
+      type: timestamp
+    - column_name: message_content
+      kind: regular
+      type: text
+    - column_name: message_id
+      kind: clustering
+      type: timeuuid
+    - column_name: message_timestamp
+      kind: clustering
+      type: timestamp
+    - column_name: metadata
+      kind: regular
+      type: map<text, text>
+    - column_name: reactions
+      kind: regular
+      type: map<text, frozen<set<uuid>>>
+    - column_name: reply_count
+      kind: regular
+      type: int
+    - column_name: thread_id
+      kind: regular
+      type: uuid
+    - column_name: user_id
+      kind: regular
+      type: uuid
+    - column_name: username
+      kind: regular
+      type: text
+  - name: document_versions
+    row_count: 50
+    columns:
+    - column_name: author_id
+      kind: regular
+      type: uuid
+    - column_name: change_summary
+      kind: regular
+      type: text
+    - column_name: character_count
+      kind: regular
+      type: int
+    - column_name: content
+      kind: regular
+      type: text
+    - column_name: created_at
+      kind: regular
+      type: timestamp
+    - column_name: document_id
+      kind: partition_key
+      type: uuid
+    - column_name: metadata
+      kind: regular
+      type: map<text, text>
+    - column_name: tags
+      kind: regular
+      type: set<text>
+    - column_name: title
+      kind: regular
+      type: text
+    - column_name: version_number
+      kind: clustering
+      type: int
+    - column_name: word_count
+      kind: regular
+      type: int
+  - name: large_blob_table
+    row_count: 50
+    columns:
+    - column_name: checksum
+      kind: regular
+      type: text
+    - column_name: chunk_data
+      kind: regular
+      type: blob
+    - column_name: chunk_id
+      kind: clustering
+      type: int
+    - column_name: chunk_size
+      kind: regular
+      type: int
+    - column_name: file_id
+      kind: partition_key
+      type: uuid
+    - column_name: file_name
+      kind: regular
+      type: text
+    - column_name: mime_type
+      kind: regular
+      type: text
+    - column_name: total_chunks
+      kind: regular
+      type: int
+  - name: many_columns_table
+    row_count: 50
+    columns:
+    - column_name: col_001
+      kind: regular
+      type: text
+    - column_name: col_002
+      kind: regular
+      type: text
+    - column_name: col_003
+      kind: regular
+      type: text
+    - column_name: col_004
+      kind: regular
+      type: text
+    - column_name: col_005
+      kind: regular
+      type: text
+    - column_name: col_006
+      kind: regular
+      type: text
+    - column_name: col_007
+      kind: regular
+      type: text
+    - column_name: col_008
+      kind: regular
+      type: text
+    - column_name: col_009
+      kind: regular
+      type: text
+    - column_name: col_010
+      kind: regular
+      type: text
+    - column_name: col_011
+      kind: regular
+      type: int
+    - column_name: col_012
+      kind: regular
+      type: int
+    - column_name: col_013
+      kind: regular
+      type: int
+    - column_name: col_014
+      kind: regular
+      type: int
+    - column_name: col_015
+      kind: regular
+      type: int
+    - column_name: col_016
+      kind: regular
+      type: int
+    - column_name: col_017
+      kind: regular
+      type: int
+    - column_name: col_018
+      kind: regular
+      type: int
+    - column_name: col_019
+      kind: regular
+      type: int
+    - column_name: col_020
+      kind: regular
+      type: int
+    - column_name: col_021
+      kind: regular
+      type: bigint
+    - column_name: col_022
+      kind: regular
+      type: bigint
+    - column_name: col_023
+      kind: regular
+      type: bigint
+    - column_name: col_024
+      kind: regular
+      type: bigint
+    - column_name: col_025
+      kind: regular
+      type: bigint
+    - column_name: col_026
+      kind: regular
+      type: float
+    - column_name: col_027
+      kind: regular
+      type: float
+    - column_name: col_028
+      kind: regular
+      type: float
+    - column_name: col_029
+      kind: regular
+      type: float
+    - column_name: col_030
+      kind: regular
+      type: float
+    - column_name: col_031
+      kind: regular
+      type: double
+    - column_name: col_032
+      kind: regular
+      type: double
+    - column_name: col_033
+      kind: regular
+      type: double
+    - column_name: col_034
+      kind: regular
+      type: double
+    - column_name: col_035
+      kind: regular
+      type: double
+    - column_name: col_036
+      kind: regular
+      type: boolean
+    - column_name: col_037
+      kind: regular
+      type: boolean
+    - column_name: col_038
+      kind: regular
+      type: boolean
+    - column_name: col_039
+      kind: regular
+      type: boolean
+    - column_name: col_040
+      kind: regular
+      type: boolean
+    - column_name: col_041
+      kind: regular
+      type: timestamp
+    - column_name: col_042
+      kind: regular
+      type: timestamp
+    - column_name: col_043
+      kind: regular
+      type: timestamp
+    - column_name: col_044
+      kind: regular
+      type: timestamp
+    - column_name: col_045
+      kind: regular
+      type: timestamp
+    - column_name: col_046
+      kind: regular
+      type: uuid
+    - column_name: col_047
+      kind: regular
+      type: uuid
+    - column_name: col_048
+      kind: regular
+      type: uuid
+    - column_name: col_049
+      kind: regular
+      type: uuid
+    - column_name: col_050
+      kind: regular
+      type: uuid
+    - column_name: col_051
+      kind: regular
+      type: blob
+    - column_name: col_052
+      kind: regular
+      type: blob
+    - column_name: col_053
+      kind: regular
+      type: blob
+    - column_name: col_054
+      kind: regular
+      type: blob
+    - column_name: col_055
+      kind: regular
+      type: blob
+    - column_name: col_056
+      kind: regular
+      type: decimal
+    - column_name: col_057
+      kind: regular
+      type: decimal
+    - column_name: col_058
+      kind: regular
+      type: decimal
+    - column_name: col_059
+      kind: regular
+      type: decimal
+    - column_name: col_060
+      kind: regular
+      type: decimal
+    - column_name: col_061
+      kind: regular
+      type: set<text>
+    - column_name: col_062
+      kind: regular
+      type: set<int>
+    - column_name: col_063
+      kind: regular
+      type: list<text>
+    - column_name: col_064
+      kind: regular
+      type: list<int>
+    - column_name: col_065
+      kind: regular
+      type: map<text, text>
+    - column_name: col_066
+      kind: regular
+      type: inet
+    - column_name: col_067
+      kind: regular
+      type: inet
+    - column_name: col_068
+      kind: regular
+      type: date
+    - column_name: col_069
+      kind: regular
+      type: date
+    - column_name: col_070
+      kind: regular
+      type: time
+    - column_name: col_071
+      kind: regular
+      type: duration
+    - column_name: col_072
+      kind: regular
+      type: timeuuid
+    - column_name: col_073
+      kind: regular
+      type: text
+    - column_name: col_074
+      kind: regular
+      type: ascii
+    - column_name: col_075
+      kind: regular
+      type: tinyint
+    - column_name: col_076
+      kind: regular
+      type: smallint
+    - column_name: col_077
+      kind: regular
+      type: text
+    - column_name: col_078
+      kind: regular
+      type: text
+    - column_name: col_079
+      kind: regular
+      type: text
+    - column_name: col_080
+      kind: regular
+      type: text
+    - column_name: col_081
+      kind: regular
+      type: text
+    - column_name: col_082
+      kind: regular
+      type: text
+    - column_name: col_083
+      kind: regular
+      type: text
+    - column_name: col_084
+      kind: regular
+      type: text
+    - column_name: col_085
+      kind: regular
+      type: text
+    - column_name: col_086
+      kind: regular
+      type: text
+    - column_name: col_087
+      kind: regular
+      type: text
+    - column_name: col_088
+      kind: regular
+      type: text
+    - column_name: col_089
+      kind: regular
+      type: text
+    - column_name: col_090
+      kind: regular
+      type: text
+    - column_name: col_091
+      kind: regular
+      type: text
+    - column_name: col_092
+      kind: regular
+      type: text
+    - column_name: col_093
+      kind: regular
+      type: text
+    - column_name: col_094
+      kind: regular
+      type: text
+    - column_name: col_095
+      kind: regular
+      type: text
+    - column_name: col_096
+      kind: regular
+      type: text
+    - column_name: col_097
+      kind: regular
+      type: text
+    - column_name: col_098
+      kind: regular
+      type: text
+    - column_name: col_099
+      kind: regular
+      type: text
+    - column_name: col_100
+      kind: regular
+      type: text
+    - column_name: id
+      kind: partition_key
+      type: uuid
+  - name: multi_metric_timeseries
+    row_count: 50
+    columns:
+    - column_name: active_sessions
+      kind: regular
+      type: int
+    - column_name: cpu_usage_percent
+      kind: regular
+      type: float
+    - column_name: custom_metrics
+      kind: regular
+      type: map<text, double>
+    - column_name: device_id
+      kind: partition_key
+      type: uuid
+    - column_name: diagnostic_data
+      kind: regular
+      type: blob
+    - column_name: disk_io_read_bytes
+      kind: regular
+      type: bigint
+    - column_name: disk_io_write_bytes
+      kind: regular
+      type: bigint
+    - column_name: disk_usage_percent
+      kind: regular
+      type: float
+    - column_name: error_count
+      kind: regular
+      type: int
+    - column_name: fan_speed_rpm
+      kind: regular
+      type: int
+    - column_name: gpu_memory_bytes
+      kind: regular
+      type: bigint
+    - column_name: gpu_usage_percent
+      kind: regular
+      type: float
+    - column_name: handle_count
+      kind: regular
+      type: int
+    - column_name: info_count
+      kind: regular
+      type: int
+    - column_name: load_average_15min
+      kind: regular
+      type: float
+    - column_name: load_average_1min
+      kind: regular
+      type: float
+    - column_name: load_average_5min
+      kind: regular
+      type: float
+    - column_name: memory_usage_bytes
+      kind: regular
+      type: bigint
+    - column_name: metric_timestamp
+      kind: clustering
+      type: timestamp
+    - column_name: network_connections
+      kind: regular
+      type: int
+    - column_name: network_rx_bytes
+      kind: regular
+      type: bigint
+    - column_name: network_tx_bytes
+      kind: regular
+      type: bigint
+    - column_name: power_consumption_watts
+      kind: regular
+      type: float
+    - column_name: process_count
+      kind: regular
+      type: int
+    - column_name: status_flags
+      kind: regular
+      type: set<text>
+    - column_name: swap_usage_bytes
+      kind: regular
+      type: bigint
+    - column_name: temperature_celsius
+      kind: regular
+      type: float
+    - column_name: thread_count
+      kind: regular
+      type: int
+    - column_name: uptime_seconds
+      kind: regular
+      type: bigint
+    - column_name: warning_count
+      kind: regular
+      type: int
+  - name: product_catalog
+    row_count: 50
+    columns:
+    - column_name: attributes
+      kind: regular
+      type: map<text, frozen<set<text>>>
+    - column_name: availability_count
+      kind: regular
+      type: int
+    - column_name: category_id
+      kind: partition_key
+      type: uuid
+    - column_name: created_at
+      kind: regular
+      type: timestamp
+    - column_name: currency
+      kind: regular
+      type: text
+    - column_name: description
+      kind: regular
+      type: text
+    - column_name: dimensions
+      kind: regular
+      type: map<text, float>
+    - column_name: images
+      kind: regular
+      type: list<text>
+    - column_name: long_description
+      kind: regular
+      type: text
+    - column_name: price
+      kind: regular
+      type: decimal
+    - column_name: product_id
+      kind: clustering
+      type: uuid
+    - column_name: product_name
+      kind: regular
+      type: text
+    - column_name: related_products
+      kind: regular
+      type: set<uuid>
+    - column_name: reviews_summary
+      kind: regular
+      type: map<text, double>
+    - column_name: specifications
+      kind: regular
+      type: map<text, text>
+    - column_name: tags
+      kind: regular
+      type: set<text>
+    - column_name: updated_at
+      kind: regular
+      type: timestamp
+    - column_name: weight
+      kind: regular
+      type: float
+  - name: sparse_data_table
+    row_count: 50
+    columns:
+    - column_name: attribute_name
+      kind: clustering
+      type: text
+    - column_name: blob_value
+      kind: regular
+      type: blob
+    - column_name: boolean_value
+      kind: regular
+      type: boolean
+    - column_name: entity_id
+      kind: partition_key
+      type: uuid
+    - column_name: json_value
+      kind: regular
+      type: text
+    - column_name: list_value
+      kind: regular
+      type: list<text>
+    - column_name: map_value
+      kind: regular
+      type: map<text, text>
+    - column_name: numeric_value
+      kind: regular
+      type: double
+    - column_name: set_value
+      kind: regular
+      type: set<text>
+    - column_name: string_value
+      kind: regular
+      type: text
+    - column_name: timestamp_value
+      kind: regular
+      type: timestamp
+  - name: wide_partition_table
+    row_count: 100
+    columns:
+    - column_name: blob_column
+      kind: regular
+      type: blob
+    - column_name: clustering_col1
+      kind: clustering
+      type: timestamp
+    - column_name: clustering_col2
+      kind: clustering
+      type: text
+    - column_name: clustering_col3
+      kind: clustering
+      type: int
+    - column_name: clustering_col4
+      kind: clustering
+      type: uuid
+    - column_name: clustering_col5
+      kind: clustering
+      type: date
+    - column_name: data_column
+      kind: regular
+      type: text
+    - column_name: json_column
+      kind: regular
+      type: text
+    - column_name: partition_key
+      kind: partition_key
+      type: uuid
+    - column_name: value_column
+      kind: regular
+      type: bigint
+

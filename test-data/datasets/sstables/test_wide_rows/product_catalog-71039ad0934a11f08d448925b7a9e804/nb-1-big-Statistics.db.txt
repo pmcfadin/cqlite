@@ -1,0 +1,67 @@
+SSTable: /data/test_wide_rows/product_catalog-71039ad0934a11f08d448925b7a9e804/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.1
+Minimum timestamp: 09/16/2025 22:14:29 (1758060869678968)
+Maximum timestamp: 09/16/2025 22:14:29 (1758060869970800)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: no tombstones (9223372036854775807)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.SnappyCompressor
+Compression ratio: 0.7383301428361067
+TTL min: 0
+TTL max: 0
+First token: -9163463451826879649 (02ce72d8-aded-4cfe-9679-0a4541907908)
+Last token: 9154361248584580054 (cbbc9280-a4c3-474b-a2ca-d78e90d8793c)
+Covered clusterings: [01c7e672-6a17-4615-936a-23fd141cae2b, fbd92c4c-91ba-4278-b99f-53ad3ad4cc52]
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=171196)=CommitLogPosition(segmentId=1758060774809, position=2811531)}
+totalColumnsSet: 350
+totalRows: 50
+Estimated tombstone drop times: 
+   Drop Time | Count  (%)  Histogram 
+   Percentiles
+   50th      0 
+   75th      0 
+   95th      0 
+   98th      0 
+   99th      0 
+   Min       0 
+   Max       0 
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   124 (124 B)  |    11 ( 22) OOOOOOOOOO.
+   149 (149 B)  |    31 ( 62) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   179 (179 B)  |     8 ( 16) OOOOOOO.
+   Percentiles
+   50th      149 (149 B)
+   75th      149 (149 B)
+   95th      179 (179 B)
+   98th      179 (179 B)
+   99th      179 (179 B)
+   Min       104 (104 B)
+   Max       179 (179 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   7       |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      7
+   75th      7
+   95th      7
+   98th      7
+   99th      7
+   Min       7
+   Max       7
+Local token space coverage: NaN
+Estimated cardinality: 50
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
+EncodingStats minTimestamp: 09/16/2025 22:14:29 (1758060869678968)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: [org.apache.cassandra.db.marshal.UUIDType]
+StaticColumns: 
+RegularColumns: updated_at:org.apache.cassandra.db.marshal.TimestampType, price:org.apache.cassandra.db.marshal.DecimalType, created_at:org.apache.cassandra.db.marshal.TimestampType, description:org.apache.cassandra.db.marshal.UTF8Type, currency:org.apache.cassandra.db.marshal.UTF8Type, availability_count:org.apache.cassandra.db.marshal.Int32Type, product_name:org.apache.cassandra.db.marshal.UTF8Type
+IsTransient: false

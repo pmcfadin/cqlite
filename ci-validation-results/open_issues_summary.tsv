@@ -1,0 +1,33 @@
+#94	2025-09-16T03:23:35Z	[core, quality-gate, validation, M1]	M1: SchemaAwareReader correctness (format detect, value length accounting, nested types)	https://github.com/pmcfadin/cqlite/issues/94	(0//0) comments
+#93	2025-09-16T03:23:26Z	[core, storage, quality-gate, P0, M1]	M1: CompressionInfo chunk map streaming with CRC validation (LZ4/Snappy/Deflate)	https://github.com/pmcfadin/cqlite/issues/93	(0//0) comments
+#92	2025-09-16T03:23:17Z	[core, storage, quality-gate, P0, M1]	M1: Spec‑accurate Index.db offsets and promoted index parsing (Cassandra 5)	https://github.com/pmcfadin/cqlite/issues/92	(0//0) comments
+#90	2025-09-12T14:04:10Z	[]	Canonical dataset v2 with precomputed references + CI alignment (follow-up to Issue #89)	https://github.com/pmcfadin/cqlite/issues/90	(1//0) comments
+#89	2025-09-16T03:22:56Z	[quality-gate, ci-cd, M1]	Precompute sstabledump references in canonical datasets (gold corpus) to remove CI tool deps	https://github.com/pmcfadin/cqlite/issues/89	(0//0) comments
+#80	2025-09-16T03:22:05Z	[testing, quality-gate, validation, P0, M1]	Remove mocks from M1-critical integration paths (file-backed only)	https://github.com/pmcfadin/cqlite/issues/80	(1//0) comments
+#79	2025-08-28T20:28:28Z	[quality-gate, ci-cd, P0, M1]	Dataset provenance gate: fail on synthetic/mocked inputs (hard M1 gate)	https://github.com/pmcfadin/cqlite/issues/79	(2//0) comments
+#67	2025-08-19T23:18:09Z	[]	Float assertions: use approx_eq in validation reports	https://github.com/pmcfadin/cqlite/issues/67	(0//0) comments
+#66	2025-09-16T03:22:32Z	[testing, quality-gate, M1]	Directory/Index tests: scope for M1 vs extended (gate or fix minimal)	https://github.com/pmcfadin/cqlite/issues/66	(2//0) comments
+#65	2025-08-19T23:17:53Z	[]	Bloom filter tests: overflow and correctness (gate to experimental)	https://github.com/pmcfadin/cqlite/issues/65	(0//0) comments
+#64	2025-08-19T23:17:49Z	[]	Gate row cell state machine tests to M2 (state_machine)	https://github.com/pmcfadin/cqlite/issues/64	(0//0) comments
+#63	2025-08-19T23:17:46Z	[]	Gate query engine and select parser tests for M2 (state_machine)	https://github.com/pmcfadin/cqlite/issues/63	(0//0) comments
+#61	2025-09-16T03:21:48Z	[core, validation, P0, M1]	M1: Collections & UDT decoding correctness (null/EOF/nesting)	https://github.com/pmcfadin/cqlite/issues/61	(1//0) comments
+#52	2025-08-15T03:45:41Z	[documentation, validation, P1, M1-Outcome-Required]	Human-verifiable validation workflow (P1)	https://github.com/pmcfadin/cqlite/issues/52	(0//0) comments
+#37	2025-08-15T03:45:28Z	[high-priority, testing, validation, P1, M1-Outcome-Required]	Tombstone reconciliation semantics validation (P1)	https://github.com/pmcfadin/cqlite/issues/37	(0//0) comments
+#36	2025-08-28T19:49:57Z	[high-priority, critical, testing, validation, P0, M1, M1-Outcome-Required]	BTI end-to-end validation: trie traversal, Rows.db decoding, byte-comparable invariants (P0)	https://github.com/pmcfadin/cqlite/issues/36	(4//0) comments
+#33	2025-08-13T17:33:19Z	[critical]	Address core parsing dependencies before validator production use	https://github.com/pmcfadin/cqlite/issues/33	(0//0) comments
+#31	2025-09-16T03:21:11Z	[critical, testing, quality-gate, validation, P0, M1, M1-Outcome-Required]	Validator parity vs sstabledump (Index/Summary/Statistics) — Rust‑only CI (P0)	https://github.com/pmcfadin/cqlite/issues/31	(2//0) comments
+#28	2025-09-16T03:22:19Z	[core, quality-gate, P0, M1, M1-Outcome-Required]	Schema/comparator-only parsing: remove heuristics and blob fallbacks (P0)	https://github.com/pmcfadin/cqlite/issues/28	(1//0) comments
+#24	2025-07-30T21:26:23Z	[enhancement, medium-priority, prd-alignment, performance]	⚡ MEDIUM: WASM bundle optimization <2MB (M6 milestone)	https://github.com/pmcfadin/cqlite/issues/24	(0//0) comments
+#23	2025-07-30T21:26:22Z	[enhancement, medium-priority, storage, prd-alignment, phase-2]	✍️ MEDIUM: SSTable writer implementation (M5 milestone)	https://github.com/pmcfadin/cqlite/issues/23	(0//0) comments
+#22	2025-07-30T21:26:50Z	[enhancement, high-priority, core, prd-alignment]	🐍 HIGH: Functional Python/NodeJS bindings (M4 milestone)	https://github.com/pmcfadin/cqlite/issues/22	(0//0) comments
+#21	2025-07-30T21:26:48Z	[enhancement, high-priority, core, prd-alignment]	📄 HIGH: Implement Parquet output support (M3 milestone)	https://github.com/pmcfadin/cqlite/issues/21	(0//0) comments
+#20	2025-07-30T21:26:40Z	[enhancement, medium-priority, testing, ci-cd]	🧪 MEDIUM: Implement comprehensive CLI testing framework	https://github.com/pmcfadin/cqlite/issues/20	(0//0) comments
+#19	2025-07-30T21:26:38Z	[enhancement, medium-priority, core]	🔍 MEDIUM: Schema discovery and validation system	https://github.com/pmcfadin/cqlite/issues/19	(0//0) comments
+#18	2025-07-30T21:26:36Z	[enhancement, medium-priority, testing]	🐳 MEDIUM: Set up Docker-based test data generation	https://github.com/pmcfadin/cqlite/issues/18	(0//0) comments
+#17	2025-09-16T03:20:54Z	[high-priority, core, storage, phase-1, quality-gate, validation, M1]	🔍 HIGH: Test and validate core SSTable reading (Cassandra 5.x, schema‑driven)	https://github.com/pmcfadin/cqlite/issues/17	(5//0) comments
+#16	2025-09-16T03:23:08Z	[high-priority, core, phase-1, blocker]	🔧 HIGH: Re-enable REPL functionality	https://github.com/pmcfadin/cqlite/issues/16	(0//0) comments
+#15	2025-07-30T21:26:33Z	[enhancement, medium-priority, quality-gate, validation, performance]	📊 MEDIUM: Establish performance baselines and monitoring	https://github.com/pmcfadin/cqlite/issues/15	(2//0) comments
+#14	2025-07-28T19:12:33Z	[high-priority, process, blocker, quality-gate, ci-cd]	🔧 HIGH: Establish CI/CD quality gates and enforcement	https://github.com/pmcfadin/cqlite/issues/14	(1//0) comments
+#13	2025-07-28T19:26:06Z	[medium-priority, process, phase-1, phase-2, quality-gate, validation]	📋 MEDIUM: Establish Phase 2 readiness criteria and validation framework	https://github.com/pmcfadin/cqlite/issues/13	(2//0) comments
+#12	2025-07-30T21:26:34Z	[enhancement, medium-priority, core, storage, prd-alignment, phase-2]	🚧 MEDIUM: Implement missing SSTable writing capability (PRD Phase 2)	https://github.com/pmcfadin/cqlite/issues/12	(0//0) comments
+#11	2025-07-26T00:17:12Z	[high-priority, process, technical-debt, prd-alignment, phase-1]	📊 HIGH: Address PRD scope expansion and technical debt	https://github.com/pmcfadin/cqlite/issues/11	(0//0) comments

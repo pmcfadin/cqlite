@@ -7,9 +7,7 @@ use cqlite_core::{
     Value,
     error::Result,
     parser::SSTableParser,
-    parser::header::{
-        ColumnInfo, parse_sstable_header,
-    },
+    parser::header::{ColumnInfo, parse_sstable_header},
     parser::types::serialize_cql_value,
 };
 use std::collections::HashMap;
@@ -17,7 +15,9 @@ use std::fs;
 use std::path::PathBuf;
 
 #[cfg(feature = "unit-tests-only")]
-use cqlite_core::parser::header::{serialize_sstable_header, CassandraVersion, CompressionInfo, SSTableHeader, SSTableStats};
+use cqlite_core::parser::header::{
+    CassandraVersion, CompressionInfo, SSTableHeader, SSTableStats, serialize_sstable_header,
+};
 #[cfg(feature = "unit-tests-only")]
 use std::path::Path;
 

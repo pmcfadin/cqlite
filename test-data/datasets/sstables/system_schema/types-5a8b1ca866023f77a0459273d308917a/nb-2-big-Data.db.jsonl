@@ -1,0 +1,1 @@
+{"table kind":"REGULAR","partition":{"key":["test_collections"],"position":30},"rows":[{"type":"row","position":30,"clustering":["address_type"],"liveness_info":{"tstamp":"2025-09-16T22:13:55.397Z"},"cells":[{"name":"field_names","value":["street", "city", "state", "zip_code", "country"]},{"name":"field_types","value":["text", "text", "text", "text", "text"]}]}]}

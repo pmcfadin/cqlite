@@ -1,0 +1,888 @@
+refs_version: 2
+generated_at: 2025-09-16T22:14:45Z
+tables:
+  - keyspace: test_timeseries
+    table: user_sessions
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:14:49Z
+  - keyspace: test_timeseries
+    table: tick_data
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/tick_data-706fe650934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/tick_data-706fe650934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/tick_data-706fe650934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/tick_data-706fe650934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:14:51Z
+  - keyspace: test_timeseries
+    table: log_entries
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:14:54Z
+  - keyspace: test_timeseries
+    table: time_bucketed_counters
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/time_bucketed_counters-705b4ce0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/time_bucketed_counters-705b4ce0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/time_bucketed_counters-705b4ce0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/time_bucketed_counters-705b4ce0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:14:57Z
+  - keyspace: test_timeseries
+    table: app_metrics
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/app_metrics-702bb160934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/app_metrics-702bb160934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/app_metrics-702bb160934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/app_metrics-702bb160934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:00Z
+  - keyspace: test_timeseries
+    table: stock_prices
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/stock_prices-703bde00934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/stock_prices-703bde00934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/stock_prices-703bde00934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/stock_prices-703bde00934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:04Z
+  - keyspace: test_timeseries
+    table: sensor_data
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:07Z
+  - keyspace: test_timeseries
+    table: user_activity
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_activity-7033a0a0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_activity-7033a0a0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_activity-7033a0a0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_activity-7033a0a0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:10Z
+  - keyspace: test_timeseries
+    table: event_store
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/event_store-705188e0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/event_store-705188e0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/event_store-705188e0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/event_store-705188e0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:12Z
+  - keyspace: test_basic
+    table: compression_test_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:15Z
+  - keyspace: test_basic
+    table: composite_key_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/composite_key_table-6e066060934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/composite_key_table-6e066060934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/composite_key_table-6e066060934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/composite_key_table-6e066060934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:17Z
+  - keyspace: test_basic
+    table: multi_partition_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/multi_partition_table-6e1d1cb0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/multi_partition_table-6e1d1cb0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/multi_partition_table-6e1d1cb0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/multi_partition_table-6e1d1cb0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:21Z
+  - keyspace: test_basic
+    table: ttl_test_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/ttl_test_table-6e728fb0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/ttl_test_table-6e728fb0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/ttl_test_table-6e728fb0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/ttl_test_table-6e728fb0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:23Z
+  - keyspace: test_basic
+    table: static_columns_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/static_columns_table-6e88fde0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/static_columns_table-6e88fde0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/static_columns_table-6e88fde0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/static_columns_table-6e88fde0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:26Z
+  - keyspace: test_basic
+    table: counters
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6ea6e620934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6ea6e620934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6ea6e620934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6ea6e620934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:29Z
+  - keyspace: test_basic
+    table: simple_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:32Z
+  - keyspace: test_basic
+    table: uncompressed_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/uncompressed_table-6e4d7b80934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/uncompressed_table-6e4d7b80934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/uncompressed_table-6e4d7b80934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/uncompressed_table-6e4d7b80934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:35Z
+  - keyspace: system_auth
+    table: roles
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_auth/roles-5bc52802de2535edaeab188eecebb090"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_auth/roles-5bc52802de2535edaeab188eecebb090/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_auth/roles-5bc52802de2535edaeab188eecebb090/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_auth/roles-5bc52802de2535edaeab188eecebb090/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:37Z
+  - keyspace: system
+    table: sstable_activity_v2
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/sstable_activity_v2-62efe31f3be8310c8d298963439c1288"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/sstable_activity_v2-62efe31f3be8310c8d298963439c1288/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/sstable_activity_v2-62efe31f3be8310c8d298963439c1288/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/sstable_activity_v2-62efe31f3be8310c8d298963439c1288/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:40Z
+  - keyspace: system
+    table: compaction_history
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/compaction_history-b4dbb7b4dc493fb5b3bfce6e434832ca"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/compaction_history-b4dbb7b4dc493fb5b3bfce6e434832ca/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/compaction_history-b4dbb7b4dc493fb5b3bfce6e434832ca/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/compaction_history-b4dbb7b4dc493fb5b3bfce6e434832ca/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:42Z
+  - keyspace: system
+    table: local
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/local-7ad54392bcdd35a684174e047860b377"
+    prefix: nb-9-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/local-7ad54392bcdd35a684174e047860b377/nb-9-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/local-7ad54392bcdd35a684174e047860b377/nb-9-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/local-7ad54392bcdd35a684174e047860b377/nb-9-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:45Z
+  - keyspace: system
+    table: local
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/local-7ad54392bcdd35a684174e047860b377"
+    prefix: nb-8-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/local-7ad54392bcdd35a684174e047860b377/nb-8-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/local-7ad54392bcdd35a684174e047860b377/nb-8-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/local-7ad54392bcdd35a684174e047860b377/nb-8-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:48Z
+  - keyspace: system
+    table: prepared_statements
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/prepared_statements-18a9c2576a0c3841ba718cd529849fef"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/prepared_statements-18a9c2576a0c3841ba718cd529849fef/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/prepared_statements-18a9c2576a0c3841ba718cd529849fef/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/prepared_statements-18a9c2576a0c3841ba718cd529849fef/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:50Z
+  - keyspace: system
+    table: sstable_activity
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/sstable_activity-5a1ff267ace03f128563cfae6103c65e"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/sstable_activity-5a1ff267ace03f128563cfae6103c65e/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/sstable_activity-5a1ff267ace03f128563cfae6103c65e/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system/sstable_activity-5a1ff267ace03f128563cfae6103c65e/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:53Z
+  - keyspace: test_collections
+    table: collection_clustering_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_clustering_table-6f964f30934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_clustering_table-6f964f30934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_clustering_table-6f964f30934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_clustering_table-6f964f30934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:56Z
+  - keyspace: test_collections
+    table: empty_collections_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/empty_collections_table-6f8cd950934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/empty_collections_table-6f8cd950934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/empty_collections_table-6f8cd950934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/empty_collections_table-6f8cd950934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:15:58Z
+  - keyspace: test_collections
+    table: typed_collections_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/typed_collections_table-6f836370934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/typed_collections_table-6f836370934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/typed_collections_table-6f836370934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/typed_collections_table-6f836370934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:01Z
+  - keyspace: test_collections
+    table: nested_collections_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/nested_collections_table-6f419f80934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/nested_collections_table-6f419f80934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/nested_collections_table-6f419f80934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/nested_collections_table-6f419f80934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:04Z
+  - keyspace: test_collections
+    table: frozen_collections_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/frozen_collections_table-6f777c90934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/frozen_collections_table-6f777c90934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/frozen_collections_table-6f777c90934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/frozen_collections_table-6f777c90934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:06Z
+  - keyspace: test_collections
+    table: large_collections_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/large_collections_table-6f517e00934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/large_collections_table-6f517e00934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/large_collections_table-6f517e00934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/large_collections_table-6f517e00934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:09Z
+  - keyspace: test_collections
+    table: collections_with_udts
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collections_with_udts-6f6b4790934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collections_with_udts-6f6b4790934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collections_with_udts-6f6b4790934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collections_with_udts-6f6b4790934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:12Z
+  - keyspace: test_collections
+    table: collection_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-6f323630934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-6f323630934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-6f323630934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-6f323630934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:14Z
+  - keyspace: test_wide_rows
+    table: product_catalog
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/product_catalog-71039ad0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/product_catalog-71039ad0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/product_catalog-71039ad0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/product_catalog-71039ad0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:17Z
+  - keyspace: test_wide_rows
+    table: sparse_data_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/sparse_data_table-711b4180934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/sparse_data_table-711b4180934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/sparse_data_table-711b4180934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/sparse_data_table-711b4180934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:20Z
+  - keyspace: test_wide_rows
+    table: wide_partition_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-70d0a3f0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-70d0a3f0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-70d0a3f0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-70d0a3f0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:23Z
+  - keyspace: test_wide_rows
+    table: large_blob_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/large_blob_table-70de5f90934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/large_blob_table-70de5f90934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/large_blob_table-70de5f90934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/large_blob_table-70de5f90934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:25Z
+  - keyspace: test_wide_rows
+    table: many_columns_table
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/many_columns_table-70d781c0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/many_columns_table-70d781c0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/many_columns_table-70d781c0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/many_columns_table-70d781c0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:28Z
+  - keyspace: test_wide_rows
+    table: multi_metric_timeseries
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/multi_metric_timeseries-710d5ed0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/multi_metric_timeseries-710d5ed0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/multi_metric_timeseries-710d5ed0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/multi_metric_timeseries-710d5ed0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:31Z
+  - keyspace: test_wide_rows
+    table: chat_messages
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/chat_messages-70e9f850934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/chat_messages-70e9f850934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/chat_messages-70e9f850934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/chat_messages-70e9f850934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:34Z
+  - keyspace: test_wide_rows
+    table: document_versions
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/document_versions-70feb8d0934a11f08d448925b7a9e804"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/document_versions-70feb8d0934a11f08d448925b7a9e804/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/document_versions-70feb8d0934a11f08d448925b7a9e804/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/document_versions-70feb8d0934a11f08d448925b7a9e804/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:36Z
+  - keyspace: system_schema
+    table: columns
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f"
+    prefix: nb-47-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-47-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-47-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-47-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:39Z
+  - keyspace: system_schema
+    table: columns
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f"
+    prefix: nb-46-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-46-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-46-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-46-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:42Z
+  - keyspace: system_schema
+    table: columns
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f"
+    prefix: nb-45-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-45-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-45-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/columns-24101c25a2ae3af787c1b40ee1aca33f/nb-45-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:44Z
+  - keyspace: system_schema
+    table: column_masks
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af"
+    prefix: nb-45-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:47Z
+  - keyspace: system_schema
+    table: functions
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/functions-96489b7980be3e14a70166a0b9159450"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/functions-96489b7980be3e14a70166a0b9159450/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/functions-96489b7980be3e14a70166a0b9159450/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/functions-96489b7980be3e14a70166a0b9159450/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:50Z
+  - keyspace: system_schema
+    table: aggregates
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/aggregates-924c55872e3a345bb10c12f37c1ba895"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/aggregates-924c55872e3a345bb10c12f37c1ba895/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/aggregates-924c55872e3a345bb10c12f37c1ba895/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/aggregates-924c55872e3a345bb10c12f37c1ba895/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:52Z
+  - keyspace: system_schema
+    table: dropped_columns
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/dropped_columns-5e7583b5f3f43af19a39b7e1d6f5f11f"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/dropped_columns-5e7583b5f3f43af19a39b7e1d6f5f11f/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/dropped_columns-5e7583b5f3f43af19a39b7e1d6f5f11f/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/dropped_columns-5e7583b5f3f43af19a39b7e1d6f5f11f/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:55Z
+  - keyspace: system_schema
+    table: indexes
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/indexes-0feb57ac311f382fba6d9024d305702f"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/indexes-0feb57ac311f382fba6d9024d305702f/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/indexes-0feb57ac311f382fba6d9024d305702f/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/indexes-0feb57ac311f382fba6d9024d305702f/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:16:57Z
+  - keyspace: system_schema
+    table: keyspaces
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6"
+    prefix: nb-54-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-54-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-54-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-54-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:00Z
+  - keyspace: system_schema
+    table: keyspaces
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6"
+    prefix: nb-53-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-53-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-53-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-53-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:03Z
+  - keyspace: system_schema
+    table: keyspaces
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6"
+    prefix: nb-55-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-55-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-55-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-55-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:05Z
+  - keyspace: system_schema
+    table: triggers
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/triggers-4df70b666b05325195a132b54005fd48"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/triggers-4df70b666b05325195a132b54005fd48/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/triggers-4df70b666b05325195a132b54005fd48/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/triggers-4df70b666b05325195a132b54005fd48/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:08Z
+  - keyspace: system_schema
+    table: tables
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09"
+    prefix: nb-47-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-47-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-47-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-47-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:10Z
+  - keyspace: system_schema
+    table: tables
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09"
+    prefix: nb-46-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-46-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-46-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-46-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:13Z
+  - keyspace: system_schema
+    table: tables
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09"
+    prefix: nb-45-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-45-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-45-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/tables-afddfb9dbc1e30688056eed6c302ba09/nb-45-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:16Z
+  - keyspace: system_schema
+    table: views
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/views-9786ac1cdd583201a7cdad556410c985"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/views-9786ac1cdd583201a7cdad556410c985/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/views-9786ac1cdd583201a7cdad556410c985/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/views-9786ac1cdd583201a7cdad556410c985/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:18Z
+  - keyspace: system_schema
+    table: types
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a"
+    prefix: nb-3-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-3-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-3-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-3-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:21Z
+  - keyspace: system_schema
+    table: types
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a"
+    prefix: nb-2-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-2-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-2-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-2-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:24Z
+  - keyspace: system_schema
+    table: types
+    sstable_dir: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-1-big-Statistics.db.txt"
+      summary_txt:
+        present: false
+        path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-1-big-Summary.db.txt"
+    generated_at: 2025-09-16T22:17:26Z

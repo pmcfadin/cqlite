@@ -1,0 +1,66 @@
+SSTable: /data/test_wide_rows/multi_metric_timeseries-710d5ed0934a11f08d448925b7a9e804/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 09/16/2025 22:14:29 (1758060869681549)
+Maximum timestamp: 09/16/2025 22:14:29 (1758060869972074)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 09/16/2025 22:14:29 (1758060869)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.7680923197287782
+TTL min: 0
+TTL max: 0
+First token: -9024079620545126652 (b89ab3ac-b4f9-4095-9741-cf28daab2643)
+Last token: 8328116307035940924 (a046577a-c0fc-40f9-8652-f263f284686e)
+Covered clusterings: [2025-09-16T22:14:29.972Z, 2025-09-16T22:14:29.681Z]
+Estimated droppable tombstones: 0.06896551724137931
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=178325)=CommitLogPosition(segmentId=1758060774809, position=2811531)}
+totalColumnsSet: 1400
+totalRows: 50
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1758060900 (09/16/2025 22:15:00) |   100 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   310 (310 B)  |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      310 (310 B)
+   75th      310 (310 B)
+   95th      310 (310 B)
+   98th      310 (310 B)
+   99th      310 (310 B)
+   Min       259 (259 B)
+   Max       310 (310 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   29      |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      29
+   75th      29
+   95th      29
+   98th      29
+   99th      29
+   Min       25
+   Max       29
+Local token space coverage: NaN
+Estimated cardinality: 50
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/16/2025 22:14:29 (1758060869)
+EncodingStats minTimestamp: 09/16/2025 22:14:29 (1758060869681549)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: [org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)]
+StaticColumns: 
+RegularColumns: temperature_celsius:org.apache.cassandra.db.marshal.FloatType, cpu_usage_percent:org.apache.cassandra.db.marshal.FloatType, load_average_15min:org.apache.cassandra.db.marshal.FloatType, load_average_5min:org.apache.cassandra.db.marshal.FloatType, swap_usage_bytes:org.apache.cassandra.db.marshal.LongType, load_average_1min:org.apache.cassandra.db.marshal.FloatType, error_count:org.apache.cassandra.db.marshal.Int32Type, handle_count:org.apache.cassandra.db.marshal.Int32Type, uptime_seconds:org.apache.cassandra.db.marshal.LongType, memory_usage_bytes:org.apache.cassandra.db.marshal.LongType, power_consumption_watts:org.apache.cassandra.db.marshal.FloatType, active_sessions:org.apache.cassandra.db.marshal.Int32Type, disk_io_read_bytes:org.apache.cassandra.db.marshal.LongType, disk_io_write_bytes:org.apache.cassandra.db.marshal.LongType, fan_speed_rpm:org.apache.cassandra.db.marshal.Int32Type, network_rx_bytes:org.apache.cassandra.db.marshal.LongType, disk_usage_percent:org.apache.cassandra.db.marshal.FloatType, info_count:org.apache.cassandra.db.marshal.Int32Type, network_tx_bytes:org.apache.cassandra.db.marshal.LongType, network_connections:org.apache.cassandra.db.marshal.Int32Type, process_count:org.apache.cassandra.db.marshal.Int32Type, gpu_memory_bytes:org.apache.cassandra.db.marshal.LongType, custom_metrics:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.DoubleType), gpu_usage_percent:org.apache.cassandra.db.marshal.FloatType, diagnostic_data:org.apache.cassandra.db.marshal.BytesType, thread_count:org.apache.cassandra.db.marshal.Int32Type, warning_count:org.apache.cassandra.db.marshal.Int32Type, status_flags:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type)
+IsTransient: false
