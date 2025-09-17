@@ -9,9 +9,12 @@ use super::{
     parser::QueryParser,
     planner::QueryPlanner,
     prepared::PreparedQuery,
+};
+
+#[cfg(feature = "state_machine")]
+use super::{
     select_executor::SelectExecutor,
     select_optimizer::SelectOptimizer,
-    // Advanced SELECT components
     select_parser,
 };
 use crate::{
@@ -44,8 +47,10 @@ pub struct QueryEngine {
     /// Query executor
     executor: QueryExecutor,
     /// Advanced SELECT optimizer
+    #[cfg(feature = "state_machine")]
     select_optimizer: SelectOptimizer,
     /// Advanced SELECT executor
+    #[cfg(feature = "state_machine")]
     select_executor: SelectExecutor,
     /// Prepared statement cache
     prepared_cache: DashMap<String, Arc<PreparedQuery>>,
@@ -70,14 +75,18 @@ impl QueryEngine {
         let executor = QueryExecutor::new(storage.clone(), schema.clone(), config);
 
         // Initialize advanced SELECT components
+        #[cfg(feature = "state_machine")]
         let select_optimizer = SelectOptimizer::new(schema.clone(), storage.clone());
+        #[cfg(feature = "state_machine")]
         let select_executor = SelectExecutor::new(schema.clone(), storage.clone());
 
         Ok(Self {
             parser,
             planner,
             executor,
+            #[cfg(feature = "state_machine")]
             select_optimizer,
+            #[cfg(feature = "state_machine")]
             select_executor,
             prepared_cache: DashMap::new(),
             plan_cache: DashMap::new(),
@@ -182,6 +191,7 @@ impl QueryEngine {
         }
 
         // Parse SELECT statement using advanced parser
+        #[cfg(feature = "state_machine")]
         let select_statement = select_parser::parse_select(sql).map_err(|e| {
             // Update error statistics
             let mut stats = self.stats.write();
@@ -189,10 +199,15 @@ impl QueryEngine {
             e
         })?;
 
+        #[cfg(not(feature = "state_machine"))]
+        return Err(crate::error::Error::QueryExecution("Advanced SELECT parsing requires state_machine feature".to_string()));
+
         // Optimize the query plan
+        #[cfg(feature = "state_machine")]
         let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
 
         // For now, let's create a simple entry in the cache to track that we've seen this query
+        #[cfg(feature = "state_machine")]
         let entry = QueryCacheEntry {
             plan: super::planner::QueryPlan {
                 plan_type: super::planner::PlanType::TableScan,
@@ -218,15 +233,17 @@ impl QueryEngine {
             hit_count: 0,
         };
 
+        #[cfg(feature = "state_machine")]
         self.plan_cache.insert(sql.to_string(), entry);
 
         // Execute the optimized plan
-        let mut result = self.select_executor.execute(optimized_plan).await?;
-
-        // Update statistics
-        self.update_execution_stats(&mut result, start_time);
-
-        Ok(result)
+        #[cfg(feature = "state_machine")]
+        {
+            let mut result = self.select_executor.execute(optimized_plan).await?;
+            // Update statistics
+            self.update_execution_stats(&mut result, start_time);
+            Ok(result)
+        }
     }
 
     /// Execute a query with parameters
@@ -587,7 +604,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "M2+ feature; gated for M1"]
+    #[cfg(feature = "state_machine")]
     async fn test_prepared_statements() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
@@ -656,7 +673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "M2+ feature; gated for M1"]
+    #[cfg(feature = "state_machine")]
     async fn test_cache_eviction() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = Config::default();

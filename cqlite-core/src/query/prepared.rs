@@ -383,6 +383,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
+    #[cfg(feature = "state_machine")]
     async fn test_prepared_query_creation() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();

@@ -10,12 +10,10 @@
 //! - Result set management
 //! - REVOLUTIONARY SELECT parser for direct SSTable access
 
-#[cfg(feature = "state_machine")]
 pub mod engine;
 pub mod executor;
 pub mod parser;
 pub mod planner;
-#[cfg(feature = "state_machine")]
 pub mod prepared;
 pub mod result;
 
@@ -33,7 +31,6 @@ pub mod select_optimizer;
 #[cfg(feature = "state_machine")]
 pub mod select_parser;
 
-#[cfg(feature = "state_machine")]
 pub use engine::{
     AnalyzeResult, CacheStats, ExplainResult, QueryCacheEntry, QueryEngine as AdvancedQueryEngine,
 };
@@ -42,7 +39,6 @@ pub use executor::{
 };
 pub use parser::QueryParser;
 pub use planner::{ExecutionStep, IndexSelection, PlanType, QueryHints, QueryPlan, QueryPlanner};
-#[cfg(feature = "state_machine")]
 pub use prepared::{
     ExecutionHints, ParameterMetadata, PreparedQuery, PreparedQueryBuilder, PreparedQueryStats,
 };
@@ -90,7 +86,6 @@ pub struct QueryEngine {
     advanced_engine: AdvancedQueryEngine,
 }
 
-#[cfg(feature = "state_machine")]
 impl QueryEngine {
     /// Create a new query engine
     pub fn new(

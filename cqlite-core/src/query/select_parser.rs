@@ -1056,6 +1056,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "state_machine")]
     fn test_select_with_aggregates() {
         let stmt = parse_select("SELECT COUNT(*), AVG(age) FROM users GROUP BY city").unwrap();
         assert!(stmt.requires_aggregation());
