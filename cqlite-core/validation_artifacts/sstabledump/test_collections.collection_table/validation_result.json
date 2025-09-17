@@ -1,12 +1,12 @@
 {
   "keyspace": "test_collections",
   "table": "collection_table",
-  "index_file_path": "../test-data/datasets/sstables/test_collections/collection_table-db3c3b9089e111f083a7cf754256a948/nb-1-big-Index.db",
+  "index_file_path": "../test-data/datasets/sstables/test_collections/collection_table-6f323630934a11f08d448925b7a9e804/nb-1-big-Index.db",
   "partition_count": 609,
   "promoted_index_count": 0,
   "key_digest_matches": [],
   "offset_matches": [],
   "perfect_parity": true,
-  "timestamp": "2025-09-12T13:14:19.674293Z",
+  "timestamp": "2025-09-17T20:20:33.141936Z",
   "errors": []
 }

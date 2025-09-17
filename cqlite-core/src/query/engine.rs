@@ -12,11 +12,7 @@ use super::{
 };
 
 #[cfg(feature = "state_machine")]
-use super::{
-    select_executor::SelectExecutor,
-    select_optimizer::SelectOptimizer,
-    select_parser,
-};
+use super::{select_executor::SelectExecutor, select_optimizer::SelectOptimizer, select_parser};
 use crate::{
     Config, Result, Value, memory::MemoryManager, schema::SchemaManager, storage::StorageEngine,
 };
@@ -200,7 +196,9 @@ impl QueryEngine {
         })?;
 
         #[cfg(not(feature = "state_machine"))]
-        return Err(crate::error::Error::QueryExecution("Advanced SELECT parsing requires state_machine feature".to_string()));
+        return Err(crate::error::Error::QueryExecution(
+            "Advanced SELECT parsing requires state_machine feature".to_string(),
+        ));
 
         // Optimize the query plan
         #[cfg(feature = "state_machine")]

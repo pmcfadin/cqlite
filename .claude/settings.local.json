@@ -5,7 +5,18 @@
       "mcp__claude-flow",
       "Bash(gh run view:*)",
       "Bash(cargo fmt:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh issue close:*)",
+      "Bash(gh issue view:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo check:*)",
+      "Bash(timeout 30s cargo test --features state_machine test_prepared_statements --no-run)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)"
     ],
     "deny": []
   }
