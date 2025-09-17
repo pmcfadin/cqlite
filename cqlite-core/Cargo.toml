@@ -137,5 +137,8 @@ tombstones = []       # tombstone/GC logic (M3+)
 benchmarks = []       # opt-in perf runs
 experimental = []     # SSTable writing and other M1 functionality (enabled by default)
 
+# Issue #80: Mock usage control - unit tests only
+unit-tests-only = []  # Enables mock/synthetic data usage for unit tests (disabled in CI integration paths)
+
 [lints]
 workspace = true

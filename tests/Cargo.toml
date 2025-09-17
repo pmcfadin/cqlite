@@ -130,3 +130,6 @@ ci_zero_tolerance = []
 experimental = []
 legacy-heuristics = ["cqlite-core/legacy-heuristics"]
 
+# Issue #80: Mock usage control - unit tests only
+unit-tests-only = ["cqlite-core/unit-tests-only"]  # Enables mock/synthetic data usage for unit tests (disabled in CI integration paths)
+

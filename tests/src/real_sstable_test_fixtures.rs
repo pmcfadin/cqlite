@@ -247,9 +247,19 @@ impl SSTableTestFixtureGenerator {
             sstable_data.extend(serialized_row);
         }
 
-        // Write the mock SSTable file
-        self.write_mock_sstable(&file_path, &header, &sstable_data)
-            .await?;
+        // Write the mock SSTable file (only available with unit-tests-only feature)
+        #[cfg(feature = "unit-tests-only")]
+        {
+            self.write_mock_sstable(&file_path, &header, &sstable_data)
+                .await?;
+        }
+        #[cfg(not(feature = "unit-tests-only"))]
+        {
+            return Err(cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Mock SSTable generation disabled: use real datasets only (Issue #80).\nEnable 'unit-tests-only' feature for unit testing with mocks.",
+            )));
+        }
 
         // Create test queries
         let test_queries = vec![
@@ -365,9 +375,19 @@ impl SSTableTestFixtureGenerator {
             sstable_data.extend(serialized_row);
         }
 
-        // Write the mock SSTable file
-        self.write_mock_sstable(&file_path, &header, &sstable_data)
-            .await?;
+        // Write the mock SSTable file (only available with unit-tests-only feature)
+        #[cfg(feature = "unit-tests-only")]
+        {
+            self.write_mock_sstable(&file_path, &header, &sstable_data)
+                .await?;
+        }
+        #[cfg(not(feature = "unit-tests-only"))]
+        {
+            return Err(cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Mock SSTable generation disabled: use real datasets only (Issue #80).\nEnable 'unit-tests-only' feature for unit testing with mocks.",
+            )));
+        }
 
         // Create test queries
         let test_queries = vec![
@@ -474,9 +494,19 @@ impl SSTableTestFixtureGenerator {
             sstable_data.extend(serialized_row);
         }
 
-        // Write the mock SSTable file
-        self.write_mock_sstable(&file_path, &header, &sstable_data)
-            .await?;
+        // Write the mock SSTable file (only available with unit-tests-only feature)
+        #[cfg(feature = "unit-tests-only")]
+        {
+            self.write_mock_sstable(&file_path, &header, &sstable_data)
+                .await?;
+        }
+        #[cfg(not(feature = "unit-tests-only"))]
+        {
+            return Err(cqlite_core::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Mock SSTable generation disabled: use real datasets only (Issue #80).\nEnable 'unit-tests-only' feature for unit testing with mocks.",
+            )));
+        }
 
         // Create test queries
         let test_queries = vec![
@@ -780,6 +810,7 @@ impl SSTableTestFixtureGenerator {
         Ok(serialized)
     }
 
+    #[cfg(feature = "unit-tests-only")]
     async fn write_mock_sstable(
         &self,
         file_path: &Path,

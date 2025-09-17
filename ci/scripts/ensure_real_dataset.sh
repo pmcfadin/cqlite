@@ -36,6 +36,7 @@ FORBIDDEN_PATTERNS=(
     "stub"
     "test-with-mock"
     "mock-cqlite"
+    "unit-tests-only"
 )
 
 # Check command line arguments
@@ -112,7 +113,18 @@ fi
 # For parity tests, we require real dataset indicators
 if echo "$INPUTS" | grep -E "(parity|sstabledump)" >/dev/null 2>&1; then
     if [[ "$FOUND_REAL_INDICATOR" == false ]]; then
-        fail "Parity test detected but no real dataset indicators found. Ensure you're using test-data/datasets with real Cassandra data."
+        fail "❌ PARITY TEST FAILURE - No real dataset indicators found.
+
+🔍 Issue #80 requires all M1-critical integration paths to use REAL datasets only.
+
+📋 Required actions:
+  1. Ensure test-data/datasets/ contains real Cassandra 5 SSTables
+  2. Download datasets: gh release download datasets-v2 --pattern 'cassandra5-small-refs-only-v2.tar.gz'
+  3. Verify SHA256: 1cfd054d7236132417fc93e91d17f660bbb96f6c5562f19ddc5c12e50bfbf2df
+  4. Extract to project root: tar -xzf cassandra5-small-refs-only-v2.tar.gz
+
+💡 For unit tests with mocks, enable the 'unit-tests-only' feature flag.
+🚫 Mock/synthetic datasets are prohibited in CI integration paths per Issue #80."
     fi
 fi
 

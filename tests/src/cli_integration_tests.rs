@@ -136,19 +136,32 @@ impl CLIIntegrationTestSuite {
 ]"#;
         fs::write(self.test_data_dir.join("users.json"), json_content)?;
 
-        // Create mock SSTable file (binary data)
-        let mock_sstable = vec![
-            // Mock header
-            0x00, 0x00, 0x00, 0x20, // Header length (32 bytes)
-            b'C', b'Q', b'L', b'I', b'T', b'E', 0x00, 0x01, // Magic + version
-            // Mock table ID (16 bytes)
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
-            0x0F, 0x10, // Mock data length
-            0x00, 0x00, 0x00, 0x10, // Mock data (16 bytes)
-            0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-            0x88, 0x99,
-        ];
-        fs::write(self.test_data_dir.join("mock.sstable"), mock_sstable)?;
+        // Create mock SSTable file (binary data) - only for unit tests
+        #[cfg(feature = "unit-tests-only")]
+        {
+            let mock_sstable = vec![
+                // Mock header
+                0x00, 0x00, 0x00, 0x20, // Header length (32 bytes)
+                b'C', b'Q', b'L', b'I', b'T', b'E', 0x00, 0x01, // Magic + version
+                // Mock table ID (16 bytes)
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+                0x0F, 0x10, // Mock data length
+                0x00, 0x00, 0x00, 0x10, // Mock data (16 bytes)
+                0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                0x88, 0x99,
+            ];
+            fs::write(self.test_data_dir.join("mock.sstable"), mock_sstable)?;
+        }
+        #[cfg(not(feature = "unit-tests-only"))]
+        {
+            // In integration mode, require real SSTable files (Issue #80)
+            // Create a placeholder that explains why mock data is not available
+            let error_message = b"Mock SSTable files disabled in integration tests (Issue #80).\nUse real Cassandra datasets from test-data/datasets/ instead.\nEnable 'unit-tests-only' feature for unit testing with mocks.";
+            fs::write(
+                self.test_data_dir.join("mock.sstable.disabled"),
+                error_message,
+            )?;
+        }
 
         // Create invalid SSTable file
         fs::write(self.test_data_dir.join("invalid.sstable"), b"invalid data")?;
