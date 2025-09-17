@@ -611,15 +611,16 @@ fn generate_validation_report(results: &[SummaryValidationResult]) -> String {
     report
 }
 
-/// Find *-Data.db file in SSTable directory
+/// Find *-Data.db file in SSTable directory, with fallback for refs-only datasets (Issue #89)
 fn find_data_file(sstable_dir: &Path) -> Result<PathBuf> {
     let entries = std::fs::read_dir(sstable_dir).map_err(|e| {
         cqlite_core::Error::corruption(format!("Failed to read SSTable directory: {e}"))
     })?;
 
-    for entry in entries {
-        let entry = entry
-            .map_err(|e| cqlite_core::Error::corruption(format!("Directory entry error: {e}")))?;
+    // First, try to find actual Data.db files (full dataset mode)
+    let mut jsonl_fallback: Option<PathBuf> = None;
+
+    for entry in entries.flatten() {
         let path = entry.path();
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
@@ -629,11 +630,26 @@ fn find_data_file(sstable_dir: &Path) -> Result<PathBuf> {
             if name.ends_with("-Data.db") {
                 return Ok(path);
             }
+            // Store jsonl file as fallback for refs-only mode
+            if name.ends_with("-Data.db.jsonl") && jsonl_fallback.is_none() {
+                jsonl_fallback = Some(path);
+            }
+        }
+    }
+
+    // If no Data.db found but we have jsonl reference, create a virtual Data.db path
+    // This enables refs-only datasets (Issue #89) to work with companion file derivation
+    if let Some(jsonl_path) = jsonl_fallback {
+        if let Some(jsonl_name) = jsonl_path.file_name().and_then(|n| n.to_str()) {
+            if let Some(data_name) = jsonl_name.strip_suffix(".jsonl") {
+                let virtual_data_path = sstable_dir.join(data_name);
+                return Ok(virtual_data_path);
+            }
         }
     }
 
     Err(cqlite_core::Error::corruption(
-        "No *-Data.db file found".to_string(),
+        "No *-Data.db file found (and no .jsonl reference for refs-only mode)".to_string(),
     ))
 }
 
