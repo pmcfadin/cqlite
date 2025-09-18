@@ -762,7 +762,9 @@ struct CompressionStatsHeader {
     block_count: u32,
 }
 
-/// Enhanced SSTable footer with comprehensive metadata
+/// Enhanced SSTable footer with comprehensive metadata (FUTURE ENHANCEMENT)
+/// Currently unused - the basic write_footer() method implements Cassandra's 16-byte format.
+/// This struct will be used when implementing enhanced metadata support.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 struct SSTableFooter {

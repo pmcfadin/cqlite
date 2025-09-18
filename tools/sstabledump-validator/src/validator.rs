@@ -24,7 +24,9 @@ pub struct _TestDatasetPair {
     pub expected_reconciliation: String,
 }
 
+/// TODO(Issue #37): Complete reconciliation validation implementation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ReconciliationDatasetResult {
     pub dataset_name: String,
     pub passed: bool,
@@ -129,7 +131,9 @@ pub enum ValidationStatus {
 }
 
 /// Reconciliation validation report for Issue #37
+/// TODO(Issue #37): Complete reconciliation validation implementation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ReconciliationValidationReport {
     pub total_datasets: usize,
     pub passed_datasets: usize,
