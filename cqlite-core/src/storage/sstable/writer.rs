@@ -764,6 +764,7 @@ struct CompressionStatsHeader {
 
 /// Enhanced SSTable footer with comprehensive metadata
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 struct SSTableFooter {
     format_version: u32,
     entry_count: u64,

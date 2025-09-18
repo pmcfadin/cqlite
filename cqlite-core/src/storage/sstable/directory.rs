@@ -1663,4 +1663,66 @@ mod tests {
             assert!(missing.iter().any(|m| m.contains("Summary")));
         }
     }
+
+    #[test]
+    #[cfg(feature = "enhanced-index-validation")]
+    fn test_enhanced_validation_functions() {
+        use std::collections::HashMap;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut components = HashMap::new();
+
+        // Create test files for enhanced validation
+        let data_file = temp_dir.path().join("nb-1-big-Data.db");
+        let stats_file = temp_dir.path().join("nb-1-big-Statistics.db");
+        fs::write(&data_file, "data").unwrap();
+        fs::write(&stats_file, "stats").unwrap();
+
+        components.insert(SSTableComponent::Data, data_file);
+        components.insert(SSTableComponent::Statistics, stats_file);
+
+        let generation = SSTableGeneration {
+            generation: 1,
+            format: "big".to_string(),
+            table_name: "test".to_string(),
+            components,
+            base_path: temp_dir.path().to_path_buf(),
+        };
+
+        // Test enhanced validation directly
+        let mut analysis = ComponentAnalysis {
+            generation: 1,
+            format: "big".to_string(),
+            required_components_present: Vec::new(),
+            required_components_missing: Vec::new(),
+            optional_components_present: Vec::new(),
+            file_sizes: HashMap::new(),
+            accessibility_status: HashMap::new(),
+        };
+
+        let issues = validate_generation_components_enhanced(&generation, &mut analysis).unwrap();
+
+        // Enhanced validation should find missing Index and Summary for "big" format
+        assert!(issues.len() >= 2);
+        assert!(
+            analysis
+                .required_components_missing
+                .contains(&SSTableComponent::Index)
+        );
+        assert!(
+            analysis
+                .required_components_missing
+                .contains(&SSTableComponent::Summary)
+        );
+        assert!(
+            analysis
+                .required_components_present
+                .contains(&SSTableComponent::Data)
+        );
+        assert!(
+            analysis
+                .required_components_present
+                .contains(&SSTableComponent::Statistics)
+        );
+    }
 }
