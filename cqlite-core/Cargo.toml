@@ -140,5 +140,9 @@ experimental = []     # SSTable writing and other M1 functionality (enabled by d
 # Issue #80: Mock usage control - unit tests only
 unit-tests-only = []  # Enables mock/synthetic data usage for unit tests (disabled in CI integration paths)
 
+# Issue #66: Enhanced index validation features (M1: disabled by default)
+# Includes promoted index parsing, complex TOC validation, and advanced assertions
+enhanced-index-validation = []
+
 [lints]
 workspace = true

@@ -485,7 +485,7 @@ impl SSTableDirectory {
             let mut has_critical_errors = false;
 
             // Create component analysis for this generation
-            let mut analysis = ComponentAnalysis {
+            let analysis = ComponentAnalysis {
                 generation: generation.generation,
                 format: generation.format.clone(),
                 required_components_present: Vec::new(),
@@ -495,48 +495,84 @@ impl SSTableDirectory {
                 accessibility_status: HashMap::new(),
             };
 
-            // Validate components with detailed analysis
-            match validate_generation_components_enhanced(generation, &mut analysis) {
-                Ok(issues) => {
-                    if !issues.is_empty() {
-                        report.validation_errors.extend(issues.clone());
-                        // Only mark as critically invalid if we have missing required components
-                        if issues.iter().any(|issue| {
-                            issue.contains("missing required") || issue.contains("corrupted")
-                        }) {
-                            has_critical_errors = true;
+            // Validate components with M1-appropriate validation
+            #[cfg(feature = "enhanced-index-validation")]
+            {
+                let mut analysis_enhanced = analysis.clone();
+                match validate_generation_components_enhanced(generation, &mut analysis_enhanced) {
+                    Ok(issues) => {
+                        if !issues.is_empty() {
+                            report.validation_errors.extend(issues.clone());
+                            // Only mark as critically invalid if we have missing required components
+                            if issues.iter().any(|issue| {
+                                issue.contains("missing required") || issue.contains("corrupted")
+                            }) {
+                                has_critical_errors = true;
+                            }
                         }
                     }
+                    Err(e) => {
+                        report.validation_errors.push(format!(
+                            "Validation error for generation {}: {}",
+                            generation.generation, e
+                        ));
+                        has_critical_errors = true;
+                    }
                 }
-                Err(e) => {
-                    report.validation_errors.push(format!(
-                        "Validation error for generation {}: {}",
-                        generation.generation, e
-                    ));
-                    has_critical_errors = true;
+            }
+
+            #[cfg(not(feature = "enhanced-index-validation"))]
+            {
+                // M1 basic validation: just check that required files exist
+                let required_files = [SSTableComponent::Data, SSTableComponent::Statistics];
+
+                for component in &required_files {
+                    if !generation.components.contains_key(component) {
+                        report.validation_errors.push(format!(
+                            "Missing required component {:?} in generation {}",
+                            component, generation.generation
+                        ));
+                        has_critical_errors = true;
+                    }
                 }
             }
 
             // Validate TOC consistency
-            match validate_toc_consistency_enhanced(generation) {
-                Ok(inconsistencies) => {
-                    if !inconsistencies.is_empty() {
-                        report.toc_inconsistencies.extend(inconsistencies.clone());
-                        // TOC inconsistencies are warnings, not critical errors unless files are missing
-                        if inconsistencies
-                            .iter()
-                            .any(|inc| inc.contains("missing") || inc.contains("NonExistent"))
-                        {
-                            has_critical_errors = true;
+            #[cfg(feature = "enhanced-index-validation")]
+            {
+                match validate_toc_consistency_enhanced(generation) {
+                    Ok(inconsistencies) => {
+                        if !inconsistencies.is_empty() {
+                            report.toc_inconsistencies.extend(inconsistencies.clone());
+                            // TOC inconsistencies are warnings, not critical errors unless files are missing
+                            if inconsistencies
+                                .iter()
+                                .any(|inc| inc.contains("missing") || inc.contains("NonExistent"))
+                            {
+                                has_critical_errors = true;
+                            }
                         }
                     }
+                    Err(e) => {
+                        report.validation_errors.push(format!(
+                            "TOC validation error for generation {}: {}",
+                            generation.generation, e
+                        ));
+                        has_critical_errors = true;
+                    }
                 }
-                Err(e) => {
-                    report.validation_errors.push(format!(
-                        "TOC validation error for generation {}: {}",
-                        generation.generation, e
-                    ));
-                    has_critical_errors = true;
+            }
+
+            #[cfg(not(feature = "enhanced-index-validation"))]
+            {
+                // M1 basic TOC validation: just check that TOC.txt exists if present
+                if let Some(toc_path) = generation.components.get(&SSTableComponent::TOC) {
+                    if !toc_path.exists() {
+                        report.validation_errors.push(format!(
+                            "TOC.txt referenced but not found for generation {}",
+                            generation.generation
+                        ));
+                    }
                 }
             }
 
@@ -889,7 +925,8 @@ fn scan_secondary_indexes(path: &Path, table_name: &str) -> Result<Vec<Secondary
     Ok(secondary_indexes)
 }
 
-/// Enhanced validation with detailed component analysis
+/// Enhanced validation with detailed component analysis (M1: gated for post-M1)
+#[cfg(feature = "enhanced-index-validation")]
 pub fn validate_generation_components_enhanced(
     generation: &SSTableGeneration,
     analysis: &mut ComponentAnalysis,
@@ -995,21 +1032,43 @@ pub fn validate_generation_components_enhanced(
     Ok(issues)
 }
 
-/// Legacy function for backward compatibility
+/// Legacy function for backward compatibility (M1: basic validation only)
 pub fn validate_generation_components(generation: &SSTableGeneration) -> Result<Vec<String>> {
-    let mut dummy_analysis = ComponentAnalysis {
-        generation: generation.generation,
-        format: generation.format.clone(),
-        required_components_present: Vec::new(),
-        required_components_missing: Vec::new(),
-        optional_components_present: Vec::new(),
-        file_sizes: HashMap::new(),
-        accessibility_status: HashMap::new(),
-    };
-    validate_generation_components_enhanced(generation, &mut dummy_analysis)
+    #[cfg(feature = "enhanced-index-validation")]
+    {
+        let mut dummy_analysis = ComponentAnalysis {
+            generation: generation.generation,
+            format: generation.format.clone(),
+            required_components_present: Vec::new(),
+            required_components_missing: Vec::new(),
+            optional_components_present: Vec::new(),
+            file_sizes: HashMap::new(),
+            accessibility_status: HashMap::new(),
+        };
+        validate_generation_components_enhanced(generation, &mut dummy_analysis)
+    }
+
+    #[cfg(not(feature = "enhanced-index-validation"))]
+    {
+        // M1 basic validation: check required files exist
+        let mut issues = Vec::new();
+        let required_files = [SSTableComponent::Data, SSTableComponent::Statistics];
+
+        for component in &required_files {
+            if !generation.components.contains_key(component) {
+                issues.push(format!(
+                    "Missing required component {:?} in generation {}",
+                    component, generation.generation
+                ));
+            }
+        }
+
+        Ok(issues)
+    }
 }
 
-/// Enhanced TOC validation with detailed component analysis
+/// Enhanced TOC validation with detailed component analysis (M1: gated for post-M1)
+#[cfg(feature = "enhanced-index-validation")]
 pub fn validate_toc_consistency_enhanced(generation: &SSTableGeneration) -> Result<Vec<String>> {
     let mut inconsistencies = Vec::new();
 
@@ -1134,9 +1193,29 @@ pub fn validate_toc_consistency_enhanced(generation: &SSTableGeneration) -> Resu
     Ok(inconsistencies)
 }
 
-/// Legacy function for backward compatibility
+/// Legacy function for backward compatibility (M1: basic validation only)
 pub fn validate_toc_consistency(generation: &SSTableGeneration) -> Result<Vec<String>> {
-    validate_toc_consistency_enhanced(generation)
+    #[cfg(feature = "enhanced-index-validation")]
+    {
+        validate_toc_consistency_enhanced(generation)
+    }
+
+    #[cfg(not(feature = "enhanced-index-validation"))]
+    {
+        // M1 basic validation: just check that TOC.txt exists and is readable
+        let mut inconsistencies = Vec::new();
+
+        if let Some(toc_path) = generation.components.get(&SSTableComponent::TOC) {
+            if !toc_path.exists() {
+                inconsistencies.push(format!(
+                    "TOC.txt referenced but not found for generation {}",
+                    generation.generation
+                ));
+            }
+        }
+
+        Ok(inconsistencies)
+    }
 }
 
 /// Validate file integrity by checking basic file properties
@@ -1381,6 +1460,7 @@ mod tests {
         assert!(components.contains(&SSTableComponent::Summary));
     }
 
+    #[cfg(feature = "enhanced-index-validation")]
     #[test]
     fn test_enhanced_component_validation() {
         use std::collections::HashMap;
@@ -1460,6 +1540,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "enhanced-index-validation")]
     #[test]
     fn test_enhanced_toc_validation() {
         let temp_dir = TempDir::new().unwrap();

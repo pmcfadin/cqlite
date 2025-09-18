@@ -16,7 +16,10 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(git pull:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(find:*)",
+      "Bash(cargo build:*)"
     ],
     "deny": []
   }
