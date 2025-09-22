@@ -1406,18 +1406,42 @@ impl SchemaValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    async fn make_registry(mut reg_config: SchemaRegistryConfig) -> SchemaRegistry {
+        reg_config.enable_auto_discovery = false;
+        let mut core_config = Config::default();
+        core_config.storage.wal.enabled = false;
+        let platform = Arc::new(Platform::new(&core_config).await.expect("platform"));
+        SchemaRegistry::new(reg_config, platform, core_config)
+            .await
+            .expect("registry")
+    }
+
+    fn simple_schema(name: &str) -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: name.to_string(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![crate::schema::Column {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                nullable: false,
+                default: None,
+            }],
+            comments: HashMap::new(),
+        }
+    }
 
     #[tokio::test]
     async fn test_schema_registry_creation() {
-        let config = SchemaRegistryConfig::default();
-        let core_config = Config::default();
-        let platform = Arc::new(Platform::new(&core_config).await.unwrap());
-
-        let registry = SchemaRegistry::new(config, platform, core_config)
-            .await
-            .unwrap();
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
         let stats = registry.get_statistics().await.unwrap();
-
         assert_eq!(stats.total_schemas, 0);
     }
 
@@ -1433,5 +1457,85 @@ mod tests {
 
         assert_eq!(query.keyspace.as_ref().unwrap(), "test_ks");
         assert_eq!(query.table_pattern.as_ref().unwrap(), "user_*");
+    }
+
+    #[tokio::test]
+    async fn register_and_retrieve_schema() {
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
+        let schema = simple_schema("users");
+
+        registry
+            .register_schema(schema.clone(), SchemaSource::Manual)
+            .await
+            .expect("register schema");
+
+        let fetched = registry
+            .get_schema("test_ks", "users")
+            .await
+            .expect("fetch schema");
+        assert_eq!(fetched.table, "users");
+        assert_eq!(fetched.partition_keys.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn schema_version_history_tracks_changes() {
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
+        let mut schema = simple_schema("accounts");
+
+        registry
+            .register_schema(schema.clone(), SchemaSource::Manual)
+            .await
+            .expect("register v1");
+
+        schema.columns.push(crate::schema::Column {
+            name: "status".to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            default: None,
+        });
+
+        registry
+            .register_schema(schema.clone(), SchemaSource::Manual)
+            .await
+            .expect("register v2");
+
+        let history = registry
+            .get_schema_history("test_ks", "accounts")
+            .await
+            .expect("history");
+
+        assert_eq!(
+            history.len(),
+            1,
+            "Second registration should emit first version"
+        );
+        assert!(
+            history[0]
+                .changes
+                .iter()
+                .any(|change| matches!(change.change_type, SchemaChangeType::ColumnAdded))
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_cached_schema_invokes_discovery_path() {
+        let mut config = SchemaRegistryConfig::default();
+        config.cache_ttl_seconds = 0;
+        config.enable_auto_discovery = true;
+        let registry = make_registry(config).await;
+
+        registry
+            .register_schema(simple_schema("events"), SchemaSource::Manual)
+            .await
+            .expect("register events schema");
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let err = registry
+            .get_schema("test_ks", "events")
+            .await
+            .expect_err("expired schema should attempt discovery");
+
+        assert!(matches!(err, Error::Schema(message) if message.contains("No SSTables found")));
     }
 }

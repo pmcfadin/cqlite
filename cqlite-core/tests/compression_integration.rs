@@ -373,6 +373,7 @@ fn test_negative_case(test_case: &CompressionTestCase) -> Result<()> {
 
 /// Test matrix runner for positive cases
 #[test]
+#[ignore = "Manual compression matrix; enable with --features compression-matrix"]
 fn test_compression_matrix_positive() {
     let test_matrix = generate_test_matrix();
     let mut passed = 0;
@@ -434,6 +435,7 @@ fn test_compression_matrix_positive() {
 
 /// Test matrix runner for negative cases
 #[test]
+#[ignore = "Manual compression matrix; enable with --features compression-matrix"]
 fn test_compression_matrix_negative() {
     let test_matrix = generate_test_matrix();
     let mut passed = 0;

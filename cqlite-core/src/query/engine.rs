@@ -118,7 +118,7 @@ impl QueryEngine {
         }
 
         // Check plan cache first for non-SELECT queries
-        if let Some(cached_entry) = self.plan_cache.get(sql) {
+        if let Some(mut cached_entry) = self.plan_cache.get_mut(sql) {
             // Update cache hit statistics
             {
                 let mut stats = self.stats.write();
@@ -127,13 +127,11 @@ impl QueryEngine {
                     / stats.total_queries as f64;
             }
 
-            // Update cache entry hit count
-            let mut entry = cached_entry.clone();
-            entry.hit_count += 1;
-            self.plan_cache.insert(sql.to_string(), entry.clone());
+            // Update cache entry hit count in place to avoid locking twice
+            cached_entry.hit_count += 1;
 
             // Execute the cached plan
-            let mut result = self.executor.execute(&entry.plan).await?;
+            let mut result = self.executor.execute(&cached_entry.plan).await?;
             self.update_execution_stats(&mut result, start_time);
             return Ok(result);
         }
@@ -166,24 +164,28 @@ impl QueryEngine {
     /// Execute a SELECT query using the advanced parser and optimizer
     async fn execute_select_query(&self, sql: &str, start_time: Instant) -> Result<QueryResult> {
         // Check plan cache first for SELECT queries too
-        if let Some(cached_entry) = self.plan_cache.get(sql) {
-            // Update cache hit statistics
-            {
-                let mut stats = self.stats.write();
-                stats.cache_hit_ratio = (stats.cache_hit_ratio * (stats.total_queries - 1) as f64
-                    + 1.0)
-                    / stats.total_queries as f64;
+        if let Some(mut cached_entry) = self.plan_cache.get_mut(sql) {
+            if cached_entry.plan.table.is_some() {
+                // Update cache hit statistics
+                {
+                    let mut stats = self.stats.write();
+                    stats.cache_hit_ratio =
+                        (stats.cache_hit_ratio * (stats.total_queries - 1) as f64 + 1.0)
+                            / stats.total_queries as f64;
+                }
+
+                // Update cache entry hit count
+                cached_entry.hit_count += 1;
+
+                // Execute the cached plan
+                let mut result = self.executor.execute(&cached_entry.plan).await?;
+                self.update_execution_stats(&mut result, start_time);
+                return Ok(result);
             }
 
-            // Update cache entry hit count
-            let mut entry = cached_entry.clone();
-            entry.hit_count += 1;
-            self.plan_cache.insert(sql.to_string(), entry.clone());
-
-            // Execute the cached plan
-            let mut result = self.executor.execute(&entry.plan).await?;
-            self.update_execution_stats(&mut result, start_time);
-            return Ok(result);
+            // Placeholder plans without table information are not reusable; drop them.
+            drop(cached_entry);
+            self.plan_cache.remove(sql);
         }
 
         // Parse SELECT statement using advanced parser
@@ -203,36 +205,6 @@ impl QueryEngine {
         // Optimize the query plan
         #[cfg(feature = "state_machine")]
         let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
-
-        // For now, let's create a simple entry in the cache to track that we've seen this query
-        #[cfg(feature = "state_machine")]
-        let entry = QueryCacheEntry {
-            plan: super::planner::QueryPlan {
-                plan_type: super::planner::PlanType::TableScan,
-                table: None,
-                estimated_cost: 1.0,
-                estimated_rows: 0,
-                selected_indexes: vec![],
-                steps: vec![],
-                hints: super::planner::QueryHints::default(),
-            },
-            parsed_query: super::ParsedQuery {
-                query_type: super::QueryType::Select,
-                table: None,
-                columns: vec![],
-                where_clause: None,
-                values: vec![],
-                set_clause: std::collections::HashMap::new(),
-                order_by: vec![],
-                limit: None,
-                sql: sql.to_string(),
-            },
-            cached_at: Instant::now(),
-            hit_count: 0,
-        };
-
-        #[cfg(feature = "state_machine")]
-        self.plan_cache.insert(sql.to_string(), entry);
 
         // Execute the optimized plan
         #[cfg(feature = "state_machine")]
@@ -705,5 +677,115 @@ mod tests {
 
         // Cache should only have 2 entries due to eviction
         assert_eq!(query_engine.cache_stats().plan_cache_size, 2);
+    }
+}
+
+#[cfg(test)]
+mod plan_cache_tests {
+    use super::*;
+    use crate::{
+        Config, memory::MemoryManager, platform::Platform, schema::SchemaManager,
+        storage::StorageEngine,
+    };
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    async fn setup_query_engine(config: &Config) -> (QueryEngine, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let platform = Arc::new(Platform::new(config).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(temp_dir.path(), config, platform)
+                .await
+                .unwrap(),
+        );
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+        let memory = Arc::new(MemoryManager::new(config).unwrap());
+
+        let engine = QueryEngine::new(storage, schema, memory, config).unwrap();
+        (engine, temp_dir)
+    }
+
+    async fn create_sample_table(engine: &QueryEngine) {
+        engine
+            .execute(
+                "CREATE TABLE plan_cache_test (
+                    id INTEGER PRIMARY KEY,
+                    value TEXT
+                )",
+            )
+            .await
+            .unwrap();
+
+        engine
+            .execute("INSERT INTO plan_cache_test (id, value) VALUES (1, 'one')")
+            .await
+            .unwrap();
+        engine
+            .execute("INSERT INTO plan_cache_test (id, value) VALUES (2, 'two')")
+            .await
+            .unwrap();
+        engine
+            .execute("INSERT INTO plan_cache_test (id, value) VALUES (3, 'three')")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_plan_cache_disabled() {
+        let mut config = Config::default();
+        config.query.query_cache_size = Some(0);
+
+        let (engine, _temp_dir) = setup_query_engine(&config).await;
+        create_sample_table(&engine).await;
+
+        engine
+            .execute("SELECT * FROM plan_cache_test WHERE id = 1")
+            .await
+            .unwrap();
+
+        assert_eq!(engine.cache_stats().plan_cache_size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_plan_cache_reuse_point_lookup() {
+        let mut config = Config::default();
+        config.query.query_cache_size = Some(4);
+
+        let (engine, _temp_dir) = setup_query_engine(&config).await;
+        create_sample_table(&engine).await;
+
+        engine.clear_plan_cache();
+
+        engine
+            .execute("SELECT * FROM plan_cache_test WHERE id = 1")
+            .await
+            .unwrap();
+        engine
+            .execute("SELECT * FROM plan_cache_test WHERE id = 1")
+            .await
+            .unwrap();
+
+        assert_eq!(engine.cache_stats().plan_cache_size, 1);
+        assert!(engine.stats().cache_hit_ratio > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_plan_cache_eviction_limit() {
+        let mut config = Config::default();
+        config.query.query_cache_size = Some(2);
+
+        let (engine, _temp_dir) = setup_query_engine(&config).await;
+        create_sample_table(&engine).await;
+
+        engine.clear_plan_cache();
+
+        for id in 1..=3 {
+            engine
+                .execute(&format!("SELECT * FROM plan_cache_test WHERE id = {}", id))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(engine.cache_stats().plan_cache_size, 2);
     }
 }

@@ -10,7 +10,7 @@ mod tests {
         query::{SelectExecutor, SelectOptimizer, SelectStatement, parse_select},
         schema::SchemaManager,
         storage::StorageEngine,
-        types::TableId,
+        types::{TableId, Value},
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -184,6 +184,246 @@ mod tests {
         .expect("COUNT aggregation (2) timed out")
         .unwrap();
         assert_eq!(result.rows.len(), 1); // COUNT returns single row
+    }
+
+    #[tokio::test]
+    async fn test_repeated_aggregation_plan_cache() {
+        let (db, _temp_dir) = create_test_database().await;
+
+        db.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, value DOUBLE)")
+            .await
+            .unwrap();
+
+        db.execute("INSERT INTO metrics VALUES (1, 10.0)")
+            .await
+            .unwrap();
+        db.execute("INSERT INTO metrics VALUES (2, 20.0)")
+            .await
+            .unwrap();
+
+        use tokio::time::{Duration, timeout};
+
+        let result = timeout(
+            Duration::from_secs(1),
+            db.execute("SELECT COUNT(*) FROM metrics"),
+        )
+        .await
+        .expect("Initial aggregation timed out")
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        let result = timeout(
+            Duration::from_secs(1),
+            db.execute("SELECT COUNT(*) FROM metrics"),
+        )
+        .await
+        .expect("Repeated aggregation timed out")
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_partition_scoped_aggregation() {
+        let (db, _temp_dir) = create_test_database().await;
+
+        db.execute(
+            "CREATE TABLE sales (
+                category TEXT,
+                item_id INT,
+                amount DOUBLE,
+                PRIMARY KEY (category, item_id)
+            )",
+        )
+        .await
+        .unwrap();
+
+        db.execute("INSERT INTO sales (category, item_id, amount) VALUES ('tech', 1, 10.0)")
+            .await
+            .unwrap();
+        db.execute("INSERT INTO sales (category, item_id, amount) VALUES ('tech', 2, 40.0)")
+            .await
+            .unwrap();
+        db.execute("INSERT INTO sales (category, item_id, amount) VALUES ('finance', 1, 25.0)")
+            .await
+            .unwrap();
+
+        use tokio::time::{Duration, timeout};
+
+        let result = timeout(
+            Duration::from_secs(2),
+            db.execute("SELECT SUM(amount) FROM sales WHERE category = 'tech'"),
+        )
+        .await
+        .expect("Partition-scoped SUM timed out")
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        let sum_value = row.values.get("Sum_amount").expect("Missing SUM result");
+        assert_eq!(sum_value.as_f64().unwrap_or_default(), 50.0);
+    }
+
+    #[tokio::test]
+    async fn test_partition_key_group_by() {
+        let (db, _temp_dir) = create_test_database().await;
+
+        db.execute(
+            "CREATE TABLE events (
+                category TEXT,
+                region TEXT,
+                event_id INT,
+                PRIMARY KEY ((category, region), event_id)
+            )",
+        )
+        .await
+        .unwrap();
+
+        let inserts = [
+            ("analytics", "us-east", 1),
+            ("analytics", "us-east", 2),
+            ("analytics", "eu-west", 3),
+            ("billing", "us-east", 4),
+        ];
+
+        for (category, region, event_id) in inserts {
+            db.execute(&format!(
+                "INSERT INTO events (category, region, event_id) VALUES ('{}', '{}', {})",
+                category, region, event_id
+            ))
+            .await
+            .unwrap();
+        }
+
+        use tokio::time::{Duration, timeout};
+
+        let result = timeout(
+            Duration::from_secs(2),
+            db.execute(
+                "SELECT category, region, COUNT(*) FROM events \
+                 WHERE category IN ('analytics', 'billing') GROUP BY category, region",
+            ),
+        )
+        .await
+        .expect("GROUP BY partition components timed out")
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 3);
+        for row in &result.rows {
+            let category = row
+                .values
+                .get("category")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string();
+            let region = row
+                .values
+                .get("region")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string();
+            let count = row.values.get("Count(*)").and_then(Value::as_i64).unwrap();
+
+            match (category.as_str(), region.as_str()) {
+                ("analytics", "us-east") => assert_eq!(count, 2),
+                ("analytics", "eu-west") => assert_eq!(count, 1),
+                ("billing", "us-east") => assert_eq!(count, 1),
+                _ => panic!("Unexpected group combination: {} / {}", category, region),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_clustering_order_by_with_aggregation() {
+        let (db, _temp_dir) = create_test_database().await;
+
+        db.execute(
+            "CREATE TABLE metrics_by_day (
+                category TEXT,
+                day TEXT,
+                metric DOUBLE,
+                PRIMARY KEY (category, day)
+            )",
+        )
+        .await
+        .unwrap();
+
+        let inserts = [
+            ("tech", "2024-05-01", 10.0),
+            ("tech", "2024-05-02", 15.0),
+            ("tech", "2024-05-03", 12.5),
+        ];
+
+        for (category, day, metric) in inserts {
+            db.execute(&format!(
+                "INSERT INTO metrics_by_day (category, day, metric) VALUES ('{}', '{}', {})",
+                category, day, metric
+            ))
+            .await
+            .unwrap();
+        }
+
+        use tokio::time::{Duration, timeout};
+
+        let result = timeout(
+            Duration::from_secs(2),
+            db.execute(
+                "SELECT MAX(metric) FROM metrics_by_day \
+                 WHERE category = 'tech' ORDER BY day DESC",
+            ),
+        )
+        .await
+        .expect("MAX aggregation with clustering ORDER BY timed out")
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        let max_value = result.rows[0]
+            .values
+            .get("Max_metric")
+            .and_then(Value::as_f64)
+            .unwrap();
+        assert!((max_value - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_aggregation_invalid_column_errors() {
+        let (db, _temp_dir) = create_test_database().await;
+
+        db.execute("CREATE TABLE agg_errors (id INTEGER PRIMARY KEY, amount DOUBLE)")
+            .await
+            .unwrap();
+        db.execute("INSERT INTO agg_errors VALUES (1, 10.0)")
+            .await
+            .unwrap();
+
+        let result = db
+            .execute("SELECT SUM(missing_column) FROM agg_errors")
+            .await;
+        assert!(
+            result.is_err(),
+            "Expected missing column to return an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aggregation_timeout_propagation() {
+        let (db, _temp_dir) = create_test_database().await;
+
+        db.execute("CREATE TABLE agg_timeout (id INTEGER PRIMARY KEY, value DOUBLE)")
+            .await
+            .unwrap();
+        db.execute("INSERT INTO agg_timeout VALUES (1, 42.0)")
+            .await
+            .unwrap();
+
+        use tokio::time::{Duration, timeout};
+
+        let result = timeout(
+            Duration::from_millis(0),
+            db.execute("SELECT COUNT(*) FROM agg_timeout"),
+        )
+        .await;
+
+        assert!(result.is_err(), "Expected timeout to elapse immediately");
     }
 
     #[tokio::test]

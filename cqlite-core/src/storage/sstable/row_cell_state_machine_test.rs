@@ -326,7 +326,9 @@ mod tests {
         data.extend(encode_vint(0)); // 0 clustering rows
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -350,7 +352,9 @@ mod tests {
         data.extend(create_clustering_rows_dense());
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         if !state_machine.is_complete() {
             eprintln!(
                 "DEBUG dense: State machine not complete: {}",
@@ -380,7 +384,9 @@ mod tests {
         data.extend(create_clustering_rows_sparse());
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         if !state_machine.is_complete() {
             eprintln!(
                 "DEBUG sparse: State machine not complete: {}",
@@ -412,7 +418,9 @@ mod tests {
         data.extend(create_clustering_rows_dense());
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -477,7 +485,9 @@ mod tests {
         data.extend_from_slice(b"Alice");
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -511,7 +521,9 @@ mod tests {
         data.push(0x00); // 0 clustering rows
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -540,7 +552,9 @@ mod tests {
         data.push(0x00); // No clustering rows
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -582,7 +596,9 @@ mod tests {
         data.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]);
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -601,8 +617,9 @@ mod tests {
 
     /// Test schema-driven decoding of User Defined Types (UDT)
     #[test]
-    #[cfg(feature = "state_machine")]
     fn test_schema_driven_udt_parsing() {
+        use crate::parser::vint::encode_vint;
+
         // Create schema with UDT column
         let mut schema = create_test_schema();
         schema.columns.push(Column {
@@ -621,16 +638,16 @@ mod tests {
         data.extend(create_simple_partition_key());
 
         // Add clustering row with UDT
-        data.push(0x02); // 1 clustering row
-        data.push(0x08); // key length: 4
+        data.extend(encode_vint(1)); // 1 clustering row
+        data.extend(encode_vint(4)); // key length: 4 (text key)
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
-        data.push(0x02); // 1 column
+        data.extend(encode_vint(1)); // 1 column
 
         // Column "address" (frozen UDT)
-        data.push(0x0E); // name length: 7
+        data.extend(encode_vint(7)); // name length: 7
         data.extend_from_slice(b"address");
-        data.push(0x20); // value length: 16 (mock UDT binary data)
+        data.extend(encode_vint(16)); // value length: 16 (mock UDT binary data)
         // Mock UDT binary data representing {street: "Main St", city: "NYC", zip: 10001}
         data.extend_from_slice(&[
             0x00, 0x07, 0x4D, 0x61, 0x69, 0x6E, 0x20, 0x53, 0x74, // street: "Main St"
@@ -639,7 +656,9 @@ mod tests {
         ]);
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -695,7 +714,9 @@ mod tests {
         ]);
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -760,7 +781,9 @@ mod tests {
         data.extend_from_slice(b"value");
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         if !state_machine.is_complete() {
             eprintln!(
                 "DEBUG multi_component: State machine not complete: {}",
@@ -828,7 +851,9 @@ mod tests {
         data.extend_from_slice(&[0x01, 0x02, 0x45, 0x46, 0x47, 0x48]); // Mock regular list data
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();
@@ -925,8 +950,9 @@ mod tests {
 
     /// Test error handling with schema mismatch
     #[test]
-    #[cfg(feature = "state_machine")]
     fn test_schema_mismatch_handling() {
+        use crate::parser::vint::encode_vint;
+
         // Create schema expecting specific columns
         let schema = create_test_schema();
         let comparator = ComparatorType::Blob;
@@ -938,20 +964,22 @@ mod tests {
         data.extend(create_simple_partition_key());
 
         // Add clustering row with unknown column
-        data.push(0x02); // 1 clustering row
-        data.push(0x08); // key length: 4
+        data.extend(encode_vint(1)); // 1 clustering row
+        data.extend(encode_vint(4)); // key length: 4
         data.extend_from_slice(b"row1");
         data.extend_from_slice(&100i64.to_be_bytes());
-        data.push(0x02); // 1 column
+        data.extend(encode_vint(1)); // 1 column
 
         // Column "unknown" (not in schema)
-        data.push(0x0E); // name length: 7
+        data.extend(encode_vint(7)); // name length: 7
         data.extend_from_slice(b"unknown");
-        data.push(0x0A); // value length: 5
+        data.extend(encode_vint(5)); // value length: 5
         data.extend_from_slice(b"value");
 
         let result = state_machine.process(&data);
-        assert!(result.is_ok());
+        if let Err(err) = result {
+            panic!("Expected parsing to succeed, got error: {}", err);
+        }
         assert!(state_machine.is_complete());
 
         let parsed_row = state_machine.take_parsed_row();

@@ -1033,4 +1033,45 @@ mod tests {
         let result = executor.evaluate_condition(&row, &condition).unwrap();
         assert!(result);
     }
+
+    #[tokio::test]
+    async fn test_condition_to_row_key_mapping() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.storage.wal.enabled = false;
+        config.storage.memtable_size_threshold = u64::MAX;
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform.clone())
+                .await
+                .unwrap(),
+        );
+        let schema = Arc::new(
+            crate::schema::SchemaManager::new(temp_dir.path())
+                .await
+                .unwrap(),
+        );
+
+        let executor = QueryExecutor::new(storage, schema, &config);
+
+        let id_condition = Condition {
+            column: "id".to_string(),
+            operator: ComparisonOperator::Equal,
+            value: Value::Integer(42),
+        };
+        let key = executor
+            .condition_to_row_key(&id_condition)
+            .expect("id condition key");
+        assert_eq!(std::str::from_utf8(key.as_bytes()).unwrap(), "user_key_42");
+
+        let name_condition = Condition {
+            column: "username".to_string(),
+            operator: ComparisonOperator::Equal,
+            value: Value::Text("carol".to_string()),
+        };
+        let key = executor
+            .condition_to_row_key(&name_condition)
+            .expect("fallback key");
+        assert_eq!(key.as_bytes(), b"carol");
+    }
 }

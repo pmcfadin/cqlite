@@ -790,30 +790,17 @@ impl RowCellStateMachine {
                                     Value::Blob(value_data.to_vec())
                                 }
                                 _ => {
-                                    // For modern formats (BIG v5, BTI), blob fallback is not allowed for basic types
-                                    match self.version {
-                                        CassandraVersion::V5_0NewBig
-                                        | CassandraVersion::V5_0Bti => {
-                                            return Err(Error::Schema(format!(
-                                                "Failed to parse column '{}' with data type '{}' in modern format {:?}. Blob fallback is disabled for modern formats.",
-                                                column_name, column.data_type, self.version
-                                            )));
-                                        }
-                                        _ => {
-                                            #[cfg(feature = "legacy-heuristics")]
-                                            {
-                                                // Legacy formats can fall back to blob with feature flag
-                                                Value::Blob(value_data.to_vec())
-                                            }
-                                            #[cfg(not(feature = "legacy-heuristics"))]
-                                            {
-                                                return Err(Error::Schema(format!(
-                                                    "Failed to parse column '{}' with data type '{}'. Enable legacy-heuristics feature for blob fallback support.",
-                                                    column_name, column.data_type
-                                                )));
-                                            }
-                                        }
+                                    if matches!(
+                                        self.version,
+                                        CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti
+                                    ) {
+                                        return Err(Error::Schema(format!(
+                                            "Failed to parse column '{}' with data type '{}' in modern format {:?}. Blob fallback is disabled for modern formats.",
+                                            column_name, column.data_type, self.version
+                                        )));
                                     }
+
+                                    Value::Blob(value_data.to_vec())
                                 }
                             }
                         }
@@ -826,20 +813,7 @@ impl RowCellStateMachine {
                                     column.data_type, column_name, self.version
                                 )));
                             }
-                            _ => {
-                                #[cfg(feature = "legacy-heuristics")]
-                                {
-                                    // Legacy formats can preserve unknown types as blob
-                                    Value::Blob(value_data.to_vec())
-                                }
-                                #[cfg(not(feature = "legacy-heuristics"))]
-                                {
-                                    return Err(Error::Schema(format!(
-                                        "Unknown data type '{}' for column '{}'. Enable legacy-heuristics feature for blob fallback support.",
-                                        column.data_type, column_name
-                                    )));
-                                }
-                            }
+                            _ => Value::Blob(value_data.to_vec()),
                         }
                     }
                 } else {
@@ -851,20 +825,7 @@ impl RowCellStateMachine {
                                 column_name, self.version
                             )));
                         }
-                        _ => {
-                            #[cfg(feature = "legacy-heuristics")]
-                            {
-                                // Legacy formats can preserve unknown columns as blob
-                                Value::Blob(value_data.to_vec())
-                            }
-                            #[cfg(not(feature = "legacy-heuristics"))]
-                            {
-                                return Err(Error::Schema(format!(
-                                    "Column '{}' not found in schema. Enable legacy-heuristics feature for blob fallback support.",
-                                    column_name
-                                )));
-                            }
-                        }
+                        _ => Value::Blob(value_data.to_vec()),
                     }
                 }
             } else {
@@ -876,19 +837,7 @@ impl RowCellStateMachine {
                             self.version
                         )));
                     }
-                    _ => {
-                        #[cfg(feature = "legacy-heuristics")]
-                        {
-                            // Legacy formats can work without schema (blob fallback)
-                            Value::Blob(value_data.to_vec())
-                        }
-                        #[cfg(not(feature = "legacy-heuristics"))]
-                        {
-                            return Err(Error::Schema(
-                                "Schema is required for parsing. Enable legacy-heuristics feature for schema-less blob fallback support.".to_string()
-                            ));
-                        }
-                    }
+                    _ => Value::Blob(value_data.to_vec()),
                 }
             }
         };
@@ -941,16 +890,16 @@ impl RowCellStateMachine {
             _ if data_type.starts_with("map<") => Ok(CqlTypeId::Map),
             _ if data_type.starts_with("tuple<") => Ok(CqlTypeId::Tuple),
             _ if data_type.starts_with("frozen<") => {
-                // Parse the inner type
+                // Parse the inner type; fall back to UDT when unknown
                 let inner = data_type
                     .trim_start_matches("frozen<")
                     .trim_end_matches('>');
-                self.data_type_to_cql_type_id(inner)
+                match self.data_type_to_cql_type_id(inner) {
+                    Ok(inner_type) => Ok(inner_type),
+                    Err(_) => Ok(CqlTypeId::Udt),
+                }
             }
-            _ => Err(Error::corruption(format!(
-                "Unknown data type: {}",
-                data_type
-            ))),
+            _ => Ok(CqlTypeId::Udt),
         }
     }
 
