@@ -286,49 +286,20 @@ impl SSTableReader {
 
         let config = crate::parser::config::ParserConfig::default();
         let parser = SSTableParser::new(config)?;
-        // Parse the header using enhanced version detection
-        let header = match Self::parse_header_with_version_detection(&header_buffer, path).await {
-            Ok(header) => header,
-            Err(e) => {
-                eprintln!(
-                    "Failed to parse header for {:?}, using fallback: {}",
-                    path, e
-                );
-                // Fallback header for corrupted or unrecognized files
-                crate::parser::header::SSTableHeader {
-                    cassandra_version: crate::parser::header::CassandraVersion::Legacy,
-                    version: crate::parser::header::SUPPORTED_VERSION,
-                    table_id: [0; 16],
-                    keyspace: path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .map(|s| s.split('-').next().unwrap_or("unknown").to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    table_name: path
-                        .file_stem()
-                        .and_then(|n| n.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    generation: Self::extract_generation_from_path(path),
-                    compression: crate::parser::header::CompressionInfo {
-                        algorithm: "NONE".to_string(),
-                        chunk_size: 0,
-                        parameters: std::collections::HashMap::new(),
-                    },
-                    stats: crate::parser::header::SSTableStats {
-                        row_count: 0,
-                        min_timestamp: 0,
-                        max_timestamp: 0,
-                        max_deletion_time: 0,
-                        compression_ratio: 1.0,
-                        row_size_histogram: vec![],
-                    },
-                    columns: vec![],
-                    properties: std::collections::HashMap::new(),
-                }
-            }
-        };
+        // Parse the header using enhanced version detection - strict error propagation
+        let header = Self::parse_header_with_version_detection(&header_buffer, path)
+            .await
+            .map_err(|e| {
+                Error::corruption(format!(
+                    "Failed to parse SSTable header for file '{}': {}. This indicates either \
+                     file corruption or an unsupported SSTable format. File size: {} bytes, \
+                     header buffer size: {} bytes.",
+                    path.display(),
+                    e,
+                    file_size,
+                    header_buffer.len()
+                ))
+            })?;
         let header_size = Self::calculate_actual_header_size(&header, &header_buffer)?;
 
         // Seek to start of data section
@@ -638,86 +609,174 @@ impl SSTableReader {
 
     // Missing function implementations
 
-    /// Enhanced header parsing with version detection
+    /// Enhanced header parsing with version detection - strict parsing without fallbacks
     async fn parse_header_with_version_detection(
         header_buffer: &[u8],
         path: &Path,
     ) -> Result<SSTableHeader> {
-        use crate::parser::header::{CassandraVersion, parse_sstable_header};
+        use crate::parser::header::{
+            CassandraVersion, SUPPORTED_MAGIC_NUMBERS, parse_sstable_header,
+        };
 
+        // Validate minimum header size
         if header_buffer.len() < 8 {
-            return Err(Error::corruption("Header buffer too small for parsing"));
+            return Err(Error::corruption(format!(
+                "Header buffer too small for parsing: {} bytes (minimum 8 bytes required). \
+                 File: {}",
+                header_buffer.len(),
+                path.display()
+            )));
         }
 
-        // Try to parse using the existing header parser first
+        // Extract and validate magic number
+        let magic_bytes = &header_buffer[0..4];
+        let magic = u32::from_be_bytes([
+            magic_bytes[0],
+            magic_bytes[1],
+            magic_bytes[2],
+            magic_bytes[3],
+        ]);
+
+        // Validate magic number against supported formats
+        if !SUPPORTED_MAGIC_NUMBERS.contains(&magic) {
+            return Err(Error::unsupported_format(format!(
+                "Unsupported SSTable format: magic number 0x{:08x} not recognized. \
+                 Supported formats: {:?}. File: {}. \
+                 This may indicate file corruption or an unsupported Cassandra version.",
+                magic,
+                SUPPORTED_MAGIC_NUMBERS
+                    .iter()
+                    .map(|m| format!("0x{:08x}", m))
+                    .collect::<Vec<_>>(),
+                path.display()
+            )));
+        }
+
+        // Detect Cassandra version from magic number
+        let cassandra_version = CassandraVersion::from_magic_number(magic).ok_or_else(|| {
+            Error::corruption(format!(
+                "Failed to map magic number 0x{:08x} to Cassandra version. File: {}",
+                magic,
+                path.display()
+            ))
+        })?;
+
+        // Try to parse using the existing header parser
         match parse_sstable_header(header_buffer) {
             Ok((_, header)) => {
-                println!(
-                    "✅ Successfully parsed header with version detection for {:?}",
-                    path
+                log::debug!(
+                    "Successfully parsed header for file '{}' with version: {:?}",
+                    path.display(),
+                    header.cassandra_version
                 );
                 Ok(header)
             }
-            Err(_) => {
-                // Fallback: Try to detect magic number manually and create a basic header
-                let magic_bytes = &header_buffer[0..4];
-                let magic = u32::from_be_bytes([
-                    magic_bytes[0],
-                    magic_bytes[1],
-                    magic_bytes[2],
-                    magic_bytes[3],
-                ]);
+            Err(parse_error) => {
+                // For legacy formats, allow minimal header parsing if feature is enabled
+                if cassandra_version == CassandraVersion::Legacy {
+                    #[cfg(feature = "legacy-heuristics")]
+                    {
+                        log::warn!(
+                            "Failed to parse full header for legacy format file '{}', \
+                             attempting minimal legacy header parsing: {:?}",
+                            path.display(),
+                            parse_error
+                        );
 
-                let version = if header_buffer.len() >= 6 {
-                    u16::from_be_bytes([header_buffer[4], header_buffer[5]])
+                        // Only create minimal header for verified legacy format
+                        Self::parse_minimal_legacy_header(header_buffer, path, cassandra_version)
+                    }
+                    #[cfg(not(feature = "legacy-heuristics"))]
+                    {
+                        Err(Error::unsupported_format(format!(
+                            "Legacy SSTable format detected but legacy-heuristics feature is disabled. \
+                             Enable feature for backward compatibility. File: {}. Parse error: {:?}",
+                            path.display(),
+                            parse_error
+                        )))
+                    }
                 } else {
-                    crate::parser::header::SUPPORTED_VERSION
-                };
-
-                // Detect Cassandra version from magic number
-                let cassandra_version =
-                    CassandraVersion::from_magic_number(magic).unwrap_or(CassandraVersion::Legacy);
-
-                println!(
-                    "🔍 Detected Cassandra version: {:?} (magic: 0x{:08x}) for {:?}",
-                    cassandra_version, magic, path
-                );
-
-                // Create fallback header
-                Ok(crate::parser::header::SSTableHeader {
-                    cassandra_version,
-                    version,
-                    table_id: [0; 16],
-                    keyspace: path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .map(|s| s.split('-').next().unwrap_or("unknown").to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    table_name: path
-                        .file_stem()
-                        .and_then(|n| n.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    generation: Self::extract_generation_from_path(path),
-                    compression: crate::parser::header::CompressionInfo {
-                        algorithm: "NONE".to_string(),
-                        chunk_size: 0,
-                        parameters: std::collections::HashMap::new(),
-                    },
-                    stats: crate::parser::header::SSTableStats {
-                        row_count: 0,
-                        min_timestamp: 0,
-                        max_timestamp: 0,
-                        max_deletion_time: 0,
-                        compression_ratio: 1.0,
-                        row_size_histogram: vec![],
-                    },
-                    columns: vec![],
-                    properties: std::collections::HashMap::new(),
-                })
+                    // For modern formats, strict parsing is required
+                    Err(Error::corruption(format!(
+                        "Failed to parse header for modern format {:?} file '{}': {:?}. \
+                         This indicates file corruption or format incompatibility.",
+                        cassandra_version,
+                        path.display(),
+                        parse_error
+                    )))
+                }
             }
         }
+    }
+
+    /// Parse minimal legacy header with strict validation (feature-gated)
+    #[cfg(feature = "legacy-heuristics")]
+    fn parse_minimal_legacy_header(
+        header_buffer: &[u8],
+        path: &Path,
+        cassandra_version: crate::parser::header::CassandraVersion,
+    ) -> Result<crate::parser::header::SSTableHeader> {
+        use crate::parser::header::{CompressionInfo, SSTableStats, SUPPORTED_VERSION};
+
+        // Extract version if available
+        let version = if header_buffer.len() >= 6 {
+            u16::from_be_bytes([header_buffer[4], header_buffer[5]])
+        } else {
+            log::warn!(
+                "Legacy header too short for version extraction, using default version. File: {}",
+                path.display()
+            );
+            SUPPORTED_VERSION
+        };
+
+        // Validate version is reasonable
+        if version > 100 {
+            // Sanity check for version
+            return Err(Error::corruption(format!(
+                "Invalid version {} in legacy header. File: {}",
+                version,
+                path.display()
+            )));
+        }
+
+        log::info!(
+            "Creating minimal legacy header for file '{}' with version {}",
+            path.display(),
+            version
+        );
+
+        Ok(crate::parser::header::SSTableHeader {
+            cassandra_version,
+            version,
+            table_id: [0; 16], // Zero-filled for legacy compatibility
+            keyspace: path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.split('-').next().unwrap_or("unknown").to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            table_name: path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            generation: Self::extract_generation_from_path(path),
+            compression: CompressionInfo {
+                algorithm: "NONE".to_string(),
+                chunk_size: 0,
+                parameters: std::collections::HashMap::new(),
+            },
+            stats: SSTableStats {
+                row_count: 0,
+                min_timestamp: 0,
+                max_timestamp: 0,
+                max_deletion_time: 0,
+                compression_ratio: 1.0,
+                row_size_histogram: vec![],
+            },
+            columns: vec![],
+            properties: std::collections::HashMap::new(),
+        })
     }
 
     /// Extract generation number from SSTable file path
@@ -976,12 +1035,16 @@ impl SSTableReader {
         let parent_dir = path.parent().unwrap_or(Path::new("."));
 
         // Try multiple CompressionInfo file patterns
-        let compressed_filename = format!(
-            "{}-CompressionInfo.db",
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-        );
+        let compressed_filename = if let Some(base_name) = Self::extract_sstable_base_name(path) {
+            format!("{}-CompressionInfo.db", base_name)
+        } else {
+            format!(
+                "{}-CompressionInfo.db",
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+            )
+        };
         let compression_info_patterns = [
             "nb-1-big-CompressionInfo.db",
             "CompressionInfo.db",
@@ -3032,11 +3095,33 @@ pub async fn open_sstable_reader(
 }
 
 impl SSTableReader {
+    /// Extract the SSTable base name pattern for component file construction
+    ///
+    /// Converts "nb-1-big-Data.db" to "nb-1-big" to allow proper component file discovery.
+    /// This preserves the generation and format parts while removing the component suffix.
+    fn extract_sstable_base_name(path: &Path) -> Option<String> {
+        let filename = path.file_name()?.to_str()?;
+
+        // Remove .db extension first
+        let filename_no_ext = filename.strip_suffix(".db")?;
+
+        // Parse SSTable filename pattern: {prefix}-{generation}-{format}-{component}
+        let parts: Vec<&str> = filename_no_ext.split('-').collect();
+
+        if parts.len() >= 4 {
+            // Join prefix, generation, and format: "nb-1-big"
+            Some(parts[0..3].join("-"))
+        } else {
+            // Fallback for non-standard naming
+            log::warn!("Non-standard SSTable filename pattern: {}", filename);
+            None
+        }
+    }
+
     /// Load Index.db reader for partition lookup and promoted index handling
     async fn load_index_reader(path: &Path, platform: &Arc<Platform>) -> Option<IndexReader> {
-        let index_path = path
-            .with_extension("db")
-            .with_file_name(format!("{}-Index.db", path.file_stem()?.to_str()?));
+        let base_name = Self::extract_sstable_base_name(path)?;
+        let index_path = path.parent()?.join(format!("{}-Index.db", base_name));
 
         match IndexReader::open(&index_path, platform.clone()).await {
             Ok(reader) => {
@@ -3052,9 +3137,8 @@ impl SSTableReader {
 
     /// Load Summary.db reader for token-range iteration
     async fn load_summary_reader(path: &Path, platform: &Arc<Platform>) -> Option<SummaryReader> {
-        let summary_path = path
-            .with_extension("db")
-            .with_file_name(format!("{}-Summary.db", path.file_stem()?.to_str()?));
+        let base_name = Self::extract_sstable_base_name(path)?;
+        let summary_path = path.parent()?.join(format!("{}-Summary.db", base_name));
 
         match SummaryReader::open(&summary_path, platform.clone()).await {
             Ok(reader) => {
@@ -3073,9 +3157,8 @@ impl SSTableReader {
         path: &Path,
         platform: &Arc<Platform>,
     ) -> Option<StatisticsReader> {
-        let statistics_path = path
-            .with_extension("db")
-            .with_file_name(format!("{}-Statistics.db", path.file_stem()?.to_str()?));
+        let base_name = Self::extract_sstable_base_name(path)?;
+        let statistics_path = path.parent()?.join(format!("{}-Statistics.db", base_name));
 
         match StatisticsReader::open(&statistics_path, platform.clone()).await {
             Ok(reader) => {
@@ -3583,5 +3666,72 @@ mod tests {
         assert_eq!(meta.offset, 1024);
         assert_eq!(meta.compressed_size, 512);
         assert_eq!(meta.entry_count, 10);
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name() {
+        use std::path::PathBuf;
+
+        // Test standard SSTable naming pattern
+        let path = PathBuf::from("nb-1-big-Data.db");
+        let base_name = SSTableReader::extract_sstable_base_name(&path);
+        assert_eq!(base_name, Some("nb-1-big".to_string()));
+
+        // Test with different components
+        let path = PathBuf::from("nb-2-da-Index.db");
+        let base_name = SSTableReader::extract_sstable_base_name(&path);
+        assert_eq!(base_name, Some("nb-2-da".to_string()));
+
+        let path = PathBuf::from("nb-3-big-Statistics.db");
+        let base_name = SSTableReader::extract_sstable_base_name(&path);
+        assert_eq!(base_name, Some("nb-3-big".to_string()));
+
+        let path = PathBuf::from("keyspace-table-nb-456-big-Summary.db");
+        let base_name = SSTableReader::extract_sstable_base_name(&path);
+        assert_eq!(base_name, Some("keyspace-table-nb".to_string()));
+
+        // Test with full path
+        let path = PathBuf::from("/some/dir/nb-1-big-Data.db");
+        let base_name = SSTableReader::extract_sstable_base_name(&path);
+        assert_eq!(base_name, Some("nb-1-big".to_string()));
+
+        // Test edge cases
+        let path = PathBuf::from("not-enough-parts.db");
+        let base_name = SSTableReader::extract_sstable_base_name(&path);
+        assert_eq!(base_name, None);
+
+        let path = PathBuf::from("no-extension");
+        let base_name = SSTableReader::extract_sstable_base_name(&path);
+        assert_eq!(base_name, None);
+
+        // Test that the extracted base names correctly build component paths
+        let data_path = PathBuf::from("/test/dir/nb-1-big-Data.db");
+        let base_name = SSTableReader::extract_sstable_base_name(&data_path).unwrap();
+
+        let expected_index_path = data_path
+            .parent()
+            .unwrap()
+            .join(format!("{}-Index.db", base_name));
+        let expected_summary_path = data_path
+            .parent()
+            .unwrap()
+            .join(format!("{}-Summary.db", base_name));
+        let expected_stats_path = data_path
+            .parent()
+            .unwrap()
+            .join(format!("{}-Statistics.db", base_name));
+
+        assert_eq!(
+            expected_index_path.file_name().unwrap(),
+            "nb-1-big-Index.db"
+        );
+        assert_eq!(
+            expected_summary_path.file_name().unwrap(),
+            "nb-1-big-Summary.db"
+        );
+        assert_eq!(
+            expected_stats_path.file_name().unwrap(),
+            "nb-1-big-Statistics.db"
+        );
     }
 }
