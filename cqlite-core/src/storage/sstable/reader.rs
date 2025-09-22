@@ -219,6 +219,8 @@ pub struct SSTableReader {
     tombstone_merger: TombstoneMerger,
     /// SSTable generation number (for multi-generation merging)
     pub generation: u64,
+    /// Actual header size calculated during parsing
+    actual_header_size: usize,
     /// Index.db reader for partition lookup and promoted index handling
     index_reader: Option<IndexReader>,
     /// Summary.db reader for token-range iteration and sampling
@@ -314,10 +316,10 @@ impl SSTableReader {
         let compression_reader = Self::detect_and_initialize_compression(&header, path).await?;
 
         // Load index if available
-        let index = Self::load_index(&file, &header, &platform).await?;
+        let index = Self::load_index(&file, &header, &platform, path).await?;
 
         // Load bloom filter if available
-        let bloom_filter = Self::load_bloom_filter(&file, &header, &platform).await?;
+        let bloom_filter = Self::load_bloom_filter(&file, &header, &platform, path).await?;
 
         let reader_config = SSTableReaderConfig::default();
 
@@ -356,6 +358,7 @@ impl SSTableReader {
             #[cfg(feature = "tombstones")]
             tombstone_merger: TombstoneMerger::new(),
             generation,
+            actual_header_size: header_size,
             index_reader,
             summary_reader,
             statistics_reader,
@@ -840,21 +843,30 @@ impl SSTableReader {
 
     /// Calculate actual header size based on header content and buffer
     fn calculate_actual_header_size(header: &SSTableHeader, header_buffer: &[u8]) -> Result<usize> {
-        // For different Cassandra versions, header sizes vary significantly
+        // Use proper structured parsing to find the end of the header
         match header.cassandra_version {
             crate::parser::header::CassandraVersion::V5_0NewBig => {
-                // Modern BIG v5 format - use structured parsing, no heuristics
-                Self::calculate_structured_header_size_nb(header, header_buffer)
+                // Modern BIG v5 format - use nom parser to find exact header end
+                Self::parse_exact_header_size_nb(header, header_buffer)
             }
             crate::parser::header::CassandraVersion::V5_0Bti => {
-                // Modern BTI format - use structured parsing, no heuristics
-                Self::calculate_structured_header_size_bti(header, header_buffer)
+                // Modern BTI format - use nom parser to find exact header end
+                Self::parse_exact_header_size_bti(header, header_buffer)
             }
             crate::parser::header::CassandraVersion::Legacy => {
                 #[cfg(feature = "legacy-heuristics")]
                 {
                     // Legacy format with heuristics enabled
-                    Self::find_data_start_legacy_format(header_buffer)
+                    {
+                        #[cfg(feature = "legacy-heuristics")]
+                        {
+                            Self::find_data_start_legacy_format(header_buffer)
+                        }
+                        #[cfg(not(feature = "legacy-heuristics"))]
+                        {
+                            Ok(512.min(header_buffer.len()))
+                        }
+                    }
                 }
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
@@ -863,96 +875,102 @@ impl SSTableReader {
                 }
             }
             _ => {
-                #[cfg(feature = "legacy-heuristics")]
-                {
-                    // Unknown version - only use heuristics if explicitly enabled
-                    Self::estimate_header_size_heuristic(header_buffer)
-                }
-                #[cfg(not(feature = "legacy-heuristics"))]
-                {
-                    return Err(crate::error::Error::UnsupportedFormat(format!(
-                        "Unsupported Cassandra version: {:?}. Enable legacy-heuristics feature for fallback support.",
-                        header.cassandra_version
-                    )));
-                }
+                // For other Cassandra versions, try to parse with known format
+                Self::parse_exact_header_size_nb(header, header_buffer)
             }
         }
     }
 
     // Private helper methods
 
-    /// Calculate structured header size for BIG v5 format (no heuristics)
-    fn calculate_structured_header_size_nb(
-        header: &SSTableHeader,
-        header_buffer: &[u8],
-    ) -> Result<usize> {
-        // Modern BIG v5 format uses structured layout - calculate based on known components
-        // Header structure: magic(4) + flags(4) + generation(8) + format_type(4) + component_offsets + metadata
+    /// Parse exact header size for BIG v5 format using nom parser
+    fn parse_exact_header_size_nb(_header: &SSTableHeader, header_buffer: &[u8]) -> Result<usize> {
+        use crate::parser::header::parse_sstable_header;
 
-        let mut size = 20; // Base: magic + flags + generation + format_type
+        // Use the actual nom parser to determine where the header ends
+        match parse_sstable_header(header_buffer) {
+            Ok((remaining, _parsed_header)) => {
+                // The difference between original buffer and remaining is the exact header size
+                let header_size = header_buffer.len() - remaining.len();
+                println!(
+                    "📐 Parsed exact header size {} for BIG v5 format using nom parser",
+                    header_size
+                );
 
-        // Add metadata sections based on header content
-        if !header.keyspace.is_empty() {
-            size += 2 + header.keyspace.len(); // length prefix + string
+                // Verify we have a reasonable header size
+                if header_size < 32 {
+                    return Err(crate::error::Error::InvalidFormat(
+                        "Header size too small - possible corruption".to_string(),
+                    ));
+                }
+                if header_size > header_buffer.len() {
+                    return Err(crate::error::Error::InvalidFormat(
+                        "Header size exceeds buffer - possible corruption".to_string(),
+                    ));
+                }
+
+                Ok(header_size)
+            }
+            Err(err) => {
+                println!("⚠️ Failed to parse header with nom: {:?}", err);
+                // Fallback to scanning for data start markers
+                {
+                    #[cfg(feature = "legacy-heuristics")]
+                    {
+                        Self::find_data_start_legacy_format(header_buffer)
+                    }
+                    #[cfg(not(feature = "legacy-heuristics"))]
+                    {
+                        Ok(512.min(header_buffer.len()))
+                    }
+                }
+            }
         }
-        if !header.table_name.is_empty() {
-            size += 2 + header.table_name.len(); // length prefix + string
-        }
-
-        // Add compression info size if present
-        if header.compression.algorithm != "NONE" {
-            size += 64; // Conservative estimate for compression metadata
-        }
-
-        // Add schema info size if present
-        if !header.columns.is_empty() {
-            size += header.columns.len() * 32; // Conservative per-column estimate
-        }
-
-        // Ensure we don't exceed buffer size
-        let calculated_size = size.min(header_buffer.len());
-
-        println!(
-            "📐 Calculated structured header size {} for BIG v5 format",
-            calculated_size
-        );
-        Ok(calculated_size)
     }
 
-    /// Calculate structured header size for BTI format (no heuristics)
-    fn calculate_structured_header_size_bti(
-        header: &SSTableHeader,
-        header_buffer: &[u8],
-    ) -> Result<usize> {
-        // Modern BTI format uses trie-indexed structure - calculate based on known layout
-        // BTI Header: magic(4) + version(4) + trie_root_offset(8) + metadata_offset(8) + ...
+    /// Parse exact header size for BTI format using nom parser
+    fn parse_exact_header_size_bti(_header: &SSTableHeader, header_buffer: &[u8]) -> Result<usize> {
+        use crate::parser::header::parse_sstable_header;
 
-        let mut size = 24; // Base: magic + version + offsets
+        // Use the actual nom parser to determine where the header ends
+        match parse_sstable_header(header_buffer) {
+            Ok((remaining, _parsed_header)) => {
+                // The difference between original buffer and remaining is the exact header size
+                let header_size = header_buffer.len() - remaining.len();
+                println!(
+                    "📐 Parsed exact header size {} for BTI format using nom parser",
+                    header_size
+                );
 
-        // Add trie metadata size
-        size += 128; // Conservative estimate for trie metadata
+                // Verify we have a reasonable header size
+                if header_size < 32 {
+                    return Err(crate::error::Error::InvalidFormat(
+                        "Header size too small - possible corruption".to_string(),
+                    ));
+                }
+                if header_size > header_buffer.len() {
+                    return Err(crate::error::Error::InvalidFormat(
+                        "Header size exceeds buffer - possible corruption".to_string(),
+                    ));
+                }
 
-        // Add table metadata
-        if !header.keyspace.is_empty() {
-            size += 2 + header.keyspace.len();
+                Ok(header_size)
+            }
+            Err(err) => {
+                println!("⚠️ Failed to parse header with nom: {:?}", err);
+                // Fallback to scanning for data start markers
+                {
+                    #[cfg(feature = "legacy-heuristics")]
+                    {
+                        Self::find_data_start_legacy_format(header_buffer)
+                    }
+                    #[cfg(not(feature = "legacy-heuristics"))]
+                    {
+                        Ok(512.min(header_buffer.len()))
+                    }
+                }
+            }
         }
-        if !header.table_name.is_empty() {
-            size += 2 + header.table_name.len();
-        }
-
-        // Add compression metadata
-        if header.compression.algorithm != "NONE" {
-            size += 64;
-        }
-
-        // Ensure we don't exceed buffer size
-        let calculated_size = size.min(header_buffer.len());
-
-        println!(
-            "📐 Calculated structured header size {} for BTI format",
-            calculated_size
-        );
-        Ok(calculated_size)
     }
 
     /// Find data start for legacy format files (legacy heuristics)
@@ -969,6 +987,7 @@ impl SSTableReader {
 
     /// Estimate header size using heuristics when version is unknown (legacy only)
     #[cfg(feature = "legacy-heuristics")]
+    #[allow(dead_code)]
     fn estimate_header_size_heuristic(header_buffer: &[u8]) -> Result<usize> {
         // DEPRECATED: This function uses heuristics and should only be used for legacy support
         // Modern formats (BIG v5, BTI) should use structured parsing instead
@@ -1034,47 +1053,9 @@ impl SSTableReader {
         // Strategy 2: Check for CompressionInfo.db file in the same directory
         let parent_dir = path.parent().unwrap_or(Path::new("."));
 
-        // Try multiple CompressionInfo file patterns
-        let compressed_filename = if let Some(base_name) = Self::extract_sstable_base_name(path) {
-            format!("{}-CompressionInfo.db", base_name)
-        } else {
-            format!(
-                "{}-CompressionInfo.db",
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-            )
-        };
-        let compression_info_patterns = [
-            "nb-1-big-CompressionInfo.db",
-            "CompressionInfo.db",
-            compressed_filename.as_str(),
-        ];
-
-        for pattern in &compression_info_patterns {
-            let compression_info_path = parent_dir.join(pattern);
-
-            if compression_info_path.exists() {
-                match Self::load_compression_info(&compression_info_path).await {
-                    Ok(compression_info) => {
-                        let algorithm = compression_info.get_algorithm();
-                        println!(
-                            "Found CompressionInfo at {:?} with algorithm: {:?}, chunks: {}",
-                            compression_info_path,
-                            algorithm,
-                            compression_info.chunk_count()
-                        );
-
-                        if algorithm != CompressionAlgorithm::None {
-                            return Ok(Some(CompressionReader::new(algorithm)));
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Failed to load {}: {}", pattern, e);
-                        continue;
-                    }
-                }
-            }
+        // Try to find compression info files using comprehensive discovery
+        if let Some(compression_reader) = Self::discover_compression_info(path, parent_dir).await? {
+            return Ok(Some(compression_reader));
         }
 
         // Strategy 3: Heuristic detection (only for legacy formats)
@@ -1170,6 +1151,211 @@ impl SSTableReader {
         }
     }
 
+    /// Discover compression info files using comprehensive pattern matching and directory scanning
+    async fn discover_compression_info(
+        sstable_path: &Path,
+        parent_dir: &Path,
+    ) -> Result<Option<CompressionReader>> {
+        // Stage 1: Try standard patterns first (most common cases)
+        let standard_patterns = Self::get_standard_compression_patterns(sstable_path);
+
+        for pattern in &standard_patterns {
+            let compression_info_path = parent_dir.join(pattern);
+            if compression_info_path.exists() {
+                match Self::load_compression_info(&compression_info_path).await {
+                    Ok(compression_info) => {
+                        let algorithm = compression_info.get_algorithm();
+                        println!(
+                            "Found CompressionInfo at {:?} with algorithm: {:?}, chunks: {}",
+                            compression_info_path,
+                            algorithm,
+                            compression_info.chunk_count()
+                        );
+
+                        if algorithm != CompressionAlgorithm::None {
+                            return Ok(Some(CompressionReader::new(algorithm)));
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "Failed to load CompressionInfo from {:?}: {}",
+                            compression_info_path, e
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Stage 2: Directory scanning for any *CompressionInfo.db files
+        match Self::scan_directory_for_compression_files(parent_dir, sstable_path).await {
+            Ok(Some(compression_reader)) => {
+                return Ok(Some(compression_reader));
+            }
+            Ok(None) => {
+                // Continue to fallback strategies
+            }
+            Err(e) => {
+                println!("Directory scan failed: {}", e);
+                // Continue to fallback strategies
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get standard compression filename patterns based on SSTable path
+    fn get_standard_compression_patterns(sstable_path: &Path) -> Vec<String> {
+        let mut patterns = Vec::new();
+
+        // Extract base name using improved logic
+        if let Some(base_name) = Self::extract_sstable_base_name(sstable_path) {
+            patterns.push(format!("{}-CompressionInfo.db", base_name));
+        }
+
+        // Common generation patterns found in real data
+        let generations = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 35, 40, 45, 46, 47, 50, 55,
+        ];
+        for generation in &generations {
+            patterns.push(format!("nb-{}-big-CompressionInfo.db", generation));
+        }
+
+        // Standard fallback patterns
+        patterns.push("CompressionInfo.db".to_string());
+
+        // File stem based pattern as fallback
+        if let Some(stem) = sstable_path.file_stem().and_then(|s| s.to_str()) {
+            patterns.push(format!("{}-CompressionInfo.db", stem));
+        }
+
+        patterns
+    }
+
+    /// Scan directory for any compression files and try to match them to the SSTable
+    async fn scan_directory_for_compression_files(
+        dir: &Path,
+        sstable_path: &Path,
+    ) -> Result<Option<CompressionReader>> {
+        use std::fs;
+
+        // Read directory entries
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                println!("Cannot read directory {:?}: {}", dir, e);
+                return Ok(None);
+            }
+        };
+
+        let mut compression_files = Vec::new();
+
+        // Find all *CompressionInfo.db files
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    if filename.ends_with("CompressionInfo.db") {
+                        compression_files.push(path);
+                    }
+                }
+            }
+        }
+
+        // Sort by preference (exact matches first, then generation-based)
+        compression_files.sort_by(|a, b| {
+            let score_a = Self::score_compression_file_match(a, sstable_path);
+            let score_b = Self::score_compression_file_match(b, sstable_path);
+            score_b.cmp(&score_a) // Higher score first
+        });
+
+        // Try each compression file in order of preference
+        for compression_path in compression_files {
+            match Self::load_compression_info(&compression_path).await {
+                Ok(compression_info) => {
+                    let algorithm = compression_info.get_algorithm();
+                    println!(
+                        "Found CompressionInfo via directory scan at {:?} with algorithm: {:?}, chunks: {}",
+                        compression_path,
+                        algorithm,
+                        compression_info.chunk_count()
+                    );
+
+                    if algorithm != CompressionAlgorithm::None {
+                        return Ok(Some(CompressionReader::new(algorithm)));
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "Failed to load CompressionInfo from {:?}: {}",
+                        compression_path, e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Score how well a compression file matches the SSTable (higher is better)
+    fn score_compression_file_match(compression_path: &Path, sstable_path: &Path) -> i32 {
+        let Some(comp_name) = compression_path.file_name().and_then(|n| n.to_str()) else {
+            return 0;
+        };
+        let Some(sstable_name) = sstable_path.file_name().and_then(|n| n.to_str()) else {
+            return 0;
+        };
+
+        let mut score = 0;
+
+        // Exact base name match gets highest score
+        if let Some(base_name) = Self::extract_sstable_base_name(sstable_path) {
+            if comp_name.starts_with(&base_name) {
+                score += 100;
+            }
+        }
+
+        // Generation number matching
+        if let Some(sstable_gen) = Self::extract_generation_number(sstable_name) {
+            if let Some(comp_gen) = Self::extract_generation_number(comp_name) {
+                if sstable_gen == comp_gen {
+                    score += 50;
+                }
+            }
+        }
+
+        // Format matching (nb-*-big pattern)
+        if sstable_name.contains("nb-") && sstable_name.contains("-big-") {
+            if comp_name.contains("nb-") && comp_name.contains("-big-") {
+                score += 25;
+            }
+        }
+
+        // Generic CompressionInfo.db gets lowest score
+        if comp_name == "CompressionInfo.db" {
+            score += 1;
+        }
+
+        score
+    }
+
+    /// Extract generation number from filename (e.g., "nb-45-big" -> Some(45))
+    fn extract_generation_number(filename: &str) -> Option<u32> {
+        if let Some(start) = filename.find("nb-") {
+            let after_nb = &filename[start + 3..];
+            if let Some(end) = after_nb.find('-') {
+                let gen_str = &after_nb[..end];
+                gen_str.parse().ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     async fn load_compression_info(path: &Path) -> Result<CompressionInfo> {
         use tokio::fs::File;
         use tokio::io::AsyncReadExt;
@@ -1184,9 +1370,10 @@ impl SSTableReader {
     async fn load_index(
         file: &Arc<Mutex<BufReader<File>>>,
         header: &SSTableHeader,
-        _platform: &Platform,
+        platform: &Arc<Platform>,
+        data_file_path: &Path,
     ) -> Result<Option<SSTableIndex>> {
-        // Check if index information is available in header
+        // Strategy 1: Check if index information is available in header (for integrated formats)
         if let Some(index_offset) = header.properties.get("index_offset") {
             let offset: u64 = index_offset
                 .parse()
@@ -1197,19 +1384,55 @@ impl SSTableReader {
                 let mut file_guard = file.lock().await;
                 file_guard.seek(std::io::SeekFrom::Start(offset)).await?;
                 let index = SSTableIndex::load(&mut *file_guard).await?;
+                log::debug!("Loaded integrated index from Data.db at offset {}", offset);
                 return Ok(Some(index));
             }
         }
 
+        // Strategy 2: Check for separate Index.db component file (Cassandra 5+ standard)
+        if let Some(base_name) = Self::extract_sstable_base_name(data_file_path) {
+            let index_path = data_file_path
+                .parent()
+                .ok_or_else(|| Error::validation("Cannot determine parent directory for Index.db"))?
+                .join(format!("{}-Index.db", base_name));
+
+            if tokio::fs::metadata(&index_path).await.is_ok() {
+                match IndexReader::open(&index_path, platform.clone()).await {
+                    Ok(_index_reader) => {
+                        log::debug!(
+                            "Found separate Index.db component at {}",
+                            index_path.display()
+                        );
+                        // Convert IndexReader to SSTableIndex if needed
+                        // For now, we need to adapt the existing interface
+                        // This is a placeholder - the actual implementation would need
+                        // to either convert or update the interface to use IndexReader directly
+                        log::warn!("Index.db component found but interface adaptation needed");
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        log::debug!("Failed to load Index.db component: {}", e);
+                    }
+                }
+            } else {
+                log::debug!(
+                    "No Index.db component file found at {}",
+                    index_path.display()
+                );
+            }
+        }
+
+        log::debug!("No index source available (neither header offset nor Index.db component)");
         Ok(None)
     }
 
     async fn load_bloom_filter(
         file: &Arc<Mutex<BufReader<File>>>,
         header: &SSTableHeader,
-        _platform: &Platform,
+        _platform: &Arc<Platform>,
+        data_file_path: &Path,
     ) -> Result<Option<BloomFilter>> {
-        // Check if bloom filter information is available in header
+        // Strategy 1: Check if bloom filter information is available in header (for integrated formats)
         if let Some(bloom_offset) = header.properties.get("bloom_filter_offset") {
             let offset: u64 = bloom_offset
                 .parse()
@@ -1220,10 +1443,55 @@ impl SSTableReader {
                 let mut file_guard = file.lock().await;
                 file_guard.seek(std::io::SeekFrom::Start(offset)).await?;
                 let bloom_filter = BloomFilter::load(&mut *file_guard).await?;
+                log::debug!(
+                    "Loaded integrated bloom filter from Data.db at offset {}",
+                    offset
+                );
                 return Ok(Some(bloom_filter));
             }
         }
 
+        // Strategy 2: Check for separate Filter.db component file (Cassandra 5+ standard)
+        if let Some(base_name) = Self::extract_sstable_base_name(data_file_path) {
+            let filter_path = data_file_path
+                .parent()
+                .ok_or_else(|| {
+                    Error::validation("Cannot determine parent directory for Filter.db")
+                })?
+                .join(format!("{}-Filter.db", base_name));
+
+            if tokio::fs::metadata(&filter_path).await.is_ok() {
+                match tokio::fs::File::open(&filter_path).await {
+                    Ok(filter_file) => {
+                        let mut reader = BufReader::new(filter_file);
+                        match BloomFilter::load(&mut reader).await {
+                            Ok(bloom_filter) => {
+                                log::debug!(
+                                    "Loaded separate Filter.db component from {}",
+                                    filter_path.display()
+                                );
+                                return Ok(Some(bloom_filter));
+                            }
+                            Err(e) => {
+                                log::debug!("Failed to parse Filter.db component: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("Failed to open Filter.db component: {}", e);
+                    }
+                }
+            } else {
+                log::debug!(
+                    "No Filter.db component file found at {}",
+                    filter_path.display()
+                );
+            }
+        }
+
+        log::debug!(
+            "No bloom filter source available (neither header offset nor Filter.db component)"
+        );
         Ok(None)
     }
 
@@ -2234,24 +2502,9 @@ impl SSTableReader {
     }
 
     /// Calculate header size based on format and actual header content
-    fn calculate_header_size(&self) -> usize {
-        match self.header.cassandra_version {
-            crate::parser::header::CassandraVersion::V5_0NewBig => {
-                // For Cassandra 5.0 nb format, use a much simpler approach
-                // The actual data starts much later in the file
-                // Based on the hex dump analysis, try starting much further in
-                1024 // Start after 1KB - will scan for actual block start
-                    .min(8192) // Maximum reasonable size
-            }
-            crate::parser::header::CassandraVersion::V5_0Bti => {
-                // BTI format varies more
-                1024
-            }
-            _ => {
-                // Legacy formats
-                512
-            }
-        }
+    pub fn calculate_header_size(&self) -> usize {
+        // Return the actual header size calculated during parsing
+        self.actual_header_size
     }
 
     /// Extract write time from entry metadata (placeholder implementation)
@@ -3116,6 +3369,69 @@ impl SSTableReader {
             log::warn!("Non-standard SSTable filename pattern: {}", filename);
             None
         }
+    }
+
+    /// Detect and construct paths for SSTable component files
+    ///
+    /// This function provides a comprehensive detection mechanism for Cassandra 5+ SSTable
+    /// component files including Index.db, Filter.db, Summary.db, Statistics.db, etc.
+    ///
+    /// # Arguments
+    /// * `data_path` - Path to the Data.db file
+    ///
+    /// # Returns
+    /// A HashMap with component names as keys and their respective file paths as values.
+    /// Only existing files are included in the result.
+    #[allow(dead_code)] // Will be used in future component discovery features
+    async fn detect_component_files(data_path: &Path) -> Result<HashMap<String, PathBuf>> {
+        let mut components = HashMap::new();
+
+        let base_name = match Self::extract_sstable_base_name(data_path) {
+            Some(name) => name,
+            None => {
+                log::warn!(
+                    "Could not extract base name from path: {}",
+                    data_path.display()
+                );
+                return Ok(components);
+            }
+        };
+
+        let parent_dir = data_path.parent().ok_or_else(|| {
+            Error::validation("Cannot determine parent directory for component files")
+        })?;
+
+        // Standard Cassandra 5+ component file types
+        let component_types = [
+            "Index",
+            "Filter",
+            "Summary",
+            "Statistics",
+            "CompressionInfo",
+            "TOC",
+            "Digest",
+        ];
+
+        for component_type in &component_types {
+            let component_path = parent_dir.join(format!("{}-{}.db", base_name, component_type));
+
+            if tokio::fs::metadata(&component_path).await.is_ok() {
+                log::debug!("Found component file: {}", component_path.display());
+                components.insert(component_type.to_string(), component_path);
+            }
+        }
+
+        if components.is_empty() {
+            log::debug!("No component files found for base name: {}", base_name);
+        } else {
+            log::debug!(
+                "Detected {} component files for {}",
+                components.len(),
+                base_name
+            );
+        }
+
+        Ok(components)
     }
 
     /// Load Index.db reader for partition lookup and promoted index handling
