@@ -1,0 +1,18 @@
+{
+  "swarm": [
+    {
+      "key": "sstable_dependencies_analysis",
+      "value": "SSTable Component Loading Dependencies Analysis\n\nCRITICAL FINDING: Path Building Bug in SchemaAwareSSTableReader\n\nLOCATION: /cqlite-core/src/storage/reader.rs:147\nBROKEN CODE: \n\n\nCREATES INVALID PATHS: /path/to/sstable/-Data.db (invalid '/-' separator)\n\nIMPACT ASSESSMENT:\n1. SchemaAwareSSTableReader - BROKEN (all memory-mapped component loading fails)\n2. SSTableReader load_*_reader methods - WORKING (uses different path building pattern)  \n3. Directory scanning/validation - WORKING (parses existing filenames correctly)\n\nDEPENDENCIES AFFECTED:\n- Memory-mapped file access for all component types (Data.db, Index.db, Summary.db, Filter.db, Statistics.db, CompressionInfo.db)\n- Advanced query engine using schema-aware operations\n- All callers of SchemaAwareSSTableReader::initialize_memory_maps()\n\nPERFORMANCE IMPACT: None - path operations are lightweight, no I/O changes\nBREAKING CHANGES: None - pure bug fix, no API changes required\nMIGRATION REQUIRED: None - internal implementation fix only\n\nERROR HANDLING: Missing component files handled gracefully with Ok(None)\nTEST COVERAGE GAP: Missing integration tests for memory mapping with real file paths\n\nRECOMMENDED IMMEDIATE FIX: Use proper path construction with file stem instead of invalid join",
+      "namespace": "swarm",
+      "timestamp": 1758496147624
+    }
+  ],
+  "default": [
+    {
+      "key": "sstable_path_fix_implementation",
+      "value": "Fixed critical SSTable component path building bug. Created extract_sstable_base_name() helper that properly extracts base pattern from SSTable filenames. For nb-1-big-Data.db extracts nb-1-big to correctly build component paths like nb-1-big-Index.db, nb-1-big-Summary.db, nb-1-big-Statistics.db. Updated load_index_reader, load_summary_reader, load_statistics_reader, and CompressionInfo path building. Added comprehensive test coverage. Root cause was file_stem() removing all extensions and breaking the naming pattern.",
+      "namespace": "default",
+      "timestamp": 1758496285242
+    }
+  ]
+}
