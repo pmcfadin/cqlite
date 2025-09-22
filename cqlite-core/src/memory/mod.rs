@@ -478,6 +478,25 @@ mod tests {
     }
 
     #[test]
+    fn test_block_cache_eviction_updates_stats() {
+        let mut config = Config::default();
+        config.memory.block_cache.max_size = 8;
+        let manager = MemoryManager::new(&config).unwrap();
+
+        let table_id = TableId::new("ks_table");
+
+        manager.put_block(&table_id, 1, vec![0u8; 8]);
+        manager.put_block(&table_id, 2, vec![0u8; 4]); // triggers eviction of block 1
+
+        assert!(manager.get_block(&table_id, 1).is_none());
+        assert!(manager.get_block(&table_id, 2).is_some());
+
+        let stats = manager.stats().unwrap();
+        assert_eq!(stats.block_cache_hits, 1);
+        assert_eq!(stats.block_cache_misses, 1);
+    }
+
+    #[test]
     fn test_row_cache() {
         let config = Config::default();
         let manager = MemoryManager::new(&config).unwrap();
@@ -500,6 +519,26 @@ mod tests {
     }
 
     #[test]
+    fn test_row_cache_eviction_and_stats() {
+        let mut config = Config::default();
+        config.memory.row_cache.max_size = 8;
+        let manager = MemoryManager::new(&config).unwrap();
+
+        let table_id = TableId::new("ks_table");
+
+        manager.put_row(&table_id, "k1", vec![Value::Text("abcd".into())]);
+        manager.put_row(&table_id, "k2", vec![Value::Text("efgh".into())]);
+        manager.put_row(&table_id, "k3", vec![Value::Text("ijkl".into())]);
+
+        assert!(manager.get_row(&table_id, "k1").is_none());
+        assert!(manager.get_row(&table_id, "k3").is_some());
+
+        let stats = manager.stats().unwrap();
+        assert_eq!(stats.row_cache_hits, 1);
+        assert_eq!(stats.row_cache_misses, 1);
+    }
+
+    #[test]
     fn test_buffer_pool() {
         let config = Config::default();
         let manager = MemoryManager::new(&config).unwrap();
@@ -513,5 +552,22 @@ mod tests {
         // Should reuse buffer
         let buffer2 = manager.allocate_buffer(size);
         assert_eq!(buffer2.len(), size);
+    }
+
+    #[test]
+    fn test_clear_caches() {
+        let mut config = Config::default();
+        config.memory.block_cache.max_size = 8;
+        config.memory.row_cache.max_size = 8;
+        let manager = MemoryManager::new(&config).unwrap();
+
+        let table_id = TableId::new("ks_table");
+        manager.put_block(&table_id, 1, vec![0u8; 8]);
+        manager.put_row(&table_id, "k1", vec![Value::Text("abcd".into())]);
+
+        manager.clear_caches();
+
+        assert!(manager.get_block(&table_id, 1).is_none());
+        assert!(manager.get_row(&table_id, "k1").is_none());
     }
 }

@@ -440,6 +440,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_error_from_conversions() {
+        // Test bincode error conversion (covers line 399-400)
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test error");
+        let bincode_err = bincode::Error::new(bincode::ErrorKind::Io(io_err));
+        let error = Error::from(bincode_err);
+        assert!(matches!(error, Error::Serialization(_)));
+
+        // Test serde_json error conversion (covers line 406-407)
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
+        let error = Error::from(json_err);
+        assert!(matches!(error, Error::Serialization(_)));
+
+        // Test nom error conversion (covers line 416-417)
+        let nom_err = nom::Err::Error(nom::error::Error::new(
+            "test input",
+            nom::error::ErrorKind::Tag,
+        ));
+        let error = Error::from(nom_err);
+        assert!(matches!(error, Error::SqlParse(_)));
+    }
+
+    #[test]
+    fn test_parse_error_display() {
+        // Test ParseError Display implementation (covers line 431-432)
+        let parse_error = ParseError {
+            message: "test parse error".to_string(),
+        };
+        let display_str = format!("{}", parse_error);
+        assert_eq!(display_str, "test parse error");
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_wasm_error_creation() {
+        // Test WASM error creation (covers line 234-235)
+        let err = Error::wasm("WASM error");
+        assert!(matches!(err, Error::Wasm(_)));
+        assert!(!err.is_recoverable());
+        assert_eq!(err.category(), ErrorCategory::Platform);
+    }
+
+    #[test]
+    fn test_new_error_types_coverage() {
+        // Test Query error (covers line 285-286, 325-326)
+        let query_err = Error::Query("query error".to_string());
+        assert!(!query_err.is_recoverable()); // line 285-286
+        assert_eq!(query_err.category(), ErrorCategory::Query); // line 325-326
+
+        // Test Table error (line 286, 326)
+        let table_err = Error::Table("table error".to_string());
+        assert!(!table_err.is_recoverable());
+        assert_eq!(table_err.category(), ErrorCategory::Schema);
+    }
+
+    #[test]
     fn test_error_creation() {
         let err = Error::storage("test error");
         assert!(matches!(err, Error::Storage(_)));

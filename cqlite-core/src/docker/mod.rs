@@ -259,4 +259,18 @@ mod tests {
         assert_eq!(parsed.rows[1], vec!["2", "Bob", "25"]);
         assert_eq!(parsed.rows[2], vec!["3", "Charlie", "35"]);
     }
+
+    #[test]
+    fn test_parse_cqlsh_output_without_header() {
+        let output = "No data returned";
+        let parsed = DockerCqlshClient::parse_cqlsh_output(output);
+        assert!(parsed.headers.is_empty());
+        assert!(parsed.rows.is_empty());
+    }
+
+    #[test]
+    fn test_parse_row_splits_and_trims() {
+        let row = parse_row(" 1 |  data |   value  ");
+        assert_eq!(row, vec!["1", "data", "value"]);
+    }
 }

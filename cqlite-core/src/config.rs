@@ -641,4 +641,88 @@ mod tests {
         config.memory.block_cache.max_size = config.memory.max_memory + 1;
         assert!(config.validate().is_err());
     }
+
+    #[test]
+    fn test_storage_validation_errors() {
+        let mut config = Config::default();
+
+        // Test invalid block_size (should trigger line 573-574)
+        config.storage.block_size = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("block_size must be greater than 0")
+        );
+
+        // Reset and test invalid memtable_size_threshold (should trigger line 579-580)
+        config = Config::default();
+        config.storage.memtable_size_threshold = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("memtable_size_threshold must be greater than 0")
+        );
+
+        // Reset and test invalid bloom filter false positive rate (should trigger line 589-590)
+        config = Config::default();
+        config.storage.enable_bloom_filters = true;
+        config.storage.bloom_filter_fp_rate = 0.0; // Invalid: exactly 0
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("bloom_filter_fp_rate must be between 0 and 1")
+        );
+
+        // Test another invalid bloom filter false positive rate
+        config.storage.bloom_filter_fp_rate = 1.0; // Invalid: exactly 1
+        let result = config.validate();
+        assert!(result.is_err());
+
+        // Test bloom filter rate above 1
+        config.storage.bloom_filter_fp_rate = 1.5; // Invalid: greater than 1
+        let result = config.validate();
+        assert!(result.is_err());
+
+        // Test bloom filter rate below 0
+        config.storage.bloom_filter_fp_rate = -0.1; // Invalid: less than 0
+        let result = config.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_valid_bloom_filter_config() {
+        let mut config = Config::default();
+        config.storage.enable_bloom_filters = true;
+        config.storage.bloom_filter_fp_rate = 0.01; // Valid rate
+        assert!(config.validate().is_ok());
+
+        config.storage.bloom_filter_fp_rate = 0.5; // Valid rate
+        assert!(config.validate().is_ok());
+
+        config.storage.bloom_filter_fp_rate = 0.99; // Valid rate
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_bloom_filter_disabled() {
+        let mut config = Config::default();
+        config.storage.enable_bloom_filters = false;
+        config.storage.bloom_filter_fp_rate = 0.0; // Should be ignored when bloom filters disabled
+        assert!(config.validate().is_ok());
+
+        config.storage.bloom_filter_fp_rate = 1.0; // Should be ignored when bloom filters disabled
+        assert!(config.validate().is_ok());
+
+        config.storage.bloom_filter_fp_rate = -1.0; // Should be ignored when bloom filters disabled
+        assert!(config.validate().is_ok());
+    }
 }

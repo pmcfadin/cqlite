@@ -1229,6 +1229,320 @@ mod tests {
     }
 
     #[test]
+    fn test_all_value_variants() {
+        // Test all Value enum variants for coverage
+        let values = vec![
+            Value::Null,
+            Value::Boolean(true),
+            Value::Integer(42),
+            Value::BigInt(9223372036854775807i64),
+            Value::Float(3.14159),
+            Value::Text("test string".to_string()),
+            Value::Blob(vec![1, 2, 3, 4]),
+            Value::Timestamp(1234567890),
+            Value::Uuid([0u8; 16]),
+            Value::Varint(vec![1, 2, 3]),
+            Value::Decimal {
+                scale: 2,
+                unscaled: vec![1, 2, 3],
+            },
+            Value::Duration {
+                months: 1,
+                days: 30,
+                nanos: 1000000000,
+            },
+            Value::Json(serde_json::Value::String("test".to_string())),
+            Value::TinyInt(127i8),
+            Value::SmallInt(32767i16),
+            Value::Float32(3.14f32),
+            Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+            Value::Set(vec![
+                Value::Text("a".to_string()),
+                Value::Text("b".to_string()),
+            ]),
+            Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(42))]),
+            Value::Tuple(vec![Value::Integer(1), Value::Text("test".to_string())]),
+            Value::Udt(UdtValue::new("TestType".to_string(), "test_ks".to_string())),
+            Value::Frozen(Box::new(Value::Integer(42))),
+            Value::Tombstone(TombstoneInfo {
+                deletion_time: 1000,
+                tombstone_type: TombstoneType::RowTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            }),
+        ];
+
+        // Test data_type() for all variants
+        for value in &values {
+            let _ = value.data_type();
+        }
+
+        // Test conversion methods
+        assert_eq!(values[1].as_bool(), Some(true));
+        assert_eq!(values[2].as_i32(), Some(42));
+        assert_eq!(values[3].as_i64(), Some(9223372036854775807i64));
+        assert_eq!(values[4].as_f64(), Some(3.14159));
+        assert_eq!(values[5].as_str(), Some("test string"));
+        assert_eq!(values[6].as_bytes(), Some([1u8, 2, 3, 4].as_slice()));
+
+        // Test is_null, is_tombstone, is_deleted
+        assert!(values[0].is_null());
+        assert!(values[22].is_tombstone());
+        assert!(values[0].is_deleted());
+        assert!(values[22].is_deleted());
+
+        // Test size_estimate for all variants
+        for value in &values {
+            assert!(value.size_estimate() > 0);
+        }
+    }
+
+    #[test]
+    fn test_all_tombstone_types() {
+        let _current_time = 2000;
+        let start_key = RowKey::new(vec![1, 2, 3]);
+        let end_key = RowKey::new(vec![4, 5, 6]);
+
+        // Test all tombstone creation methods
+        let row_tombstone = Value::row_tombstone(1000);
+        let cell_tombstone = Value::cell_tombstone(1000);
+        let ttl_tombstone = Value::ttl_tombstone(1000, 500);
+        let range_tombstone = Value::range_tombstone(1000, start_key.clone(), end_key.clone());
+        let range_tombstone_ttl =
+            Value::range_tombstone_with_ttl(1000, start_key.clone(), end_key.clone(), 500);
+
+        // Test tombstone type checking
+        assert!(row_tombstone.is_tombstone_type(TombstoneType::RowTombstone));
+        assert!(cell_tombstone.is_tombstone_type(TombstoneType::CellTombstone));
+        assert!(ttl_tombstone.is_tombstone_type(TombstoneType::TtlExpiration));
+        assert!(range_tombstone.is_tombstone_type(TombstoneType::RangeTombstone));
+        assert!(range_tombstone_ttl.is_tombstone_type(TombstoneType::RangeTombstone));
+
+        // Test deletion time retrieval
+        assert_eq!(row_tombstone.deletion_time(), Some(1000));
+        assert_eq!(cell_tombstone.deletion_time(), Some(1000));
+
+        // Test TTL functionality
+        assert_eq!(ttl_tombstone.tombstone_ttl(), Some(500));
+        assert!(ttl_tombstone.is_expired(2000));
+        assert!(!ttl_tombstone.is_expired(1200));
+
+        // Test range tombstone functionality
+        let test_key = RowKey::new(vec![3, 3, 3]);
+        assert!(range_tombstone.tombstone_covers_key(&test_key));
+
+        let range_info = range_tombstone.tombstone_range();
+        assert!(range_info.is_some());
+    }
+
+    #[test]
+    fn test_collection_validation() {
+        // Test list validation
+        let valid_list = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
+        assert!(valid_list.validate_collection_types().is_ok());
+        assert_eq!(valid_list.collection_len(), Some(3));
+        assert!(!valid_list.is_empty_collection());
+
+        let mixed_list = Value::List(vec![Value::Integer(1), Value::Text("two".to_string())]);
+        assert!(mixed_list.validate_collection_types().is_err());
+
+        // Test set validation
+        let valid_set = Value::Set(vec![
+            Value::Text("a".to_string()),
+            Value::Text("b".to_string()),
+        ]);
+        assert!(valid_set.validate_collection_types().is_ok());
+
+        let duplicate_set = Value::Set(vec![
+            Value::Text("a".to_string()),
+            Value::Text("a".to_string()),
+        ]);
+        assert!(duplicate_set.validate_collection_types().is_err());
+
+        // Test map validation
+        let valid_map = Value::Map(vec![
+            (Value::Text("key1".to_string()), Value::Integer(1)),
+            (Value::Text("key2".to_string()), Value::Integer(2)),
+        ]);
+        assert!(valid_map.validate_collection_types().is_ok());
+
+        let duplicate_key_map = Value::Map(vec![
+            (Value::Text("key1".to_string()), Value::Integer(1)),
+            (Value::Text("key1".to_string()), Value::Integer(2)),
+        ]);
+        assert!(duplicate_key_map.validate_collection_types().is_err());
+
+        // Test empty collections
+        let empty_list = Value::List(vec![]);
+        assert!(empty_list.is_empty_collection());
+        assert_eq!(empty_list.collection_len(), Some(0));
+
+        // Test is_valid_collection_element
+        assert!(!Value::Null.is_valid_collection_element());
+        assert!(Value::Integer(42).is_valid_collection_element());
+    }
+
+    #[test]
+    fn test_udt_functionality() {
+        let mut udt = UdtValue::new("Person".to_string(), "test_ks".to_string());
+
+        // Test field operations
+        udt = udt.with_field("name".to_string(), Some(Value::Text("John".to_string())));
+        udt = udt.with_field("age".to_string(), Some(Value::Integer(30)));
+
+        assert_eq!(udt.field_count(), 2);
+        assert_eq!(
+            udt.get_field("name"),
+            Some(&Value::Text("John".to_string()))
+        );
+        assert_eq!(udt.get_field("age"), Some(&Value::Integer(30)));
+        assert_eq!(udt.get_field("nonexistent"), None);
+
+        let field_names = udt.field_names();
+        assert!(field_names.contains(&"name"));
+        assert!(field_names.contains(&"age"));
+
+        // Test field modification
+        udt.set_field("age".to_string(), Some(Value::Integer(31)));
+        assert_eq!(udt.get_field("age"), Some(&Value::Integer(31)));
+
+        // Test new field addition via set_field
+        udt.set_field(
+            "email".to_string(),
+            Some(Value::Text("john@example.com".to_string())),
+        );
+        assert_eq!(udt.field_count(), 3);
+    }
+
+    #[test]
+    fn test_udt_type_def_functionality() {
+        let type_def = UdtTypeDef::new("test_ks".to_string(), "Person".to_string())
+            .with_field("name".to_string(), CqlType::Text, false)
+            .with_field("age".to_string(), CqlType::Int, true);
+
+        // Test field retrieval
+        let name_field = type_def.get_field("name");
+        assert!(name_field.is_some());
+        assert_eq!(name_field.unwrap().field_type, CqlType::Text);
+        assert!(!name_field.unwrap().nullable);
+
+        // Test validation of matching UDT value
+        let valid_udt = UdtValue::new("Person".to_string(), "test_ks".to_string())
+            .with_field("name".to_string(), Some(Value::Text("John".to_string())))
+            .with_field("age".to_string(), Some(Value::Integer(30)));
+
+        assert!(type_def.validate_value(&valid_udt).is_ok());
+
+        // Test validation failures
+        let wrong_type_udt = UdtValue::new("Wrong".to_string(), "test_ks".to_string());
+        assert!(type_def.validate_value(&wrong_type_udt).is_err());
+
+        let wrong_keyspace_udt = UdtValue::new("Person".to_string(), "wrong_ks".to_string());
+        assert!(type_def.validate_value(&wrong_keyspace_udt).is_err());
+    }
+
+    #[test]
+    fn test_tuple_functionality() {
+        let mut tuple = TupleValue::new(vec![
+            Some(Value::Integer(1)),
+            Some(Value::Text("test".to_string())),
+            None,
+        ]);
+
+        assert_eq!(tuple.field_count(), 3);
+        assert_eq!(tuple.get_field(0), Some(&Value::Integer(1)));
+        assert_eq!(tuple.get_field(1), Some(&Value::Text("test".to_string())));
+        assert_eq!(tuple.get_field(2), None);
+        assert_eq!(tuple.get_field(3), None);
+
+        // Test field modification
+        tuple.set_field(2, Some(Value::Boolean(true)));
+        assert_eq!(tuple.get_field(2), Some(&Value::Boolean(true)));
+
+        // Test out-of-bounds modification (should be no-op)
+        tuple.set_field(10, Some(Value::Integer(42)));
+        assert_eq!(tuple.field_count(), 3);
+    }
+
+    #[test]
+    fn test_data_type_functionality() {
+        // Test is_numeric for all types
+        assert!(DataType::TinyInt.is_numeric());
+        assert!(DataType::SmallInt.is_numeric());
+        assert!(DataType::Integer.is_numeric());
+        assert!(DataType::BigInt.is_numeric());
+        assert!(DataType::Float32.is_numeric());
+        assert!(DataType::Float.is_numeric());
+        assert!(!DataType::Text.is_numeric());
+        assert!(!DataType::Boolean.is_numeric());
+
+        // Test default values for all types
+        assert_eq!(DataType::Null.default_value(), Value::Null);
+        assert_eq!(DataType::Boolean.default_value(), Value::Boolean(false));
+        assert_eq!(DataType::Integer.default_value(), Value::Integer(0));
+        assert_eq!(DataType::Text.default_value(), Value::Text(String::new()));
+
+        // Test string representation
+        assert_eq!(DataType::Boolean.to_string(), "BOOLEAN");
+        assert_eq!(DataType::Integer.to_string(), "INTEGER");
+        assert_eq!(DataType::Text.to_string(), "TEXT");
+        assert_eq!(DataType::Tuple.to_string(), "TUPLE");
+        assert_eq!(DataType::Udt.to_string(), "UDT");
+        assert_eq!(DataType::Frozen.to_string(), "FROZEN");
+        assert_eq!(DataType::Tombstone.to_string(), "TOMBSTONE");
+    }
+
+    #[test]
+    fn test_row_key_functionality() {
+        // Test creation from bytes
+        let key1 = RowKey::new(vec![1, 2, 3, 4]);
+        assert_eq!(key1.len(), 4);
+        assert!(!key1.is_empty());
+        assert_eq!(key1.as_bytes(), &[1, 2, 3, 4]);
+
+        // Test creation from value
+        let value = Value::Text("test".to_string());
+        let key2 = RowKey::from_value(&value).unwrap();
+        assert!(key2.len() > 0);
+
+        // Test empty key
+        let empty_key = RowKey::new(vec![]);
+        assert!(empty_key.is_empty());
+        assert_eq!(empty_key.len(), 0);
+
+        // Test From implementations
+        let key3 = RowKey::from("test");
+        let key4 = RowKey::from(b"test".to_vec());
+        assert_eq!(key3.as_bytes(), key4.as_bytes());
+    }
+
+    #[test]
+    fn test_value_comparison() {
+        // Test null comparisons
+        assert!(Value::Null < Value::Integer(42));
+        assert!(Value::Integer(42) > Value::Null);
+        assert_eq!(
+            Value::Null.partial_cmp(&Value::Null),
+            Some(std::cmp::Ordering::Equal)
+        );
+
+        // Test same-type comparisons
+        assert!(Value::Integer(1) < Value::Integer(2));
+        assert!(Value::Text("a".to_string()) < Value::Text("b".to_string()));
+        assert!(Value::Boolean(false) < Value::Boolean(true));
+
+        // Test mixed-type comparisons (fall back to string comparison)
+        let int_val = Value::Integer(42);
+        let text_val = Value::Text("hello".to_string());
+        assert!(int_val.partial_cmp(&text_val).is_some());
+    }
+
+    #[test]
     fn test_tombstone_functionality() {
         // Test row tombstone creation
         let row_tombstone = Value::row_tombstone(1000);
