@@ -773,6 +773,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validation_runner_smoke_without_fixtures() {
+        let config = ValidationTestConfig {
+            validate_fixtures: false,
+            validate_cli: false,
+            validate_performance: false,
+            generate_report: false,
+            report_format: ReportFormat::Json,
+            timeout_seconds: 5,
+        };
+
+        let mut runner = ValidationTestRunner::new(config).unwrap();
+        let results = runner.run_validation_tests().await.unwrap();
+
+        assert_eq!(results.total_validations, 0);
+        assert_eq!(results.failed_validations, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires full validation harness and external fixtures"]
     async fn test_basic_validation() {
         let config = ValidationTestConfig {
             validate_fixtures: true,

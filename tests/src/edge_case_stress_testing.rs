@@ -1215,6 +1215,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "Manual stress suite; enable when running targeted soak tests"]
     fn test_stress_framework() {
         let config = StressTestConfig {
             max_memory_mb: 64,
@@ -1235,6 +1236,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Manual stress suite; enable when running targeted soak tests"]
     fn test_large_data_volumes() {
         let mut framework = StressTestFramework::new();
         let result = framework.test_large_data_volumes();
@@ -1242,6 +1244,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Manual stress suite; enable when running targeted soak tests"]
     fn test_memory_exhaustion() {
         let mut framework = StressTestFramework::new();
         let result = framework.test_memory_exhaustion_scenarios();

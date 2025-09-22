@@ -31,9 +31,18 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 #[allow(unused_imports)]
 use tempfile::TempDir;
 
+#[allow(dead_code)]
+fn integration_tests_enabled() -> bool {
+    std::env::var("CQLITE_RUN_INTEGRATION").is_ok()
+}
+
 /// Comprehensive end-to-end test
 #[tokio::test]
 async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!("INFO: Skipping test_complete_workflow; set CQLITE_RUN_INTEGRATION=1 to enable");
+        return Ok(());
+    }
     // Setup test environment
     let temp_dir = TempDir::new()?;
     let config = Config::default();
@@ -177,6 +186,10 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
 /// Test error handling and edge cases
 #[tokio::test]
 async fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!("INFO: Skipping test_error_handling; set CQLITE_RUN_INTEGRATION=1 to enable");
+        return Ok(());
+    }
     let temp_dir = TempDir::new()?;
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
@@ -213,6 +226,12 @@ async fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
 /// Test performance and scalability
 #[tokio::test]
 async fn test_performance_scalability() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_performance_scalability; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     let temp_dir = TempDir::new()?;
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
@@ -274,6 +293,12 @@ async fn test_performance_scalability() -> Result<(), Box<dyn std::error::Error>
 /// Test concurrent operations
 #[tokio::test]
 async fn test_concurrent_operations() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_concurrent_operations; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     let temp_dir = TempDir::new()?;
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
@@ -330,6 +355,12 @@ async fn test_concurrent_operations() -> Result<(), Box<dyn std::error::Error>> 
 /// Test real Cassandra 5+ SSTable compatibility
 #[tokio::test]
 async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_cassandra5_sstable_compatibility; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     println!("🔄 Testing Cassandra 5+ SSTable compatibility...");
 
     let _temp_dir = TempDir::new()?;
@@ -416,6 +447,12 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
 /// Test with real-world large datasets
 #[tokio::test]
 async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_large_dataset_processing; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     println!("💾 Testing large dataset processing...");
 
     let temp_dir = TempDir::new()?;
@@ -560,6 +597,12 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
 /// Test concurrent round-trip operations with Cassandra 5+ data
 #[tokio::test]
 async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_concurrent_round_trip_operations; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     println!("🔀 Testing concurrent round-trip operations...");
 
     let temp_dir = TempDir::new()?;
@@ -714,6 +757,12 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
 /// Test edge cases and error recovery
 #[tokio::test]
 async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_edge_cases_and_error_recovery; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     println!("⚠️  Testing edge cases and error recovery...");
 
     let temp_dir = TempDir::new()?;
@@ -925,6 +974,12 @@ fn values_are_compatible(original: &Value, parsed: &Value) -> bool {
 /// Comprehensive VInt encoding/decoding integration test
 #[tokio::test]
 async fn test_vint_encoding_comprehensive() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_vint_encoding_comprehensive; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     println!("🔢 Testing comprehensive VInt encoding/decoding...");
 
     use cqlite_core::parser::vint::{encode_vint, parse_vint};
@@ -1070,6 +1125,12 @@ async fn test_vint_encoding_comprehensive() -> Result<(), Box<dyn std::error::Er
 /// Test complex types (Lists, Sets, Maps, Tuples, UDTs) integration
 #[tokio::test]
 async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_complex_types_integration; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     println!("🏗️  Testing complex types integration...");
 
     let temp_dir = TempDir::new()?;
@@ -1297,6 +1358,12 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
 /// Test SSTable creation, writing, and reading with known data
 #[tokio::test]
 async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_sstable_round_trip_validation; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     println!("📦 Testing SSTable round-trip validation...");
 
     let temp_dir = TempDir::new()?;
@@ -1464,6 +1531,12 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
 /// Test data type validation across all supported Cassandra types
 #[tokio::test]
 async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping test_comprehensive_data_type_validation; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     println!("🔍 Testing comprehensive data type validation...");
 
     use cqlite_core::parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value};

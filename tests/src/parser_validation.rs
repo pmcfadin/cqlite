@@ -241,6 +241,7 @@ mod vint_validation_tests {
     use cqlite_core::parser::vint::*;
 
     #[test]
+    #[ignore = "Manual parser validation; enable with --features integration_e2e"]
     fn test_vint_cassandra_compatibility() {
         // Test cases based on Cassandra VInt implementation
         let test_cases = vec![

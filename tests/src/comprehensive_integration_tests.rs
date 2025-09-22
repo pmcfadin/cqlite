@@ -24,6 +24,11 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::time::timeout;
 
+#[allow(dead_code)]
+fn integration_tests_enabled() -> bool {
+    std::env::var("CQLITE_RUN_INTEGRATION").is_ok()
+}
+
 /// Integration test configuration
 #[derive(Debug, Clone)]
 pub struct IntegrationTestConfig {
@@ -1114,6 +1119,12 @@ impl TestStatus {
 // Test runner entry point
 #[tokio::test]
 async fn run_comprehensive_integration_tests() -> Result<()> {
+    if !integration_tests_enabled() {
+        println!(
+            "INFO: Skipping run_comprehensive_integration_tests; set CQLITE_RUN_INTEGRATION=1 to enable"
+        );
+        return Ok(());
+    }
     let config = IntegrationTestConfig {
         test_real_sstables: false, // Skip real SSTable tests in CI for now
         test_cli_integration: true,

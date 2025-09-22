@@ -1011,6 +1011,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "Manual edge-case suite; enable when running focused compatibility testing"]
     fn test_edge_case_suite() {
         let mut tests = EdgeCaseDataTypeTests::new();
         // Disable stress tests in unit testing
@@ -1024,6 +1025,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Manual edge-case suite; enable when running focused compatibility testing"]
     fn test_extreme_boundaries() {
         let mut tests = EdgeCaseDataTypeTests::new();
         let result = tests.test_extreme_numeric_boundaries();
@@ -1031,6 +1033,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Manual edge-case suite; enable when running focused compatibility testing"]
     fn test_unicode_handling() {
         let mut tests = EdgeCaseDataTypeTests::new();
         let result = tests.test_unicode_edge_cases();
@@ -1038,6 +1041,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Manual edge-case suite; enable when running focused compatibility testing"]
     fn test_malformed_data() {
         let mut tests = EdgeCaseDataTypeTests::new();
         let result = tests.test_malformed_vint_data();

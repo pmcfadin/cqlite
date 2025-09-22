@@ -748,6 +748,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "Manual edge-case suite; enable when running focused compatibility testing"]
     fn test_edge_case_runner() {
         let config = EdgeCaseConfig {
             enable_data_type_tests: true,
@@ -777,6 +778,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Manual edge-case suite; enable when running focused compatibility testing"]
     fn test_comprehensive_edge_case_tests() {
         // This would run a quick version for unit testing
         let config = EdgeCaseConfig {

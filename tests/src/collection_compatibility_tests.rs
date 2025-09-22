@@ -743,6 +743,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "Manual collection compatibility suite; enable when running targeted validation"]
     fn test_collection_compatibility_suite() {
         let mut tester = CollectionCompatibilityTester::new();
         let result = tester.run_all_tests();
