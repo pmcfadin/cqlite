@@ -686,4 +686,35 @@ mod tests {
         assert!(matches!(complex_config.backend, ParserBackend::Antlr));
         assert_eq!(complex_config.timeout, Duration::from_secs(60));
     }
+
+    #[test]
+    fn test_parallel_requires_multiple_workers() {
+        let mut config = ParserConfig::minimal().with_feature(ParserFeature::Parallel);
+        config.performance.worker_threads = 1;
+        let err = config
+            .validate()
+            .expect_err("parallel parsing should require >1 worker");
+        assert!(err.contains("Parallel parsing requires at least 2 worker threads"));
+    }
+
+    #[test]
+    fn test_streaming_not_allowed_with_antlr() {
+        let config = ParserConfig::strict().with_feature(ParserFeature::Streaming);
+        let err = config
+            .validate()
+            .expect_err("streaming should be incompatible with ANTLR backend");
+        assert!(err.contains("Streaming is not supported with ANTLR backend"));
+    }
+
+    #[test]
+    fn test_builder_validation_failure() {
+        let result = ParserConfigBuilder::new()
+            .backend(ParserBackend::Auto)
+            .timeout(Duration::from_secs(0))
+            .build();
+        assert!(
+            result.is_err(),
+            "zero timeout should fail builder validation"
+        );
+    }
 }

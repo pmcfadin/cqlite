@@ -521,6 +521,7 @@ impl Default for ComplexTypeParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_primitive_type_parsing() {
@@ -540,6 +541,76 @@ mod tests {
         assert!(matches!(result.cql_type, CqlType::List(_)));
         assert_eq!(result.category, TypeCategory::Collection);
         assert!(result.complexity_score > 1);
+    }
+
+    #[test]
+    fn test_nested_frozen_collection_metadata() {
+        let parser = ComplexTypeParser::new();
+        let parsed = parser
+            .parse_type("frozen<map<text, list<int>>>")
+            .expect("nested frozen type should parse");
+
+        assert_eq!(parsed.category, TypeCategory::Frozen);
+        assert!(parsed.metadata.is_frozen);
+        assert!(parsed.complexity_score > 10);
+        assert_eq!(
+            parser.convert_type_to_string(&parsed.cql_type),
+            "frozen<map<text, list<int>>>"
+        );
+    }
+
+    #[test]
+    fn test_type_depth_limit_error() {
+        let parser = ComplexTypeParser::new();
+        let context = TypeParsingContext {
+            keyspace: None,
+            depth: 5,
+            max_depth: 4,
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        let err = parser
+            .parse_type_with_context("int", &context)
+            .expect_err("depth constraint should be enforced");
+        assert!(
+            err.to_string().contains("Type nesting too deep"),
+            "unexpected error message: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_unexpected_trailing_content_error() {
+        let parser = ComplexTypeParser::new();
+        let err = parser
+            .parse_type("int trailing")
+            .expect_err("parser should reject trailing content");
+        assert!(
+            err.to_string()
+                .contains("Unexpected content after type definition"),
+            "unexpected error message: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_infer_type_from_complex_value() {
+        let parser = ComplexTypeParser::new();
+        let value = Value::Map(vec![(
+            Value::Text("sensor_a".into()),
+            Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+        )]);
+
+        let inferred = parser.infer_type_from_value(&value).unwrap();
+        if let CqlType::Map(key, val) = inferred.cql_type {
+            assert_eq!(*key, CqlType::Text);
+            if let CqlType::List(inner) = *val {
+                assert_eq!(*inner, CqlType::Int);
+            } else {
+                panic!("expected list<int> value type");
+            }
+        } else {
+            panic!("expected map<text, list<int>> type");
+        }
     }
 
     #[test]

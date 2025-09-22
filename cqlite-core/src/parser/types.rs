@@ -1892,4 +1892,47 @@ mod tests {
         ]);
         assert_eq!(deletion_time, 5000);
     }
+
+    #[test]
+    fn test_parse_list_v5_homogeneous() {
+        let mut data = Vec::new();
+        data.extend(super::super::vint::encode_vint(2)); // two elements
+        data.push(0x00); // homogeneous collection
+        data.push(CqlTypeId::Int as u8);
+
+        data.extend(super::super::vint::encode_vint(4));
+        data.extend_from_slice(&1i32.to_be_bytes());
+
+        data.extend(super::super::vint::encode_vint(4));
+        data.extend_from_slice(&2i32.to_be_bytes());
+
+        let (_, value) = parse_list_v5_format(&data).expect("parse list");
+        assert_eq!(
+            value,
+            Value::List(vec![Value::Integer(1), Value::Integer(2)])
+        );
+    }
+
+    #[test]
+    fn test_parse_list_v5_mixed_types() {
+        let mut data = Vec::new();
+        data.extend(super::super::vint::encode_vint(2)); // two elements
+        data.push(0x01); // mixed-type flag
+
+        // First element: text "alpha"
+        data.push(CqlTypeId::Varchar as u8);
+        data.extend(super::super::vint::encode_vint(5));
+        data.extend_from_slice(b"alpha");
+
+        // Second element: integer 7
+        data.push(CqlTypeId::Int as u8);
+        data.extend(super::super::vint::encode_vint(4));
+        data.extend_from_slice(&7i32.to_be_bytes());
+
+        let (_, value) = parse_list_v5_format(&data).expect("parse list");
+        assert_eq!(
+            value,
+            Value::List(vec![Value::Text("alpha".to_string()), Value::Integer(7)])
+        );
+    }
 }

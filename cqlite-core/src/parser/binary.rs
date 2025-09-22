@@ -145,10 +145,11 @@ pub fn parse_vint_binary(data: &[u8]) -> ParseResult<(u64, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::config::ParserConfig;
 
     #[test]
     fn test_binary_parser_creation() {
-        let config = super::super::config::ParserConfig::default();
+        let config = ParserConfig::default();
         let parser = SSTableParser::new(config).unwrap();
 
         let info = parser.backend_info();
@@ -157,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_binary_parser_unsupported() {
-        let config = super::super::config::ParserConfig::default();
+        let config = ParserConfig::default();
         let parser = SSTableParser::new(config).unwrap();
 
         let result = parser.parse("SELECT * FROM test").await;
@@ -183,5 +184,23 @@ mod tests {
 
         let empty_result = parse_vint_binary(&[]);
         assert!(empty_result.is_err());
+    }
+
+    #[test]
+    fn test_parse_vint_binary_unsupported_multi_byte() {
+        let data = &[0x80, 0x01];
+        let err =
+            parse_vint_binary(data).expect_err("multi-byte vint should return unsupported error");
+        assert!(matches!(err, CQLiteParseError::Unsupported(_)));
+    }
+
+    #[test]
+    fn test_backend_info_and_validate_syntax() {
+        let info = SSTableParser::backend_info();
+        assert_eq!(info.name, "binary");
+        assert!(info.features.contains(&ParserFeature::Streaming));
+
+        let parser = SSTableParser::new(ParserConfig::default()).unwrap();
+        assert!(!parser.validate_syntax("SELECT * FROM ks.table"));
     }
 }

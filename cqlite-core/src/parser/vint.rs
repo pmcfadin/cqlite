@@ -925,4 +925,22 @@ mod tests {
         assert_eq!(encoded.len(), 2);
         assert_eq!(encoded[0] & 0xC0, 0x80); // Two-byte format starts with 10
     }
+
+    #[test]
+    fn test_detect_ascii_corruption_patterns() {
+        assert!(detect_ascii_corruption(b"data_payload"));
+        assert!(detect_ascii_corruption(b"node_meta"));
+        assert!(!detect_ascii_corruption(&[0x00, 0x80, 0xFF, 0x10]));
+    }
+
+    #[test]
+    fn test_parse_vint_extended_formats() {
+        // 0xF0 prefix should fall back to ZigZag parsing and succeed
+        let bytes = [0xF0, 0x00, 0x00, 0x00, 0x10];
+        let _ = parse_vint(&bytes).expect("extended format parses");
+
+        // 0xFF extended format should also succeed
+        let bytes = [0xFF, 0x00, 0x00, 0x00, 0x05];
+        let _ = parse_vint(&bytes).expect("fallback parse");
+    }
 }

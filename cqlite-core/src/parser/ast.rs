@@ -838,4 +838,31 @@ mod tests {
         let back_to_cql: CqlType = data_type.into();
         assert_eq!(cql_type, back_to_cql);
     }
+
+    #[test]
+    fn test_identifier_needs_quoting_rules() {
+        let numeric_start = CqlIdentifier::new("123abc");
+        assert!(numeric_start.needs_quoting());
+
+        let mixed_case = CqlIdentifier::new("CamelCase");
+        assert!(!mixed_case.needs_quoting());
+
+        let quoted = CqlIdentifier::quoted("any value");
+        assert!(quoted.needs_quoting());
+    }
+
+    #[test]
+    fn test_table_options_default_is_empty() {
+        let options = CqlTableOptions::default();
+        assert!(options.options.is_empty());
+    }
+
+    #[test]
+    fn test_varint_and_counter_mapping() {
+        let big_int = CqlType::from(CqlDataType::Varint);
+        assert_eq!(big_int, CqlType::BigInt);
+
+        let counter_type = CqlType::from(CqlDataType::Counter);
+        assert_eq!(counter_type, CqlType::BigInt);
+    }
 }

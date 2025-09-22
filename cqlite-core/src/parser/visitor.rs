@@ -1832,4 +1832,35 @@ mod tests {
         assert!(types.iter().any(|t| matches!(t, CqlDataType::Set(_))));
         assert!(types.iter().any(|t| matches!(t, CqlDataType::BigInt)));
     }
+
+    #[test]
+    fn test_default_visitor_handles_batch_and_truncate() {
+        let insert = CqlInsert {
+            table: CqlTable::new("users"),
+            columns: vec![CqlIdentifier::new("id"), CqlIdentifier::new("name")],
+            values: CqlInsertValues::Values(vec![
+                CqlExpression::Literal(CqlLiteral::Integer(1)),
+                CqlExpression::Literal(CqlLiteral::String("alice".to_string())),
+            ]),
+            if_not_exists: false,
+            using: None,
+        };
+
+        let batch = CqlStatement::Batch(CqlBatch {
+            batch_type: CqlBatchType::Logged,
+            using: None,
+            statements: vec![CqlBatchStatement::Insert(insert.clone())],
+        });
+
+        let truncate = CqlStatement::Truncate(CqlTruncate {
+            table: CqlTable::new("users"),
+        });
+
+        let mut visitor = DefaultVisitor;
+        let result: () = visitor.visit_statement(&batch).unwrap();
+        assert_eq!(result, ());
+
+        let result: () = visitor.visit_statement(&truncate).unwrap();
+        assert_eq!(result, ());
+    }
 }
