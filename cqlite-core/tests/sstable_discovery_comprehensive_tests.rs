@@ -609,10 +609,21 @@ async fn test_integration_table_loading() {
                 let timestamp_range = reader.get_timestamp_range().await;
                 let _token_range = reader.iterate_token_range(-1000, 1000).await;
 
+                // Convert stats to HashMap format
+                let mut stats_map = std::collections::HashMap::new();
+                stats_map.insert("file_size".to_string(), stats.file_size.to_string());
+                stats_map.insert("entry_count".to_string(), stats.entry_count.to_string());
+                stats_map.insert("cache_hit_rate".to_string(), format!("{:.2}", stats.cache_hit_rate));
+
+                // Convert timestamp range to expected format
+                let ts_range = timestamp_range
+                    .map(|opt| opt.map(|(min, max)| (min as u64, max as u64)).unwrap_or((0, 0)))
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) });
+
                 loaded_sstables.push(LoadedSSTableInfo {
                     name: base_name.to_string(),
-                    stats,
-                    timestamp_range,
+                    stats: stats_map,
+                    timestamp_range: ts_range,
                     components_found: verify_components_discovered(&table_dir, base_name).await,
                 });
 

@@ -431,7 +431,7 @@ async fn compare_index_outputs(
         let sstabledump_entry = &sstabledump_entries[i];
 
         // Compare key digests
-        let digest_match = our_entry.key_digest == sstabledump_entry.key_digest;
+        let digest_match = our_entry.key_digest.as_ref() == sstabledump_entry.key_digest.as_slice();
         key_digest_matches.push(digest_match);
         if !digest_match {
             errors.push(format!(
