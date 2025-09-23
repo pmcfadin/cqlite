@@ -811,13 +811,13 @@ impl CqlVisitor<()> for SemanticValidator {
     fn visit_delete(&mut self, delete: &CqlDelete) -> Result<()> {
         // Check if table exists
         let table_name = delete.table.full_name();
-        if !self.context.schemas.contains_key(&table_name) {
-            if matches!(
+        if !self.context.schemas.contains_key(&table_name)
+            && matches!(
                 self.context.strictness,
                 super::traits::ValidationStrictness::Strict
-            ) {
-                self.add_error(format!("Table '{}' does not exist", table_name));
-            }
+            )
+        {
+            self.add_error(format!("Table '{}' does not exist", table_name));
         }
 
         // Continue with default traversal
@@ -863,13 +863,13 @@ impl CqlVisitor<()> for SemanticValidator {
         // Check if table exists (for non-IF EXISTS statements)
         if !drop.if_exists {
             let table_name = drop.table.full_name();
-            if !self.context.schemas.contains_key(&table_name) {
-                if matches!(
+            if !self.context.schemas.contains_key(&table_name)
+                && matches!(
                     self.context.strictness,
                     super::traits::ValidationStrictness::Strict
-                ) {
-                    self.add_error(format!("Table '{}' does not exist", table_name));
-                }
+                )
+            {
+                self.add_error(format!("Table '{}' does not exist", table_name));
             }
         }
 
@@ -880,13 +880,13 @@ impl CqlVisitor<()> for SemanticValidator {
     fn visit_create_index(&mut self, create: &CqlCreateIndex) -> Result<()> {
         // Check if table exists
         let table_name = create.table.full_name();
-        if !self.context.schemas.contains_key(&table_name) {
-            if matches!(
+        if !self.context.schemas.contains_key(&table_name)
+            && matches!(
                 self.context.strictness,
                 super::traits::ValidationStrictness::Strict
-            ) {
-                self.add_error(format!("Table '{}' does not exist", table_name));
-            }
+            )
+        {
+            self.add_error(format!("Table '{}' does not exist", table_name));
         }
 
         // Continue with default traversal
@@ -896,13 +896,13 @@ impl CqlVisitor<()> for SemanticValidator {
     fn visit_alter_table(&mut self, alter: &CqlAlterTable) -> Result<()> {
         // Check if table exists
         let table_name = alter.table.full_name();
-        if !self.context.schemas.contains_key(&table_name) {
-            if matches!(
+        if !self.context.schemas.contains_key(&table_name)
+            && matches!(
                 self.context.strictness,
                 super::traits::ValidationStrictness::Strict
-            ) {
-                self.add_error(format!("Table '{}' does not exist", table_name));
-            }
+            )
+        {
+            self.add_error(format!("Table '{}' does not exist", table_name));
         }
 
         // Continue with default traversal
@@ -913,13 +913,13 @@ impl CqlVisitor<()> for SemanticValidator {
         // Validate UDT references
         if let CqlDataType::Udt(udt_name) = data_type {
             let udt_key = udt_name.as_str();
-            if !self.context.udts.contains_key(udt_key) {
-                if matches!(
+            if !self.context.udts.contains_key(udt_key)
+                && matches!(
                     self.context.strictness,
                     super::traits::ValidationStrictness::Strict
-                ) {
-                    self.add_error(format!("UDT '{}' does not exist", udt_key));
-                }
+                )
+            {
+                self.add_error(format!("UDT '{}' does not exist", udt_key));
             }
         }
 

@@ -332,7 +332,7 @@ impl CassandraValidationFramework {
             (
                 TableId::new("table2"),
                 RowKey::from("key1"),
-                Value::Float(3.14),
+                Value::Float(std::f64::consts::PI),
             ),
         ];
 
@@ -531,9 +531,7 @@ impl ValidationReport {
 
     pub fn detailed_report(&self) -> String {
         let mut report = String::new();
-        report.push_str(&format!(
-            "=== Cassandra Compatibility Validation Report ===\n\n"
-        ));
+        report.push_str(&"=== Cassandra Compatibility Validation Report ===\n\n".to_string());
         report.push_str(&format!("{}\n\n", self.summary()));
 
         for (test_name, result) in &self.tests {

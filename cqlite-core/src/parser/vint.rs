@@ -173,7 +173,7 @@ fn parse_zigzag_vint(input: &[u8]) -> IResult<&[u8], i64> {
     };
 
     let signed_value = zigzag_decode(unsigned_value);
-    let (remaining_input, _) = take(bytes_used as usize)(input)?;
+    let (remaining_input, _) = take(bytes_used)(input)?;
     Ok((remaining_input, signed_value))
 }
 
@@ -322,7 +322,7 @@ fn encode_cassandra_vint(value: i64) -> Vec<u8> {
         4 // Four bytes
     } else {
         // Calculate bytes needed for larger values
-        let abs_value = value.abs() as u64;
+        let abs_value = value.unsigned_abs();
         if abs_value <= 0xFF {
             2
         } else if abs_value <= 0xFFFF {
@@ -375,7 +375,7 @@ fn encode_cassandra_vint_multi_byte(value: i64, num_bytes: usize) -> Vec<u8> {
 
     // Place the value in the remaining bits
     let data_bits = (num_bytes * 8) - leading_ones - 1; // Total data bits available
-    let data_bytes = (data_bits + 7) / 8; // How many bytes we need for data
+    let data_bytes = data_bits.div_ceil(8); // How many bytes we need for data
 
     // Copy the relevant bytes from value_bytes
     let start_idx = 8 - data_bytes;

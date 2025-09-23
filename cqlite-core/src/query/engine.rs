@@ -137,11 +137,10 @@ impl QueryEngine {
         }
 
         // Parse the query (non-SELECT)
-        let parsed_query = self.parser.parse(sql).map_err(|e| {
+        let parsed_query = self.parser.parse(sql).inspect_err(|_e| {
             // Update error statistics
             let mut stats = self.stats.write();
             stats.error_queries += 1;
-            e
         })?;
 
         // Plan the query
