@@ -553,7 +553,7 @@ async fn create_performance_data_file(dir: &Path, base_name: &str, partition_cou
         data.extend_from_slice(&(key.len() as u32).to_be_bytes());
         data.extend_from_slice(key.as_bytes());
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x40]); // Row size
-        data.extend_from_slice(&vec![0xBB; 64]); // Row data
+        data.extend_from_slice(&[0xBB; 64]); // Row data
     }
 
     fs::write(path, data).await.unwrap();
@@ -595,7 +595,7 @@ async fn create_performance_summary_file(dir: &Path, base_name: &str, partition_
     let path = dir.join(format!("{}-Summary.db", base_name));
     let mut data = Vec::new();
 
-    let summary_entries = (partition_count / 100).max(5).min(50);
+    let summary_entries = (partition_count / 100).clamp(5, 50);
 
     // Summary header
     data.extend_from_slice(&[
@@ -655,7 +655,7 @@ async fn create_performance_filter_file(dir: &Path, base_name: &str, partition_c
     let path = dir.join(format!("{}-Filter.db", base_name));
     let mut data = Vec::new();
 
-    let filter_size = (partition_count / 8).max(1024).min(32768);
+    let filter_size = (partition_count / 8).clamp(1024, 32768);
 
     // Bloom filter header
     data.extend_from_slice(&[

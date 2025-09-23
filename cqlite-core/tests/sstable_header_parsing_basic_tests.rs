@@ -150,7 +150,7 @@ mod basic_corruption_tests {
     #[test]
     fn test_error_consistency() {
         // Test that similar corruptions produce consistent error handling
-        let similar_corruptions = vec![
+        let similar_corruptions = [
             vec![0xFF; 8], // Invalid magic
             vec![0x00; 8], // Zero magic
             vec![0x42; 8], // Random magic
