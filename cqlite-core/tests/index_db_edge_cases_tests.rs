@@ -13,10 +13,7 @@
 use cqlite_core::{
     Config, Error,
     platform::Platform,
-    storage::sstable::{
-        SSTableReader,
-        index_reader::IndexReader,
-    },
+    storage::sstable::{SSTableReader, index_reader::IndexReader},
 };
 use std::{path::Path, sync::Arc};
 use tempfile::TempDir;
@@ -389,7 +386,8 @@ async fn test_zero_length_key_digest() {
 
     // Create Index.db with zero-length key digest (should be invalid)
     let data = vec![
-        0x00, 0x10, // Marker
+        0x00,
+        0x10, // Marker
              // No key digest data follows (simulates zero-length)
     ];
     fs::write(&index_file, data).await.unwrap();
@@ -583,8 +581,5 @@ async fn create_concurrent_test_index(path: &Path) {
 fn get_memory_usage() -> usize {
     // Simple memory usage approximation
     // In a real implementation, you might use platform-specific APIs
-    std::alloc::System
-        .default()
-        .layout(std::alloc::Layout::new::<u8>())
-        .size()
+    std::mem::size_of::<u8>() * 1024 // Simplified memory usage estimate
 }

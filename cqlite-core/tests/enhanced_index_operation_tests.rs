@@ -82,11 +82,11 @@ async fn test_partition_lookups(index_reader: &IndexReader) {
 async fn test_promoted_index_functionality(index_reader: &IndexReader) {
     // Test promoted index entries
     // Test index entries access (using available methods)
-    let _total_entries = index_reader.entry_count();
-    println!("✓ Tested index entry count");
+    let _partition_entries = index_reader.get_partition_entries();
+    println!("✓ Tested index partition entries access");
 
-    // Test specific entry lookup by index
-    let _first_entry = index_reader.get_entry_at_index(0);
+    // Test index statistics
+    let _stats = index_reader.get_statistics();
     println!("✓ Tested index entry access");
 }
 
@@ -108,8 +108,32 @@ async fn test_sstable_reader_index_operations(reader: &SSTableReader) {
 
     // Test 2: lookup_partition_with_schema_context (should not be dead code)
     let schema_test_key = b"schema_driven_key";
+    // Create a simple parsing context for the schema lookup
+    use cqlite_core::schema::{KeyColumn, ParsingContext, TableSchema};
+    use cqlite_core::types::ComparatorType;
+    use std::collections::HashMap;
+
+    let simple_schema = TableSchema {
+        keyspace: "test".to_string(),
+        table: "test".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "key".to_string(),
+            data_type: "text".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![],
+        comments: HashMap::new(),
+    };
+
+    let parsing_context = ParsingContext {
+        schema: simple_schema,
+        partition_comparators: vec![ComparatorType::Text],
+        clustering_comparators: vec![],
+        column_comparators: HashMap::new(),
+    };
     let _schema_lookup = reader
-        .lookup_partition_with_schema_context(schema_test_key, None)
+        .lookup_partition_with_schema_context(schema_test_key, &parsing_context)
         .await;
     println!("✓ Tested lookup_partition_with_schema_context");
 

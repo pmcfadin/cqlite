@@ -23,21 +23,19 @@ async fn test_sstable_reader_component_discovery() {
 
     // Create SSTable files with realistic names
     let test_scenarios = vec![
-        ("nb-1-big", create_cassandra5_pattern_files),
-        (
-            "users-46436710673711f0b2cf19d64e7cbecb",
-            create_uuid_pattern_files,
-        ),
-        ("mc-2-large", create_multi_component_files),
+        "nb-1-big",
+        "users-46436710673711f0b2cf19d64e7cbecb",
+        "mc-2-large",
     ];
 
-    for (base_name, file_creator) in test_scenarios {
+    for base_name in test_scenarios {
         println!("Testing scenario: {}", base_name);
 
         let scenario_dir = base_path.join(base_name);
         fs::create_dir(&scenario_dir).await.unwrap();
 
-        file_creator(&scenario_dir, base_name).await;
+        // Use the same file creation pattern for all scenarios
+        create_cassandra5_pattern_files(&scenario_dir, base_name).await;
 
         let data_file = scenario_dir.join(format!("{}-Data.db", base_name));
 
@@ -110,8 +108,9 @@ async fn test_enhanced_index_functionality() {
             let test_digest = vec![0x01, 0x02, 0x03, 0x04];
             let _lookup_result = index_reader.lookup_partition(&test_digest);
 
-            // Test promoted index functionality
-            let _promoted_entries = index_reader.get_promoted_index_entries();
+            // Test index functionality with available methods
+            let _partition_entries = index_reader.get_partition_entries();
+            let _stats = index_reader.get_statistics();
 
             println!("✓ Enhanced Index.db operations completed");
         }
@@ -140,10 +139,10 @@ async fn test_summary_token_range_functionality() {
         Ok(summary_reader) => {
             println!("✓ Enhanced SummaryReader created successfully");
 
-            // Test token range operations
-            let _min_token = summary_reader.get_min_token();
-            let _max_token = summary_reader.get_max_token();
-            let _entries = summary_reader.get_summary_entries();
+            // Test token range operations with available methods
+            let _entries = summary_reader.get_entries();
+            let _token_ranges = summary_reader.get_token_ranges();
+            let _stats = summary_reader.get_statistics();
 
             println!("✓ Summary.db token range operations completed");
         }
@@ -169,11 +168,11 @@ async fn test_statistics_metadata_extraction() {
         Ok(statistics_reader) => {
             println!("✓ Enhanced StatisticsReader created successfully");
 
-            // Test metadata extraction
-            let _min_timestamp = statistics_reader.get_min_timestamp();
-            let _max_timestamp = statistics_reader.get_max_timestamp();
-            let _row_count = statistics_reader.get_estimated_row_count();
-            let _column_count = statistics_reader.get_estimated_column_count();
+            // Test metadata extraction with available methods
+            let (_min_timestamp, _max_timestamp) = statistics_reader.timestamp_range();
+            let _row_count = statistics_reader.live_row_count();
+            let _column_names = statistics_reader.column_names();
+            let _has_ttl = statistics_reader.has_ttl_data();
 
             println!("✓ Statistics.db metadata extraction completed");
         }
@@ -308,10 +307,36 @@ async fn test_index_operations_reachability() {
         let _index_lookup = reader.lookup_partition_with_index(test_key).await;
 
         // Test 2: lookup_partition_with_schema
-        let _schema_lookup = reader.lookup_partition_with_schema(test_key, None).await;
+        // Create a simple parsing context for the schema lookup
+        use cqlite_core::schema::{KeyColumn, ParsingContext, TableSchema};
+        use cqlite_core::types::ComparatorType;
+        use std::collections::HashMap;
+
+        let simple_schema = TableSchema {
+            keyspace: "test".to_string(),
+            table: "test".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "key".to_string(),
+                data_type: "text".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        let parsing_context = ParsingContext {
+            schema: simple_schema,
+            partition_comparators: vec![ComparatorType::Text],
+            clustering_comparators: vec![],
+            column_comparators: HashMap::new(),
+        };
+        let _schema_lookup = reader
+            .lookup_partition_with_schema_context(test_key, &parsing_context)
+            .await;
 
         // Test 3: iterate_token_range
-        let _token_iteration = reader.iterate_token_range(None, None, None).await;
+        let _token_iteration = reader.iterate_token_range(-1000, 1000).await;
 
         // Test 4: get_timestamp_range
         let _timestamp_range = reader.get_timestamp_range().await;

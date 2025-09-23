@@ -315,10 +315,22 @@ impl SSTableReader {
         // ENHANCEMENT: Initialize compression reader with improved format detection
         let compression_reader = Self::detect_and_initialize_compression(&header, path).await?;
 
-        // Load index if available
+        // ENHANCEMENT: Pre-validate component architecture for better error handling
+        let components = Self::detect_component_files(path).await?;
+        if !components.is_empty() {
+            let integrity_issues = Self::validate_component_integrity(path, &components).await?;
+            if !integrity_issues.is_empty() {
+                log::warn!(
+                    "Component integrity issues detected but proceeding with loading: {:?}",
+                    integrity_issues
+                );
+            }
+        }
+
+        // Load index if available (supports both integrated and component-based)
         let index = Self::load_index(&file, &header, &platform, path).await?;
 
-        // Load bloom filter if available
+        // Load bloom filter if available (supports both integrated and component-based)
         let bloom_filter = Self::load_bloom_filter(&file, &header, &platform, path).await?;
 
         let reader_config = SSTableReaderConfig::default();
@@ -1398,20 +1410,35 @@ impl SSTableReader {
 
             if tokio::fs::metadata(&index_path).await.is_ok() {
                 match IndexReader::open(&index_path, platform.clone()).await {
-                    Ok(_index_reader) => {
+                    Ok(index_reader) => {
                         log::debug!(
                             "Found separate Index.db component at {}",
                             index_path.display()
                         );
-                        // Convert IndexReader to SSTableIndex if needed
-                        // For now, we need to adapt the existing interface
-                        // This is a placeholder - the actual implementation would need
-                        // to either convert or update the interface to use IndexReader directly
-                        log::warn!("Index.db component found but interface adaptation needed");
-                        return Ok(None);
+
+                        // Convert IndexReader to SSTableIndex by extracting partition entries
+                        match Self::convert_index_reader_to_sstable_index(index_reader).await {
+                            Ok(sstable_index) => {
+                                log::debug!(
+                                    "Successfully converted Index.db component to SSTableIndex"
+                                );
+                                return Ok(Some(sstable_index));
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to convert Index.db component to SSTableIndex: {}. This may indicate an incompatible Index.db format or corruption.",
+                                    e
+                                );
+                                // Continue to fallback strategies - try header-based or legacy loading
+                            }
+                        }
                     }
                     Err(e) => {
-                        log::debug!("Failed to load Index.db component: {}", e);
+                        log::debug!(
+                            "Failed to load Index.db component: {}. This may indicate file corruption, permission issues, or format incompatibility.",
+                            e
+                        );
+                        // Continue to fallback strategies - try header-based or legacy loading
                     }
                 }
             } else {
@@ -1473,12 +1500,20 @@ impl SSTableReader {
                                 return Ok(Some(bloom_filter));
                             }
                             Err(e) => {
-                                log::debug!("Failed to parse Filter.db component: {}", e);
+                                log::warn!(
+                                    "Failed to parse Filter.db component: {}. This may indicate an incompatible Filter.db format or corruption. Bloom filter functionality will be unavailable.",
+                                    e
+                                );
+                                // Continue without bloom filter - this is non-critical for basic operation
                             }
                         }
                     }
                     Err(e) => {
-                        log::debug!("Failed to open Filter.db component: {}", e);
+                        log::debug!(
+                            "Failed to open Filter.db component: {}. This may indicate file permission issues or file system errors. Bloom filter functionality will be unavailable.",
+                            e
+                        );
+                        // Continue without bloom filter - this is non-critical for basic operation
                     }
                 }
             } else {
@@ -3383,6 +3418,108 @@ impl SSTableReader {
     /// A HashMap with component names as keys and their respective file paths as values.
     /// Only existing files are included in the result.
     #[allow(dead_code)] // Will be used in future component discovery features
+    /// Convert IndexReader to SSTableIndex for backward compatibility
+    ///
+    /// This method bridges the gap between the new component-based IndexReader
+    /// and the existing SSTableIndex interface used throughout the codebase.
+    async fn convert_index_reader_to_sstable_index(
+        index_reader: IndexReader,
+    ) -> Result<SSTableIndex> {
+        use crate::storage::sstable::index::{Index, IndexEntry};
+
+        let mut index = Index::new();
+
+        // Extract partition entries from IndexReader and convert to IndexEntry format
+        let partition_entries = index_reader.get_partition_entries();
+
+        for partition_entry in partition_entries {
+            // Convert partition entry to our internal IndexEntry format
+            let index_entry = IndexEntry {
+                table_id: crate::types::TableId::new("default"), // Default table ID - could be enhanced
+                key: RowKey::new(partition_entry.key_digest.clone()),
+                offset: partition_entry.data_offset,
+                size: partition_entry.data_size,
+                compressed: false, // Default - could be enhanced with compression detection
+            };
+
+            // Add to index using default table ID
+            index.add_entry(index_entry);
+        }
+
+        log::debug!(
+            "Converted {} partition entries from IndexReader to SSTableIndex",
+            partition_entries.len()
+        );
+
+        Ok(index)
+    }
+
+    /// Validate component file integrity and consistency
+    ///
+    /// This method performs basic validation to ensure component files are consistent
+    /// with each other and with the main Data.db file.
+    async fn validate_component_integrity(
+        data_path: &Path,
+        components: &HashMap<String, PathBuf>,
+    ) -> Result<Vec<String>> {
+        let mut issues = Vec::new();
+
+        // Validate that Data.db file exists and is accessible
+        match tokio::fs::metadata(data_path).await {
+            Ok(data_metadata) => {
+                if data_metadata.len() == 0 {
+                    issues.push("Data.db file is empty".to_string());
+                }
+            }
+            Err(e) => {
+                issues.push(format!("Cannot access Data.db file: {}", e));
+                return Ok(issues); // Can't validate further without Data.db
+            }
+        }
+
+        // Check for suspicious file sizes (basic sanity check)
+        for (component_type, component_path) in components {
+            match tokio::fs::metadata(component_path).await {
+                Ok(metadata) => {
+                    let size = metadata.len();
+                    match component_type.as_str() {
+                        "Index" if size < 8 => {
+                            issues
+                                .push(format!("Index.db file suspiciously small: {} bytes", size));
+                        }
+                        "Filter" if size < 8 => {
+                            issues
+                                .push(format!("Filter.db file suspiciously small: {} bytes", size));
+                        }
+                        _ => {} // Other components can vary widely in size
+                    }
+                }
+                Err(e) => {
+                    issues.push(format!(
+                        "Cannot access component file {}: {}",
+                        component_path.display(),
+                        e
+                    ));
+                }
+            }
+        }
+
+        if issues.is_empty() {
+            log::debug!(
+                "Component integrity validation passed for {}",
+                data_path.display()
+            );
+        } else {
+            log::warn!(
+                "Component integrity issues detected for {}: {:?}",
+                data_path.display(),
+                issues
+            );
+        }
+
+        Ok(issues)
+    }
+
     async fn detect_component_files(data_path: &Path) -> Result<HashMap<String, PathBuf>> {
         let mut components = HashMap::new();
 
@@ -3390,7 +3527,7 @@ impl SSTableReader {
             Some(name) => name,
             None => {
                 log::warn!(
-                    "Could not extract base name from path: {}",
+                    "Could not extract base name from path: {}. Component file discovery requires standard SSTable naming convention.",
                     data_path.display()
                 );
                 return Ok(components);
@@ -3401,34 +3538,66 @@ impl SSTableReader {
             Error::validation("Cannot determine parent directory for component files")
         })?;
 
-        // Standard Cassandra 5+ component file types
+        // Standard Cassandra 5+ component file types with criticality flags
         let component_types = [
-            "Index",
-            "Filter",
-            "Summary",
-            "Statistics",
-            "CompressionInfo",
-            "TOC",
-            "Digest",
+            ("Index", true),            // Critical for lookups
+            ("Filter", false),          // Optional bloom filter
+            ("Summary", false),         // Optional summary
+            ("Statistics", false),      // Optional statistics
+            ("CompressionInfo", false), // Optional compression metadata
+            ("TOC", false),             // Optional table of contents
+            ("Digest", false),          // Optional digest/checksum
         ];
 
-        for component_type in &component_types {
+        let mut critical_missing = Vec::new();
+
+        for (component_type, is_critical) in &component_types {
             let component_path = parent_dir.join(format!("{}-{}.db", base_name, component_type));
 
-            if tokio::fs::metadata(&component_path).await.is_ok() {
-                log::debug!("Found component file: {}", component_path.display());
-                components.insert(component_type.to_string(), component_path);
+            match tokio::fs::metadata(&component_path).await {
+                Ok(metadata) => {
+                    if metadata.len() == 0 {
+                        log::warn!("Component file is empty: {}", component_path.display());
+                        if *is_critical {
+                            critical_missing.push(component_type.to_string());
+                        }
+                    } else {
+                        log::debug!(
+                            "Found component file: {} (size: {} bytes)",
+                            component_path.display(),
+                            metadata.len()
+                        );
+                        components.insert(component_type.to_string(), component_path);
+                    }
+                }
+                Err(_) => {
+                    log::debug!("Component file not found: {}", component_path.display());
+                    if *is_critical {
+                        critical_missing.push(component_type.to_string());
+                    }
+                }
             }
         }
 
+        // Log component architecture analysis
         if components.is_empty() {
-            log::debug!("No component files found for base name: {}", base_name);
+            log::debug!(
+                "No component files found for base name: {}. This SSTable likely uses integrated format (all data in Data.db).",
+                base_name
+            );
         } else {
             log::debug!(
-                "Detected {} component files for {}",
+                "Detected {} component files for {} (component-based architecture)",
                 components.len(),
                 base_name
             );
+
+            if !critical_missing.is_empty() {
+                log::warn!(
+                    "Missing critical component files: {:?}. Index-based lookups may be unavailable.",
+                    critical_missing
+                );
+            }
         }
 
         Ok(components)

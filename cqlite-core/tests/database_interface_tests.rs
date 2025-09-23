@@ -1,3 +1,14 @@
+//! Database interface tests
+//!
+//! These tests verify the core database interface functionality including:
+//! - Table creation and data insertion
+//! - Query execution and result validation
+//! - Database lifecycle management
+//! - Error handling and recovery
+//!
+//! Note: These tests require the legacy-heuristics feature to handle
+//! SSTable files generated during testing.
+
 use cqlite_core::{Config, Database, Value};
 use tempfile::TempDir;
 
