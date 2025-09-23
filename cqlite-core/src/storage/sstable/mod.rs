@@ -55,13 +55,15 @@ use crate::{Config, Result, RowKey, Value, types::TableId};
 pub struct SSTableId(pub String);
 
 impl SSTableId {
-    /// Create a new SSTable ID with timestamp
+    /// Create a new SSTable ID with timestamp using Cassandra naming convention
     pub fn new() -> Self {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros();
-        Self(format!("sstable_{}.sst", timestamp))
+        // Use Cassandra naming convention: <keyspace>-<table>-<generation>-<format>-Data.db
+        // For generated files, we'll use a simplified pattern: sstable-<timestamp>-big-Data.db
+        Self(format!("sstable-{}-big-Data.db", timestamp))
     }
 
     /// Create SSTable ID from filename
@@ -125,25 +127,20 @@ impl SSTableManager {
 
         while let Some(entry) = dir_entries.next_entry().await? {
             let path = entry.path();
-            if let Some(extension) = path.extension() {
-                if extension == "sst" {
-                    if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                        let sstable_id = SSTableId::from_filename(filename);
-                        // Try to open the SSTable reader, but don't fail if one file is problematic
-                        match reader::SSTableReader::open(
-                            &path,
-                            &self.config,
-                            self.platform.clone(),
-                        )
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                // Check for Cassandra SSTable data files using the *-Data.db pattern
+                if filename.ends_with("-Data.db") {
+                    let sstable_id = SSTableId::from_filename(filename);
+                    // Try to open the SSTable reader, but don't fail if one file is problematic
+                    match reader::SSTableReader::open(&path, &self.config, self.platform.clone())
                         .await
-                        {
-                            Ok(reader) => {
-                                readers.insert(sstable_id, Arc::new(reader));
-                            }
-                            Err(_) => {
-                                // Skip problematic SSTable files during initialization
-                                eprintln!("Warning: Could not load SSTable file: {:?}", path);
-                            }
+                    {
+                        Ok(reader) => {
+                            readers.insert(sstable_id, Arc::new(reader));
+                        }
+                        Err(_) => {
+                            // Skip problematic SSTable files during initialization
+                            eprintln!("Warning: Could not load SSTable file: {:?}", path);
                         }
                     }
                 }
