@@ -78,7 +78,19 @@
       "Bash(timeout 30s env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib storage::sstable::reader --no-run)",
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test enhanced_index_operation_tests)",
       "Bash(timeout:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_component_discovery_tests test_component_file_discovery_patterns --test-threads=1)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_eager_loading_integration_tests test_complete_eager_loading_workflow --test-threads=1)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_component_discovery_tests test_component_file_discovery_patterns -- --test-threads=1)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_eager_loading_integration_tests test_complete_eager_loading_workflow -- --test-threads=1)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_header_parsing_basic_tests --test sstable_header_parsing_comprehensive_tests --test sstable_header_parsing_unit_tests --test sstable_header_parsing_performance_tests --test sstable_header_parsing_error_handling_tests)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_header_parsing_basic_tests)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib storage::sstable::reader)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_reader_performance_regression_tests)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_reader_performance_regression_tests --no-run)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib --no-run)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_header_parsing_basic_tests --no-run)"
     ],
     "deny": []
   }

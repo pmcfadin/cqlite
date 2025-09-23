@@ -1,10 +1,16 @@
-// Integration tests for SSTable reading functionality - Issue #25
+//! SSTable reading tests module
 
 pub mod basic_reading_tests;
 pub mod format_detection_tests;
 pub mod compression_tests;
 pub mod error_handling_tests;
 pub mod performance_tests;
+
+// Comprehensive header parsing test suites
+pub mod header_parsing_comprehensive_tests;
+pub mod header_parsing_unit_tests;
+pub mod header_parsing_performance_tests;
+pub mod header_parsing_error_handling_tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
