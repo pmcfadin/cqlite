@@ -90,7 +90,12 @@
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_reader_performance_regression_tests --no-run)",
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib)",
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib --no-run)",
-      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_header_parsing_basic_tests --no-run)"
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstable_header_parsing_basic_tests --no-run)",
+      "Bash(RUST_BACKTRACE=0 cargo clippy --workspace --all-targets --all-features --message-format=short)",
+      "Bash(grep:*)",
+      "Bash(echo:*)",
+      "Bash(tee:*)",
+      "Bash(cargo tree:*)"
     ],
     "deny": []
   }

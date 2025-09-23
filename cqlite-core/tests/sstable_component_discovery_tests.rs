@@ -481,11 +481,11 @@ async fn create_realistic_data_file(path: &Path) {
         data.extend_from_slice(&[
             0x00, 0x00, 0x00, 0x10, // Partition key length
         ]);
-        data.extend_from_slice(&format!("discovery_key_{:04}", i).as_bytes());
+        data.extend_from_slice(format!("discovery_key_{:04}", i).as_bytes());
         data.extend_from_slice(&[
             0x00, 0x00, 0x00, 0x20, // Row data length
         ]);
-        data.extend_from_slice(&vec![0x44; 32]); // Mock row data
+        data.extend_from_slice(&[0x44; 32]); // Mock row data
     }
 
     fs::write(path, data).await.unwrap();
@@ -546,7 +546,7 @@ async fn create_realistic_summary_file(path: &Path) {
         data.extend_from_slice(&[
             0x00, 0x0C, // Key length
         ]);
-        data.extend_from_slice(&format!("summary_{:02}", i).as_bytes());
+        data.extend_from_slice(format!("summary_{:02}", i).as_bytes());
         data.extend_from_slice(&token.to_be_bytes()); // Token
         data.extend_from_slice(&[
             0x00,

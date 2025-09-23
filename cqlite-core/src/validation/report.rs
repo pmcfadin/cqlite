@@ -82,7 +82,7 @@ impl ReportGenerator {
     /// Generate JSON format report
     fn generate_json_report(&self, report_data: &ValidationReport) -> Result<String> {
         serde_json::to_string_pretty(report_data)
-            .map_err(|e| Error::ParseError(format!("JSON serialization failed: {}", e)))
+            .map_err(|e| Error::Parse(format!("JSON serialization failed: {}", e)))
     }
 
     /// Generate Markdown format report

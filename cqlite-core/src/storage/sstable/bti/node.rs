@@ -59,7 +59,7 @@ impl std::error::Error for BtiError {}
 
 impl From<BtiError> for Error {
     fn from(err: BtiError) -> Self {
-        Error::ParseError(format!("BTI error: {}", err))
+        Error::Parse(format!("BTI error: {}", err))
     }
 }
 
@@ -560,6 +560,6 @@ mod tests {
         nav.navigate_to_child(b'a', &pointer).unwrap();
 
         assert_eq!(nav.current_offset, 1100);
-        assert_eq!(nav.current_path(), &[b'a']);
+        assert_eq!(nav.current_path(), b"a");
     }
 }

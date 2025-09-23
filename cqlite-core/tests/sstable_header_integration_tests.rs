@@ -111,7 +111,7 @@ mod integration_tests {
             assert!(
                 matches!(
                     error,
-                    Error::InvalidFormat(_) | Error::Corruption(_) | Error::ParseError(_)
+                    Error::InvalidFormat(_) | Error::Corruption(_) | Error::Parse(_)
                 ),
                 "Unexpected error type for {}: {:?}",
                 scenario_name,

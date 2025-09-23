@@ -81,7 +81,7 @@ pub enum ValidationStatus {
     Timeout,
 }
 
-/// Legacy validation configuration - using core::ValidationConfig instead
+// Legacy validation configuration - using core::ValidationConfig instead
 // #[derive(Debug, Clone, Serialize, Deserialize)]
 // pub struct ValidationConfig {
 //     pub timeout_seconds: u64,

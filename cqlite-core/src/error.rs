@@ -116,7 +116,7 @@ pub enum Error {
 
     /// Parse error
     #[error("Parse error: {0}")]
-    ParseError(String),
+    Parse(String),
 
     /// Invalid input error
     #[error("Invalid input: {0}")]
@@ -290,7 +290,7 @@ impl Error {
 
             Error::Serialization(_) => false,
             Error::Internal(_) => false,
-            Error::ParseError(_) => false,
+            Error::Parse(_) => false,
             Error::InvalidInput(_) => false,
             Error::InvalidFormat(_) => false,
             Error::UnsupportedFormat(_) => false,
@@ -329,7 +329,7 @@ impl Error {
             Error::Wasm(_) => ErrorCategory::Platform,
 
             Error::Internal(_) => ErrorCategory::Internal,
-            Error::ParseError(_) => ErrorCategory::Data,
+            Error::Parse(_) => ErrorCategory::Data,
             Error::InvalidInput(_) => ErrorCategory::Data,
             Error::InvalidFormat(_) => ErrorCategory::Data,
             Error::UnsupportedFormat(_) => ErrorCategory::Data,

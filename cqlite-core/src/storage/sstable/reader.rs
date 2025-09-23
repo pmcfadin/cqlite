@@ -501,6 +501,8 @@ impl SSTableReader {
     }
 
     /// Increment cache hit counter (thread-safe)
+    /// Currently unused as caching is not yet implemented (always cache miss)
+    #[allow(dead_code)]
     fn record_cache_hit(&self) {
         self.cache_hits.fetch_add(1, Ordering::Relaxed);
     }

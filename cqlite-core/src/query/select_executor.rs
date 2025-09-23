@@ -205,9 +205,7 @@ impl SelectExecutor {
                         // For specific projection, only include requested columns
                         if projection.is_empty() || projection.contains(&name) {
                             row_values.insert(name, col_value);
-                        } else {
                         }
-                    } else {
                     }
                 }
             } else {

@@ -943,7 +943,7 @@ async fn create_test_data_file(dir: &Path, base_name: &str, partition_count: usi
         data.extend_from_slice(&(key.len() as u32).to_be_bytes());
         data.extend_from_slice(key.as_bytes());
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x80]); // 128 byte rows
-        data.extend_from_slice(&vec![0xAA; 128]);
+        data.extend_from_slice(&[0xAA; 128]);
     }
 
     fs::write(path, data).await.unwrap();

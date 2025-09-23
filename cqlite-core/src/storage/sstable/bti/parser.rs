@@ -45,12 +45,12 @@ impl BtiHeader {
     /// Parse BTI header from bytes
     pub fn parse(data: &[u8]) -> BtiResult<(Self, usize)> {
         if data.len() < 24 {
-            return Err(Error::ParseError("BTI header too short".to_string()));
+            return Err(Error::Parse("BTI header too short".to_string()));
         }
 
         let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         if magic != Self::MAGIC {
-            return Err(Error::ParseError(format!(
+            return Err(Error::Parse(format!(
                 "Invalid BTI magic: 0x{:08x}, expected 0x{:08x}",
                 magic,
                 Self::MAGIC
@@ -59,7 +59,7 @@ impl BtiHeader {
 
         let version = u16::from_be_bytes([data[4], data[5]]);
         if version != Self::VERSION {
-            return Err(Error::ParseError(format!(
+            return Err(Error::Parse(format!(
                 "Unsupported BTI version: 0x{:04x}, expected 0x{:04x}",
                 version,
                 Self::VERSION
@@ -216,7 +216,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
     /// Parse node data from bytes
     fn parse_node_data(&self, data: &[u8], offset: u64) -> BtiResult<BtiNode> {
         if data.is_empty() {
-            return Err(Error::ParseError("Empty node data".to_string()));
+            return Err(Error::Parse("Empty node data".to_string()));
         }
 
         let header_byte = data[0];
@@ -231,7 +231,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
                     let _ = pos + 16; // PayloadRef is typically 16 bytes
                     payload_ref
                 } else {
-                    return Err(Error::ParseError(
+                    return Err(Error::Parse(
                         "PayloadOnly node must have payload".to_string(),
                     ));
                 };
@@ -246,7 +246,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
 
             BtiNodeType::Single => {
                 if pos >= data.len() {
-                    return Err(Error::ParseError("Single node data too short".to_string()));
+                    return Err(Error::Parse("Single node data too short".to_string()));
                 }
 
                 let byte = data[pos];
@@ -267,7 +267,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
 
             BtiNodeType::Sparse => {
                 if pos >= data.len() {
-                    return Err(Error::ParseError("Sparse node data too short".to_string()));
+                    return Err(Error::Parse("Sparse node data too short".to_string()));
                 }
 
                 let transition_count = data[pos] as usize;
@@ -279,7 +279,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
                 let mut bytes = Vec::with_capacity(transition_count);
                 for _ in 0..transition_count {
                     if pos >= data.len() {
-                        return Err(Error::ParseError(
+                        return Err(Error::Parse(
                             "Sparse node transitions data too short".to_string(),
                         ));
                     }
@@ -304,7 +304,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
 
             BtiNodeType::Dense => {
                 if pos + 1 >= data.len() {
-                    return Err(Error::ParseError("Dense node data too short".to_string()));
+                    return Err(Error::Parse("Dense node data too short".to_string()));
                 }
 
                 let start_byte = data[pos];
@@ -340,14 +340,14 @@ impl<R: Read + Seek> PartitionsParser<R> {
             1 => Ok(BtiNodeType::Single),
             2 => Ok(BtiNodeType::Sparse),
             3 => Ok(BtiNodeType::Dense),
-            other => Err(Error::ParseError(format!("Invalid node type: {}", other))),
+            other => Err(Error::Parse(format!("Invalid node type: {}", other))),
         }
     }
 
     /// Parse payload reference
     fn parse_payload_ref(&self, data: &[u8]) -> BtiResult<PayloadRef> {
         if data.len() < 12 {
-            return Err(Error::ParseError("PayloadRef data too short".to_string()));
+            return Err(Error::Parse("PayloadRef data too short".to_string()));
         }
 
         let offset = u64::from_be_bytes([
@@ -362,7 +362,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
     /// Parse sized pointer
     fn parse_sized_pointer(&self, data: &[u8], _base_offset: u64) -> BtiResult<SizedPointer> {
         if data.len() < 8 {
-            return Err(Error::ParseError("SizedPointer data too short".to_string()));
+            return Err(Error::Parse("SizedPointer data too short".to_string()));
         }
 
         let distance = u64::from_be_bytes([
@@ -494,7 +494,7 @@ impl<R: Read + Seek> RowsParser<R> {
         // Implementation is the same as PartitionsParser::parse_node_data
         // TODO: Extract to common utility function
         if data.is_empty() {
-            return Err(Error::ParseError("Empty node data".to_string()));
+            return Err(Error::Parse("Empty node data".to_string()));
         }
 
         let header_byte = data[0];
@@ -518,7 +518,7 @@ impl<R: Read + Seek> RowsParser<R> {
             1 => Ok(BtiNodeType::Single),
             2 => Ok(BtiNodeType::Sparse),
             3 => Ok(BtiNodeType::Dense),
-            other => Err(Error::ParseError(format!("Invalid node type: {}", other))),
+            other => Err(Error::Parse(format!("Invalid node type: {}", other))),
         }
     }
 

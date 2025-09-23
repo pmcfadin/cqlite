@@ -103,7 +103,7 @@ pub enum CQLiteParseError {
 
 impl From<Error> for CQLiteParseError {
     fn from(err: Error) -> Self {
-        CQLiteParseError::ParseError(err.to_string())
+        CQLiteParseError::Parse(err.to_string())
     }
 }
 

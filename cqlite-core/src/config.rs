@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Main configuration structure for CQLite database
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     /// Storage engine configuration
     pub storage: StorageConfig,
@@ -23,19 +23,6 @@ pub struct Config {
     pub wasm: WasmConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            storage: StorageConfig::default(),
-            memory: MemoryConfig::default(),
-            query: QueryConfig::default(),
-            performance: PerformanceConfig::default(),
-
-            #[cfg(target_arch = "wasm32")]
-            wasm: WasmConfig::default(),
-        }
-    }
-}
 
 /// Storage engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
