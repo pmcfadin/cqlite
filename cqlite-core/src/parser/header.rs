@@ -44,15 +44,27 @@ impl CassandraVersion {
         }
     }
 
-    /// Parse magic number to version
+    /// Parse magic number to version with proper format detection
     pub fn from_magic_number(magic: u32) -> Option<CassandraVersion> {
         match magic {
-            0x6F61_0000 => Some(CassandraVersion::Legacy),
-            0xAD01_0000 => Some(CassandraVersion::V5_0Alpha),
-            0xA007_0000 => Some(CassandraVersion::V5_0Beta),
-            0x4316_0000 => Some(CassandraVersion::V5_0Release),
-            0x0040_0000 => Some(CassandraVersion::V5_0NewBig),
-            0x6461_0000 => Some(CassandraVersion::V5_0Bti),
+            // Legacy 'oa' format (big-endian 'oa' followed by version bytes)
+            0x6F61_0000..=0x6F61_FFFF => Some(CassandraVersion::Legacy),
+
+            // Cassandra 5.0 Alpha format
+            0xAD01_0000..=0xAD01_FFFF => Some(CassandraVersion::V5_0Alpha),
+
+            // Cassandra 5.0 Beta format
+            0xA007_0000..=0xA007_FFFF => Some(CassandraVersion::V5_0Beta),
+
+            // Cassandra 5.0 Release format
+            0x4316_0000..=0x4316_FFFF => Some(CassandraVersion::V5_0Release),
+
+            // Cassandra 5.0 'nb' (new big) format
+            0x0040_0000..=0x0040_FFFF => Some(CassandraVersion::V5_0NewBig),
+
+            // Cassandra 5.0 BTI (Big Trie-Indexed) format
+            0x6461_0000..=0x6461_FFFF => Some(CassandraVersion::V5_0Bti),
+
             _ => None,
         }
     }
@@ -158,36 +170,76 @@ pub struct ColumnInfo {
 
 /// Parse the SSTable magic number and version, supporting multiple Cassandra versions
 pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion, u16)> {
+    // Ensure we have enough data for magic number
+    if input.len() < 4 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+
     let (input, magic) = be_u32(input)?;
+
+    // Log magic number for debugging
+    log::debug!("Parsed magic number: 0x{:08X}", magic);
 
     // Detect Cassandra version from magic number
     let cassandra_version = CassandraVersion::from_magic_number(magic).ok_or_else(|| {
+        log::error!("Unknown magic number: 0x{:08X}", magic);
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
     })?;
 
-    // Handle different format versions - 'nb' format has different header structure
-    let (input, version) = match cassandra_version {
-        CassandraVersion::V5_0NewBig => {
-            // For 'nb' format, skip the next bytes and look for version later
-            // Based on analysis of real data, version appears at offset 29 (25 bytes after magic number)
-            let (input, _skip_bytes) = take(25usize)(input)?; // Skip 25 bytes after magic number
-            let (input, version) = be_u16(input)?;
-            (input, version)
-        }
-        _ => {
-            // Standard format: version immediately follows magic number
-            let (input, version) = be_u16(input)?;
-            (input, version)
-        }
-    };
+    log::debug!("Detected Cassandra version: {:?}", cassandra_version);
 
-    // For now, we support version 0x0001 across all Cassandra versions
-    // This can be extended in the future for version-specific handling
-    if version != SUPPORTED_VERSION {
+    // Ensure we have enough data for version
+    if input.len() < 2 {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
-            nom::error::ErrorKind::Verify,
+            nom::error::ErrorKind::Eof,
         )));
+    }
+
+    // All Cassandra formats have version immediately after magic number
+    // The previous hardcoded 25-byte skip was incorrect and based on misanalysis
+    let (input, version) = be_u16(input)?;
+
+    log::debug!("Parsed version: 0x{:04X}", version);
+
+    // Validate version - be more permissive for different Cassandra versions
+    match cassandra_version {
+        CassandraVersion::Legacy
+        | CassandraVersion::V5_0Alpha
+        | CassandraVersion::V5_0Beta
+        | CassandraVersion::V5_0Release => {
+            // Standard versions support 0x0001
+            if version != SUPPORTED_VERSION {
+                log::warn!(
+                    "Unsupported version 0x{:04X} for {:?}, expected 0x{:04X}",
+                    version,
+                    cassandra_version,
+                    SUPPORTED_VERSION
+                );
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        }
+        CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+            // Newer formats may have different version schemes
+            // Accept a wider range of versions for forward compatibility
+            if version == 0 || version > 0x00FF {
+                log::warn!(
+                    "Suspicious version 0x{:04X} for {:?}",
+                    version,
+                    cassandra_version
+                );
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        }
     }
 
     Ok((input, (cassandra_version, version)))
@@ -344,17 +396,9 @@ pub fn serialize_sstable_header(header: &SSTableHeader) -> Result<Vec<u8>> {
     // Magic and version - handle different layouts for different Cassandra versions
     result.extend_from_slice(&header.cassandra_version.magic_number().to_be_bytes());
 
-    match header.cassandra_version {
-        CassandraVersion::V5_0NewBig => {
-            // For 'nb' format, add 25 bytes of padding before the version
-            result.extend_from_slice(&[0u8; 25]);
-            result.extend_from_slice(&header.version.to_be_bytes());
-        }
-        _ => {
-            // Standard format: version immediately follows magic number
-            result.extend_from_slice(&header.version.to_be_bytes());
-        }
-    }
+    // All Cassandra formats use standard layout: magic number + version
+    // The previous 25-byte padding was incorrect
+    result.extend_from_slice(&header.version.to_be_bytes());
 
     // Table ID
     result.extend_from_slice(&header.table_id);
@@ -506,19 +550,18 @@ mod tests {
     fn test_magic_and_version_cassandra_5_newbig() {
         let mut data = Vec::new();
         data.extend_from_slice(&CassandraVersion::V5_0NewBig.magic_number().to_be_bytes());
-        // For 'nb' format, add 25 bytes of padding before the version
-        data.extend_from_slice(&[0u8; 25]);
+        // Standard format: version immediately follows magic number
         data.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
 
         let (remaining, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
         assert_eq!(cassandra_version, CassandraVersion::V5_0NewBig);
         assert_eq!(version, SUPPORTED_VERSION);
 
-        // Verify that parser consumed the expected amount of data
-        assert!(
-            remaining.is_empty(),
-            "Parser should consume all data, but {} bytes remain",
-            remaining.len()
+        // Should consume exactly 6 bytes (4 for magic + 2 for version)
+        assert_eq!(
+            data.len() - remaining.len(),
+            6,
+            "Parser should consume exactly 6 bytes"
         );
     }
 
@@ -534,6 +577,7 @@ mod tests {
 
     #[test]
     fn test_cassandra_version_from_magic() {
+        // Test exact magic numbers
         assert_eq!(
             CassandraVersion::from_magic_number(0x6F61_0000),
             Some(CassandraVersion::Legacy)
@@ -554,7 +598,24 @@ mod tests {
             CassandraVersion::from_magic_number(0x0040_0000),
             Some(CassandraVersion::V5_0NewBig)
         );
+        assert_eq!(
+            CassandraVersion::from_magic_number(0x6461_0000),
+            Some(CassandraVersion::V5_0Bti)
+        );
+
+        // Test range detection (magic + version bytes)
+        assert_eq!(
+            CassandraVersion::from_magic_number(0x6F61_0001),
+            Some(CassandraVersion::Legacy)
+        );
+        assert_eq!(
+            CassandraVersion::from_magic_number(0xAD01_0001),
+            Some(CassandraVersion::V5_0Alpha)
+        );
+
+        // Test invalid magic numbers
         assert_eq!(CassandraVersion::from_magic_number(0xDEADBEEF), None);
+        assert_eq!(CassandraVersion::from_magic_number(0x0000_0000), None);
     }
 
     #[test]
@@ -633,6 +694,74 @@ mod tests {
         assert_eq!(parsed.algorithm, compression.algorithm);
         assert_eq!(parsed.chunk_size, compression.chunk_size);
         assert_eq!(parsed.parameters, compression.parameters);
+    }
+
+    #[test]
+    fn test_insufficient_data_handling() {
+        // Test with insufficient data for magic number
+        let data = vec![0x6F, 0x61]; // Only 2 bytes
+        let result = parse_magic_and_version(&data);
+        assert!(
+            result.is_err(),
+            "Should fail with insufficient data for magic number"
+        );
+
+        // Test with sufficient magic but insufficient version data
+        let data = vec![0x6F, 0x61, 0x00, 0x00]; // Magic number but no version
+        let result = parse_magic_and_version(&data);
+        assert!(
+            result.is_err(),
+            "Should fail with insufficient data for version"
+        );
+    }
+
+    #[test]
+    fn test_version_validation_for_different_formats() {
+        // Test standard format with valid version
+        let mut data = Vec::new();
+        data.extend_from_slice(&CassandraVersion::Legacy.magic_number().to_be_bytes());
+        data.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
+        let result = parse_magic_and_version(&data);
+        assert!(
+            result.is_ok(),
+            "Standard format with valid version should succeed"
+        );
+
+        // Test newer format with relaxed version validation
+        let mut data = Vec::new();
+        data.extend_from_slice(&CassandraVersion::V5_0Bti.magic_number().to_be_bytes());
+        data.extend_from_slice(&0x0002u16.to_be_bytes()); // Different version
+        let result = parse_magic_and_version(&data);
+        assert!(
+            result.is_ok(),
+            "BTI format should accept wider version range"
+        );
+
+        // Test with invalid version (0)
+        let mut data = Vec::new();
+        data.extend_from_slice(&CassandraVersion::V5_0Bti.magic_number().to_be_bytes());
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        let result = parse_magic_and_version(&data);
+        assert!(result.is_err(), "Should reject version 0");
+    }
+
+    #[test]
+    fn test_magic_number_range_detection() {
+        // Test that we properly detect formats even with embedded version data
+        let magic_with_version = 0x6F61_0001; // 'oa' + version 1
+        assert_eq!(
+            CassandraVersion::from_magic_number(magic_with_version),
+            Some(CassandraVersion::Legacy),
+            "Should detect legacy format even with version bits"
+        );
+
+        // Test BTI format with version bits
+        let bti_with_version = 0x6461_0002; // 'da' + version 2
+        assert_eq!(
+            CassandraVersion::from_magic_number(bti_with_version),
+            Some(CassandraVersion::V5_0Bti),
+            "Should detect BTI format even with version bits"
+        );
     }
 
     #[test]
