@@ -109,7 +109,7 @@ path = "src/bin/sstabledump_parity_validator.rs"
 
 
 [features]
-default = ["all-compression", "metrics", "experimental"]
+default = ["all-compression", "metrics", "experimental", "legacy-heuristics"]
 
 # Compression features - properly feature-gated
 lz4 = ["dep:lz4_flex"]
