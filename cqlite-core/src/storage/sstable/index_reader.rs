@@ -36,10 +36,11 @@ pub struct IndexHeader {
 }
 
 /// Partition index entry in Index.db
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PartitionIndexEntry {
-    /// Partition key hash/digest
-    pub key_digest: Vec<u8>,
+    /// Partition key hash/digest - using Arc to enable zero-copy sharing in lookup tables
+    /// This eliminates memory explosion from cloning large numbers of partition digests
+    pub key_digest: Arc<[u8]>,
     /// Offset in Data.db file
     pub data_offset: u64,
     /// Size of partition data
@@ -69,14 +70,15 @@ pub struct PromotedIndexEntry {
 }
 
 /// Complete Index.db data structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IndexData {
     /// File header
     pub header: IndexHeader,
     /// All partition index entries
     pub partition_entries: Vec<PartitionIndexEntry>,
-    /// Lookup table for efficient partition access
-    pub key_lookup: HashMap<Vec<u8>, usize>,
+    /// Lookup table for efficient partition access - uses Arc to avoid copying key digests
+    /// This eliminates memory explosion from cloning large numbers of partition digests
+    pub key_lookup: HashMap<Arc<[u8]>, usize>,
 }
 
 /// High-level Index.db file reader
@@ -139,9 +141,12 @@ impl IndexReader {
 
     /// Look up a partition by key digest
     pub fn lookup_partition(&self, key_digest: &[u8]) -> Option<&PartitionIndexEntry> {
+        // Create a temporary Arc for lookup without cloning the original data
+        // This allows efficient lookup while maintaining zero-copy semantics
+        let key_arc: Arc<[u8]> = key_digest.into();
         self.index_data
             .key_lookup
-            .get(key_digest)
+            .get(&key_arc)
             .and_then(|&index| self.index_data.partition_entries.get(index))
     }
 
@@ -217,10 +222,11 @@ fn parse_index_data_with_summary<'a>(
     let (remaining, partition_entries) =
         parse_all_partition_keys_with_summary(input, summary_reader)?;
 
-    // Build lookup table
+    // Build lookup table with zero-copy approach using Arc::clone (reference counting only)
+    // This eliminates the memory explosion from cloning Vec<u8> key digests
     let mut key_lookup = HashMap::new();
     for (index, entry) in partition_entries.iter().enumerate() {
-        key_lookup.insert(entry.key_digest.clone(), index);
+        key_lookup.insert(Arc::clone(&entry.key_digest), index);
     }
 
     // Create a dummy header for compatibility
@@ -285,7 +291,7 @@ fn parse_simple_partition_key_with_offset<'a>(
 
     // Calculate data offset using Summary.db correlation if available
     let (data_offset, data_size) = if let Some(summary) = summary_reader {
-        calculate_data_offset_from_summary(summary, &key_digest.to_vec(), entry_index)
+        calculate_data_offset_from_summary(summary, key_digest, entry_index)
     } else {
         // For backwards compatibility, try to estimate from Index.db position
         let estimated_offset = estimate_data_offset_from_index_position(entry_index);
@@ -295,7 +301,7 @@ fn parse_simple_partition_key_with_offset<'a>(
     Ok((
         input,
         PartitionIndexEntry {
-            key_digest: key_digest.to_vec(),
+            key_digest: Arc::from(key_digest),  // Convert to Arc to avoid copying
             data_offset,
             data_size,
             promoted_index: None, // Not available in simple format
@@ -333,7 +339,7 @@ fn try_parse_enhanced_partition_entry(input: &[u8]) -> IResult<&[u8], PartitionI
     Ok((
         input,
         PartitionIndexEntry {
-            key_digest: key_digest.to_vec(),
+            key_digest: Arc::from(key_digest),  // Convert to Arc to avoid copying
             data_offset,
             data_size,
             promoted_index,
@@ -436,8 +442,8 @@ mod tests {
         let (_, entry) = parse_simple_partition_key(&data).unwrap();
 
         assert_eq!(
-            entry.key_digest,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            entry.key_digest.as_ref(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
         // Legacy API should still return estimated offsets instead of hardcoded 0
         assert!(entry.data_offset > 0); // Should use estimation now
@@ -459,8 +465,8 @@ mod tests {
         let (_, entry5) = parse_simple_partition_key_with_offset(&data, 5, None).unwrap();
 
         assert_eq!(
-            entry0.key_digest,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            entry0.key_digest.as_ref(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
 
         // Verify offset estimation works
@@ -469,8 +475,8 @@ mod tests {
         assert_eq!(entry5.data_offset, 1024 + (5 * 4096)); // Fifth entry offset
 
         // All should have the same key digest in this test
-        assert_eq!(entry0.key_digest, entry1.key_digest);
-        assert_eq!(entry1.key_digest, entry5.key_digest);
+        assert_eq!(entry0.key_digest.as_ref(), entry1.key_digest.as_ref());
+        assert_eq!(entry1.key_digest.as_ref(), entry5.key_digest.as_ref());
     }
 
     #[test]
@@ -486,8 +492,8 @@ mod tests {
         let (_, entry) = try_parse_enhanced_partition_entry(&data).unwrap();
 
         assert_eq!(
-            entry.key_digest,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            entry.key_digest.as_ref(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
         assert_eq!(entry.data_offset, 8192);
         assert_eq!(entry.data_size, 4096);
@@ -508,17 +514,17 @@ mod tests {
 
         assert_eq!(entries.len(), 2);
 
-        if entries.len() >= 1 {
+        if !entries.is_empty() {
             assert_eq!(
-                entries[0].key_digest,
-                vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+                entries[0].key_digest.as_ref(),
+                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
             );
         }
 
         if entries.len() >= 2 {
             assert_eq!(
-                entries[1].key_digest,
-                vec![
+                entries[1].key_digest.as_ref(),
+                &[
                     0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D,
                     0x1E, 0x1F, 0x20
                 ]

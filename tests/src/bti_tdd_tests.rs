@@ -191,7 +191,7 @@ impl BtiTddTestSuite {
         // Test deterministic encoding (same input produces same output)
         let encoded2 = self.encoder.encode_value(value)?;
         if encoded != encoded2 {
-            return Err(Error::ParseError("Non-deterministic encoding".to_string()));
+            return Err(Error::Parse("Non-deterministic encoding".to_string()));
         }
 
         Ok(())
@@ -229,7 +229,7 @@ impl BtiTddTestSuite {
         // Verify lexicographic ordering matches logical ordering
         for i in 0..encoded_values.len() - 1 {
             if encoded_values[i] > encoded_values[i + 1] {
-                return Err(Error::ParseError(format!(
+                return Err(Error::Parse(format!(
                     "Ordering violation between index {} and {}",
                     i,
                     i + 1
@@ -296,7 +296,7 @@ impl BtiTddTestSuite {
         // TODO: Implement proper node parsing test when BTI implementation is complete
         // For now, just validate that data is not empty and return success
         if data.is_empty() {
-            return Err(Error::ParseError("Empty node data".to_string()));
+            return Err(Error::Parse("Empty node data".to_string()));
         }
 
         // Mock success for compilation
@@ -378,17 +378,17 @@ impl BtiTddTestSuite {
         // Test successful lookup
         if let Some(target) = node.find_transition(b'a') {
             if target.absolute_position != 1100 {
-                return Err(Error::ParseError("Incorrect target position".to_string()));
+                return Err(Error::Parse("Incorrect target position".to_string()));
             }
         } else {
-            return Err(Error::ParseError(
+            return Err(Error::Parse(
                 "Failed to find transition for 'a'".to_string(),
             ));
         }
 
         // Test failed lookup
         if node.find_transition(b'x').is_some() {
-            return Err(Error::ParseError(
+            return Err(Error::Parse(
                 "Found transition for non-existent 'x'".to_string(),
             ));
         }
@@ -410,7 +410,7 @@ impl BtiTddTestSuite {
 
         let transitions = node.get_transitions();
         if transitions.len() != 3 {
-            return Err(Error::ParseError(format!(
+            return Err(Error::Parse(format!(
                 "Expected 3 transitions, got {}",
                 transitions.len()
             )));
@@ -418,7 +418,7 @@ impl BtiTddTestSuite {
 
         // Verify transitions are in order
         if transitions[0].0 != b'a' || transitions[1].0 != b'm' || transitions[2].0 != b'z' {
-            return Err(Error::ParseError(
+            return Err(Error::Parse(
                 "Transitions not in expected order".to_string(),
             ));
         }
@@ -483,7 +483,7 @@ impl BtiTddTestSuite {
 
         let cursor = Cursor::new(file_data);
         let _rows_parser = RowsParser::new(cursor)
-            .map_err(|e| Error::ParseError(format!("Failed to create rows parser: {}", e)))?;
+            .map_err(|e| Error::Parse(format!("Failed to create rows parser: {}", e)))?;
 
         Ok(())
     }
@@ -515,7 +515,7 @@ impl BtiTddTestSuite {
 
         // Verify ordering
         if encoded_start >= encoded_end {
-            return Err(Error::ParseError("Range start >= end".to_string()));
+            return Err(Error::Parse("Range start >= end".to_string()));
         }
 
         Ok(())
@@ -691,7 +691,7 @@ impl BtiTddTestSuite {
 
         // Verify proper ordering with tombstones
         if encoded_start >= encoded_end {
-            return Err(Error::ParseError(
+            return Err(Error::Parse(
                 "Range tombstone ordering incorrect".to_string(),
             ));
         }
@@ -751,7 +751,7 @@ impl BtiTddTestSuite {
         // Verify strict ordering
         for i in 0..encoded_values.len() - 1 {
             if encoded_values[i] >= encoded_values[i + 1] {
-                return Err(Error::ParseError(format!(
+                return Err(Error::Parse(format!(
                     "Cross-type ordering violation at index {}",
                     i
                 )));
@@ -781,7 +781,7 @@ impl BtiTddTestSuite {
         let encoded2 = self.encoder.encode_value(&set2)?;
 
         if encoded1 != encoded2 {
-            return Err(Error::ParseError(
+            return Err(Error::Parse(
                 "Set ordering not deterministic".to_string(),
             ));
         }
@@ -805,7 +805,7 @@ impl BtiTddTestSuite {
         // Verify ordering
         for i in 0..encoded_keys.len() - 1 {
             if encoded_keys[i] >= encoded_keys[i + 1] {
-                return Err(Error::ParseError(format!(
+                return Err(Error::Parse(format!(
                     "Composite key ordering violation at index {}",
                     i
                 )));
@@ -858,7 +858,7 @@ impl BtiTddTestSuite {
 
         for i in 0..encoded_keys.len() - 1 {
             if encoded_keys[i] >= encoded_keys[i + 1] {
-                return Err(Error::ParseError(format!(
+                return Err(Error::Parse(format!(
                     "Large clustering key ordering violation at index {}",
                     i
                 )));
@@ -877,7 +877,7 @@ impl BtiTddTestSuite {
         // Test encoder stats
         let stats = self.encoder.get_stats();
         if stats.buffer_capacity == 0 {
-            return Err(Error::ParseError("Encoder stats not working".to_string()));
+            return Err(Error::Parse("Encoder stats not working".to_string()));
         }
 
         Ok(())
@@ -929,7 +929,7 @@ impl BtiTddTestSuite {
         // Should be able to encode at least 1000 ops/sec
         let ops_per_sec = 3000.0 / duration.as_secs_f64();
         if ops_per_sec < 1000.0 {
-            return Err(Error::ParseError(format!(
+            return Err(Error::Parse(format!(
                 "Encoding throughput too low: {:.0} ops/sec",
                 ops_per_sec
             )));
@@ -949,7 +949,7 @@ impl BtiTddTestSuite {
 
         // Buffer should grow reasonably
         if stats_after.buffer_size > stats_before.buffer_size + 1000 {
-            return Err(Error::ParseError("Excessive memory usage".to_string()));
+            return Err(Error::Parse("Excessive memory usage".to_string()));
         }
 
         Ok(())
@@ -961,7 +961,7 @@ impl BtiTddTestSuite {
 
         let batch_encoded = self.batch_encoder.encode_batch(&values)?;
         if batch_encoded.len() != values.len() {
-            return Err(Error::ParseError(
+            return Err(Error::Parse(
                 "Batch encoding count mismatch".to_string(),
             ));
         }
@@ -970,7 +970,7 @@ impl BtiTddTestSuite {
         for (i, value) in values.iter().enumerate() {
             let individual_encoded = self.encoder.encode_value(value)?;
             if individual_encoded != batch_encoded[i] {
-                return Err(Error::ParseError(format!(
+                return Err(Error::Parse(format!(
                     "Batch encoding mismatch at index {}",
                     i
                 )));

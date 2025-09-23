@@ -252,7 +252,7 @@ impl Error {
 
     /// Create a parse error
     pub fn parser(msg: impl Into<String>) -> Self {
-        Self::ParseError(msg.into())
+        Self::Parse(msg.into())
     }
 
     /// Check if this error is recoverable

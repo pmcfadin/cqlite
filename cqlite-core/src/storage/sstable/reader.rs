@@ -3530,7 +3530,7 @@ impl SSTableReader {
             // Convert partition entry to our internal IndexEntry format
             let index_entry = IndexEntry {
                 table_id: crate::types::TableId::new("default"), // Default table ID - could be enhanced
-                key: RowKey::new(partition_entry.key_digest.clone()),
+                key: RowKey::new(partition_entry.key_digest.to_vec()),
                 offset: partition_entry.data_offset,
                 size: partition_entry.data_size,
                 compressed: false, // Default - could be enhanced with compression detection

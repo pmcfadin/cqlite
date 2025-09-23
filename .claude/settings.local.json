@@ -95,7 +95,9 @@
       "Bash(grep:*)",
       "Bash(echo:*)",
       "Bash(tee:*)",
-      "Bash(cargo tree:*)"
+      "Bash(cargo tree:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package tests integration --verbose)",
+      "Bash(awk:*)"
     ],
     "deny": []
   }
