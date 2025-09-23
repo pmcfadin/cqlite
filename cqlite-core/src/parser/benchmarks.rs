@@ -504,8 +504,8 @@ impl ParserBenchmarks {
             (types::CqlTypeId::Int, crate::Value::Integer(-42)),
             (types::CqlTypeId::BigInt, crate::Value::BigInt(1_000_000)),
             (types::CqlTypeId::BigInt, crate::Value::BigInt(-1_000_000)),
-            (types::CqlTypeId::Float, crate::Value::Float(3.14159)),
-            (types::CqlTypeId::Float, crate::Value::Float(-2.71828)),
+            (types::CqlTypeId::Float, crate::Value::Float(std::f64::consts::PI)),
+            (types::CqlTypeId::Float, crate::Value::Float(-std::f64::consts::E)),
             (
                 types::CqlTypeId::Varchar,
                 crate::Value::Text("benchmark_string".to_string()),

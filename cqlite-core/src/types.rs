@@ -1236,7 +1236,7 @@ mod tests {
             Value::Boolean(true),
             Value::Integer(42),
             Value::BigInt(9223372036854775807i64),
-            Value::Float(3.14159),
+            Value::Float(std::f64::consts::PI),
             Value::Text("test string".to_string()),
             Value::Blob(vec![1, 2, 3, 4]),
             Value::Timestamp(1234567890),
@@ -1282,7 +1282,7 @@ mod tests {
         assert_eq!(values[1].as_bool(), Some(true));
         assert_eq!(values[2].as_i32(), Some(42));
         assert_eq!(values[3].as_i64(), Some(9223372036854775807i64));
-        assert_eq!(values[4].as_f64(), Some(3.14159));
+        assert_eq!(values[4].as_f64(), Some(std::f64::consts::PI));
         assert_eq!(values[5].as_str(), Some("test string"));
         assert_eq!(values[6].as_bytes(), Some([1u8, 2, 3, 4].as_slice()));
 

@@ -536,8 +536,8 @@ impl DataIntegrityValidator {
             "boolean" => Ok(vec![Value::Boolean(true), Value::Boolean(false)]),
             "float" => Ok(vec![
                 Value::Float(0.0),
-                Value::Float(3.14159),
-                Value::Float(-3.14159),
+                Value::Float(std::f64::consts::PI),
+                Value::Float(-std::f64::consts::PI),
                 Value::Float(f64::MAX),
                 Value::Float(f64::MIN),
             ]),

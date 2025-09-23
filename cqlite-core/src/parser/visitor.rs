@@ -747,13 +747,13 @@ impl CqlVisitor<()> for SemanticValidator {
     fn visit_select(&mut self, select: &CqlSelect) -> Result<()> {
         // Check if table exists
         let table_name = select.from.full_name();
-        if !self.context.schemas.contains_key(&table_name) {
-            if matches!(
+        if !self.context.schemas.contains_key(&table_name)
+            && matches!(
                 self.context.strictness,
                 super::traits::ValidationStrictness::Strict
-            ) {
-                self.add_error(format!("Table '{}' does not exist", table_name));
-            }
+            )
+        {
+            self.add_error(format!("Table '{}' does not exist", table_name));
         }
 
         // Continue with default traversal
@@ -795,13 +795,13 @@ impl CqlVisitor<()> for SemanticValidator {
     fn visit_update(&mut self, update: &CqlUpdate) -> Result<()> {
         // Check if table exists
         let table_name = update.table.full_name();
-        if !self.context.schemas.contains_key(&table_name) {
-            if matches!(
+        if !self.context.schemas.contains_key(&table_name)
+            && matches!(
                 self.context.strictness,
                 super::traits::ValidationStrictness::Strict
-            ) {
-                self.add_error(format!("Table '{}' does not exist", table_name));
-            }
+            )
+        {
+            self.add_error(format!("Table '{}' does not exist", table_name));
         }
 
         // Continue with default traversal

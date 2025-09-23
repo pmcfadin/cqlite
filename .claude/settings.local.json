@@ -97,7 +97,8 @@
       "Bash(tee:*)",
       "Bash(cargo tree:*)",
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package tests integration --verbose)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core test_simple_partition_key_parsing --no-default-features)"
     ],
     "deny": []
   }

@@ -609,18 +609,10 @@ pub struct CqlUsing {
 }
 
 /// Table options (WITH clause)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CqlTableOptions {
     /// Option values
     pub options: HashMap<String, CqlLiteral>,
-}
-
-impl Default for CqlTableOptions {
-    fn default() -> Self {
-        Self {
-            options: HashMap::new(),
-        }
-    }
 }
 
 impl CqlIdentifier {
