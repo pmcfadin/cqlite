@@ -301,7 +301,7 @@ fn parse_simple_partition_key_with_offset<'a>(
     Ok((
         input,
         PartitionIndexEntry {
-            key_digest: Arc::from(key_digest),  // Convert to Arc to avoid copying
+            key_digest: Arc::from(key_digest), // Convert to Arc to avoid copying
             data_offset,
             data_size,
             promoted_index: None, // Not available in simple format
@@ -339,7 +339,7 @@ fn try_parse_enhanced_partition_entry(input: &[u8]) -> IResult<&[u8], PartitionI
     Ok((
         input,
         PartitionIndexEntry {
-            key_digest: Arc::from(key_digest),  // Convert to Arc to avoid copying
+            key_digest: Arc::from(key_digest), // Convert to Arc to avoid copying
             data_offset,
             data_size,
             promoted_index,

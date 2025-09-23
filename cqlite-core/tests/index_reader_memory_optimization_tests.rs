@@ -4,9 +4,9 @@
 //! works correctly and doesn't introduce regressions.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::fs;
 
@@ -57,7 +57,10 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         let ptr = System.alloc(layout);
         if !ptr.is_null() {
             self.allocations.fetch_add(1, Ordering::SeqCst);
-            let new_current = self.current_memory.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
+            let new_current = self
+                .current_memory
+                .fetch_add(layout.size(), Ordering::SeqCst)
+                + layout.size();
 
             // Update peak memory
             let mut peak = self.peak_memory.load(Ordering::SeqCst);
@@ -79,7 +82,8 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         System.dealloc(ptr, layout);
         self.deallocations.fetch_add(1, Ordering::SeqCst);
-        self.current_memory.fetch_sub(layout.size(), Ordering::SeqCst);
+        self.current_memory
+            .fetch_sub(layout.size(), Ordering::SeqCst);
     }
 }
 
@@ -127,7 +131,10 @@ fn test_arc_lookup_table_memory_efficiency() {
         assert_eq!(lookup_result, Some(&expected_index));
     }
 
-    println!("Memory used for Arc-based lookup table: {} bytes", final_memory - initial_memory);
+    println!(
+        "Memory used for Arc-based lookup table: {} bytes",
+        final_memory - initial_memory
+    );
     println!("Allocations: {}", final_allocations - initial_allocations);
 
     // With Arc<[u8]>, we only allocate reference counts, not the data itself
@@ -181,11 +188,19 @@ fn test_memory_comparison_vec_vs_arc() {
     let final_memory_arc = TRACKING_ALLOCATOR.get_current_memory();
     let arc_memory_usage = final_memory_arc - initial_memory_arc;
 
-    println!("Vec cloning approach memory usage: {} bytes", vec_memory_usage);
-    println!("Arc sharing approach memory usage: {} bytes", arc_memory_usage);
-    println!("Memory reduction: {} bytes ({:.1}%)",
-             vec_memory_usage - arc_memory_usage,
-             ((vec_memory_usage - arc_memory_usage) as f64 / vec_memory_usage as f64) * 100.0);
+    println!(
+        "Vec cloning approach memory usage: {} bytes",
+        vec_memory_usage
+    );
+    println!(
+        "Arc sharing approach memory usage: {} bytes",
+        arc_memory_usage
+    );
+    println!(
+        "Memory reduction: {} bytes ({:.1}%)",
+        vec_memory_usage - arc_memory_usage,
+        ((vec_memory_usage - arc_memory_usage) as f64 / vec_memory_usage as f64) * 100.0
+    );
 
     // Arc approach should use significantly less memory
     assert!(arc_memory_usage < vec_memory_usage);
@@ -238,7 +253,10 @@ async fn test_large_sstable_memory_usage() {
             }
         }
         Err(e) => {
-            println!("Index reader test with large file failed (expected with mock data): {}", e);
+            println!(
+                "Index reader test with large file failed (expected with mock data): {}",
+                e
+            );
         }
     }
 }
@@ -376,7 +394,10 @@ fn test_arc_edge_cases() {
     assert_eq!(duplicate_lookup.get(&duplicate_arc), Some(&1)); // Should have the last index
 
     // Test that Arc sharing works correctly - both entries should share the same data
-    assert!(Arc::ptr_eq(&duplicate_entries[0].key_digest, &duplicate_entries[1].key_digest));
+    assert!(Arc::ptr_eq(
+        &duplicate_entries[0].key_digest,
+        &duplicate_entries[1].key_digest
+    ));
 }
 
 /// Property-based test for Arc-based lookup table correctness
@@ -422,8 +443,13 @@ fn property_test_arc_lookup_correctness() {
         // Property: Every partition entry should be findable in the lookup table
         for (expected_index, entry) in partition_entries.iter().enumerate() {
             let lookup_result = key_lookup.get(&entry.key_digest);
-            assert_eq!(lookup_result, Some(&expected_index),
-                      "Failed to find entry {} with key digest {:?}", expected_index, entry.key_digest);
+            assert_eq!(
+                lookup_result,
+                Some(&expected_index),
+                "Failed to find entry {} with key digest {:?}",
+                expected_index,
+                entry.key_digest
+            );
         }
 
         // Property: Lookup table size should equal number of unique entries
@@ -433,7 +459,13 @@ fn property_test_arc_lookup_correctness() {
         for entry in &partition_entries {
             // The Arc in the lookup table should be the same reference as in the entry
             if let Some(&index) = key_lookup.get(&entry.key_digest) {
-                assert_eq!(index, partition_entries.iter().position(|e| Arc::ptr_eq(&e.key_digest, &entry.key_digest)).unwrap());
+                assert_eq!(
+                    index,
+                    partition_entries
+                        .iter()
+                        .position(|e| Arc::ptr_eq(&e.key_digest, &entry.key_digest))
+                        .unwrap()
+                );
             }
         }
 
@@ -513,7 +545,10 @@ fn test_arc_no_memory_leaks() {
         0
     };
 
-    println!("Memory difference after Arc test: {} bytes", memory_difference);
+    println!(
+        "Memory difference after Arc test: {} bytes",
+        memory_difference
+    );
 
     // Memory usage should return close to initial levels (allowing some tolerance for allocator overhead)
     assert!(memory_difference < 1024); // Less than 1KB difference indicates no significant leaks
@@ -523,7 +558,8 @@ fn test_arc_no_memory_leaks() {
 #[test]
 fn test_arc_reference_counting() {
     // Create a partition entry with Arc key digest
-    let key_data: Box<[u8]> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].into_boxed_slice();
+    let key_data: Box<[u8]> =
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].into_boxed_slice();
     let arc_key = Arc::from(key_data);
 
     // Initially, there should be 1 reference
