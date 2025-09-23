@@ -605,7 +605,7 @@ async fn test_integration_table_loading() {
                 println!("✓ Successfully loaded SSTable: {}", base_name);
 
                 // Test basic operations
-                let stats = reader.get_statistics().clone();
+                let stats = reader.stats().await.unwrap_or_default();
                 let timestamp_range = reader.get_timestamp_range().await;
                 let _token_range = reader.iterate_token_range(-1000, 1000).await;
 

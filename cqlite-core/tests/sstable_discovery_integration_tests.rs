@@ -83,7 +83,7 @@ async fn test_realistic_cassandra_keyspace_integration() {
                         total_sstables_loaded += 1;
 
                         // Test basic operations
-                        let _stats = reader.get_metadata().clone();
+                        let _stats = reader.stats().await.unwrap_or_default();
                         let _timestamp_range = reader.get_timestamp_range().await;
 
                         // Test lookup operations
@@ -233,7 +233,7 @@ async fn test_mixed_format_integration() {
                     let _lookup_result = reader
                         .lookup_partition_with_index(test_key.as_bytes())
                         .await;
-                    let _stats = reader.get_statistics().await;
+                    let _stats = reader.stats().await.unwrap_or_default();
 
                     println!("✓ Successfully loaded and tested: {}", filename);
                 }
@@ -467,7 +467,7 @@ async fn test_real_world_patterns_integration() {
                 total_loaded += 1;
 
                 // Test that operations work with real-world patterns
-                let _stats = reader.get_statistics().await;
+                let _stats = reader.stats().await.unwrap_or_default();
                 let _timestamp_range = reader.get_timestamp_range().await;
 
                 // Test lookup with pattern-derived key

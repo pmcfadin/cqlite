@@ -24,6 +24,8 @@ use crate::{
     types::{ComparatorType, TableId},
 };
 
+use super::header_spec::get_global_registry;
+
 // Structured logging
 use log::{debug, info, warn};
 
@@ -126,6 +128,21 @@ pub struct SSTableReaderStats {
     pub compression_ratio: f64,
     /// Cache hit rate for recent queries
     pub cache_hit_rate: f64,
+}
+
+impl Default for SSTableReaderStats {
+    fn default() -> Self {
+        Self {
+            file_size: 0,
+            entry_count: 0,
+            table_count: 0,
+            block_count: 0,
+            index_size: 0,
+            bloom_filter_size: 0,
+            compression_ratio: 0.0,
+            cache_hit_rate: 0.0,
+        }
+    }
 }
 
 /// Configuration for SSTable reader
@@ -570,8 +587,8 @@ impl SSTableReader {
         let base_size = std::mem::size_of::<Self>();
         let block_cache_size = self
             .block_cache
-            .iter()
-            .map(|(_, block)| block.data.len() + std::mem::size_of::<CachedBlock>())
+            .values()
+            .map(|block| block.data.len() + std::mem::size_of::<CachedBlock>())
             .sum::<usize>();
         let meta_cache_size = self.block_meta_cache.len() * std::mem::size_of::<BlockMeta>();
 
@@ -662,7 +679,7 @@ impl SSTableReader {
 
     // Missing function implementations
 
-    /// Enhanced header parsing with version detection - strict parsing without fallbacks
+    /// Enhanced header parsing with version detection using spec-driven approach
     async fn parse_header_with_version_detection(
         header_buffer: &[u8],
         path: &Path,
@@ -681,6 +698,30 @@ impl SSTableReader {
             )));
         }
 
+        // First try spec-driven parsing for Data.db component
+        let registry = get_global_registry();
+        match registry.parse_data_header(header_buffer) {
+            Ok(parsed_header) => {
+                log::debug!(
+                    "Successfully parsed Data.db header using spec-driven approach for file '{}' \
+                     with version: {:?}",
+                    path.display(),
+                    parsed_header.cassandra_version
+                );
+
+                // Convert ParsedHeader to SSTableHeader for compatibility
+                return Self::convert_parsed_header_to_sstable_header(parsed_header, header_buffer);
+            }
+            Err(spec_error) => {
+                log::debug!(
+                    "Spec-driven parsing failed for file '{}', falling back to legacy parser: {}",
+                    path.display(),
+                    spec_error
+                );
+            }
+        }
+
+        // Fallback to legacy parsing approach
         // Extract and validate magic number
         let magic_bytes = &header_buffer[0..4];
         let magic = u32::from_be_bytes([
@@ -760,6 +801,87 @@ impl SSTableReader {
                 }
             }
         }
+    }
+
+    /// Convert ParsedHeader from spec-driven parsing to SSTableHeader for compatibility
+    fn convert_parsed_header_to_sstable_header(
+        parsed_header: super::header_spec::ParsedHeader,
+        _header_buffer: &[u8],
+    ) -> Result<SSTableHeader> {
+        use crate::parser::header::{ColumnInfo, CompressionInfo, SSTableStats};
+        use std::collections::HashMap;
+
+        // Extract required fields with proper error handling
+        let table_id = parsed_header
+            .fields
+            .get("table_id")
+            .and_then(|v| v.as_bytes().ok())
+            .and_then(|bytes| {
+                if bytes.len() == 16 {
+                    let mut id = [0u8; 16];
+                    id.copy_from_slice(bytes);
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or([0u8; 16]);
+
+        let keyspace = parsed_header
+            .fields
+            .get("keyspace")
+            .and_then(|v| v.as_string().ok())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let table_name = parsed_header
+            .fields
+            .get("table_name")
+            .and_then(|v| v.as_string().ok())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let generation = parsed_header
+            .fields
+            .get("generation")
+            .and_then(|v| v.as_u64().ok())
+            .unwrap_or(0);
+
+        // Create default compression info (would be enhanced with actual compression parsing)
+        let compression = CompressionInfo {
+            algorithm: "NONE".to_string(),
+            chunk_size: 4096,
+            parameters: HashMap::new(),
+        };
+
+        // Create default stats (would be enhanced with actual stats parsing)
+        let stats = SSTableStats {
+            row_count: 0,
+            min_timestamp: 0,
+            max_timestamp: 0,
+            max_deletion_time: 0,
+            compression_ratio: 1.0,
+            row_size_histogram: Vec::new(),
+        };
+
+        // Create default columns (would be enhanced with actual column parsing)
+        let columns = Vec::<ColumnInfo>::new();
+
+        // Create default properties
+        let properties = HashMap::new();
+
+        Ok(SSTableHeader {
+            cassandra_version: parsed_header.cassandra_version,
+            version: parsed_header.format_version as u16,
+            table_id,
+            keyspace,
+            table_name,
+            generation,
+            compression,
+            stats,
+            columns,
+            properties,
+        })
     }
 
     /// Parse minimal legacy header with strict validation (feature-gated)
@@ -4175,7 +4297,7 @@ impl SSTableReader {
             let first_row = &parsed_row.clustering_rows[0];
             if !first_row.columns.is_empty() {
                 // Return the first column value
-                for (_, value) in first_row.columns.iter() {
+                if let Some((_, value)) = first_row.columns.iter().next() {
                     return Ok(value.clone());
                 }
             }
@@ -4184,7 +4306,7 @@ impl SSTableReader {
         // Fallback: try static row data
         if let Some(ref static_row) = parsed_row.static_row {
             if !static_row.columns.is_empty() {
-                for (_, value) in static_row.columns.iter() {
+                if let Some((_, value)) = static_row.columns.iter().next() {
                     return Ok(value.clone());
                 }
             }

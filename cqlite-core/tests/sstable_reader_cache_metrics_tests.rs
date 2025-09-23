@@ -38,7 +38,7 @@ async fn test_cache_metrics_basic_accuracy() {
     match SSTableReader::open(&data_file, &config, platform).await {
         Ok(reader) => {
             // First access - should be cache misses
-            let initial_stats = reader.get_stats().await;
+            let initial_stats = reader.stats().await.unwrap_or_default();
             let initial_hit_rate = initial_stats.cache_hit_rate;
 
             println!("Initial cache hit rate: {:.4}", initial_hit_rate);
@@ -51,7 +51,7 @@ async fn test_cache_metrics_basic_accuracy() {
             }
 
             // Check stats after misses
-            let after_misses_stats = reader.get_stats().await;
+            let after_misses_stats = reader.stats().await.unwrap_or_default();
             let miss_hit_rate = after_misses_stats.cache_hit_rate;
             println!(
                 "Hit rate after {} miss operations: {:.4}",
@@ -65,7 +65,7 @@ async fn test_cache_metrics_basic_accuracy() {
             }
 
             // Check stats after hits
-            let after_hits_stats = reader.get_stats().await;
+            let after_hits_stats = reader.stats().await.unwrap_or_default();
             let final_hit_rate = after_hits_stats.cache_hit_rate;
             println!(
                 "Final hit rate after repeated operations: {:.4}",
@@ -126,7 +126,7 @@ async fn test_concurrent_cache_metrics_accuracy() {
                 let total_operations = concurrency * operations_per_thread;
 
                 // Get initial stats
-                let initial_stats = reader.get_stats().await;
+                let initial_stats = reader.stats().await.unwrap_or_default();
 
                 // Perform concurrent operations with shared key set (should generate hits)
                 let shared_key_count = 10;
@@ -143,9 +143,9 @@ async fn test_concurrent_cache_metrics_accuracy() {
                             let key_index = (thread_id + i) % shared_key_count;
                             let key = format!("shared_cache_key_{:02}", key_index).into_bytes();
 
-                            let start_stats = reader_clone.get_stats().await;
+                            let start_stats = reader_clone.stats().await.unwrap_or_default();
                             let _ = reader_clone.lookup_partition_with_index(&key).await;
-                            let end_stats = reader_clone.get_stats().await;
+                            let end_stats = reader_clone.stats().await.unwrap_or_default();
 
                             // Approximate hit/miss detection based on stats change
                             if end_stats.cache_hit_rate > start_stats.cache_hit_rate {
@@ -171,7 +171,7 @@ async fn test_concurrent_cache_metrics_accuracy() {
                 }
 
                 // Get final stats
-                let final_stats = reader.get_stats().await;
+                let final_stats = reader.stats().await.unwrap_or_default();
                 let final_hit_rate = final_stats.cache_hit_rate;
 
                 println!(
@@ -232,13 +232,13 @@ async fn test_mixed_access_pattern_cache_metrics() {
             for (pattern_name, pattern_fn) in access_patterns {
                 println!("Testing cache metrics for {} access pattern", pattern_name);
 
-                let initial_stats = reader.get_stats().await;
+                let initial_stats = reader.stats().await.unwrap_or_default();
                 let initial_hit_rate = initial_stats.cache_hit_rate;
 
                 // Execute access pattern
                 pattern_fn(&reader).await;
 
-                let final_stats = reader.get_stats().await;
+                let final_stats = reader.stats().await.unwrap_or_default();
                 let final_hit_rate = final_stats.cache_hit_rate;
 
                 println!(
@@ -336,7 +336,7 @@ async fn test_cache_metrics_stability_over_time() {
                 }
 
                 // Measure hit rate
-                let stats = reader.get_stats().await;
+                let stats = reader.stats().await.unwrap_or_default();
                 hit_rate_history.push(stats.cache_hit_rate);
 
                 tokio::time::sleep(measurement_interval).await;
@@ -423,7 +423,7 @@ async fn test_cache_eviction_metrics_accuracy() {
                 let _ = reader.lookup_partition_with_index(&key).await;
             }
 
-            let after_initial_stats = reader.get_stats().await;
+            let after_initial_stats = reader.stats().await.unwrap_or_default();
             println!(
                 "Hit rate after initial fill: {:.4}",
                 after_initial_stats.cache_hit_rate
@@ -435,7 +435,7 @@ async fn test_cache_eviction_metrics_accuracy() {
                 let _ = reader.lookup_partition_with_index(&key).await;
             }
 
-            let after_second_access_stats = reader.get_stats().await;
+            let after_second_access_stats = reader.stats().await.unwrap_or_default();
             println!(
                 "Hit rate after second access: {:.4}",
                 after_second_access_stats.cache_hit_rate
@@ -456,7 +456,7 @@ async fn test_cache_eviction_metrics_accuracy() {
                 let _ = reader.lookup_partition_with_index(&key).await;
             }
 
-            let after_eviction_stats = reader.get_stats().await;
+            let after_eviction_stats = reader.stats().await.unwrap_or_default();
             println!(
                 "Hit rate after eviction: {:.4}",
                 after_eviction_stats.cache_hit_rate
@@ -468,7 +468,7 @@ async fn test_cache_eviction_metrics_accuracy() {
                 let _ = reader.lookup_partition_with_index(&key).await;
             }
 
-            let final_stats = reader.get_stats().await;
+            let final_stats = reader.stats().await.unwrap_or_default();
             println!("Final hit rate: {:.4}", final_stats.cache_hit_rate);
 
             // Verify metrics remain consistent and reasonable

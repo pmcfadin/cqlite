@@ -8,6 +8,8 @@ use crate::{
     error::{Error, Result},
     platform::Platform,
 };
+
+use super::header_spec::get_global_registry;
 use nom::{
     IResult,
     bytes::complete::take,
@@ -213,14 +215,67 @@ pub struct IndexStatistics {
     pub file_size: u64,
 }
 
-/// Parse Index.db file data with optional Summary.db correlation - Real Cassandra 5 format
+/// Parse Index.db file data with optional Summary.db correlation using spec-driven approach
 fn parse_index_data_with_summary<'a>(
     input: &'a [u8],
     summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], IndexData> {
-    // Parse all partition key digests - no header in real C5 format
+    use nom::error::{Error as NomError, ErrorKind};
+
+    // First try spec-driven header parsing
+    let registry = get_global_registry();
+    let (remaining, header) = match registry.parse_index_header(input) {
+        Ok(parsed_header) => {
+            log::debug!("Successfully parsed Index.db header using spec-driven approach");
+
+            // Convert ParsedHeader to IndexHeader
+            let header = IndexHeader {
+                version: parsed_header
+                    .fields
+                    .get("version")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(1),
+                entry_count: parsed_header
+                    .fields
+                    .get("entry_count")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(0),
+                data_size: parsed_header
+                    .fields
+                    .get("data_size")
+                    .and_then(|v| v.as_u64().ok())
+                    .unwrap_or(input.len() as u64),
+                checksum: parsed_header
+                    .fields
+                    .get("checksum")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(0),
+            };
+
+            // Skip header bytes for data parsing
+            let header_size = parsed_header.header_size;
+            if input.len() < header_size {
+                return Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)));
+            }
+            (&input[header_size..], header)
+        }
+        Err(_) => {
+            log::debug!("Spec-driven header parsing failed, assuming headerless format");
+
+            // Parse all partition key digests - no header in some formats
+            let header = IndexHeader {
+                version: 1,
+                entry_count: 0, // Will be updated after parsing entries
+                data_size: input.len() as u64,
+                checksum: 0,
+            };
+            (input, header)
+        }
+    };
+
+    // Parse partition entries from remaining data
     let (remaining, partition_entries) =
-        parse_all_partition_keys_with_summary(input, summary_reader)?;
+        parse_all_partition_keys_with_summary(remaining, summary_reader)?;
 
     // Build lookup table with zero-copy approach using Arc::clone (reference counting only)
     // This eliminates the memory explosion from cloning Vec<u8> key digests
@@ -229,12 +284,10 @@ fn parse_index_data_with_summary<'a>(
         key_lookup.insert(Arc::clone(&entry.key_digest), index);
     }
 
-    // Create a dummy header for compatibility
+    // Update header with actual entry count
     let header = IndexHeader {
-        version: 1,
         entry_count: partition_entries.len() as u32,
-        data_size: input.len() as u64,
-        checksum: 0,
+        ..header
     };
 
     Ok((

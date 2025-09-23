@@ -49,6 +49,8 @@ use crate::{
     error::{Error, Result},
     platform::Platform,
 };
+
+use super::header_spec::get_global_registry;
 use nom::{
     IResult,
     bytes::complete::take,
@@ -372,7 +374,7 @@ fn parse_summary_data(input: &[u8]) -> IResult<&[u8], SummaryData> {
     ))
 }
 
-/// Parse Summary.db header with comprehensive validation
+/// Parse Summary.db header using spec-driven approach with fallback
 fn parse_summary_header(input: &[u8]) -> IResult<&[u8], SummaryHeader> {
     use nom::error::{Error as NomError, ErrorKind};
 
@@ -382,6 +384,74 @@ fn parse_summary_header(input: &[u8]) -> IResult<&[u8], SummaryHeader> {
 
     let original_input = input;
 
+    // First try spec-driven parsing
+    let registry = get_global_registry();
+    match registry.parse_summary_header(input) {
+        Ok(parsed_header) => {
+            log::debug!("Successfully parsed Summary.db header using spec-driven approach");
+
+            // Convert ParsedHeader to SummaryHeader
+            let entry_count = parsed_header
+                .fields
+                .get("entry_count")
+                .and_then(|v| v.as_u32().ok())
+                .unwrap_or(0);
+
+            let sampling_rate = parsed_header
+                .fields
+                .get("sampling_rate")
+                .and_then(|v| v.as_u32().ok())
+                .unwrap_or(1);
+
+            let min_token = parsed_header
+                .fields
+                .get("min_token")
+                .and_then(|v| v.as_u64().ok())
+                .unwrap_or(0) as i64;
+
+            let max_token = parsed_header
+                .fields
+                .get("max_token")
+                .and_then(|v| v.as_u64().ok())
+                .unwrap_or(0) as i64;
+
+            let data_size = parsed_header
+                .fields
+                .get("data_size")
+                .and_then(|v| v.as_u64().ok())
+                .unwrap_or(input.len() as u64);
+
+            let checksum = parsed_header
+                .fields
+                .get("checksum")
+                .and_then(|v| v.as_u32().ok())
+                .unwrap_or(0);
+
+            let header = SummaryHeader {
+                version: parsed_header.format_version,
+                entry_count,
+                sampling_rate,
+                min_token,
+                max_token,
+                data_size,
+                checksum,
+                header_size: parsed_header.header_size,
+            };
+
+            let remaining = if input.len() >= parsed_header.header_size {
+                &input[parsed_header.header_size..]
+            } else {
+                &input[input.len()..]
+            };
+
+            return Ok((remaining, header));
+        }
+        Err(_) => {
+            log::debug!("Spec-driven parsing failed, falling back to legacy parser");
+        }
+    }
+
+    // Fallback to legacy parsing approach
     // Try parsing with magic number validation first (newer formats)
     let (input, maybe_magic) = be_u32(input)?;
     let (input, version, entry_count, sampling_rate) = if maybe_magic == SUMMARY_MAGIC_NUMBER {

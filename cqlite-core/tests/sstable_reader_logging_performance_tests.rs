@@ -336,9 +336,9 @@ async fn measure_async_throughput(
 ) -> f64 {
     // Configure logging level
     if enable_logging {
-        std::env::set_var("RUST_LOG", "debug");
+        unsafe { std::env::set_var("RUST_LOG", "debug"); }
     } else {
-        std::env::set_var("RUST_LOG", "error");
+        unsafe { std::env::set_var("RUST_LOG", "error"); }
     }
 
     let operation_count = 200;
@@ -369,9 +369,9 @@ async fn measure_concurrent_operations(
     enable_logging: bool,
 ) -> Duration {
     if enable_logging {
-        std::env::set_var("RUST_LOG", "debug");
+        unsafe { std::env::set_var("RUST_LOG", "debug"); }
     } else {
-        std::env::set_var("RUST_LOG", "error");
+        unsafe { std::env::set_var("RUST_LOG", "error"); }
     }
 
     let start_time = Instant::now();
@@ -413,9 +413,9 @@ async fn measure_operation_latencies(
     enable_logging: bool,
 ) -> Vec<u64> {
     if enable_logging {
-        std::env::set_var("RUST_LOG", "debug");
+        unsafe { std::env::set_var("RUST_LOG", "debug"); }
     } else {
-        std::env::set_var("RUST_LOG", "error");
+        unsafe { std::env::set_var("RUST_LOG", "error"); }
     }
 
     let mut latencies = Vec::new();
@@ -447,9 +447,9 @@ async fn perform_memory_test_operations(
     enable_logging: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if enable_logging {
-        std::env::set_var("RUST_LOG", "debug");
+        unsafe { std::env::set_var("RUST_LOG", "debug"); }
     } else {
-        std::env::set_var("RUST_LOG", "error");
+        unsafe { std::env::set_var("RUST_LOG", "error"); }
     }
 
     if let Ok(reader) = SSTableReader::open(data_file, config, platform).await {
@@ -469,7 +469,7 @@ async fn perform_volume_test_operations(
     platform: Arc<Platform>,
     operation_count: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    std::env::set_var("RUST_LOG", "debug"); // Always enable debug logging for volume tests
+    unsafe { std::env::set_var("RUST_LOG", "debug"); } // Always enable debug logging for volume tests
 
     if let Ok(reader) = SSTableReader::open(data_file, config, platform).await {
         for i in 0..operation_count {
