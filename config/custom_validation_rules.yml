@@ -1,0 +1,292 @@
+# Custom Validation Rules for CQLite Test Data Pipeline
+# These rules extend the standard validation with project-specific requirements
+
+# File-level validation rules
+file_validation:
+  # Required SSTable components
+  required_components:
+    - Data.db
+    - Index.db
+    - Summary.db
+    - Statistics.db
+
+  # Optional components that may be present
+  optional_components:
+    - Filter.db
+    - CompressionInfo.db
+    - Digest.crc32
+
+  # File size constraints
+  file_size_constraints:
+    # Data file must be at least 1KB
+    Data.db:
+      min_size: 1024
+      max_size: 1073741824  # 1GB
+
+    # Index file constraints
+    Index.db:
+      min_size: 100
+      max_ratio_to_data: 0.5  # Index should be < 50% of data size
+
+    # Summary file constraints
+    Summary.db:
+      min_size: 50
+      max_ratio_to_index: 0.2  # Summary should be < 20% of index size
+
+    # Statistics file constraints
+    Statistics.db:
+      min_size: 100
+      max_size: 65536  # 64KB should be enough for statistics
+
+# Format-specific validation rules
+format_validation:
+  # SSTable format version requirements
+  sstable_format:
+    min_version: "big-nb"  # Cassandra 5 format
+    supported_versions:
+      - "big-nb"
+      - "big-nc"
+
+  # Header validation
+  data_file_header:
+    # First 16 bytes validation patterns
+    required_patterns:
+      - pattern: "^\\x00\\x00\\x00"  # Start with version bytes
+        description: "Valid SSTable header"
+
+  # Index file validation
+  index_file_structure:
+    # Index entries should be aligned
+    entry_alignment: 8
+
+    # Minimum number of index entries
+    min_entries: 1
+
+  # Compression validation
+  compression:
+    # Valid compression algorithms
+    supported_algorithms:
+      - LZ4Compressor
+      - SnappyCompressor
+      - ZstdCompressor
+      - DeflateCompressor
+
+    # Compression ratio constraints
+    min_compression_ratio: 0.1  # At least 10% compression
+    max_compression_ratio: 0.9  # At most 90% compression
+
+# Data integrity validation rules
+data_integrity:
+  # Checksum validation
+  checksums:
+    enabled: true
+    algorithm: "sha256"
+
+    # Files to checksum
+    checksum_files:
+      - Data.db
+      - Index.db
+      - Summary.db
+      - Statistics.db
+
+  # Cross-component consistency
+  cross_component:
+    # Index should reference valid data offsets
+    index_data_consistency: true
+
+    # Summary should contain valid index ranges
+    summary_index_consistency: true
+
+    # Statistics should match data characteristics
+    statistics_data_consistency: true
+
+  # Content validation
+  content_validation:
+    # Validate that data is not corrupted
+    corruption_detection: true
+
+    # Check for empty or truncated files
+    completeness_check: true
+
+    # Validate bloom filter if present
+    bloom_filter_validation: true
+
+# Performance validation rules
+performance_validation:
+  # Read performance requirements
+  read_performance:
+    # Maximum time to read entire SSTable
+    max_read_time_seconds: 30.0
+
+    # Minimum throughput
+    min_throughput_rows_per_second: 1000.0
+
+    # Memory usage constraints
+    max_memory_usage_mb: 512.0
+
+  # Index performance requirements
+  index_performance:
+    # Maximum time to load index
+    max_index_load_time_seconds: 5.0
+
+    # Index should enable efficient seeks
+    max_seek_time_milliseconds: 100.0
+
+  # Summary performance requirements
+  summary_performance:
+    # Summary should load quickly
+    max_summary_load_time_seconds: 1.0
+
+# Schema validation rules
+schema_validation:
+  # Column type validation
+  column_types:
+    # Supported primitive types
+    supported_primitive_types:
+      - text
+      - varchar
+      - ascii
+      - int
+      - bigint
+      - smallint
+      - tinyint
+      - float
+      - double
+      - decimal
+      - boolean
+      - timestamp
+      - date
+      - time
+      - uuid
+      - timeuuid
+      - blob
+      - inet
+      - duration
+
+    # Supported collection types
+    supported_collection_types:
+      - list
+      - set
+      - map
+
+    # Complex type validation
+    frozen_types: true
+    user_defined_types: true
+    tuple_types: true
+
+  # Key validation
+  key_validation:
+    # Partition key constraints
+    partition_key:
+      max_components: 10
+      max_size_bytes: 65536  # 64KB
+
+    # Clustering key constraints
+    clustering_key:
+      max_components: 20
+      max_size_bytes: 65536  # 64KB
+
+# Cassandra 5 specific validation
+cassandra5_validation:
+  # New features in Cassandra 5
+  new_features:
+    # Vector type support
+    vector_types:
+      enabled: true
+      max_dimensions: 2048
+
+    # Storage Attached Indexes (SAI)
+    sai_indexes:
+      enabled: true
+      max_indexes_per_table: 10
+
+    # Unified Compaction Strategy
+    unified_compaction:
+      enabled: true
+
+  # Deprecated features that should not be present
+  deprecated_features:
+    # Legacy compaction strategies
+    deprecated_compaction_strategies:
+      - DateTieredCompactionStrategy
+
+    # Deprecated data types
+    deprecated_types: []
+
+# Custom business logic validation
+business_logic_validation:
+  # TTL validation
+  ttl_validation:
+    # TTL values should be reasonable
+    min_ttl_seconds: 1
+    max_ttl_seconds: 2147483647  # Max int32
+
+    # Check for expired data
+    check_expired_data: true
+
+  # Tombstone validation
+  tombstone_validation:
+    # Tombstone timestamps should be valid
+    validate_tombstone_timestamps: true
+
+    # Check for tombstone/data conflicts
+    check_tombstone_conflicts: true
+
+    # Range tombstone validation
+    range_tombstone_validation: true
+
+  # Collection validation
+  collection_validation:
+    # Maximum collection size
+    max_collection_size: 10000
+
+    # Validate collection elements
+    validate_collection_elements: true
+
+    # Check for empty collections
+    allow_empty_collections: true
+
+# Error handling configuration
+error_handling:
+  # How to handle validation failures
+  failure_handling:
+    # Stop on first error or continue
+    stop_on_first_error: false
+
+    # Maximum number of errors before stopping
+    max_errors: 100
+
+    # Treatment of warnings
+    warnings_as_errors: false
+
+  # Recovery options
+  recovery:
+    # Attempt to repair minor issues
+    auto_repair: false
+
+    # Generate corrected versions
+    generate_corrected_versions: false
+
+    # Backup original files before repair
+    backup_before_repair: true
+
+# Reporting configuration
+reporting:
+  # Report format options
+  formats:
+    - json
+    - yaml
+    - html
+    - junit_xml
+
+  # Report detail level
+  detail_level: detailed  # summary, detailed, verbose
+
+  # Include performance metrics in reports
+  include_performance_metrics: true
+
+  # Include screenshots for visual validation
+  include_visual_validation: false
+
+  # Report output directory
+  output_directory: "validation_reports"

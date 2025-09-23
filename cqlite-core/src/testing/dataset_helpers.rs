@@ -361,7 +361,7 @@ pub fn read_jsonl_rows(
     let reader = BufReader::new(file);
     let iter = reader
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(Result::ok)
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok());
     Ok(iter)

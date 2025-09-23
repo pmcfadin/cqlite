@@ -540,7 +540,10 @@ mod tests {
         let parser = QueryParser::new(&Config::default());
 
         assert_eq!(parser.parse_value("123").unwrap(), Value::Integer(123));
-        assert_eq!(parser.parse_value("3.14").unwrap(), Value::Float(3.14));
+        #[allow(clippy::approx_constant)]
+        {
+            assert_eq!(parser.parse_value("3.14").unwrap(), Value::Float(3.14));
+        }
         assert_eq!(
             parser.parse_value("'hello'").unwrap(),
             Value::Text("hello".to_string())

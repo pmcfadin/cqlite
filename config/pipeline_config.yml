@@ -1,0 +1,164 @@
+# Test Data Pipeline Configuration for CQLite
+# This configuration controls the automated test data generation and validation pipeline
+
+# Base directory for the project
+base_dir: "."
+
+# Cassandra installation directory (optional)
+# cassandra_home: "/opt/cassandra"
+
+# CQLite binary path (will be auto-detected if not specified)
+# cqlite_binary: "./target/release/cqlite"
+
+# Maximum number of parallel tasks for generation and validation
+max_parallel_tasks: 4
+
+# Retention policy for old dataset versions (in days)
+retention_days: 30
+
+# Quality gates for validation
+quality_gates:
+  # Maximum number of errors allowed
+  max_errors: 0
+
+  # Maximum number of warnings allowed
+  max_warnings: 10
+
+  # Minimum data file size in bytes
+  min_data_file_size: 1024
+
+  # Minimum number of datasets required
+  min_datasets: 10
+
+  # Maximum age of datasets in hours before regeneration
+  max_dataset_age_hours: 168  # 1 week
+
+  # Maximum number of old datasets allowed
+  max_old_datasets: 2
+
+  # Minimum success rate for regression tests
+  min_regression_success_rate: 0.95
+
+# Performance thresholds
+performance_thresholds:
+  # Maximum time in seconds for reading an SSTable
+  max_read_time_seconds: 30.0
+
+  # Minimum throughput in lines per second
+  min_throughput_lines_per_second: 1000.0
+
+  # Maximum memory usage in MB
+  max_memory_usage_mb: 512.0
+
+# Dataset generation configuration
+dataset_generation:
+  # Categories to generate (all, basic_types, collections, etc.)
+  categories:
+    - basic_types
+    - collections
+    - compression
+    - ttl_scenarios
+    - tombstone_scenarios
+    - performance_benchmarks
+    - edge_cases
+    - cassandra5_features
+
+  # Row counts for different dataset sizes
+  row_counts:
+    small: 100
+    medium: 1000
+    large: 10000
+    performance: 100000
+
+  # Compression types to test
+  compression_types:
+    - LZ4Compressor
+    - SnappyCompressor
+    - ZstdCompressor
+    - DeflateCompressor
+
+  # Bloom filter false positive chances
+  bloom_filter_fp_chances:
+    - 0.001
+    - 0.01
+    - 0.1
+
+# Validation configuration
+validation:
+  # Enable CQLite compatibility testing
+  enable_cqlite_compatibility: true
+
+  # Timeout for validation operations in seconds
+  validation_timeout: 300
+
+  # Enable checksum validation
+  enable_checksum_validation: true
+
+  # Enable cross-component validation
+  enable_cross_component_validation: true
+
+# Benchmark configuration
+benchmarks:
+  # Enable performance benchmarking
+  enable_benchmarking: true
+
+  # Number of benchmark runs per dataset
+  benchmark_runs: 3
+
+  # Benchmark timeout in seconds
+  benchmark_timeout: 60
+
+  # Metrics to collect
+  metrics:
+    - read_time_seconds
+    - read_throughput_lines_per_second
+    - memory_usage_mb
+    - cpu_usage_percent
+
+# CI/CD integration settings
+ci_integration:
+  # GitHub integration
+  github:
+    enabled: true
+    # token: "${GITHUB_TOKEN}"  # Set via environment variable
+
+  # Slack notifications
+  slack:
+    enabled: false
+    # webhook_url: "${SLACK_WEBHOOK}"  # Set via environment variable
+
+  # Artifact storage
+  artifacts:
+    enabled: true
+    # bucket: "cqlite-test-artifacts"  # S3 bucket for artifacts
+
+  # Pre-commit hooks
+  pre_commit:
+    enabled: true
+    quick_validation_only: true
+
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+  # Log to file
+  file:
+    enabled: true
+    path: "logs/pipeline.log"
+    max_size_mb: 10
+    backup_count: 5
+
+# Advanced settings
+advanced:
+  # Parallel generation of datasets
+  parallel_generation: true
+
+  # Enable memory profiling
+  memory_profiling: false
+
+  # Enable detailed timing information
+  detailed_timing: true
+
+  # Custom validation rules file
+  custom_validation_rules: "config/custom_validation_rules.yml"

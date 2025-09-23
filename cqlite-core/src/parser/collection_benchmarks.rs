@@ -239,7 +239,7 @@ impl CollectionBenchmarks {
                         0 => Value::Integer(i as i32),
                         1 => Value::Text(format!("field_{}", i)),
                         2 => Value::Boolean(i % 2 == 0),
-                        3 => Value::Float(i as f64 * 3.14),
+                        3 => Value::Float(i as f64 * std::f64::consts::PI),
                         4 => Value::BigInt(i as i64 * 1_000_000),
                         _ => {
                             let mut uuid = [0u8; 16];
