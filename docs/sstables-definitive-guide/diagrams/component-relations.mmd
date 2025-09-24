@@ -1,0 +1,14 @@
+%% SSTable component relationship (Data/Index/Summary/Filter/Statistics/CompressionInfo/TOC)
+%% Alt: Component relationships among SSTable files and their roles
+%% Caption: `Data.db` is primary; other components accelerate lookups or carry metadata
+flowchart LR
+  DATA[Data.db]:::p --> IDX[Index.db]
+  IDX --> SUM[Summary.db]
+  DATA --> BF[Filter.db]
+  DATA --> STATS[Statistics.db]
+  DATA --> CI[CompressionInfo.db]
+  classDef p fill:#efe,stroke:#484,stroke-width:1px
+  classDef m fill:#eef,stroke:#88a,stroke-width:1px
+  class DATA p
+  class IDX,SUM,BF,STATS,CI m
+

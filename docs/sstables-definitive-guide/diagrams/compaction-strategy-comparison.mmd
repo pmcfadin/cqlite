@@ -1,0 +1,27 @@
+%% Compaction strategies comparison (Cassandra 5.0)
+%% Alt text: Visual summary of STCS/LCS/TWCS principles and trade-offs
+%% Caption: STCS groups by size, LCS levels to remove overlap, TWCS isolates by time
+flowchart TD
+  subgraph ST[STCS]
+    A1[Similar-size tiers] --> A2[Compact N at a time]
+    A2 --> A3[Overlapping ranges]
+  end
+
+  subgraph LV[LCS]
+    B1[L0 backlog allowed] --> B2[Levels L1+ non-overlap]
+    B2 --> B3[Lower read amp]
+  end
+
+  subgraph TW[TWCS]
+    C1[Time windows] --> C2[Compact within window]
+    C2 --> C3[TTL-friendly]
+  end
+
+  A3 -. higher reads .-> OUT1[(Higher Read Amp)]
+  A2 -. lower writes .-> OUT2[(Lower Write Amp)]
+  B3 -. cost .-> OUT4[(Higher Write Amp)]
+  B2 -. benefit .-> OUT5[(Low Read Amp)]
+  C3 -. tradeoff .-> OUT6[(Moderate Read Amp)]
+
+  classDef note fill:#f9f,stroke:#333,stroke-width:1px
+  class OUT1,OUT2,OUT4,OUT5,OUT6 note

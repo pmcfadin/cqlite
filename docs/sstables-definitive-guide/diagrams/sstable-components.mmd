@@ -1,0 +1,15 @@
+%% SSTable component relationship diagram (stub)
+flowchart TD
+  A[Memtable] -->|Flush| B[Data.db]
+  A -->|Flush| C[Index.db]
+  A -->|Flush| D[Summary.db]
+  A -->|Flush| E[Filter.db]
+  A -->|Flush| F[Statistics.db]
+  A -->|Flush| G[CompressionInfo.db]
+  B -. listed in .-> H[TOC.txt]
+  C -. listed in .-> H
+  D -. listed in .-> H
+  E -. listed in .-> H
+  F -. listed in .-> H
+  G -. listed in .-> H
+

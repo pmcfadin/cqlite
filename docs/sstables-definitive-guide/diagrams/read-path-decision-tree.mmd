@@ -1,0 +1,16 @@
+%% Read path decision tree (Bloom → Index/Summary → Data)
+%% Alt: Decision tree for point and slice reads across Bloom, Summary/Index, and Data
+%% Caption: Negative lookups exit at Bloom; positives navigate via Summary/Index to Data
+flowchart TD
+  Q[Read request (key or slice)] --> B{Bloom contains?}
+  B -- No --> R0[Return not found]
+  B -- Yes --> S{Have Summary/Index?}
+  S -- No --> SEQ[Sequential scan Data.db]
+  S -- Yes --> SUM[Binary search Summary.db]
+  SUM --> IDX[Index seek in Index.db]
+  IDX --> D[Data read in Data.db]
+  Q -->|Slice| TR[Token range iteration]
+  TR --> SUM
+  classDef note fill:#eef,stroke:#88a,stroke-width:1px
+  class R0,SEQ,D note
+

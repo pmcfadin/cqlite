@@ -1,0 +1,39 @@
+%% SAI file layout (Cassandra 5.0, per-column segments; includes vector)
+%% Alt: Per-column SAI segments alongside base SSTables; vector segments included
+%% Cap: SAI writes immutable segments per indexed column; compaction merges segments
+flowchart TD
+  subgraph BaseSSTable[Base Table SSTables]
+    D[Data.db]
+    I[Index.db]
+    S[Summary.db]
+    F[Filter.db]
+    ST[Statistics.db]
+    C[CompressionInfo.db]
+  end
+
+  subgraph SAI[Storage-Attached Indexes]
+    direction TB
+    subgraph NumericIndex[Numeric Column Index]
+      N1[Segment N1: postings/tree]
+      N2[Segment N2: postings/tree]
+      Nmeta[Metadata]
+    end
+    subgraph TextIndex[Text Column Index]
+      T1[Segment T1: terms + postings]
+      T2[Segment T2: terms + postings]
+      Tmeta[Metadata]
+    end
+    subgraph VectorIndex[Vector Column Index]
+      V1[Segment V1: vector blocks]
+      V2[Segment V2: vector blocks]
+      Vmeta[Metadata]
+    end
+  end
+
+  D -. authoritative rows .-> Out[(Results)]
+  N1 -->|candidates| Out
+  N2 -->|candidates| Out
+  T1 -->|candidates| Out
+  T2 -->|candidates| Out
+  V1 -->|candidates| Out
+  V2 -->|candidates| Out

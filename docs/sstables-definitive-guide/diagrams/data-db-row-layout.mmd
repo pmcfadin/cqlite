@@ -1,0 +1,11 @@
+%% Data.db row layout (schematic)
+%% Alt: Annotated Data.db partition/row/cell structure
+%% Caption: Serialization header → unfiltered rows/markers → cells with flags and vints
+flowchart TD
+  SH[Serialization Header] --> P[Partition start]
+  P --> U1[Unfiltered: Row/Marker]
+  U1 --> U2[Row → Cells]
+  U2 --> C1[Cell header (flags, ts, ttl)]
+  C1 --> C2[Value bytes]
+  U1 --> M1[Range tombstone marker]
+
