@@ -1273,7 +1273,11 @@ impl SSTableReader {
             | crate::parser::header::CassandraVersion::V5_0Bti
             | crate::parser::header::CassandraVersion::V5_0Alpha
             | crate::parser::header::CassandraVersion::V5_0Beta
-            | crate::parser::header::CassandraVersion::V5_0Release => {
+            | crate::parser::header::CassandraVersion::V5_0Release
+            | crate::parser::header::CassandraVersion::V5_0DataFormat
+            | crate::parser::header::CassandraVersion::V5_0SummaryFormat
+            | crate::parser::header::CassandraVersion::V5_0FormatC
+            | crate::parser::header::CassandraVersion::V5_0FormatD => {
                 // Modern formats should never use heuristics - this is an error
                 log::error!(
                     "Heuristic compression detection called for modern format: {:?}",
