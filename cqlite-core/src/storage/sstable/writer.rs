@@ -174,7 +174,7 @@ impl SSTableWriter {
             "Cassandra header must be exactly 32 bytes"
         );
 
-        self.writer.write_all(&header).map_err(|e| Error::from(e))?;
+        self.writer.write_all(&header).map_err(Error::from)?;
         self.offset += header.len() as u64;
         Ok(())
     }
@@ -300,15 +300,13 @@ impl SSTableWriter {
         let header_bytes =
             bincode::serialize(&block_header).map_err(|e| Error::serialization(e.to_string()))?;
 
-        self.writer
-            .write_all(&header_bytes)
-            .map_err(|e| Error::from(e))?;
+        self.writer.write_all(&header_bytes).map_err(Error::from)?;
         self.offset += header_bytes.len() as u64;
 
         // Write compressed block data
         self.writer
             .write_all(&compressed_data)
-            .map_err(|e| Error::from(e))?;
+            .map_err(Error::from)?;
         self.offset += compressed_data.len() as u64;
 
         // Store checksum for verification
@@ -494,7 +492,7 @@ impl SSTableWriter {
         self.write_footer().await?;
 
         // Flush all data to disk
-        self.writer.flush().map_err(|e| Error::from(e))?;
+        self.writer.flush().map_err(Error::from)?;
 
         self.finalized = true;
         Ok(())
@@ -515,15 +513,11 @@ impl SSTableWriter {
         let header_bytes =
             bincode::serialize(&bloom_header).map_err(|e| Error::serialization(e.to_string()))?;
 
-        self.writer
-            .write_all(&header_bytes)
-            .map_err(|e| Error::from(e))?;
+        self.writer.write_all(&header_bytes).map_err(Error::from)?;
         self.offset += header_bytes.len() as u64;
 
         // Write bloom filter data
-        self.writer
-            .write_all(&bloom_data)
-            .map_err(|e| Error::from(e))?;
+        self.writer.write_all(&bloom_data).map_err(Error::from)?;
         self.offset += bloom_data.len() as u64;
 
         Ok(())
@@ -548,15 +542,11 @@ impl SSTableWriter {
         let header_bytes =
             bincode::serialize(&stats_header).map_err(|e| Error::serialization(e.to_string()))?;
 
-        self.writer
-            .write_all(&header_bytes)
-            .map_err(|e| Error::from(e))?;
+        self.writer.write_all(&header_bytes).map_err(Error::from)?;
         self.offset += header_bytes.len() as u64;
 
         // Write stats data
-        self.writer
-            .write_all(&stats_data)
-            .map_err(|e| Error::from(e))?;
+        self.writer.write_all(&stats_data).map_err(Error::from)?;
         self.offset += stats_data.len() as u64;
 
         Ok(())
@@ -571,9 +561,7 @@ impl SSTableWriter {
             .map_err(|e| Error::serialization(e.to_string()))?;
 
         // Write index data
-        self.writer
-            .write_all(&index_data)
-            .map_err(|e| Error::from(e))?;
+        self.writer.write_all(&index_data).map_err(Error::from)?;
         self.offset += index_data.len() as u64;
 
         // Write index metadata
@@ -588,7 +576,7 @@ impl SSTableWriter {
 
         self.writer
             .write_all(&metadata_bytes)
-            .map_err(|e| Error::from(e))?;
+            .map_err(Error::from)?;
         self.offset += metadata_bytes.len() as u64;
 
         Ok(())
@@ -616,7 +604,7 @@ impl SSTableWriter {
             "Cassandra footer must be exactly 16 bytes"
         );
 
-        self.writer.write_all(&footer).map_err(|e| Error::from(e))?;
+        self.writer.write_all(&footer).map_err(Error::from)?;
         self.offset += footer.len() as u64;
 
         Ok(())

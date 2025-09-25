@@ -2,9 +2,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 use crate::error::Error;
 use crate::{Config, Result, RowKey, Value, platform::Platform, types::TableId};
@@ -29,14 +31,27 @@ pub enum WalEntry {
     Checkpoint { timestamp: u64 },
 }
 
+/// WAL state protected by a single lock to prevent deadlocks
+#[derive(Debug)]
+struct WalState {
+    /// File handle for writing
+    file: tokio::fs::File,
+
+    /// Current file size
+    file_size: u64,
+
+    /// Entry count
+    entry_count: u64,
+}
+
 /// Write-Ahead Log for durability
 #[derive(Debug)]
 pub struct WriteAheadLog {
     /// Path to the WAL file
     file_path: PathBuf,
 
-    /// File handle for writing
-    file: Arc<Mutex<tokio::fs::File>>,
+    /// WAL state protected by a single lock
+    state: Arc<Mutex<WalState>>,
 
     /// Platform abstraction
     #[allow(dead_code)]
@@ -45,11 +60,8 @@ pub struct WriteAheadLog {
     /// Configuration
     config: Config,
 
-    /// Current file size
-    file_size: Arc<Mutex<u64>>,
-
-    /// Entry count
-    entry_count: Arc<Mutex<u64>>,
+    /// Operation timeout
+    operation_timeout: Duration,
 }
 
 impl WriteAheadLog {
@@ -64,17 +76,22 @@ impl WriteAheadLog {
             .read(true)
             .open(&file_path)
             .await
-            .map_err(|e| Error::from(e))?;
+            .map_err(Error::from)?;
 
-        let file_size = file.metadata().await.map_err(|e| Error::from(e))?.len();
+        let file_size = file.metadata().await.map_err(Error::from)?.len();
+
+        let state = WalState {
+            file,
+            file_size,
+            entry_count: 0,
+        };
 
         Ok(Self {
             file_path,
-            file: Arc::new(Mutex::new(file)),
+            state: Arc::new(Mutex::new(state)),
             platform,
             config: config.clone(),
-            file_size: Arc::new(Mutex::new(file_size)),
-            entry_count: Arc::new(Mutex::new(0)),
+            operation_timeout: Duration::from_secs(30), // 30 second timeout
         })
     }
 
@@ -114,7 +131,7 @@ impl WriteAheadLog {
         self.write_entry(&entry).await
     }
 
-    /// Write an entry to the WAL
+    /// Write an entry to the WAL with timeout protection
     async fn write_entry(&self, entry: &WalEntry) -> Result<()> {
         let serialized =
             bincode::serialize(entry).map_err(|e| Error::serialization(e.to_string()))?;
@@ -123,62 +140,89 @@ impl WriteAheadLog {
         let length = serialized.len() as u32;
         let length_bytes = length.to_le_bytes();
 
-        let mut file = self.file.lock().await;
-        let mut file_size = self.file_size.lock().await;
-        let mut entry_count = self.entry_count.lock().await;
+        // Use timeout to prevent hanging
+        let result = timeout(self.operation_timeout, async {
+            let mut state = self.state.lock().await;
 
-        // Write length prefix
-        file.write_all(&length_bytes)
-            .await
-            .map_err(|e| Error::from(e))?;
+            // Write length prefix
+            state
+                .file
+                .write_all(&length_bytes)
+                .await
+                .map_err(Error::from)?;
 
-        // Write entry data
-        file.write_all(&serialized)
-            .await
-            .map_err(|e| Error::from(e))?;
+            // Write entry data
+            state
+                .file
+                .write_all(&serialized)
+                .await
+                .map_err(Error::from)?;
 
-        // Update counters
-        *file_size += (length_bytes.len() + serialized.len()) as u64;
-        *entry_count += 1;
+            // Update counters
+            state.file_size += (length_bytes.len() + serialized.len()) as u64;
+            state.entry_count += 1;
 
-        // Auto-sync if configured
-        if self.config.storage.wal.sync_writes {
-            file.sync_all().await.map_err(|e| Error::from(e))?;
+            // Auto-sync if configured
+            if self.config.storage.wal.sync_writes {
+                state.file.sync_all().await.map_err(Error::from)?;
+            }
+
+            Ok::<(), Error>(())
+        })
+        .await;
+
+        match result {
+            Ok(inner_result) => inner_result,
+            Err(_) => Err(Error::Timeout(
+                "WAL write operation timed out after 30 seconds".to_string(),
+            )),
         }
-
-        Ok(())
     }
 
     /// Flush all pending writes to disk
     pub async fn flush(&self) -> Result<()> {
-        let file = self.file.lock().await;
-        file.sync_all().await.map_err(|e| Error::from(e))?;
-        Ok(())
+        let result = timeout(self.operation_timeout, async {
+            let state = self.state.lock().await;
+            state.file.sync_all().await.map_err(Error::from)?;
+            Ok::<(), Error>(())
+        })
+        .await;
+
+        match result {
+            Ok(inner_result) => inner_result,
+            Err(_) => Err(Error::Timeout(
+                "WAL flush operation timed out after 30 seconds".to_string(),
+            )),
+        }
     }
 
     /// Read all entries from the WAL
     pub async fn read_all(&self) -> Result<Vec<WalEntry>> {
         let mut entries = Vec::new();
-        let mut file = self.file.lock().await;
+        let mut state = self.state.lock().await;
 
         // Seek to beginning
-        file.seek(SeekFrom::Start(0))
+        state
+            .file
+            .seek(SeekFrom::Start(0))
             .await
-            .map_err(|e| Error::from(e))?;
+            .map_err(Error::from)?;
 
         // Read entries
         loop {
             // Read length prefix
             let mut length_bytes = [0u8; 4];
-            match file.read_exact(&mut length_bytes).await {
+            match state.file.read_exact(&mut length_bytes).await {
                 Ok(_) => {
                     let length = u32::from_le_bytes(length_bytes) as usize;
 
                     // Read entry data
                     let mut entry_data = vec![0u8; length];
-                    file.read_exact(&mut entry_data)
+                    state
+                        .file
+                        .read_exact(&mut entry_data)
                         .await
-                        .map_err(|e| Error::from(e))?;
+                        .map_err(Error::from)?;
 
                     // Deserialize entry
                     let entry: WalEntry = bincode::deserialize(&entry_data)
@@ -201,25 +245,26 @@ impl WriteAheadLog {
 
     /// Truncate the WAL file
     pub async fn truncate(&self) -> Result<()> {
-        let mut file = self.file.lock().await;
-        let mut file_size = self.file_size.lock().await;
-        let mut entry_count = self.entry_count.lock().await;
+        let mut state = self.state.lock().await;
 
-        file.set_len(0).await.map_err(|e| Error::from(e))?;
-        file.seek(SeekFrom::Start(0))
+        state.file.set_len(0).await.map_err(Error::from)?;
+        state
+            .file
+            .seek(SeekFrom::Start(0))
             .await
-            .map_err(|e| Error::from(e))?;
+            .map_err(Error::from)?;
 
-        *file_size = 0;
-        *entry_count = 0;
+        state.file_size = 0;
+        state.entry_count = 0;
 
         Ok(())
     }
 
     /// Get WAL statistics
     pub async fn stats(&self) -> Result<WalStats> {
-        let file_size = *self.file_size.lock().await;
-        let entry_count = *self.entry_count.lock().await;
+        let state = self.state.lock().await;
+        let file_size = state.file_size;
+        let entry_count = state.entry_count;
 
         Ok(WalStats {
             file_size,

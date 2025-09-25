@@ -464,7 +464,7 @@ impl SchemaAwareReader {
 
     /// Get Cassandra version detected from the SSTable
     pub fn cassandra_version(&self) -> CassandraVersion {
-        self.version.clone()
+        self.version
     }
 
     /// Get the file path being read

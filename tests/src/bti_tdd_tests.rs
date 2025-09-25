@@ -781,9 +781,7 @@ impl BtiTddTestSuite {
         let encoded2 = self.encoder.encode_value(&set2)?;
 
         if encoded1 != encoded2 {
-            return Err(Error::Parse(
-                "Set ordering not deterministic".to_string(),
-            ));
+            return Err(Error::Parse("Set ordering not deterministic".to_string()));
         }
 
         Ok(())
@@ -961,9 +959,7 @@ impl BtiTddTestSuite {
 
         let batch_encoded = self.batch_encoder.encode_batch(&values)?;
         if batch_encoded.len() != values.len() {
-            return Err(Error::Parse(
-                "Batch encoding count mismatch".to_string(),
-            ));
+            return Err(Error::Parse("Batch encoding count mismatch".to_string()));
         }
 
         // Test individual encoding matches batch encoding

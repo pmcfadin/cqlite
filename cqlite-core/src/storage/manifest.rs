@@ -98,9 +98,7 @@ impl Manifest {
 
         let state = if tokio::fs::metadata(&manifest_path).await.is_ok() {
             // Load existing manifest
-            let data = tokio::fs::read(&manifest_path)
-                .await
-                .map_err(|e| Error::from(e))?;
+            let data = tokio::fs::read(&manifest_path).await.map_err(Error::from)?;
 
             bincode::deserialize(&data).map_err(|e| Error::serialization(e.to_string()))?
         } else {
@@ -274,7 +272,7 @@ impl Manifest {
 
         tokio::fs::write(&self.manifest_path, data)
             .await
-            .map_err(|e| Error::from(e))?;
+            .map_err(Error::from)?;
 
         Ok(())
     }
@@ -305,7 +303,7 @@ impl Manifest {
 
         tokio::fs::write(&checkpoint_path, data)
             .await
-            .map_err(|e| Error::from(e))?;
+            .map_err(Error::from)?;
 
         Ok(())
     }

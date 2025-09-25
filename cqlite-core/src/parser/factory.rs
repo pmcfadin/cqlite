@@ -27,7 +27,7 @@ impl ParserFactory {
     /// Create a parser with the specified configuration
     pub fn create(config: ParserConfig) -> Result<Arc<dyn CqlParser + Send + Sync>> {
         // Validate configuration
-        config.validate().map_err(|e| Error::configuration(e))?;
+        config.validate().map_err(Error::configuration)?;
 
         let backend = match config.backend.clone() {
             ParserBackend::Nom => Self::create_nom_parser(config)?,
@@ -298,7 +298,7 @@ static GLOBAL_REGISTRY: OnceLock<Mutex<ParserRegistry>> = OnceLock::new();
 fn with_global_registry<T>(f: impl FnOnce(&mut ParserRegistry) -> T) -> T {
     let registry = GLOBAL_REGISTRY.get_or_init(|| Mutex::new(ParserRegistry::new()));
     let mut guard = registry.lock().unwrap();
-    f(&mut *guard)
+    f(&mut guard)
 }
 
 /// Register a global parser factory

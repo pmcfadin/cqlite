@@ -555,7 +555,7 @@ async fn create_realistic_summary_file(path: &Path) {
             0x00,
             0x00,
             0x00,
-            (i as u8) * 100,
+            ((i * 100) % 256) as u8,
             0x00, // Index offset
             0x00,
             0x00,

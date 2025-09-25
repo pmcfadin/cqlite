@@ -99,7 +99,6 @@ impl QueryParser {
         // Extract LIMIT clause
         if let Some(limit_part) = self.extract_after(sql, "LIMIT") {
             let limit_str = limit_part
-                .trim()
                 .split_whitespace()
                 .next()
                 .ok_or_else(|| Error::query_execution("Missing limit value".to_string()))?;
@@ -429,7 +428,7 @@ impl QueryParser {
         let mut order_by = Vec::new();
 
         for order_item in order_part.split(',') {
-            let parts: Vec<&str> = order_item.trim().split_whitespace().collect();
+            let parts: Vec<&str> = order_item.split_whitespace().collect();
             if !parts.is_empty() {
                 let column = parts[0].to_string();
                 let direction = if parts.len() > 1 && parts[1].to_uppercase() == "DESC" {

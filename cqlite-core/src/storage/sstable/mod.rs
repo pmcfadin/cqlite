@@ -55,6 +55,12 @@ use crate::{Config, Result, RowKey, Value, types::TableId};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SSTableId(pub String);
 
+impl Default for SSTableId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SSTableId {
     /// Create a new SSTable ID with timestamp using Cassandra naming convention
     pub fn new() -> Self {

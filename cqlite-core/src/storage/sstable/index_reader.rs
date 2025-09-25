@@ -118,6 +118,14 @@ impl IndexReader {
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).await?;
 
+        // Check for empty file
+        if buffer.is_empty() {
+            return Err(Error::corruption(format!(
+                "Index.db file is empty: {}",
+                path.display()
+            )));
+        }
+
         // Parse the index data with optional Summary.db correlation
         let index_data = match parse_index_data_with_summary(&buffer, summary_reader) {
             Ok((_, data)) => data,

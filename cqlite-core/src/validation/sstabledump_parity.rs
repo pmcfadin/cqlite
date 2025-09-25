@@ -708,7 +708,7 @@ impl SStableDumpParityValidator {
 
         writeln!(report, "# SSTableDump Parity Validation Report").unwrap();
         writeln!(report, "## Issue #25: Zero Tolerance Evidence").unwrap();
-        writeln!(report, "").unwrap();
+        writeln!(report).unwrap();
         writeln!(
             report,
             "**Validation Timestamp:** {}",
@@ -716,7 +716,7 @@ impl SStableDumpParityValidator {
         )
         .unwrap();
         writeln!(report, "**Overall Status:** {:?}", result.status).unwrap();
-        writeln!(report, "").unwrap();
+        writeln!(report).unwrap();
 
         // Summary statistics
         writeln!(report, "## Summary").unwrap();
@@ -744,7 +744,7 @@ impl SStableDumpParityValidator {
             result.discrepancy_summary.total_discrepancies
         )
         .unwrap();
-        writeln!(report, "").unwrap();
+        writeln!(report).unwrap();
 
         // Parity evidence
         match result.status {
@@ -754,7 +754,7 @@ impl SStableDumpParityValidator {
                     "## ✅ ZERO TOLERANCE EVIDENCE: PERFECT PARITY ACHIEVED"
                 )
                 .unwrap();
-                writeln!(report, "").unwrap();
+                writeln!(report).unwrap();
                 writeln!(
                     report,
                     "Our spec-accurate, schema-driven readers produce **IDENTICAL** output"
@@ -765,7 +765,7 @@ impl SStableDumpParityValidator {
                     "to Cassandra's sstabledump tool with **ZERO DISCREPANCIES**."
                 )
                 .unwrap();
-                writeln!(report, "").unwrap();
+                writeln!(report).unwrap();
                 writeln!(report, "This proves that Issue #25 implementation:").unwrap();
                 writeln!(report, "- ✅ Eliminates ALL heuristic parsing").unwrap();
                 writeln!(report, "- ✅ Uses schema-driven type resolution").unwrap();
@@ -778,12 +778,12 @@ impl SStableDumpParityValidator {
             }
             _ => {
                 writeln!(report, "## ⚠️ DISCREPANCIES FOUND - REQUIRES ATTENTION").unwrap();
-                writeln!(report, "").unwrap();
+                writeln!(report).unwrap();
                 writeln!(report, "**Critical Issues:**").unwrap();
                 for issue in &result.discrepancy_summary.critical_issues {
                     writeln!(report, "- {}", issue).unwrap();
                 }
-                writeln!(report, "").unwrap();
+                writeln!(report).unwrap();
             }
         }
 
@@ -825,7 +825,7 @@ impl SStableDumpParityValidator {
             "⚠️ SOME GUARDRAILS FAILED"
         };
         writeln!(report, "- **Guardrail Status:** {}", guardrails_status).unwrap();
-        writeln!(report, "").unwrap();
+        writeln!(report).unwrap();
 
         // Detailed guardrail results
         writeln!(report, "### Performance Guardrail Details").unwrap();
@@ -848,7 +848,7 @@ impl SStableDumpParityValidator {
             )
             .unwrap();
         }
-        writeln!(report, "").unwrap();
+        writeln!(report).unwrap();
 
         // Baseline comparison details
         let baseline = &result
@@ -888,7 +888,7 @@ impl SStableDumpParityValidator {
             (baseline.regression_threshold - 1.0) * 100.0
         )
         .unwrap();
-        writeln!(report, "").unwrap();
+        writeln!(report).unwrap();
 
         // Throughput analysis
         let throughput = &result
@@ -918,12 +918,12 @@ impl SStableDumpParityValidator {
             }
         )
         .unwrap();
-        writeln!(report, "").unwrap();
+        writeln!(report).unwrap();
 
         // Detailed file results
         if !result.file_results.is_empty() {
             writeln!(report, "## Detailed File Results").unwrap();
-            writeln!(report, "").unwrap();
+            writeln!(report).unwrap();
 
             for (i, file_result) in result.file_results.iter().enumerate() {
                 let status_emoji = match file_result.status {
@@ -985,7 +985,7 @@ impl SStableDumpParityValidator {
                         }
                     }
                 }
-                writeln!(report, "").unwrap();
+                writeln!(report).unwrap();
             }
         }
 

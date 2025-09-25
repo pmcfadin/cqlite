@@ -4,10 +4,10 @@
 //! specification-driven decoding shared across Data.db, Index.db, and Summary.db readers.
 
 use cqlite_core::{
-    storage::sstable::header_spec::{
-        get_global_registry, SSTableComponentType, HeaderSpecRegistry,
-    },
     parser::header::CassandraVersion,
+    storage::sstable::header_spec::{
+        HeaderSpecRegistry, SSTableComponentType, get_global_registry,
+    },
 };
 
 /// Test basic header specification registry functionality
@@ -33,8 +33,8 @@ async fn test_header_spec_registry_initialization() {
 
     let summary_spec = registry.get_spec(SSTableComponentType::Summary).unwrap();
     assert_eq!(summary_spec.component_type, SSTableComponentType::Summary);
-    assert!(summary_spec.has_magic_number);
-    assert_eq!(summary_spec.magic_number, Some(0x43515354)); // "CQST"
+    assert!(!summary_spec.has_magic_number); // Default spec is legacy format
+    assert_eq!(summary_spec.magic_number, None); // Legacy format has no magic
 }
 
 /// Test Data.db header parsing with different Cassandra versions
@@ -60,7 +60,11 @@ async fn test_data_header_parsing_multiple_versions() {
     data.extend_from_slice(&12345u64.to_be_bytes());
 
     let result = registry.parse_data_header(&data);
-    assert!(result.is_ok(), "Failed to parse valid Data.db header: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to parse valid Data.db header: {:?}",
+        result.err()
+    );
 
     let parsed_header = result.unwrap();
     assert_eq!(parsed_header.component_type, SSTableComponentType::Data);
@@ -73,13 +77,28 @@ async fn test_data_header_parsing_multiple_versions() {
     assert!(parsed_header.fields.contains_key("table_name"));
     assert!(parsed_header.fields.contains_key("generation"));
 
-    let keyspace = parsed_header.fields.get("keyspace").unwrap().as_string().unwrap();
+    let keyspace = parsed_header
+        .fields
+        .get("keyspace")
+        .unwrap()
+        .as_string()
+        .unwrap();
     assert_eq!(keyspace, "keyspace");
 
-    let table_name = parsed_header.fields.get("table_name").unwrap().as_string().unwrap();
+    let table_name = parsed_header
+        .fields
+        .get("table_name")
+        .unwrap()
+        .as_string()
+        .unwrap();
     assert_eq!(table_name, "table");
 
-    let generation = parsed_header.fields.get("generation").unwrap().as_u64().unwrap();
+    let generation = parsed_header
+        .fields
+        .get("generation")
+        .unwrap()
+        .as_u64()
+        .unwrap();
     assert_eq!(generation, 12345);
 }
 
@@ -95,7 +114,11 @@ async fn test_index_header_parsing_legacy_format() {
     data.extend_from_slice(&0x12345678u32.to_be_bytes()); // checksum
 
     let result = registry.parse_index_header(&data);
-    assert!(result.is_ok(), "Failed to parse valid Index.db header: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to parse valid Index.db header: {:?}",
+        result.err()
+    );
 
     let parsed_header = result.unwrap();
     assert_eq!(parsed_header.component_type, SSTableComponentType::Index);
@@ -103,16 +126,36 @@ async fn test_index_header_parsing_legacy_format() {
     assert_eq!(parsed_header.format_version, 2);
 
     // Verify field extraction
-    let version = parsed_header.fields.get("version").unwrap().as_u32().unwrap();
+    let version = parsed_header
+        .fields
+        .get("version")
+        .unwrap()
+        .as_u32()
+        .unwrap();
     assert_eq!(version, 2);
 
-    let entry_count = parsed_header.fields.get("entry_count").unwrap().as_u32().unwrap();
+    let entry_count = parsed_header
+        .fields
+        .get("entry_count")
+        .unwrap()
+        .as_u32()
+        .unwrap();
     assert_eq!(entry_count, 1000);
 
-    let data_size = parsed_header.fields.get("data_size").unwrap().as_u64().unwrap();
+    let data_size = parsed_header
+        .fields
+        .get("data_size")
+        .unwrap()
+        .as_u64()
+        .unwrap();
     assert_eq!(data_size, 65536);
 
-    let checksum = parsed_header.fields.get("checksum").unwrap().as_u32().unwrap();
+    let checksum = parsed_header
+        .fields
+        .get("checksum")
+        .unwrap()
+        .as_u32()
+        .unwrap();
     assert_eq!(checksum, 0x12345678);
 }
 
@@ -132,23 +175,47 @@ async fn test_summary_header_parsing_with_magic() {
     data.extend_from_slice(&0xABCDEF00u32.to_be_bytes()); // checksum
 
     let result = registry.parse_summary_header(&data);
-    assert!(result.is_ok(), "Failed to parse valid Summary.db header: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to parse valid Summary.db header: {:?}",
+        result.err()
+    );
 
     let parsed_header = result.unwrap();
     assert_eq!(parsed_header.component_type, SSTableComponentType::Summary);
     assert_eq!(parsed_header.format_version, 3);
 
     // Verify field extraction
-    let entry_count = parsed_header.fields.get("entry_count").unwrap().as_u32().unwrap();
+    let entry_count = parsed_header
+        .fields
+        .get("entry_count")
+        .unwrap()
+        .as_u32()
+        .unwrap();
     assert_eq!(entry_count, 500);
 
-    let sampling_rate = parsed_header.fields.get("sampling_rate").unwrap().as_u32().unwrap();
+    let sampling_rate = parsed_header
+        .fields
+        .get("sampling_rate")
+        .unwrap()
+        .as_u32()
+        .unwrap();
     assert_eq!(sampling_rate, 128);
 
-    let min_token = parsed_header.fields.get("min_token").unwrap().as_u64().unwrap();
+    let min_token = parsed_header
+        .fields
+        .get("min_token")
+        .unwrap()
+        .as_u64()
+        .unwrap();
     assert_eq!(min_token as i64, -1000);
 
-    let max_token = parsed_header.fields.get("max_token").unwrap().as_u64().unwrap();
+    let max_token = parsed_header
+        .fields
+        .get("max_token")
+        .unwrap()
+        .as_u64()
+        .unwrap();
     assert_eq!(max_token as i64, 1000);
 }
 
@@ -165,7 +232,10 @@ async fn test_field_validation_constraints() {
     data.extend_from_slice(&0u32.to_be_bytes()); // checksum
 
     let result = registry.parse_index_header(&data);
-    assert!(result.is_err(), "Should fail validation for excessive entry count");
+    assert!(
+        result.is_err(),
+        "Should fail validation for excessive entry count"
+    );
 
     // Test Summary.db with invalid sampling rate (zero)
     let mut data = Vec::new();
@@ -179,7 +249,10 @@ async fn test_field_validation_constraints() {
     data.extend_from_slice(&0u32.to_be_bytes()); // checksum
 
     let result = registry.parse_summary_header(&data);
-    assert!(result.is_err(), "Should fail validation for zero sampling rate");
+    assert!(
+        result.is_err(),
+        "Should fail validation for zero sampling rate"
+    );
 }
 
 /// Test error handling for insufficient data
@@ -290,10 +363,20 @@ async fn test_roundtrip_compatibility() {
     // Verify the parsed values match expected legacy format
     assert_eq!(parsed_header.format_version, 1);
 
-    let entry_count = parsed_header.fields.get("entry_count").unwrap().as_u32().unwrap();
+    let entry_count = parsed_header
+        .fields
+        .get("entry_count")
+        .unwrap()
+        .as_u32()
+        .unwrap();
     assert_eq!(entry_count, 250);
 
-    let sampling_rate = parsed_header.fields.get("sampling_rate").unwrap().as_u32().unwrap();
+    let sampling_rate = parsed_header
+        .fields
+        .get("sampling_rate")
+        .unwrap()
+        .as_u32()
+        .unwrap();
     assert_eq!(sampling_rate, 64);
 }
 
@@ -329,13 +412,20 @@ async fn test_parsing_performance_regression() {
     }
     let spec_duration = start.elapsed();
 
-    println!("Spec-driven parsing: {} iterations in {:?} ({:?} per iteration)",
-             iterations, spec_duration, spec_duration / iterations);
+    println!(
+        "Spec-driven parsing: {} iterations in {:?} ({:?} per iteration)",
+        iterations,
+        spec_duration,
+        spec_duration / iterations
+    );
 
     // Ensure performance is reasonable (should be faster than 100μs per parse)
     let per_iteration = spec_duration / iterations;
-    assert!(per_iteration.as_micros() < 100,
-            "Spec-driven parsing too slow: {:?} per iteration", per_iteration);
+    assert!(
+        per_iteration.as_micros() < 100,
+        "Spec-driven parsing too slow: {:?} per iteration",
+        per_iteration
+    );
 }
 
 /// Test comprehensive field extraction with different data types
@@ -354,9 +444,18 @@ async fn test_comprehensive_field_extraction() {
 
     // Test type-safe extraction
     assert_eq!(result.fields.get("version").unwrap().as_u32().unwrap(), 5);
-    assert_eq!(result.fields.get("entry_count").unwrap().as_u32().unwrap(), 2500);
-    assert_eq!(result.fields.get("data_size").unwrap().as_u64().unwrap(), 1048576);
-    assert_eq!(result.fields.get("checksum").unwrap().as_u32().unwrap(), 0xDEADBEEF);
+    assert_eq!(
+        result.fields.get("entry_count").unwrap().as_u32().unwrap(),
+        2500
+    );
+    assert_eq!(
+        result.fields.get("data_size").unwrap().as_u64().unwrap(),
+        1048576
+    );
+    assert_eq!(
+        result.fields.get("checksum").unwrap().as_u32().unwrap(),
+        0xDEADBEEF
+    );
 
     // Test that wrong type extraction fails appropriately
     assert!(result.fields.get("version").unwrap().as_string().is_err());

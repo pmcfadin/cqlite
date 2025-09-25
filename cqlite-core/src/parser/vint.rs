@@ -39,7 +39,10 @@ fn detect_ascii_corruption(input: &[u8]) -> bool {
     }
 
     // Check if all bytes look like printable ASCII (likely corruption)
-    let ascii_count = bytes.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count();
+    let ascii_count = bytes
+        .iter()
+        .filter(|&&b| (0x20..=0x7E).contains(&b))
+        .count();
     if ascii_count >= 3 {
         return true;
     }
@@ -90,11 +93,11 @@ pub fn parse_vint(input: &[u8]) -> IResult<&[u8], i64> {
 
     // Try the fixed Cassandra-compatible VInt parsing first
     match crate::parser::vint_fixed::parse_vint_fixed(input) {
-        Ok(result) => return Ok(result),
+        Ok(result) => Ok(result),
         Err(_) => {
             // Fall back to ZigZag encoding for backward compatibility
             // This handles edge cases and legacy formats
-            return parse_zigzag_vint(input);
+            parse_zigzag_vint(input)
         }
     }
 }
@@ -229,7 +232,7 @@ fn parse_cassandra_vint_format(
         let max_positive = (1i64 << (data_bits - 1)) - 1;
         if value > max_positive {
             // Convert from unsigned to signed (two's complement)
-            value = value - (1i64 << data_bits);
+            value -= 1i64 << data_bits;
         }
 
         value
@@ -312,13 +315,13 @@ fn encode_cassandra_vint(value: i64) -> Vec<u8> {
     // Determine the number of bytes needed
     let bytes_needed = if value == 0 {
         1
-    } else if value >= -63 && value <= 63 {
+    } else if (-63..=63).contains(&value) {
         1 // Single byte range for small values
-    } else if value >= -8192 && value <= 8191 {
+    } else if (-8192..=8191).contains(&value) {
         2 // Two bytes
-    } else if value >= -1048576 && value <= 1048575 {
+    } else if (-1048576..=1048575).contains(&value) {
         3 // Three bytes  
-    } else if value >= -134217728 && value <= 134217727 {
+    } else if (-134217728..=134217727).contains(&value) {
         4 // Four bytes
     } else {
         // Calculate bytes needed for larger values
@@ -339,11 +342,11 @@ fn encode_cassandra_vint(value: i64) -> Vec<u8> {
     match bytes_needed {
         1 => {
             // Single byte: 1xxxxxxx for values 0-127, 0xxxxxxx for negative -1 to -63
-            if value >= 0 && value <= 63 {
+            if (0..=63).contains(&value) {
                 vec![0x80 | (value as u8)]
             } else if value == -1 {
                 vec![0xFF]
-            } else if value >= -63 && value < 0 {
+            } else if (-63..0).contains(&value) {
                 vec![0xC0 | ((-value) as u8)]
             } else {
                 // fallback to two bytes

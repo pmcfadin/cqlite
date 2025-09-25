@@ -323,7 +323,7 @@ impl DataIntegrityValidator {
         let details = match self.open_sstable_reader(path).await {
             Ok(_reader) => {
                 bytes_validated = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                format!("Format structure valid, header parsed successfully")
+                "Format structure valid, header parsed successfully".to_string()
             }
             Err(e) => {
                 status = IntegrityStatus::Failed;

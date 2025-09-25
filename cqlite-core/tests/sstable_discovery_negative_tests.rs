@@ -576,11 +576,11 @@ fn create_valid_sstable_header() -> Vec<u8> {
         data.extend_from_slice(&[
             0x00, 0x00, 0x00, 0x08, // Key length
         ]);
-        data.extend_from_slice(&format!("key_{:04}", i).as_bytes());
+        data.extend_from_slice(format!("key_{:04}", i).as_bytes());
         data.extend_from_slice(&[
             0x00, 0x00, 0x00, 0x10, // Value length
         ]);
-        data.extend_from_slice(&vec![0x44; 16]); // Mock value data
+        data.extend_from_slice(&[0x44; 16]); // Mock value data
     }
 
     data
@@ -612,7 +612,7 @@ fn get_memory_usage() -> usize {
 async fn test_negative_tests_coordination() {
     // Store negative test results in memory for coordination
     let result = tokio::process::Command::new("npx")
-        .args(&[
+        .args([
             "claude-flow@alpha",
             "hooks",
             "post-edit",

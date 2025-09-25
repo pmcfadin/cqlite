@@ -193,6 +193,12 @@ pub struct HeaderSpecRegistry {
     specs: HashMap<SSTableComponentType, ComponentHeaderSpec>,
 }
 
+impl Default for HeaderSpecRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HeaderSpecRegistry {
     /// Create a new registry with default specifications
     pub fn new() -> Self {
@@ -324,12 +330,23 @@ impl HeaderSpecRegistry {
             SSTableComponentType::Summary,
             ComponentHeaderSpec {
                 component_type: SSTableComponentType::Summary,
-                has_magic_number: true,
-                magic_number: Some(0x43515354), // "CQST" in ASCII
+                has_magic_number: false, // Default to legacy format
+                magic_number: None,
                 min_version: 1,
                 max_version: 10,
                 field_layout: HeaderFieldLayout {
                     fields: vec![
+                        HeaderField {
+                            name: "version".to_string(),
+                            field_type: HeaderFieldType::U32BE,
+                            optional: false,
+                            validation: Some(FieldValidation {
+                                min_value: Some(1),
+                                max_value: Some(10),
+                                allowed_values: None,
+                                max_length: None,
+                            }),
+                        },
                         HeaderField {
                             name: "entry_count".to_string(),
                             field_type: HeaderFieldType::U32BE,
@@ -428,36 +445,43 @@ pub fn parse_component_header(input: &[u8], spec: &ComponentHeaderSpec) -> Resul
 
     // Parse magic number and version for components that support it
     let (cassandra_version, format_version) = if spec.has_magic_number {
-        let (new_remaining, (version, format_ver)) = parse_magic_and_version(remaining)
-            .map_err(|e| Error::corruption(format!("Failed to parse magic/version: {:?}", e)))?;
-        remaining = new_remaining;
+        // Try to parse magic number if expected
+        if let Some(expected_magic) = spec.magic_number {
+            // For Summary.db with known magic number ("CQST")
+            if remaining.len() < 4 {
+                return Err(Error::corruption(
+                    "Insufficient data for magic number".to_string(),
+                ));
+            }
+            let (new_remaining, magic) = be_u32::<_, nom::error::Error<&[u8]>>(remaining)
+                .map_err(|e| Error::corruption(format!("Failed to parse magic: {:?}", e)))?;
+            if magic != expected_magic {
+                return Err(Error::corruption(format!(
+                    "Magic number mismatch: expected 0x{:08X}, got 0x{:08X}",
+                    expected_magic, magic
+                )));
+            }
+            remaining = new_remaining;
 
-        // Validate version range
-        if u32::from(format_ver) < spec.min_version || u32::from(format_ver) > spec.max_version {
-            return Err(Error::corruption(format!(
-                "Unsupported version {} for {:?} (supported: {}-{})",
-                format_ver, spec.component_type, spec.min_version, spec.max_version
-            )));
+            // Parse version after magic
+            let (new_remaining, version) = be_u32::<_, nom::error::Error<&[u8]>>(remaining)
+                .map_err(|e| Error::corruption(format!("Failed to parse version: {:?}", e)))?;
+            remaining = new_remaining;
+
+            (CassandraVersion::Legacy, version as u16)
+        } else {
+            // For Data.db with dynamic magic numbers
+            let (new_remaining, (version, format_ver)) = parse_magic_and_version(remaining)
+                .map_err(|e| {
+                    Error::corruption(format!("Failed to parse magic/version: {:?}", e))
+                })?;
+            remaining = new_remaining;
+            (version, format_ver)
         }
-
-        (version, format_ver)
     } else {
-        // For legacy components without magic numbers, read version directly
-        let (new_remaining, version) = be_u32::<_, nom::error::Error<&[u8]>>(remaining)
-            .map_err(|e| Error::corruption(format!("Failed to parse version: {:?}", e)))?;
-        remaining = new_remaining;
-
-        if version < spec.min_version || version > spec.max_version {
-            return Err(Error::corruption(format!(
-                "Unsupported version {} for {:?} (supported: {}-{})",
-                version, spec.component_type, spec.min_version, spec.max_version
-            )));
-        }
-
-        // Store version as field for legacy components
-        fields.insert("version".to_string(), HeaderFieldValue::U32(version));
-
-        (CassandraVersion::Legacy, version as u16)
+        // For legacy components without magic numbers (Index.db),
+        // version will be parsed as part of the field layout
+        (CassandraVersion::Legacy, 1u16) // Default version, actual version comes from fields
     };
 
     // Parse each field according to specification
@@ -482,10 +506,21 @@ pub fn parse_component_header(input: &[u8], spec: &ComponentHeaderSpec) -> Resul
         )));
     }
 
+    // For legacy components without magic numbers, update format_version from parsed version field
+    let actual_format_version = if !spec.has_magic_number {
+        if let Some(HeaderFieldValue::U32(version)) = fields.get("version") {
+            *version as u16
+        } else {
+            format_version
+        }
+    } else {
+        format_version
+    };
+
     Ok(ParsedHeader {
         component_type: spec.component_type,
         cassandra_version,
-        format_version: format_version.into(),
+        format_version: actual_format_version.into(),
         fields,
         header_size,
     })
@@ -525,7 +560,15 @@ fn parse_header_field<'a>(
             (remaining, HeaderFieldValue::VInt(val))
         }
         HeaderFieldType::VString => {
-            let (remaining, len) = parse_vint_length(input)?;
+            // VString format: one byte length followed by UTF-8 bytes
+            if input.is_empty() {
+                return Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)));
+            }
+            let len = input[0] as usize;
+            if input.len() < 1 + len {
+                return Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)));
+            }
+            let (remaining, _) = take(1usize)(input)?; // consume length byte
             let (remaining, bytes) = take(len)(remaining)?;
             let string = String::from_utf8(bytes.to_vec())
                 .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::Verify)))?;
@@ -586,22 +629,49 @@ fn parse_header_field<'a>(
 
 /// Validate field value against constraints
 fn validate_field_value(value: &HeaderFieldValue, validation: &FieldValidation) -> Result<()> {
-    // Validate numeric ranges
-    if let (Some(min), Some(max)) = (validation.min_value, validation.max_value) {
+    // Validate numeric ranges with proper handling of both signed and unsigned values
+    if validation.min_value.is_some() || validation.max_value.is_some() {
         let num_value = match value {
             HeaderFieldValue::U8(v) => *v as u64,
             HeaderFieldValue::U16(v) => *v as u64,
             HeaderFieldValue::U32(v) => *v as u64,
             HeaderFieldValue::U64(v) => *v,
-            HeaderFieldValue::VInt(v) => *v as u64,
+            HeaderFieldValue::VInt(v) => {
+                // For VInt, handle negative values carefully
+                if *v < 0 {
+                    // Check only minimum for negative values
+                    if let Some(min) = validation.min_value {
+                        if *v < (min as i64) {
+                            return Err(Error::corruption(format!(
+                                "Field value {} below minimum {}",
+                                v, min
+                            )));
+                        }
+                    }
+                    return Ok(()); // Skip max validation for negative VInt
+                } else {
+                    *v as u64
+                }
+            }
             _ => return Ok(()), // Skip validation for non-numeric types
         };
 
-        if num_value < min || num_value > max {
-            return Err(Error::corruption(format!(
-                "Field value {} outside valid range [{}, {}]",
-                num_value, min, max
-            )));
+        if let Some(min) = validation.min_value {
+            if num_value < min {
+                return Err(Error::corruption(format!(
+                    "Field value {} below minimum {}",
+                    num_value, min
+                )));
+            }
+        }
+
+        if let Some(max) = validation.max_value {
+            if num_value > max {
+                return Err(Error::corruption(format!(
+                    "Field value {} above maximum {}",
+                    num_value, max
+                )));
+            }
         }
     }
 
@@ -628,7 +698,7 @@ fn validate_field_value(value: &HeaderFieldValue, validation: &FieldValidation) 
             HeaderFieldValue::U16(v) => *v as u64,
             HeaderFieldValue::U32(v) => *v as u64,
             HeaderFieldValue::U64(v) => *v,
-            HeaderFieldValue::VInt(v) => *v as u64,
+            HeaderFieldValue::VInt(v) => (*v).unsigned_abs(),
             _ => return Ok(()), // Skip validation for non-numeric types
         };
 
@@ -655,9 +725,31 @@ impl HeaderSpecRegistry {
         self.parse_header(input, SSTableComponentType::Index)
     }
 
-    /// Parse Summary.db header
+    /// Parse Summary.db header with auto-detection of format
     pub fn parse_summary_header(&self, input: &[u8]) -> Result<ParsedHeader> {
-        self.parse_header(input, SSTableComponentType::Summary)
+        if input.len() < 4 {
+            return Err(Error::corruption(
+                "Insufficient data for Summary.db header".to_string(),
+            ));
+        }
+
+        // Check if it starts with "CQST" magic number
+        let potential_magic = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
+        if potential_magic == 0x43515354 {
+            // Use magic number format
+            let mut magic_spec = self.get_spec(SSTableComponentType::Summary)?.clone();
+            magic_spec.has_magic_number = true;
+            magic_spec.magic_number = Some(0x43515354); // "CQST"
+            // Remove version field since it's handled by magic parsing
+            magic_spec
+                .field_layout
+                .fields
+                .retain(|f| f.name != "version");
+            parse_component_header(input, &magic_spec)
+        } else {
+            // Use legacy format (no magic number)
+            self.parse_header(input, SSTableComponentType::Summary)
+        }
     }
 }
 

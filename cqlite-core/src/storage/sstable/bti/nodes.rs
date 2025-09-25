@@ -215,6 +215,12 @@ pub struct NodeParser {
     page_cache: HashMap<u64, Vec<u8>>,
 }
 
+impl Default for NodeParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NodeParser {
     /// Create new node parser
     pub fn new() -> Self {

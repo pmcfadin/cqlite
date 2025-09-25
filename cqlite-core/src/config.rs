@@ -23,7 +23,6 @@ pub struct Config {
     pub wasm: WasmConfig,
 }
 
-
 /// Storage engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {

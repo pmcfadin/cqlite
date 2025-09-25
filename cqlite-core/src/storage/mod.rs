@@ -105,16 +105,18 @@ impl StorageEngine {
             self.wal.append(table_id, &key, &value).await?;
         }
 
-        // Write to MemTable
-        {
+        // Write to MemTable and check if flush is needed
+        let should_flush = {
             let mut memtable = self.memtable.write().await;
             memtable.put(table_id, key, value)?;
 
             // Check if MemTable needs to be flushed
-            if memtable.size() >= self.config.storage.memtable_size_threshold {
-                // Trigger async flush
-                self.flush_memtable().await?;
-            }
+            memtable.size() >= self.config.storage.memtable_size_threshold
+        }; // Release the lock before flushing
+
+        if should_flush {
+            // Trigger async flush (lock is released)
+            self.flush_memtable().await?;
         }
 
         Ok(())
@@ -427,7 +429,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Temporarily disabled due to hanging issue - investigating WAL deadlock"]
     async fn test_batch_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
@@ -456,17 +457,40 @@ mod tests {
         ];
 
         storage.batch_write(batch_ops).await.unwrap();
-        // Skip flush_batch since it requires experimental features for SSTable writing
-        // In a production environment, this would be enabled with experimental features
-        // storage.flush_batch().await.unwrap();
+        storage.shutdown().await.unwrap();
+    }
 
-        // For this test, we just verify that the batch_write operation succeeded
-        // without errors. In a real implementation with experimental features enabled,
-        // we would also verify that the data can be retrieved.
-        //
-        // Note: Without flush_batch, the data may remain in memory and not be
-        // immediately available for retrieval, which is expected behavior.
+    #[tokio::test]
+    async fn test_batch_operations_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        // Force fallback path by setting small threshold so batch writer is not initialized
+        config.storage.memtable_size_threshold = 1024; // 1KB - smaller than 1MB threshold
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
 
+        let mut storage = StorageEngine::open(temp_dir.path(), &config, platform)
+            .await
+            .unwrap();
+
+        // Test batch write operations (should use fallback path)
+        let batch_ops = vec![
+            BatchOperation::Put {
+                table_id: TableId::new("test_table"),
+                key: RowKey::from("key1"),
+                value: Value::Text("value1".to_string()),
+            },
+            BatchOperation::Put {
+                table_id: TableId::new("test_table"),
+                key: RowKey::from("key2"),
+                value: Value::Text("value2".to_string()),
+            },
+            BatchOperation::Delete {
+                table_id: TableId::new("test_table"),
+                key: RowKey::from("key3"),
+            },
+        ];
+
+        storage.batch_write(batch_ops).await.unwrap();
         storage.shutdown().await.unwrap();
     }
 }

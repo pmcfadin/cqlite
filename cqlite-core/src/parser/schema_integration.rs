@@ -118,7 +118,7 @@ pub async fn parse_cql_schema_enhanced(
     let statement = parser.parse(cql).await?;
 
     // Use visitor pattern to convert AST to TableSchema
-    let mut visitor = SchemaBuilderVisitor::default();
+    let mut visitor = SchemaBuilderVisitor;
     let schema = visitor.visit_statement(&statement)?;
 
     Ok(schema)

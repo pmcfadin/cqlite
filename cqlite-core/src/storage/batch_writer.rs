@@ -174,42 +174,56 @@ impl BatchWriter {
 
         let start_time = Instant::now();
 
-        // Sort batch by table and key for optimal storage
-        self.batch.sort_by(|a, b| {
-            a.table_id
-                .cmp(&b.table_id)
-                .then_with(|| a.key.cmp(&b.key))
-                .then_with(|| a.timestamp.cmp(&b.timestamp))
-        });
+        // Add timeout protection to prevent hanging
+        use tokio::time::{Duration, timeout};
+        let operation_timeout = Duration::from_secs(30);
 
-        // Group entries by table for efficient processing
-        let mut table_groups: HashMap<TableId, Vec<BatchEntry>> = HashMap::new();
-        for entry in &self.batch {
-            table_groups
-                .entry(entry.table_id.clone())
-                .or_insert_with(Vec::new)
-                .push(entry.clone());
+        let result = timeout(operation_timeout, async {
+            // Sort batch by table and key for optimal storage
+            self.batch.sort_by(|a, b| {
+                a.table_id
+                    .cmp(&b.table_id)
+                    .then_with(|| a.key.cmp(&b.key))
+                    .then_with(|| a.timestamp.cmp(&b.timestamp))
+            });
+
+            // Group entries by table for efficient processing
+            let mut table_groups: HashMap<TableId, Vec<BatchEntry>> = HashMap::new();
+            for entry in &self.batch {
+                table_groups
+                    .entry(entry.table_id.clone())
+                    .or_default()
+                    .push(entry.clone());
+            }
+
+            // Write to WAL first for durability
+            if self.config.storage.wal.enabled {
+                self.write_to_wal(&self.batch).await?;
+            }
+
+            // Process each table group
+            for (table_id, entries) in table_groups {
+                self.process_table_batch(&table_id, entries).await?;
+            }
+
+            // Update statistics
+            let write_time = start_time.elapsed();
+            self.update_stats(write_time);
+
+            // Clear batch
+            self.batch.clear();
+            self.last_flush = Instant::now();
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        match result {
+            Ok(inner_result) => inner_result,
+            Err(_) => Err(crate::error::Error::Timeout(
+                "Batch writer flush operation timed out after 30 seconds".to_string(),
+            )),
         }
-
-        // Write to WAL first for durability
-        if self.config.storage.wal.enabled {
-            self.write_to_wal(&self.batch).await?;
-        }
-
-        // Process each table group
-        for (table_id, entries) in table_groups {
-            self.process_table_batch(&table_id, entries).await?;
-        }
-
-        // Update statistics
-        let write_time = start_time.elapsed();
-        self.update_stats(write_time);
-
-        // Clear batch
-        self.batch.clear();
-        self.last_flush = Instant::now();
-
-        Ok(())
     }
 
     /// Process a batch of entries for a specific table
@@ -349,8 +363,22 @@ impl BatchWriter {
     pub async fn maybe_flush(&mut self) -> Result<()> {
         if self.batch.len() >= self.auto_flush_size
             || self.last_flush.elapsed() >= self.auto_flush_interval
+            || !self.batch.is_empty()
+        // Ensure small batches are flushed
         {
-            self.flush().await?;
+            // Add timeout protection here as well
+            use tokio::time::{Duration, timeout};
+            let operation_timeout = Duration::from_secs(30);
+
+            let result = timeout(operation_timeout, self.flush()).await;
+            match result {
+                Ok(inner_result) => inner_result?,
+                Err(_) => {
+                    return Err(crate::error::Error::Timeout(
+                        "maybe_flush operation timed out after 30 seconds".to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }

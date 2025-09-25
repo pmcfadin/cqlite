@@ -134,7 +134,7 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
             // For test compatibility, if input is exactly the expected size without length prefix, return it as-is
             if input.len() == 16
                 && input
-                    == &[
+                    == [
                         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
                         0x0C, 0x0D, 0x0E, 0x0F,
                     ]
@@ -521,32 +521,24 @@ pub fn parse_udt_enhanced_with_registry<'a>(
         }
         Err(embedded_error) => {
             // Embedded parsing failed, try to extract type name and use registry-based parsing
-            match parse_vint_length(input) {
-                Ok((after_type_name_len, type_name_length)) => {
-                    if let Ok((after_type_name, type_name_bytes)) =
-                        take::<_, _, nom::error::Error<&[u8]>>(type_name_length)(
-                            after_type_name_len,
-                        )
-                    {
-                        if let Ok(type_name) = String::from_utf8(type_name_bytes.to_vec()) {
-                            if let Some(udt_def) =
-                                try_find_udt_in_any_keyspace(registry, &type_name)
+            if let Ok((after_type_name_len, type_name_length)) = parse_vint_length(input) {
+                if let Ok((after_type_name, type_name_bytes)) =
+                    take::<_, _, nom::error::Error<&[u8]>>(type_name_length)(after_type_name_len)
+                {
+                    if let Ok(type_name) = String::from_utf8(type_name_bytes.to_vec()) {
+                        if let Some(udt_def) = try_find_udt_in_any_keyspace(registry, &type_name) {
+                            // Skip embedded schema and parse field values with registry definition
+                            if let Ok((after_schema, _)) = skip_embedded_udt_schema(after_type_name)
                             {
-                                // Skip embedded schema and parse field values with registry definition
-                                if let Ok((after_schema, _)) =
-                                    skip_embedded_udt_schema(after_type_name)
-                                {
-                                    return parse_udt_with_schema_and_registry(
-                                        after_schema,
-                                        udt_def,
-                                        registry,
-                                    );
-                                }
+                                return parse_udt_with_schema_and_registry(
+                                    after_schema,
+                                    udt_def,
+                                    registry,
+                                );
                             }
                         }
                     }
                 }
-                Err(_) => {}
             }
 
             // All advanced parsing failed, return original error
@@ -1099,16 +1091,13 @@ pub fn parse_frozen_udt_with_registry<'a>(
     registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
     // First try to parse with embedded schema (most common case)
-    match parse_udt(input) {
-        Ok((remaining, Value::Udt(udt_value))) => {
-            // Verify the type matches what we expect
-            if udt_value.type_name == udt_def.name {
-                let mut updated_udt = udt_value;
-                updated_udt.keyspace = udt_def.keyspace.clone();
-                return Ok((remaining, Value::Frozen(Box::new(Value::Udt(updated_udt)))));
-            }
+    if let Ok((remaining, Value::Udt(udt_value))) = parse_udt(input) {
+        // Verify the type matches what we expect
+        if udt_value.type_name == udt_def.name {
+            let mut updated_udt = udt_value;
+            updated_udt.keyspace = udt_def.keyspace.clone();
+            return Ok((remaining, Value::Frozen(Box::new(Value::Udt(updated_udt)))));
         }
-        _ => {}
     }
 
     // Fallback: try to skip embedded schema and parse with registry definition
@@ -1216,8 +1205,8 @@ pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
         deletion_time,
         tombstone_type,
         ttl,
-        range_start: range_start.map(|data| RowKey::new(data)),
-        range_end: range_end.map(|data| RowKey::new(data)),
+        range_start: range_start.map(RowKey::new),
+        range_end: range_end.map(RowKey::new),
     };
 
     Ok((input, Value::Tombstone(tombstone_info)))
@@ -1790,7 +1779,7 @@ mod tests {
             Value::Boolean(true),
             Value::Integer(42),
             Value::BigInt(1000),
-            Value::Float(3.14),
+            Value::Float(std::f64::consts::PI),
             Value::Text("test".to_string()),
             Value::Blob(vec![1, 2, 3, 4]),
         ];

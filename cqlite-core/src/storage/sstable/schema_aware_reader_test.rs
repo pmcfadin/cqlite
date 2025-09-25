@@ -10,7 +10,6 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tempfile::TempDir;
 
     fn create_test_schema() -> TableSchema {
         TableSchema {
@@ -151,12 +150,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_schema_aware_stats() {
-        let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
-
-        // Create a simple test file for the SSTable reader
-        std::fs::write(temp_dir.path().join("test.sst"), b"dummy_data").unwrap();
 
         let schema = create_test_schema();
         let config_clone = config.clone();
@@ -169,31 +164,22 @@ mod tests {
                 .unwrap(),
         );
 
-        // This would normally fail without a proper SSTable file, but demonstrates the API
-        let result = SchemaAwareReader::new(
-            &temp_dir.path().join("test.sst"),
-            schema,
-            registry,
-            &config,
-            platform,
-        )
-        .await;
+        // Test schema-aware reader components without requiring a real SSTable file
+        // First test schema validation
+        assert!(SchemaAwareReader::validate_schema_completeness(&schema).is_ok());
 
-        // The SchemaAwareReader should now successfully handle the dummy file
-        // by creating a default reader with empty stats
-        match result {
-            Ok(reader) => {
-                // Verify the reader was created with expected schema
-                assert_eq!(reader.context().schema.keyspace, "test_ks");
-                assert_eq!(reader.context().schema.table, "test_table");
-                assert_eq!(reader.context().partition_comparators.len(), 1);
-                assert_eq!(reader.context().clustering_comparators.len(), 1);
-                assert_eq!(reader.context().column_comparators.len(), 3);
-            }
-            Err(e) => {
-                eprintln!("Unexpected error creating SchemaAwareReader: {:?}", e);
-                panic!("Expected SchemaAwareReader creation to succeed");
-            }
-        }
+        // Test parsing context creation
+        let context_result = SchemaAwareReader::create_parsing_context(&schema, &registry);
+        assert!(context_result.is_ok());
+
+        let context = context_result.unwrap();
+        assert_eq!(context.schema.keyspace, "test_ks");
+        assert_eq!(context.schema.table, "test_table");
+        assert_eq!(context.partition_comparators.len(), 1);
+        assert_eq!(context.clustering_comparators.len(), 1);
+        assert_eq!(context.column_comparators.len(), 3);
+
+        // Verify the context is complete for schema validation
+        assert!(context.is_complete());
     }
 }

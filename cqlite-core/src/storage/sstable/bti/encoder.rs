@@ -105,6 +105,12 @@ mod escape_sequences {
     pub const ESCAPED_SEPARATOR: &[u8] = &[0xFF, 0x01];
 }
 
+impl Default for ByteComparableEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ByteComparableEncoder {
     /// Create new encoder with default configuration
     pub fn new() -> Self {
@@ -669,6 +675,12 @@ impl ByteComparableDecoder {
 pub struct BatchEncoder {
     encoder: ByteComparableEncoder,
     batch_buffer: Vec<Vec<u8>>,
+}
+
+impl Default for BatchEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BatchEncoder {

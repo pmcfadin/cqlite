@@ -1857,10 +1857,8 @@ mod tests {
         });
 
         let mut visitor = DefaultVisitor;
-        let result: () = visitor.visit_statement(&batch).unwrap();
-        assert_eq!(result, ());
+        let _: () = visitor.visit_statement(&batch).unwrap();
 
-        let result: () = visitor.visit_statement(&truncate).unwrap();
-        assert_eq!(result, ());
+        let _: () = visitor.visit_statement(&truncate).unwrap();
     }
 }

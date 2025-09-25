@@ -13,6 +13,12 @@ pub struct ThreadingProvider {
     io_pool: Arc<Semaphore>,
 }
 
+impl Default for ThreadingProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThreadingProvider {
     /// Create a new threading provider
     pub fn new() -> Self {

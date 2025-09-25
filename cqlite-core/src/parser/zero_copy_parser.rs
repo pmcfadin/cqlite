@@ -12,6 +12,12 @@ pub struct StringInterner {
     cache: HashMap<String, &'static str>,
 }
 
+impl Default for StringInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StringInterner {
     /// Create new string interner
     pub fn new() -> Self {

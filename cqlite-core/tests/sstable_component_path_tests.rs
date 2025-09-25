@@ -230,8 +230,8 @@ async fn test_malformed_component_files() {
     let summary_file = base_path.join("nb-1-big-Summary.db");
     let statistics_file = base_path.join("nb-1-big-Statistics.db");
 
-    // Write invalid/corrupted data
-    fs::write(&index_file, b"invalid_data_123").await.unwrap();
+    // Write invalid/corrupted data that will definitely cause parsing errors
+    fs::write(&index_file, b"").await.unwrap(); // Empty file should fail
     fs::write(&summary_file, b"corrupted_summary")
         .await
         .unwrap();

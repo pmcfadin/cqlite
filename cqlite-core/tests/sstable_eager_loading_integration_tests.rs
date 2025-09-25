@@ -415,7 +415,7 @@ async fn test_partition_key_lookups(reader: &SSTableReader) {
     ];
 
     for key in &partition_keys {
-        let _lookup = reader.lookup_partition_with_index(*key).await;
+        let _lookup = reader.lookup_partition_with_index(key).await;
     }
 
     println!("✓ Partition key lookups completed");
@@ -834,7 +834,7 @@ async fn create_workflow_data_file(dir: &Path, base_name: &str, keyspace: &str, 
         data.extend_from_slice(&(key.len() as u32).to_be_bytes());
         data.extend_from_slice(key.as_bytes());
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x30]); // Row size
-        data.extend_from_slice(&vec![0xCC; 48]); // Row data
+        data.extend_from_slice(&[0xCC; 48]); // Row data
     }
 
     fs::write(path, data).await.unwrap();
@@ -965,7 +965,7 @@ async fn create_single_partition_files(dir: &Path, base_name: &str) {
     data.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]); // Key length
     data.extend_from_slice(b"single_partition");
     data.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]); // Row size
-    data.extend_from_slice(&vec![0xEE; 16]); // Row data
+    data.extend_from_slice(&[0xEE; 16]); // Row data
 
     fs::write(path, data).await.unwrap();
     create_minimal_companion_files(dir, base_name).await;

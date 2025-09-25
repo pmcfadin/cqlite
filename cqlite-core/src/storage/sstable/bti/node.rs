@@ -138,7 +138,7 @@ impl SizedPointer {
     /// Decode pointer from bytes
     pub fn from_bytes(data: &[u8], size: u8) -> BtiResult<Self> {
         let distance = match size {
-            1 if data.len() >= 1 => data[0] as u64,
+            1 if !data.is_empty() => data[0] as u64,
             2 if data.len() >= 2 => u16::from_be_bytes([data[0], data[1]]) as u64,
             4 if data.len() >= 4 => u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u64,
             8 if data.len() >= 8 => u64::from_be_bytes([

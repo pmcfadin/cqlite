@@ -33,6 +33,8 @@ We have some big problems. A code review has found some huge code flaws. We need
 - `src/storage/sstable/index_reader.rs:220`: Copies every partition digest into a `HashMap<Vec<u8>, usize>`; large tables explode memory/time—consider `Arc<[u8]>` or borrowed keys. x
 
 ## Gaps & Next Steps
-- Add golden-path tests over real Cassandra 5 artifacts to exercise `get`, `scan`, `lookup_partition_with_index`, and Summary/Index integration.
-- Replace heuristic header parsing with spec-driven decoding shared across Data.db, Index.db, and Summary.db readers.
-- After fixing component lookup, wire integration tests in `tests/` to assert partition lookups, range scans, and decompression succeed against fixtures.
+- Add golden-path tests over real Cassandra 5 artifacts to exercise `get`, `scan`, `lookup_partition_with_index`, and Summary/Index integration. x
+
+- Replace heuristic header parsing with spec-driven decoding shared across Data.db, Index.db, and Summary.db readers. x
+
+- After fixing component lookup, wire integration tests in `tests/` to assert partition lookups, range scans, and decompression succeed against fixtures. 

@@ -336,9 +336,13 @@ async fn measure_async_throughput(
 ) -> f64 {
     // Configure logging level
     if enable_logging {
-        unsafe { std::env::set_var("RUST_LOG", "debug"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "debug");
+        }
     } else {
-        unsafe { std::env::set_var("RUST_LOG", "error"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "error");
+        }
     }
 
     let operation_count = 200;
@@ -369,9 +373,13 @@ async fn measure_concurrent_operations(
     enable_logging: bool,
 ) -> Duration {
     if enable_logging {
-        unsafe { std::env::set_var("RUST_LOG", "debug"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "debug");
+        }
     } else {
-        unsafe { std::env::set_var("RUST_LOG", "error"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "error");
+        }
     }
 
     let start_time = Instant::now();
@@ -413,9 +421,13 @@ async fn measure_operation_latencies(
     enable_logging: bool,
 ) -> Vec<u64> {
     if enable_logging {
-        unsafe { std::env::set_var("RUST_LOG", "debug"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "debug");
+        }
     } else {
-        unsafe { std::env::set_var("RUST_LOG", "error"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "error");
+        }
     }
 
     let mut latencies = Vec::new();
@@ -447,9 +459,13 @@ async fn perform_memory_test_operations(
     enable_logging: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if enable_logging {
-        unsafe { std::env::set_var("RUST_LOG", "debug"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "debug");
+        }
     } else {
-        unsafe { std::env::set_var("RUST_LOG", "error"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "error");
+        }
     }
 
     if let Ok(reader) = SSTableReader::open(data_file, config, platform).await {
@@ -469,7 +485,9 @@ async fn perform_volume_test_operations(
     platform: Arc<Platform>,
     operation_count: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    unsafe { std::env::set_var("RUST_LOG", "debug"); } // Always enable debug logging for volume tests
+    unsafe {
+        std::env::set_var("RUST_LOG", "debug");
+    } // Always enable debug logging for volume tests
 
     if let Ok(reader) = SSTableReader::open(data_file, config, platform).await {
         for i in 0..operation_count {
@@ -555,7 +573,7 @@ async fn create_logging_data_file(dir: &Path, base_name: &str, partition_count: 
         data.extend_from_slice(&(key.len() as u32).to_be_bytes());
         data.extend_from_slice(key.as_bytes());
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]); // Row size
-        data.extend_from_slice(&vec![0xCC; 32]); // Row data
+        data.extend_from_slice(&[0xCC; 32]); // Row data
     }
 
     fs::write(path, data).await.unwrap();

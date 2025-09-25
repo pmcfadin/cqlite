@@ -189,10 +189,7 @@ impl UdtRegistry {
 
     /// Register a UDT type definition
     pub fn register_udt(&mut self, udt_def: UdtTypeDef) {
-        let keyspace_udts = self
-            .udts
-            .entry(udt_def.keyspace.clone())
-            .or_insert_with(HashMap::new);
+        let keyspace_udts = self.udts.entry(udt_def.keyspace.clone()).or_default();
         keyspace_udts.insert(udt_def.name.clone(), udt_def);
     }
 
@@ -211,7 +208,7 @@ impl UdtRegistry {
         self.udts
             .get(keyspace)
             .map(|udts| udts.keys().map(|s| s.as_str()).collect())
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
     }
 
     /// Check if a UDT is registered
@@ -1098,18 +1095,17 @@ impl SchemaManager {
         }
 
         // Then try to find any schema matching the table name
-        for schema in self.schemas.values() {
-            if cql_parser::table_name_matches(
-                &Some(schema.keyspace.clone()),
-                &schema.table,
-                keyspace,
-                table,
-            ) {
-                return Some(schema);
-            }
-        }
-
-        None
+        self.schemas
+            .values()
+            .find(|&schema| {
+                cql_parser::table_name_matches(
+                    &Some(schema.keyspace.clone()),
+                    &schema.table,
+                    keyspace,
+                    table,
+                )
+            })
+            .map(|v| v as _)
     }
 
     /// Extract table information from CQL without full parsing

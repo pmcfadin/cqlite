@@ -183,3 +183,36 @@ release-prep version:
     git commit -m "Release {{version}}"
     git tag -a "v{{version}}" -m "Release {{version}}"
     @echo "Release {{version}} prepared. Push with: git push origin main --tags"
+
+# Build SSTables guide (PDF)
+book-pdf:
+    @echo "Rendering Mermaid diagrams..."
+    cd docs/sstables-definitive-guide/diagrams && for f in *.mmd; do base="${f%.mmd}"; mmdc -i "$f" -o "${base}.svg" --backgroundColor white --scale 1.2; done
+    @echo "Building PDF with pandoc..."
+    mkdir -p docs/sstables-definitive-guide/dist
+    pandoc \
+      docs/sstables-definitive-guide/chapters/*.md \
+      -o docs/sstables-definitive-guide/dist/sstables-definitive-guide.pdf \
+      --from gfm \
+      --pdf-engine=xelatex \
+      --toc --toc-depth=2 \
+      --resource-path=.:docs/sstables-definitive-guide \
+      -V geometry:margin=1in \
+      -V mainfont="Helvetica Neue" -V monofont="Menlo" \
+      -V colorlinks=true \
+      --metadata title="SSTables: The Definitive Guide (Apache Cassandra)"
+    @echo "✅ PDF written to docs/sstables-definitive-guide/dist/sstables-definitive-guide.pdf"
+
+# Build SSTables guide (HTML)
+book-html:
+    @echo "Rendering Mermaid diagrams..."
+    cd docs/sstables-definitive-guide/diagrams && for f in *.mmd; do base="${f%.mmd}"; mmdc -i "$f" -o "${base}.svg" --backgroundColor white --scale 1.2; done
+    @echo "Building HTML with pandoc..."
+    mkdir -p docs/sstables-definitive-guide/dist
+    pandoc \
+      docs/sstables-definitive-guide/chapters/*.md \
+      -o docs/sstables-definitive-guide/dist/sstables-definitive-guide.html \
+      --from gfm \
+      --toc --toc-depth=2 \
+      --resource-path=.:docs/sstables-definitive-guide
+    @echo "✅ HTML written to docs/sstables-definitive-guide/dist/sstables-definitive-guide.html"

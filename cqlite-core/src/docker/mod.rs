@@ -26,7 +26,7 @@ impl DockerCqlshClient {
     /// Find the running Cassandra container
     pub fn find_cassandra_container() -> io::Result<DockerContainer> {
         let output = Command::new("docker")
-            .args(&[
+            .args([
                 "ps",
                 "--format",
                 "{{.ID}}|{{.Names}}|{{.Image}}",
@@ -36,10 +36,7 @@ impl DockerCqlshClient {
             .output()?;
 
         if !output.status.success() {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "Failed to list Docker containers",
-            ));
+            return Err(Error::other("Failed to list Docker containers"));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -68,15 +65,12 @@ impl DockerCqlshClient {
     /// Execute a CQL query using cqlsh in the container
     pub fn execute_cql(&self, query: &str) -> io::Result<String> {
         let output = Command::new("docker")
-            .args(&["exec", "-i", &self.container.name, "cqlsh", "-e", query])
+            .args(["exec", "-i", &self.container.name, "cqlsh", "-e", query])
             .output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("cqlsh command failed: {}", stderr),
-            ));
+            return Err(Error::other(format!("cqlsh command failed: {}", stderr)));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -85,7 +79,7 @@ impl DockerCqlshClient {
     /// Execute a CQL query with host and port
     pub fn execute_cql_with_host(&self, query: &str, host: &str, port: u16) -> io::Result<String> {
         let output = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 "-i",
                 &self.container.name,
@@ -99,10 +93,7 @@ impl DockerCqlshClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("cqlsh command failed: {}", stderr),
-            ));
+            return Err(Error::other(format!("cqlsh command failed: {}", stderr)));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -115,7 +106,7 @@ impl DockerCqlshClient {
 
         // Write the content to the container
         let mut child = Command::new("docker")
-            .args(&["exec", "-i", &self.container.name, "tee", temp_file])
+            .args(["exec", "-i", &self.container.name, "tee", temp_file])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()?;
@@ -129,20 +120,17 @@ impl DockerCqlshClient {
 
         // Execute the file
         let output = Command::new("docker")
-            .args(&["exec", "-i", &self.container.name, "cqlsh", "-f", temp_file])
+            .args(["exec", "-i", &self.container.name, "cqlsh", "-f", temp_file])
             .output()?;
 
         // Clean up
         let _ = Command::new("docker")
-            .args(&["exec", &self.container.name, "rm", temp_file])
+            .args(["exec", &self.container.name, "rm", temp_file])
             .output();
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("cqlsh command failed: {}", stderr),
-            ));
+            return Err(Error::other(format!("cqlsh command failed: {}", stderr)));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -150,10 +138,7 @@ impl DockerCqlshClient {
 
     /// Check if the Cassandra container is ready
     pub fn is_ready(&self) -> bool {
-        match self.execute_cql("SELECT now() FROM system.local;") {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        self.execute_cql("SELECT now() FROM system.local;").is_ok()
     }
 
     /// Wait for Cassandra to be ready (with timeout)

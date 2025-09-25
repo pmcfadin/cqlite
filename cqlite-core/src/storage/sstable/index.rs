@@ -66,11 +66,11 @@ impl Index {
         // Add to entries map
         self.entries
             .entry(table_id.clone())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(key.clone(), entry);
 
         // Add to sorted keys
-        let sorted_keys = self.sorted_keys.entry(table_id).or_insert_with(Vec::new);
+        let sorted_keys = self.sorted_keys.entry(table_id).or_default();
 
         // Insert in sorted order
         match sorted_keys.binary_search(&key) {

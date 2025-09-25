@@ -37,6 +37,10 @@ pub enum Error {
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
 
+    /// Timeout error
+    #[error("Operation timeout: {0}")]
+    Timeout(String),
+
     /// Invalid path error
     #[error("Invalid path: {0}")]
     InvalidPath(String),
@@ -296,6 +300,7 @@ impl Error {
             Error::UnsupportedFormat(_) => false,
             Error::InvalidPath(_) => false,
             Error::InvalidState(_) => false,
+            Error::Timeout(_) => false,
         }
     }
 
@@ -335,6 +340,7 @@ impl Error {
             Error::UnsupportedFormat(_) => ErrorCategory::Data,
             Error::InvalidPath(_) => ErrorCategory::System,
             Error::InvalidState(_) => ErrorCategory::Logic,
+            Error::Timeout(_) => ErrorCategory::System,
         }
     }
 }

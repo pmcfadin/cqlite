@@ -986,7 +986,7 @@ impl ErrorHandler {
         let applicable_strategies: Vec<_> = self
             .recovery_strategies
             .iter()
-            .filter(|s| s.applicable_errors.contains(&error_type))
+            .filter(|s| s.applicable_errors.contains(error_type))
             .collect();
 
         if applicable_strategies.is_empty() {

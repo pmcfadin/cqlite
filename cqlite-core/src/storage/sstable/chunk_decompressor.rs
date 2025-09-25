@@ -139,15 +139,13 @@ impl ChunkDecompressor {
             .ok_or_else(|| Error::InvalidFormat(format!("No offset for chunk {}", chunk_index)))?;
 
         // Determine chunk size by finding the file size
-        let current_pos = reader
-            .seek(SeekFrom::Current(0))
-            .map_err(|e| Error::Io(e))?;
+        let current_pos = reader.stream_position().map_err(Error::Io)?;
 
-        let file_size = reader.seek(SeekFrom::End(0)).map_err(|e| Error::Io(e))?;
+        let file_size = reader.seek(SeekFrom::End(0)).map_err(Error::Io)?;
 
         reader
             .seek(SeekFrom::Start(current_pos))
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
 
         let compressed_size = self
             .compression_info
@@ -159,13 +157,11 @@ impl ChunkDecompressor {
         // Seek to compressed chunk offset
         reader
             .seek(SeekFrom::Start(compressed_offset))
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
 
         // Read compressed chunk data
         let mut compressed_data = vec![0u8; compressed_size];
-        reader
-            .read_exact(&mut compressed_data)
-            .map_err(|e| Error::Io(e))?;
+        reader.read_exact(&mut compressed_data).map_err(Error::Io)?;
 
         println!(
             "📦 Reading chunk {} at offset {} ({} bytes compressed)",
@@ -337,7 +333,7 @@ impl ChunkDecompressor {
             use flate2::read::DeflateDecoder;
             use std::io::Read;
 
-            let mut decoder = DeflateDecoder::new(&compressed_data[..]);
+            let mut decoder = DeflateDecoder::new(compressed_data);
             let mut decompressed = Vec::new();
 
             match decoder.read_to_end(&mut decompressed) {
@@ -367,7 +363,7 @@ impl ChunkDecompressor {
     fn decompress_zstd_chunk(&self, compressed_data: &[u8], chunk_index: usize) -> Result<Vec<u8>> {
         #[cfg(feature = "zstd")]
         {
-            match zstd::decode_all(&compressed_data[..]) {
+            match zstd::decode_all(compressed_data) {
                 Ok(decompressed) => Ok(decompressed),
                 Err(e) => Err(Error::InvalidFormat(format!(
                     "Zstd decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
@@ -415,7 +411,7 @@ impl ChunkDecompressor {
 pub fn create_decompressor_from_file(
     compression_info_path: &std::path::Path,
 ) -> Result<ChunkDecompressor> {
-    let compression_data = std::fs::read(compression_info_path).map_err(|e| Error::Io(e))?;
+    let compression_data = std::fs::read(compression_info_path).map_err(Error::Io)?;
 
     let compression_info = CompressionInfo::parse(&compression_data)
         .or_else(|_parse_err| {

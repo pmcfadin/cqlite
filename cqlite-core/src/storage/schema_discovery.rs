@@ -288,7 +288,7 @@ impl SchemaDiscovery {
 
     /// Create a reader for the SSTable file
     async fn create_reader(&self, file_path: &Path) -> Result<BulletproofReader> {
-        Ok(BulletproofReader::open(file_path)?)
+        BulletproofReader::open(file_path)
     }
 
     /// Extract schema information from SSTable header

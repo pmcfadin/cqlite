@@ -154,7 +154,7 @@ impl CassandraValidationFramework {
             .map_err(|e| Error::storage(format!("Failed to read test file: {}", e)))?;
 
         // Check header magic
-        if &file_data[0..4] != [0x5A, 0x5A, 0x5A, 0x5A] {
+        if file_data[0..4] != [0x5A, 0x5A, 0x5A, 0x5A] {
             return Ok(TestResult::failure(
                 "Header magic bytes incorrect",
                 &format!("Got {:?}", &file_data[0..4]),
@@ -164,7 +164,7 @@ impl CassandraValidationFramework {
         // Check footer magic (last 8 bytes)
         let footer_start = file_data.len() - 8;
         let expected_footer_magic = [0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A];
-        if &file_data[footer_start..] != expected_footer_magic {
+        if file_data[footer_start..] != expected_footer_magic {
             return Ok(TestResult::failure(
                 "Footer magic bytes incorrect",
                 &format!("Got {:?}", &file_data[footer_start..]),
@@ -489,6 +489,12 @@ pub struct ValidationReport {
     pub tests: Vec<(String, TestResult)>,
 }
 
+impl Default for ValidationReport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ValidationReport {
     pub fn new() -> Self {
         Self { tests: Vec::new() }
@@ -531,7 +537,7 @@ impl ValidationReport {
 
     pub fn detailed_report(&self) -> String {
         let mut report = String::new();
-        report.push_str(&"=== Cassandra Compatibility Validation Report ===\n\n".to_string());
+        report.push_str("=== Cassandra Compatibility Validation Report ===\n\n");
         report.push_str(&format!("{}\n\n", self.summary()));
 
         for (test_name, result) in &self.tests {

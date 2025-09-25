@@ -379,7 +379,7 @@ impl HardenedValidatorParser {
         let udt_registry = config
             .udt_registry
             .clone()
-            .unwrap_or_else(|| UdtRegistry::with_cassandra5_defaults());
+            .unwrap_or_else(UdtRegistry::with_cassandra5_defaults);
         type_parser = type_parser.with_udt_registry(udt_registry.clone());
 
         // Initialize version-specific parsers
@@ -1257,7 +1257,7 @@ impl HardenedValidatorParser {
 
         // Try to resolve UDT from registry
         if let Some(udt_def) = self.try_resolve_udt(&type_name) {
-            self.parse_udt_with_schema(remaining, &udt_def, version)
+            self.parse_udt_with_schema(remaining, udt_def, version)
         } else {
             // Fallback to embedded schema parsing
             self.parse_udt_embedded_schema(data, version)
@@ -1813,7 +1813,7 @@ impl HardenedValidatorParser {
                         type_name: "udt".to_string(),
                         category: TypeCategory::UserDefined,
                         nesting_level: 1,
-                        element_types: obj.keys().map(|k| k.clone()).collect(),
+                        element_types: obj.keys().cloned().collect(),
                     }))
                 }
             }
@@ -2283,7 +2283,7 @@ impl HardenedValidatorParser {
             "**Versions Tested:** {}\n",
             result.version_results.len()
         ));
-        report.push_str("\n");
+        report.push('\n');
 
         // Executive Summary
         report.push_str("## Executive Summary\n\n");
@@ -2325,7 +2325,7 @@ impl HardenedValidatorParser {
                 .map(|r| r.false_negatives)
                 .sum::<usize>()
         ));
-        report.push_str("\n");
+        report.push('\n');
 
         // Version-Specific Results
         report.push_str("## Version-Specific Results\n\n");
@@ -2369,7 +2369,7 @@ impl HardenedValidatorParser {
                     }
                 }
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         // Performance Analysis
@@ -2390,7 +2390,7 @@ impl HardenedValidatorParser {
             "- **Peak Memory Usage:** {:.1} MB\n",
             result.performance_metrics.memory_stats.peak_memory_mb
         ));
-        report.push_str("\n");
+        report.push('\n');
 
         // Performance vs Targets
         report.push_str("### Performance vs Targets\n");
@@ -2411,7 +2411,7 @@ impl HardenedValidatorParser {
             "- **Memory Efficiency:** {:.2}x (target)\n",
             targets.memory_ratio
         ));
-        report.push_str("\n");
+        report.push('\n');
 
         // Error Analysis
         if result.error_analysis.total_errors > 0 {
@@ -2426,7 +2426,7 @@ impl HardenedValidatorParser {
                 for error in &result.error_analysis.critical_errors {
                     report.push_str(&format!("- {}\n", error));
                 }
-                report.push_str("\n");
+                report.push('\n');
             }
 
             if !result.error_analysis.error_patterns.is_empty() {
@@ -2438,7 +2438,7 @@ impl HardenedValidatorParser {
                     ));
                     report.push_str(&format!("  - Recommendation: {}\n", pattern.recommendation));
                 }
-                report.push_str("\n");
+                report.push('\n');
             }
         }
 
@@ -2463,7 +2463,7 @@ impl HardenedValidatorParser {
                 report.push_str(&format!("- {}\n", type_name));
             }
         }
-        report.push_str("\n");
+        report.push('\n');
 
         // Recommendations
         report.push_str("## Recommendations\n\n");

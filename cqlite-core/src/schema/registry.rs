@@ -350,7 +350,7 @@ impl SchemaRegistry {
         match schemas.get(&table_id) {
             Some(entry) => {
                 // Check if schema is still valid (cache TTL)
-                if self.is_entry_expired(&entry) {
+                if self.is_entry_expired(entry) {
                     drop(schemas); // Release read lock
                     return self.refresh_schema(keyspace, table).await;
                 }
@@ -1143,7 +1143,7 @@ impl SchemaRegistry {
         }
 
         // Find removed columns
-        for (name, _) in &old_columns {
+        for name in old_columns.keys() {
             if !new_columns.contains_key(name) {
                 changes.push(SchemaChange {
                     change_type: SchemaChangeType::ColumnRemoved,
@@ -1392,6 +1392,12 @@ impl ParsingContext {
 
 /// Schema validator for comprehensive validation
 pub struct SchemaValidator;
+
+impl Default for SchemaValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SchemaValidator {
     pub fn new() -> Self {

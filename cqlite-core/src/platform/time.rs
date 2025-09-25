@@ -6,6 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Debug)]
 pub struct TimeProvider;
 
+impl Default for TimeProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeProvider {
     /// Create a new time provider
     pub fn new() -> Self {

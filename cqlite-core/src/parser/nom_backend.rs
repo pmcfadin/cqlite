@@ -82,12 +82,11 @@ impl CqlParser for NomParser {
         let _start = Instant::now();
 
         // Use real nom parsing implementation
-        let result = self.parse_statement_impl(input);
 
         // Note: We can't update stats here because we have &self, not &mut self
         // In a real implementation, we'd use interior mutability or a different approach
 
-        result
+        self.parse_statement_impl(input)
     }
 
     async fn parse_type(&self, input: &str) -> Result<CqlDataType> {

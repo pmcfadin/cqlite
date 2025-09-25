@@ -294,7 +294,7 @@ impl ValidationReport {
     /// Get detailed validation report as formatted string
     pub fn detailed_report(&self) -> String {
         let mut report = String::new();
-        report.push_str(&format!("=== SSTable Directory Validation Report ===\n\n"));
+        report.push_str("=== SSTable Directory Validation Report ===\n\n");
         report.push_str(&format!("Total Generations: {}\n", self.total_generations));
         report.push_str(&format!("Valid Generations: {}\n", self.valid_generations));
         report.push_str(&format!(
@@ -351,7 +351,7 @@ impl ValidationReport {
         }
 
         if !self.component_analysis.is_empty() {
-            report.push_str(&format!("📊 Component Analysis by Generation:\n"));
+            report.push_str("📊 Component Analysis by Generation:\n");
             for analysis in &self.component_analysis {
                 report.push_str(&format!(
                     "\n  Generation {} ({} format):\n",

@@ -1254,7 +1254,7 @@ mod tests {
             Value::Json(serde_json::Value::String("test".to_string())),
             Value::TinyInt(127i8),
             Value::SmallInt(32767i16),
-            Value::Float32(3.14f32),
+            Value::Float32(std::f32::consts::PI),
             Value::List(vec![Value::Integer(1), Value::Integer(2)]),
             Value::Set(vec![
                 Value::Text("a".to_string()),

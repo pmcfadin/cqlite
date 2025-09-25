@@ -77,7 +77,7 @@ impl CompressionInfo {
             if data.len() >= 2 + len_2byte + 4 {
                 let chunk_len_pos = 2 + len_2byte;
                 // Account for padding to 4-byte boundary
-                let padded_pos = ((chunk_len_pos + 3) / 4) * 4;
+                let padded_pos = chunk_len_pos.div_ceil(4) * 4;
                 if data.len() >= padded_pos + 4 {
                     let chunk_len_bytes = &data[padded_pos..padded_pos + 4];
                     let chunk_len = u32::from_be_bytes([
@@ -619,7 +619,7 @@ impl CompressionInfo {
     /// Create a debug representation showing the hex dump analysis
     pub fn debug_hex_analysis(&self, original_data: &[u8]) -> String {
         let mut analysis = String::new();
-        analysis.push_str(&format!("CompressionInfo Analysis:\n"));
+        analysis.push_str("CompressionInfo Analysis:\n");
         analysis.push_str(&format!("  Algorithm: {}\n", self.algorithm));
         analysis.push_str(&format!(
             "  Chunk Length: {} bytes (0x{:x})\n",

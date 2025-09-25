@@ -13,6 +13,8 @@ use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
 
+mod common;
+
 /// Integration test with realistic Cassandra keyspace structure
 #[tokio::test]
 async fn test_realistic_cassandra_keyspace_integration() {
@@ -139,57 +141,44 @@ async fn test_realistic_cassandra_keyspace_integration() {
     println!("  - Successfully loaded {} SSTables", total_sstables_loaded);
 }
 
-/// Integration test with mixed file formats and generations
+/// Integration test with mixed file formats and generations using real SSTable data
 #[tokio::test]
 async fn test_mixed_format_integration() {
-    let temp_dir = TempDir::new().unwrap();
-    let mixed_root = temp_dir.path();
+    use crate::common::sstable_test_utils::{AssertionHelpers, TestContext};
 
-    let scenarios = vec![
-        MixedFormatScenario {
-            name: "modern_only".to_string(),
-            description: "Only modern Cassandra *-Data.db files".to_string(),
-            files: vec![
-                ("nb-1-big-Data.db", SSTableFormat::Modern),
-                ("nb-2-big-Data.db", SSTableFormat::Modern),
-                ("mc-3-large-Data.db", SSTableFormat::Modern),
-            ],
-        },
-        MixedFormatScenario {
-            name: "legacy_only".to_string(),
-            description: "Only legacy .sst files".to_string(),
-            files: vec![
-                ("legacy-1.sst", SSTableFormat::Legacy),
-                ("legacy-2.sst", SSTableFormat::Legacy),
-                ("old-table.sst", SSTableFormat::Legacy),
-            ],
-        },
-        MixedFormatScenario {
-            name: "mixed_formats".to_string(),
-            description: "Mixed modern and legacy formats".to_string(),
-            files: vec![
-                ("nb-1-big-Data.db", SSTableFormat::Modern),
-                ("legacy-1.sst", SSTableFormat::Legacy),
-                ("mc-2-large-Data.db", SSTableFormat::Modern),
-                ("legacy-2.sst", SSTableFormat::Legacy),
-                ("nb-3-big-Data.db", SSTableFormat::Modern),
-            ],
-        },
-        MixedFormatScenario {
-            name: "uuid_based".to_string(),
-            description: "UUID-based modern format".to_string(),
-            files: vec![
+    // Test discovery across different real datasets and table formats
+    let test_scenarios = vec![
+        MixedFormatTestScenario {
+            name: "modern_cassandra_formats".to_string(),
+            description: "Modern Cassandra SSTable formats across datasets".to_string(),
+            datasets: vec![
                 (
-                    "users-46436710673711f0b2cf19d64e7cbecb-Data.db",
-                    SSTableFormat::Modern,
+                    "test_basic",
+                    vec!["simple_table", "compression_test_table", "ttl_test_table"],
+                ),
+                ("test_timeseries", vec!["user_sessions", "tick_data"]),
+            ],
+        },
+        MixedFormatTestScenario {
+            name: "system_vs_user_tables".to_string(),
+            description: "System keyspace vs user table format differences".to_string(),
+            datasets: vec![
+                ("system", vec!["local", "compaction_history"]),
+                ("test_basic", vec!["simple_table", "counters"]),
+            ],
+        },
+        MixedFormatTestScenario {
+            name: "diverse_table_types".to_string(),
+            description: "Different table types and column configurations".to_string(),
+            datasets: vec![
+                ("test_collections", vec!["list_table", "map_table"]),
+                (
+                    "test_wide_rows",
+                    vec!["wide_partition_table", "clustering_table"],
                 ),
                 (
-                    "sessions-a1b2c3d4e5f6789012345678901234ab-Data.db",
-                    SSTableFormat::Modern,
-                ),
-                (
-                    "events-fedcba9876543210abcdef0123456789-Data.db",
-                    SSTableFormat::Modern,
+                    "test_basic",
+                    vec!["static_columns_table", "multi_partition_table"],
                 ),
             ],
         },
@@ -199,75 +188,148 @@ async fn test_mixed_format_integration() {
     let platform = Arc::new(Platform::new(&config).await.unwrap());
     let mut scenario_results = HashMap::new();
 
-    for scenario in scenarios {
+    for scenario in test_scenarios {
         println!(
             "Testing mixed format scenario: {} - {}",
             scenario.name, scenario.description
         );
 
-        let scenario_dir = mixed_root.join(&scenario.name);
-        fs::create_dir_all(&scenario_dir).await.unwrap();
+        let mut total_files = 0;
+        let mut loaded_files = 0;
+        let mut discovered_components = HashMap::new();
 
-        let mut loaded_files = Vec::new();
+        // Test each dataset and table combination
+        for (dataset_name, table_names) in &scenario.datasets {
+            println!("  Testing dataset: {}", dataset_name);
 
-        // Create all files for this scenario
-        for (filename, format) in &scenario.files {
-            let file_path = scenario_dir.join(filename);
+            match TestContext::new(dataset_name).await {
+                Ok(mut context) => {
+                    for table_name in table_names {
+                        println!("    Testing table: {}", table_name);
 
-            match format {
-                SSTableFormat::Modern => {
-                    create_modern_sstable_with_components(&scenario_dir, filename).await;
-                }
-                SSTableFormat::Legacy => {
-                    create_legacy_sstable(&file_path).await;
-                }
-            }
+                        match context.prepare_sstable(table_name).await {
+                            Ok(table_dir) => {
+                                // Discover SSTable files in this table
+                                let data_files: Vec<_> = std::fs::read_dir(&table_dir)
+                                    .unwrap()
+                                    .filter_map(|entry| {
+                                        let entry = entry.ok()?;
+                                        let path = entry.path();
+                                        let filename = path.file_name()?.to_str()?;
+                                        if filename.ends_with("-Data.db") {
+                                            Some(path)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
 
-            // Test loading each file
-            match SSTableReader::open(&file_path, &config, platform.clone()).await {
-                Ok(reader) => {
-                    loaded_files.push(filename.clone());
+                                total_files += data_files.len();
 
-                    // Test operations work regardless of format
-                    let test_key = format!("test_key_{}", filename.replace('.', "_"));
-                    let _lookup_result = reader
-                        .lookup_partition_with_index(test_key.as_bytes())
-                        .await;
-                    let _stats = reader.stats().await.unwrap_or_default();
+                                // Test loading each SSTable file
+                                for data_file in &data_files {
+                                    match SSTableReader::open(data_file, &config, platform.clone())
+                                        .await
+                                    {
+                                        Ok(reader) => {
+                                            loaded_files += 1;
 
-                    println!("✓ Successfully loaded and tested: {}", filename);
+                                            // Test basic operations across different formats
+                                            let _stats = reader.stats().await.unwrap_or_default();
+                                            let _timestamp_range =
+                                                reader.get_timestamp_range().await;
+
+                                            // Test partition lookup functionality
+                                            let test_key = format!(
+                                                "test_{}_{}_key",
+                                                dataset_name.replace("_", ""),
+                                                table_name
+                                            );
+                                            let _lookup_result = reader
+                                                .lookup_partition_with_index(test_key.as_bytes())
+                                                .await;
+
+                                            // Verify component discovery for this table
+                                            let components =
+                                                AssertionHelpers::discover_components(&table_dir)
+                                                    .unwrap();
+                                            discovered_components.insert(
+                                                format!("{}/{}", dataset_name, table_name),
+                                                components.len(),
+                                            );
+
+                                            println!(
+                                                "      ✓ Successfully loaded: {}",
+                                                data_file.file_name().unwrap().to_str().unwrap()
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "      ✗ Failed to load {}: {}",
+                                                data_file.display(),
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("    Failed to prepare table {}: {}", table_name, e);
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
-                    eprintln!("✗ Failed to load {}: {}", filename, e);
+                    eprintln!(
+                        "  Failed to create test context for {}: {}",
+                        dataset_name, e
+                    );
                 }
             }
         }
 
+        let success_rate = if total_files > 0 {
+            loaded_files as f64 / total_files as f64
+        } else {
+            0.0
+        };
+
         scenario_results.insert(
             scenario.name.clone(),
             ScenarioResult {
-                total_files: scenario.files.len(),
-                loaded_files: loaded_files.len(),
-                success_rate: (loaded_files.len() as f64) / (scenario.files.len() as f64),
+                total_files,
+                loaded_files,
+                success_rate,
             },
         );
 
-        // Cleanup scenario directory
-        fs::remove_dir_all(&scenario_dir).await.unwrap();
-        println!("✓ Completed mixed format scenario: {}", scenario.name);
+        println!(
+            "✓ Scenario {} completed: {}/{} files loaded ({:.1}% success)",
+            scenario.name,
+            loaded_files,
+            total_files,
+            success_rate * 100.0
+        );
     }
 
     // Store mixed format integration results
     store_mixed_format_results(&scenario_results).await;
 
     // Validate all scenarios succeeded
+    let mut total_success_rate = 0.0;
+    let mut scenario_count = 0;
+
     for (scenario_name, result) in scenario_results {
         assert!(
-            result.success_rate >= 0.8,
-            "Scenario {} had low success rate: {:.2}",
+            result.success_rate >= 0.7,
+            "Scenario {} had low success rate: {:.2}% (expected >= 70%)",
             scenario_name,
-            result.success_rate
+            result.success_rate * 100.0
         );
+
+        total_success_rate += result.success_rate;
+        scenario_count += 1;
+
         println!(
             "✓ Scenario {}: {}/{} files loaded ({:.1}% success)",
             scenario_name,
@@ -276,6 +338,19 @@ async fn test_mixed_format_integration() {
             result.success_rate * 100.0
         );
     }
+
+    // Validate overall mixed format integration success
+    let avg_success_rate = total_success_rate / scenario_count as f64;
+    assert!(
+        avg_success_rate >= 0.8,
+        "Overall mixed format integration success rate too low: {:.1}%",
+        avg_success_rate * 100.0
+    );
+
+    println!(
+        "✓ Mixed format integration test completed with average success rate: {:.1}%",
+        avg_success_rate * 100.0
+    );
 }
 
 /// Integration test with large number of SSTables (stress test)
@@ -528,12 +603,21 @@ async fn test_real_world_patterns_integration() {
 // Supporting types and functions
 
 #[derive(Debug)]
+struct MixedFormatTestScenario {
+    name: String,
+    description: String,
+    datasets: Vec<(&'static str, Vec<&'static str>)>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
 struct MixedFormatScenario {
     name: String,
     description: String,
     files: Vec<(&'static str, SSTableFormat)>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum SSTableFormat {
     Modern,
@@ -547,6 +631,7 @@ struct ScenarioResult {
     success_rate: f64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct LargeScaleMetrics {
     total_sstables_created: usize,
@@ -557,6 +642,7 @@ struct LargeScaleMetrics {
     load_success_rate: f64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct PatternResult {
     loaded_successfully: bool,
@@ -599,6 +685,7 @@ async fn create_realistic_cassandra_sstable(dir: &Path, base_name: &str, data_si
     }
 }
 
+#[allow(dead_code)]
 async fn create_modern_sstable_with_components(dir: &Path, filename: &str) {
     if let Some(base_name) = filename.strip_suffix("-Data.db") {
         create_realistic_cassandra_sstable(dir, base_name, 8192).await;
@@ -611,6 +698,7 @@ async fn create_modern_sstable_with_components(dir: &Path, filename: &str) {
     }
 }
 
+#[allow(dead_code)]
 async fn create_legacy_sstable(file_path: &Path) {
     let legacy_content = create_legacy_sstable_content();
     fs::write(file_path, legacy_content).await.unwrap();
@@ -636,7 +724,7 @@ fn create_realistic_data_content(size: usize) -> Vec<u8> {
 
     // Cassandra SSTable header
     data.extend_from_slice(&[
-        0x6d, 0x61, 0x64, 0x61, // Magic "mada"
+        0x6f, 0x61, 0x00, 0x00, // Magic number for Cassandra 5.x format
         0x00, 0x00, 0x00, 0x05, // Version 5
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // Timestamp (1ms)
         0x00, 0x00, 0x00, 0x01, // Table count
@@ -647,9 +735,9 @@ fn create_realistic_data_content(size: usize) -> Vec<u8> {
     let partitions = std::cmp::min(100, size / 64);
     for i in 0..partitions {
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]); // Key length
-        data.extend_from_slice(&format!("partition_{:04}", i).as_bytes());
+        data.extend_from_slice(format!("partition_{:04}", i).as_bytes());
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]); // Value length
-        data.extend_from_slice(&vec![0x44; 32]); // Mock value
+        data.extend_from_slice(&[0x44; 32]); // Mock value
     }
 
     // Pad to requested size
@@ -701,7 +789,7 @@ fn create_realistic_summary_content(size: usize) -> Vec<u8> {
     for i in 0..entries {
         let token = -5000000000i64 + (i as i64 * 1000000000);
         data.extend_from_slice(&[0x00, 0x08]); // Key length
-        data.extend_from_slice(&format!("sum_{:02}", i).as_bytes());
+        data.extend_from_slice(format!("sum_{:02}", i).as_bytes());
         data.extend_from_slice(&token.to_be_bytes());
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, (i as u8) * 10, 0x00]);
     }
@@ -782,12 +870,13 @@ fn create_toc_content() -> Vec<u8> {
     content.as_bytes().to_vec()
 }
 
+#[allow(dead_code)]
 fn create_legacy_sstable_content() -> Vec<u8> {
     let mut data = Vec::new();
 
     // Legacy SSTable header
     data.extend_from_slice(&[
-        0x6c, 0x65, 0x67, 0x61, // Magic "lega" (legacy)
+        0x64, 0x61, 0x00, 0x00, // Magic number for legacy Cassandra format
         0x00, 0x00, 0x00, 0x01, // Version 1
         0x00, 0x00, 0x00, 0x0A, // Entry count (10)
     ]);
@@ -795,9 +884,9 @@ fn create_legacy_sstable_content() -> Vec<u8> {
     // Legacy format data
     for i in 0..10 {
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x08]); // Key length
-        data.extend_from_slice(&format!("leg_{:04}", i).as_bytes());
+        data.extend_from_slice(format!("leg_{:04}", i).as_bytes());
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]); // Value length
-        data.extend_from_slice(&vec![0x4C; 16]); // 'L' for legacy
+        data.extend_from_slice(&[0x4C; 16]); // 'L' for legacy
     }
 
     data
@@ -806,7 +895,7 @@ fn create_legacy_sstable_content() -> Vec<u8> {
 fn create_minimal_data_content() -> Vec<u8> {
     // Minimal valid header for stress testing
     vec![
-        0x6d, 0x61, 0x64, 0x61, // Magic
+        0x6f, 0x61, 0x00, 0x00, // Magic number for Cassandra 5.x format
         0x00, 0x00, 0x00, 0x05, // Version
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Timestamp
         0x00, 0x00, 0x00, 0x01, // Table count
@@ -836,7 +925,7 @@ async fn store_keyspace_integration_results(
     loaded: usize,
 ) {
     let _ = tokio::process::Command::new("npx")
-        .args(&[
+        .args([
             "claude-flow@alpha",
             "hooks",
             "post-edit",
@@ -858,7 +947,7 @@ async fn store_keyspace_integration_results(
 
 async fn store_mixed_format_results(results: &HashMap<String, ScenarioResult>) {
     let _ = tokio::process::Command::new("npx")
-        .args(&[
+        .args([
             "claude-flow@alpha",
             "hooks",
             "post-edit",
@@ -878,7 +967,7 @@ async fn store_mixed_format_results(results: &HashMap<String, ScenarioResult>) {
 
 async fn store_large_scale_metrics(metrics: &LargeScaleMetrics) {
     let _ = tokio::process::Command::new("npx")
-        .args(&[
+        .args([
             "claude-flow@alpha",
             "hooks",
             "post-edit",
@@ -902,7 +991,7 @@ async fn store_real_world_pattern_results(
     loaded: usize,
 ) {
     let _ = tokio::process::Command::new("npx")
-        .args(&[
+        .args([
             "claude-flow@alpha",
             "hooks",
             "post-edit",

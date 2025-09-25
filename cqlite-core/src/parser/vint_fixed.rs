@@ -124,7 +124,7 @@ pub fn encode_vint_fixed(value: i64) -> Vec<u8> {
     let unsigned_value = zigzag_encode(value);
 
     // For small values in range [-64, 63], use direct Cassandra single-byte format
-    if value >= -64 && value <= 63 {
+    if (-64..=63).contains(&value) {
         if value >= 0 {
             // Positive values: 0x80 + value (0x80-0xBF)
             vec![(0x80 + value) as u8]

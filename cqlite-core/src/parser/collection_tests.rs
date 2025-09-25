@@ -472,7 +472,7 @@ mod tuple_tests {
 
     #[test]
     fn test_mixed_type_tuple_parsing() {
-        // Tuple: (42, "hello", true, 3.14)
+        // Tuple: (42, "hello", true, PI)
         let mut data = Vec::new();
 
         // Field count
@@ -501,7 +501,7 @@ mod tuple_tests {
         data.push(1u8);
 
         // Field 3: Double 3.14
-        let double_bytes = 3.14f64.to_be_bytes();
+        let double_bytes = std::f64::consts::PI.to_be_bytes();
         data.extend_from_slice(&(double_bytes.len() as i32).to_be_bytes());
         data.extend_from_slice(&double_bytes);
 
@@ -515,7 +515,9 @@ mod tuple_tests {
             assert!(matches!(parsed_tuple[0], Value::Integer(42)));
             assert!(matches!(parsed_tuple[1], Value::Text(ref s) if s == "hello"));
             assert!(matches!(parsed_tuple[2], Value::Boolean(true)));
-            assert!(matches!(parsed_tuple[3], Value::Float(f) if approx_eq(f, 3.14)));
+            assert!(
+                matches!(parsed_tuple[3], Value::Float(f) if approx_eq(f, std::f64::consts::PI))
+            );
         } else {
             panic!("Expected tuple value");
         }
@@ -583,7 +585,7 @@ mod roundtrip_tests {
             Value::Integer(42),
             Value::Text("hello".to_string()),
             Value::Boolean(true),
-            Value::Float(3.14),
+            Value::Float(std::f64::consts::PI),
         ]);
 
         let serialized = serialize_cql_value(&original).unwrap();

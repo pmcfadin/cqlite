@@ -726,7 +726,7 @@ impl FormatValidator {
 
         match (source_info, target_info) {
             (Some(source), Some(target)) => {
-                let version_diff = self.calculate_version_difference(&source, &target);
+                let version_diff = self.calculate_version_difference(source, target);
 
                 match compatibility_type {
                     CompatibilityType::BackwardCompatibility => {
@@ -831,7 +831,10 @@ impl FormatValidator {
         }
 
         // Check if it looks like a valid binary format
-        let text_bytes = contents.iter().filter(|&&b| b >= 32 && b <= 126).count();
+        let text_bytes = contents
+            .iter()
+            .filter(|&&b| (32..=126).contains(&b))
+            .count();
         let text_ratio = text_bytes as f64 / contents.len() as f64;
 
         if text_ratio > 0.8 {

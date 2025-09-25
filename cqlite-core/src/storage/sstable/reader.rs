@@ -267,7 +267,10 @@ impl SSTableReader {
 
         // Convert to bytes and check if they look like ASCII text
         let bytes = value.to_be_bytes();
-        let ascii_count = bytes.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count();
+        let ascii_count = bytes
+            .iter()
+            .filter(|&&b| (0x20..=0x7E).contains(&b))
+            .count();
 
         // If 3 or more bytes are printable ASCII, likely corruption
         ascii_count >= 3
@@ -292,7 +295,10 @@ impl SSTableReader {
         }
 
         // Check if all 4 bytes are printable ASCII
-        let ascii_count = chunk.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count();
+        let ascii_count = chunk
+            .iter()
+            .filter(|&&b| (0x20..=0x7E).contains(&b))
+            .count();
         ascii_count >= 3
     }
 
@@ -1499,10 +1505,12 @@ impl SSTableReader {
         }
 
         // Format matching (nb-*-big pattern)
-        if sstable_name.contains("nb-") && sstable_name.contains("-big-") {
-            if comp_name.contains("nb-") && comp_name.contains("-big-") {
-                score += 25;
-            }
+        if sstable_name.contains("nb-")
+            && sstable_name.contains("-big-")
+            && comp_name.contains("nb-")
+            && comp_name.contains("-big-")
+        {
+            score += 25;
         }
 
         // Generic CompressionInfo.db gets lowest score
@@ -2219,10 +2227,10 @@ impl SSTableReader {
                     return Ok(None);
                 }
                 Err(e) => {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to read BTI block header: {}", e),
-                    )));
+                    return Err(Error::Io(std::io::Error::other(format!(
+                        "Failed to read BTI block header: {}",
+                        e
+                    ))));
                 }
             }
         };
@@ -2264,10 +2272,10 @@ impl SSTableReader {
                     return Ok(None);
                 }
                 Err(e) => {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to read legacy block header: {}", e),
-                    )));
+                    return Err(Error::Io(std::io::Error::other(format!(
+                        "Failed to read legacy block header: {}",
+                        e
+                    ))));
                 }
             }
         };
@@ -2294,10 +2302,10 @@ impl SSTableReader {
         {
             let mut file_guard = self.file.lock().await;
             file_guard.read_exact(&mut block_data).await.map_err(|e| {
-                Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to read block data ({}): {}", size, e),
-                ))
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to read block data ({}): {}",
+                    size, e
+                )))
             })?;
         }
         Ok(block_data)
@@ -2323,10 +2331,10 @@ impl SSTableReader {
                     .read_exact(&mut buffer[..to_read])
                     .await
                     .map_err(|e| {
-                        Error::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Failed to read block chunk ({}): {}", to_read, e),
-                        ))
+                        Error::Io(std::io::Error::other(format!(
+                            "Failed to read block chunk ({}): {}",
+                            to_read, e
+                        )))
                     })?;
 
                 block_data.extend_from_slice(&buffer[..to_read]);
@@ -2542,10 +2550,7 @@ impl SSTableReader {
                 }
             };
 
-            let mut _state_machine: RowCellStateMachine = match state_machine_result {
-                Ok(sm) => sm,
-                Err(e) => return Err(e),
-            };
+            let mut _state_machine: RowCellStateMachine = state_machine_result?;
 
             // Process data starting from current offset
             let remaining_data = &data[offset..];
@@ -2788,13 +2793,11 @@ impl SSTableReader {
         // Modern formats should never reach this non-schema fallback path
         match self.header.cassandra_version {
             crate::parser::header::CassandraVersion::V5_0NewBig
-            | crate::parser::header::CassandraVersion::V5_0Bti => {
-                return Err(Error::Schema(format!(
-                    "Non-schema key parsing fallback not allowed for modern format {:?}. \
+            | crate::parser::header::CassandraVersion::V5_0Bti => Err(Error::Schema(format!(
+                "Non-schema key parsing fallback not allowed for modern format {:?}. \
                      Use SchemaAwareReader with proper schema registry.",
-                    self.header.cassandra_version
-                )));
-            }
+                self.header.cassandra_version
+            ))),
             _ => {
                 // Legacy formats can return raw key data as last resort
                 #[cfg(feature = "legacy-heuristics")]
@@ -3113,13 +3116,11 @@ impl SSTableReader {
         // Modern formats should never use blob fallback without schema
         match self.header.cassandra_version {
             crate::parser::header::CassandraVersion::V5_0NewBig
-            | crate::parser::header::CassandraVersion::V5_0Bti => {
-                return Err(Error::Schema(format!(
-                    "Blob fallback not allowed for value parsing in modern format {:?}. \
+            | crate::parser::header::CassandraVersion::V5_0Bti => Err(Error::Schema(format!(
+                "Blob fallback not allowed for value parsing in modern format {:?}. \
                      Use SchemaAwareReader with complete schema information.",
-                    self.header.cassandra_version
-                )));
-            }
+                self.header.cassandra_version
+            ))),
             _ => {
                 // Legacy formats can use blob fallback as last resort
                 #[cfg(feature = "legacy-heuristics")]
@@ -3467,13 +3468,11 @@ impl SSTableReader {
         // Modern formats should never use generic UDT fabrication without schema
         match self.header.cassandra_version {
             crate::parser::header::CassandraVersion::V5_0NewBig
-            | crate::parser::header::CassandraVersion::V5_0Bti => {
-                return Err(Error::Schema(format!(
-                    "Generic UDT fabrication not allowed for modern format {:?}. \
+            | crate::parser::header::CassandraVersion::V5_0Bti => Err(Error::Schema(format!(
+                "Generic UDT fabrication not allowed for modern format {:?}. \
                      Use SchemaAwareReader with complete UDT schema information.",
-                    self.header.cassandra_version
-                )));
-            }
+                self.header.cassandra_version
+            ))),
             _ => {
                 // Legacy formats can use generic UDT fabrication as last resort
                 #[cfg(feature = "legacy-heuristics")]

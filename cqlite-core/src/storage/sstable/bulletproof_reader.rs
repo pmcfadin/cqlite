@@ -43,6 +43,12 @@ pub struct BulletproofReader {
     data_reader: Option<BufReader<File>>,
 }
 
+impl Default for BulletproofReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BulletproofReader {
     /// Create a new bulletproof reader with default settings (for testing)
     pub fn new() -> Self {
@@ -134,7 +140,7 @@ impl BulletproofReader {
             )));
         }
 
-        let file = File::open(&data_path).map_err(|e| Error::Io(e))?;
+        let file = File::open(&data_path).map_err(Error::Io)?;
         let reader = BufReader::new(file);
 
         self.data_reader = Some(reader);
@@ -159,12 +165,10 @@ impl BulletproofReader {
             // Read directly from uncompressed file
             use std::io::{Read, Seek, SeekFrom};
 
-            reader
-                .seek(SeekFrom::Start(offset))
-                .map_err(|e| Error::Io(e))?;
+            reader.seek(SeekFrom::Start(offset)).map_err(Error::Io)?;
 
             let mut buffer = vec![0u8; length];
-            reader.read_exact(&mut buffer).map_err(|e| Error::Io(e))?;
+            reader.read_exact(&mut buffer).map_err(Error::Io)?;
 
             Ok(buffer)
         }
@@ -188,17 +192,17 @@ impl BulletproofReader {
             use std::io::{Read, Seek, SeekFrom};
 
             // Get file size
-            let current_pos = reader.stream_position().map_err(|e| Error::Io(e))?;
-            let file_size = reader.seek(SeekFrom::End(0)).map_err(|e| Error::Io(e))?;
+            let current_pos = reader.stream_position().map_err(Error::Io)?;
+            let file_size = reader.seek(SeekFrom::End(0)).map_err(Error::Io)?;
             reader
                 .seek(SeekFrom::Start(current_pos))
-                .map_err(|e| Error::Io(e))?;
+                .map_err(Error::Io)?;
 
             // Read entire file
-            reader.seek(SeekFrom::Start(0)).map_err(|e| Error::Io(e))?;
+            reader.seek(SeekFrom::Start(0)).map_err(Error::Io)?;
 
             let mut buffer = Vec::with_capacity(file_size as usize);
-            reader.read_to_end(&mut buffer).map_err(|e| Error::Io(e))?;
+            reader.read_to_end(&mut buffer).map_err(Error::Io)?;
 
             Ok(buffer)
         }
@@ -678,10 +682,10 @@ pub fn test_read_sstable_directory<P: AsRef<Path>>(dir_path: P) -> Result<()> {
     info!("Testing bulletproof SSTable reading in: {:?}", dir);
 
     // Find Data.db files
-    let entries = std::fs::read_dir(dir).map_err(|e| Error::Io(e))?;
+    let entries = std::fs::read_dir(dir).map_err(Error::Io)?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| Error::Io(e))?;
+        let entry = entry.map_err(Error::Io)?;
         let path = entry.path();
 
         if path

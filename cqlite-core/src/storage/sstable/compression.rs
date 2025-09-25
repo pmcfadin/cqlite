@@ -5,11 +5,12 @@ use std::io::Read;
 // use async_trait::async_trait; // Commented out - unused
 
 /// Compression algorithms supported
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub enum CompressionAlgorithm {
     /// No compression
     None,
     /// LZ4 compression (fast)
+    #[default]
     Lz4,
     /// Snappy compression (balanced)
     Snappy,
@@ -17,12 +18,6 @@ pub enum CompressionAlgorithm {
     Deflate,
     /// Zstd compression (high efficiency)
     Zstd,
-}
-
-impl Default for CompressionAlgorithm {
-    fn default() -> Self {
-        CompressionAlgorithm::Lz4
-    }
 }
 
 impl From<String> for CompressionAlgorithm {

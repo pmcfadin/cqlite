@@ -144,7 +144,7 @@ impl QueryExecutor {
             .ok_or_else(|| Error::query_execution("No lookup condition found".to_string()))?;
 
         // Convert condition value to row key using the same format as INSERT
-        let row_key = self.condition_to_row_key(&lookup_condition)?;
+        let row_key = self.condition_to_row_key(lookup_condition)?;
 
         #[cfg(debug_assertions)]
         eprintln!(
@@ -339,7 +339,7 @@ impl QueryExecutor {
             })?;
 
         // Simplified bloom filter scan - just do direct lookup
-        let row_key = self.condition_to_row_key(&condition)?;
+        let row_key = self.condition_to_row_key(condition)?;
 
         // Direct lookup instead of bloom filter check
         if let Some(row_data) = self.storage.get(table, &row_key).await? {
@@ -372,7 +372,7 @@ impl QueryExecutor {
             })?;
 
         // Direct primary key lookup using consistent key format
-        let row_key = self.condition_to_row_key(&condition)?;
+        let row_key = self.condition_to_row_key(condition)?;
 
         if let Some(row_data) = self.storage.get(table, &row_key).await? {
             let query_row = self.storage_data_to_query_row(row_data, &row_key)?;

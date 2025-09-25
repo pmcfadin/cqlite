@@ -139,10 +139,10 @@ impl FormatDetector {
     pub fn detect_from_directory(&self, dir: &Path) -> Result<SSTableFormat> {
         use std::fs;
 
-        let entries = fs::read_dir(dir).map_err(|e| Error::Io(e))?;
+        let entries = fs::read_dir(dir).map_err(Error::Io)?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| Error::Io(e))?;
+            let entry = entry.map_err(Error::Io)?;
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("db") {

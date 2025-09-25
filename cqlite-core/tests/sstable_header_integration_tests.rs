@@ -362,7 +362,7 @@ mod integration_tests {
         let mut join_set = JoinSet::new();
 
         for (filename, _) in corruption_patterns {
-            let file_path = temp_dir.path().join(&filename);
+            let file_path = temp_dir.path().join(filename);
             let config_clone = config.clone();
             let platform_clone = platform.clone();
 

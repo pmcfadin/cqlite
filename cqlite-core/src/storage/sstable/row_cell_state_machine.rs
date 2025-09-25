@@ -1000,11 +1000,11 @@ impl RowCellStateMachine {
         // Modern formats should never use basic fallback parsing with blob values
         match self.version {
             CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                return Err(Error::Schema(format!(
+                Err(Error::Schema(format!(
                     "Basic fallback parsing with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
                     self.version
-                )));
+                )))
             }
             _ => {
                 // Legacy formats can use basic parsing as last resort
@@ -1017,9 +1017,9 @@ impl RowCellStateMachine {
                 #[cfg(feature = "legacy-heuristics")]
                 {
                     // Legacy heuristic parsing implementation would go here
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Legacy basic parsing not yet implemented.".to_string(),
-                    ));
+                    ))
                 }
             }
         }
@@ -1032,11 +1032,11 @@ impl RowCellStateMachine {
         // Modern formats should never create fallback rows with blob values
         match self.version {
             CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                return Err(Error::Schema(format!(
+                Err(Error::Schema(format!(
                     "Fallback row creation with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
                     self.version
-                )));
+                )))
             }
             _ => {
                 // Legacy formats can create fallback rows as last resort
@@ -1048,9 +1048,9 @@ impl RowCellStateMachine {
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Legacy fallback row creation not yet implemented.".to_string(),
-                    ));
+                    ))
                 }
             }
         }
@@ -1089,11 +1089,11 @@ impl RowCellStateMachine {
         // Modern formats should never parse as single cell with blob values
         match self.version {
             CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                return Err(Error::Schema(format!(
+                Err(Error::Schema(format!(
                     "Single cell parsing with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
                     self.version
-                )));
+                )))
             }
             _ => {
                 // Legacy formats can parse as single cell as last resort
@@ -1105,9 +1105,9 @@ impl RowCellStateMachine {
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Legacy single cell parsing not yet implemented.".to_string(),
-                    ));
+                    ))
                 }
             }
         }
@@ -1118,11 +1118,11 @@ impl RowCellStateMachine {
         // Modern formats should never use pattern-based parsing with blob values
         match self.version {
             CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                return Err(Error::Schema(format!(
+                Err(Error::Schema(format!(
                     "Pattern-based parsing with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
                     self.version
-                )));
+                )))
             }
             _ => {
                 // Legacy formats can use pattern parsing as last resort
@@ -1134,9 +1134,9 @@ impl RowCellStateMachine {
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Legacy pattern parsing not yet implemented.".to_string(),
-                    ));
+                    ))
                 }
             }
         }
@@ -1148,11 +1148,11 @@ impl RowCellStateMachine {
         // Modern formats should never use byte analysis parsing with blob values
         match self.version {
             CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                return Err(Error::Schema(format!(
+                Err(Error::Schema(format!(
                     "Byte analysis parsing with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
                     self.version
-                )));
+                )))
             }
             _ => {
                 // Legacy formats can use byte analysis as last resort
@@ -1164,9 +1164,9 @@ impl RowCellStateMachine {
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Legacy byte analysis parsing not yet implemented.".to_string(),
-                    ));
+                    ))
                 }
             }
         }

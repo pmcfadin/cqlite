@@ -542,7 +542,7 @@ impl ParserValidator {
         let passed_tests = self.results.values().filter(|r| r.passed).count();
         let failed_tests = total_tests - passed_tests;
 
-        report.push_str(&"## Summary\n".to_string());
+        report.push_str("## Summary\n");
         report.push_str(&format!("- Total Tests: {}\n", total_tests));
         report.push_str(&format!(
             "- Passed: {} ({:.1}%)\n",
@@ -577,7 +577,7 @@ impl ParserValidator {
                 report.push_str(&format!("- Error: {}\n", error));
             }
 
-            report.push_str("\n");
+            report.push('\n');
         }
 
         report

@@ -47,7 +47,7 @@ impl BloomFilter {
         let hash_count = hash_count.max(1);
 
         // Calculate number of u64 words needed
-        let word_count = (bit_count + 63) / 64;
+        let word_count = bit_count.div_ceil(64);
 
         Ok(Self {
             bits: vec![0u64; word_count as usize],
@@ -190,7 +190,7 @@ impl BloomFilter {
         ]);
 
         // Calculate expected word count
-        let word_count = (bit_count + 63) / 64;
+        let word_count = bit_count.div_ceil(64);
         let expected_size = 12 + (word_count as usize * 8);
 
         if data.len() != expected_size {

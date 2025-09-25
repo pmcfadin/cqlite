@@ -17,19 +17,10 @@ include = [
     "cqlite-core/src/validation/*"
 ]
 
-# Exclude synthetic/mocked test paths from coverage (per issue comment)
-exclude = [
-    "**/tests/**",
-    "**/*test*.rs", 
-    "**/synthetic/**",
-    "**/mock/**",
-    "**/fixtures/**",
-    "examples/**",
-    "target/**"
-]
+# Note: exclude requires --workspace flag, so using include filters instead
 
 # Output formats for CI integration
-out = ["Html", "Cobertura", "Lcov"]
+out = ["Html", "Xml", "Lcov"]
 
 # Generate coverage reports in validation_artifacts directory
 output-dir = "validation_artifacts/coverage"
@@ -38,11 +29,4 @@ output-dir = "validation_artifacts/coverage"
 # Full coverage analysis (informational)
 fail-under = 80.0
 packages = ["cqlite-core", "cqlite-cli"]
-exclude = [
-    "**/tests/**",
-    "**/*test*.rs", 
-    "**/synthetic/**",
-    "**/mock/**",
-    "examples/**",
-    "target/**"
-]
+# Note: exclude requires --workspace flag

@@ -132,7 +132,7 @@ impl MemoryManager {
         let mut cache = self.block_cache.write();
 
         // Check if block exists and clone it before any mutations
-        let block_option = cache.blocks.get(&key).map(|block| Arc::clone(block));
+        let block_option = cache.blocks.get(&key).map(Arc::clone);
 
         if let Some(block) = block_option {
             // Update LRU order (now safe since we don't hold immutable borrow)
@@ -207,7 +207,7 @@ impl MemoryManager {
         let mut cache = self.row_cache.write();
 
         // Check if row exists and clone it before any mutations
-        let row_option = cache.rows.get(&key).map(|row| Arc::clone(row));
+        let row_option = cache.rows.get(&key).map(Arc::clone);
 
         if let Some(row) = row_option {
             // Update LRU order (now safe since we don't hold immutable borrow)
@@ -289,10 +289,7 @@ impl MemoryManager {
         buffer.resize(size, 0);
 
         let mut pool = self.buffer_pool.write();
-        pool.free_buffers
-            .entry(size)
-            .or_insert_with(Vec::new)
-            .push(buffer);
+        pool.free_buffers.entry(size).or_default().push(buffer);
         pool.allocated_count -= 1;
     }
 

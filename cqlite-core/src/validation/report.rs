@@ -89,7 +89,7 @@ impl ReportGenerator {
     fn generate_markdown_report(&self, report_data: &ValidationReport) -> Result<String> {
         let mut output = String::new();
 
-        output.push_str(&format!("# Validation Report\n\n"));
+        output.push_str("# Validation Report\n\n");
         output.push_str(&format!(
             "**Date**: {}\n",
             report_data.timestamp.format("%Y-%m-%d %H:%M:%S UTC")

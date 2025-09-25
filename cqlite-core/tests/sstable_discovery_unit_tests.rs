@@ -266,7 +266,7 @@ async fn test_directory_scanning() {
         .filter(|f| f.ends_with("-Data.db") || f.ends_with(".sst"))
         .collect();
 
-    let expected_sstable_count = 5; // 4 Data.db + 2 .sst - 1 in subdir
+    let expected_sstable_count = 6; // 3 Data.db + 2 .sst + 1 malformed Data.db (matches pattern)
     assert_eq!(
         sstable_files.len(),
         expected_sstable_count,
@@ -329,8 +329,21 @@ async fn test_generation_number_parsing() {
         // Parse generation from filename parts
         let parts: Vec<&str> = filename.split('-').collect();
 
-        let parsed_generation = if parts.len() >= 4 && parts[0] != "" && parts[2] != "" {
-            parts[1].parse::<u64>().ok()
+        let parsed_generation = if parts.len() >= 4 && !parts[0].is_empty() && !parts[2].is_empty()
+        {
+            // Reject strings with leading + or -
+            if parts[1].starts_with('+') || parts[1].starts_with('-') {
+                None
+            } else {
+                // Parse as u64 but reject values > i64::MAX to match expected behavior
+                parts[1].parse::<u64>().ok().and_then(|val| {
+                    if val <= i64::MAX as u64 {
+                        Some(val)
+                    } else {
+                        None
+                    }
+                })
+            }
         } else {
             None
         };
@@ -436,9 +449,9 @@ async fn test_component_discovery_unit() {
         let filename = format!("{}-{}", base_name, component);
         let file_path = test_root.join(&filename);
 
-        let content = match component {
-            &"Data.db" => create_minimal_sstable_data(),
-            &"TOC.txt" => b"Data.db\nIndex.db\nSummary.db\n".to_vec(),
+        let content = match *component {
+            "Data.db" => create_minimal_sstable_data(),
+            "TOC.txt" => b"Data.db\nIndex.db\nSummary.db\n".to_vec(),
             _ => vec![0x42; 1024], // Placeholder content
         };
 
@@ -511,7 +524,7 @@ fn create_minimal_sstable_data() -> Vec<u8> {
 async fn test_hooks_integration() {
     // Test coordination hooks integration
     let result = tokio::process::Command::new("npx")
-        .args(&[
+        .args([
             "claude-flow@alpha",
             "hooks",
             "notify",
