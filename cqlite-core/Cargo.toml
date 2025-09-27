@@ -144,5 +144,8 @@ unit-tests-only = []  # Enables mock/synthetic data usage for unit tests (disabl
 # Includes promoted index parsing, complex TOC validation, and advanced assertions
 enhanced-index-validation = []
 
+# Docker integration testing feature
+docker-integration = []
+
 [lints]
 workspace = true

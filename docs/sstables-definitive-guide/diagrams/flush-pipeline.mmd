@@ -2,7 +2,7 @@
 %% Alt: Flush pipeline from Memtable/WAL to per-component files with TOC
 %% Caption: Flush steps create Data.db then derive Index/Summary/Filter/Statistics/CompressionInfo and TOC.txt
 flowchart TD
-  CQL[CQL Mutations] --> WAL[Commit Log (WAL)]
+  CQL[CQL Mutations] --> WAL[Commit Log: WAL]
   CQL --> MEM[Memtable]
 
   subgraph Flush
@@ -11,7 +11,7 @@ flowchart TD
     IDX --> SUM[Sample Summary.db]
     DATA --> STATS[Collect Statistics.db]
     DATA --> COMPINFO[Write CompressionInfo.db]
-    DATA --> BF[Build Filter.db (Bloom)]
+    DATA --> BF[Build Filter.db: Bloom]
   end
 
   SUM --> TOC[Emit TOC.txt]
@@ -22,20 +22,3 @@ flowchart TD
 
   classDef note fill:#eef,stroke:#88a,stroke-width:1px
   class TOC note
-%% Flush pipeline diagram (stub)
-flowchart LR
-  M[Memtable] --> W[Write Commit Log]
-  W --> FP[Flush Pipeline]
-  FP --> B[Data.db]
-  FP --> C[Index.db]
-  FP --> D[Summary.db]
-  FP --> E[Filter.db]
-  FP --> F[Statistics.db]
-  FP --> G[CompressionInfo.db]
-  B -. components listed .-> T[TOC.txt]
-  C -. components listed .-> T
-  D -. components listed .-> T
-  E -. components listed .-> T
-  F -. components listed .-> T
-  G -. components listed .-> T
-

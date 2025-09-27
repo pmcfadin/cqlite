@@ -21,7 +21,7 @@ mod tests {
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x05]);
 
         // Reserved (22 bytes, must be zero per spec)
-        data.extend_from_slice(&vec![0; 22]);
+        data.extend_from_slice(&[0; 22]);
 
         assert_eq!(data.len(), 32, "Header must be exactly 32 bytes per spec");
         data

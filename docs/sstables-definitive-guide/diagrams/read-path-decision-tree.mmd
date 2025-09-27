@@ -2,7 +2,7 @@
 %% Alt: Decision tree for point and slice reads across Bloom, Summary/Index, and Data
 %% Caption: Negative lookups exit at Bloom; positives navigate via Summary/Index to Data
 flowchart TD
-  Q[Read request (key or slice)] --> B{Bloom contains?}
+  Q[Read request: key or slice] --> B{Bloom contains?}
   B -- No --> R0[Return not found]
   B -- Yes --> S{Have Summary/Index?}
   S -- No --> SEQ[Sequential scan Data.db]

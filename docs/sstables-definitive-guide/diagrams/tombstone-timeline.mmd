@@ -2,13 +2,13 @@
 %% Alt: Timeline of writes, tombstones, TTL expiry across generations
 %% Caption: Newer writes can shadow older tombstones; TTLs expire visibility over time
 sequenceDiagram
-  participant W1 as Write(v=42, t=1000)
-  participant T1 as RowTombstone(t=2000)
-  participant W2 as Write(v=new, t=3000)
+  participant W1 as Write v=42, t=1000
+  participant T1 as RowTombstone t=2000
+  participant W2 as Write v=new, t=3000
   participant TTL as TTL Expiry
 
-  Note over W1: value=42 visible until T1
+  Note over W1: value 42 visible until T1
   T1->>W1: Deletes older value(s)
   Note over W2: newer value writes after T1
-  TTL-->>W2: Optional: expiry at t=write+ttl
+  TTL-->>W2: Optional expiry at t=write+ttl
 

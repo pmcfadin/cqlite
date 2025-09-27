@@ -2,7 +2,7 @@
 %% Alt: Dispatcher routes to numeric/text/vector SAI; candidates validated via base read path
 %% Cap: SAI returns candidate primary keys; base SSTable read path materializes rows
 flowchart LR
-  Q[Query (range/text/vector)] --> D[SAI Dispatcher]
+  Q[Query: range/text/vector] --> D[SAI Dispatcher]
   D --> N[Numeric Range Reader]
   D --> X[Text Term/Prefix Reader]
   D --> V[Vector Similarity Reader]

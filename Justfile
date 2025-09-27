@@ -198,7 +198,8 @@ book-pdf:
       --toc --toc-depth=2 \
       --resource-path=.:docs/sstables-definitive-guide \
       -V geometry:margin=1in \
-      -V mainfont="Helvetica Neue" -V monofont="Menlo" \
+      -V mainfont="Noto Sans" -V monofont="Noto Sans Mono" \
+      --include-in-header=docs/sstables-definitive-guide/pandoc-header.tex \
       -V colorlinks=true \
       --metadata title="SSTables: The Definitive Guide (Apache Cassandra)"
     @echo "✅ PDF written to docs/sstables-definitive-guide/dist/sstables-definitive-guide.pdf"

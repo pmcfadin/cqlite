@@ -315,7 +315,7 @@ mod set_tests {
             assert_eq!(parsed_set.len(), 5); // All elements as stored
 
             // Verify the elements are parsed correctly
-            let expected = vec!["apple", "banana", "apple", "cherry", "banana"];
+            let expected = ["apple", "banana", "apple", "cherry", "banana"];
             for (i, item) in parsed_set.iter().enumerate() {
                 if let Value::Text(text) = item {
                     assert_eq!(text, expected[i]);

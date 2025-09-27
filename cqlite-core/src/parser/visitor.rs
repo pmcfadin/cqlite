@@ -944,10 +944,13 @@ impl CqlVisitor<()> for SemanticValidator {
     }
 }
 
+/// Type alias for AST transformation function
+pub type TransformationFn = Box<dyn Fn(&CqlStatement) -> Option<CqlStatement>>;
+
 /// Visitor that transforms AST nodes
 pub struct AstTransformer {
     /// Transformations to apply
-    pub transformations: Vec<Box<dyn Fn(&CqlStatement) -> Option<CqlStatement>>>,
+    pub transformations: Vec<TransformationFn>,
 }
 
 impl std::fmt::Debug for AstTransformer {

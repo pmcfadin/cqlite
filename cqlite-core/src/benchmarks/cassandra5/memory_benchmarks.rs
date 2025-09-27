@@ -529,8 +529,8 @@ impl MemoryBenchmarks {
         let sum_x2: f64 = (0..samples.len()).map(|i| (i as f64).powi(2)).sum();
 
         // Linear regression slope (growth rate)
-        let slope = (n * sum_xy_product - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2));
-        slope
+        
+        (n * sum_xy_product - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2))
     }
 
     /// Simulate processing operations that might cause memory leaks

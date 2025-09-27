@@ -382,6 +382,12 @@ pub struct MemoryMonitor {
     samples: Vec<(Instant, f64)>,
 }
 
+impl Default for MemoryMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryMonitor {
     pub fn new() -> Self {
         Self {

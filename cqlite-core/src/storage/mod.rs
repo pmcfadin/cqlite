@@ -462,35 +462,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_operations_fallback() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut config = Config::default();
-        // Force fallback path by setting small threshold so batch writer is not initialized
-        config.storage.memtable_size_threshold = 1024; // 1KB - smaller than 1MB threshold
-        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        // Add timeout to prevent hanging in parallel test execution
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let temp_dir = TempDir::new().unwrap();
+            let mut config = Config::default();
+            // Force fallback path by setting small threshold so batch writer is not initialized
+            config.storage.memtable_size_threshold = 1024; // 1KB - smaller than 1MB threshold
+            let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-        let mut storage = StorageEngine::open(temp_dir.path(), &config, platform)
-            .await
-            .unwrap();
+            let mut storage = StorageEngine::open(temp_dir.path(), &config, platform)
+                .await
+                .unwrap();
 
-        // Test batch write operations (should use fallback path)
-        let batch_ops = vec![
-            BatchOperation::Put {
-                table_id: TableId::new("test_table"),
-                key: RowKey::from("key1"),
-                value: Value::Text("value1".to_string()),
-            },
-            BatchOperation::Put {
-                table_id: TableId::new("test_table"),
-                key: RowKey::from("key2"),
-                value: Value::Text("value2".to_string()),
-            },
-            BatchOperation::Delete {
-                table_id: TableId::new("test_table"),
-                key: RowKey::from("key3"),
-            },
-        ];
+            // Test batch write operations (should use fallback path)
+            let batch_ops = vec![
+                BatchOperation::Put {
+                    table_id: TableId::new("test_table"),
+                    key: RowKey::from("key1"),
+                    value: Value::Text("value1".to_string()),
+                },
+                BatchOperation::Put {
+                    table_id: TableId::new("test_table"),
+                    key: RowKey::from("key2"),
+                    value: Value::Text("value2".to_string()),
+                },
+                BatchOperation::Delete {
+                    table_id: TableId::new("test_table"),
+                    key: RowKey::from("key3"),
+                },
+            ];
 
-        storage.batch_write(batch_ops).await.unwrap();
-        storage.shutdown().await.unwrap();
+            storage.batch_write(batch_ops).await.unwrap();
+            storage.shutdown().await.unwrap();
+        })
+        .await
+        .expect("Test should complete within 30 seconds");
     }
 }

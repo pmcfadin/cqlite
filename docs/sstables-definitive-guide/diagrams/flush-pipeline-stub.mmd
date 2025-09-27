@@ -1,0 +1,16 @@
+%% Flush pipeline diagram (stub)
+flowchart LR
+  M[Memtable] --> W[Write Commit Log]
+  W --> FP[Flush Pipeline]
+  FP --> B[Data.db]
+  FP --> C[Index.db]
+  FP --> D[Summary.db]
+  FP --> E[Filter.db]
+  FP --> F[Statistics.db]
+  FP --> G[CompressionInfo.db]
+  B -. components listed .-> T[TOC.txt]
+  C -. components listed .-> T
+  D -. components listed .-> T
+  E -. components listed .-> T
+  F -. components listed .-> T
+  G -. components listed .-> T

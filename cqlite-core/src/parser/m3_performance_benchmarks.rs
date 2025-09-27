@@ -485,14 +485,14 @@ impl M3PerformanceBenchmarks {
         let passed_tests = self.results.iter().filter(|r| r.meets_targets).count();
         let pass_rate = (passed_tests as f64 / total_tests as f64) * 100.0;
 
-        report.push_str(&format!("## Executive Summary\n"));
+        report.push_str("## Executive Summary\n");
         report.push_str(&format!("- **Total Tests**: {}\n", total_tests));
         report.push_str(&format!(
             "- **Passed**: {} ({:.1}%)\n",
             passed_tests, pass_rate
         ));
         report.push_str(&format!("- **Failed**: {}\n", total_tests - passed_tests));
-        report.push_str(&format!("\n### Performance Targets\n"));
+        report.push_str("\n### Performance Targets\n");
         report.push_str(&format!(
             "- Complex type slowdown: <{:.1}x ✅\n",
             self.targets.max_complex_slowdown_ratio
@@ -569,7 +569,7 @@ impl M3PerformanceBenchmarks {
                         report.push_str(&format!("- **{}**: {:.2}\n", key, value));
                     }
 
-                    report.push_str("\n");
+                    report.push('\n');
                 }
             }
         }
@@ -994,7 +994,7 @@ impl M3PerformanceBenchmarks {
         // E-commerce product with complex attributes
         let mut data = Vec::new();
 
-        for i in 0..1000 {
+        for i in 0i32..1000 {
             // Product UDT
             let type_name = "Product";
             data.extend_from_slice(&encode_vint(type_name.len() as i64));
@@ -1007,7 +1007,7 @@ impl M3PerformanceBenchmarks {
             data.extend_from_slice(&encode_vint(field.len() as i64));
             data.extend_from_slice(field.as_bytes());
             data.push(CqlTypeId::Int as u8);
-            data.extend_from_slice(&(i as i32).to_be_bytes());
+            data.extend_from_slice(&i.to_be_bytes());
 
             // name
             let field = "name";
@@ -1069,13 +1069,13 @@ impl M3PerformanceBenchmarks {
             data.extend_from_slice(&encode_vint(2)); // 2 reviews
             data.push(CqlTypeId::Tuple as u8);
 
-            for review_idx in 0..2 {
+            for review_idx in 0i32..2 {
                 // Review tuple: (rating, comment)
                 data.extend_from_slice(&encode_vint(2));
 
                 // Rating
                 data.push(CqlTypeId::Int as u8);
-                data.extend_from_slice(&((4 + review_idx) as i32).to_be_bytes());
+                data.extend_from_slice(&(4 + review_idx).to_be_bytes());
 
                 // Comment
                 data.push(CqlTypeId::Varchar as u8);

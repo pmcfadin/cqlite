@@ -78,7 +78,7 @@ impl TombstoneMerger {
             if let Value::Tombstone(tombstone_info) = &gen_value.value {
                 if !self.is_tombstone_expired(tombstone_info) {
                     // Update latest tombstone if this one is newer
-                    if latest_tombstone_time.map_or(true, |t| tombstone_info.deletion_time > t) {
+                    if latest_tombstone_time.is_none_or(|t| tombstone_info.deletion_time > t) {
                         latest_tombstone_time = Some(tombstone_info.deletion_time);
                         _latest_tombstone_type = Some(tombstone_info.tombstone_type);
                     }
@@ -240,12 +240,11 @@ impl TombstoneMerger {
                 // Check against active range tombstones (sorted by deletion time)
                 for (tombstone_info, _) in &active_range_tombstones {
                     // Only apply range tombstone if it's newer than the entry
-                    if tombstone_info.deletion_time > entry.metadata.write_time {
-                        if self.range_tombstone_applies(tombstone_info, key) {
+                    if tombstone_info.deletion_time > entry.metadata.write_time
+                        && self.range_tombstone_applies(tombstone_info, key) {
                             is_deleted_by_range = true;
                             break; // Stop at first matching tombstone (they're sorted by time)
                         }
-                    }
                 }
 
                 if !is_deleted_by_range {

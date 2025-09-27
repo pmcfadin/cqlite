@@ -112,7 +112,7 @@ pub struct Tokenizer {
 impl Tokenizer {
     pub fn new(input: &str) -> Self {
         let chars: Vec<char> = input.chars().collect();
-        let current_char = chars.get(0).copied();
+        let current_char = chars.first().copied();
 
         Self {
             input: chars,
@@ -194,12 +194,12 @@ impl Tokenizer {
         if has_dot {
             let float_val = value
                 .parse::<f64>()
-                .map_err(|_| Error::sql_parse(&format!("Invalid float: {}", value)))?;
+                .map_err(|_| Error::sql_parse(format!("Invalid float: {}", value)))?;
             Ok(Token::Float(float_val))
         } else {
             let int_val = value
                 .parse::<i64>()
-                .map_err(|_| Error::sql_parse(&format!("Invalid integer: {}", value)))?;
+                .map_err(|_| Error::sql_parse(format!("Invalid integer: {}", value)))?;
             Ok(Token::Integer(int_val))
         }
     }
@@ -390,7 +390,7 @@ impl Tokenizer {
                     return Ok(token);
                 }
                 Some(ch) => {
-                    return Err(Error::sql_parse(&format!("Unexpected character: {}", ch)));
+                    return Err(Error::sql_parse(format!("Unexpected character: {}", ch)));
                 }
             }
         }
@@ -424,7 +424,7 @@ impl SelectParser {
                 self.advance()?;
                 Ok(())
             } else {
-                Err(Error::sql_parse(&format!(
+                Err(Error::sql_parse(format!(
                     "Expected {:?}, found {:?}",
                     expected, current
                 )))
@@ -665,7 +665,7 @@ impl SelectParser {
                 self.expect(Token::RightParen)?;
                 Ok(expr)
             }
-            _ => Err(Error::sql_parse(&format!(
+            _ => Err(Error::sql_parse(format!(
                 "Unexpected token in expression: {:?}",
                 self.current_token
             ))),
@@ -872,7 +872,7 @@ impl SelectParser {
                 }
             }
             _ => {
-                return Err(Error::sql_parse(&format!(
+                return Err(Error::sql_parse(format!(
                     "Expected comparison operator, found {:?}",
                     self.current_token
                 )));

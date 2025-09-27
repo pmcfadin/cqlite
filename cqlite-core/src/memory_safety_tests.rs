@@ -22,6 +22,12 @@ pub struct TrackingAllocator {
     peak_memory: AtomicUsize,
 }
 
+impl Default for TrackingAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrackingAllocator {
     pub const fn new() -> Self {
         Self {
@@ -128,10 +134,7 @@ impl MemorySafetyTests {
             // Test row cache operations
             for i in 0..1000 {
                 let key = format!("key_{}", i);
-                let data = vec![
-                    Value::Integer(i as i32),
-                    Value::Text(format!("value_{}", i)),
-                ];
+                let data = vec![Value::Integer(i), Value::Text(format!("value_{}", i))];
                 memory_manager.put_row(&table_id, &key, data);
             }
 
@@ -256,7 +259,7 @@ impl MemorySafetyTests {
             let config = self.config.clone();
             let handle = task::spawn(async move {
                 let mut memtable = MemTable::new(&config)?;
-                let table_id = TableId::new(&format!("concurrent_table_{}", task_id));
+                let table_id = TableId::new(format!("concurrent_table_{}", task_id));
 
                 // Each task inserts 1000 entries
                 for i in 0..1000 {

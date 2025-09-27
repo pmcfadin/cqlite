@@ -249,7 +249,7 @@ impl SelectExecutor {
             if let Some(column_value) = row.values.get(&predicate.column) {
                 let matches = match &predicate.operation {
                     super::select_optimizer::SSTableFilterOp::Equal => {
-                        predicate.values.first().map_or(false, |v| {
+                        predicate.values.first().is_some_and(|v| {
                             self.values_equal(column_value, v).unwrap_or(false)
                         })
                     }

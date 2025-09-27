@@ -165,7 +165,7 @@ impl MemorySafetyRunner {
         }
 
         let output = Command::new("cargo")
-            .args(&[
+            .args([
                 "+nightly",
                 "test",
                 "--package",
@@ -219,7 +219,7 @@ impl MemorySafetyRunner {
         println!("Running stress tests for memory leak detection...");
 
         let output = Command::new("cargo")
-            .args(&[
+            .args([
                 "test",
                 "--package",
                 "cqlite-core",

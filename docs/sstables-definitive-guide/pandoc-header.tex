@@ -1,0 +1,24 @@
+% Font configuration with fallbacks for symbols and box drawing
+\usepackage{fontspec}
+% Use HarfBuzz renderer for better glyph fallback
+\defaultfontfeatures{Renderer=HarfBuzz}
+\setmainfont{Noto Sans}[
+  Scale=MatchLowercase,
+  Ligatures=TeX,
+]
+\setsansfont{Noto Sans}[
+  Scale=MatchLowercase,
+]
+\setmonofont{Noto Sans Mono}[
+  Scale=MatchLowercase,
+]
+% Fallbacks for symbols (arrows, math) and box drawing
+\newfontfamily\symbolsfont{Noto Sans Symbols 2}
+\newfontfamily\fallbackmono{Noto Sans Mono}
+% Map common Unicode to LaTeX-friendly forms when needed
+\usepackage{newunicodechar}
+% Prefer pulling glyphs directly from the symbols font to avoid missing glyph warnings
+\newunicodechar{→}{{\symbolsfont\symbol{"2192}}}
+\newunicodechar{≤}{{\symbolsfont\symbol{"2264}}}
+\newunicodechar{≈}{{\symbolsfont\symbol{"2248}}}
+\DeclareTextFontCommand{\textsymbols}{\symbolsfont}

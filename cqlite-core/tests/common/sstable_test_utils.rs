@@ -141,9 +141,8 @@ impl TestContext {
         let config = Config::default();
 
         // Use environment-relative path calculation instead of hardcoded paths
-        let dataset_path = if let Ok(test_data_dir) = std::env::var("CQLITE_TEST_DATA_DIR") {
-            Path::new(&test_data_dir)
-                .join("datasets")
+        let dataset_path = if let Ok(datasets_root) = std::env::var("CQLITE_DATASETS_ROOT") {
+            Path::new(&datasets_root)
                 .join("sstables")
                 .join(dataset_name)
         } else {
@@ -204,13 +203,13 @@ impl TestContext {
 
             if path.is_dir() {
                 if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    let (table_name, uuid_dir) = self.parse_table_directory_name(file_name)?;
+                    let (table_name, _uuid) = self.parse_table_directory_name(file_name)?;
                     let components = self.discover_sstable_components(&path)?;
 
                     tables.push(TableDescriptor {
                         name: table_name,
-                        uuid_dir,
-                        row_count: None, // Could be parsed from metadata
+                        uuid_dir: file_name.to_string(), // Use the full directory name
+                        row_count: None,                 // Could be parsed from metadata
                         expected_components: components,
                     });
                 }
@@ -576,8 +575,8 @@ impl DatasetUtils {
     #[allow(dead_code)]
     /// Get all available datasets
     pub fn get_available_datasets() -> Result<Vec<String>> {
-        let datasets_path = if let Ok(test_data_dir) = std::env::var("CQLITE_TEST_DATA_DIR") {
-            Path::new(&test_data_dir).join("datasets").join("sstables")
+        let datasets_path = if let Ok(datasets_root) = std::env::var("CQLITE_DATASETS_ROOT") {
+            Path::new(&datasets_root).join("sstables")
         } else {
             // Default to relative path from cargo manifest
             Path::new(env!("CARGO_MANIFEST_DIR"))

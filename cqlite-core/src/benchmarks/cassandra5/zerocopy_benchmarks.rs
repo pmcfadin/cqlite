@@ -428,7 +428,7 @@ impl ZeroCopyBenchmarks {
                     }
                     data.extend_from_slice(b"]map:{");
                     for i in 0..5 {
-                        data.extend_from_slice(&format!("key{}:value{}", i, i).as_bytes());
+                        data.extend_from_slice(format!("key{}:value{}", i, i).as_bytes());
                     }
                     data.extend_from_slice(b"}");
                 }

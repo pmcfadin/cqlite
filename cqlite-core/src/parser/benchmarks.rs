@@ -334,7 +334,7 @@ impl ParserBenchmarks {
         let passed_benchmarks = self.results.iter().filter(|r| r.meets_targets).count();
         let failed_benchmarks = total_benchmarks - passed_benchmarks;
 
-        report.push_str(&format!("## Summary\n"));
+        report.push_str("## Summary\n");
         report.push_str(&format!(
             "- Target Throughput: {:.1} MB/s\n",
             self.min_throughput_mbs
@@ -380,7 +380,7 @@ impl ParserBenchmarks {
                 report.push_str(&format!("- Memory Usage: {} MB\n", memory / 1_000_000));
             }
 
-            report.push_str("\n");
+            report.push('\n');
         }
 
         // Performance analysis

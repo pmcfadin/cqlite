@@ -449,6 +449,12 @@ pub mod utils {
         samples: Vec<f64>,
     }
 
+    impl Default for MemoryMonitor {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl MemoryMonitor {
         pub fn new() -> Self {
             let baseline = get_process_memory_mb();

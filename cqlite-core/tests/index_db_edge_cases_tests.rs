@@ -227,19 +227,20 @@ async fn test_partition_offset_boundaries() {
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
     // Use environment-relative paths for test datasets
-    let test_data_base = if let Ok(test_data_dir) = std::env::var("CQLITE_TEST_DATA_DIR") {
-        std::path::PathBuf::from(test_data_dir)
+    let test_data_base = if let Ok(datasets_root) = std::env::var("CQLITE_DATASETS_ROOT") {
+        std::path::PathBuf::from(datasets_root)
     } else {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .join("test-data")
+            .join("datasets")
     };
 
     let test_data_paths = vec![
-        test_data_base.join("datasets/sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804/nb-1-big-Data.db"),
-        test_data_base.join("datasets/sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804/nb-1-big-Data.db"),
-        test_data_base.join("datasets/sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804/nb-1-big-Data.db"),
+        test_data_base.join("sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804/nb-1-big-Data.db"),
+        test_data_base.join("sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804/nb-1-big-Data.db"),
+        test_data_base.join("sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804/nb-1-big-Data.db"),
     ];
 
     for data_file_path in test_data_paths {
@@ -333,16 +334,19 @@ async fn test_concurrent_index_access() {
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
     // Use environment-relative path for test dataset
-    let test_data_base = if let Ok(test_data_dir) = std::env::var("CQLITE_TEST_DATA_DIR") {
-        std::path::PathBuf::from(test_data_dir)
+    let test_data_base = if let Ok(datasets_root) = std::env::var("CQLITE_DATASETS_ROOT") {
+        std::path::PathBuf::from(datasets_root)
     } else {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .join("test-data")
+            .join("datasets")
     };
 
-    let data_file = test_data_base.join("datasets/sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804/nb-1-big-Data.db");
+    let data_file = test_data_base.join(
+        "sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804/nb-1-big-Data.db",
+    );
 
     if !data_file.exists() {
         println!(

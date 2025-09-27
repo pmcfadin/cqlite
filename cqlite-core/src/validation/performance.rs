@@ -158,15 +158,14 @@ pub async fn run_test(
 
     // Check against config threshold using default value
     let performance_threshold_ms = 1000u64; // Default performance threshold in ms
-    if elapsed_ms > performance_threshold_ms {
-        if result.status == ValidationStatus::Passed {
+    if elapsed_ms > performance_threshold_ms
+        && result.status == ValidationStatus::Passed {
             result.status = ValidationStatus::Warning;
             result.warnings.push(format!(
                 "Performance above config threshold: {}ms > {}ms",
                 elapsed_ms, performance_threshold_ms
             ));
         }
-    }
 
     result
 }

@@ -17,7 +17,7 @@ use cqlite_core::{
     Config,
     platform::Platform,
     storage::sstable::{
-        compression::{Compression, CompressionPriority},
+        compression::{CompressionPriority, StreamingDecompressor},
         performance_benchmarks::PerformanceBenchmarks,
         streaming_reader::{StreamingReaderConfig, StreamingSSTableReader},
     },
@@ -95,10 +95,12 @@ async fn test_compression_algorithm_selection() -> Result<(), Box<dyn std::error
     for (name, data) in test_cases {
         println!("    🔍 Testing with {name}");
 
-        let speed_choice = Compression::select_optimal_algorithm(&data, CompressionPriority::Speed);
+        let speed_choice =
+            StreamingDecompressor::select_optimal_algorithm(&data, CompressionPriority::Speed);
         let balanced_choice =
-            Compression::select_optimal_algorithm(&data, CompressionPriority::Balanced);
-        let ratio_choice = Compression::select_optimal_algorithm(&data, CompressionPriority::Ratio);
+            StreamingDecompressor::select_optimal_algorithm(&data, CompressionPriority::Balanced);
+        let ratio_choice =
+            StreamingDecompressor::select_optimal_algorithm(&data, CompressionPriority::Ratio);
 
         println!(
             "      Speed: {speed_choice:?}, Balanced: {balanced_choice:?}, Ratio: {ratio_choice:?}"

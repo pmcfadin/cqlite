@@ -125,6 +125,9 @@ pub const SUPPORTED_MAGIC_NUMBERS: &[u32] = &[
     0x0000_0080, // Cassandra 5.0 Summary.db format
     0x8c33_0000, // Cassandra 5.0 Format C
     0x4325_0000, // Cassandra 5.0 Format D
+    0x2C00_0000, // Extended format variant A
+    0xC302_0000, // Extended format variant B
+    0xF81E_0000, // Extended format variant C
 ];
 
 /// Current supported format version

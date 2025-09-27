@@ -534,7 +534,7 @@ fn get_memory_usage() -> usize {
 
 fn force_garbage_collection() {
     // Force garbage collection if available
-    #[cfg(feature = "gc")]
+    #[cfg(feature = "legacy-heuristics")]
     {
         // Platform-specific GC trigger would go here
     }

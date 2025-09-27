@@ -327,8 +327,8 @@ impl PerformanceMonitor {
             .filter(|m| m.meets_target)
             .count();
 
-        report.push_str(&format!("📊 Summary (Last Hour)\n"));
-        report.push_str(&format!("----------------------\n"));
+        report.push_str("📊 Summary (Last Hour)\n");
+        report.push_str("----------------------\n");
         report.push_str(&format!("Total Metrics Tracked: {}\n", total_metrics));
         report.push_str(&format!(
             "Recent Measurements: {}\n",
@@ -345,8 +345,8 @@ impl PerformanceMonitor {
         ));
 
         // Performance targets status
-        report.push_str(&format!("\n🎯 Performance Targets Status\n"));
-        report.push_str(&format!("-----------------------------\n"));
+        report.push_str("\n🎯 Performance Targets Status\n");
+        report.push_str("-----------------------------\n");
 
         for (metric_name, baseline) in baselines.iter() {
             let latest_measurement = measurements
@@ -393,8 +393,8 @@ impl PerformanceMonitor {
             .collect();
 
         if !recent_alerts.is_empty() {
-            report.push_str(&format!("\n🚨 Recent Alerts (24h)\n"));
-            report.push_str(&format!("----------------------\n"));
+            report.push_str("\n🚨 Recent Alerts (24h)\n");
+            report.push_str("----------------------\n");
 
             for alert in recent_alerts.iter().take(10) {
                 // Show max 10 recent alerts
@@ -418,8 +418,8 @@ impl PerformanceMonitor {
         }
 
         // Performance trends
-        report.push_str(&format!("\n📈 Performance Trends\n"));
-        report.push_str(&format!("--------------------\n"));
+        report.push_str("\n📈 Performance Trends\n");
+        report.push_str("--------------------\n");
 
         for (metric_name, _baseline) in baselines.iter() {
             let metric_measurements: Vec<_> = measurements
@@ -457,8 +457,8 @@ impl PerformanceMonitor {
             }
         }
 
-        report.push_str(&format!("\n💡 Recommendations\n"));
-        report.push_str(&format!("------------------\n"));
+        report.push_str("\n💡 Recommendations\n");
+        report.push_str("------------------\n");
 
         let critical_alerts = alerts
             .iter()

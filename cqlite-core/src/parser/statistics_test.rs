@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn test_row_statistics_parsing() {
         // Create test data for row statistics (simplified)
-        let test_data = vec![
+        let test_data = [
             // total_rows (VInt: 1000)
             0x7D, 0x00, // VInt encoding of 1000
             // live_rows (VInt: 900)

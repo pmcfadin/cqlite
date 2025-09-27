@@ -43,15 +43,14 @@ pub struct CollectionBenchmarkResult {
     pub ops_per_second: f64,
 }
 
+#[derive(Default)]
 pub struct CollectionBenchmarks {
     pub results: Vec<CollectionBenchmarkResult>,
 }
 
 impl CollectionBenchmarks {
     pub fn new() -> Self {
-        Self {
-            results: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Run comprehensive collection benchmarks
@@ -92,7 +91,7 @@ impl CollectionBenchmarks {
             )?;
 
             // Integer List benchmark
-            let int_list = Value::List((0..size).map(|i| Value::Integer(i as i32)).collect());
+            let int_list = Value::List((0i32..size).map(Value::Integer).collect());
 
             self.benchmark_collection_roundtrip(
                 "parse_serialize",
@@ -145,7 +144,7 @@ impl CollectionBenchmarks {
             )?;
 
             // Integer Set benchmark
-            let int_set = Value::Set((0..size).map(|i| Value::Integer(i as i32)).collect());
+            let int_set = Value::Set((0i32..size).map(Value::Integer).collect());
 
             self.benchmark_collection_roundtrip(
                 "parse_serialize",
@@ -167,13 +166,8 @@ impl CollectionBenchmarks {
         for size in sizes {
             // String-to-Integer Map (common pattern)
             let string_int_map = Value::Map(
-                (0..size)
-                    .map(|i| {
-                        (
-                            Value::Text(format!("key_{:06}", i)),
-                            Value::Integer(i as i32),
-                        )
-                    })
+                (0i32..size)
+                    .map(|i| (Value::Text(format!("key_{:06}", i)), Value::Integer(i)))
                     .collect(),
             );
 
@@ -236,7 +230,7 @@ impl CollectionBenchmarks {
             let mixed_tuple = Value::Tuple(
                 (0..size)
                     .map(|i| match i % 6 {
-                        0 => Value::Integer(i as i32),
+                        0 => Value::Integer(i),
                         1 => Value::Text(format!("field_{}", i)),
                         2 => Value::Boolean(i % 2 == 0),
                         3 => Value::Float(i as f64 * std::f64::consts::PI),
@@ -258,7 +252,7 @@ impl CollectionBenchmarks {
             )?;
 
             // Homogeneous integer tuple
-            let int_tuple = Value::Tuple((0..size).map(|i| Value::Integer(i as i32)).collect());
+            let int_tuple = Value::Tuple((0i32..size).map(Value::Integer).collect());
 
             self.benchmark_collection_roundtrip(
                 "parse_serialize",
@@ -295,10 +289,10 @@ impl CollectionBenchmarks {
         for size in sizes {
             // List of Maps (JSON-like structures)
             let list_of_maps = Value::List(
-                (0..size)
+                (0i32..size)
                     .map(|i| {
                         Value::Map(vec![
-                            (Value::Text("id".to_string()), Value::Integer(i as i32)),
+                            (Value::Text("id".to_string()), Value::Integer(i)),
                             (
                                 Value::Text("name".to_string()),
                                 Value::Text(format!("item_{}", i)),
@@ -350,7 +344,7 @@ impl CollectionBenchmarks {
             let nested_tuple = Value::Tuple(vec![
                 Value::Integer(42),
                 Value::Text("complex_record".to_string()),
-                Value::List((0..size).map(|i| Value::Integer(i as i32)).collect()),
+                Value::List((0i32..size).map(Value::Integer).collect()),
                 Value::Map(
                     (0..size / 2)
                         .map(|i| {
@@ -397,7 +391,8 @@ impl CollectionBenchmarks {
             )?;
 
             // Large integer list
-            let large_int_list = Value::List((0..size).map(|i| Value::Integer(i as i32)).collect());
+            let large_int_list =
+                Value::List((0i32..size).map(Value::Integer).collect());
 
             self.benchmark_collection_roundtrip(
                 "parse_serialize",
@@ -410,13 +405,8 @@ impl CollectionBenchmarks {
             if size <= 10000 {
                 // Large map
                 let large_map = Value::Map(
-                    (0..size)
-                        .map(|i| {
-                            (
-                                Value::Text(format!("key_{:08}", i)),
-                                Value::Integer(i as i32),
-                            )
-                        })
+                    (0i32..size)
+                        .map(|i| (Value::Text(format!("key_{:08}", i)), Value::Integer(i)))
                         .collect(),
                 );
 
@@ -509,8 +499,8 @@ impl CollectionBenchmarks {
         let avg_ops_per_sec: f64 =
             self.results.iter().map(|r| r.ops_per_second).sum::<f64>() / total_tests as f64;
 
-        report.push_str(&format!("📊 Summary\n"));
-        report.push_str(&format!("----------\n"));
+        report.push_str("📊 Summary\n");
+        report.push_str("----------\n");
         report.push_str(&format!("Total Benchmarks: {}\n", total_tests));
         report.push_str(&format!("Average Throughput: {:.2} MB/s\n", avg_throughput));
         report.push_str(&format!("Peak Throughput: {:.2} MB/s\n", max_throughput));
@@ -523,7 +513,7 @@ impl CollectionBenchmarks {
         for result in &self.results {
             type_groups
                 .entry(result.collection_type.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(result);
         }
 
@@ -551,7 +541,7 @@ impl CollectionBenchmarks {
                 "  Avg Serialize Time: {:.1} μs\n",
                 avg_serialize_time
             ));
-            report.push_str("\n");
+            report.push('\n');
         }
 
         // Detailed results
@@ -616,7 +606,7 @@ impl CollectionBenchmarks {
             .collect();
 
         if !large_data.is_empty() {
-            report.push_str(&format!("\n📈 Large Data Collections (>1MB):\n"));
+            report.push_str("\n📈 Large Data Collections (>1MB):\n");
             for data in &large_data {
                 let mb_size = data.data_size_bytes as f64 / 1_000_000.0;
                 report.push_str(&format!(

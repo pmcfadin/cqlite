@@ -1,37 +1,37 @@
 # Index.db Parity Validation Report - Issue #31
 ## Zero-Diff Validation with Real Cassandra 5 Datasets
 
-**Validation Timestamp:** 2025-09-20 21:16:58 UTC
+**Validation Timestamp:** 2025-09-27 00:09:25 UTC
 **Total Tables Tested:** 4
 
 ## ✅ PERFECT PARITY ACHIEVED
 
 ### Summary
 - **Perfect Parity:** 4/4
-- **Total Partitions:** 1961
+- **Total Partitions:** 1201
 - **Total Promoted Entries:** 0
 
 ### Detailed Results
 #### ✅ test_basic.simple_table
-- **Partitions:** 1220
+- **Partitions:** 732
 - **Promoted Index Entries:** 0
 - **Key Digest Matches:** 0/0
 - **Offset Matches:** 0/0
 
 #### ✅ test_timeseries.sensor_data
-- **Partitions:** 12
+- **Partitions:** 7
 - **Promoted Index Entries:** 0
 - **Key Digest Matches:** 0/0
 - **Offset Matches:** 0/0
 
 #### ✅ test_wide_rows.wide_partition_table
-- **Partitions:** 120
+- **Partitions:** 76
 - **Promoted Index Entries:** 0
 - **Key Digest Matches:** 0/0
 - **Offset Matches:** 0/0
 
 #### ✅ test_collections.collection_table
-- **Partitions:** 609
+- **Partitions:** 386
 - **Promoted Index Entries:** 0
 - **Key Digest Matches:** 0/0
 - **Offset Matches:** 0/0
