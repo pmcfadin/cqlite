@@ -160,13 +160,15 @@ jobs:
 
     # Required Check 4: Unit tests (core crates only)
     - name: 🧪 Run unit tests (core crates)
+      env:
+        CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
       run: |
         echo "::group::Core Crate Unit Tests"
         echo "🧪 Running tests for core crates required for M1..."
-        
+
         # M1-focused test execution - exclude advanced integration features
         echo "🎯 Running M1-focused core tests (parsing, SSTable reading, format compatibility)..."
-        
+
         # Test 1: Core library tests (without full features that include query integration)
         if ! timeout 10m cargo test --package cqlite-core --lib --verbose --no-fail-fast; then
           echo "❌ Core library tests failed or timed out"

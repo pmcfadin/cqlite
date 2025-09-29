@@ -84,6 +84,7 @@ jobs:
 
       - name: Run tests
         env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           RUST_LOG: debug
           RUST_BACKTRACE: full
         run: |
