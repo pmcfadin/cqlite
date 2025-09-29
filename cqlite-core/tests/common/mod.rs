@@ -11,11 +11,13 @@ pub mod sstable_test_utils;
 pub use sstable_test_utils::TestContext;
 
 // Re-export enhanced test infrastructure
+// Note: These re-exports are available when the test-infrastructure feature is enabled
+// Currently commented out as they are not yet used in tests
 #[cfg(feature = "test-infrastructure")]
+#[allow(unused_imports)]
 pub use enhanced_test_context::{
-    CoverageTracker, E2ESubcategory, EnhancedTestContext, EnhancedTestContextBuilder,
-    EnhancedTestMetrics, IntegrationSubcategory, PerformanceSubcategory, PropertySubcategory,
-    PropertyTestConfig, QualityGate, SchemaValidationConfig, TestCategory, UnitSubcategory,
+    CoverageTracker, EnhancedTestContext, EnhancedTestContextBuilder, EnhancedTestMetrics,
+    IntegrationSubcategory, QualityGate, TestCategory, UnitSubcategory,
 };
 
 // Common test configuration and setup helpers
@@ -41,20 +43,6 @@ pub fn init_test_logging() {
         .try_init();
 }
 
-/// Common test constants
-pub mod constants {
-    /// Default timeout for async operations in tests
-    pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
-
-    /// Expected minimum cache hit rate for performance tests
-    pub const MIN_CACHE_HIT_RATE: f64 = 75.0;
-
-    /// Maximum memory usage for tests (in MB)
-    pub const MAX_MEMORY_USAGE_MB: usize = 256;
-
-    /// Number of concurrent operations for stress tests
-    pub const CONCURRENT_OPERATIONS: usize = 10;
-}
 
 #[cfg(test)]
 mod tests {

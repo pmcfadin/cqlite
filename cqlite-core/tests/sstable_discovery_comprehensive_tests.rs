@@ -20,6 +20,7 @@ use cqlite_core::Config;
 mod common;
 
 /// Test data structure for SSTable discovery scenarios
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct DiscoveryTestCase {
     name: String,
@@ -27,9 +28,9 @@ struct DiscoveryTestCase {
     files: Vec<FileSpec>,
     expected_data_files: Vec<String>,
     should_discover: bool,
-    backward_compatible: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct FileSpec {
     name: String,
@@ -37,6 +38,7 @@ struct FileSpec {
     size_hint: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum FileContentType {
     CassandraData,
@@ -46,7 +48,6 @@ enum FileContentType {
     CassandraStatistics,
     CassandraCompression,
     CassandraToc,
-    LegacySst,
     InvalidData,
 }
 
@@ -99,7 +100,6 @@ async fn test_cassandra_data_db_discovery() {
             ],
             expected_data_files: vec!["nb-1-big-Data.db".to_string()],
             should_discover: true,
-            backward_compatible: false,
         },
         DiscoveryTestCase {
             name: "cassandra_4x_uuid".to_string(),
@@ -128,7 +128,6 @@ async fn test_cassandra_data_db_discovery() {
             ],
             expected_data_files: vec!["users-46436710673711f0b2cf19d64e7cbecb-Data.db".to_string()],
             should_discover: true,
-            backward_compatible: false,
         },
         DiscoveryTestCase {
             name: "cassandra_5x_large".to_string(),
@@ -167,7 +166,6 @@ async fn test_cassandra_data_db_discovery() {
             ],
             expected_data_files: vec!["mc-42-large-Data.db".to_string()],
             should_discover: true,
-            backward_compatible: false,
         },
         DiscoveryTestCase {
             name: "mixed_generations".to_string(),
@@ -210,7 +208,6 @@ async fn test_cassandra_data_db_discovery() {
                 "nb-3-big-Data.db".to_string(),
             ],
             should_discover: true,
-            backward_compatible: false,
         },
         DiscoveryTestCase {
             name: "system_keyspace".to_string(),
@@ -248,7 +245,6 @@ async fn test_cassandra_data_db_discovery() {
                 "system-schema_keyspaces-ka-1-Data.db".to_string(),
             ],
             should_discover: true,
-            backward_compatible: false,
         },
     ];
 
@@ -475,7 +471,6 @@ async fn test_sstable_discovery_edge_cases() {
             ],
             expected_data_files: vec![], // Should not discover malformed names
             should_discover: false,
-            backward_compatible: false,
         },
         DiscoveryTestCase {
             name: "invalid_file_patterns".to_string(),
@@ -499,7 +494,6 @@ async fn test_sstable_discovery_edge_cases() {
             ],
             expected_data_files: vec![], // Should not discover invalid patterns
             should_discover: false,
-            backward_compatible: false,
         },
         DiscoveryTestCase {
             name: "zero_size_files".to_string(),
@@ -518,7 +512,6 @@ async fn test_sstable_discovery_edge_cases() {
             ],
             expected_data_files: vec!["nb-1-big-Data.db".to_string()], // Should discover even zero-size
             should_discover: true,
-            backward_compatible: false,
         },
         DiscoveryTestCase {
             name: "huge_generation_numbers".to_string(),
@@ -540,7 +533,6 @@ async fn test_sstable_discovery_edge_cases() {
                 "mc-18446744073709551615-large-Data.db".to_string(),
             ],
             should_discover: true,
-            backward_compatible: false,
         },
         DiscoveryTestCase {
             name: "unicode_in_paths".to_string(),
@@ -562,7 +554,6 @@ async fn test_sstable_discovery_edge_cases() {
                 "émoji-1-large-Data.db".to_string(),
             ],
             should_discover: true,
-            backward_compatible: false,
         },
     ];
 
@@ -644,31 +635,12 @@ async fn test_integration_table_loading() {
                 println!("✓ Successfully loaded SSTable: {}", base_name);
 
                 // Test basic operations
-                let stats = reader.stats().await.unwrap_or_default();
-                let timestamp_range = reader.get_timestamp_range().await;
+                let _stats = reader.stats().await.unwrap_or_default();
+                let _timestamp_range = reader.get_timestamp_range().await;
                 let _token_range = reader.iterate_token_range(-1000, 1000).await;
-
-                // Convert stats to HashMap format
-                let mut stats_map = std::collections::HashMap::new();
-                stats_map.insert("file_size".to_string(), stats.file_size.to_string());
-                stats_map.insert("entry_count".to_string(), stats.entry_count.to_string());
-                stats_map.insert(
-                    "cache_hit_rate".to_string(),
-                    format!("{:.2}", stats.cache_hit_rate),
-                );
-
-                // Convert timestamp range to expected format
-                let ts_range = timestamp_range
-                    .map(|opt| {
-                        opt.map(|(min, max)| (min as u64, max as u64))
-                            .unwrap_or((0, 0))
-                    })
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) });
 
                 loaded_sstables.push(LoadedSSTableInfo {
                     name: base_name.to_string(),
-                    stats: stats_map,
-                    timestamp_range: ts_range,
                     components_found: verify_components_discovered(&table_dir, base_name).await,
                 });
 
@@ -797,6 +769,7 @@ async fn test_performance_discovery_regression() {
 
 // Supporting types and functions
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct TestResult {
     success: bool,
@@ -805,25 +778,22 @@ struct TestResult {
     components_verified: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct LoadedSSTableInfo {
     name: String,
-    stats: HashMap<String, String>,
-    timestamp_range: Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>>,
     components_found: ComponentsFound,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct ComponentsFound {
     data: bool,
     index: bool,
     summary: bool,
-    filter: bool,
-    statistics: bool,
-    compression: bool,
-    toc: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct PerformanceMetrics {
     num_sstables: usize,
@@ -832,6 +802,7 @@ struct PerformanceMetrics {
     avg_time_per_sstable_ms: u64,
 }
 
+#[allow(dead_code)]
 async fn test_sstable_discovery(dir: &Path, test_case: &DiscoveryTestCase) -> TestResult {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
@@ -883,14 +854,8 @@ async fn test_sstable_discovery(dir: &Path, test_case: &DiscoveryTestCase) -> Te
     }
 }
 
-async fn test_backward_compatibility(dir: &Path, test_case: &DiscoveryTestCase) -> TestResult {
-    // Similar to test_sstable_discovery but with specific backward compatibility checks
 
-    // Additional backward compatibility validation could go here
-
-    test_sstable_discovery(dir, test_case).await
-}
-
+#[allow(dead_code)]
 async fn test_edge_case_handling(dir: &Path, test_case: &DiscoveryTestCase) -> TestResult {
     // Edge cases should be handled gracefully without crashing
     let result = test_sstable_discovery(dir, test_case).await;
@@ -905,6 +870,7 @@ async fn test_edge_case_handling(dir: &Path, test_case: &DiscoveryTestCase) -> T
     }
 }
 
+#[allow(dead_code)]
 async fn create_file_content(path: &Path, content_type: &FileContentType, size_hint: usize) {
     let content = match content_type {
         FileContentType::CassandraData => create_cassandra_data_content(size_hint),
@@ -914,13 +880,13 @@ async fn create_file_content(path: &Path, content_type: &FileContentType, size_h
         FileContentType::CassandraStatistics => create_cassandra_statistics_content(),
         FileContentType::CassandraCompression => create_cassandra_compression_content(),
         FileContentType::CassandraToc => create_cassandra_toc_content(),
-        FileContentType::LegacySst => create_legacy_sst_content(size_hint),
         FileContentType::InvalidData => create_invalid_data_content(size_hint),
     };
 
     fs::write(path, content).await.unwrap();
 }
 
+#[allow(dead_code)]
 fn create_cassandra_data_content(size_hint: usize) -> Vec<u8> {
     let mut data = Vec::new();
 
@@ -942,6 +908,7 @@ fn create_cassandra_data_content(size_hint: usize) -> Vec<u8> {
     data
 }
 
+#[allow(dead_code)]
 fn create_cassandra_index_content(size_hint: usize) -> Vec<u8> {
     let mut data = Vec::new();
 
@@ -960,6 +927,7 @@ fn create_cassandra_index_content(size_hint: usize) -> Vec<u8> {
     data
 }
 
+#[allow(dead_code)]
 fn create_cassandra_summary_content(size_hint: usize) -> Vec<u8> {
     let mut data = Vec::new();
 
@@ -979,6 +947,7 @@ fn create_cassandra_summary_content(size_hint: usize) -> Vec<u8> {
     data
 }
 
+#[allow(dead_code)]
 fn create_cassandra_filter_content(size_hint: usize) -> Vec<u8> {
     let mut data = Vec::new();
 
@@ -998,6 +967,7 @@ fn create_cassandra_filter_content(size_hint: usize) -> Vec<u8> {
     data
 }
 
+#[allow(dead_code)]
 fn create_cassandra_statistics_content() -> Vec<u8> {
     let stats = vec![
         ("min_timestamp", 1640995200000u64),
@@ -1017,40 +987,26 @@ fn create_cassandra_statistics_content() -> Vec<u8> {
     data
 }
 
+#[allow(dead_code)]
 fn create_cassandra_compression_content() -> Vec<u8> {
     let content = "algorithm=LZ4\nchunk_length=65536\nparameters={}\n";
     content.as_bytes().to_vec()
 }
 
+#[allow(dead_code)]
 fn create_cassandra_toc_content() -> Vec<u8> {
     let content =
         "Data.db\nIndex.db\nSummary.db\nStatistics.db\nFilter.db\nCompressionInfo.db\nTOC.txt\n";
     content.as_bytes().to_vec()
 }
 
-fn create_legacy_sst_content(size_hint: usize) -> Vec<u8> {
-    let mut data = Vec::new();
-
-    // Legacy SSTable header
-    data.extend_from_slice(&[
-        0x64, 0x61, 0x00, 0x00, // Magic number for legacy Cassandra format
-        0x00, 0x00, 0x00, 0x01, // Version 1
-    ]);
-
-    // Fill remaining space
-    let remaining = size_hint.saturating_sub(data.len());
-    if remaining > 0 {
-        data.extend(vec![0x4C; remaining]); // 'L' for Legacy
-    }
-
-    data
-}
-
+#[allow(dead_code)]
 fn create_invalid_data_content(size_hint: usize) -> Vec<u8> {
     // Just random/invalid data
     vec![0x00; size_hint]
 }
 
+#[allow(dead_code)]
 async fn create_complete_sstable_structure(dir: &Path, base_name: &str, data_size: usize) {
     let files = vec![
         (
@@ -1096,22 +1052,18 @@ async fn create_complete_sstable_structure(dir: &Path, base_name: &str, data_siz
     }
 }
 
+#[allow(dead_code)]
 async fn verify_components_discovered(dir: &Path, base_name: &str) -> ComponentsFound {
     ComponentsFound {
         data: dir.join(format!("{}-Data.db", base_name)).exists(),
         index: dir.join(format!("{}-Index.db", base_name)).exists(),
         summary: dir.join(format!("{}-Summary.db", base_name)).exists(),
-        filter: dir.join(format!("{}-Filter.db", base_name)).exists(),
-        statistics: dir.join(format!("{}-Statistics.db", base_name)).exists(),
-        compression: dir
-            .join(format!("{}-CompressionInfo.db", base_name))
-            .exists(),
-        toc: dir.join(format!("{}-TOC.txt", base_name)).exists(),
     }
 }
 
 // Memory coordination functions
 
+#[allow(dead_code)]
 async fn store_discovery_results_in_memory(results: &HashMap<String, TestResult>) {
     // Memory coordination disabled to prevent test deadlocks
     // Original implementation spawned external processes that could hang
@@ -1121,6 +1073,7 @@ async fn store_discovery_results_in_memory(results: &HashMap<String, TestResult>
     );
 }
 
+#[allow(dead_code)]
 async fn store_backward_compat_results_in_memory(results: &HashMap<String, TestResult>) {
     // Memory coordination disabled to prevent test deadlocks
     // Original implementation spawned external processes that could hang
@@ -1130,6 +1083,7 @@ async fn store_backward_compat_results_in_memory(results: &HashMap<String, TestR
     );
 }
 
+#[allow(dead_code)]
 async fn store_edge_case_results_in_memory(results: &HashMap<String, TestResult>) {
     // Memory coordination disabled to prevent test deadlocks
     // Original implementation spawned external processes that could hang
@@ -1139,6 +1093,7 @@ async fn store_edge_case_results_in_memory(results: &HashMap<String, TestResult>
     );
 }
 
+#[allow(dead_code)]
 async fn store_integration_results_in_memory(results: &[LoadedSSTableInfo]) {
     // Memory coordination disabled to prevent test deadlocks
     // Original implementation spawned external processes that could hang
@@ -1148,6 +1103,7 @@ async fn store_integration_results_in_memory(results: &[LoadedSSTableInfo]) {
     );
 }
 
+#[allow(dead_code)]
 async fn store_performance_metrics_in_memory(metrics: &PerformanceMetrics) {
     // Memory coordination disabled to prevent test deadlocks
     // Original implementation spawned external processes that could hang

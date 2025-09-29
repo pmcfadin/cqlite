@@ -171,7 +171,7 @@ mod tests {
 
         println!(
             "  ✅ Statistics validation passed for {}",
-            file_path.split('/').last().unwrap_or("unknown")
+            file_path.split('/').next_back().unwrap_or("unknown")
         );
     }
 

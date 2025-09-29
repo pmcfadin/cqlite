@@ -152,6 +152,7 @@ pub enum FromClause {
 
 /// Advanced WHERE expression tree
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum WhereExpression {
     /// Simple comparison
     Comparison(ComparisonExpression),

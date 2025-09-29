@@ -501,7 +501,7 @@ async fn generate_comprehensive_test_data(
 
 /// Create comprehensive UDT registry for testing
 fn create_comprehensive_udt_registry() -> UdtRegistry {
-    let mut registry = UdtRegistry::new();
+    let registry = UdtRegistry::new();
 
     // Add standard UDTs - would normally be loaded from schema
     // For now, return empty registry and let parser handle embedded schemas

@@ -76,17 +76,15 @@ mod tests {
                     // Use reviewer's exact pattern for Statistics.db resolution
                     let mut stats_files = Vec::new();
                     if let Ok(entries) = std::fs::read_dir(table_dir) {
-                        for entry in entries {
-                            if let Ok(entry) = entry {
-                                let path = entry.path();
-                                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                    if name.ends_with("-Data.db") {
-                                        let stats_name =
-                                            name.replacen("-Data.db", "-Statistics.db", 1);
-                                        let stats_path = path.with_file_name(stats_name);
-                                        if stats_path.exists() {
-                                            stats_files.push(stats_path);
-                                        }
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                if name.ends_with("-Data.db") {
+                                    let stats_name =
+                                        name.replacen("-Data.db", "-Statistics.db", 1);
+                                    let stats_path = path.with_file_name(stats_name);
+                                    if stats_path.exists() {
+                                        stats_files.push(stats_path);
                                     }
                                 }
                             }
@@ -116,7 +114,7 @@ mod tests {
                                 );
 
                                 // Enhanced validation: basic types table gets strict row count validation
-                                if basic_types_table.map_or(false, |bt| {
+                                if basic_types_table.is_some_and(|bt| {
                                     bt.keyspace == table_info.keyspace
                                         && bt.table == table_info.table
                                 }) {

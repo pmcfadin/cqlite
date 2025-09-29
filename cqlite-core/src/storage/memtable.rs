@@ -367,7 +367,7 @@ mod tests {
         // Insert test data
         for i in 0..10 {
             let key = RowKey::from(format!("key_{:02}", i));
-            let value = Value::Integer(i as i32);
+            let value = Value::Integer(i);
             memtable.put(&table_id, key, value).unwrap();
         }
 

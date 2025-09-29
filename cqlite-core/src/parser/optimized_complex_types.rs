@@ -547,8 +547,8 @@ mod tests {
         data.push(CqlTypeId::Int as u8); // element type
 
         // Add 3 integers
-        for i in 1..=3 {
-            data.extend_from_slice(&(i as i32).to_be_bytes());
+        for i in 1i32..=3 {
+            data.extend_from_slice(&i.to_be_bytes());
         }
 
         let (_, result) = parser.parse_optimized_list(&data).unwrap();

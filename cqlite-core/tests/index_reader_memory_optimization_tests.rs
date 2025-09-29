@@ -39,10 +39,6 @@ impl TrackingAllocator {
         self.current_memory.store(0, Ordering::SeqCst);
     }
 
-    fn get_peak_memory(&self) -> usize {
-        self.peak_memory.load(Ordering::SeqCst)
-    }
-
     fn get_current_memory(&self) -> usize {
         self.current_memory.load(Ordering::SeqCst)
     }
@@ -379,7 +375,7 @@ fn test_arc_edge_cases() {
 
     // Test duplicate key digests (should overwrite)
     let duplicate_arc = Arc::from([1u8; 16]);
-    let duplicate_entries = vec![
+    let duplicate_entries = [
         PartitionIndexEntry {
             key_digest: Arc::clone(&duplicate_arc),
             data_offset: 1024,

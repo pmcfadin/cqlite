@@ -470,10 +470,10 @@ async fn run_mixed_benchmark(
 
         if let Ok(total) = read_latency_total.lock() {
             read_latency = *total;
-        }
+        };
         if let Ok(total) = write_latency_total.lock() {
             write_latency = *total;
-        }
+        };
     }
 
     /* if let Ok(pb_lock) = pb_shared.lock() {

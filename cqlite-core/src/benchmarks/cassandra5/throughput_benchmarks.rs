@@ -675,7 +675,7 @@ impl ThroughputBenchmarks {
         };
 
         // Memory usage estimates
-        let memory_mb = (size_mb * 0.3).max(64.0).min(256.0); // 30% of file size, min 64MB, max 256MB
+        let memory_mb = (size_mb * 0.3).clamp(64.0, 256.0); // 30% of file size, min 64MB, max 256MB
 
         (base_throughput, base_ops_per_sec, memory_mb)
     }

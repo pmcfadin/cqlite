@@ -1,7 +1,7 @@
 //! Comprehensive unit tests for schema-driven parsing
 
 #[cfg(test)]
-mod tests {
+mod parser_tests {
     use crate::{
         schema::{
             parser::SchemaParser, registry::ParsingContext, ClusteringColumn, ClusteringOrder,

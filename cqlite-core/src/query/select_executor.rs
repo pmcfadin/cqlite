@@ -881,6 +881,7 @@ impl SelectExecutor {
     }
 
     /// Evaluate a constant expression (no table access needed)
+    #[allow(clippy::only_used_in_recursion)]
     fn evaluate_constant_expression(
         &self,
         expr: &SelectExpression,

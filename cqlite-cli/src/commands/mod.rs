@@ -140,7 +140,7 @@ impl QueryResult {
 // use crate::table_scanner::{TableScanner, ScanStrategy, ScanConfig};
 use anyhow::{Context, Result};
 use cqlite_core::{
-    schema::{parse_cql_schema, ClusteringColumn, Column, KeyColumn, TableSchema},
+    schema::{parse_cql_schema, ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema},
     storage::sstable::{bulletproof_reader::BulletproofReader, reader::SSTableReader},
     Database,
 };
@@ -1284,7 +1284,7 @@ fn parse_json_schema(json: &serde_json::Value) -> Result<TableSchema> {
                     name: col_name.clone(),
                     position: clustering_columns.len(),
                     data_type: col_type.to_string(),
-                    order: "ASC".to_string(),
+                    order: ClusteringOrder::Asc,
                 });
             }
             "Regular" => {

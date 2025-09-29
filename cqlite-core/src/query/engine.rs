@@ -189,7 +189,7 @@ impl QueryEngine {
 
         // Parse SELECT statement using advanced parser
         #[cfg(feature = "state_machine")]
-        let select_statement = select_parser::parse_select(sql).inspect_err(|e| {
+        let select_statement = select_parser::parse_select(sql).inspect_err(|_e| {
             // Update error statistics
             let mut stats = self.stats.write();
             stats.error_queries += 1;

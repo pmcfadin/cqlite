@@ -1919,6 +1919,7 @@ impl SSTableReader {
 
     /// Enhanced filtering logic for post-merge values including collection validation
     #[cfg(feature = "tombstones")]
+    #[allow(clippy::only_used_in_recursion)]
     fn should_include_value_after_merge(
         &self,
         value: &Value,

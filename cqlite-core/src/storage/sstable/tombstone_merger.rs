@@ -653,7 +653,7 @@ mod tests {
         for i in 0..10000 {
             let key = RowKey::from(format!("key_{}", i));
             let values = vec![GenerationValue {
-                value: Value::Integer(i as i32),
+                value: Value::Integer(i),
                 metadata: EntryMetadata {
                     write_time: 1000 + i as i64,
                     generation: 1,

@@ -543,10 +543,10 @@ async fn test_concurrent_access_handling() {
     // Wait for all concurrent operations
     let mut successes = 0;
     for handle in handles {
-        match handle.await.unwrap() {
-            Ok(_) => successes += 1,
-            Err(_) => {} // Errors are acceptable for concurrent access
+        if handle.await.unwrap().is_ok() {
+            successes += 1;
         }
+        // Errors are acceptable for concurrent access
     }
 
     // At least one should succeed, but concurrent failures are acceptable

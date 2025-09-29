@@ -454,14 +454,14 @@ mod tests {
             .execute("SELECT * FROM employees WHERE department = 'Engineering' ORDER BY id ASC")
             .await
             .unwrap();
-        assert!(result.rows.len() >= 1);
+        assert!(!result.rows.is_empty());
 
         // Test LIMIT with partition key filter
         let result = db
             .execute("SELECT * FROM employees WHERE department = 'Engineering' LIMIT 2")
             .await
             .unwrap();
-        assert!(result.rows.len() >= 1);
+        assert!(!result.rows.is_empty());
     }
 
     #[tokio::test]
@@ -719,7 +719,7 @@ mod tests {
             result.rows.len()
         );
         assert!(
-            result.rows.len() > 0,
+            !result.rows.is_empty(),
             "COUNT query returned no rows. Expected count from orders table"
         );
 
@@ -730,32 +730,32 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.rows.len() > 0,
+            !result.rows.is_empty(),
             "SUM query returned no rows. Expected sum from orders table"
         );
 
         // 2. High-value orders (simplified for CQL compliance)
         let result = db
             .execute(
-                "SELECT order_id, customer_id, total_amount 
-             FROM orders 
+                "SELECT order_id, customer_id, total_amount
+             FROM orders
              WHERE order_id = 1",
             )
             .await
             .unwrap();
 
-        assert!(result.rows.len() > 0);
+        assert!(!result.rows.is_empty());
 
         // 3. Simple filtering (CQL-compliant)
         let result = db
             .execute(
-                "SELECT * FROM orders 
+                "SELECT * FROM orders
              WHERE order_id = 2",
             )
             .await
             .unwrap();
 
-        assert!(result.rows.len() > 0);
+        assert!(!result.rows.is_empty());
     }
 }
 

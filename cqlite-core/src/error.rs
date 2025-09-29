@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn test_error_from_conversions() {
         // Test bincode error conversion (covers line 399-400)
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test error");
+        let io_err = std::io::Error::other("test error");
         let bincode_err = bincode::Error::new(bincode::ErrorKind::Io(io_err));
         let error = Error::from(bincode_err);
         assert!(matches!(error, Error::Serialization(_)));
@@ -676,7 +676,10 @@ mod tests {
         let success: Result<i32> = Ok(42);
         let failure: Result<i32> = Err(Error::storage("test error"));
 
-        assert_eq!(success.unwrap(), 42);
+        assert!(success.is_ok());
+        if let Ok(value) = success {
+            assert_eq!(value, 42);
+        }
         assert!(failure.is_err());
     }
 }

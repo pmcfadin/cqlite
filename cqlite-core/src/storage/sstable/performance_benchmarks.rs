@@ -421,6 +421,13 @@ impl MemoryMonitor {
     }
 }
 
+/// Get current memory usage (simplified)
+fn get_memory_usage() -> f64 {
+    // In a real implementation, this would use platform-specific memory monitoring
+    // For now, return a placeholder value
+    0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,11 +475,4 @@ mod tests {
         assert_eq!(results.ops_per_second, 100.0);
         assert_eq!(results.error_count, 0);
     }
-}
-
-/// Get current memory usage (simplified)
-fn get_memory_usage() -> f64 {
-    // In a real implementation, this would use platform-specific memory monitoring
-    // For now, return a placeholder value
-    0.0
 }

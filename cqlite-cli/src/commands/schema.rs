@@ -1,7 +1,7 @@
 use crate::cli_types::SchemaCommands;
 use anyhow::{Context, Result};
 use cqlite_core::{
-    schema::{parse_cql_schema, ClusteringColumn, Column, KeyColumn, TableSchema},
+    schema::{parse_cql_schema, ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema},
     Database,
 };
 use serde_json;
@@ -567,7 +567,7 @@ fn parse_composite_primary_key(
                 name: column.name.clone(),
                 data_type: column.data_type.clone(),
                 position,
-                order: "ASC".to_string(), // Default to ASC
+                order: ClusteringOrder::Asc, // Default to ASC
             });
         }
     }

@@ -1580,7 +1580,7 @@ mod tests {
         // Test creation from value
         let value = Value::Text("test".to_string());
         let key2 = RowKey::from_value(&value).unwrap();
-        assert!(key2.len() > 0);
+        assert!(!key2.is_empty());
 
         // Test empty key
         let empty_key = RowKey::new(vec![]);

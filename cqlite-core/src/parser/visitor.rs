@@ -1647,7 +1647,7 @@ mod tests {
 
         // Should have validation errors
         assert!(!validator.is_valid());
-        assert!(validator.get_errors().len() > 0);
+        assert!(!validator.get_errors().is_empty());
     }
 
     #[test]

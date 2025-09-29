@@ -26,7 +26,7 @@ impl MemorySafetyRunner {
     /// Check if Miri is available
     fn check_miri_available() -> bool {
         Command::new("cargo")
-            .args(&["miri", "--version"])
+            .args(["miri", "--version"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -37,7 +37,7 @@ impl MemorySafetyRunner {
     /// Check if Valgrind is available
     fn check_valgrind_available() -> bool {
         Command::new("valgrind")
-            .args(&["--version"])
+            .args(["--version"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -52,7 +52,7 @@ impl MemorySafetyRunner {
             .unwrap_or_default()
             .contains("-Zsanitizer=address")
             || Command::new("rustc")
-                .args(&["--print", "target-features"])
+                .args(["--print", "target-features"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
@@ -76,7 +76,7 @@ impl MemorySafetyRunner {
         }
 
         let output = Command::new("cargo")
-            .args(&[
+            .args([
                 "miri",
                 "test",
                 "--package",
@@ -111,7 +111,7 @@ impl MemorySafetyRunner {
 
         // First, build the test binary
         let output = Command::new("cargo")
-            .args(&[
+            .args([
                 "test",
                 "--package",
                 "cqlite-core",
@@ -130,7 +130,7 @@ impl MemorySafetyRunner {
 
         // Run with Valgrind
         let output = Command::new("valgrind")
-            .args(&[
+            .args([
                 "--tool=memcheck",
                 "--leak-check=full",
                 "--show-leak-kinds=all",

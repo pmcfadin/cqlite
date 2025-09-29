@@ -654,6 +654,6 @@ mod tests {
         let expected_size = (0.1 * 1024.0 * 1024.0) as usize;
 
         assert_eq!(data.len(), expected_size);
-        assert!(data.len() > 0);
+        assert!(!data.is_empty());
     }
 }

@@ -232,31 +232,29 @@ mod integration_tests {
         let test_data =
             std::fs::read_dir(REAL_DATA_PATH).expect("Failed to read test data directory");
 
-        for entry in test_data {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Ok(directory) = SSTableDirectory::scan(&path) {
-                        for generation in &directory.generations {
-                            if generation.components.contains_key(&SSTableComponent::TOC) {
-                                println!("Testing TOC consistency for: {}", directory.table_name);
+        for entry in test_data.flatten() {
+            let path = entry.path();
+            if path.is_dir() && SSTableDirectory::scan(&path).is_ok() {
+                if let Ok(directory) = SSTableDirectory::scan(&path) {
+                    for generation in &directory.generations {
+                        if generation.components.contains_key(&SSTableComponent::TOC) {
+                            println!("Testing TOC consistency for: {}", directory.table_name);
 
-                                let inconsistencies = validate_toc_consistency(generation)
-                                    .expect("TOC validation should succeed");
+                            let inconsistencies = validate_toc_consistency(generation)
+                                .expect("TOC validation should succeed");
 
-                                if inconsistencies.is_empty() {
-                                    println!("  ✅ TOC is consistent");
-                                } else {
-                                    println!("  ⚠️ TOC inconsistencies found:");
-                                    for inconsistency in &inconsistencies {
-                                        println!("    - {}", inconsistency);
-                                    }
+                            if inconsistencies.is_empty() {
+                                println!("  ✅ TOC is consistent");
+                            } else {
+                                println!("  ⚠️ TOC inconsistencies found:");
+                                for inconsistency in &inconsistencies {
+                                    println!("    - {}", inconsistency);
                                 }
-
-                                // At least one table should have consistent TOC
-                                // (this is more of a data quality check than a code test)
-                                return;
                             }
+
+                            // At least one table should have consistent TOC
+                            // (this is more of a data quality check than a code test)
+                            return;
                         }
                     }
                 }

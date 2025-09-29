@@ -55,23 +55,18 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-use cqlite_core::{Config, Error, Result};
+use cqlite_core::{Error, Result};
 
 /// Test context for managing SSTable test environments
 #[derive(Debug)]
 pub struct TestContext {
     /// Temporary directory for test files
     pub temp_dir: TempDir,
-    /// CQLite configuration for tests
-    pub config: Config,
     /// Path to the test dataset directory
     pub dataset_path: PathBuf,
-    /// Cassandra version being tested
-    pub cassandra_version: String,
     /// Performance metrics collector
     pub metrics: TestMetrics,
 }
@@ -81,16 +76,13 @@ pub struct TestContext {
 pub struct TestMetrics {
     /// SSTable load times
     pub load_times: Vec<Duration>,
-    /// Index access times
-    pub index_times: Vec<Duration>,
     /// Cache hit rates
     pub cache_hits: u64,
     /// Cache miss counts
     pub cache_misses: u64,
     /// Total bytes read
+    #[allow(dead_code)]
     pub bytes_read: u64,
-    /// Memory usage peaks
-    pub memory_peaks: Vec<usize>,
 }
 
 /// SSTable dataset descriptor for different test scenarios
@@ -138,8 +130,6 @@ impl TestContext {
         let temp_dir = TempDir::new()
             .map_err(|e| Error::InvalidState(format!("Failed to create temp dir: {}", e)))?;
 
-        let config = Config::default();
-
         // Use environment-relative path calculation instead of hardcoded paths
         let dataset_path = if let Ok(datasets_root) = std::env::var("CQLITE_DATASETS_ROOT") {
             Path::new(&datasets_root)
@@ -163,13 +153,9 @@ impl TestContext {
             )));
         }
 
-        let cassandra_version = "5.0".to_string(); // Default to 5.0, can be overridden
-
         Ok(TestContext {
             temp_dir,
-            config,
             dataset_path,
-            cassandra_version,
             metrics: TestMetrics::default(),
         })
     }
@@ -315,32 +301,14 @@ impl TestContext {
         Ok(components)
     }
 
-    /// Record cache hit for metrics
-    pub fn record_cache_hit(&mut self) {
-        self.metrics.cache_hits += 1;
-    }
-
-    /// Record cache miss for metrics
-    pub fn record_cache_miss(&mut self) {
-        self.metrics.cache_misses += 1;
-    }
-
     /// Record bytes read for metrics
+    #[allow(dead_code)]
     pub fn record_bytes_read(&mut self, bytes: u64) {
         self.metrics.bytes_read += bytes;
     }
 
-    /// Get cache hit rate as percentage
-    pub fn cache_hit_rate(&self) -> f64 {
-        let total = self.metrics.cache_hits + self.metrics.cache_misses;
-        if total == 0 {
-            0.0
-        } else {
-            (self.metrics.cache_hits as f64 / total as f64) * 100.0
-        }
-    }
-
     /// Clean up test context and return metrics
+    #[allow(dead_code)]
     pub fn cleanup(self) -> Result<TestMetrics> {
         // TempDir automatically cleans up when dropped
         Ok(self.metrics)
@@ -352,8 +320,8 @@ impl TestContext {
 pub struct PerformanceTestUtils;
 
 impl PerformanceTestUtils {
-    #[allow(dead_code)]
     /// Time an async operation and return the result with duration
+    #[allow(dead_code)]
     pub async fn time_operation<F, Fut, T>(operation: F) -> (T, Duration)
     where
         F: FnOnce() -> Fut,
@@ -366,6 +334,7 @@ impl PerformanceTestUtils {
     }
 
     /// Run concurrent access test with multiple readers
+    #[allow(dead_code)]
     pub async fn concurrent_access_test<F, Fut>(
         operation_factory: F,
         num_concurrent: usize,
@@ -374,6 +343,7 @@ impl PerformanceTestUtils {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send,
     {
+        use std::sync::Arc;
         let operation_factory = Arc::new(operation_factory);
         let mut handles = Vec::new();
 
@@ -396,55 +366,20 @@ impl PerformanceTestUtils {
 
         durations
     }
-
-    /// Collect memory usage during an operation
-    pub async fn memory_profiled_operation<F, Fut, T>(operation: F) -> (T, Vec<usize>)
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = T>,
-    {
-        let mut memory_samples = Vec::new();
-
-        // Start memory monitoring
-        let monitoring_handle = tokio::spawn(async move {
-            let mut samples = Vec::new();
-            let mut interval = tokio::time::interval(Duration::from_millis(10));
-
-            for _ in 0..100 {
-                // Sample for up to 1 second
-                interval.tick().await;
-                // Platform memory usage monitoring is not available in all environments
-                // For testing purposes, we'll simulate memory tracking
-                samples.push(1024 * 1024); // 1MB sample
-            }
-
-            samples
-        });
-
-        // Run the operation
-        let result = operation().await;
-
-        // Stop monitoring and collect samples
-        monitoring_handle.abort();
-        if let Ok(samples) = monitoring_handle.await {
-            memory_samples = samples;
-        }
-
-        (result, memory_samples)
-    }
 }
 
 /// Common assertion helpers for SSTable testing
 pub struct AssertionHelpers;
 
 impl AssertionHelpers {
-    #[allow(dead_code)]
     /// Discover actual components in a directory (public version)
+    #[allow(dead_code)]
     pub fn discover_components(table_dir: &Path) -> Result<Vec<SSTableComponent>> {
         Self::discover_components_internal(table_dir)
     }
 
     /// Validate SSTable component file offsets
+    #[allow(dead_code)]
     pub fn validate_offsets(
         data_file_size: u64,
         index_offsets: &[(u64, u64)], // (start, end) pairs
@@ -469,52 +404,8 @@ impl AssertionHelpers {
         Ok(())
     }
 
-    /// Verify partition lookup functionality (placeholder for actual implementation)
-    pub async fn verify_partition_lookup(
-        _sstable_path: &Path,
-        _partition_key: &[u8],
-        _expected_present: bool,
-    ) -> Result<()> {
-        // This is a placeholder for actual partition lookup verification
-        // In a real implementation, this would open the SSTable files and
-        // check if the partition key exists
-        Ok(())
-    }
-
-    /// Verify cache metrics are within expected ranges
-    pub fn verify_cache_metrics(
-        context: &TestContext,
-        min_hit_rate: f64,
-        max_memory_mb: usize,
-    ) -> Result<()> {
-        let hit_rate = context.cache_hit_rate();
-        if hit_rate < min_hit_rate {
-            return Err(Error::InvalidFormat(format!(
-                "Cache hit rate too low: {}% < {}%",
-                hit_rate, min_hit_rate
-            )));
-        }
-
-        let max_memory_bytes = context
-            .metrics
-            .memory_peaks
-            .iter()
-            .max()
-            .copied()
-            .unwrap_or(0);
-        let max_memory_mb_actual = max_memory_bytes / (1024 * 1024);
-
-        if max_memory_mb_actual > max_memory_mb {
-            return Err(Error::InvalidFormat(format!(
-                "Memory usage too high: {}MB > {}MB",
-                max_memory_mb_actual, max_memory_mb
-            )));
-        }
-
-        Ok(())
-    }
-
     /// Verify SSTable component integrity
+    #[allow(dead_code)]
     pub async fn verify_component_integrity(
         table_dir: &Path,
         expected_components: &[SSTableComponent],
@@ -572,8 +463,8 @@ impl AssertionHelpers {
 pub struct DatasetUtils;
 
 impl DatasetUtils {
-    #[allow(dead_code)]
     /// Get all available datasets
+    #[allow(dead_code)]
     pub fn get_available_datasets() -> Result<Vec<String>> {
         let datasets_path = if let Ok(datasets_root) = std::env::var("CQLITE_DATASETS_ROOT") {
             Path::new(&datasets_root).join("sstables")
@@ -603,18 +494,6 @@ impl DatasetUtils {
         }
 
         Ok(datasets)
-    }
-
-    /// Create dataset descriptor with metadata
-    pub async fn create_dataset_descriptor(dataset_name: &str) -> Result<DatasetDescriptor> {
-        let context = TestContext::new(dataset_name).await?;
-        let tables = context.get_available_tables()?;
-
-        Ok(DatasetDescriptor {
-            name: dataset_name.to_string(),
-            tables,
-            cassandra_version: context.cassandra_version,
-        })
     }
 }
 
