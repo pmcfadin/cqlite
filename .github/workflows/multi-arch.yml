@@ -27,31 +27,31 @@ jobs:
           - os: ubuntu-latest
             arch: x86_64
             target: x86_64-unknown-linux-gnu
-            features: "all-compression,metrics,experimental"
+            features: "all-compression,metrics,experimental,benchmarks"
 
           # Linux ARM64 (cross-compile)
           - os: ubuntu-latest
             arch: aarch64
             target: aarch64-unknown-linux-gnu
-            features: "all-compression,metrics,experimental"
+            features: "all-compression,metrics,experimental,benchmarks"
 
           # macOS x86_64
           - os: macos-13
             arch: x86_64
             target: x86_64-apple-darwin
-            features: "all-compression,metrics,experimental"
+            features: "all-compression,metrics,experimental,benchmarks"
 
           # macOS ARM64 (Apple Silicon)
           - os: macos-14
             arch: aarch64
             target: aarch64-apple-darwin
-            features: "all-compression,metrics,experimental"
+            features: "all-compression,metrics,experimental,benchmarks"
 
           # Windows x86_64
           - os: windows-latest
             arch: x86_64
             target: x86_64-pc-windows-msvc
-            features: "all-compression,metrics,experimental"
+            features: "all-compression,metrics,experimental,benchmarks"
 
           # WASM32 (browser target)
           - os: ubuntu-latest
