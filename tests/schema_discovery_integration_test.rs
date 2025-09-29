@@ -115,13 +115,13 @@ mod schema_discovery_tests {
         }
     }
 
-    #[test]
-    fn test_type_inference_engine() {
+    #[tokio::test]
+    async fn test_type_inference_engine() {
         let engine = MockTypeInferenceEngine::new();
 
         // Test with empty samples
         let empty_samples = vec![];
-        let result = futures::executor::block_on(engine.infer_column_type(&empty_samples)).unwrap();
+        let result = engine.infer_column_type(&empty_samples).await.unwrap();
         assert_eq!(result.type_id, "text");
 
         // Test with text samples

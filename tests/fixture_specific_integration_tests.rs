@@ -34,12 +34,12 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
     let platform = Arc::new(Platform::new(&config).await?);
     let reader = SSTableReader::open(&fixture_path, &config, platform).await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     println!("🔍 Testing minimal fixture partition lookup integration:");
 
     // Test the specific fixture data (id=1, value="test")
-    let test_key = RowKey::from_bytes(&1i32.to_be_bytes());
+    let test_key = RowKey::from(&1i32.to_be_bytes()[..]);
 
     let start_time = Instant::now();
     let result = reader.get(&table_id, &test_key).await?;
@@ -54,10 +54,12 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
             );
 
             // Validate expected fixture content
-            if value.len() == 4 && &value == b"test" {
+            if value.len() == 4 && value.as_bytes() == Some(b"test".as_slice()) {
                 println!("  🎯 Confirmed expected fixture value: 'test'");
+            } else if let Some(bytes) = value.as_bytes() {
+                println!("  📋 Found value: {:?}", String::from_utf8_lossy(bytes));
             } else {
-                println!("  📋 Found value: {:?}", String::from_utf8_lossy(&value));
+                println!("  📋 Found value: {:?}", value);
             }
 
             // Performance check
@@ -73,7 +75,7 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
     }
 
     // Test non-existent key to verify proper lookup behavior
-    let non_existent_key = RowKey::from_bytes(&999i32.to_be_bytes());
+    let non_existent_key = RowKey::from(&999i32.to_be_bytes()[..]);
     let start_time = Instant::now();
     let result = reader.get(&table_id, &non_existent_key).await?;
     let lookup_duration = start_time.elapsed();
@@ -120,7 +122,7 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
         (reader, "real_dataset")
     };
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     println!("🔍 Testing range scan integration with {}: ", data_source);
 
@@ -176,8 +178,8 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
     }
 
     // Test 3: Range scan with integer keys (for fixture compatibility)
-    let start_key = RowKey::from_bytes(&0i32.to_be_bytes());
-    let end_key = RowKey::from_bytes(&5i32.to_be_bytes());
+    let start_key = RowKey::from(&0i32.to_be_bytes()[..]);
+    let end_key = RowKey::from(&5i32.to_be_bytes()[..]);
 
     let start_time = Instant::now();
     let range_results = reader
@@ -200,8 +202,8 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
     }
 
     // Test 4: Empty range scan
-    let empty_start = RowKey::from_bytes(&1000i32.to_be_bytes());
-    let empty_end = RowKey::from_bytes(&2000i32.to_be_bytes());
+    let empty_start = RowKey::from(&1000i32.to_be_bytes()[..]);
+    let empty_end = RowKey::from(&2000i32.to_be_bytes()[..]);
 
     let start_time = Instant::now();
     let empty_results = reader
@@ -269,13 +271,14 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
         data_source
     );
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Check compression status
-    let health_metrics = reader.health_check().await?;
-    println!("  📊 Compression info:");
-    println!("    - Enabled: {}", health_metrics.compression_enabled);
-    println!("    - Algorithm: {}", health_metrics.compression_algorithm);
+    // NOTE: health_check() method is not currently available
+    // let health_metrics = reader.health_check().await?;
+    // println!("  📊 Compression info:");
+    // println!("    - Enabled: {}", health_metrics.compression_enabled);
+    // println!("    - Algorithm: {}", health_metrics.compression_algorithm);
 
     // Test 1: Read through decompression pipeline
     let start_time = Instant::now();
@@ -308,13 +311,12 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
     );
 
     // Performance check: decompression should not be prohibitively slow
-    if health_metrics.compression_enabled {
-        assert!(
-            decompression_duration.as_millis() < 1000,
-            "Decompression should be reasonably fast: {:?}ms",
-            decompression_duration.as_millis()
-        );
-    }
+    // Note: health_metrics not available, performing generic performance check
+    assert!(
+        decompression_duration.as_millis() < 1000,
+        "Decompression should be reasonably fast: {:?}ms",
+        decompression_duration.as_millis()
+    );
 
     // Test 2: Individual partition lookup through decompression
     if !results.is_empty() {
@@ -427,7 +429,7 @@ async fn test_cross_operation_validation() -> Result<()> {
         data_source
     );
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Get some data through scan
     let scan_results = reader.scan(&table_id, None, None, Some(10)).await?;

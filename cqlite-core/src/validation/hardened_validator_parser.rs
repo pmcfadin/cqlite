@@ -1578,8 +1578,7 @@ impl ComplexTypeTestResult {
 
 impl VersionSpecificParser {
     fn new(version: CassandraVersion) -> Result<Self> {
-        let format_handlers: FormatHandlerMap =
-            HashMap::new();
+        let format_handlers: FormatHandlerMap = HashMap::new();
 
         // Add version-specific format handlers
         match version {

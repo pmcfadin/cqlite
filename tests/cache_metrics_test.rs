@@ -1,14 +1,15 @@
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::reader::{SSTableReader, SSTableReaderConfig};
-use cqlite_core::{RowKey, TableId, Value};
+use cqlite_core::{Config, RowKey, TableId, Value};
 use std::sync::Arc;
 use tokio;
 
 #[tokio::test]
 async fn test_cache_hit_rate_tracking() {
     // Create a mock SSTable reader for testing cache metrics
-    let platform = Arc::new(Platform::default());
-    let config = SSTableReaderConfig::default();
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.unwrap());
+    let reader_config = SSTableReaderConfig::default();
 
     // This test would need a real SSTable file to work properly
     // For now, we test the cache metrics calculation logic

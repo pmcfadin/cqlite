@@ -951,7 +951,6 @@ impl CqlType {
     }
 }
 
-
 /// Schema management service for handling table schemas and UDT definitions
 #[derive(Debug)]
 pub struct SchemaManager {

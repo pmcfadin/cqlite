@@ -1,9 +1,10 @@
 //! Integration tests for schema-driven parsing with sstabledump parity
 
 use cqlite_core::{
+    platform::Platform,
     schema::{ParsingContext, SchemaParser, SchemaRegistry, SchemaRegistryConfig, TableSchema},
     types::ComparatorType,
-    Config, Platform,
+    Config,
 };
 use std::collections::HashMap;
 use std::sync::Arc;

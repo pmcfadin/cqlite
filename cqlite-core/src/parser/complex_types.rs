@@ -222,7 +222,6 @@ impl ComplexTypeParser {
         ))(input)
     }
 
-
     fn parse_collection_type<'a>(
         &'a self,
         context: &'a TypeParsingContext,

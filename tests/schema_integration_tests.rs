@@ -4,12 +4,13 @@
 //! for the three representative table types requested by reviewers.
 
 use cqlite_core::{
+    platform::Platform,
     schema::{
         Column, KeyColumn, ParsingContext, SchemaParser, SchemaRegistry, SchemaRegistryConfig,
         TableSchema,
     },
     types::{ComparatorType, Value},
-    Config, Platform,
+    Config,
 };
 use std::collections::HashMap;
 use std::sync::Arc;

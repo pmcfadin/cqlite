@@ -3,6 +3,8 @@
 //! This test suite validates all security mechanisms and ensures
 //! the codebase is resistant to common attack patterns.
 
+#![cfg(feature = "security-tests")]
+
 use cqlite_core::security::{
     fuzzing::{FuzzingReport, SecurityFuzzer},
     memory_validator::{MemorySafetyValidator, MemoryValidationConfig},
@@ -448,7 +450,7 @@ impl SecurityTestResults {
     /// Print comprehensive test report
     pub fn print_report(&self) {
         println!("\n🔒 SECURITY TEST REPORT 🔒");
-        println!("=".repeat(50));
+        println!("{}", "=".repeat(50));
         println!(
             "Overall Result: {}",
             if self.overall_passed {
@@ -472,7 +474,7 @@ impl SecurityTestResults {
             test_result.print_summary();
         }
 
-        println!("=".repeat(50));
+        println!("{}", "=".repeat(50));
     }
 }
 

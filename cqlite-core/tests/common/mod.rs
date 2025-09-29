@@ -43,7 +43,6 @@ pub fn init_test_logging() {
         .try_init();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

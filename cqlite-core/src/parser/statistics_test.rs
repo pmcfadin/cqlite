@@ -80,8 +80,7 @@ mod tests {
                             let path = entry.path();
                             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                                 if name.ends_with("-Data.db") {
-                                    let stats_name =
-                                        name.replacen("-Data.db", "-Statistics.db", 1);
+                                    let stats_name = name.replacen("-Data.db", "-Statistics.db", 1);
                                     let stats_path = path.with_file_name(stats_name);
                                     if stats_path.exists() {
                                         stats_files.push(stats_path);

@@ -89,7 +89,6 @@ impl fmt::Display for TestCategory {
     }
 }
 
-
 /// Coverage tracking for quality gates
 #[derive(Debug, Clone, Default)]
 pub struct CoverageTracker {
@@ -131,7 +130,7 @@ pub struct QualityGate {
 impl QualityGate {
     pub fn new() -> Self {
         Self {
-            min_coverage: 95.0, // Target 95% coverage for Phase 2
+            min_coverage: 95.0,                           // Target 95% coverage for Phase 2
             max_execution_time: Duration::from_secs(300), // 5 minutes
             max_memory_usage: 512,                        // 512MB
         }
@@ -220,9 +219,7 @@ impl EnhancedTestContextBuilder {
     pub async fn build(self, dataset_name: &str) -> Result<EnhancedTestContext> {
         let base_context = TestContext::new(dataset_name).await?;
 
-        Ok(EnhancedTestContext {
-            base_context,
-        })
+        Ok(EnhancedTestContext { base_context })
     }
 }
 
@@ -286,8 +283,6 @@ impl EnhancedTestContext {
         50000 // Estimated lines in codebase
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

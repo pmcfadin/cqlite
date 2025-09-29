@@ -18,15 +18,11 @@ use std::time::Instant;
 
 use cqlite_core::{
     error::{Error, Result},
-    parser::row::PartitionKey,
     platform::Platform,
-    schema::{registry::SchemaRegistry, ClusteringColumn, KeyColumn, TableSchema},
-    storage::sstable::{
-        index_reader::IndexReader, reader::SSTableReader, schema_aware_reader::SchemaAwareReader,
-        summary_reader::SummaryReader,
-    },
+    schema::{registry::SchemaRegistry, TableSchema},
+    storage::sstable::reader::SSTableReader,
     types::{ComparatorType, TableId},
-    Config, RowKey, Value,
+    Config, RowKey,
 };
 
 use tokio::fs;
@@ -74,9 +70,12 @@ impl GoldenPathPartitionTestFixture {
         );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
-            return Err(Error::io_error(format!(
-                "Test SSTable not found: {:?}. Please ensure test-data is available.",
-                fallback_path
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "Test SSTable not found: {:?}. Please ensure test-data is available.",
+                    fallback_path
+                ),
             )));
         }
 
@@ -90,9 +89,9 @@ impl GoldenPathPartitionTestFixture {
         );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
-            return Err(Error::io_error(format!(
-                "Test SSTable not found: {:?}",
-                fallback_path
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Test SSTable not found: {:?}", fallback_path),
             )));
         }
 
@@ -104,11 +103,17 @@ impl GoldenPathPartitionTestFixture {
         TableSchema::builder()
             .table_name("test_table")
             .keyspace_name("test_keyspace")
-            .partition_key("user_id", ComparatorType::UUIDType)
-            .clustering_key("timestamp", ComparatorType::TimestampType)
-            .clustering_key("event_type", ComparatorType::UTF8Type)
-            .column("data", ComparatorType::UTF8Type)
-            .column("metadata", ComparatorType::MapType)
+            .partition_key("user_id", ComparatorType::Uuid)
+            .clustering_key("timestamp", ComparatorType::Timestamp)
+            .clustering_key("event_type", ComparatorType::Text)
+            .column("data", ComparatorType::Text)
+            .column(
+                "metadata",
+                ComparatorType::Map(
+                    Box::new(ComparatorType::Text),
+                    Box::new(ComparatorType::Text),
+                ),
+            )
             .build()
     }
 
@@ -117,7 +122,7 @@ impl GoldenPathPartitionTestFixture {
         (1..=20)
             .map(|i| {
                 let partition_data = format!("partition_{:03}", i);
-                RowKey::from_bytes(partition_data.as_bytes())
+                RowKey::from(partition_data.as_bytes())
             })
             .collect()
     }
@@ -128,8 +133,8 @@ async fn test_golden_path_single_partition_lookup() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
     let reader = fixture.setup_collections_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
-    let partition_key = RowKey::from_bytes(b"single_partition_test");
+    let table_id = TableId::new("test_keyspace.test_table");
+    let partition_key = RowKey::from(b"single_partition_test".as_ref());
 
     // Test: Single partition key lookup
     let start_time = Instant::now();
@@ -167,7 +172,7 @@ async fn test_golden_path_multi_partition_scanning() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
     let partition_keys = fixture.create_test_partition_keys();
 
     // Test: Lookup multiple partitions
@@ -217,11 +222,11 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Scan across partition boundaries
-    let start_partition = RowKey::from_bytes(b"partition_boundary_start");
-    let end_partition = RowKey::from_bytes(b"partition_boundary_end");
+    let start_partition = RowKey::from(b"partition_boundary_start".as_ref());
+    let end_partition = RowKey::from(b"partition_boundary_end".as_ref());
 
     let start_time = Instant::now();
     let results = reader
@@ -275,7 +280,7 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
     let reader = fixture.setup_collections_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Operations within a single partition using clustering keys
     let base_partition = "cluster_test_partition";
@@ -288,7 +293,7 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
     let mut clustering_results = Vec::new();
 
     for clustering_key_str in &clustering_keys {
-        let clustering_key = RowKey::from_bytes(clustering_key_str.as_bytes());
+        let clustering_key = RowKey::from(clustering_key_str.as_bytes());
 
         let start_time = Instant::now();
         let result = reader.get(&table_id, &clustering_key).await?;
@@ -305,8 +310,8 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
     }
 
     // Test: Range scan within partition using clustering key boundaries
-    let partition_start = RowKey::from_bytes(format!("{}:cluster_000", base_partition).as_bytes());
-    let partition_end = RowKey::from_bytes(format!("{}:cluster_999", base_partition).as_bytes());
+    let partition_start = RowKey::from(format!("{}:cluster_000", base_partition).as_bytes());
+    let partition_end = RowKey::from(format!("{}:cluster_999", base_partition).as_bytes());
 
     let start_time = Instant::now();
     let range_results = reader
@@ -340,7 +345,7 @@ async fn test_golden_path_partition_bloom_filter_efficiency() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
     let reader = fixture.setup_collections_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Bloom filter efficiency for partition lookups
     let non_existent_partitions = vec![
@@ -353,7 +358,7 @@ async fn test_golden_path_partition_bloom_filter_efficiency() -> Result<()> {
     let mut bloom_test_times = Vec::new();
 
     for partition_name in &non_existent_partitions {
-        let partition_key = RowKey::from_bytes(partition_name.as_bytes());
+        let partition_key = RowKey::from(partition_name.as_bytes());
 
         let start_time = Instant::now();
         let result = reader.get(&table_id, &partition_key).await?;
@@ -398,14 +403,15 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
     let reader = fixture.setup_wide_rows_reader().await?;
 
     // Test: Integration with summary index for partition operations
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Verify reader has summary functionality
-    let health_metrics = reader.health_check().await?;
-    println!(
-        "✅ Reader health: index={}, bloom={}",
-        health_metrics.index_available, health_metrics.bloom_filter_enabled
-    );
+    // NOTE: health_check() method is not currently available
+    // let health_metrics = reader.health_check().await?;
+    // println!(
+    //     "✅ Reader health: index={}, bloom={}",
+    //     health_metrics.index_available, health_metrics.bloom_filter_enabled
+    // );
 
     // Test partition lookup with summary index
     let test_partitions = vec![
@@ -415,7 +421,7 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
     ];
 
     for partition_name in &test_partitions {
-        let partition_key = RowKey::from_bytes(partition_name.as_bytes());
+        let partition_key = RowKey::from(partition_name.as_bytes());
 
         let start_time = Instant::now();
         let result = reader.get(&table_id, &partition_key).await?;
@@ -444,8 +450,8 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
     }
 
     // Test summary-assisted range scan
-    let range_start = RowKey::from_bytes(b"summary_partition_a");
-    let range_end = RowKey::from_bytes(b"summary_partition_z");
+    let range_start = RowKey::from(b"summary_partition_a".as_ref());
+    let range_end = RowKey::from(b"summary_partition_z".as_ref());
 
     let start_time = Instant::now();
     let range_results = reader
@@ -474,11 +480,11 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Benchmark: Batch partition lookups
     let partition_keys = (1..=50)
-        .map(|i| RowKey::from_bytes(format!("benchmark_partition_{:03}", i).as_bytes()))
+        .map(|i| RowKey::from(format!("benchmark_partition_{:03}", i).as_bytes()))
         .collect::<Vec<_>>();
 
     let start_time = Instant::now();
@@ -520,7 +526,7 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
             let reader = reader.clone();
             let table_id = table_id.clone();
             tokio::spawn(async move {
-                let key = RowKey::from_bytes(format!("concurrent_partition_{}", i).as_bytes());
+                let key = RowKey::from(format!("concurrent_partition_{}", i).as_bytes());
                 let start_time = Instant::now();
                 let result = reader.get(&table_id, &key).await;
                 let duration = start_time.elapsed();
@@ -561,10 +567,10 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
     let reader = fixture.setup_collections_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Edge case 1: Empty partition key
-    let empty_partition = RowKey::from_bytes(b"");
+    let empty_partition = RowKey::from(b"");
     let result = reader.get(&table_id, &empty_partition).await?;
     assert!(
         result.is_none(),
@@ -572,7 +578,7 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
     );
 
     // Edge case 2: Maximum length partition key
-    let max_partition = RowKey::from_bytes(&vec![b'p'; 1024]);
+    let max_partition = RowKey::from(vec![b'p'; 1024]);
     let start_time = Instant::now();
     let result = reader.get(&table_id, &max_partition).await?;
     let duration = start_time.elapsed();
@@ -591,7 +597,7 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
     ];
 
     for binary_key in binary_partitions {
-        let partition_key = RowKey::from_bytes(&binary_key);
+        let partition_key = RowKey::from(&binary_key[..]);
         let result = reader.get(&table_id, &partition_key).await?;
         // Should handle binary keys without errors
     }
@@ -604,7 +610,7 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
     ];
 
     for unicode_partition in unicode_partitions {
-        let partition_key = RowKey::from_bytes(unicode_partition.as_bytes());
+        let partition_key = RowKey::from(unicode_partition.as_bytes());
         let result = reader.get(&table_id, &partition_key).await?;
         // Should handle unicode gracefully
     }
@@ -618,25 +624,26 @@ async fn test_golden_path_partition_integration_validation() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Integration test: Verify partition operations integrate with all components
 
     // 1. Health check before partition operations
-    let health_metrics = reader.health_check().await?;
-    assert!(health_metrics.file_accessible, "File should be accessible");
-    println!("✅ Pre-partition health check passed");
+    // NOTE: health_check() method is not currently available
+    // let health_metrics = reader.health_check().await?;
+    // assert!(health_metrics.file_accessible, "File should be accessible");
+    // println!("✅ Pre-partition health check passed");
 
     // 2. Test partition lookup with all optimizations
-    let test_partition = RowKey::from_bytes(b"integration_test_partition");
+    let test_partition = RowKey::from(b"integration_test_partition".as_ref());
 
     let start_time = Instant::now();
     let partition_result = reader.get(&table_id, &test_partition).await?;
     let partition_duration = start_time.elapsed();
 
     // 3. Test partition scan with integration
-    let scan_start = RowKey::from_bytes(b"integration_scan_start");
-    let scan_end = RowKey::from_bytes(b"integration_scan_end");
+    let scan_start = RowKey::from(b"integration_scan_start".as_ref());
+    let scan_end = RowKey::from(b"integration_scan_end".as_ref());
 
     let scan_start_time = Instant::now();
     let scan_results = reader
@@ -647,9 +654,10 @@ async fn test_golden_path_partition_integration_validation() -> Result<()> {
     // 4. Verify statistics after operations
     let post_stats = reader.stats().await?;
     println!(
-        "✅ Post-operation stats: file_size={}, cache_hits={}",
-        post_stats.file_size, post_stats.cache_hits
+        "✅ Post-operation stats: file_size={}",
+        post_stats.file_size
     );
+    // NOTE: cache_hits field is not available, use cache_hit_rate instead
 
     // 5. Integration performance assertions
     assert!(

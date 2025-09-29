@@ -560,6 +560,26 @@ impl Value {
         }
     }
 
+    /// Get the length of the byte representation for this value
+    /// Returns the length of the underlying bytes for Blob/Text, or 0 for other types
+    pub fn len(&self) -> usize {
+        match self {
+            Value::Blob(b) => b.len(),
+            Value::Text(s) => s.len(),
+            _ => 0,
+        }
+    }
+
+    /// Check if the value is empty (for Blob/Text) or is Null
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Value::Null => true,
+            Value::Blob(b) => b.is_empty(),
+            Value::Text(s) => s.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Get the size in bytes for this value when serialized
     pub fn size_estimate(&self) -> usize {
         match self {

@@ -854,7 +854,6 @@ async fn test_sstable_discovery(dir: &Path, test_case: &DiscoveryTestCase) -> Te
     }
 }
 
-
 #[allow(dead_code)]
 async fn test_edge_case_handling(dir: &Path, test_case: &DiscoveryTestCase) -> TestResult {
     // Edge cases should be handled gracefully without crashing

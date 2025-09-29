@@ -22,6 +22,12 @@ tokio = { workspace = true, features = ["full"] }
 log = { workspace = true }
 env_logger = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+futures = { workspace = true }
+uuid = { version = "1.6", features = ["v4"] }
+insta = "1.34"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

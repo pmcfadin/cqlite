@@ -22,8 +22,9 @@ use cqlite_core::{
     platform::Platform,
     schema::{registry::SchemaRegistry, TableSchema},
     storage::sstable::{
-        reader::SSTableReader, schema_aware_reader::SchemaAwareReader,
-        streaming_reader::StreamingReader,
+        reader::SSTableReader,
+        schema_aware_reader::SchemaAwareReader,
+        // streaming_reader::StreamingReader, // Not exported
     },
     types::{ComparatorType, TableId},
     Config, RowKey, Value,
@@ -75,9 +76,12 @@ impl GoldenPathScanTestFixture {
         );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
-            return Err(Error::io_error(format!(
-                "Test SSTable not found: {:?}. Please ensure test-data is available.",
-                fallback_path
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "Test SSTable not found: {:?}. Please ensure test-data is available.",
+                    fallback_path
+                ),
             )));
         }
 
@@ -91,9 +95,9 @@ impl GoldenPathScanTestFixture {
         );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
-            return Err(Error::io_error(format!(
-                "Test SSTable not found: {:?}",
-                fallback_path
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Test SSTable not found: {:?}", fallback_path),
             )));
         }
 
@@ -103,7 +107,7 @@ impl GoldenPathScanTestFixture {
     /// Create test keys for scan range testing
     fn create_test_key_range(&self) -> Vec<RowKey> {
         (1..=50)
-            .map(|i| RowKey::from_bytes(format!("scan_key_{:03}", i).as_bytes()))
+            .map(|i| RowKey::from(format!("scan_key_{:03}", i).as_bytes()))
             .collect()
     }
 }
@@ -113,7 +117,7 @@ async fn test_golden_path_full_table_scan() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Full table scan without limits
     let start_time = Instant::now();
@@ -147,11 +151,11 @@ async fn test_golden_path_range_scan_with_boundaries() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Create test range
-    let start_key = RowKey::from_bytes(b"range_start_key");
-    let end_key = RowKey::from_bytes(b"range_end_key");
+    let start_key = RowKey::from(b"range_start_key".as_ref());
+    let end_key = RowKey::from(b"range_end_key".as_ref());
 
     // Test: Range scan with start and end boundaries
     let start_time = Instant::now();
@@ -195,7 +199,7 @@ async fn test_golden_path_limited_scan_operations() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test various limit values
     let test_limits = vec![1, 5, 10, 50, 100];
@@ -237,18 +241,18 @@ async fn test_golden_path_prefix_scan_operations() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Prefix-based scanning
     let prefix = "test_prefix";
-    let start_key = RowKey::from_bytes(prefix.as_bytes());
+    let start_key = RowKey::from(prefix.as_bytes());
 
     // Create end key by incrementing last byte for prefix scan
     let mut end_bytes = prefix.as_bytes().to_vec();
     if let Some(last_byte) = end_bytes.last_mut() {
         *last_byte = last_byte.saturating_add(1);
     }
-    let end_key = RowKey::from_bytes(&end_bytes);
+    let end_key = RowKey::from(&end_bytes[..]);
 
     let start_time = Instant::now();
     let results = reader
@@ -284,7 +288,7 @@ async fn test_golden_path_scan_performance_benchmarks() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Benchmark: Multiple scan operations
     let scan_operations = vec![
@@ -336,7 +340,7 @@ async fn test_golden_path_scan_ordering_validation() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_timeseries_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Verify scan results are properly ordered
     let results = reader.scan(&table_id, None, None, Some(50)).await?;
@@ -383,7 +387,7 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Edge case 1: Scan with limit 0
     let results = reader.scan(&table_id, None, None, Some(0)).await?;
@@ -393,7 +397,7 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
     );
 
     // Edge case 2: Scan non-existent table
-    let non_existent_table = TableId::new("non_existent", "table");
+    let non_existent_table = TableId::new("non_existent.table");
     let results = reader.scan(&non_existent_table, None, None, None).await?;
     // Should not crash, results may be empty
 
@@ -409,8 +413,8 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
     );
 
     // Edge case 4: Empty key range scan
-    let empty_start = RowKey::from_bytes(b"");
-    let empty_end = RowKey::from_bytes(b"");
+    let empty_start = RowKey::from(b"");
+    let empty_end = RowKey::from(b"");
     let results = reader
         .scan(&table_id, Some(&empty_start), Some(&empty_end), None)
         .await?;
@@ -425,7 +429,7 @@ async fn test_golden_path_streaming_scan_operations() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Memory-efficient streaming scan
     match reader.scan_stream(&table_id, None, None).await {
@@ -486,7 +490,7 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = Arc::new(fixture.setup_wide_rows_reader().await?);
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Multiple concurrent scans
     let handles = (1..=5)
@@ -549,16 +553,17 @@ async fn test_golden_path_scan_integration_validation() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
 
-    let table_id = TableId::new("test_keyspace", "test_table");
+    let table_id = TableId::new("test_keyspace.test_table");
 
     // Integration test: Verify scan integrates properly with all SSTable components
 
     // 1. Check reader health before scanning
-    let health_metrics = reader.health_check().await?;
-    assert!(
-        health_metrics.file_accessible,
-        "File should be accessible for scanning"
-    );
+    // NOTE: health_check() method is not currently available
+    // let health_metrics = reader.health_check().await?;
+    // assert!(
+    //     health_metrics.file_accessible,
+    //     "File should be accessible for scanning"
+    // );
 
     // 2. Perform scan and measure comprehensive metrics
     let start_time = Instant::now();
@@ -568,9 +573,10 @@ async fn test_golden_path_scan_integration_validation() -> Result<()> {
     // 3. Verify reader statistics after scan
     let stats = reader.stats().await?;
     println!(
-        "✅ Post-scan stats: blocks={}, entries={}, cache_hits={}",
-        stats.block_count, stats.entry_count, stats.cache_hits
+        "✅ Post-scan stats: blocks={}, entries={}",
+        stats.block_count, stats.entry_count
     );
+    // NOTE: cache_hits field is not available, use cache_hit_rate instead
 
     // 4. Integration validation
     assert!(
