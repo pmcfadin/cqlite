@@ -2,9 +2,7 @@
 //!
 //! Tests various attack vectors and malformed inputs to verify security fixes
 
-use cqlite_core::parser::header::{
-    parse_magic_and_version, parse_sstable_header, CassandraVersion,
-};
+use cqlite_core::parser::header::{parse_magic_and_version, CassandraVersion};
 use cqlite_core::parser::vint::{parse_vint, parse_vint_length, MAX_VINT_SIZE};
 
 #[cfg(test)]
@@ -105,14 +103,14 @@ mod security_tests {
         for test_data in max_length_tests {
             let result = parse_vint(&test_data);
             // Should either parse successfully or fail gracefully
-            if let Err(_) = result {
+            if result.is_err() {
                 // Error is acceptable for oversized data
                 continue;
             }
             // If it parses, ensure it doesn't cause overflow
             if let Ok((_, value)) = result {
                 assert!(
-                    value >= i64::MIN && value <= i64::MAX,
+                    (i64::MIN..=i64::MAX).contains(&value),
                     "VInt overflow detected"
                 );
             }

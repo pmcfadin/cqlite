@@ -56,11 +56,7 @@ mod e2e_tests {
             }
             if start.elapsed() >= timeout {
                 let _ = child.kill();
-                anyhow::bail!(
-                    "Timed out after {:?} running CLI with args {:?}",
-                    timeout,
-                    args
-                );
+                anyhow::bail!("Timed out after {timeout:?} running CLI with args {args:?}");
             }
             thread::sleep(Duration::from_millis(50));
         }
