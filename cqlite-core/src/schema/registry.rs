@@ -1236,7 +1236,7 @@ impl SchemaRegistry {
         &self,
         schema: &TableSchema,
         errors: &mut Vec<ValidationError>,
-        _warnings: &mut Vec<ValidationWarning>,
+        _warnings: &mut [ValidationWarning],
     ) {
         for column in &schema.columns {
             if let Err(e) = CqlType::parse(&column.data_type) {
