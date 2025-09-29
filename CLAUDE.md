@@ -1,352 +1,288 @@
-# Claude Code Configuration - SPARC Development Environment
+# CLAUDE.md
 
-## 🚨 CRITICAL: CONCURRENT EXECUTION & FILE MANAGEMENT
-
-**ABSOLUTE RULES**:
-1. ALL operations MUST be concurrent/parallel in a single message
-2. **NEVER save working files, text/mds and tests to the root folder**
-3. ALWAYS organize files in appropriate subdirectories
-4. **USE CLAUDE CODE'S TASK TOOL** for spawning agents concurrently, not just MCP
-
-### ⚡ GOLDEN RULE: "1 MESSAGE = ALL RELATED OPERATIONS"
-
-**MANDATORY PATTERNS:**
-- **TodoWrite**: ALWAYS batch ALL todos in ONE call (5-10+ todos minimum)
-- **Task tool (Claude Code)**: ALWAYS spawn ALL agents in ONE message with full instructions
-- **File operations**: ALWAYS batch ALL reads/writes/edits in ONE message
-- **Bash commands**: ALWAYS batch ALL terminal operations in ONE message
-- **Memory operations**: ALWAYS batch ALL memory store/retrieve in ONE message
-
-### 🎯 CRITICAL: Claude Code Task Tool for Agent Execution
-
-**Claude Code's Task tool is the PRIMARY way to spawn agents:**
-```javascript
-// ✅ CORRECT: Use Claude Code's Task tool for parallel agent execution
-[Single Message]:
-  Task("Research agent", "Analyze requirements and patterns...", "researcher")
-  Task("Coder agent", "Implement core features...", "coder")
-  Task("Tester agent", "Create comprehensive tests...", "tester")
-  Task("Reviewer agent", "Review code quality...", "reviewer")
-  Task("Architect agent", "Design system architecture...", "system-architect")
-```
-
-**MCP tools are ONLY for coordination setup:**
-- `mcp__claude-flow__swarm_init` - Initialize coordination topology
-- `mcp__claude-flow__agent_spawn` - Define agent types for coordination
-- `mcp__claude-flow__task_orchestrate` - Orchestrate high-level workflows
-
-### 📁 File Organization Rules
-
-**NEVER save to root folder. Use these directories:**
-- `/src` - Source code files
-- `/tests` - Test files
-- `/docs` - Documentation and markdown files
-- `/config` - Configuration files
-- `/scripts` - Utility scripts
-- `/examples` - Example code
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-This project uses SPARC (Specification, Pseudocode, Architecture, Refinement, Completion) methodology with Claude-Flow orchestration for systematic Test-Driven Development.
+CQLite is a high-performance Rust library providing local Apache Cassandra SSTable access. It enables reading and writing Cassandra data files without cluster dependencies, built for performance and safety with planned bindings for Python, NodeJS, and WASM.
 
-## SPARC Commands
+**Project Status**: Early Development (M1 Milestone - Core Reading Library)
 
-### Core Commands
-- `npx claude-flow sparc modes` - List available modes
-- `npx claude-flow sparc run <mode> "<task>"` - Execute specific mode
-- `npx claude-flow sparc tdd "<feature>"` - Run complete TDD workflow
-- `npx claude-flow sparc info <mode>` - Get mode details
+## Essential Commands
 
-### Batchtools Commands
-- `npx claude-flow sparc batch <modes> "<task>"` - Parallel execution
-- `npx claude-flow sparc pipeline "<task>"` - Full pipeline processing
-- `npx claude-flow sparc concurrent <mode> "<tasks-file>"` - Multi-task processing
-
-### Build Commands
-- `npm run build` - Build project
-- `npm run test` - Run tests
-- `npm run lint` - Linting
-- `npm run typecheck` - Type checking
-
-## SPARC Workflow Phases
-
-1. **Specification** - Requirements analysis (`sparc run spec-pseudocode`)
-2. **Pseudocode** - Algorithm design (`sparc run spec-pseudocode`)
-3. **Architecture** - System design (`sparc run architect`)
-4. **Refinement** - TDD implementation (`sparc tdd`)
-5. **Completion** - Integration (`sparc run integration`)
-
-## Code Style & Best Practices
-
-- **Modular Design**: Files under 500 lines
-- **Environment Safety**: Never hardcode secrets
-- **Test-First**: Write tests before implementation
-- **Clean Architecture**: Separate concerns
-- **Documentation**: Keep updated
-
-## 🚀 Available Agents (54 Total)
-
-### Core Development
-`coder`, `reviewer`, `tester`, `planner`, `researcher`
-
-### Swarm Coordination
-`hierarchical-coordinator`, `mesh-coordinator`, `adaptive-coordinator`, `collective-intelligence-coordinator`, `swarm-memory-manager`
-
-### Consensus & Distributed
-`byzantine-coordinator`, `raft-manager`, `gossip-coordinator`, `consensus-builder`, `crdt-synchronizer`, `quorum-manager`, `security-manager`
-
-### Performance & Optimization
-`perf-analyzer`, `performance-benchmarker`, `task-orchestrator`, `memory-coordinator`, `smart-agent`
-
-### GitHub & Repository
-`github-modes`, `pr-manager`, `code-review-swarm`, `issue-tracker`, `release-manager`, `workflow-automation`, `project-board-sync`, `repo-architect`, `multi-repo-swarm`
-
-### SPARC Methodology
-`sparc-coord`, `sparc-coder`, `specification`, `pseudocode`, `architecture`, `refinement`
-
-### Specialized Development
-`backend-dev`, `mobile-dev`, `ml-developer`, `cicd-engineer`, `api-docs`, `system-architect`, `code-analyzer`, `base-template-generator`
-
-### Testing & Validation
-`tdd-london-swarm`, `production-validator`
-
-### Migration & Planning
-`migration-planner`, `swarm-init`
-
-## 🎯 Claude Code vs MCP Tools
-
-### Claude Code Handles ALL EXECUTION:
-- **Task tool**: Spawn and run agents concurrently for actual work
-- File operations (Read, Write, Edit, MultiEdit, Glob, Grep)
-- Code generation and programming
-- Bash commands and system operations
-- Implementation work
-- Project navigation and analysis
-- TodoWrite and task management
-- Git operations
-- Package management
-- Testing and debugging
-
-### MCP Tools ONLY COORDINATE:
-- Swarm initialization (topology setup)
-- Agent type definitions (coordination patterns)
-- Task orchestration (high-level planning)
-- Memory management
-- Neural features
-- Performance tracking
-- GitHub integration
-
-**KEY**: MCP coordinates the strategy, Claude Code's Task tool executes with real agents.
-
-## 🚀 Quick Setup
+### Building and Testing
 
 ```bash
-# Add MCP servers (Claude Flow required, others optional)
-claude mcp add claude-flow npx claude-flow@alpha mcp start
-claude mcp add ruv-swarm npx ruv-swarm mcp start  # Optional: Enhanced coordination
-claude mcp add flow-nexus npx flow-nexus@latest mcp start  # Optional: Cloud features
+# Build the project (workspace)
+cargo build
+
+# Build with release optimizations
+cargo build --release
+
+# Run all tests (requires test data)
+env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core
+
+# Run tests with timeout (recommended)
+env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets timeout 60s cargo test --package cqlite-core
+
+# Run single test by name
+env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core test_name_here
+
+# Run specific test file
+env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test file_name
+
+# Run with verbose output
+env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core -- --nocapture
+
+# Run quiet mode (one character per test)
+env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --quiet
 ```
 
-## MCP Tool Categories
+### Code Quality
 
-### Coordination
-`swarm_init`, `agent_spawn`, `task_orchestrate`
-
-### Monitoring
-`swarm_status`, `agent_list`, `agent_metrics`, `task_status`, `task_results`
-
-### Memory & Neural
-`memory_usage`, `neural_status`, `neural_train`, `neural_patterns`
-
-### GitHub Integration
-`github_swarm`, `repo_analyze`, `pr_enhance`, `issue_triage`, `code_review`
-
-### System
-`benchmark_run`, `features_detect`, `swarm_monitor`
-
-### Flow-Nexus MCP Tools (Optional Advanced Features)
-Flow-Nexus extends MCP capabilities with 70+ cloud-based orchestration tools:
-
-**Key MCP Tool Categories:**
-- **Swarm & Agents**: `swarm_init`, `swarm_scale`, `agent_spawn`, `task_orchestrate`
-- **Sandboxes**: `sandbox_create`, `sandbox_execute`, `sandbox_upload` (cloud execution)
-- **Templates**: `template_list`, `template_deploy` (pre-built project templates)
-- **Neural AI**: `neural_train`, `neural_patterns`, `seraphina_chat` (AI assistant)
-- **GitHub**: `github_repo_analyze`, `github_pr_manage` (repository management)
-- **Real-time**: `execution_stream_subscribe`, `realtime_subscribe` (live monitoring)
-- **Storage**: `storage_upload`, `storage_list` (cloud file management)
-
-**Authentication Required:**
-- Register: `mcp__flow-nexus__user_register` or `npx flow-nexus@latest register`
-- Login: `mcp__flow-nexus__user_login` or `npx flow-nexus@latest login`
-- Access 70+ specialized MCP tools for advanced orchestration
-
-## 🚀 Agent Execution Flow with Claude Code
-
-### The Correct Pattern:
-
-1. **Optional**: Use MCP tools to set up coordination topology
-2. **REQUIRED**: Use Claude Code's Task tool to spawn agents that do actual work
-3. **REQUIRED**: Each agent runs hooks for coordination
-4. **REQUIRED**: Batch all operations in single messages
-
-### Example Full-Stack Development:
-
-```javascript
-// Single message with all agent spawning via Claude Code's Task tool
-[Parallel Agent Execution]:
-  Task("Backend Developer", "Build REST API with Express. Use hooks for coordination.", "backend-dev")
-  Task("Frontend Developer", "Create React UI. Coordinate with backend via memory.", "coder")
-  Task("Database Architect", "Design PostgreSQL schema. Store schema in memory.", "code-analyzer")
-  Task("Test Engineer", "Write Jest tests. Check memory for API contracts.", "tester")
-  Task("DevOps Engineer", "Setup Docker and CI/CD. Document in memory.", "cicd-engineer")
-  Task("Security Auditor", "Review authentication. Report findings via hooks.", "reviewer")
-  
-  // All todos batched together
-  TodoWrite { todos: [...8-10 todos...] }
-  
-  // All file operations together
-  Write "backend/server.js"
-  Write "frontend/App.jsx"
-  Write "database/schema.sql"
-```
-
-## 📋 Agent Coordination Protocol
-
-### Every Agent Spawned via Task Tool MUST:
-
-**1️⃣ BEFORE Work:**
 ```bash
-npx claude-flow@alpha hooks pre-task --description "[task]"
-npx claude-flow@alpha hooks session-restore --session-id "swarm-[id]"
+# Run clippy (linter)
+cargo clippy --workspace --all-targets --all-features
+
+# Run clippy with warnings as errors (CI mode)
+env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
+
+# Format code
+cargo fmt
+
+# Check formatting without making changes
+cargo fmt --check
+
+# Run specific clippy check on core package
+cargo clippy --package cqlite-core
 ```
 
-**2️⃣ DURING Work:**
+### Coverage and Benchmarking
+
 ```bash
-npx claude-flow@alpha hooks post-edit --file "[file]" --memory-key "swarm/[agent]/[step]"
-npx claude-flow@alpha hooks notify --message "[what was done]"
+# Generate code coverage report
+env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo tarpaulin --packages cqlite-core --out Stdout --exclude-files "tests/*" --exclude-files "src/bin/*" --timeout 120
+
+# Run benchmarks
+cargo bench --package cqlite-core
 ```
 
-**3️⃣ AFTER Work:**
+### CLI Tool
+
 ```bash
-npx claude-flow@alpha hooks post-task --task-id "[task]"
-npx claude-flow@alpha hooks session-end --export-metrics true
+# Run CLI (from workspace root)
+cargo run --bin cqlite -- <command>
+
+# Run CLI with release optimizations
+cargo run --release --bin cqlite -- <command>
 ```
 
-## 🎯 Concurrent Execution Examples
+## Architecture Overview
 
-### ✅ CORRECT WORKFLOW: MCP Coordinates, Claude Code Executes
+### Workspace Structure
 
-```javascript
-// Step 1: MCP tools set up coordination (optional, for complex tasks)
-[Single Message - Coordination Setup]:
-  mcp__claude-flow__swarm_init { topology: "mesh", maxAgents: 6 }
-  mcp__claude-flow__agent_spawn { type: "researcher" }
-  mcp__claude-flow__agent_spawn { type: "coder" }
-  mcp__claude-flow__agent_spawn { type: "tester" }
+CQLite uses a Cargo workspace with multiple crates:
 
-// Step 2: Claude Code Task tool spawns ACTUAL agents that do the work
-[Single Message - Parallel Agent Execution]:
-  // Claude Code's Task tool spawns real agents concurrently
-  Task("Research agent", "Analyze API requirements and best practices. Check memory for prior decisions.", "researcher")
-  Task("Coder agent", "Implement REST endpoints with authentication. Coordinate via hooks.", "coder")
-  Task("Database agent", "Design and implement database schema. Store decisions in memory.", "code-analyzer")
-  Task("Tester agent", "Create comprehensive test suite with 90% coverage.", "tester")
-  Task("Reviewer agent", "Review code quality and security. Document findings.", "reviewer")
-  
-  // Batch ALL todos in ONE call
-  TodoWrite { todos: [
-    {id: "1", content: "Research API patterns", status: "in_progress", priority: "high"},
-    {id: "2", content: "Design database schema", status: "in_progress", priority: "high"},
-    {id: "3", content: "Implement authentication", status: "pending", priority: "high"},
-    {id: "4", content: "Build REST endpoints", status: "pending", priority: "high"},
-    {id: "5", content: "Write unit tests", status: "pending", priority: "medium"},
-    {id: "6", content: "Integration tests", status: "pending", priority: "medium"},
-    {id: "7", content: "API documentation", status: "pending", priority: "low"},
-    {id: "8", content: "Performance optimization", status: "pending", priority: "low"}
-  ]}
-  
-  // Parallel file operations
-  Bash "mkdir -p app/{src,tests,docs,config}"
-  Write "app/package.json"
-  Write "app/src/server.js"
-  Write "app/tests/server.test.js"
-  Write "app/docs/API.md"
+- **cqlite-core**: Core database engine (SSTable parsing, storage, query execution)
+- **cqlite-cli**: Command-line interface tool
+- **cqlite-ffi**: Foreign Function Interface bindings for C/C++ integration
+- **cqlite-wasm**: WebAssembly bindings for browser deployment
+- **tests**: Integration test suite
+- **examples**: Example usage code
+- **tools/**: Specialized validation and testing tools
+  - `sstabledump-validator`: Validates parsing against Apache Cassandra's sstabledump
+  - `format-validator`: Format checking and validation utilities
+
+### Core Architecture (cqlite-core)
+
+The core library is organized into these key modules:
+
+#### Storage Layer (`src/storage/`)
+- **SSTable Management** (`storage/sstable/`): Handles SSTable format parsing, reading, and component discovery
+  - `reader.rs`: Primary SSTable reading interface
+  - `directory.rs`: SSTable file discovery and organization
+  - `compression.rs`: LZ4, Snappy, Deflate, Zstd decompression
+  - `index_reader.rs`: Partition index parsing for fast lookups
+  - `header_spec.rs`: SSTable header format specifications
+  - `bti/`: Big Table Index (BTI) support for Cassandra 5.0+
+- **MemTable** (`storage/memtable.rs`): In-memory write buffer
+- **Write-Ahead Log** (`storage/wal.rs`): Durability guarantees
+- **Compaction** (`storage/compaction.rs`): Background SSTable merging
+- **Manifest** (`storage/manifest.rs`): Metadata tracking
+
+#### Parser Layer (`src/parser/`)
+- **Dual Backend Support**: Switchable between nom and ANTLR4 parsers
+- **AST Definitions** (`ast.rs`): Abstract Syntax Trees for CQL statements
+- **Visitor Pattern** (`visitor.rs`): AST traversal and transformation
+- **Binary Parsing** (`binary.rs`): SSTable binary format parsing
+- **Statistics** (`statistics.rs`, `enhanced_statistics_parser.rs`): SSTable metadata parsing
+- **Complex Types** (`complex_types.rs`, `optimized_complex_types.rs`): Collections, UDTs, tuples
+
+#### Query Engine (`src/query/`)
+- **QueryEngine** (`engine.rs`): Main query execution coordinator
+- **QueryPlanner** (`planner.rs`): Query optimization and planning
+- **QueryExecutor** (`executor.rs`): Statement execution
+- **PreparedQuery** (`prepared.rs`): Prepared statement support
+- **SELECT Components** (feature-gated with `state_machine`):
+  - `select_parser.rs`: Dedicated SELECT statement parser
+  - `select_executor.rs`: SELECT execution engine
+  - `select_optimizer.rs`: Query optimization
+
+#### Schema Management (`src/schema/`)
+- **SchemaManager**: Schema discovery, validation, and evolution
+- **Parser Integration**: Schema parsing from CQL DDL and SSTable metadata
+
+#### Supporting Infrastructure
+- **Error Handling** (`error.rs`): Comprehensive error types using `thiserror`
+- **Type System** (`types.rs`): CQL type mappings and conversions
+- **Memory Management** (`memory/`): Memory allocation and tracking
+- **Platform Abstraction** (`platform/`): OS-specific implementations
+- **Validation** (`validation/`): Data and format validation
+- **Testing Infrastructure** (`testing/`, `docker/`): Test utilities and Docker integration
+
+### Test Data Requirements
+
+**CRITICAL**: Tests require real Cassandra 5.0 SSTable files located at:
+```
+test-data/datasets/sstables/
 ```
 
-### ❌ WRONG (Multiple Messages):
-```javascript
-Message 1: mcp__claude-flow__swarm_init
-Message 2: Task("agent 1")
-Message 3: TodoWrite { todos: [single todo] }
-Message 4: Write "file.js"
-// This breaks parallel coordination!
+The test data includes:
+- `test_basic/simple_table`: Basic single-column tables
+- `test_collections/collection_table`: Collection types (lists, sets, maps)
+- `test_timeseries/`: Time-series data patterns
+- `test_wide_rows/wide_partition_table`: Wide partition testing
+
+Reference files in JSONL format are also required for validation (`.jsonl` files alongside SSTables).
+
+### Feature Flags
+
+#### Active Features (M1)
+- `default = ["all-compression", "metrics", "experimental", "legacy-heuristics"]`
+- `all-compression`: Includes lz4, snappy, deflate, zstd
+- `experimental`: SSTable writing and M1 functionality
+- `legacy-heuristics`: Backward compatibility support
+
+#### Disabled Features (M2+)
+- `antlr`: ANTLR4 parser integration
+- `state_machine`: Advanced query state orchestration
+- `events`: Validation event recording
+- `tombstones`: Tombstone and garbage collection logic
+- `benchmarks`: Performance benchmark suite
+
+#### Test Infrastructure Features
+- `test-infrastructure`: Enhanced TestContext framework
+- `docker-integration`: Docker-based integration testing
+
+## Development Guidelines
+
+### Milestone Context
+
+Currently on **M1: Core Reading Library** focusing on:
+- SSTable format parsing (Cassandra 5.0+ with BTI)
+- Basic read operations
+- Index-based partition lookups
+- Real test data validation (no mocks in integration tests)
+
+### Code Quality Standards
+
+1. **Clippy Configuration**: Workspace uses M1-balanced clippy settings
+   - `correctness` and `suspicious`: deny
+   - `perf`, `style`, `complexity`: warn
+   - Pedantic checks allowed during M1 for velocity
+
+2. **Test Requirements**:
+   - All integration tests must use real SSTable data
+   - Unit tests may use synthetic data when feature `unit-tests-only` is enabled
+   - Test data must be validated against `sstabledump` output
+
+3. **Error Handling**:
+   - Use `thiserror` for library errors
+   - Use `anyhow` for application-level errors in binaries
+   - Propagate errors with `?` operator, avoid unwrap/expect in library code
+
+4. **Performance**:
+   - Memory usage target: <128MB for large SSTables
+   - Parse speed target: 1GB files in <10 seconds
+   - Query latency target: Sub-millisecond partition lookups
+
+### Running CI Locally
+
+The M1 CI pipeline validates:
+1. Compilation without warnings (`RUSTFLAGS="-D warnings"`)
+2. Clippy correctness and suspicious checks
+3. All tests pass with real Cassandra 5.0 data
+4. Code coverage tracking (90% minimum target)
+
+Reproduce CI locally:
+```bash
+# Full CI validation sequence
+env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
+cargo fmt --check
+env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --quiet
 ```
 
-## Performance Benefits
+### Common Development Patterns
 
-- **84.8% SWE-Bench solve rate**
-- **32.3% token reduction**
-- **2.8-4.4x speed improvement**
-- **27+ neural models**
+#### Adding a New SSTable Component Parser
+1. Define component in `storage/sstable/mod.rs`
+2. Implement parser in dedicated module (e.g., `storage/sstable/new_component.rs`)
+3. Add component discovery in `storage/sstable/directory.rs`
+4. Create integration test using real SSTable data
+5. Validate against `sstabledump` output
 
-## Hooks Integration
+#### Adding a New CQL Type
+1. Define type in `types.rs`
+2. Add parser support in `parser/types.rs`
+3. Implement serialization/deserialization
+4. Add conversion logic in type system
+5. Create test with real SSTable containing that type
 
-### Pre-Operation
-- Auto-assign agents by file type
-- Validate commands for safety
-- Prepare resources automatically
-- Optimize topology by complexity
-- Cache searches
+#### Working with Binary Formats
+- Use `nom` combinators for binary parsing
+- Reference `header_spec.rs` for format specifications
+- Validate byte-level parsing with hex dumps from real files
+- Document bit layouts and field structures
 
-### Post-Operation
-- Auto-format code
-- Train neural patterns
-- Update memory
-- Analyze performance
-- Track token usage
+## Troubleshooting
 
-### Session Management
-- Generate summaries
-- Persist state
-- Track metrics
-- Restore context
-- Export workflows
+### Test Failures
 
-## Advanced Features (v2.0.0)
+**Missing Test Data**:
+```
+Error: CQLITE_DATASETS_ROOT environment variable not set
+```
+Solution: Set `CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets`
 
-- 🚀 Automatic Topology Selection
-- ⚡ Parallel Execution (2.8-4.4x speed)
-- 🧠 Neural Training
-- 📊 Bottleneck Analysis
-- 🤖 Smart Auto-Spawning
-- 🛡️ Self-Healing Workflows
-- 💾 Cross-Session Memory
-- 🔗 GitHub Integration
+**Timeout Issues**:
+```
+test result: FAILED. <X> tests exceeded timeout
+```
+Solution: Use `timeout` wrapper or increase test timeout in CI
 
-## Integration Tips
+**Compilation Errors with Features**:
+Ensure you're not enabling M2+ features (antlr, state_machine, events) during M1 development.
 
-1. Start with basic swarm init
-2. Scale agents gradually
-3. Use memory for context
-4. Monitor progress regularly
-5. Train patterns from success
-6. Enable hooks automation
-7. Use GitHub tools first
+### Performance Issues
 
-## Support
+- Use `cargo flamegraph` for profiling
+- Check memory usage with `cargo instruments` on macOS
+- Run performance benchmarks with `cargo bench`
+- Validate against performance baseline in `target/criterion/`
 
-- Documentation: https://github.com/ruvnet/claude-flow
-- Issues: https://github.com/ruvnet/claude-flow/issues
-- Flow-Nexus Platform: https://flow-nexus.ruv.io (registration required for cloud features)
+## Key Files and Locations
 
----
+- **Main Library Entry**: `cqlite-core/src/lib.rs`
+- **SSTable Reading**: `cqlite-core/src/storage/sstable/reader.rs`
+- **Parser Entry**: `cqlite-core/src/parser/mod.rs`
+- **Error Definitions**: `cqlite-core/src/error.rs`
+- **Test Utilities**: `cqlite-core/tests/common/`
+- **CI Configuration**: `.github/workflows/m1-ci.yml`
+- **Coverage Config**: `Cargo.toml` → `[package.metadata.coverage]`
 
-Remember: **Claude Flow coordinates, Claude Code creates!**
+## Resources
 
-# important-instruction-reminders
-Do what has been asked; nothing more, nothing less.
-NEVER create files unless they're absolutely necessary for achieving your goal.
-ALWAYS prefer editing an existing file to creating a new one.
-NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
-Never save working files, text/mds and tests to the root folder.
+- **Cassandra 5.0 Format Documentation**: https://opensource.docs.scylladb.com
+- **CQL Grammar**: https://github.com/pmcfadin/cassandra-antlr4-grammar
+- **Project Issues**: https://github.com/pmcfadin/cqlite/issues
+- **Validation Artifacts**: `cqlite-core/validation_artifacts/sstabledump/`
