@@ -54,17 +54,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
 
 use cqlite_core::{schema::TableSchema, types::Value, Config, Error, Result};
 
 // Re-export the original TestContext for compatibility
-pub use super::sstable_test_utils::{
-    DatasetDescriptor, SSTableComponent, TableDescriptor, TestContext, TestMetrics,
-};
+pub use super::sstable_test_utils::{TestContext, TestMetrics};
 
 /// Test category taxonomy for systematic test organization
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -144,7 +140,7 @@ impl fmt::Display for TestCategory {
 }
 
 /// Schema validation configuration for tests
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SchemaValidationConfig {
     /// Enable strict schema validation
     pub strict_mode: bool,
@@ -172,7 +168,7 @@ pub trait SchemaValidator: fmt::Debug + Send + Sync {
 }
 
 /// Property-based testing configuration
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PropertyTestConfig {
     /// Number of test cases to generate
     pub test_cases: usize,
@@ -183,7 +179,7 @@ pub struct PropertyTestConfig {
     /// Shrinking configuration
     pub shrink_config: ShrinkConfig,
     /// Custom generators
-    pub generators: HashMap<String, PropertyGenerator>,
+    pub generators: HashMap<String, Box<dyn PropertyGenerator>>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,7 +265,7 @@ impl CoverageTracker {
 }
 
 /// Quality gate configuration and enforcement
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct QualityGate {
     /// Minimum required line coverage percentage
     pub min_coverage: f64,
@@ -325,27 +321,36 @@ impl QualityGate {
     pub fn validate(&self, metrics: &EnhancedTestMetrics) -> Result<()> {
         // Validate coverage requirements
         if metrics.coverage.coverage_percentage() < self.min_coverage {
-            return Err(Error::TestFailure(format!(
-                "Coverage too low: {:.2}% < {:.2}%",
-                metrics.coverage.coverage_percentage(),
-                self.min_coverage
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "Coverage too low: {:.2}% < {:.2}%",
+                    metrics.coverage.coverage_percentage(),
+                    self.min_coverage
+                )
             )));
         }
 
         // Validate execution time
         if metrics.execution_time > self.max_execution_time {
-            return Err(Error::TestFailure(format!(
-                "Execution time too long: {:?} > {:?}",
-                metrics.execution_time, self.max_execution_time
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "Execution time too long: {:?} > {:?}",
+                    metrics.execution_time, self.max_execution_time
+                )
             )));
         }
 
         // Validate memory usage
         let max_memory_mb = metrics.memory_peaks.iter().max().copied().unwrap_or(0) / (1024 * 1024);
         if max_memory_mb > self.max_memory_usage {
-            return Err(Error::TestFailure(format!(
-                "Memory usage too high: {}MB > {}MB",
-                max_memory_mb, self.max_memory_usage
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "Memory usage too high: {}MB > {}MB",
+                    max_memory_mb, self.max_memory_usage
+                )
             )));
         }
 
@@ -353,9 +358,12 @@ impl QualityGate {
         for (component, target) in &self.component_targets {
             let component_coverage = metrics.coverage.component_coverage_percentage(component);
             if component_coverage < *target {
-                return Err(Error::TestFailure(format!(
-                    "Component '{}' coverage too low: {:.2}% < {:.2}%",
-                    component, component_coverage, target
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "Component '{}' coverage too low: {:.2}% < {:.2}%",
+                        component, component_coverage, target
+                    )
                 )));
             }
         }

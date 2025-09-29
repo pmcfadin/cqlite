@@ -260,7 +260,8 @@
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets timeout 60s cargo tarpaulin --packages cqlite-core --out Stdout --exclude-files \"tests/*\" --exclude-files \"src/bin/*\")",
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets timeout 90s cargo tarpaulin --packages cqlite-core --out Stdout --exclude-files \"tests/*\" --exclude-files \"src/bin/*\")",
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets timeout 30s cargo test --package cqlite-core --lib --quiet)",
-      "Bash(RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --lib --message-format=short)"
+      "Bash(RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --lib --message-format=short)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --no-run)"
     ],
     "deny": []
   }
