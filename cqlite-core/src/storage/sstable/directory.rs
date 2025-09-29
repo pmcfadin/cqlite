@@ -3,12 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Header validation utilities for SSTable components
 mod header_validation {
-    use anyhow::{Result, anyhow};
+    use anyhow::{anyhow, Result};
     use std::fs::File;
     use std::io::{BufReader, Read};
     use std::path::Path;
@@ -123,6 +123,7 @@ pub struct SSTableGeneration {
 
 /// SSTable component types found in Cassandra 5
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum SSTableComponent {
     /// Main data file containing row data
     Data,
@@ -1313,11 +1314,9 @@ mod tests {
         assert_eq!(fmt, "da");
         assert_eq!(comp, SSTableComponent::Partitions);
 
-        assert!(
-            parse_sstable_filename("not-an-sstable.txt")
-                .unwrap()
-                .is_none()
-        );
+        assert!(parse_sstable_filename("not-an-sstable.txt")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1403,11 +1402,9 @@ mod tests {
         assert_eq!(secondary_index.generations.len(), 1);
 
         // Test getter methods
-        assert!(
-            directory
-                .get_secondary_index("users_metadata_idx")
-                .is_some()
-        );
+        assert!(directory
+            .get_secondary_index("users_metadata_idx")
+            .is_some());
         assert!(directory.get_secondary_index("nonexistent").is_none());
     }
 
@@ -1508,26 +1505,18 @@ mod tests {
         assert!(issues.iter().any(|i| i.contains("Summary")));
 
         // Check analysis results
-        assert!(
-            analysis
-                .required_components_present
-                .contains(&SSTableComponent::Data)
-        );
-        assert!(
-            analysis
-                .required_components_present
-                .contains(&SSTableComponent::Statistics)
-        );
-        assert!(
-            analysis
-                .required_components_present
-                .contains(&SSTableComponent::Index)
-        );
-        assert!(
-            analysis
-                .required_components_missing
-                .contains(&SSTableComponent::Summary)
-        );
+        assert!(analysis
+            .required_components_present
+            .contains(&SSTableComponent::Data));
+        assert!(analysis
+            .required_components_present
+            .contains(&SSTableComponent::Statistics));
+        assert!(analysis
+            .required_components_present
+            .contains(&SSTableComponent::Index));
+        assert!(analysis
+            .required_components_missing
+            .contains(&SSTableComponent::Summary));
 
         // Verify file sizes were recorded
         assert!(analysis.file_sizes.get(&SSTableComponent::Data).unwrap() > &0);
@@ -1571,12 +1560,10 @@ mod tests {
 
         // Should detect the inconsistency (NonExistent.db listed in TOC but not present)
         assert!(!report.toc_inconsistencies.is_empty());
-        assert!(
-            report
-                .toc_inconsistencies
-                .iter()
-                .any(|inc| inc.contains("NonExistent"))
-        );
+        assert!(report
+            .toc_inconsistencies
+            .iter()
+            .any(|inc| inc.contains("NonExistent")));
     }
 
     #[test]
@@ -1704,25 +1691,17 @@ mod tests {
 
         // Enhanced validation should find missing Index and Summary for "big" format
         assert!(issues.len() >= 2);
-        assert!(
-            analysis
-                .required_components_missing
-                .contains(&SSTableComponent::Index)
-        );
-        assert!(
-            analysis
-                .required_components_missing
-                .contains(&SSTableComponent::Summary)
-        );
-        assert!(
-            analysis
-                .required_components_present
-                .contains(&SSTableComponent::Data)
-        );
-        assert!(
-            analysis
-                .required_components_present
-                .contains(&SSTableComponent::Statistics)
-        );
+        assert!(analysis
+            .required_components_missing
+            .contains(&SSTableComponent::Index));
+        assert!(analysis
+            .required_components_missing
+            .contains(&SSTableComponent::Summary));
+        assert!(analysis
+            .required_components_present
+            .contains(&SSTableComponent::Data));
+        assert!(analysis
+            .required_components_present
+            .contains(&SSTableComponent::Statistics));
     }
 }

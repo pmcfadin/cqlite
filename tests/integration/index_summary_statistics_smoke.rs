@@ -9,9 +9,9 @@
 
 use cqlite_core::testing::dataset_helpers::{list_tables, resolve_table_to_sstable_path};
 use cqlite_core::{
-    Config, Result,
     platform::Platform,
-    storage::sstable::{SSTableReader, index_reader::IndexReader},
+    storage::sstable::{index_reader::IndexReader, SSTableReader},
+    Config, Result,
 };
 use std::{path::Path, sync::Arc};
 

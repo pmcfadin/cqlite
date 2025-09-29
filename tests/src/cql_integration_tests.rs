@@ -3,11 +3,11 @@
 //! Integration tests that work with real CQL files and test the complete
 //! schema parsing pipeline from CQL input to validated schema output.
 
-use cqlite_core::Config;
 use cqlite_core::error::{Error, Result};
 use cqlite_core::platform::Platform;
 use cqlite_core::schema::{SchemaManager, TableSchema};
 use cqlite_core::storage::StorageEngine;
+use cqlite_core::Config;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;

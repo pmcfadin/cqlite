@@ -63,10 +63,7 @@ impl SchemaParityTestFixture {
         };
 
         self.registry
-            .register_schema(
-                simple_schema,
-                cqlite_core::schema::SchemaSource::Manual,
-            )
+            .register_schema(simple_schema, cqlite_core::schema::SchemaSource::Manual)
             .await
             .unwrap();
 
@@ -203,10 +200,7 @@ impl SchemaParityTestFixture {
         };
 
         self.registry
-            .register_schema(
-                udt_schema,
-                cqlite_core::schema::SchemaSource::Manual,
-            )
+            .register_schema(udt_schema, cqlite_core::schema::SchemaSource::Manual)
             .await
             .unwrap();
     }
@@ -291,7 +285,7 @@ async fn test_schema_validation() {
         .validate_schema("test_ks", "simple_table")
         .await
         .unwrap();
-    
+
     assert_eq!(
         report.status,
         cqlite_core::schema::SchemaValidationStatus::Valid
@@ -303,7 +297,7 @@ async fn test_schema_validation() {
         .validate_schema("test_ks", "collections_table")
         .await
         .unwrap();
-    
+
     assert_eq!(
         report.status,
         cqlite_core::schema::SchemaValidationStatus::Valid
@@ -334,7 +328,10 @@ async fn test_comparator_consistency() {
         .unwrap();
 
     assert_eq!(comparators.get("id"), Some(&ComparatorType::Uuid));
-    assert_eq!(comparators.get("timestamp"), Some(&ComparatorType::Timestamp));
+    assert_eq!(
+        comparators.get("timestamp"),
+        Some(&ComparatorType::Timestamp)
+    );
     assert!(matches!(
         comparators.get("tags"),
         Some(ComparatorType::Set(_))
@@ -359,10 +356,7 @@ async fn test_error_on_missing_schema() {
         .await;
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Schema not found"));
+    assert!(result.unwrap_err().to_string().contains("Schema not found"));
 }
 
 #[tokio::test]

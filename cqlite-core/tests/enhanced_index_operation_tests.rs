@@ -9,9 +9,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
-use cqlite_core::storage::sstable::{SSTableReader, index_reader::IndexReader};
+use cqlite_core::storage::sstable::{index_reader::IndexReader, SSTableReader};
+use cqlite_core::Config;
 
 /// Test enhanced partition lookup using Index.db reader
 #[tokio::test]
@@ -249,11 +249,9 @@ async fn test_index_error_handling() {
 
     // Test 1: Missing Index.db file
     let missing_index = base_path.join("missing-Index.db");
-    assert!(
-        IndexReader::open(&missing_index, platform.clone())
-            .await
-            .is_err()
-    );
+    assert!(IndexReader::open(&missing_index, platform.clone())
+        .await
+        .is_err());
     println!("✓ Missing Index.db handled gracefully");
 
     // Test 2: Corrupted Index.db file
@@ -274,11 +272,9 @@ async fn test_index_error_handling() {
     // Test 3: Empty Index.db file
     let empty_index = base_path.join("empty-Index.db");
     fs::write(&empty_index, b"").await.unwrap();
-    assert!(
-        IndexReader::open(&empty_index, platform.clone())
-            .await
-            .is_err()
-    );
+    assert!(IndexReader::open(&empty_index, platform.clone())
+        .await
+        .is_err());
     println!("✓ Empty Index.db handled gracefully");
 
     // Test 4: SSTableReader with missing Index.db

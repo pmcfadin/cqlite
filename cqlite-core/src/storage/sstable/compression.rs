@@ -1,6 +1,6 @@
 //! Compression support for SSTable storage
 
-use crate::{Result, error::Error};
+use crate::{error::Error, Result};
 use std::io::Read;
 // use async_trait::async_trait; // Commented out - unused
 
@@ -119,8 +119,8 @@ impl Compression {
             CompressionAlgorithm::Deflate => {
                 #[cfg(feature = "deflate")]
                 {
-                    use flate2::Compression as DeflateCompression;
                     use flate2::write::DeflateEncoder;
+                    use flate2::Compression as DeflateCompression;
                     use std::io::Write;
 
                     // Use Cassandra-compatible Deflate parameters (level 6)

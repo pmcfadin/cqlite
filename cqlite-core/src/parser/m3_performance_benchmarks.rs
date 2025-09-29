@@ -9,7 +9,7 @@
 //! - Latency: <10ms additional latency for complex type queries
 
 use super::optimized_complex_types::OptimizedComplexTypeParser;
-use super::types::{CqlTypeId, parse_cql_value};
+use super::types::{parse_cql_value, CqlTypeId};
 use super::vint::encode_vint;
 use crate::error::Result;
 use std::collections::HashMap;

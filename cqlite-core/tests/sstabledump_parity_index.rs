@@ -11,7 +11,6 @@
 //! - Zero-diff parity with comprehensive assertions
 
 use cqlite_core::{
-    Config, Result as CqliteResult,
     platform::Platform,
     storage::sstable::index_reader::IndexReader,
     testing::dataset_helpers::{
@@ -19,6 +18,7 @@ use cqlite_core::{
         list_tables, load_metadata, read_jsonl_rows, resolve_table_to_sstable_path,
         should_ignore_file,
     },
+    Config, Result as CqliteResult,
 };
 use serde::{Deserialize, Serialize};
 use std::{

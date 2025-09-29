@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use cqlite_core::{
-    Config, Result, RowKey, Value,
     config::CompressionAlgorithm,
     platform::Platform,
     storage::sstable::{reader::SSTableReader, writer::SSTableWriter},
     types::TableId,
+    Config, Result, RowKey, Value,
 };
 
 use tempfile::TempDir;

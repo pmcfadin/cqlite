@@ -10,9 +10,21 @@ members = [
 ]
 resolver = "2"
 
+[package]
+name = "cqlite"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cqlite-core = { path = "cqlite-core" }
+clap = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+log = { workspace = true }
+env_logger = { workspace = true }
+
 [workspace.package]
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 authors = ["CQLite Team"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cqlite/cqlite"
@@ -133,6 +145,19 @@ debug-assertions = true
 codegen-units = 256
 incremental = true
 overflow-checks = true
+
+# Package metadata for CI/CD quality gates
+[package.metadata.coverage]
+minimum-coverage = 90
+exclude-files = ["src/bin/*", "benches/*", "examples/*"]
+enforce-threshold = true
+tool = "cargo-llvm-cov"
+
+[package.metadata.performance]
+max-regression = 0.1
+baseline-path = "target/criterion"
+enforce-benchmarks = true
+timeout-seconds = 300
 
 # M1 Clippy Configuration - Balanced for milestone delivery
 [workspace.lints.clippy]

@@ -12,7 +12,7 @@
 use crate::{
     error::{Error, Result},
     parser::{
-        types::{CqlTypeId, parse_cql_value_raw},
+        types::{parse_cql_value_raw, CqlTypeId},
         vint::parse_vint_length,
     },
     schema::TableSchema,
@@ -864,6 +864,7 @@ impl RowCellStateMachine {
     }
 
     /// Convert data type string to CQL type ID
+    #[allow(clippy::only_used_in_recursion)]
     fn data_type_to_cql_type_id(&self, data_type: &str) -> Result<CqlTypeId> {
         match data_type.to_lowercase().as_str() {
             "ascii" => Ok(CqlTypeId::Ascii),

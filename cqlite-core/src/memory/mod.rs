@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{Config, Result, Value, types::TableId};
+use crate::{types::TableId, Config, Result, Value};
 
 /// Memory manager for caching and buffer management
 #[derive(Debug)]
@@ -322,6 +322,7 @@ impl MemoryManager {
     }
 
     /// Estimate value size
+    #[allow(clippy::only_used_in_recursion)]
     fn estimate_value_size(&self, value: &Value) -> usize {
         match value {
             Value::Null => 1,

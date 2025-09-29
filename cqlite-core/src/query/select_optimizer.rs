@@ -8,7 +8,7 @@
 //! - Parallel execution planning
 
 use super::select_ast::*;
-use crate::{Result, TableId, Value, schema::SchemaManager, storage::StorageEngine};
+use crate::{schema::SchemaManager, storage::StorageEngine, Result, TableId, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -671,7 +671,7 @@ impl ExecutionStep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, platform::Platform, schema::SchemaManager, storage::StorageEngine};
+    use crate::{platform::Platform, schema::SchemaManager, storage::StorageEngine, Config};
     use tempfile::TempDir;
 
     async fn create_test_optimizer() -> SelectOptimizer {

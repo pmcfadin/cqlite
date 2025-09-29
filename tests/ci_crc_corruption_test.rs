@@ -4,9 +4,9 @@
 //! then intentionally corrupts one chunk's CRC to ensure the validation
 //! fails with the expected deterministic error message.
 
-use cqlite_core::storage::sstable::compression_info::CompressionInfo;
-use cqlite_core::storage::sstable::chunk_decompressor::ChunkDecompressor;
 use cqlite_core::parser::header::CassandraVersion;
+use cqlite_core::storage::sstable::chunk_decompressor::ChunkDecompressor;
+use cqlite_core::storage::sstable::compression_info::CompressionInfo;
 use cqlite_core::{Error, Result};
 use std::io::Cursor;
 
@@ -24,8 +24,9 @@ fn test_ci_crc_corruption_detection() {
     };
 
     // Create decompressor with modern format (CRC validation enabled)
-    let mut decompressor = ChunkDecompressor::new(compression_info.clone(), CassandraVersion::V5_0Release)
-        .expect("Failed to create decompressor");
+    let mut decompressor =
+        ChunkDecompressor::new(compression_info.clone(), CassandraVersion::V5_0Release)
+            .expect("Failed to create decompressor");
 
     // Create fake compressed data (dummy LZ4 compressed chunk)
     let fake_compressed_data = vec![
@@ -40,27 +41,34 @@ fn test_ci_crc_corruption_detection() {
     // Test 1: With valid CRC, decompression should attempt (might fail on actual decompression but CRC should pass)
     let result = decompressor.read_data(&mut reader, 0, 10);
     // We expect this to pass CRC validation but possibly fail on LZ4 decompression
-    
+
     // Test 2: Now corrupt the first chunk's CRC
     compression_info.chunk_crcs[0] = 0xDEADBEEF; // Corrupted CRC
-    
-    let mut corrupted_decompressor = ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
-        .expect("Failed to create corrupted decompressor");
+
+    let mut corrupted_decompressor =
+        ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
+            .expect("Failed to create corrupted decompressor");
 
     let mut reader2 = Cursor::new(&fake_compressed_data);
-    
+
     // This should fail with deterministic CRC error
     let result = corrupted_decompressor.read_data(&mut reader2, 0, 10);
-    
+
     match result {
         Err(Error::InvalidFormat(msg)) if msg.contains("CRC mismatch for chunk 0") => {
-            println!("✅ CI Test PASSED: CRC corruption detected with expected error: {}", msg);
+            println!(
+                "✅ CI Test PASSED: CRC corruption detected with expected error: {}",
+                msg
+            );
             assert!(msg.contains("expected: 0xDEADBEEF"));
             assert!(msg.contains("actual:"));
-        },
+        }
         Err(other_error) => {
-            panic!("❌ CI Test FAILED: Expected CRC validation error, got: {:?}", other_error);
-        },
+            panic!(
+                "❌ CI Test FAILED: Expected CRC validation error, got: {:?}",
+                other_error
+            );
+        }
         Ok(_) => {
             panic!("❌ CI Test FAILED: Expected CRC validation to fail, but it succeeded");
         }
@@ -76,15 +84,16 @@ fn test_ci_crc_corruption_detection() {
             crc32: Some(0x12345678),
             chunk_crcs: vec![0xDEADBEEF, 0xEEFF0011, 0x22334455], // Corrupted CRC
         },
-        CassandraVersion::Legacy
-    ).expect("Failed to create legacy decompressor");
+        CassandraVersion::Legacy,
+    )
+    .expect("Failed to create legacy decompressor");
 
     let mut reader3 = Cursor::new(&fake_compressed_data);
-    
+
     // Legacy format should skip CRC validation and proceed to decompression
     let result = legacy_decompressor.read_data(&mut reader3, 0, 10);
     // We expect this to skip CRC validation (might still fail on LZ4 decompression)
-    
+
     println!("✅ CI Test COMPLETED: CRC corruption detection verified for modern formats, skipped for legacy");
 }
 
@@ -109,16 +118,19 @@ fn test_ci_multiple_crc_corruption() {
     // Try to read from different chunks - each should fail with CRC error
     for chunk_offset in [0u64, 8192u64, 16384u64] {
         let result = decompressor.read_data(&mut reader, chunk_offset, 100);
-        
+
         match result {
             Err(Error::InvalidFormat(msg)) if msg.contains("CRC mismatch") => {
-                println!("✅ Chunk at offset {} correctly failed CRC validation: {}", chunk_offset, msg);
-            },
+                println!(
+                    "✅ Chunk at offset {} correctly failed CRC validation: {}",
+                    chunk_offset, msg
+                );
+            }
             other => {
                 println!("⚠️  Chunk at offset {} result: {:?}", chunk_offset, other);
             }
         }
-        
+
         // Reset reader position
         reader.set_position(0);
     }

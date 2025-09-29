@@ -4,9 +4,9 @@
 //! behavior. All parsing operations require explicit schema context.
 
 use crate::{
-    Error, Result,
-    schema::{CqlType, registry::ParsingContext},
+    schema::{registry::ParsingContext, CqlType},
     types::{ComparatorType, Value},
+    Error, Result,
 };
 use std::collections::HashMap;
 
@@ -495,6 +495,7 @@ impl SchemaParser {
     }
 
     /// Convert a ComparatorType back to CqlType for parsing
+    #[allow(clippy::only_used_in_recursion)]
     fn comparator_to_cql_type(&self, comparator: &ComparatorType) -> Result<CqlType> {
         match comparator {
             ComparatorType::Boolean => Ok(CqlType::Boolean),

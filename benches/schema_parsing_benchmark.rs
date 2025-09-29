@@ -1,17 +1,13 @@
 //! Performance benchmarks for schema-driven parsing
-//! 
+//!
 //! These benchmarks verify that schema-driven parsing does not introduce
 //! performance regressions compared to the previous type-guessing approach.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use cqlite_core::{
-    schema::{
-        parser::SchemaParser,
-        registry::ParsingContext,
-        TableSchema, Column, KeyColumn,
-    },
+    schema::{parser::SchemaParser, registry::ParsingContext, Column, KeyColumn, TableSchema},
     types::{ComparatorType, Value},
 };
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::HashMap;
 
 struct BenchmarkContext {
@@ -136,7 +132,10 @@ fn create_collections_parser() -> SchemaParser {
     );
     column_comparators.insert(
         "metrics".to_string(),
-        ComparatorType::Map(Box::new(ComparatorType::Text), Box::new(ComparatorType::Float)),
+        ComparatorType::Map(
+            Box::new(ComparatorType::Text),
+            Box::new(ComparatorType::Float),
+        ),
     );
     column_comparators.insert(
         "samples".to_string(),
@@ -263,12 +262,12 @@ fn generate_uuid_partition_key() -> Vec<u8> {
 fn generate_set_column() -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(&3i32.to_be_bytes()); // 3 elements
-    
+
     for item in &["tag1", "tag2", "tag3"] {
         data.extend_from_slice(&(item.len() as i32).to_be_bytes());
         data.extend_from_slice(item.as_bytes());
     }
-    
+
     data
 }
 
@@ -304,132 +303,147 @@ fn generate_complex_clustering_key() -> Vec<u8> {
 
 fn bench_simple_parsing(c: &mut Criterion) {
     let ctx = BenchmarkContext::new();
-    
+
     let partition_data = generate_simple_partition_key();
     let clustering_data = generate_simple_clustering_key();
     let text_data = generate_text_column("Hello, World!");
-    
+
     let mut group = c.benchmark_group("simple_parsing");
-    
+
     group.bench_function("partition_key", |b| {
         b.iter(|| {
-            ctx.simple_parser.parse_partition_key(black_box(&partition_data))
+            ctx.simple_parser
+                .parse_partition_key(black_box(&partition_data))
         })
     });
-    
+
     group.bench_function("clustering_key", |b| {
         b.iter(|| {
-            ctx.simple_parser.parse_clustering_keys(black_box(&clustering_data))
+            ctx.simple_parser
+                .parse_clustering_keys(black_box(&clustering_data))
         })
     });
-    
+
     group.bench_function("text_column", |b| {
         b.iter(|| {
-            ctx.simple_parser.parse_column_value(black_box("name"), black_box(&text_data))
+            ctx.simple_parser
+                .parse_column_value(black_box("name"), black_box(&text_data))
         })
     });
-    
+
     group.finish();
 }
 
 fn bench_collections_parsing(c: &mut Criterion) {
     let ctx = BenchmarkContext::new();
-    
+
     let uuid_data = generate_uuid_partition_key();
     let set_data = generate_set_column();
     let list_data = generate_list_column();
-    
+
     let mut group = c.benchmark_group("collections_parsing");
-    
+
     group.bench_function("uuid_partition", |b| {
         b.iter(|| {
-            ctx.collections_parser.parse_partition_key(black_box(&uuid_data))
+            ctx.collections_parser
+                .parse_partition_key(black_box(&uuid_data))
         })
     });
-    
+
     group.bench_function("set_column", |b| {
         b.iter(|| {
-            ctx.collections_parser.parse_column_value(black_box("tags"), black_box(&set_data))
+            ctx.collections_parser
+                .parse_column_value(black_box("tags"), black_box(&set_data))
         })
     });
-    
+
     group.bench_function("list_column", |b| {
         b.iter(|| {
-            ctx.collections_parser.parse_column_value(black_box("samples"), black_box(&list_data))
+            ctx.collections_parser
+                .parse_column_value(black_box("samples"), black_box(&list_data))
         })
     });
-    
+
     group.finish();
 }
 
 fn bench_complex_parsing(c: &mut Criterion) {
     let ctx = BenchmarkContext::new();
-    
+
     let partition_data = generate_complex_partition_key();
     let clustering_data = generate_complex_clustering_key();
-    
+
     let mut group = c.benchmark_group("complex_parsing");
-    
+
     group.bench_function("multi_component_partition", |b| {
         b.iter(|| {
-            ctx.complex_parser.parse_partition_key(black_box(&partition_data))
+            ctx.complex_parser
+                .parse_partition_key(black_box(&partition_data))
         })
     });
-    
+
     group.bench_function("multi_component_clustering", |b| {
         b.iter(|| {
-            ctx.complex_parser.parse_clustering_keys(black_box(&clustering_data))
+            ctx.complex_parser
+                .parse_clustering_keys(black_box(&clustering_data))
         })
     });
-    
+
     group.finish();
 }
 
 fn bench_throughput(c: &mut Criterion) {
     let ctx = BenchmarkContext::new();
-    
+
     let partition_data = generate_simple_partition_key();
     let text_data = generate_text_column("Benchmark text data");
-    
+
     let mut group = c.benchmark_group("throughput");
     group.throughput(criterion::Throughput::Elements(1000));
-    
+
     group.bench_function("parse_1000_partition_keys", |b| {
         b.iter(|| {
             for _ in 0..1000 {
-                let _ = ctx.simple_parser.parse_partition_key(black_box(&partition_data));
+                let _ = ctx
+                    .simple_parser
+                    .parse_partition_key(black_box(&partition_data));
             }
         })
     });
-    
+
     group.bench_function("parse_1000_text_columns", |b| {
         b.iter(|| {
             for _ in 0..1000 {
-                let _ = ctx.simple_parser.parse_column_value(black_box("name"), black_box(&text_data));
+                let _ = ctx
+                    .simple_parser
+                    .parse_column_value(black_box("name"), black_box(&text_data));
             }
         })
     });
-    
+
     group.finish();
 }
 
 fn bench_schema_lookup(c: &mut Criterion) {
     let ctx = BenchmarkContext::new();
-    
+
     let mut group = c.benchmark_group("schema_lookup");
-    
+
     group.bench_function("comparator_lookup", |b| {
         b.iter(|| {
-            let _comparator = ctx.simple_parser.context().get_column_comparator(black_box("name"));
+            let _comparator = ctx
+                .simple_parser
+                .context()
+                .get_column_comparator(black_box("name"));
         })
     });
-    
+
     group.bench_function("context_access", |b| {
         b.iter(|| {
             let _context = ctx.simple_parser.context();
         })
     });
-    
+
     group.finish();
 }
 

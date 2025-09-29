@@ -1,5 +1,5 @@
-use cqlite_core::storage::sstable::reader::{SSTableReader, SSTableReaderConfig};
 use cqlite_core::platform::Platform;
+use cqlite_core::storage::sstable::reader::{SSTableReader, SSTableReaderConfig};
 use cqlite_core::{RowKey, TableId, Value};
 use std::sync::Arc;
 use tokio;

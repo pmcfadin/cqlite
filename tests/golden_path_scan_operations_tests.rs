@@ -18,20 +18,19 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cqlite_core::{
-    Config, RowKey, Value,
     error::{Error, Result},
     platform::Platform,
+    schema::{registry::SchemaRegistry, TableSchema},
     storage::sstable::{
-        reader::SSTableReader,
-        schema_aware_reader::SchemaAwareReader,
+        reader::SSTableReader, schema_aware_reader::SchemaAwareReader,
         streaming_reader::StreamingReader,
     },
-    schema::{TableSchema, registry::SchemaRegistry},
     types::{ComparatorType, TableId},
+    Config, RowKey, Value,
 };
 
-use tokio::fs;
 use futures::StreamExt;
+use tokio::fs;
 
 /// Test fixture for golden path scan operations
 pub struct GoldenPathScanTestFixture {
@@ -52,8 +51,8 @@ impl GoldenPathScanTestFixture {
         let platform = Arc::new(Platform::new(&config).await?);
         let schema_registry = Arc::new(SchemaRegistry::new());
 
-        let datasets_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/datasets/sstables");
+        let datasets_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/datasets/sstables");
 
         Ok(Self {
             datasets_path,
@@ -65,13 +64,15 @@ impl GoldenPathScanTestFixture {
 
     /// Setup SSTable reader for wide rows dataset (good for scan testing)
     async fn setup_wide_rows_reader(&self) -> Result<SSTableReader> {
-        let sstable_path = self.datasets_path
+        let sstable_path = self
+            .datasets_path
             .join("test_wide_rows")
             .join("*/nb-*-big-Data.db");
 
         // Find actual file - fallback to test_basic if wide_rows not available
-        let fallback_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let fallback_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
+        );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
             return Err(Error::io_error(format!(
@@ -85,8 +86,9 @@ impl GoldenPathScanTestFixture {
 
     /// Setup timeseries dataset reader for ordered scan testing
     async fn setup_timeseries_reader(&self) -> Result<SSTableReader> {
-        let fallback_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let fallback_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
+        );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
             return Err(Error::io_error(format!(
@@ -132,7 +134,7 @@ async fn test_golden_path_full_table_scan() -> Result<()> {
     // Verify results are sorted by key
     for i in 1..results.len() {
         assert!(
-            results[i-1].0 <= results[i].0,
+            results[i - 1].0 <= results[i].0,
             "Scan results should be sorted by key"
         );
     }
@@ -153,7 +155,9 @@ async fn test_golden_path_range_scan_with_boundaries() -> Result<()> {
 
     // Test: Range scan with start and end boundaries
     let start_time = Instant::now();
-    let results = reader.scan(&table_id, Some(&start_key), Some(&end_key), None).await?;
+    let results = reader
+        .scan(&table_id, Some(&start_key), Some(&end_key), None)
+        .await?;
     let scan_duration = start_time.elapsed();
 
     println!("✅ Range scan completed in {:?}", scan_duration);
@@ -175,7 +179,9 @@ async fn test_golden_path_range_scan_with_boundaries() -> Result<()> {
     }
 
     // Test edge case: scan with start > end (should return empty)
-    let invalid_results = reader.scan(&table_id, Some(&end_key), Some(&start_key), None).await?;
+    let invalid_results = reader
+        .scan(&table_id, Some(&end_key), Some(&start_key), None)
+        .await?;
     assert!(
         invalid_results.is_empty(),
         "Scan with start > end should return empty results"
@@ -215,8 +221,12 @@ async fn test_golden_path_limited_scan_operations() -> Result<()> {
             scan_duration.as_millis()
         );
 
-        println!("✅ Limited scan (limit={}) returned {} entries in {:?}",
-                 limit, results.len(), scan_duration);
+        println!(
+            "✅ Limited scan (limit={}) returned {} entries in {:?}",
+            limit,
+            results.len(),
+            scan_duration
+        );
     }
 
     Ok(())
@@ -241,10 +251,15 @@ async fn test_golden_path_prefix_scan_operations() -> Result<()> {
     let end_key = RowKey::from_bytes(&end_bytes);
 
     let start_time = Instant::now();
-    let results = reader.scan(&table_id, Some(&start_key), Some(&end_key), None).await?;
+    let results = reader
+        .scan(&table_id, Some(&start_key), Some(&end_key), None)
+        .await?;
     let scan_duration = start_time.elapsed();
 
-    println!("✅ Prefix scan for '{}' completed in {:?}", prefix, scan_duration);
+    println!(
+        "✅ Prefix scan for '{}' completed in {:?}",
+        prefix, scan_duration
+    );
     println!("✅ Prefix scan found {} matching entries", results.len());
 
     // All results should start with the prefix
@@ -330,14 +345,17 @@ async fn test_golden_path_scan_ordering_validation() -> Result<()> {
         // Verify ascending order
         for i in 1..results.len() {
             assert!(
-                results[i-1].0 <= results[i].0,
+                results[i - 1].0 <= results[i].0,
                 "Scan results should be in ascending key order: {:?} > {:?}",
-                results[i-1].0,
+                results[i - 1].0,
                 results[i].0
             );
         }
 
-        println!("✅ Scan ordering validated - {} entries in correct ascending order", results.len());
+        println!(
+            "✅ Scan ordering validated - {} entries in correct ascending order",
+            results.len()
+        );
 
         // Additional validation: Check for duplicates
         let mut seen_keys = std::collections::HashSet::new();
@@ -351,7 +369,10 @@ async fn test_golden_path_scan_ordering_validation() -> Result<()> {
 
         println!("✅ No duplicate keys found in scan results");
     } else {
-        println!("ℹ️  Insufficient data for ordering validation (found {} entries)", results.len());
+        println!(
+            "ℹ️  Insufficient data for ordering validation (found {} entries)",
+            results.len()
+        );
     }
 
     Ok(())
@@ -366,7 +387,10 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
 
     // Edge case 1: Scan with limit 0
     let results = reader.scan(&table_id, None, None, Some(0)).await?;
-    assert!(results.is_empty(), "Scan with limit 0 should return empty results");
+    assert!(
+        results.is_empty(),
+        "Scan with limit 0 should return empty results"
+    );
 
     // Edge case 2: Scan non-existent table
     let non_existent_table = TableId::new("non_existent", "table");
@@ -387,7 +411,9 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
     // Edge case 4: Empty key range scan
     let empty_start = RowKey::from_bytes(b"");
     let empty_end = RowKey::from_bytes(b"");
-    let results = reader.scan(&table_id, Some(&empty_start), Some(&empty_end), None).await?;
+    let results = reader
+        .scan(&table_id, Some(&empty_start), Some(&empty_end), None)
+        .await?;
     // Should handle gracefully
 
     println!("✅ All scan edge cases handled successfully");
@@ -428,7 +454,10 @@ async fn test_golden_path_streaming_scan_operations() -> Result<()> {
 
             let duration = start_time.elapsed();
 
-            println!("✅ Streaming scan processed {} entries in {:?}", count, duration);
+            println!(
+                "✅ Streaming scan processed {} entries in {:?}",
+                count, duration
+            );
             println!("✅ Total value size: {} bytes", total_value_size);
 
             // Performance assertion for streaming
@@ -480,7 +509,8 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
 
     // Verify all concurrent scans completed successfully
     for handle_result in results {
-        let (id, scan_result, duration) = handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
+        let (id, scan_result, duration) =
+            handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
 
         let scan_results = scan_result?;
 
@@ -492,8 +522,12 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
             duration.as_millis()
         );
 
-        println!("✅ Concurrent scan {} found {} entries in {:?}",
-                 id, scan_results.len(), duration);
+        println!(
+            "✅ Concurrent scan {} found {} entries in {:?}",
+            id,
+            scan_results.len(),
+            duration
+        );
     }
 
     // Total concurrent execution should be efficient
@@ -503,7 +537,10 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
         total_duration.as_millis()
     );
 
-    println!("✅ All concurrent scan operations completed in {:?}", total_duration);
+    println!(
+        "✅ All concurrent scan operations completed in {:?}",
+        total_duration
+    );
     Ok(())
 }
 
@@ -518,7 +555,10 @@ async fn test_golden_path_scan_integration_validation() -> Result<()> {
 
     // 1. Check reader health before scanning
     let health_metrics = reader.health_check().await?;
-    assert!(health_metrics.file_accessible, "File should be accessible for scanning");
+    assert!(
+        health_metrics.file_accessible,
+        "File should be accessible for scanning"
+    );
 
     // 2. Perform scan and measure comprehensive metrics
     let start_time = Instant::now();
@@ -527,8 +567,10 @@ async fn test_golden_path_scan_integration_validation() -> Result<()> {
 
     // 3. Verify reader statistics after scan
     let stats = reader.stats().await?;
-    println!("✅ Post-scan stats: blocks={}, entries={}, cache_hits={}",
-             stats.block_count, stats.entry_count, stats.cache_hits);
+    println!(
+        "✅ Post-scan stats: blocks={}, entries={}, cache_hits={}",
+        stats.block_count, stats.entry_count, stats.cache_hits
+    );
 
     // 4. Integration validation
     assert!(

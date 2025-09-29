@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
+use cqlite_core::Config;
 
 /// Memory constraints for decompression tests
 const MAX_DECOMPRESSION_MEMORY_MB: usize = 50; // Max 50MB for decompression

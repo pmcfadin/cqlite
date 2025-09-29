@@ -31,6 +31,30 @@
       "value": "CRITICAL SSTable Discovery Bug Fix Implementation\n\nPROBLEM RESOLVED:\n- Location: /Users/patrick/local_projects/cqlite/cqlite-core/src/storage/sstable/mod.rs:126-149\n- Issue: SSTable manager was filtering files by .sst extension instead of Cassandra *-Data.db pattern\n- Impact: SSTable discovery completely failed for real Cassandra files\n\nCHANGES IMPLEMENTED:\n\n1. DISCOVERY PATTERN FIX (lines 128-130):\n   ❌ OLD: if extension == \"sst\"\n   ✅ NEW: if filename.ends_with(\"-Data.db\")\n\n2. CASSANDRA NAMING CONVENTION SUPPORT:\n   - Pattern: keyspace-table-generation-format-Data.db\n   - Examples: nb-1-big-Data.db, users-42-bti-Data.db, events-123-mc-Data.db\n   - Handles: generation numbers, compression formats (big, bti, mc, etc.)\n\n3. ID GENERATION FIX (lines 58-67):\n   ❌ OLD: sstable_{timestamp}.sst\n   ✅ NEW: sstable-{timestamp}-big-Data.db\n\nTESTING REQUIREMENTS:\n- Verify discovery with real Cassandra files: nb-1-big-Data.db, na-15-big-Data.db\n- Test generation number patterns: users-42-bti-Data.db\n- Confirm companion file discovery still works (Index.db, Summary.db, etc.)\n- Validate SSTableId creation and filename handling\n\nPERFORMANCE IMPACT: None - pattern matching is equally efficient\nBREAKING CHANGES: None - purely internal discovery logic\nMIGRATION: Existing SSTable files will now be properly discovered\n\nFILES MODIFIED:\n- /Users/patrick/local_projects/cqlite/cqlite-core/src/storage/sstable/mod.rs\n\nCOORDINATION: Using hooks for team synchronization and memory persistence",
       "namespace": "default",
       "timestamp": 1758587790597
+    },
+    {
+      "key": "swarm/test-infrastructure/coverage-targets",
+      "value": "storage::sstable:95,parser:90,validation:98,memory:85,platform:80",
+      "namespace": "default",
+      "timestamp": 1758932455807
+    },
+    {
+      "key": "swarm/test-infrastructure/ignored-tests-count",
+      "value": "43",
+      "namespace": "default",
+      "timestamp": 1758932459490
+    },
+    {
+      "key": "swarm/test-infrastructure/test-priorities",
+      "value": "Priority1:SSTableOperations:15tests,Priority2:SchemaValidation:12tests,Priority3:EdgeCases:8tests,Priority4:Performance:8tests",
+      "namespace": "default",
+      "timestamp": 1758932471720
+    },
+    {
+      "key": "swarm/test-infrastructure/quality-gates",
+      "value": "min_coverage:95,min_branch_coverage:85,max_execution_time:300s,max_memory_usage:512MB",
+      "namespace": "default",
+      "timestamp": 1758932474040
     }
   ]
 }

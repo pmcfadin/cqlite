@@ -1,6 +1,6 @@
 //! File system abstraction
 
-use crate::{Result, error::Error};
+use crate::{error::Error, Result};
 use std::path::Path;
 use tokio::fs;
 

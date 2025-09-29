@@ -527,13 +527,11 @@ mod comparator_type_creation_tests {
         // Collections have different ordering support
         assert!(ComparatorType::List(Box::new(ComparatorType::Int)).supports_ordering());
         assert!(!ComparatorType::Set(Box::new(ComparatorType::Int)).supports_ordering());
-        assert!(
-            !ComparatorType::Map(
-                Box::new(ComparatorType::Text),
-                Box::new(ComparatorType::Int)
-            )
-            .supports_ordering()
-        );
+        assert!(!ComparatorType::Map(
+            Box::new(ComparatorType::Text),
+            Box::new(ComparatorType::Int)
+        )
+        .supports_ordering());
 
         // Complex types
         assert!(

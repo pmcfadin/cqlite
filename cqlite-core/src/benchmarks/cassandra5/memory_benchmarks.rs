@@ -14,8 +14,8 @@ use std::time::Duration;
 use crate::{Config, Platform, Result};
 
 use super::{
+    utils::{generate_test_data, MemoryMonitor, PrecisionTimer},
     BenchmarkResult, PRDTargets,
-    utils::{MemoryMonitor, PrecisionTimer, generate_test_data},
 };
 
 /// Memory usage benchmarking suite for large Cassandra 5+ SSTable files
@@ -529,7 +529,7 @@ impl MemoryBenchmarks {
         let sum_x2: f64 = (0..samples.len()).map(|i| (i as f64).powi(2)).sum();
 
         // Linear regression slope (growth rate)
-        
+
         (n * sum_xy_product - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2))
     }
 

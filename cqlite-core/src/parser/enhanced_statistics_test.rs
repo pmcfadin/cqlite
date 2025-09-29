@@ -6,9 +6,9 @@
 mod tests {
     use super::super::enhanced_statistics_parser::*;
     use super::super::statistics::*;
-    use crate::Config;
     use crate::platform::Platform;
     use crate::storage::sstable::statistics_reader::StatisticsReader;
+    use crate::Config;
     use std::path::Path;
     use std::sync::Arc;
     use tokio::fs;

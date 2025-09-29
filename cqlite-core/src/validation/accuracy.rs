@@ -24,6 +24,7 @@ pub struct AccuracyTestCase {
 
 /// Accuracy validation levels
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::enum_variant_names)]
 pub enum AccuracyLevel {
     ByteLevel,   // Exact byte-for-byte comparison
     ValueLevel,  // Compare parsed values semantically

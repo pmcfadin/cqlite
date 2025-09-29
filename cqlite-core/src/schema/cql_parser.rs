@@ -9,13 +9,13 @@ use crate::parser::types::CqlTypeId;
 use crate::parser::{CqlCreateTable, CqlDataType};
 use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use nom::{
-    IResult,
     branch::alt,
     bytes::complete::{tag_no_case, take_while, take_while1},
     character::complete::char,
     combinator::{map, opt},
     multi::{separated_list0, separated_list1},
     sequence::{delimited, preceded, separated_pair, tuple},
+    IResult,
 };
 use serde_json;
 use std::collections::HashMap;
@@ -323,7 +323,7 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
                     name,
                     data_type,
                     position: pos,
-                    order: "ASC".to_string(),
+                    order: crate::schema::ClusteringOrder::Asc,
                 }
             })
             .collect(),
@@ -514,9 +514,9 @@ pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
     //
     // For now, this uses the existing nom parser for demonstration purposes.
 
-    use crate::parser::CqlStatement;
     use crate::parser::traits::CqlVisitor;
     use crate::parser::visitor::SchemaBuilderVisitor;
+    use crate::parser::CqlStatement;
 
     // Parse using the existing nom parser to get the TableSchema
     let schema = parse_cql_schema(cql)?;

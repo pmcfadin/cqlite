@@ -6,10 +6,10 @@
 use super::vint::{parse_vint, parse_vint_length};
 use crate::error::Result;
 use nom::{
-    IResult,
     bytes::complete::take,
     multi::count,
-    number::complete::{be_u8, be_u16, be_u32, be_u64},
+    number::complete::{be_u16, be_u32, be_u64, be_u8},
+    IResult,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -6,8 +6,8 @@
 // Feature flag handled at parent module level
 
 use crate::{
-    Result,
     types::{RowKey, TableId, TombstoneInfo, TombstoneType, Value},
+    Result,
 };
 use std::collections::HashMap;
 
@@ -241,10 +241,11 @@ impl TombstoneMerger {
                 for (tombstone_info, _) in &active_range_tombstones {
                     // Only apply range tombstone if it's newer than the entry
                     if tombstone_info.deletion_time > entry.metadata.write_time
-                        && self.range_tombstone_applies(tombstone_info, key) {
-                            is_deleted_by_range = true;
-                            break; // Stop at first matching tombstone (they're sorted by time)
-                        }
+                        && self.range_tombstone_applies(tombstone_info, key)
+                    {
+                        is_deleted_by_range = true;
+                        break; // Stop at first matching tombstone (they're sorted by time)
+                    }
                 }
 
                 if !is_deleted_by_range {

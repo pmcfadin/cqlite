@@ -11,22 +11,22 @@ use memmap2::{Mmap, MmapOptions};
 use parking_lot::Mutex as SyncMutex;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    Config, Error, Result, RowKey, Value,
     parser::{
-        SSTableHeader, SSTableParser,
         header::CassandraVersion,
-        types::{CqlTypeId, parse_cql_value},
+        types::{parse_cql_value, CqlTypeId},
         vint::parse_vint_length,
+        SSTableHeader, SSTableParser,
     },
     platform::Platform,
     types::TableId,
+    Config, Error, Result, RowKey, Value,
 };
 
 use super::{
@@ -772,8 +772,8 @@ impl StreamingSSTableReader {
 
             // Remove oldest 25% of blocks
             let remove_count = (block_ages.len() / 4).max(1);
-            for i in 0..remove_count {
-                blocks_to_remove.push(block_ages[i].0);
+            for (block_id, _) in block_ages.iter().take(remove_count) {
+                blocks_to_remove.push(*block_id);
             }
         }
 

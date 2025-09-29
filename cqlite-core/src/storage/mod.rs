@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 
 use crate::platform::Platform;
 use crate::storage::batch_writer::{BatchWriter, BatchWriterBuilder};
-use crate::{Config, Result, RowKey, Value, types::TableId};
+use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// Main storage engine that coordinates all storage components
 #[derive(Debug)]

@@ -4,17 +4,17 @@
 //! parsing, planning, and execution of CQL queries.
 
 use super::{
-    QueryStats,
     executor::{QueryExecutor, QueryResult},
     parser::QueryParser,
     planner::QueryPlanner,
     prepared::PreparedQuery,
+    QueryStats,
 };
 
 #[cfg(feature = "state_machine")]
 use super::{select_executor::SelectExecutor, select_optimizer::SelectOptimizer, select_parser};
 use crate::{
-    Config, Result, Value, memory::MemoryManager, schema::SchemaManager, storage::StorageEngine,
+    memory::MemoryManager, schema::SchemaManager, storage::StorageEngine, Config, Result, Value,
 };
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -315,7 +315,7 @@ impl QueryEngine {
             selected_indexes: plan
                 .selected_indexes
                 .iter()
-                .map(|idx| format!("{} ({})", idx.index_name, format!("{:?}", idx.index_type)))
+                .map(|idx| format!("{} ({:?})", idx.index_name, idx.index_type))
                 .collect(),
             execution_steps: plan
                 .steps
@@ -682,8 +682,8 @@ mod tests {
 mod plan_cache_tests {
     use super::*;
     use crate::{
-        Config, memory::MemoryManager, platform::Platform, schema::SchemaManager,
-        storage::StorageEngine,
+        memory::MemoryManager, platform::Platform, schema::SchemaManager, storage::StorageEngine,
+        Config,
     };
     use std::sync::Arc;
     use tempfile::TempDir;

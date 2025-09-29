@@ -9,14 +9,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cqlite_core::{
-    Config, RowKey, Value,
     error::{Error, Result},
     platform::Platform,
-    storage::sstable::{
-        reader::SSTableReader,
-        compression::CompressionReader,
-    },
+    storage::sstable::{compression::CompressionReader, reader::SSTableReader},
     types::TableId,
+    Config, RowKey, Value,
 };
 
 use tokio::fs;
@@ -50,7 +47,11 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
 
     match result {
         Some(value) => {
-            println!("  ✅ Found fixture data: {} bytes in {:?}", value.len(), lookup_duration);
+            println!(
+                "  ✅ Found fixture data: {} bytes in {:?}",
+                value.len(),
+                lookup_duration
+            );
 
             // Validate expected fixture content
             if value.len() == 4 && &value == b"test" {
@@ -84,7 +85,10 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
         lookup_duration.as_micros()
     );
 
-    println!("  ✅ Non-existent key properly handled in {:?}", lookup_duration);
+    println!(
+        "  ✅ Non-existent key properly handled in {:?}",
+        lookup_duration
+    );
 
     Ok(())
 }
@@ -125,13 +129,17 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
     let full_results = reader.scan(&table_id, None, None, None).await?;
     let full_scan_duration = start_time.elapsed();
 
-    println!("  ✅ Full scan: {} entries in {:?}", full_results.len(), full_scan_duration);
+    println!(
+        "  ✅ Full scan: {} entries in {:?}",
+        full_results.len(),
+        full_scan_duration
+    );
 
     // Validate scan results are properly ordered
     if full_results.len() > 1 {
         for i in 1..full_results.len() {
             assert!(
-                full_results[i-1].0 <= full_results[i].0,
+                full_results[i - 1].0 <= full_results[i].0,
                 "Scan results should be in ascending order"
             );
         }
@@ -152,8 +160,12 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
             limit
         );
 
-        println!("  ✅ Limited scan ({}): {} entries in {:?}",
-                 limit, limited_results.len(), limited_duration);
+        println!(
+            "  ✅ Limited scan ({}): {} entries in {:?}",
+            limit,
+            limited_results.len(),
+            limited_duration
+        );
 
         // Performance check for limited scans
         assert!(
@@ -168,11 +180,16 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
     let end_key = RowKey::from_bytes(&5i32.to_be_bytes());
 
     let start_time = Instant::now();
-    let range_results = reader.scan(&table_id, Some(&start_key), Some(&end_key), None).await?;
+    let range_results = reader
+        .scan(&table_id, Some(&start_key), Some(&end_key), None)
+        .await?;
     let range_duration = start_time.elapsed();
 
-    println!("  ✅ Range scan [0-5]: {} entries in {:?}",
-             range_results.len(), range_duration);
+    println!(
+        "  ✅ Range scan [0-5]: {} entries in {:?}",
+        range_results.len(),
+        range_duration
+    );
 
     // Validate range boundaries
     for (key, _value) in &range_results {
@@ -187,11 +204,16 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
     let empty_end = RowKey::from_bytes(&2000i32.to_be_bytes());
 
     let start_time = Instant::now();
-    let empty_results = reader.scan(&table_id, Some(&empty_start), Some(&empty_end), None).await?;
+    let empty_results = reader
+        .scan(&table_id, Some(&empty_start), Some(&empty_end), None)
+        .await?;
     let empty_duration = start_time.elapsed();
 
-    println!("  ✅ Empty range scan: {} entries in {:?}",
-             empty_results.len(), empty_duration);
+    println!(
+        "  ✅ Empty range scan: {} entries in {:?}",
+        empty_results.len(),
+        empty_duration
+    );
 
     // Empty scans should be very fast
     assert!(
@@ -242,7 +264,10 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
         }
     };
 
-    println!("🗜️  Testing decompression integration with: {}", data_source);
+    println!(
+        "🗜️  Testing decompression integration with: {}",
+        data_source
+    );
 
     let table_id = TableId::new("test_keyspace", "test_table");
 
@@ -257,18 +282,30 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
     let results = reader.scan(&table_id, None, None, Some(20)).await?;
     let decompression_duration = start_time.elapsed();
 
-    println!("  ✅ Decompressed scan: {} entries in {:?}",
-             results.len(), decompression_duration);
+    println!(
+        "  ✅ Decompressed scan: {} entries in {:?}",
+        results.len(),
+        decompression_duration
+    );
 
     // Validate decompressed data
     let mut total_decompressed_bytes = 0;
     for (key, value) in &results {
-        assert!(!key.as_bytes().is_empty(), "Key should not be empty after decompression");
-        assert!(!value.is_empty(), "Value should not be empty after decompression");
+        assert!(
+            !key.as_bytes().is_empty(),
+            "Key should not be empty after decompression"
+        );
+        assert!(
+            !value.is_empty(),
+            "Value should not be empty after decompression"
+        );
         total_decompressed_bytes += value.len();
     }
 
-    println!("  📊 Total decompressed data: {} bytes", total_decompressed_bytes);
+    println!(
+        "  📊 Total decompressed data: {} bytes",
+        total_decompressed_bytes
+    );
 
     // Performance check: decompression should not be prohibitively slow
     if health_metrics.compression_enabled {
@@ -289,8 +326,11 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
 
         match lookup_result {
             Some(value) => {
-                println!("  ✅ Decompressed lookup: {} bytes in {:?}",
-                         value.len(), lookup_duration);
+                println!(
+                    "  ✅ Decompressed lookup: {} bytes in {:?}",
+                    value.len(),
+                    lookup_duration
+                );
 
                 // Cross-validate with scan result
                 assert_eq!(
@@ -322,12 +362,16 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
         stress_times.push(duration);
 
         if i % 3 == 0 {
-            println!("  🔄 Stress test {}/{}...", i+1, stress_operations);
+            println!("  🔄 Stress test {}/{}...", i + 1, stress_operations);
         }
     }
 
-    let avg_stress_time = stress_times.iter().sum::<std::time::Duration>() / stress_times.len() as u32;
-    println!("  ✅ Stress test complete: average {:?} per operation", avg_stress_time);
+    let avg_stress_time =
+        stress_times.iter().sum::<std::time::Duration>() / stress_times.len() as u32;
+    println!(
+        "  ✅ Stress test complete: average {:?} per operation",
+        avg_stress_time
+    );
 
     // Performance assertion for sustained operations
     assert!(
@@ -378,7 +422,10 @@ async fn test_cross_operation_validation() -> Result<()> {
         }
     };
 
-    println!("🔄 Testing cross-operation validation with: {}", data_source);
+    println!(
+        "🔄 Testing cross-operation validation with: {}",
+        data_source
+    );
 
     let table_id = TableId::new("test_keyspace", "test_table");
 
@@ -413,20 +460,26 @@ async fn test_cross_operation_validation() -> Result<()> {
         }
     }
 
-    println!("  ✅ Cross-validated {}/{} entries", validated_count, scan_results.len());
+    println!(
+        "  ✅ Cross-validated {}/{} entries",
+        validated_count,
+        scan_results.len()
+    );
 
     // Test 2: Validate range scan consistency
     if scan_results.len() >= 2 {
         let first_key = &scan_results[0].0;
         let last_key = &scan_results[scan_results.len() - 1].0;
 
-        let range_results = reader.scan(&table_id, Some(first_key), Some(last_key), None).await?;
+        let range_results = reader
+            .scan(&table_id, Some(first_key), Some(last_key), None)
+            .await?;
 
         // All scan results should be contained in range results
         for (scan_key, scan_value) in &scan_results {
-            let found_in_range = range_results.iter().any(|(range_key, range_value)| {
-                range_key == scan_key && range_value == scan_value
-            });
+            let found_in_range = range_results
+                .iter()
+                .any(|(range_key, range_value)| range_key == scan_key && range_value == scan_value);
 
             if !found_in_range {
                 println!("  ⚠️  Scan entry not found in range scan: {:?}", scan_key);

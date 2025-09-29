@@ -3,11 +3,20 @@
 //! This module provides reusable components for integration and unit tests
 //! across the CQLite test suite.
 
+pub mod enhanced_test_context;
 pub mod sstable_test_utils;
 
 // Re-export commonly used types and utilities
 #[allow(unused_imports)]
 pub use sstable_test_utils::TestContext;
+
+// Re-export enhanced test infrastructure
+#[cfg(feature = "test-infrastructure")]
+pub use enhanced_test_context::{
+    CoverageTracker, E2ESubcategory, EnhancedTestContext, EnhancedTestContextBuilder,
+    EnhancedTestMetrics, IntegrationSubcategory, PerformanceSubcategory, PropertySubcategory,
+    PropertyTestConfig, QualityGate, SchemaValidationConfig, TestCategory, UnitSubcategory,
+};
 
 // Common test configuration and setup helpers
 use cqlite_core::Config;

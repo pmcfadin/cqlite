@@ -1163,7 +1163,7 @@ impl CqlVisitor<TableSchema> for SchemaBuilderVisitor {
                     name: ck_col.as_str().to_string(),
                     data_type: self.convert_cql_data_type_to_string(&column_def.data_type),
                     position: pos,
-                    order: "ASC".to_string(), // Default ordering
+                    order: crate::schema::ClusteringOrder::Asc, // Default ordering
                 })
             })
             .collect();
@@ -1269,6 +1269,7 @@ impl SchemaBuilderVisitor {
         Self
     }
     /// Convert CqlDataType to string representation compatible with existing schema format
+    #[allow(clippy::only_used_in_recursion)]
     fn convert_cql_data_type_to_string(&self, data_type: &CqlDataType) -> String {
         match data_type {
             // Primitive types
@@ -1770,11 +1771,9 @@ mod tests {
         assert!(visitor.has_errors());
         let errors = visitor.get_errors();
         assert!(errors.iter().any(|e| e.contains("Duplicate column name")));
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("not found in column definitions"))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("not found in column definitions")));
     }
 
     #[test]

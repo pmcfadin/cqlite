@@ -11,9 +11,9 @@
 //! - Memory limits and large datasets
 
 use cqlite_core::{
-    Config, Error,
     platform::Platform,
-    storage::sstable::{SSTableReader, index_reader::IndexReader},
+    storage::sstable::{index_reader::IndexReader, SSTableReader},
+    Config, Error,
 };
 use std::{path::Path, sync::Arc};
 use tempfile::TempDir;

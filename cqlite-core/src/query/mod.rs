@@ -54,14 +54,14 @@ pub use select_executor::SelectExecutor;
 #[cfg(feature = "state_machine")]
 pub use select_optimizer::{OptimizedQueryPlan, SelectOptimizer};
 #[cfg(feature = "state_machine")]
-pub use select_parser::{SelectParser, parse_select};
+pub use select_parser::{parse_select, SelectParser};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    Config, Result, TableId, Value, memory::MemoryManager, schema::SchemaManager,
-    storage::StorageEngine,
+    memory::MemoryManager, schema::SchemaManager, storage::StorageEngine, Config, Result, TableId,
+    Value,
 };
 
 /// Query execution statistics

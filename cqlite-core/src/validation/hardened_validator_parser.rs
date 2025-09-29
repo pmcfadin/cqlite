@@ -9,7 +9,7 @@ use crate::{
     error::{Error, Result},
     parser::{
         complex_types::{ComplexTypeParser, TypeCategory},
-        types::{CqlTypeId, parse_cql_value},
+        types::{parse_cql_value, CqlTypeId},
         vint::parse_vint,
     },
     schema::{CqlType, UdtRegistry},
@@ -17,9 +17,9 @@ use crate::{
 };
 
 use nom::{
-    IResult,
     bytes::complete::take,
-    number::complete::{be_i32, be_i64, be_u8, be_u32, be_u64},
+    number::complete::{be_i32, be_i64, be_u32, be_u64, be_u8},
+    IResult,
 };
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::process::Command;
+
+// Type alias for complex type to reduce complexity warnings
+type FormatHandlerMap = HashMap<String, Box<dyn Fn(&[u8]) -> Result<Value> + Send + Sync>>;
 
 /// Cassandra version enumeration for version-specific parsing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -60,6 +63,7 @@ impl fmt::Display for CassandraVersion {
 
 impl CassandraVersion {
     /// Parse version from string
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
             "3.7" => Ok(CassandraVersion::V3_7),
@@ -367,7 +371,7 @@ pub struct HardenedValidatorParser {
 #[allow(dead_code)]
 struct VersionSpecificParser {
     version: CassandraVersion,
-    format_handlers: HashMap<String, Box<dyn Fn(&[u8]) -> Result<Value> + Send + Sync>>,
+    format_handlers: FormatHandlerMap,
 }
 
 impl HardenedValidatorParser {
@@ -617,6 +621,7 @@ impl HardenedValidatorParser {
     }
 
     /// Discover SSTable files in directory
+    #[allow(clippy::only_used_in_recursion)]
     fn discover_sstable_files<'a>(
         &'a self,
         dir: &'a Path,
@@ -1573,7 +1578,7 @@ impl ComplexTypeTestResult {
 
 impl VersionSpecificParser {
     fn new(version: CassandraVersion) -> Result<Self> {
-        let format_handlers: HashMap<String, Box<dyn Fn(&[u8]) -> Result<Value> + Send + Sync>> =
+        let format_handlers: FormatHandlerMap =
             HashMap::new();
 
         // Add version-specific format handlers
@@ -2211,6 +2216,7 @@ impl HardenedValidatorParser {
     }
 
     /// Create empty value for CQL type
+    #[allow(clippy::only_used_in_recursion)]
     fn create_empty_value_for_cql_type(&self, cql_type: &CqlType) -> Result<Value> {
         match cql_type {
             CqlType::Boolean => Ok(Value::Boolean(false)),

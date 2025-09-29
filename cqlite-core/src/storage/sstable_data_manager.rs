@@ -14,11 +14,11 @@ use parking_lot::RwLock;
 use tokio::sync::{RwLock as AsyncRwLock, Semaphore};
 
 use crate::{
-    Config, Error, Result, RowKey, Value,
     parser::header::CassandraVersion,
     platform::Platform,
     schema::{SchemaManager, TableSchema},
     storage::sstable::bulletproof_reader::BulletproofReader,
+    Config, Error, Result, RowKey, Value,
 };
 
 /// Configuration for the SSTable data manager

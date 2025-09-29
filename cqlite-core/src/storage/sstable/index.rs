@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::{Result, RowKey, types::TableId};
+use crate::{types::TableId, Result, RowKey};
 
 /// Index entry for fast key lookups
 #[derive(Debug, Clone, Serialize, Deserialize)]

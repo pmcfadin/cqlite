@@ -11,10 +11,10 @@ use crate::{
     types::{RowKey, TombstoneInfo, TombstoneType, UdtField, UdtTypeDef, UdtValue, Value},
 };
 use nom::{
-    IResult,
     bytes::complete::take,
     combinator::{map, map_res},
-    number::complete::{be_f32, be_f64, be_i32, be_i64, be_u8, be_u16, be_u32},
+    number::complete::{be_f32, be_f64, be_i32, be_i64, be_u16, be_u32, be_u8},
+    IResult,
 };
 
 /// CQL type identifiers as they appear in the binary format

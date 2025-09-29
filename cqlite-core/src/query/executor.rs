@@ -9,11 +9,11 @@
 //! - Index utilization
 
 use super::{
-    ComparisonOperator, Condition,
     planner::{ExecutionStep, ParallelizationInfo, QueryPlan, StepType},
+    ComparisonOperator, Condition,
 };
 use crate::{
-    Config, Error, Result, RowKey, TableId, Value, schema::SchemaManager, storage::StorageEngine,
+    schema::SchemaManager, storage::StorageEngine, Config, Error, Result, RowKey, TableId, Value,
 };
 use crossbeam::channel;
 use std::collections::HashMap;

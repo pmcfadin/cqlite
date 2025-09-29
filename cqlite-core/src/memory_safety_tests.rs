@@ -5,8 +5,8 @@
 //! memory-related issues.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::memory::MemoryManager;

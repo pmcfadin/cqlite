@@ -147,5 +147,17 @@ enhanced-index-validation = []
 # Docker integration testing feature
 docker-integration = []
 
+# Test infrastructure features for Phase 2 - Enhanced TestContext Framework
+test-infrastructure = [
+    "test-schema-validation",
+    "test-property-testing",
+    "test-coverage-tracking",
+    "test-quality-gates"
+]
+test-schema-validation = []    # Schema-aware test validation
+test-property-testing = []     # Property-based testing support
+test-coverage-tracking = []    # Real-time coverage tracking
+test-quality-gates = []        # Quality gate enforcement
+
 [lints]
 workspace = true

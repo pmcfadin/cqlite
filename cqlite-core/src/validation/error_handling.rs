@@ -1567,18 +1567,14 @@ mod tests {
 
         // Test that recovery strategies are properly initialized
         assert!(!handler.recovery_strategies.is_empty());
-        assert!(
-            handler
-                .recovery_strategies
-                .iter()
-                .any(|s| s.name.contains("Corruption"))
-        );
-        assert!(
-            handler
-                .recovery_strategies
-                .iter()
-                .any(|s| s.name.contains("I/O Error"))
-        );
+        assert!(handler
+            .recovery_strategies
+            .iter()
+            .any(|s| s.name.contains("Corruption")));
+        assert!(handler
+            .recovery_strategies
+            .iter()
+            .any(|s| s.name.contains("I/O Error")));
     }
 
     #[test]

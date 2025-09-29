@@ -9,9 +9,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
+use cqlite_core::Config;
 
 /// Test handling of zero-byte component files
 #[tokio::test]
@@ -31,7 +31,7 @@ async fn test_zero_byte_component_files() {
     // Create realistic Data.db but zero-byte component files
     create_minimal_data_file(&data_file).await;
     fs::write(&index_file, b"").await.unwrap(); // Zero bytes
-    fs::write(&summary_file, b"").await.unwrap(); // Zero bytes 
+    fs::write(&summary_file, b"").await.unwrap(); // Zero bytes
     fs::write(&filter_file, b"").await.unwrap(); // Zero bytes
 
     let config = Config::default();
@@ -110,7 +110,7 @@ async fn test_invalid_magic_numbers() {
     invalid_index.extend_from_slice(&[0x00; 60]); // Padding
     fs::write(&index_file, invalid_index).await.unwrap();
 
-    let mut invalid_summary = vec![0xCA, 0xFE, 0xBA, 0xBE]; // Wrong magic  
+    let mut invalid_summary = vec![0xCA, 0xFE, 0xBA, 0xBE]; // Wrong magic
     invalid_summary.extend_from_slice(&[0x00; 60]); // Padding
     fs::write(&summary_file, invalid_summary).await.unwrap();
 

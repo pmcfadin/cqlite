@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
+use cqlite_core::Config;
 
 // Import test utilities for real SSTable data
 mod common;

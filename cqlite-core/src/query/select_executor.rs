@@ -16,10 +16,10 @@ use super::{
     select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
 };
 use crate::{
-    Error, Result, TableId,
     schema::SchemaManager,
     storage::StorageEngine,
     types::{RowKey, Value},
+    Error, Result, TableId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -248,11 +248,10 @@ impl SelectExecutor {
         for predicate in predicates {
             if let Some(column_value) = row.values.get(&predicate.column) {
                 let matches = match &predicate.operation {
-                    super::select_optimizer::SSTableFilterOp::Equal => {
-                        predicate.values.first().is_some_and(|v| {
-                            self.values_equal(column_value, v).unwrap_or(false)
-                        })
-                    }
+                    super::select_optimizer::SSTableFilterOp::Equal => predicate
+                        .values
+                        .first()
+                        .is_some_and(|v| self.values_equal(column_value, v).unwrap_or(false)),
                     super::select_optimizer::SSTableFilterOp::In => {
                         predicate.values.contains(column_value)
                     }
@@ -1025,7 +1024,7 @@ impl SelectExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, platform::Platform};
+    use crate::{platform::Platform, Config};
     use tempfile::TempDir;
 
     async fn create_test_executor() -> SelectExecutor {

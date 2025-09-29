@@ -4,11 +4,11 @@
 //! including header parsing, data blocks, and metadata validation.
 
 use cqlite_core::error::Result;
-use cqlite_core::parser::SSTableParser;
 use cqlite_core::parser::header::{
-    CassandraVersion, ColumnInfo, CompressionInfo, SSTABLE_MAGIC, SSTableHeader, SSTableStats,
-    SUPPORTED_VERSION, parse_sstable_header, serialize_sstable_header,
+    parse_sstable_header, serialize_sstable_header, CassandraVersion, ColumnInfo, CompressionInfo,
+    SSTableHeader, SSTableStats, SSTABLE_MAGIC, SUPPORTED_VERSION,
 };
+use cqlite_core::parser::SSTableParser;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 

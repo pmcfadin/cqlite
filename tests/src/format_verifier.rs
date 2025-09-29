@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use cqlite_core::{Result, error::Error};
+use cqlite_core::{error::Error, Result};
 
 /// Binary format verification results
 #[derive(Debug, Clone)]

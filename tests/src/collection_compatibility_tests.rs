@@ -4,14 +4,14 @@
 //! to ensure 100% compatibility with the 'oa' format specification.
 
 use cqlite_core::{
-    Result,
     parser::{
-        types::{CqlTypeId, parse_cql_value, serialize_cql_value},
+        types::{parse_cql_value, serialize_cql_value, CqlTypeId},
         vint::encode_vint,
         // parse_list_with_type, parse_set_with_type, parse_map_with_types,
         // parse_tuple, parse_udt
     },
     types::Value,
+    Result,
 };
 
 /// Test collection parsing against Cassandra 5+ format specification

@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
-    Config, Result,
     parser::header::{CassandraVersion, ColumnInfo},
     platform::Platform,
     schema::{Column, TableSchema},
     storage::sstable::bulletproof_reader::BulletproofReader,
     types::{DataType, Value},
+    Config, Result,
 };
 
 /// Schema discovery configuration

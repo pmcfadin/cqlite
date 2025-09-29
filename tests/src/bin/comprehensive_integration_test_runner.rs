@@ -3,8 +3,8 @@
 /// Standalone executable for running the complete CQLite integration test suite.
 /// This runner provides a CI/CD friendly interface with clear pass/fail results.
 use cqlite_tests::comprehensive_integration_test_suite::{
-    ComprehensiveIntegrationTestSuite, IntegrationTestConfig, print_integration_test_results,
-    run_comprehensive_integration_tests, run_quick_integration_tests,
+    print_integration_test_results, run_comprehensive_integration_tests,
+    run_quick_integration_tests, ComprehensiveIntegrationTestSuite, IntegrationTestConfig,
 };
 use std::env;
 use std::path::PathBuf;

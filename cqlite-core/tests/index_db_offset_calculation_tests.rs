@@ -9,9 +9,9 @@
 //! All tests now use real Cassandra SSTable data from the test dataset directory.
 
 use cqlite_core::{
-    Config,
     platform::Platform,
-    storage::sstable::{SSTableReader, index_reader::IndexReader},
+    storage::sstable::{index_reader::IndexReader, SSTableReader},
+    Config,
 };
 use std::{collections::HashSet, sync::Arc};
 use tokio::fs;

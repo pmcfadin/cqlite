@@ -6,7 +6,7 @@
 
 use super::statistics::*;
 use crate::error::Result;
-use nom::{IResult, number::complete::be_u32};
+use nom::{number::complete::be_u32, IResult};
 use std::collections::HashMap;
 
 /// Enhanced Statistics.db header parser for real 'nb' format

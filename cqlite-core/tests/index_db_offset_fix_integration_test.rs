@@ -6,7 +6,7 @@
 //! - Maintains backward compatibility while providing better partition lookup accuracy
 
 use cqlite_core::{
-    Config, Result, platform::Platform, storage::sstable::index_reader::IndexReader,
+    platform::Platform, storage::sstable::index_reader::IndexReader, Config, Result,
 };
 use std::sync::Arc;
 use tempfile::tempdir;

@@ -379,9 +379,9 @@ async fn run_mixed_benchmark(
         }
     } else {
         // Multi-threaded mixed benchmark
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
         use std::sync::Mutex;
-        use std::sync::atomic::{AtomicU64, Ordering};
         use tokio::task::JoinSet;
 
         let read_counter = Arc::new(AtomicU64::new(0));

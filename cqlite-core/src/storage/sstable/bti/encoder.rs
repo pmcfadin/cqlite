@@ -1074,19 +1074,15 @@ mod tests {
 
         // Test valid encodings
         assert!(encoder.validate_encoded_key(&[type_prefixes::NULL]).is_ok());
-        assert!(
-            encoder
-                .validate_encoded_key(&[type_prefixes::BOOLEAN_TRUE])
-                .is_ok()
-        );
+        assert!(encoder
+            .validate_encoded_key(&[type_prefixes::BOOLEAN_TRUE])
+            .is_ok());
 
         // Test invalid encodings
         assert!(encoder.validate_encoded_key(&[]).is_err()); // Empty
-        assert!(
-            encoder
-                .validate_encoded_key(&[type_prefixes::NULL, 0x00, 0x00, 0x00])
-                .is_err()
-        ); // Null too long
+        assert!(encoder
+            .validate_encoded_key(&[type_prefixes::NULL, 0x00, 0x00, 0x00])
+            .is_err()); // Null too long
     }
 
     #[test]
@@ -1146,11 +1142,9 @@ mod tests {
         assert!(blob1 < blob2);
 
         // Should contain escaped null sequence
-        assert!(
-            blob_with_null
-                .windows(2)
-                .any(|w| w == escape_sequences::ESCAPED_NULL)
-        );
+        assert!(blob_with_null
+            .windows(2)
+            .any(|w| w == escape_sequences::ESCAPED_NULL));
     }
 
     #[test]

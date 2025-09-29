@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::row_cell_state_machine::*;
-    use crate::schema::{ClusteringColumn, Column, TableSchema};
+    use crate::schema::{ClusteringColumn, ClusteringOrder, Column, TableSchema};
     use crate::types::{ComparatorType, Value};
     use std::collections::HashMap;
 
@@ -648,7 +648,7 @@ mod tests {
         data.extend(encode_vint(7)); // name length: 7
         data.extend_from_slice(b"address");
         data.extend(encode_vint(16)); // value length: 16 (mock UDT binary data)
-        // Mock UDT binary data representing {street: "Main St", city: "NYC", zip: 10001}
+                                      // Mock UDT binary data representing {street: "Main St", city: "NYC", zip: 10001}
         data.extend_from_slice(&[
             0x00, 0x07, 0x4D, 0x61, 0x69, 0x6E, 0x20, 0x53, 0x74, // street: "Main St"
             0x00, 0x03, 0x4E, 0x59, 0x43, // city: "NYC"
@@ -706,7 +706,7 @@ mod tests {
         data.push(0x16); // name length: 11
         data.extend_from_slice(b"coordinates");
         data.push(0x1C); // value length: 14 (mock tuple binary data)
-        // Mock tuple binary: (40.7128, -74.0060, "NYC")
+                         // Mock tuple binary: (40.7128, -74.0060, "NYC")
         data.extend_from_slice(&[
             0x40, 0x44, 0x5B, 0x3F, 0xDB, 0x8B, 0x44, 0x61, // 40.7128 (double)
             0xC0, 0x52, 0x80, 0x7E, 0xA9, 0x86, 0xB8, 0x6A, // -74.0060 (double)
@@ -745,13 +745,13 @@ mod tests {
                 name: "timestamp".to_string(),
                 data_type: "timestamp".to_string(),
                 position: 0,
-                order: "ASC".to_string(),
+                order: ClusteringOrder::Asc,
             },
             ClusteringColumn {
                 name: "sequence".to_string(),
                 data_type: "int".to_string(),
                 position: 1,
-                order: "ASC".to_string(),
+                order: ClusteringOrder::Asc,
             },
         ];
 
@@ -766,7 +766,7 @@ mod tests {
         // Add clustering row with composite clustering key
         data.extend(encode_vint(1)); // 1 clustering row
         data.extend(encode_vint(12)); // key length: 8 (timestamp) + 4 (int) = 12
-        // Mock composite clustering key: timestamp + sequence
+                                      // Mock composite clustering key: timestamp + sequence
         data.extend_from_slice(&[
             0x00, 0x00, 0x01, 0x83, 0x8F, 0xA4, 0x32, 0x00, // timestamp (8 bytes)
             0x00, 0x00, 0x00, 0x01, // sequence = 1 (4 bytes)
@@ -915,7 +915,7 @@ mod tests {
         data.push(0x10); // name length: 8
         data.extend_from_slice(b"metadata");
         data.push(0x18); // value length: 12 (mock map binary data)
-        // Mock map data: {"key1": [1, 2, 3], "key2": [4, 5, 6]}
+                         // Mock map data: {"key1": [1, 2, 3], "key2": [4, 5, 6]}
         data.extend_from_slice(&[
             0x02, // 2 entries
             0x04, 0x6B, 0x65, 0x79, 0x31, // "key1"

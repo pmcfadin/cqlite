@@ -6,7 +6,7 @@
 //! - Better timestamp detection
 //! - Robust handling of null values and edge cases
 
-use cqlite_core::parser::types::{CqlTypeId, parse_cql_value};
+use cqlite_core::parser::types::{parse_cql_value, CqlTypeId};
 use cqlite_core::types::Value;
 
 #[cfg(test)]
@@ -218,14 +218,14 @@ mod parsing_improvements_tests {
     fn test_edge_cases_and_error_handling() {
         // Test case 1: Truncated data
         let _truncated_uuid = &[0x6b, 0xa7, 0xb8, 0x10]; // Only 4 bytes of UUID
-        // Should handle gracefully without panicking
+                                                         // Should handle gracefully without panicking
 
         // Test case 2: Oversized data
         // Test with very large data that could cause memory issues
 
         // Test case 3: Malformed length prefixes
         let _bad_length_prefix = &[0xFF, 0xFF, 0xFF, 0xFF]; // Huge length
-        // Should handle gracefully
+                                                            // Should handle gracefully
 
         // Test case 4: Nested error conditions
         // Complex scenarios that could trigger multiple error paths

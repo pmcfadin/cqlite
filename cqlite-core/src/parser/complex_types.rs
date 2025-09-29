@@ -7,20 +7,20 @@
 use std::collections::HashMap;
 
 use nom::{
-    IResult,
     branch::alt,
     bytes::complete::tag_no_case,
     character::complete::{char, multispace0},
     combinator::map,
     sequence::tuple,
+    IResult,
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, Result,
     schema::{CqlType, UdtRegistry},
     types::Value,
+    Error, Result,
 };
 
 /// Comprehensive type parser for all Cassandra data types
@@ -190,10 +190,12 @@ impl ComplexTypeParser {
         input: &'a str,
         context: &TypeParsingContext,
     ) -> IResult<&'a str, CqlType> {
-        let new_context = TypeParsingContext {
-            depth: context.depth + 1,
-            ..context.clone()
-        };
+        if context.depth > 10 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::TooLarge,
+            )));
+        }
 
         alt((
             // Frozen types
@@ -203,18 +205,23 @@ impl ComplexTypeParser {
                     multispace0,
                     char('<'),
                     multispace0,
-                    |input| self.parse_cql_type_internal(input, &new_context),
+                    |input| {
+                        let mut new_context = context.clone();
+                        new_context.depth += 1;
+                        self.parse_cql_type_internal(input, &new_context)
+                    },
                     multispace0,
                     char('>'),
                 )),
                 |(_, _, _, _, inner_type, _, _)| CqlType::Frozen(Box::new(inner_type)),
             ),
             // Collection types
-            self.parse_collection_type(&new_context),
+            self.parse_collection_type(context),
             // Primitive types
             self.parse_primitive_type(),
         ))(input)
     }
+
 
     fn parse_collection_type<'a>(
         &'a self,
@@ -318,6 +325,7 @@ impl ComplexTypeParser {
         })
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn calculate_complexity_score(&self, cql_type: &CqlType) -> u32 {
         match cql_type {
             CqlType::Boolean
@@ -351,6 +359,7 @@ impl ComplexTypeParser {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn estimate_type_size(&self, cql_type: &CqlType) -> Option<usize> {
         match cql_type {
             CqlType::Boolean => Some(1),
@@ -369,6 +378,7 @@ impl ComplexTypeParser {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn categorize_type(&self, cql_type: &CqlType) -> TypeCategory {
         match cql_type {
             CqlType::Boolean
@@ -425,6 +435,7 @@ impl ComplexTypeParser {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn infer_cql_type_from_value(&self, value: &Value) -> Result<CqlType> {
         match value {
             Value::Null => Ok(CqlType::Text),
@@ -476,6 +487,7 @@ impl ComplexTypeParser {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn format_cql_type(&self, cql_type: &CqlType) -> String {
         match cql_type {
             CqlType::Boolean => "boolean".to_string(),

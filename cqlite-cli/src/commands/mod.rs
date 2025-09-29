@@ -140,9 +140,9 @@ impl QueryResult {
 // use crate::table_scanner::{TableScanner, ScanStrategy, ScanConfig};
 use anyhow::{Context, Result};
 use cqlite_core::{
-    Database,
-    schema::{ClusteringColumn, Column, KeyColumn, TableSchema, parse_cql_schema},
+    schema::{parse_cql_schema, ClusteringColumn, Column, KeyColumn, TableSchema},
     storage::sstable::{bulletproof_reader::BulletproofReader, reader::SSTableReader},
+    Database,
 };
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};

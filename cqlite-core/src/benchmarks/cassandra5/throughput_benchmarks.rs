@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use crate::{Config, Platform, Result};
 
 use super::{
+    utils::{generate_test_data, MemoryMonitor, PrecisionTimer},
     BenchmarkResult, PRDTargets,
-    utils::{MemoryMonitor, PrecisionTimer, generate_test_data},
 };
 
 /// Throughput benchmarking suite comparing against native Cassandra tools

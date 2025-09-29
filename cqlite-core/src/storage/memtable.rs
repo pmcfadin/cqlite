@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Config, Result, RowKey, Value, types::TableId};
+use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// Entry in the MemTable with metadata
 #[derive(Debug, Clone)]
@@ -258,6 +258,7 @@ impl MemTable {
     }
 
     /// Estimate the size of a value in bytes
+    #[allow(clippy::only_used_in_recursion)]
     fn estimate_value_size(&self, value: &Option<Value>) -> usize {
         match value {
             None => 0,

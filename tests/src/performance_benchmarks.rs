@@ -6,7 +6,7 @@
 //! Cassandra-scale workloads with acceptable performance characteristics.
 
 use cqlite_core::error::Result;
-use cqlite_core::parser::header::{CassandraVersion, SSTableHeader, parse_sstable_header};
+use cqlite_core::parser::header::{parse_sstable_header, CassandraVersion, SSTableHeader};
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};
 use cqlite_core::platform::Platform;

@@ -5,14 +5,14 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::index_reader::{IndexReader, PartitionIndexEntry};
+use cqlite_core::Config;
 
 /// Memory tracking allocator for testing
 struct TrackingAllocator {

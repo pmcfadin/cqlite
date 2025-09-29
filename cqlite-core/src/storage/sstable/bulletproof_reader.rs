@@ -24,7 +24,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use super::{
-    chunk_decompressor::{ChunkDecompressor, create_decompressor_from_file},
+    chunk_decompressor::{create_decompressor_from_file, ChunkDecompressor},
     compression_info::CompressionInfo,
     format_detector::{SSTableComponent, SSTableFormat, SSTableInfo},
 };

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
 
-use crate::{Config, Result, RowKey, platform::Platform, types::TableId};
+use crate::{platform::Platform, types::TableId, Config, Result, RowKey};
 
 use super::{
     reader::SSTableReader,

@@ -14,17 +14,17 @@
 
 #[allow(unused_imports)]
 use cqlite_core::{
-    Config, RowKey, TableId,
     parser::{
-        SSTableParser,
         header::{CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats},
         parse_cql_value, parse_sstable_header, serialize_cql_value, serialize_sstable_header,
         types::CqlTypeId,
+        SSTableParser,
     },
     platform::Platform,
     schema::discovery::SchemaDiscoveryEngine,
     storage::StorageEngine,
     types::Value,
+    Config, RowKey, TableId,
 };
 #[allow(unused_imports)]
 use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -1539,7 +1539,7 @@ async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::er
     }
     println!("🔍 Testing comprehensive data type validation...");
 
-    use cqlite_core::parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value};
+    use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value, CqlTypeId};
 
     // Test all primitive types
     let primitive_tests = vec![

@@ -8,9 +8,9 @@
 // use cqlite_core::parser::header::CassandraVersion;
 use cqlite_core::storage::sstable::bti::encoder::{ByteComparableDecoder, ByteComparableEncoder};
 use cqlite_core::storage::sstable::bti::nodes::{
-    NodeRef, NodeType, TrieNode, select_optimal_node_type,
+    select_optimal_node_type, NodeRef, NodeType, TrieNode,
 };
-use cqlite_core::storage::sstable::bti::{BTI_MAGIC_NUMBER, detect_format, is_bti_format};
+use cqlite_core::storage::sstable::bti::{detect_format, is_bti_format, BTI_MAGIC_NUMBER};
 use cqlite_core::types::Value;
 // use std::collections::HashMap; // Removed - unused
 

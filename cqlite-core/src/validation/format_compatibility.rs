@@ -1411,12 +1411,10 @@ mod tests {
         assert!(!v5_1.unwrap().deprecated);
 
         // Ensure no legacy versions are supported
-        assert!(
-            version_support
-                .supported_versions
-                .iter()
-                .all(|v| v.major >= 5)
-        );
+        assert!(version_support
+            .supported_versions
+            .iter()
+            .all(|v| v.major >= 5));
     }
 
     #[test]

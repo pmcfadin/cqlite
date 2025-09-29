@@ -4,19 +4,15 @@
 use clap::{Arg, Command};
 use cqlite_core::{
     error::Result,
-    validation::hardened_validator_parser::{
-        HardenedValidatorParser, HardenedValidatorConfig, CassandraVersion,
-        PerformanceTargets, MemoryLimits,
-    },
     schema::UdtRegistry,
+    validation::hardened_validator_parser::{
+        CassandraVersion, HardenedValidatorConfig, HardenedValidatorParser, MemoryLimits,
+        PerformanceTargets,
+    },
 };
-use std::{
-    path::PathBuf,
-    process,
-    time::Instant,
-};
+use log::{error, info, warn};
+use std::{path::PathBuf, process, time::Instant};
 use tokio;
-use log::{info, error, warn};
 
 #[tokio::main]
 async fn main() {
@@ -142,13 +138,14 @@ async fn main() {
     }
 
     // Parse command line arguments
-    let target_version = match CassandraVersion::from_str(matches.get_one::<String>("target-version").unwrap()) {
-        Ok(version) => version,
-        Err(e) => {
-            error!("Invalid target version: {}", e);
-            process::exit(1);
-        }
-    };
+    let target_version =
+        match CassandraVersion::from_str(matches.get_one::<String>("target-version").unwrap()) {
+            Ok(version) => version,
+            Err(e) => {
+                error!("Invalid target version: {}", e);
+                process::exit(1);
+            }
+        };
 
     let test_data_paths: Vec<PathBuf> = matches
         .get_many::<String>("test-data-paths")
@@ -181,7 +178,9 @@ async fn main() {
     // Generate test data if requested
     if generate_test_data {
         info!("🔧 Generating comprehensive test data...");
-        if let Err(e) = generate_comprehensive_test_data(&target_version, cassandra_host, cassandra_port).await {
+        if let Err(e) =
+            generate_comprehensive_test_data(&target_version, cassandra_host, cassandra_port).await
+        {
             error!("Failed to generate test data: {}", e);
             process::exit(1);
         }
@@ -237,33 +236,84 @@ async fn main() {
     info!("✅ Validation completed in {:?}", total_time);
     info!("Status: {:?}", validation_result.status);
 
-    let total_files: usize = validation_result.version_results.values().map(|r| r.files_processed).sum();
-    let total_success: usize = validation_result.version_results.values().map(|r| r.successful_parses).sum();
-    let total_false_positives: usize = validation_result.version_results.values().map(|r| r.false_positives).sum();
-    let total_false_negatives: usize = validation_result.version_results.values().map(|r| r.false_negatives).sum();
+    let total_files: usize = validation_result
+        .version_results
+        .values()
+        .map(|r| r.files_processed)
+        .sum();
+    let total_success: usize = validation_result
+        .version_results
+        .values()
+        .map(|r| r.successful_parses)
+        .sum();
+    let total_false_positives: usize = validation_result
+        .version_results
+        .values()
+        .map(|r| r.false_positives)
+        .sum();
+    let total_false_negatives: usize = validation_result
+        .version_results
+        .values()
+        .map(|r| r.false_negatives)
+        .sum();
 
     info!("📊 Summary Statistics:");
     info!("  Total test files: {}", total_files);
     info!("  Successful parses: {}", total_success);
     info!("  False positives: {}", total_false_positives);
     info!("  False negatives: {}", total_false_negatives);
-    info!("  Overall accuracy: {:.2}%", if total_files > 0 { (total_success as f64 / total_files as f64) * 100.0 } else { 0.0 });
-    info!("  Throughput: {:.2} MB/s", validation_result.performance_metrics.throughput_mbs);
-    info!("  Peak memory: {:.1} MB", validation_result.performance_metrics.memory_stats.peak_memory_mb);
+    info!(
+        "  Overall accuracy: {:.2}%",
+        if total_files > 0 {
+            (total_success as f64 / total_files as f64) * 100.0
+        } else {
+            0.0
+        }
+    );
+    info!(
+        "  Throughput: {:.2} MB/s",
+        validation_result.performance_metrics.throughput_mbs
+    );
+    info!(
+        "  Peak memory: {:.1} MB",
+        validation_result
+            .performance_metrics
+            .memory_stats
+            .peak_memory_mb
+    );
 
     // Performance analysis
     if benchmark_mode {
         info!("🏎️  Performance Benchmark Results:");
         let vs_targets = &validation_result.performance_metrics.vs_targets;
-        info!("  All targets met: {}", if vs_targets.all_targets_met { "✅" } else { "❌" });
-        info!("  Time per MB ratio: {:.2}x (target)", vs_targets.time_per_mb_ratio);
-        info!("  Throughput ratio: {:.2}x (target)", vs_targets.throughput_ratio);
-        info!("  Memory efficiency: {:.2}x (target)", vs_targets.memory_ratio);
-        
+        info!(
+            "  All targets met: {}",
+            if vs_targets.all_targets_met {
+                "✅"
+            } else {
+                "❌"
+            }
+        );
+        info!(
+            "  Time per MB ratio: {:.2}x (target)",
+            vs_targets.time_per_mb_ratio
+        );
+        info!(
+            "  Throughput ratio: {:.2}x (target)",
+            vs_targets.throughput_ratio
+        );
+        info!(
+            "  Memory efficiency: {:.2}x (target)",
+            vs_targets.memory_ratio
+        );
+
         if !vs_targets.all_targets_met {
             warn!("⚠️  Performance targets not met!");
             if vs_targets.time_per_mb_ratio > 1.0 {
-                warn!("  - Processing time exceeds {:.1} ms/MB target", max_ms_per_mb);
+                warn!(
+                    "  - Processing time exceeds {:.1} ms/MB target",
+                    max_ms_per_mb
+                );
             }
             if vs_targets.throughput_ratio < 1.0 {
                 warn!("  - Throughput below {:.1} MB/s target", min_throughput_mbs);
@@ -274,15 +324,16 @@ async fn main() {
     // Version-specific results
     info!("🔀 Version-Specific Results:");
     for (version, result) in &validation_result.version_results {
-        info!("  Cassandra {}: {:.1}% accuracy ({}/{})", 
-            version, 
-            result.accuracy_percentage,
-            result.successful_parses,
-            result.files_processed
+        info!(
+            "  Cassandra {}: {:.1}% accuracy ({}/{})",
+            version, result.accuracy_percentage, result.successful_parses, result.files_processed
         );
-        
+
         if !result.complex_type_results.is_empty() {
-            info!("    Complex types tested: {}", result.complex_type_results.len());
+            info!(
+                "    Complex types tested: {}",
+                result.complex_type_results.len()
+            );
             for (type_name, type_result) in &result.complex_type_results {
                 let success_rate = if type_result.tests_run > 0 {
                     (type_result.tests_passed as f64 / type_result.tests_run as f64) * 100.0
@@ -297,19 +348,25 @@ async fn main() {
     // Error analysis
     if validation_result.error_analysis.total_errors > 0 {
         warn!("⚠️  Error Analysis:");
-        warn!("  Total errors: {}", validation_result.error_analysis.total_errors);
-        
+        warn!(
+            "  Total errors: {}",
+            validation_result.error_analysis.total_errors
+        );
+
         if !validation_result.error_analysis.critical_errors.is_empty() {
             error!("🚨 Critical errors detected:");
             for critical_error in &validation_result.error_analysis.critical_errors {
                 error!("    {}", critical_error);
             }
         }
-        
+
         if !validation_result.error_analysis.error_patterns.is_empty() {
             warn!("  Error patterns identified:");
             for pattern in &validation_result.error_analysis.error_patterns {
-                warn!("    {}: {} occurrences", pattern.pattern, pattern.occurrences);
+                warn!(
+                    "    {}: {} occurrences",
+                    pattern.pattern, pattern.occurrences
+                );
                 warn!("      Recommendation: {}", pattern.recommendation);
             }
         }
@@ -317,9 +374,18 @@ async fn main() {
 
     // Coverage analysis
     info!("📈 Test Coverage:");
-    info!("  Coverage percentage: {:.1}%", validation_result.coverage_metrics.coverage_percentage);
-    info!("  Types tested: {}", validation_result.coverage_metrics.types_tested.len());
-    info!("  Edge cases covered: {}", validation_result.coverage_metrics.edge_cases_covered);
+    info!(
+        "  Coverage percentage: {:.1}%",
+        validation_result.coverage_metrics.coverage_percentage
+    );
+    info!(
+        "  Types tested: {}",
+        validation_result.coverage_metrics.types_tested.len()
+    );
+    info!(
+        "  Edge cases covered: {}",
+        validation_result.coverage_metrics.edge_cases_covered
+    );
 
     // Generate detailed report
     info!("📝 Generating detailed validation report...");
@@ -368,10 +434,21 @@ async fn main() {
         process::exit(3);
     }
 
-    if !validation_result.performance_metrics.vs_targets.all_targets_met {
+    if !validation_result
+        .performance_metrics
+        .vs_targets
+        .all_targets_met
+    {
         error!("❌ CRITICAL: Performance targets not met!");
         error!("   Required: sub-second per MB processing");
-        error!("   Actual: {:.1} ms/MB", max_ms_per_mb * validation_result.performance_metrics.vs_targets.time_per_mb_ratio);
+        error!(
+            "   Actual: {:.1} ms/MB",
+            max_ms_per_mb
+                * validation_result
+                    .performance_metrics
+                    .vs_targets
+                    .time_per_mb_ratio
+        );
         process::exit(4);
     }
 
@@ -380,15 +457,20 @@ async fn main() {
 }
 
 /// Generate comprehensive test data using the Python script
-async fn generate_comprehensive_test_data(version: &CassandraVersion, host: &str, port: u16) -> Result<()> {
+async fn generate_comprehensive_test_data(
+    version: &CassandraVersion,
+    host: &str,
+    port: u16,
+) -> Result<()> {
     use tokio::process::Command;
 
     let script_path = "scripts/generate_hardened_validator_test_data.py";
-    
+
     if !std::path::Path::new(script_path).exists() {
-        return Err(cqlite_core::error::Error::internal(
-            format!("Test data generation script not found: {}", script_path)
-        ));
+        return Err(cqlite_core::error::Error::internal(format!(
+            "Test data generation script not found: {}",
+            script_path
+        )));
     }
 
     let mut cmd = Command::new("python3");
@@ -405,9 +487,10 @@ async fn generate_comprehensive_test_data(version: &CassandraVersion, host: &str
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(cqlite_core::error::Error::internal(
-            format!("Test data generation failed: {}", stderr)
-        ));
+        return Err(cqlite_core::error::Error::internal(format!(
+            "Test data generation failed: {}",
+            stderr
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -432,11 +515,16 @@ mod tests {
     #[test]
     fn test_cli_argument_parsing() {
         // Test that CLI arguments are correctly structured
-        let cmd = Command::new("hardened-validator")
-            .arg(Arg::new("target-version").long("target-version").value_parser(["3.7", "3.11", "4.0", "4.1", "5.0"]));
-        
+        let cmd = Command::new("hardened-validator").arg(
+            Arg::new("target-version")
+                .long("target-version")
+                .value_parser(["3.7", "3.11", "4.0", "4.1", "5.0"]),
+        );
+
         // This test ensures the CLI structure is valid
-        assert!(cmd.try_get_matches_from(vec!["hardened-validator", "--target-version", "5.0"]).is_ok());
+        assert!(cmd
+            .try_get_matches_from(vec!["hardened-validator", "--target-version", "5.0"])
+            .is_ok());
     }
 
     #[tokio::test]

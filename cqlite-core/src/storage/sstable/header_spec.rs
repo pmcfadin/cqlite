@@ -15,14 +15,14 @@
 use crate::{
     error::{Error, Result},
     parser::{
-        header::{CassandraVersion, parse_magic_and_version},
+        header::{parse_magic_and_version, CassandraVersion},
         vint::{parse_vint, parse_vint_length},
     },
 };
 use nom::{
-    IResult,
     bytes::complete::take,
     number::complete::{be_u16, be_u32, be_u64, le_u32},
+    IResult,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -436,8 +436,8 @@ pub fn parse_component_header(input: &[u8], spec: &ComponentHeaderSpec) -> Resul
     // Validate minimum input size
     if input.len() < spec.field_layout.min_size {
         return Err(Error::corruption(format!(
-            "Insufficient data for {} header: need {} bytes, have {}",
-            format!("{:?}", spec.component_type),
+            "Insufficient data for {:?} header: need {} bytes, have {}",
+            spec.component_type,
             spec.field_layout.min_size,
             input.len()
         )));
@@ -740,7 +740,7 @@ impl HeaderSpecRegistry {
             let mut magic_spec = self.get_spec(SSTableComponentType::Summary)?.clone();
             magic_spec.has_magic_number = true;
             magic_spec.magic_number = Some(0x43515354); // "CQST"
-            // Remove version field since it's handled by magic parsing
+                                                        // Remove version field since it's handled by magic parsing
             magic_spec
                 .field_layout
                 .fields

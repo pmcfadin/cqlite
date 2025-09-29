@@ -6,11 +6,11 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        Config, Database,
-        query::{SelectExecutor, SelectOptimizer, SelectStatement, parse_select},
+        query::{parse_select, SelectExecutor, SelectOptimizer, SelectStatement},
         schema::SchemaManager,
         storage::StorageEngine,
         types::{TableId, Value},
+        Config, Database,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -123,7 +123,7 @@ mod tests {
             println!("INFO: Skipping test_aggregation_functions in CI environment");
             return;
         }
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{timeout, Duration};
         let (db, _temp_dir) = create_test_database().await;
 
         // Create table
@@ -201,7 +201,7 @@ mod tests {
             .await
             .unwrap();
 
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{timeout, Duration};
 
         let result = timeout(
             Duration::from_secs(1),
@@ -247,7 +247,7 @@ mod tests {
             .await
             .unwrap();
 
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{timeout, Duration};
 
         let result = timeout(
             Duration::from_secs(2),
@@ -294,7 +294,7 @@ mod tests {
             .unwrap();
         }
 
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{timeout, Duration};
 
         let result = timeout(
             Duration::from_secs(2),
@@ -362,7 +362,7 @@ mod tests {
             .unwrap();
         }
 
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{timeout, Duration};
 
         let result = timeout(
             Duration::from_secs(2),
@@ -415,7 +415,7 @@ mod tests {
             .await
             .unwrap();
 
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{timeout, Duration};
 
         let result = timeout(
             Duration::from_millis(0),
@@ -573,7 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_performance_with_large_dataset() {
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{timeout, Duration};
 
         // Keep this test bounded to avoid timeouts on CI runners
         let ci = std::env::var("CI").is_ok();

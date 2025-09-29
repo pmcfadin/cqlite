@@ -10,14 +10,14 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use cqlite_core::{
-    Error, Result,
     config::Config,
     platform::Platform,
     storage::sstable::{
-        SSTableManager,
         bulletproof_reader::BulletproofReader,
         reader::{IntegrityStatus, SSTableReader},
+        SSTableManager,
     },
+    Error, Result,
 };
 
 /// Comprehensive test result reporting

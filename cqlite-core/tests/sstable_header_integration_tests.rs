@@ -4,18 +4,18 @@
 //! SSTable reading pipeline and error handling propagates properly.
 
 use cqlite_core::{
-    Config,
     error::{Error, ErrorCategory},
     parser::header::{
-        CassandraVersion, ColumnInfo, CompressionInfo, SSTABLE_MAGIC, SSTableHeader, SSTableStats,
-        SUPPORTED_VERSION, parse_sstable_header, serialize_sstable_header,
+        parse_sstable_header, serialize_sstable_header, CassandraVersion, ColumnInfo,
+        CompressionInfo, SSTableHeader, SSTableStats, SSTABLE_MAGIC, SUPPORTED_VERSION,
     },
     platform::Platform,
     storage::sstable::{
-        SSTableManager,
         format_detector::{FormatDetector, SSTableFormat, SSTableInfo},
         reader::SSTableReader,
+        SSTableManager,
     },
+    Config,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;

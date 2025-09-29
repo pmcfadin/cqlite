@@ -698,16 +698,12 @@ mod tests {
         let engine = ValidationEngine::new(config);
         let test_cases = engine.generate_edge_case_test_cases();
         assert!(test_cases.len() >= 5);
-        assert!(
-            test_cases
-                .iter()
-                .any(|tc| matches!(tc.test_type, EdgeCaseType::EmptyData))
-        );
-        assert!(
-            test_cases
-                .iter()
-                .any(|tc| matches!(tc.test_type, EdgeCaseType::NullValues))
-        );
+        assert!(test_cases
+            .iter()
+            .any(|tc| matches!(tc.test_type, EdgeCaseType::EmptyData)));
+        assert!(test_cases
+            .iter()
+            .any(|tc| matches!(tc.test_type, EdgeCaseType::NullValues)));
     }
 
     #[test]

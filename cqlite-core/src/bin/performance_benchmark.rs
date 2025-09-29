@@ -4,12 +4,12 @@
 
 #[cfg(feature = "benchmarks")]
 use cqlite_core::{
-    RowKey, Value,
     parser::{
         benchmarks::ParserBenchmarks,
         m3_performance_benchmarks::M3PerformanceBenchmarks,
         vint::{encode_vint, parse_vint},
     },
+    RowKey, Value,
 };
 #[cfg(feature = "benchmarks")]
 use std::collections::HashMap;

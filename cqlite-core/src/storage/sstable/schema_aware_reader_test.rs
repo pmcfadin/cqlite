@@ -4,9 +4,12 @@
 mod tests {
     use super::super::schema_aware_reader::*;
     use crate::{
-        Config,
         platform::Platform,
-        schema::{ClusteringColumn, Column, KeyColumn, TableSchema, registry::SchemaRegistry},
+        schema::{
+            registry::SchemaRegistry, ClusteringColumn, ClusteringOrder, Column, KeyColumn,
+            TableSchema,
+        },
+        Config,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -24,7 +27,7 @@ mod tests {
                 name: "timestamp".to_string(),
                 data_type: "timestamp".to_string(),
                 position: 0,
-                order: "ASC".to_string(),
+                order: ClusteringOrder::Asc,
             }],
             columns: vec![
                 Column {
@@ -102,7 +105,7 @@ mod tests {
             name: "other_ts".to_string(),
             data_type: "timestamp".to_string(),
             position: 2, // Non-contiguous - should be 1
-            order: "ASC".to_string(),
+            order: ClusteringOrder::Asc,
         });
 
         assert!(SchemaAwareReader::validate_schema_completeness(&schema).is_err());

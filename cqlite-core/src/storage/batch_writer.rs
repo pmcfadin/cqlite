@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::storage::sstable::SSTableManager;
 use crate::storage::wal::WriteAheadLog;
-use crate::{Config, Result, RowKey, Value, types::TableId};
+use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// Batch writer for efficient write operations
 #[derive(Debug)]
@@ -175,7 +175,7 @@ impl BatchWriter {
         let start_time = Instant::now();
 
         // Add timeout protection to prevent hanging
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{timeout, Duration};
         let operation_timeout = Duration::from_secs(30);
 
         let result = timeout(operation_timeout, async {
@@ -367,7 +367,7 @@ impl BatchWriter {
         // Ensure small batches are flushed
         {
             // Add timeout protection here as well
-            use tokio::time::{Duration, timeout};
+            use tokio::time::{timeout, Duration};
             let operation_timeout = Duration::from_secs(30);
 
             let result = timeout(operation_timeout, self.flush()).await;

@@ -391,8 +391,7 @@ impl CollectionBenchmarks {
             )?;
 
             // Large integer list
-            let large_int_list =
-                Value::List((0i32..size).map(Value::Integer).collect());
+            let large_int_list = Value::List((0i32..size).map(Value::Integer).collect());
 
             self.benchmark_collection_roundtrip(
                 "parse_serialize",

@@ -11,9 +11,9 @@ use crate::{
 
 use super::header_spec::get_global_registry;
 use nom::{
-    IResult,
     bytes::complete::take,
     number::complete::{be_u16, be_u32, be_u64},
+    IResult,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

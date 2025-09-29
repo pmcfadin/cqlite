@@ -176,6 +176,7 @@ impl Default for FormatDetector {
 
 /// SSTable file components
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum SSTableComponent {
     Data,
     Index,

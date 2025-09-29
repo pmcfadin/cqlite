@@ -10,19 +10,19 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cqlite_core::{
-    Config, RowKey, Value,
     error::{Error, Result},
+    parser::header::CassandraVersion,
     platform::Platform,
+    schema::{registry::SchemaRegistry, TableSchema},
     storage::sstable::{
-        reader::SSTableReader,
+        compression::{CompressionInfo, CompressionReader},
         index_reader::IndexReader,
+        reader::SSTableReader,
         statistics_reader::StatisticsReader,
         summary_reader::SummaryReader,
-        compression::{CompressionReader, CompressionInfo},
     },
-    schema::{TableSchema, registry::SchemaRegistry},
     types::{ComparatorType, TableId},
-    parser::header::CassandraVersion,
+    Config, RowKey, Value,
 };
 
 use tokio::fs;
@@ -77,8 +77,9 @@ impl ComponentIntegrationTestFixture {
 
     /// Setup SSTable reader for real dataset testing (fallback)
     async fn setup_real_dataset_reader(&self) -> Result<SSTableReader> {
-        let fallback_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let fallback_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
+        );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
             return Err(Error::io_error(format!(
@@ -111,7 +112,7 @@ impl ComponentIntegrationTestFixture {
 
         if existing_components.is_empty() {
             return Err(Error::io_error(
-                "No fixture components found. Please run create_fixtures.py first."
+                "No fixture components found. Please run create_fixtures.py first.",
             ));
         }
 
@@ -135,7 +136,10 @@ async fn test_component_integration_health_check() -> Result<()> {
 
     // Verify fixture components exist
     let components = fixture.verify_fixture_components().await?;
-    assert!(!components.is_empty(), "Should have at least one fixture component");
+    assert!(
+        !components.is_empty(),
+        "Should have at least one fixture component"
+    );
 
     println!("✅ Found {} fixture components:", components.len());
     for component in &components {
@@ -170,14 +174,14 @@ async fn test_partition_lookup_component_integration() -> Result<()> {
     let fixture = ComponentIntegrationTestFixture::new().await?;
     let reader = match fixture.setup_minimal_fixture_reader().await {
         Ok(reader) => reader,
-        Err(_) => fixture.setup_real_dataset_reader().await?
+        Err(_) => fixture.setup_real_dataset_reader().await?,
     };
 
     let table_id = TableId::new("test_keyspace", "test_table");
 
     // Test 1: Basic partition lookup with component integration
     let test_keys = vec![
-        RowKey::from_bytes(&1i32.to_be_bytes()),  // Integer key 1 (from fixture)
+        RowKey::from_bytes(&1i32.to_be_bytes()), // Integer key 1 (from fixture)
         RowKey::from_bytes(b"test_partition_key"),
         RowKey::from_bytes(b"non_existent_key"),
     ];
@@ -191,20 +195,30 @@ async fn test_partition_lookup_component_integration() -> Result<()> {
 
         match result {
             Some(value) => {
-                println!("  ✅ Key {}: Found {} bytes in {:?}", i+1, value.len(), lookup_duration);
+                println!(
+                    "  ✅ Key {}: Found {} bytes in {:?}",
+                    i + 1,
+                    value.len(),
+                    lookup_duration
+                );
 
                 // Verify value is reasonable
                 assert!(!value.is_empty(), "Value should not be empty");
 
                 // For minimal fixture, expect "test" value
                 if value.len() == 4 && &value == b"test" {
-                    println!("    📋 Found expected fixture value: {:?}",
-                             String::from_utf8_lossy(&value));
+                    println!(
+                        "    📋 Found expected fixture value: {:?}",
+                        String::from_utf8_lossy(&value)
+                    );
                 }
             }
             None => {
-                println!("  ℹ️  Key {}: Not found in {:?} (expected for some keys)",
-                         i+1, lookup_duration);
+                println!(
+                    "  ℹ️  Key {}: Not found in {:?} (expected for some keys)",
+                    i + 1,
+                    lookup_duration
+                );
             }
         }
 
@@ -218,8 +232,10 @@ async fn test_partition_lookup_component_integration() -> Result<()> {
 
     // Test 2: Verify component stats after lookups
     let stats = reader.stats().await?;
-    println!("📊 Post-lookup stats: cache_hits={}, file_size={}",
-             stats.cache_hits, stats.file_size);
+    println!(
+        "📊 Post-lookup stats: cache_hits={}, file_size={}",
+        stats.cache_hits, stats.file_size
+    );
 
     Ok(())
 }
@@ -229,7 +245,7 @@ async fn test_range_scan_component_integration() -> Result<()> {
     let fixture = ComponentIntegrationTestFixture::new().await?;
     let reader = match fixture.setup_minimal_fixture_reader().await {
         Ok(reader) => reader,
-        Err(_) => fixture.setup_real_dataset_reader().await?
+        Err(_) => fixture.setup_real_dataset_reader().await?,
     };
 
     let table_id = TableId::new("test_keyspace", "test_table");
@@ -241,8 +257,11 @@ async fn test_range_scan_component_integration() -> Result<()> {
     let full_results = reader.scan(&table_id, None, None, None).await?;
     let full_scan_duration = start_time.elapsed();
 
-    println!("  ✅ Full scan: {} entries in {:?}",
-             full_results.len(), full_scan_duration);
+    println!(
+        "  ✅ Full scan: {} entries in {:?}",
+        full_results.len(),
+        full_scan_duration
+    );
 
     // Performance assertion for full scan
     assert!(
@@ -256,8 +275,11 @@ async fn test_range_scan_component_integration() -> Result<()> {
     let limited_results = reader.scan(&table_id, None, None, Some(10)).await?;
     let limited_scan_duration = start_time.elapsed();
 
-    println!("  ✅ Limited scan (10): {} entries in {:?}",
-             limited_results.len(), limited_scan_duration);
+    println!(
+        "  ✅ Limited scan (10): {} entries in {:?}",
+        limited_results.len(),
+        limited_scan_duration
+    );
 
     // Verify limit is respected
     assert!(
@@ -278,11 +300,16 @@ async fn test_range_scan_component_integration() -> Result<()> {
     let end_key = RowKey::from_bytes(&100i32.to_be_bytes());
 
     let start_time = Instant::now();
-    let range_results = reader.scan(&table_id, Some(&start_key), Some(&end_key), None).await?;
+    let range_results = reader
+        .scan(&table_id, Some(&start_key), Some(&end_key), None)
+        .await?;
     let range_scan_duration = start_time.elapsed();
 
-    println!("  ✅ Range scan [0-100]: {} entries in {:?}",
-             range_results.len(), range_scan_duration);
+    println!(
+        "  ✅ Range scan [0-100]: {} entries in {:?}",
+        range_results.len(),
+        range_scan_duration
+    );
 
     // Verify results are within range
     for (key, _value) in &range_results {
@@ -296,7 +323,7 @@ async fn test_range_scan_component_integration() -> Result<()> {
     if range_results.len() > 1 {
         for i in 1..range_results.len() {
             assert!(
-                range_results[i-1].0 <= range_results[i].0,
+                range_results[i - 1].0 <= range_results[i].0,
                 "Scan results should be ordered"
             );
         }
@@ -315,7 +342,7 @@ async fn test_decompression_component_integration() -> Result<()> {
         Ok(reader) => {
             println!("🔍 Testing decompression with real dataset");
             reader
-        },
+        }
         Err(_) => {
             println!("ℹ️  Real dataset not available, using minimal fixture");
             fixture.setup_minimal_fixture_reader().await?
@@ -335,8 +362,11 @@ async fn test_decompression_component_integration() -> Result<()> {
     let results = reader.scan(&table_id, None, None, Some(50)).await?;
     let decompression_duration = start_time.elapsed();
 
-    println!("  ✅ Decompressed {} entries in {:?}",
-             results.len(), decompression_duration);
+    println!(
+        "  ✅ Decompressed {} entries in {:?}",
+        results.len(),
+        decompression_duration
+    );
 
     // Performance assertion: Decompression should not significantly slow down reads
     assert!(
@@ -368,8 +398,11 @@ async fn test_decompression_component_integration() -> Result<()> {
 
     match lookup_result {
         Some(value) => {
-            println!("  ✅ Decompressed lookup: {} bytes in {:?}",
-                     value.len(), lookup_duration);
+            println!(
+                "  ✅ Decompressed lookup: {} bytes in {:?}",
+                value.len(),
+                lookup_duration
+            );
 
             // Verify decompressed value
             assert!(!value.is_empty(), "Decompressed value should not be empty");
@@ -394,7 +427,7 @@ async fn test_end_to_end_component_integration() -> Result<()> {
     let fixture = ComponentIntegrationTestFixture::new().await?;
     let reader = match fixture.setup_minimal_fixture_reader().await {
         Ok(reader) => reader,
-        Err(_) => fixture.setup_real_dataset_reader().await?
+        Err(_) => fixture.setup_real_dataset_reader().await?,
     };
 
     let table_id = TableId::new("test_keyspace", "test_table");
@@ -435,7 +468,9 @@ async fn test_end_to_end_component_integration() -> Result<()> {
             ("scan", "range") => {
                 let start_key = RowKey::from_bytes(&0i32.to_be_bytes());
                 let end_key = RowKey::from_bytes(&10i32.to_be_bytes());
-                let _results = reader.scan(&table_id, Some(&start_key), Some(&end_key), None).await?;
+                let _results = reader
+                    .scan(&table_id, Some(&start_key), Some(&end_key), None)
+                    .await?;
             }
             _ => {}
         }
@@ -462,9 +497,15 @@ async fn test_end_to_end_component_integration() -> Result<()> {
 
     println!("📊 Final integration stats:");
     println!("  - Operations completed successfully");
-    println!("  - File still accessible: {}", final_health.file_accessible);
+    println!(
+        "  - File still accessible: {}",
+        final_health.file_accessible
+    );
     println!("  - Cache efficiency: {} hits", final_stats.cache_hits);
-    println!("  - Memory usage: {} bytes", final_health.estimated_memory_usage);
+    println!(
+        "  - Memory usage: {} bytes",
+        final_health.estimated_memory_usage
+    );
 
     // Test 5: Cross-validation between get and scan
     let scan_results = reader.scan(&table_id, None, None, Some(3)).await?;
@@ -493,14 +534,19 @@ async fn test_component_integration_error_handling() -> Result<()> {
 
     // Test 1: Non-existent file handling
     let non_existent_path = PathBuf::from("/tmp/non_existent_sstable.db");
-    let result = SSTableReader::open(&non_existent_path, &fixture.config, fixture.platform.clone()).await;
+    let result = SSTableReader::open(
+        &non_existent_path,
+        &fixture.config,
+        fixture.platform.clone(),
+    )
+    .await;
     assert!(result.is_err(), "Should fail for non-existent file");
     println!("  ✅ Non-existent file handled correctly");
 
     // Test 2: Operations on working reader
     let reader = match fixture.setup_minimal_fixture_reader().await {
         Ok(reader) => reader,
-        Err(_) => fixture.setup_real_dataset_reader().await?
+        Err(_) => fixture.setup_real_dataset_reader().await?,
     };
 
     let table_id = TableId::new("test_keyspace", "test_table");
@@ -516,8 +562,11 @@ async fn test_component_integration_error_handling() -> Result<()> {
         let result = reader.get(&table_id, &key).await;
         match result {
             Ok(value) => {
-                println!("  ✅ Edge case {}: handled, result={:?}",
-                         case_name, value.is_some());
+                println!(
+                    "  ✅ Edge case {}: handled, result={:?}",
+                    case_name,
+                    value.is_some()
+                );
             }
             Err(e) => {
                 println!("  ✅ Edge case {}: handled error: {}", case_name, e);
@@ -535,8 +584,11 @@ async fn test_component_integration_error_handling() -> Result<()> {
         let result = reader.scan(&table_id, start, end, limit).await;
         match result {
             Ok(results) => {
-                println!("  ✅ Invalid scan {}: handled, {} results",
-                         case_name, results.len());
+                println!(
+                    "  ✅ Invalid scan {}: handled, {} results",
+                    case_name,
+                    results.len()
+                );
 
                 if let Some(limit_val) = limit {
                     if limit_val == 0 {

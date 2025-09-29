@@ -3,12 +3,12 @@
 
 use anyhow::{Context, Result};
 use cqlite_core::{
-    Config,
-    schema::{TableSchema, parse_cql_schema},
+    schema::{parse_cql_schema, TableSchema},
     storage::sstable::{
         bulletproof_reader::BulletproofReader, directory::SSTableDirectory, reader::SSTableReader,
         statistics_reader::find_statistics_file,
     },
+    Config,
 };
 use csv;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::cli::{
-    InfoOutputFormat, create_version_error, detect_sstable_version, validate_cassandra_version,
+    create_version_error, detect_sstable_version, validate_cassandra_version, InfoOutputFormat,
 };
 
 /// Main info command implementation

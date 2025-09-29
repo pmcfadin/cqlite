@@ -14,7 +14,6 @@ use std::time::Instant;
 
 #[cfg(feature = "benchmarks")]
 use cqlite_core::{
-    Config,
     platform::Platform,
     storage::sstable::{
         compression::{CompressionPriority, StreamingDecompressor},
@@ -22,6 +21,7 @@ use cqlite_core::{
         streaming_reader::{StreamingReaderConfig, StreamingSSTableReader},
     },
     types::TableId,
+    Config,
 };
 
 #[cfg(feature = "benchmarks")]

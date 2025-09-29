@@ -10,20 +10,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
-    Config, RowKey,
     error::{Error, Result},
     parser::header::CassandraVersion,
     platform::Platform,
     schema::{
-        CqlType, TableSchema,
         parser::SchemaParser,
         registry::{ParsingContext, SchemaRegistry},
+        CqlType, TableSchema,
     },
     storage::sstable::{
         format_detector::SSTableFormat,
         reader::{SSTableReader, SSTableReaderStats},
     },
     types::{ComparatorType, Value},
+    Config, RowKey,
 };
 
 /// Schema-aware SSTable reader that uses SchemaParser for all value parsing
@@ -594,7 +594,7 @@ impl From<SchemaAwareReaderError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{ClusteringColumn, Column, KeyColumn};
+    use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn};
 
     fn create_test_schema() -> TableSchema {
         TableSchema {
@@ -609,7 +609,7 @@ mod tests {
                 name: "timestamp".to_string(),
                 data_type: "timestamp".to_string(),
                 position: 0,
-                order: "ASC".to_string(),
+                order: ClusteringOrder::Asc,
             }],
             columns: vec![
                 Column {

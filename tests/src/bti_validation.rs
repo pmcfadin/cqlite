@@ -5,7 +5,7 @@
 
 use cqlite_core::{
     error::Error,
-    parser::{SSTableParser, header::*},
+    parser::{header::*, SSTableParser},
 };
 use std::fs;
 use std::path::PathBuf;
@@ -194,8 +194,8 @@ impl BtiValidationSuite {
     /// Parse BTI header from bytes
     pub fn parse_bti_header(&self, input: &[u8]) -> Result<(BtiHeader, usize), Error> {
         use nom::{
-            IResult,
             number::complete::{be_u16, be_u32, be_u64},
+            IResult,
         };
 
         fn parse_compression_info(input: &[u8]) -> IResult<&[u8], CompressionInfo> {
@@ -268,10 +268,10 @@ impl BtiValidationSuite {
     /// Parse BTI node from bytes
     pub fn parse_bti_node(&self, input: &[u8]) -> Result<(BtiNode, usize), Error> {
         use nom::{
-            IResult,
             bytes::complete::take,
             multi::count,
-            number::complete::{be_u8, be_u16, be_u32, be_u64},
+            number::complete::{be_u16, be_u32, be_u64, be_u8},
+            IResult,
         };
 
         fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {

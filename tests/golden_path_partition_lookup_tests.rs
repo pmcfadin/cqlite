@@ -17,18 +17,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cqlite_core::{
-    Config, RowKey, Value,
     error::{Error, Result},
-    platform::Platform,
-    storage::sstable::{
-        reader::SSTableReader,
-        schema_aware_reader::SchemaAwareReader,
-        summary_reader::SummaryReader,
-        index_reader::IndexReader,
-    },
-    schema::{TableSchema, KeyColumn, ClusteringColumn, registry::SchemaRegistry},
-    types::{ComparatorType, TableId},
     parser::row::PartitionKey,
+    platform::Platform,
+    schema::{registry::SchemaRegistry, ClusteringColumn, KeyColumn, TableSchema},
+    storage::sstable::{
+        index_reader::IndexReader, reader::SSTableReader, schema_aware_reader::SchemaAwareReader,
+        summary_reader::SummaryReader,
+    },
+    types::{ComparatorType, TableId},
+    Config, RowKey, Value,
 };
 
 use tokio::fs;
@@ -52,8 +50,8 @@ impl GoldenPathPartitionTestFixture {
         let platform = Arc::new(Platform::new(&config).await?);
         let schema_registry = Arc::new(SchemaRegistry::new());
 
-        let datasets_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/datasets/sstables");
+        let datasets_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/datasets/sstables");
 
         Ok(Self {
             datasets_path,
@@ -66,12 +64,14 @@ impl GoldenPathPartitionTestFixture {
     /// Setup SSTable reader for partition testing (using collections dataset)
     async fn setup_collections_reader(&self) -> Result<SSTableReader> {
         // Try collections dataset first, fallback to test_basic
-        let primary_path = self.datasets_path
+        let primary_path = self
+            .datasets_path
             .join("test_collections")
             .join("*/nb-*-big-Data.db");
 
-        let fallback_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let fallback_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
+        );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
             return Err(Error::io_error(format!(
@@ -85,8 +85,9 @@ impl GoldenPathPartitionTestFixture {
 
     /// Setup wide rows reader for multi-partition testing
     async fn setup_wide_rows_reader(&self) -> Result<SSTableReader> {
-        let fallback_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let fallback_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
+        );
 
         if !fs::metadata(&fallback_path).await.is_ok() {
             return Err(Error::io_error(format!(
@@ -135,7 +136,10 @@ async fn test_golden_path_single_partition_lookup() -> Result<()> {
     let result = reader.get(&table_id, &partition_key).await?;
     let lookup_duration = start_time.elapsed();
 
-    println!("✅ Single partition lookup completed in {:?}", lookup_duration);
+    println!(
+        "✅ Single partition lookup completed in {:?}",
+        lookup_duration
+    );
 
     // Performance assertion: Partition lookups should be very fast
     assert!(
@@ -191,8 +195,11 @@ async fn test_golden_path_multi_partition_scanning() -> Result<()> {
 
     let avg_lookup_time = total_lookup_time / partition_keys.len() as u32;
 
-    println!("✅ Multi-partition scan: {}/{} partitions found",
-             found_partitions, partition_keys.len());
+    println!(
+        "✅ Multi-partition scan: {}/{} partitions found",
+        found_partitions,
+        partition_keys.len()
+    );
     println!("✅ Average partition lookup time: {:?}", avg_lookup_time);
 
     // Performance assertion for batch lookups
@@ -217,11 +224,24 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
     let end_partition = RowKey::from_bytes(b"partition_boundary_end");
 
     let start_time = Instant::now();
-    let results = reader.scan(&table_id, Some(&start_partition), Some(&end_partition), Some(100)).await?;
+    let results = reader
+        .scan(
+            &table_id,
+            Some(&start_partition),
+            Some(&end_partition),
+            Some(100),
+        )
+        .await?;
     let scan_duration = start_time.elapsed();
 
-    println!("✅ Partition boundary scan completed in {:?}", scan_duration);
-    println!("✅ Found {} entries across partition boundaries", results.len());
+    println!(
+        "✅ Partition boundary scan completed in {:?}",
+        scan_duration
+    );
+    println!(
+        "✅ Found {} entries across partition boundaries",
+        results.len()
+    );
 
     // Performance assertion
     assert!(
@@ -241,7 +261,10 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
             }
         }
 
-        println!("✅ Scan covered {} unique partition prefixes", unique_partition_prefixes.len());
+        println!(
+            "✅ Scan covered {} unique partition prefixes",
+            unique_partition_prefixes.len()
+        );
     }
 
     Ok(())
@@ -286,11 +309,21 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
     let partition_end = RowKey::from_bytes(format!("{}:cluster_999", base_partition).as_bytes());
 
     let start_time = Instant::now();
-    let range_results = reader.scan(&table_id, Some(&partition_start), Some(&partition_end), Some(50)).await?;
+    let range_results = reader
+        .scan(
+            &table_id,
+            Some(&partition_start),
+            Some(&partition_end),
+            Some(50),
+        )
+        .await?;
     let range_duration = start_time.elapsed();
 
-    println!("✅ Clustering key range scan found {} entries in {:?}",
-             range_results.len(), range_duration);
+    println!(
+        "✅ Clustering key range scan found {} entries in {:?}",
+        range_results.len(),
+        range_duration
+    );
 
     // Performance assertion for clustering range scan
     assert!(
@@ -344,10 +377,17 @@ async fn test_golden_path_partition_bloom_filter_efficiency() -> Result<()> {
         );
     }
 
-    let avg_bloom_time = bloom_test_times.iter().sum::<std::time::Duration>() / bloom_test_times.len() as u32;
+    let avg_bloom_time =
+        bloom_test_times.iter().sum::<std::time::Duration>() / bloom_test_times.len() as u32;
 
-    println!("✅ Bloom filter efficiency test: average lookup time {:?}", avg_bloom_time);
-    println!("✅ All {} non-existent partition lookups were efficient", non_existent_partitions.len());
+    println!(
+        "✅ Bloom filter efficiency test: average lookup time {:?}",
+        avg_bloom_time
+    );
+    println!(
+        "✅ All {} non-existent partition lookups were efficient",
+        non_existent_partitions.len()
+    );
 
     Ok(())
 }
@@ -362,9 +402,10 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
 
     // Verify reader has summary functionality
     let health_metrics = reader.health_check().await?;
-    println!("✅ Reader health: index={}, bloom={}",
-             health_metrics.index_available,
-             health_metrics.bloom_filter_enabled);
+    println!(
+        "✅ Reader health: index={}, bloom={}",
+        health_metrics.index_available, health_metrics.bloom_filter_enabled
+    );
 
     // Test partition lookup with summary index
     let test_partitions = vec![
@@ -390,7 +431,11 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
 
         match result {
             Some(value) => {
-                println!("✅ Found partition {}: {} bytes", partition_name, value.len());
+                println!(
+                    "✅ Found partition {}: {} bytes",
+                    partition_name,
+                    value.len()
+                );
             }
             None => {
                 println!("ℹ️  Partition {} not found (expected)", partition_name);
@@ -403,11 +448,16 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
     let range_end = RowKey::from_bytes(b"summary_partition_z");
 
     let start_time = Instant::now();
-    let range_results = reader.scan(&table_id, Some(&range_start), Some(&range_end), Some(25)).await?;
+    let range_results = reader
+        .scan(&table_id, Some(&range_start), Some(&range_end), Some(25))
+        .await?;
     let range_duration = start_time.elapsed();
 
-    println!("✅ Summary-assisted range scan: {} entries in {:?}",
-             range_results.len(), range_duration);
+    println!(
+        "✅ Summary-assisted range scan: {} entries in {:?}",
+        range_results.len(),
+        range_duration
+    );
 
     // Summary should make range scans efficient
     assert!(
@@ -456,8 +506,13 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
         total_duration.as_millis()
     );
 
-    println!("✅ Partition benchmark: {} lookups in {:?} (avg: {:?}, found: {})",
-             partition_keys.len(), total_duration, avg_duration, found_count);
+    println!(
+        "✅ Partition benchmark: {} lookups in {:?} (avg: {:?}, found: {})",
+        partition_keys.len(),
+        total_duration,
+        avg_duration,
+        found_count
+    );
 
     // Benchmark: Concurrent partition lookups
     let concurrent_handles = (1..=10)
@@ -480,18 +535,23 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
 
     // Verify concurrent operations
     for handle_result in concurrent_results {
-        let (id, lookup_result, duration) = handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
+        let (id, lookup_result, duration) =
+            handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
 
         lookup_result?; // Verify no errors
 
         assert!(
             duration.as_millis() < 100,
             "Concurrent partition lookup {} should be fast: {:?}ms",
-            id, duration.as_millis()
+            id,
+            duration.as_millis()
         );
     }
 
-    println!("✅ Concurrent partition benchmark: 10 lookups in {:?}", concurrent_total);
+    println!(
+        "✅ Concurrent partition benchmark: 10 lookups in {:?}",
+        concurrent_total
+    );
 
     Ok(())
 }
@@ -506,7 +566,10 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
     // Edge case 1: Empty partition key
     let empty_partition = RowKey::from_bytes(b"");
     let result = reader.get(&table_id, &empty_partition).await?;
-    assert!(result.is_none(), "Empty partition key should not match data");
+    assert!(
+        result.is_none(),
+        "Empty partition key should not match data"
+    );
 
     // Edge case 2: Maximum length partition key
     let max_partition = RowKey::from_bytes(&vec![b'p'; 1024]);
@@ -576,13 +639,17 @@ async fn test_golden_path_partition_integration_validation() -> Result<()> {
     let scan_end = RowKey::from_bytes(b"integration_scan_end");
 
     let scan_start_time = Instant::now();
-    let scan_results = reader.scan(&table_id, Some(&scan_start), Some(&scan_end), Some(20)).await?;
+    let scan_results = reader
+        .scan(&table_id, Some(&scan_start), Some(&scan_end), Some(20))
+        .await?;
     let scan_duration = scan_start_time.elapsed();
 
     // 4. Verify statistics after operations
     let post_stats = reader.stats().await?;
-    println!("✅ Post-operation stats: file_size={}, cache_hits={}",
-             post_stats.file_size, post_stats.cache_hits);
+    println!(
+        "✅ Post-operation stats: file_size={}, cache_hits={}",
+        post_stats.file_size, post_stats.cache_hits
+    );
 
     // 5. Integration performance assertions
     assert!(

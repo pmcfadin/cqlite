@@ -11,13 +11,13 @@ use cqlite_core::Result;
 
 // Import our test modules
 use cqlite_tests::{
-    format_verifier::{SSTableFormatVerifier, verify_sstable_format},
-    sstable_validator::{SSTableValidator, run_validation},
+    format_verifier::{verify_sstable_format, SSTableFormatVerifier},
+    sstable_validator::{run_validation, SSTableValidator},
 };
 
 #[cfg(feature = "benchmarks")]
 use cqlite_tests::sstable_benchmark::{
-    BenchmarkConfig, SSTableBenchmark, run_comprehensive_benchmark,
+    run_comprehensive_benchmark, BenchmarkConfig, SSTableBenchmark,
 };
 
 #[tokio::main]

@@ -3,9 +3,9 @@
 //! This module tests extreme boundary conditions, malformed data handling,
 //! and edge cases that could break Cassandra compatibility.
 
-use cqlite_core::parser::types::{CqlTypeId, parse_cql_value, serialize_cql_value};
+use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value, CqlTypeId};
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
-use cqlite_core::{Value, error::Result};
+use cqlite_core::{error::Result, Value};
 use std::collections::HashMap;
 
 /// Comprehensive edge case test suite for data types

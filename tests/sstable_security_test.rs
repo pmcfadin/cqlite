@@ -2,7 +2,9 @@
 //!
 //! Tests various attack vectors and malformed inputs to verify security fixes
 
-use cqlite_core::parser::header::{parse_magic_and_version, parse_sstable_header, CassandraVersion};
+use cqlite_core::parser::header::{
+    parse_magic_and_version, parse_sstable_header, CassandraVersion,
+};
 use cqlite_core::parser::vint::{parse_vint, parse_vint_length, MAX_VINT_SIZE};
 
 #[cfg(test)]
@@ -27,7 +29,11 @@ mod security_tests {
             data.extend_from_slice(&[0x00, 0x01]); // Valid version
 
             let result = parse_magic_and_version(&data);
-            assert!(result.is_err(), "Invalid magic 0x{:08X} should be rejected", magic);
+            assert!(
+                result.is_err(),
+                "Invalid magic 0x{:08X} should be rejected",
+                magic
+            );
         }
     }
 
@@ -48,7 +54,11 @@ mod security_tests {
             data.extend_from_slice(&version.to_be_bytes());
 
             let result = parse_magic_and_version(&data);
-            assert!(result.is_err(), "Invalid version 0x{:04X} should be rejected", version);
+            assert!(
+                result.is_err(),
+                "Invalid version 0x{:04X} should be rejected",
+                version
+            );
         }
     }
 
@@ -58,12 +68,12 @@ mod security_tests {
 
         // Test various truncation points
         let truncation_tests = vec![
-            0,  // Empty
-            1,  // Single byte
-            2,  // Two bytes
-            3,  // Three bytes
-            4,  // Just magic
-            5,  // Magic + 1 version byte
+            0, // Empty
+            1, // Single byte
+            2, // Two bytes
+            3, // Three bytes
+            4, // Just magic
+            5, // Magic + 1 version byte
         ];
 
         for size in truncation_tests {
@@ -74,7 +84,11 @@ mod security_tests {
 
             let result = parse_magic_and_version(&data);
             if size < 6 {
-                assert!(result.is_err(), "Truncated data of size {} should be rejected", size);
+                assert!(
+                    result.is_err(),
+                    "Truncated data of size {} should be rejected",
+                    size
+                );
             }
         }
     }
@@ -83,9 +97,9 @@ mod security_tests {
     fn test_vint_integer_overflow() {
         // Test maximum length VInts
         let max_length_tests = vec![
-            vec![0xFF; MAX_VINT_SIZE], // Maximum size, all 0xFF
+            vec![0xFF; MAX_VINT_SIZE],     // Maximum size, all 0xFF
             vec![0xFF; MAX_VINT_SIZE + 1], // Exceeds maximum
-            vec![0xFF; 20], // Way too large
+            vec![0xFF; 20],                // Way too large
         ];
 
         for test_data in max_length_tests {
@@ -97,7 +111,10 @@ mod security_tests {
             }
             // If it parses, ensure it doesn't cause overflow
             if let Ok((_, value)) = result {
-                assert!(value >= i64::MIN && value <= i64::MAX, "VInt overflow detected");
+                assert!(
+                    value >= i64::MIN && value <= i64::MAX,
+                    "VInt overflow detected"
+                );
             }
         }
     }
@@ -113,7 +130,11 @@ mod security_tests {
 
         for test_data in negative_vint_tests {
             let result = parse_vint_length(&test_data);
-            assert!(result.is_err(), "Negative length {:?} should be rejected", test_data);
+            assert!(
+                result.is_err(),
+                "Negative length {:?} should be rejected",
+                test_data
+            );
         }
     }
 
@@ -124,7 +145,7 @@ mod security_tests {
             // Invalid UTF-8 sequences
             vec![0x03, 0xFF, 0xFE, 0xFD], // Length 3, invalid UTF-8
             vec![0x04, 0xC0, 0x80, 0x00, 0x00], // Overlong encoding
-            vec![0x02, 0xED, 0xA0], // Surrogate pair
+            vec![0x02, 0xED, 0xA0],       // Surrogate pair
             // Extremely long strings
             vec![0xFF, 0xFF, 0xFF, 0xFF], // Massive length prefix
         ];
@@ -144,14 +165,22 @@ mod security_tests {
             (vec![0x80, 0xFF], "Large 2-byte length with no data"),
             (vec![0xC0, 0xFF, 0xFF], "Large 3-byte length with no data"),
             // VInt claiming huge length
-            (vec![0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], "8-byte VInt maximum"),
+            (
+                vec![0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                "8-byte VInt maximum",
+            ),
         ];
 
         for (test_data, description) in overflow_tests {
             let result = parse_vint(&test_data);
             // Should either succeed with reasonable value or fail safely
             if let Ok((_, value)) = result {
-                assert!(value < 1_000_000_000, "{}: VInt value {} too large", description, value);
+                assert!(
+                    value < 1_000_000_000,
+                    "{}: VInt value {} too large",
+                    description,
+                    value
+                );
             }
         }
     }
@@ -169,14 +198,16 @@ mod security_tests {
             0x6F, 0x61, 0x00, 0x01, // Looks like valid header
             0xDE, 0xAD, 0xBE, 0xEF, // Invalid data
             0x00, 0x00, 0x00, 0x00, // More nulls
-            0x00, 0x00, 0x00, 0x00,
-            0x01,                   // Final byte to complete 25-byte padding
+            0x00, 0x00, 0x00, 0x00, 0x01, // Final byte to complete 25-byte padding
         ];
         data.extend_from_slice(&malicious_padding);
         data.extend_from_slice(&[0x00, 0x01]); // Valid version
 
         let result = parse_magic_and_version(&data);
-        assert!(result.is_ok(), "Valid 'nb' format should parse despite padding content");
+        assert!(
+            result.is_ok(),
+            "Valid 'nb' format should parse despite padding content"
+        );
 
         if let Ok((_, (version, _))) = result {
             assert_eq!(version, CassandraVersion::V5_0NewBig);
@@ -216,10 +247,16 @@ mod security_tests {
                 // - Memory addresses
                 // - Internal paths
                 // - Detailed parsing state
-                assert!(!error_msg.contains(&format!("{:?}", data)),
-                    "{}: Error message should not contain raw data", description);
-                assert!(!error_msg.contains("0x"),
-                    "{}: Error message should not contain hex addresses", description);
+                assert!(
+                    !error_msg.contains(&format!("{:?}", data)),
+                    "{}: Error message should not contain raw data",
+                    description
+                );
+                assert!(
+                    !error_msg.contains("0x"),
+                    "{}: Error message should not contain hex addresses",
+                    description
+                );
             }
         }
     }
@@ -253,9 +290,17 @@ mod security_tests {
             let result = parse_magic_and_version(&data);
 
             if size < 6 {
-                assert!(result.is_err(), "{}: Should fail with insufficient data", description);
+                assert!(
+                    result.is_err(),
+                    "{}: Should fail with insufficient data",
+                    description
+                );
             } else {
-                assert!(result.is_ok(), "{}: Should succeed with sufficient data", description);
+                assert!(
+                    result.is_ok(),
+                    "{}: Should succeed with sufficient data",
+                    description
+                );
             }
         }
     }

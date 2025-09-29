@@ -753,12 +753,10 @@ mod tests {
         assert!(ComparatorType::Int.supports_ordering());
         assert!(ComparatorType::Text.supports_ordering());
         assert!(!ComparatorType::Set(Box::new(ComparatorType::Int)).supports_ordering());
-        assert!(
-            !ComparatorType::Map(
-                Box::new(ComparatorType::Text),
-                Box::new(ComparatorType::Int)
-            )
-            .supports_ordering()
-        );
+        assert!(!ComparatorType::Map(
+            Box::new(ComparatorType::Text),
+            Box::new(ComparatorType::Int)
+        )
+        .supports_ordering());
     }
 }

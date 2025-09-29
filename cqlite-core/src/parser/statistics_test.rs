@@ -6,10 +6,10 @@
 #[cfg(test)]
 mod tests {
     use super::super::statistics::*;
-    use crate::Config;
     use crate::platform::Platform;
     use crate::storage::sstable::statistics_reader::StatisticsReader;
     use crate::testing::{list_tables, resolve_table_to_sstable_path};
+    use crate::Config;
     use std::sync::Arc;
 
     /// Test parsing real Statistics.db files from canonical datasets

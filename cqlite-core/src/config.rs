@@ -636,24 +636,20 @@ mod tests {
         config.storage.block_size = 0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("block_size must be greater than 0")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("block_size must be greater than 0"));
 
         // Reset and test invalid memtable_size_threshold (should trigger line 579-580)
         config = Config::default();
         config.storage.memtable_size_threshold = 0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("memtable_size_threshold must be greater than 0")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("memtable_size_threshold must be greater than 0"));
 
         // Reset and test invalid bloom filter false positive rate (should trigger line 589-590)
         config = Config::default();
@@ -661,12 +657,10 @@ mod tests {
         config.storage.bloom_filter_fp_rate = 0.0; // Invalid: exactly 0
         let result = config.validate();
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("bloom_filter_fp_rate must be between 0 and 1")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("bloom_filter_fp_rate must be between 0 and 1"));
 
         // Test another invalid bloom filter false positive rate
         config.storage.bloom_filter_fp_rate = 1.0; // Invalid: exactly 1

@@ -2,8 +2,8 @@
 //!
 //! This module contains the FFI iterator interface.
 
-use crate::CQLITE_OK;
 use crate::database::CQLiteDB;
+use crate::CQLITE_OK;
 use std::os::raw::c_int;
 
 /// Iterator handle

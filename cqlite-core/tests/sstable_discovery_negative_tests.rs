@@ -7,9 +7,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
+use cqlite_core::Config;
 
 /// Test behavior with completely missing files
 #[tokio::test]

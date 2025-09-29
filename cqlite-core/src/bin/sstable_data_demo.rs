@@ -14,7 +14,6 @@ use colored::Colorize; // For colored terminal output
 use tokio;
 
 use cqlite_core::{
-    Config,
     platform::Platform,
     schema::SchemaManager,
     storage::{
@@ -22,6 +21,7 @@ use cqlite_core::{
         schema_discovery::{SchemaDiscovery, SchemaDiscoveryConfig},
         sstable_data_manager::{SSTableDataManager, SSTableDataManagerConfig},
     },
+    Config,
 };
 
 #[derive(Parser, Clone)]

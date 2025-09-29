@@ -92,14 +92,14 @@ pub use config::{
 };
 
 // Re-export factory
-pub use factory::{ParserFactory, ParserRegistry, UseCase, register_global_factory};
+pub use factory::{register_global_factory, ParserFactory, ParserRegistry, UseCase};
 
 // Re-export schema integration functions
 pub use schema_integration::{
-    SchemaParserConfig, extract_table_name_enhanced, parse_cql_schema_compat,
-    parse_cql_schema_enhanced, parse_cql_schema_fast, parse_cql_schema_simple,
-    parse_cql_schema_strict, parse_cql_schemas_batch, table_name_matches_enhanced,
-    validate_cql_schema_syntax,
+    extract_table_name_enhanced, parse_cql_schema_compat, parse_cql_schema_enhanced,
+    parse_cql_schema_fast, parse_cql_schema_simple, parse_cql_schema_strict,
+    parse_cql_schemas_batch, table_name_matches_enhanced, validate_cql_schema_syntax,
+    SchemaParserConfig,
 };
 
 // Re-export parser implementations

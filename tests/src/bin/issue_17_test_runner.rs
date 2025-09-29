@@ -13,7 +13,7 @@ use std::env;
 use std::time::Instant;
 
 use cqlite_tests::comprehensive_sstable_test_suite::{
-    TestSuiteReport, run_comprehensive_sstable_tests,
+    run_comprehensive_sstable_tests, TestSuiteReport,
 };
 
 #[tokio::main]

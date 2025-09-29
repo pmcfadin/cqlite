@@ -13,12 +13,12 @@ use cqlite_core::storage::sstable::validation::TestStatus;
 #[cfg(feature = "experimental")]
 use cqlite_core::storage::sstable::writer::SSTableWriter;
 use cqlite_core::{
-    Config, Result,
     platform::Platform,
     storage::sstable::validation::{CassandraValidationFramework, TestResult, ValidationReport},
+    Config, Result,
 };
 #[cfg(feature = "experimental")]
-use cqlite_core::{RowKey, Value, storage::sstable::reader::SSTableReader, types::TableId};
+use cqlite_core::{storage::sstable::reader::SSTableReader, types::TableId, RowKey, Value};
 
 use tempfile::TempDir;
 

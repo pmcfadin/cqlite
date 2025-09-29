@@ -124,16 +124,14 @@ mod tests {
         assert!(err.to_string().contains("Invalid BTI trie node type: 0xFF"));
 
         let err = node::BtiError::MaxDepthExceeded(150);
-        assert!(
-            err.to_string()
-                .contains("BTI trie depth exceeded maximum: 150")
-        );
+        assert!(err
+            .to_string()
+            .contains("BTI trie depth exceeded maximum: 150"));
 
         let err = node::BtiError::InvalidByteComparableKey("bad_key".to_string());
-        assert!(
-            err.to_string()
-                .contains("Invalid byte-comparable key: bad_key")
-        );
+        assert!(err
+            .to_string()
+            .contains("Invalid byte-comparable key: bad_key"));
     }
 
     #[test]

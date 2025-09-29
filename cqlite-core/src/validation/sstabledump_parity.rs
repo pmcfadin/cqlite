@@ -396,6 +396,7 @@ impl SStableDumpParityValidator {
     }
 
     /// Recursively find SSTable files in directory
+    #[allow(clippy::only_used_in_recursion)]
     fn find_sstables_in_directory(&self, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         let entries = std::fs::read_dir(dir)?;
 

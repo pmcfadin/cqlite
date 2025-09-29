@@ -69,8 +69,8 @@ pub mod comprehensive_sstable_test_suite;
 
 // Re-export main test runner functions
 pub use integration_runner::{
-    IntegrationTestConfig, IntegrationTestResults, IntegrationTestRunner,
     run_compatibility_validation, run_performance_validation, run_quick_compatibility_check,
+    IntegrationTestConfig, IntegrationTestResults, IntegrationTestRunner,
 };
 
 // Re-export test framework components
@@ -121,8 +121,8 @@ pub mod real_sstable_compatibility_test;
 
 // Re-export edge case testing components
 pub use edge_case_runner::{
-    EdgeCaseConfig, EdgeCaseResults, EdgeCaseRunner, run_comprehensive_edge_case_tests,
-    run_edge_case_tests_with_config,
+    run_comprehensive_edge_case_tests, run_edge_case_tests_with_config, EdgeCaseConfig,
+    EdgeCaseResults, EdgeCaseRunner,
 };
 
 // Comprehensive integration testing modules
@@ -142,8 +142,8 @@ pub use collection_compatibility_tests::{
     TestResult as CollectionTestResult,
 };
 pub use comprehensive_sstable_test_suite::{
-    ComprehensiveSSTableTestSuite, PerformanceMetrics, TestDetails, TestResult, TestStatus,
-    TestSuiteReport, run_comprehensive_sstable_tests,
+    run_comprehensive_sstable_tests, ComprehensiveSSTableTestSuite, PerformanceMetrics,
+    TestDetails, TestResult, TestStatus, TestSuiteReport,
 };
 pub use real_sstable_test_fixtures::{
     SSTableTestFixture, SSTableTestFixtureConfig, SSTableTestFixtureGenerator,
@@ -188,9 +188,9 @@ pub mod integration_test_harness;
 
 // Re-export new comprehensive testing components
 pub use comprehensive_integration_test_suite::{
-    ComprehensiveIntegrationTestSuite, IntegrationTestConfig as ComprehensiveTestConfig,
-    IntegrationTestSuiteResults, print_integration_test_results,
-    run_comprehensive_integration_tests, run_quick_integration_tests,
+    print_integration_test_results, run_comprehensive_integration_tests,
+    run_quick_integration_tests, ComprehensiveIntegrationTestSuite,
+    IntegrationTestConfig as ComprehensiveTestConfig, IntegrationTestSuiteResults,
 };
 pub use integration_test_harness::{
     MemoryMonitor, PerformanceMeasurement, PerformanceMeasurer, SSTableFileFinder, TableInfo,
@@ -199,14 +199,14 @@ pub use integration_test_harness::{
 };
 
 // Re-export SSTable validation components
-pub use complex_data_test::{ComplexDataTestResults, ComplexDataTestSuite, run_complex_data_tests};
-pub use format_verifier::{FormatVerificationResult, SSTableFormatVerifier, verify_sstable_format};
+pub use complex_data_test::{run_complex_data_tests, ComplexDataTestResults, ComplexDataTestSuite};
+pub use format_verifier::{verify_sstable_format, FormatVerificationResult, SSTableFormatVerifier};
 #[cfg(feature = "benchmarks")]
 pub use sstable_benchmark::{
-    BenchmarkConfig as SSTableBenchmarkConfig, BenchmarkResults, SSTableBenchmark,
-    run_comprehensive_benchmark,
+    run_comprehensive_benchmark, BenchmarkConfig as SSTableBenchmarkConfig, BenchmarkResults,
+    SSTableBenchmark,
 };
-pub use sstable_validator::{SSTableValidator, run_validation};
+pub use sstable_validator::{run_validation, SSTableValidator};
 
 // Minimal smoke tests for baseline
 #[cfg(test)]

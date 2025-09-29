@@ -265,7 +265,7 @@ fn test_complex_configuration_scenarios() {
 
 #[tokio::test]
 async fn test_benchmark_functionality() {
-    use cqlite_core::parser::factory::benchmarks::{BenchmarkConfig, benchmark_parsers};
+    use cqlite_core::parser::factory::benchmarks::{benchmark_parsers, BenchmarkConfig};
 
     // Test benchmark configuration
     let mut config = BenchmarkConfig::default();

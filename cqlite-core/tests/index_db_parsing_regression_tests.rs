@@ -10,9 +10,9 @@
 //! - Enhanced validation with real SSTable data
 
 use cqlite_core::{
-    Config,
     platform::Platform,
-    storage::sstable::{SSTableReader, index_reader::IndexReader},
+    storage::sstable::{index_reader::IndexReader, SSTableReader},
+    Config,
 };
 use std::{collections::HashSet, path::Path, sync::Arc};
 use tempfile::TempDir;

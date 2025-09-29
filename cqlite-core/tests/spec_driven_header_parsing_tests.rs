@@ -6,7 +6,7 @@
 use cqlite_core::{
     parser::header::CassandraVersion,
     storage::sstable::header_spec::{
-        HeaderSpecRegistry, SSTableComponentType, get_global_registry,
+        get_global_registry, HeaderSpecRegistry, SSTableComponentType,
     },
 };
 

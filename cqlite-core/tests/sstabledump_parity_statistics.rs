@@ -6,14 +6,15 @@
 //! dataset helpers to access deterministic Cassandra SSTable files.
 
 use cqlite_core::{
-    Config,
     error::Result,
     platform::Platform,
     storage::sstable::statistics_reader::StatisticsReader,
     testing::dataset_helpers::{
-        DatasetError, TableInfo, derive_reference_paths_from_data_db, list_tables, load_metadata,
+        derive_reference_paths_from_data_db, list_tables, load_metadata,
         parse_sstablemetadata_text, resolve_table_to_sstable_path, should_ignore_file,
+        DatasetError, TableInfo,
     },
+    Config,
 };
 use serde_json;
 use std::path::{Path, PathBuf};

@@ -12,13 +12,13 @@ use std::sync::Arc;
 // use std::time::Duration; // For future timing operations
 
 use crate::{
-    Config, Platform, Result,
     storage::sstable::compression::{Compression, CompressionAlgorithm},
+    Config, Platform, Result,
 };
 
 use super::{
+    utils::{generate_test_data, MemoryMonitor, PrecisionTimer},
     BenchmarkResult, PRDTargets,
-    utils::{MemoryMonitor, PrecisionTimer, generate_test_data},
 };
 
 /// Compression performance benchmarking suite for Cassandra 5+

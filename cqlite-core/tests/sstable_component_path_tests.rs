@@ -8,12 +8,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::{
-    SSTableReader, index_reader::IndexReader, statistics_reader::StatisticsReader,
-    summary_reader::SummaryReader,
+    index_reader::IndexReader, statistics_reader::StatisticsReader, summary_reader::SummaryReader,
+    SSTableReader,
 };
+use cqlite_core::Config;
 
 /// Test that component file paths are built correctly from Data.db paths
 #[tokio::test]
@@ -202,21 +202,15 @@ async fn test_missing_component_files() {
     let statistics_path = base_path.join("nb-1-big-Statistics.db");
 
     // These should fail gracefully
-    assert!(
-        IndexReader::open(&index_path, platform.clone())
-            .await
-            .is_err()
-    );
-    assert!(
-        SummaryReader::open(&summary_path, platform.clone())
-            .await
-            .is_err()
-    );
-    assert!(
-        StatisticsReader::open(&statistics_path, platform.clone())
-            .await
-            .is_err()
-    );
+    assert!(IndexReader::open(&index_path, platform.clone())
+        .await
+        .is_err());
+    assert!(SummaryReader::open(&summary_path, platform.clone())
+        .await
+        .is_err());
+    assert!(StatisticsReader::open(&statistics_path, platform.clone())
+        .await
+        .is_err());
 }
 
 /// Test malformed component files
@@ -282,11 +276,9 @@ async fn test_path_building_edge_cases() {
             // Verify path construction is correct
             assert!(index_path.to_string_lossy().ends_with("-Index.db"));
             assert!(summary_path.to_string_lossy().ends_with("-Summary.db"));
-            assert!(
-                statistics_path
-                    .to_string_lossy()
-                    .ends_with("-Statistics.db")
-            );
+            assert!(statistics_path
+                .to_string_lossy()
+                .ends_with("-Statistics.db"));
 
             println!("✓ Path building works for: {}", data_filename);
         }

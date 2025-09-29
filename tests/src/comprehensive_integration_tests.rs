@@ -6,11 +6,11 @@
 use cqlite_core::{platform::Platform, storage::StorageEngine};
 
 use cqlite_core::{
-    Config,
     error::Result,
     parser::types::serialize_cql_value,
     schema::SchemaManager,
     types::{RowKey, TableId, Value},
+    Config,
 };
 
 use assert_cmd::prelude::*;

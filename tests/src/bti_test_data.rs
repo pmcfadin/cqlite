@@ -520,11 +520,9 @@ mod tests {
         let datasets = generator.generate_comprehensive_datasets();
 
         assert!(!datasets.is_empty());
-        assert!(
-            datasets
-                .iter()
-                .any(|d| d.name == "multi_component_partition_keys")
-        );
+        assert!(datasets
+            .iter()
+            .any(|d| d.name == "multi_component_partition_keys"));
         assert!(datasets.iter().any(|d| d.name == "nested_collections_udts"));
         assert!(datasets.iter().any(|d| d.name == "wide_partitions"));
     }

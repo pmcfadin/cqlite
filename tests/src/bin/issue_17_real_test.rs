@@ -6,7 +6,7 @@
 // EMERGENCY M1 FIX: Allow clippy warnings
 #![allow(clippy::all)]
 
-use cqlite_core::{Config, Result, platform::Platform, storage::sstable::SSTableReader};
+use cqlite_core::{platform::Platform, storage::sstable::SSTableReader, Config, Result};
 use std::{path::Path, sync::Arc, time::Instant};
 
 #[tokio::main]

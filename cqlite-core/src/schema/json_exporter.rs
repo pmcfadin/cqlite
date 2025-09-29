@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::{
-    Error, Result,
     schema::{
-        TableSchema,
         discovery::{CollectionType, IndexType, SchemaInfo, SchemaMetadata, TableOptions},
+        TableSchema,
     },
+    Error, Result,
 };
 
 /// JSON export configuration
@@ -365,7 +365,7 @@ impl JsonExporter {
                 is_static: false,
                 is_partition_key: false,
                 is_clustering_key: true,
-                clustering_order: Some(ck.order.clone()),
+                clustering_order: Some(ck.order.to_string()),
                 default_value: None,
                 description: None,
                 type_details: if self.config.include_type_details {
@@ -428,7 +428,7 @@ impl JsonExporter {
                 .iter()
                 .map(|ck| JsonClusteringKey {
                     column: ck.name.clone(),
-                    order: ck.order.clone(),
+                    order: ck.order.to_string(),
                 })
                 .collect(),
         };
@@ -521,7 +521,7 @@ impl JsonExporter {
                 .clustering_keys
                 .iter()
                 .find(|ck| ck.name == column.name)
-                .map(|ck| ck.order.clone());
+                .map(|ck| ck.order.to_string());
 
             json_columns.push(JsonColumn {
                 name: column.name.clone(),
@@ -552,7 +552,7 @@ impl JsonExporter {
                 .iter()
                 .map(|ck| JsonClusteringKey {
                     column: ck.name.clone(),
-                    order: ck.order.clone(),
+                    order: ck.order.to_string(),
                 })
                 .collect(),
         };

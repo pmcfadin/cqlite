@@ -9,9 +9,9 @@ use std::time::Instant;
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
+use cqlite_core::Config;
 
 /// Performance regression thresholds
 const MAX_PERFORMANCE_REGRESSION_PERCENT: f64 = 10.0; // Max 10% performance regression

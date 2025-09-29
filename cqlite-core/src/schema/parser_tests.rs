@@ -4,8 +4,8 @@
 mod tests {
     use crate::{
         schema::{
-            ClusteringColumn, Column, KeyColumn, TableSchema, parser::SchemaParser,
-            registry::ParsingContext,
+            parser::SchemaParser, registry::ParsingContext, ClusteringColumn, ClusteringOrder,
+            Column, KeyColumn, TableSchema,
         },
         types::{ComparatorType, Value},
     };
@@ -25,7 +25,7 @@ mod tests {
                 name: "timestamp".to_string(),
                 data_type: "bigint".to_string(),
                 position: 0,
-                order: "ASC".to_string(),
+                order: ClusteringOrder::Asc,
             }],
             columns: vec![
                 Column {
@@ -372,12 +372,10 @@ mod tests {
 
         let result = SchemaParser::new(context);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Incomplete parsing context")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Incomplete parsing context"));
     }
 
     #[test]
@@ -403,13 +401,13 @@ mod tests {
                     name: "timestamp".to_string(),
                     data_type: "timestamp".to_string(),
                     position: 0,
-                    order: "ASC".to_string(),
+                    order: ClusteringOrder::Asc,
                 },
                 ClusteringColumn {
                     name: "sequence".to_string(),
                     data_type: "bigint".to_string(),
                     position: 1,
-                    order: "ASC".to_string(),
+                    order: ClusteringOrder::Asc,
                 },
             ],
             columns: vec![

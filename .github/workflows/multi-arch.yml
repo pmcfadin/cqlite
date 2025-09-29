@@ -1,0 +1,226 @@
+name: Multi-Architecture Testing
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+jobs:
+  multi-arch-test:
+    name: Test on ${{ matrix.os }} - ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            features: "all-compression,metrics,experimental"
+
+          # Linux ARM64 (cross-compile)
+          - os: ubuntu-latest
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            features: "all-compression,metrics,experimental"
+
+          # macOS x86_64
+          - os: macos-13
+            arch: x86_64
+            target: x86_64-apple-darwin
+            features: "all-compression,metrics,experimental"
+
+          # macOS ARM64 (Apple Silicon)
+          - os: macos-14
+            arch: aarch64
+            target: aarch64-apple-darwin
+            features: "all-compression,metrics,experimental"
+
+          # Windows x86_64
+          - os: windows-latest
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            features: "all-compression,metrics,experimental"
+
+          # WASM32 (browser target)
+          - os: ubuntu-latest
+            arch: wasm32
+            target: wasm32-unknown-unknown
+            features: "wasm"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+        components: rustfmt, clippy
+
+    - name: Install cross-compilation tools (Linux ARM64)
+      if: matrix.arch == 'aarch64' && matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+    - name: Install WASM tools
+      if: matrix.arch == 'wasm32'
+      run: |
+        cargo install wasm-pack
+        curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        cache-on-failure: true
+
+    - name: Restore test datasets
+      if: matrix.arch != 'wasm32'
+      uses: actions/cache/restore@v4
+      with:
+        path: test-data/datasets/
+        key: datasets-v2-${{ hashFiles('test-data/**/*.md') }}
+        restore-keys: datasets-v2-
+
+    - name: Download test datasets (if needed)
+      if: matrix.arch != 'wasm32'
+      run: |
+        if [ ! -d "test-data/datasets" ] || [ $(find test-data -name '*.db' | wc -l) -eq 0 ]; then
+          echo "📦 Downloading minimal test datasets for multi-arch testing..."
+          mkdir -p test-data
+          gh release download datasets-v2 --pattern "cassandra5-small-refs-only-v2.tar.gz" --dir /tmp
+          echo "1cfd054d7236132417fc93e91d17f660bbb96f6c5562f19ddc5c12e50bfbf2df  /tmp/cassandra5-small-refs-only-v2.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/cassandra5-small-refs-only-v2.tar.gz -C .
+          echo "✅ Test datasets ready"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+
+    - name: Environment validation
+      run: |
+        echo "🔍 Validating ${{ matrix.os }}-${{ matrix.arch }} environment..."
+        rustc --version
+        cargo --version
+        echo "Target: ${{ matrix.target }}"
+        echo "Features: ${{ matrix.features }}"
+      shell: bash
+
+    - name: Check code formatting
+      run: cargo fmt --all -- --check
+      shell: bash
+
+    - name: Run clippy for target
+      run: |
+        cargo clippy --target ${{ matrix.target }} \
+          --package cqlite-core \
+          --features ${{ matrix.features }} \
+          --all-targets -- -D warnings
+      shell: bash
+
+    - name: Build for target
+      run: |
+        echo "🔨 Building cqlite-core for ${{ matrix.target }}..."
+        cargo build --target ${{ matrix.target }} \
+          --package cqlite-core \
+          --features ${{ matrix.features }} \
+          --verbose
+      shell: bash
+
+    - name: Run tests (non-WASM)
+      if: matrix.arch != 'wasm32'
+      env:
+        CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+      run: |
+        echo "🧪 Running tests for ${{ matrix.target }}..."
+        cargo test --target ${{ matrix.target }} \
+          --package cqlite-core \
+          --features ${{ matrix.features }} \
+          --lib \
+          --verbose \
+          -- --test-threads=1
+      shell: bash
+
+    - name: Build and test WASM package
+      if: matrix.arch == 'wasm32'
+      working-directory: cqlite-wasm
+      run: |
+        echo "🧪 Testing WASM build with wasm-pack..."
+        wasm-pack build --target web --out-dir pkg-web
+        wasm-pack test --headless --firefox
+      shell: bash
+
+    - name: Performance smoke test (release build)
+      if: matrix.arch != 'wasm32' && matrix.os == 'ubuntu-latest'
+      run: |
+        echo "⚡ Running performance smoke test..."
+        cargo build --target ${{ matrix.target }} \
+          --package cqlite-core \
+          --features ${{ matrix.features }} \
+          --release
+
+        # Basic performance validation - should complete within timeout
+        timeout 60s cargo run --target ${{ matrix.target }} \
+          --package cqlite-core \
+          --features ${{ matrix.features }} \
+          --release \
+          --bin performance_baseline_runner \
+          -- --mode=smoke-test || echo "⚠️ Performance smoke test timed out or failed (non-blocking)"
+      shell: bash
+
+  # Quality gate job that depends on all matrix jobs
+  multi-arch-gate:
+    name: Multi-Architecture Quality Gate
+    runs-on: ubuntu-latest
+    needs: [multi-arch-test]
+    if: always()
+
+    steps:
+    - name: Check all matrix jobs passed
+      run: |
+        echo "🎯 Multi-Architecture Testing Results:"
+        echo "Status: ${{ needs.multi-arch-test.result }}"
+
+        if [ "${{ needs.multi-arch-test.result }}" != "success" ]; then
+          echo "❌ Multi-architecture testing failed"
+          echo "💡 Check individual matrix job failures above"
+          exit 1
+        fi
+
+        echo "✅ All multi-architecture tests passed!"
+        echo "📊 Validated platforms:"
+        echo "  ✅ Linux x86_64"
+        echo "  ✅ Linux ARM64"
+        echo "  ✅ macOS x86_64"
+        echo "  ✅ macOS ARM64 (Apple Silicon)"
+        echo "  ✅ Windows x86_64"
+        echo "  ✅ WASM32 (browser)"
+
+  # Store results for coordination
+  store-results:
+    name: Store Multi-Arch Results
+    runs-on: ubuntu-latest
+    needs: [multi-arch-gate]
+    if: always()
+
+    steps:
+    - name: Store multi-arch test results
+      run: |
+        echo "📊 Multi-arch test completed with status: ${{ needs.multi-arch-gate.result }}"
+        echo "🔄 Results available for coordination with other quality gates"

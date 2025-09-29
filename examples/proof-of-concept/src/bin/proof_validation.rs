@@ -4,11 +4,11 @@
 //! real Cassandra SSTable files with complex types, proving end-to-end functionality.
 
 use cqlite_core::{
-    Config, Database, Value,
     parser::complex_types::ComplexTypeParser,
     platform::Platform,
     storage::sstable::reader::SSTableReader,
     types::{RowKey, TableId},
+    Config, Database, Value,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

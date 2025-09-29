@@ -7,13 +7,13 @@
 mod tests {
     use super::super::key_digest::KeyDigestComputer;
     use crate::{
-        Config, Result,
         platform::Platform,
         schema::{
-            Column, KeyColumn, TableSchema,
             registry::{SchemaRegistry, SchemaRegistryConfig, SchemaSource},
+            Column, KeyColumn, TableSchema,
         },
         types::ComparatorType,
+        Config, Result,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -260,7 +260,8 @@ mod tests {
                     if partition_key_defs.len() > 1 {
                         key_bytes.extend_from_slice(&[0x00, 0x08]); // length
                     }
-                    key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]); // value 100
+                    key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]);
+                    // value 100
                 }
                 "boolean" => {
                     if partition_key_defs.len() > 1 {

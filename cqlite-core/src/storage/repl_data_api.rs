@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
-    Config, Error, Result, Value,
     platform::Platform,
     query::result::{QueryResult, QueryRow},
     schema::{SchemaManager, TableSchema},
@@ -21,6 +20,7 @@ use crate::{
         CacheStatistics, DataRow, SSTableDataManager, SSTableDataManagerConfig, TableDiscovery,
         TableInfo,
     },
+    Config, Error, Result, Value,
 };
 
 /// REPL data access configuration

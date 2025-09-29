@@ -3,7 +3,7 @@
 //! This module provides simplified tests that focus on the core security
 //! aspects of header parsing without complex type dependencies.
 
-use cqlite_core::parser::header::{SSTABLE_MAGIC, SUPPORTED_VERSION, parse_sstable_header};
+use cqlite_core::parser::header::{parse_sstable_header, SSTABLE_MAGIC, SUPPORTED_VERSION};
 
 /// Test suite for basic header corruption scenarios
 #[cfg(test)]
@@ -88,7 +88,8 @@ mod basic_corruption_tests {
             Ok((_, header)) => {
                 println!("✅ Parsed null-padded header successfully");
                 // Basic validation
-                assert!(!header.keyspace.is_empty() || header.keyspace.is_empty()); // Either is fine
+                assert!(!header.keyspace.is_empty() || header.keyspace.is_empty());
+                // Either is fine
             }
             Err(_) => {
                 println!("✅ Correctly rejected null-padded header");

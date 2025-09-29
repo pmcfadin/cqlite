@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cqlite_core::platform::Platform;
 #[cfg(feature = "experimental")]
 use cqlite_core::storage::sstable::writer::SSTableWriter;
-use cqlite_core::{Config, Result};
 #[cfg(feature = "experimental")]
-use cqlite_core::{RowKey, Value, storage::sstable::reader::SSTableReader, types::TableId};
+use cqlite_core::{storage::sstable::reader::SSTableReader, types::TableId, RowKey, Value};
+use cqlite_core::{Config, Result};
 
 use tempfile::TempDir;
 

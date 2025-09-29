@@ -4,12 +4,12 @@
 //! abstraction layer while maintaining full backward compatibility.
 
 use super::{
-    UseCase,
     ast::CqlStatement,
     config::{ParserBackend, ParserConfig},
     factory::ParserFactory,
     traits::CqlVisitor,
     visitor::SchemaBuilderVisitor,
+    UseCase,
 };
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;

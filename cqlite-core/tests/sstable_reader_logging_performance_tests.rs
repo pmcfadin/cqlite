@@ -10,9 +10,9 @@ use tempfile::TempDir;
 use tokio::fs;
 use tokio::task::JoinSet;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
+use cqlite_core::Config;
 
 /// Performance thresholds for logging impact
 const MAX_LOGGING_OVERHEAD_PERCENT: f64 = 15.0; // Max 15% performance degradation

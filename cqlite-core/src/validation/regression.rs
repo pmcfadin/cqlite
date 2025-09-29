@@ -98,15 +98,12 @@ impl RegressionTestSuite {
 pub fn generate_test_cases(
     _config: &crate::validation::ValidationConfig,
 ) -> Result<Vec<RegressionTestCase>> {
-    let mut cases = Vec::new();
-
-    // Generate basic regression test cases
-    cases.push(RegressionTestCase {
+    let cases = vec![RegressionTestCase {
         name: "basic_sstable_parsing".to_string(),
         description: "Basic SSTable parsing regression test".to_string(),
         test_data_path: "test-data/basic.sstable".to_string(),
         expected_results: HashMap::new(),
-    });
+    }];
 
     Ok(cases)
 }

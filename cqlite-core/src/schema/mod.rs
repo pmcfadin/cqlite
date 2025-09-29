@@ -42,11 +42,11 @@ pub use json_exporter::{
 // Type alias for backward compatibility
 pub type ColumnSpec = Column;
 
-use crate::Config;
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;
 use crate::storage::StorageEngine;
 use crate::types::{ComparatorType, UdtTypeDef};
+use crate::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -104,8 +104,36 @@ pub struct ClusteringColumn {
     pub position: usize,
 
     /// Sort order (ASC or DESC)
-    #[serde(default = "default_order")]
-    pub order: String,
+    #[serde(default)]
+    pub order: ClusteringOrder,
+}
+
+/// Clustering order enum for sorting
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ClusteringOrder {
+    /// Ascending order
+    #[default]
+    Asc,
+    /// Descending order
+    Desc,
+}
+
+impl From<&str> for ClusteringOrder {
+    fn from(s: &str) -> Self {
+        match s.to_uppercase().as_str() {
+            "DESC" => ClusteringOrder::Desc,
+            _ => ClusteringOrder::Asc,
+        }
+    }
+}
+
+impl std::fmt::Display for ClusteringOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClusteringOrder::Asc => write!(f, "ASC"),
+            ClusteringOrder::Desc => write!(f, "DESC"),
+        }
+    }
 }
 
 /// Regular column definition
@@ -384,6 +412,7 @@ impl UdtRegistry {
     }
 
     /// Check if a field type depends on a UDT
+    #[allow(clippy::only_used_in_recursion)]
     fn field_type_depends_on(&self, field_type: &CqlType, target_udt: &str) -> bool {
         match field_type {
             CqlType::Udt(udt_name, _) => udt_name == target_udt,
@@ -459,6 +488,7 @@ impl UdtRegistry {
     }
 
     /// Format CQL type for CREATE TYPE statements
+    #[allow(clippy::only_used_in_recursion)]
     fn format_cql_type(&self, cql_type: &CqlType) -> String {
         match cql_type {
             CqlType::Boolean => "boolean".to_string(),
@@ -699,6 +729,7 @@ impl TableSchema {
     }
 
     /// Check if two ComparatorTypes are compatible (helper method)
+    #[allow(clippy::only_used_in_recursion)]
     fn comparators_are_compatible(&self, left: &ComparatorType, right: &ComparatorType) -> bool {
         match (left, right) {
             // Exact matches
@@ -920,10 +951,6 @@ impl CqlType {
     }
 }
 
-// Default functions for serde
-fn default_order() -> String {
-    "ASC".to_string()
-}
 
 /// Schema management service for handling table schemas and UDT definitions
 #[derive(Debug)]

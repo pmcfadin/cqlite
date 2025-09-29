@@ -10,7 +10,10 @@
 //! - Uses ZigZag encoding for signed integers to efficiently encode small negative values
 //! - Maximum 9 bytes total length
 
-use nom::{IResult, bytes::complete::take};
+use nom::{bytes::complete::take, IResult};
+
+// Type aliases for complex types to reduce complexity warnings
+type VintParseResult<'a> = Result<Option<(usize, i64)>, nom::Err<nom::error::Error<&'a [u8]>>>;
 
 /// Detect ASCII corruption in VInt data
 ///
@@ -146,6 +149,7 @@ fn parse_zigzag_vint(input: &[u8]) -> IResult<&[u8], i64> {
         // Read the remaining bytes as a big-endian integer
         let mut value = 0u64;
         let bytes_to_read = input.len() - 1; // Skip the 0xF0 marker
+        #[allow(clippy::needless_range_loop)]
         for i in 1..=bytes_to_read.min(8) {
             // Max 8 bytes for u64
             value = (value << 8) | (input[i] as u64);
@@ -162,6 +166,7 @@ fn parse_zigzag_vint(input: &[u8]) -> IResult<&[u8], i64> {
         // Read the remaining bytes as a big-endian integer
         let mut value = 0u64;
         let bytes_to_read = input.len() - 1; // Skip the 0xFF marker
+        #[allow(clippy::needless_range_loop)]
         for i in 1..=bytes_to_read.min(8) {
             // Max 8 bytes for u64
             value = (value << 8) | (input[i] as u64);
@@ -182,9 +187,7 @@ fn parse_zigzag_vint(input: &[u8]) -> IResult<&[u8], i64> {
 
 /// Parse VInt using Cassandra-compatible format
 #[allow(dead_code)]
-fn parse_cassandra_vint_format(
-    input: &[u8],
-) -> Result<Option<(usize, i64)>, nom::Err<nom::error::Error<&[u8]>>> {
+fn parse_cassandra_vint_format(input: &[u8]) -> VintParseResult<'_> {
     if input.is_empty() {
         return Ok(None);
     }
@@ -223,6 +226,7 @@ fn parse_cassandra_vint_format(
         let mut value = (first_byte & first_data_mask) as i64;
 
         // Add remaining bytes
+        #[allow(clippy::needless_range_loop)]
         for i in 1..total_length {
             value = (value << 8) | (input[i] as i64);
         }
@@ -243,9 +247,7 @@ fn parse_cassandra_vint_format(
 
 /// Parse VInt using custom BTI format (Issue #36)
 #[allow(dead_code)]
-fn parse_custom_vint_format(
-    input: &[u8],
-) -> Result<Option<(usize, i64)>, nom::Err<nom::error::Error<&[u8]>>> {
+fn parse_custom_vint_format(input: &[u8]) -> VintParseResult<'_> {
     if input.is_empty() {
         return Ok(None);
     }
@@ -320,7 +322,7 @@ fn encode_cassandra_vint(value: i64) -> Vec<u8> {
     } else if (-8192..=8191).contains(&value) {
         2 // Two bytes
     } else if (-1048576..=1048575).contains(&value) {
-        3 // Three bytes  
+        3 // Three bytes
     } else if (-134217728..=134217727).contains(&value) {
         4 // Four bytes
     } else {
@@ -910,8 +912,8 @@ mod tests {
         // Test truly invalid sequences (corrupted data that shouldn't parse)
         // Focus on patterns that should be rejected by corruption detection
         let _corrupted_data = b"data"; // ASCII corruption
-        // Note: corruption detection should catch these, but if not, we accept them
-        // as the new format is more permissive for backward compatibility
+                                       // Note: corruption detection should catch these, but if not, we accept them
+                                       // as the new format is more permissive for backward compatibility
     }
 
     #[test]

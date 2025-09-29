@@ -3,7 +3,7 @@
 //! This example demonstrates that cqlite-core can successfully read
 //! Cassandra 5+ SSTable files.
 
-use cqlite_core::{Config, platform::Platform, storage::sstable::reader::SSTableReader};
+use cqlite_core::{platform::Platform, storage::sstable::reader::SSTableReader, Config};
 use std::sync::Arc;
 
 #[tokio::main]

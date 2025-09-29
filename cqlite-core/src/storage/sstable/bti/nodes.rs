@@ -5,9 +5,9 @@
 use super::BtiError;
 use crate::error::Result;
 use nom::{
-    IResult,
     bytes::complete::take,
-    number::complete::{be_u8, be_u16, be_u64},
+    number::complete::{be_u16, be_u64, be_u8},
+    IResult,
 };
 use std::collections::HashMap;
 

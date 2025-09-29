@@ -16,17 +16,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cqlite_core::{
-    Config, RowKey, Value,
     error::{Error, Result},
     platform::Platform,
+    schema::{registry::SchemaRegistry, TableSchema},
     storage::sstable::{
-        reader::SSTableReader,
+        bloom::BloomFilter, index_reader::IndexReader, reader::SSTableReader,
         schema_aware_reader::SchemaAwareReader,
-        bloom::BloomFilter,
-        index_reader::IndexReader,
     },
-    schema::{TableSchema, registry::SchemaRegistry},
     types::{ComparatorType, TableId},
+    Config, RowKey, Value,
 };
 
 use tokio::fs;
@@ -50,8 +48,8 @@ impl GoldenPathGetTestFixture {
         let platform = Arc::new(Platform::new(&config).await?);
         let schema_registry = Arc::new(SchemaRegistry::new());
 
-        let datasets_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/datasets/sstables");
+        let datasets_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/datasets/sstables");
 
         Ok(Self {
             datasets_path,
@@ -63,8 +61,9 @@ impl GoldenPathGetTestFixture {
 
     /// Setup SSTable reader for test_basic dataset
     async fn setup_test_basic_reader(&self) -> Result<SSTableReader> {
-        let sstable_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let sstable_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
+        );
 
         // Verify test data exists
         if !fs::metadata(&sstable_path).await.is_ok() {
@@ -79,19 +78,22 @@ impl GoldenPathGetTestFixture {
 
     /// Setup schema-aware reader for comprehensive testing
     async fn setup_schema_aware_reader(&self, table_name: &str) -> Result<SchemaAwareReader> {
-        let sstable_path = self.datasets_path
+        let sstable_path = self
+            .datasets_path
             .join(format!("{}/*/nb-*-big-Data.db", table_name))
             .to_string_lossy()
             .replace("*", "*");
 
         // Find actual SSTable file using glob pattern
-        let pattern = self.datasets_path
+        let pattern = self
+            .datasets_path
             .join(format!("{}", table_name))
             .join("*/nb-*-big-Data.db");
 
         // For now, use test_basic as fallback
-        let actual_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let actual_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
+        );
 
         if !fs::metadata(&actual_path).await.is_ok() {
             return Err(Error::io_error(format!(
@@ -139,11 +141,18 @@ async fn test_golden_path_simple_get_operation() -> Result<()> {
     // Log result for analysis
     match result {
         Some(value) => {
-            println!("✅ Found value for key {:?}: {} bytes", test_key, value.len());
+            println!(
+                "✅ Found value for key {:?}: {} bytes",
+                test_key,
+                value.len()
+            );
             assert!(!value.is_empty(), "Retrieved value should not be empty");
         }
         None => {
-            println!("ℹ️  No value found for key {:?} (expected for test dataset)", test_key);
+            println!(
+                "ℹ️  No value found for key {:?} (expected for test dataset)",
+                test_key
+            );
         }
     }
 
@@ -285,21 +294,28 @@ async fn test_golden_path_get_integration_validation() -> Result<()> {
 
     // Check reader health metrics
     let health_metrics = reader.health_check().await?;
-    assert!(health_metrics.file_accessible, "SSTable file should be accessible");
+    assert!(
+        health_metrics.file_accessible,
+        "SSTable file should be accessible"
+    );
     assert!(health_metrics.index_available, "Index should be available");
 
-    println!("✅ Reader health: compression={}, bloom={}, index={}",
-             health_metrics.compression_enabled,
-             health_metrics.bloom_filter_enabled,
-             health_metrics.index_available);
+    println!(
+        "✅ Reader health: compression={}, bloom={}, index={}",
+        health_metrics.compression_enabled,
+        health_metrics.bloom_filter_enabled,
+        health_metrics.index_available
+    );
 
     // Verify reader statistics
     let stats = reader.stats().await?;
     assert!(stats.file_size > 0, "File size should be positive");
     assert!(stats.block_count > 0, "Should have at least one block");
 
-    println!("✅ Reader stats: file_size={}, blocks={}, entries={}",
-             stats.file_size, stats.block_count, stats.entry_count);
+    println!(
+        "✅ Reader stats: file_size={}, blocks={}, entries={}",
+        stats.file_size, stats.block_count, stats.entry_count
+    );
 
     // Test get operation with full integration
     let start_time = Instant::now();
@@ -340,7 +356,10 @@ async fn test_golden_path_schema_aware_get_operations() -> Result<()> {
 
             // Verify schema-aware statistics
             let stats = schema_reader.stats().await?;
-            assert!(stats.schema_parsed_values >= 0, "Schema parsing should track operations");
+            assert!(
+                stats.schema_parsed_values >= 0,
+                "Schema parsing should track operations"
+            );
 
             println!("✅ Schema-aware get operations validated");
         }
@@ -381,7 +400,8 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
 
     // Verify all concurrent operations completed successfully
     for handle_result in results {
-        let (id, get_result, duration) = handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
+        let (id, get_result, duration) =
+            handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
 
         // Each operation should complete reasonably fast
         assert!(
@@ -402,7 +422,10 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
         total_duration.as_millis()
     );
 
-    println!("✅ Concurrent get operations completed in {:?}", total_duration);
+    println!(
+        "✅ Concurrent get operations completed in {:?}",
+        total_duration
+    );
     Ok(())
 }
 
@@ -424,7 +447,10 @@ async fn test_golden_path_data_isolation() -> Result<()> {
     let result2 = reader2.get(&table_id, &test_key).await?;
 
     // Results should be consistent (same data)
-    assert_eq!(result1, result2, "Independent readers should return consistent results");
+    assert_eq!(
+        result1, result2,
+        "Independent readers should return consistent results"
+    );
 
     println!("✅ Data isolation validated - multiple readers work independently");
     Ok(())

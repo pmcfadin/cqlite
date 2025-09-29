@@ -3,13 +3,13 @@
 //! Establishes and validates performance baselines for Issue #15
 
 #[cfg(feature = "benchmarks")]
-use cqlite_core::Value;
-#[cfg(feature = "benchmarks")]
 use cqlite_core::parser::types::serialize_cql_value;
 #[cfg(feature = "benchmarks")]
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
 #[cfg(feature = "benchmarks")]
 use cqlite_core::performance_monitor::PerformanceMonitor;
+#[cfg(feature = "benchmarks")]
+use cqlite_core::Value;
 #[cfg(feature = "benchmarks")]
 use std::time::Instant;
 

@@ -4,8 +4,8 @@
 //! compatibility with Cassandra 5+ format specifications.
 
 use cqlite_core::parser::vint::{encode_vint, parse_vint};
-use cqlite_core::parser::{CqlTypeId, parse_cql_value, serialize_cql_value};
-use cqlite_core::{Value, error::Result};
+use cqlite_core::parser::{parse_cql_value, serialize_cql_value, CqlTypeId};
+use cqlite_core::{error::Result, Value};
 use std::collections::HashMap;
 
 /// Comprehensive CQL type system test suite

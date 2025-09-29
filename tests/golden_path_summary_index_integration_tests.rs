@@ -17,18 +17,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cqlite_core::{
-    Config, RowKey, Value,
     error::{Error, Result},
     platform::Platform,
+    schema::{registry::SchemaRegistry, TableSchema},
     storage::sstable::{
-        reader::SSTableReader,
-        summary_reader::SummaryReader,
-        index_reader::IndexReader,
-        bloom::BloomFilter,
-        statistics_reader::StatisticsReader,
+        bloom::BloomFilter, index_reader::IndexReader, reader::SSTableReader,
+        statistics_reader::StatisticsReader, summary_reader::SummaryReader,
     },
-    schema::{TableSchema, registry::SchemaRegistry},
     types::{ComparatorType, TableId},
+    Config, RowKey, Value,
 };
 
 use tokio::fs;
@@ -52,8 +49,8 @@ impl GoldenPathSummaryIndexTestFixture {
         let platform = Arc::new(Platform::new(&config).await?);
         let schema_registry = Arc::new(SchemaRegistry::new());
 
-        let datasets_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/datasets/sstables");
+        let datasets_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/datasets/sstables");
 
         Ok(Self {
             datasets_path,
@@ -65,8 +62,9 @@ impl GoldenPathSummaryIndexTestFixture {
 
     /// Setup complete SSTable reader with all components
     async fn setup_complete_sstable_reader(&self) -> Result<SSTableReader> {
-        let sstable_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let sstable_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
+        );
 
         if !fs::metadata(&sstable_path).await.is_ok() {
             return Err(Error::io_error(format!(
@@ -95,8 +93,9 @@ impl GoldenPathSummaryIndexTestFixture {
 
     /// Setup standalone index reader for component testing
     async fn setup_index_reader(&self) -> Result<IndexReader> {
-        let index_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Index.db");
+        let index_path = self.datasets_path.join(
+            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Index.db",
+        );
 
         if !fs::metadata(&index_path).await.is_ok() {
             return Err(Error::io_error(format!(
@@ -110,7 +109,8 @@ impl GoldenPathSummaryIndexTestFixture {
 
     /// Verify all SSTable component files exist
     async fn verify_component_files(&self) -> Result<HashMap<String, PathBuf>> {
-        let base_path = self.datasets_path
+        let base_path = self
+            .datasets_path
             .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804");
 
         let components = vec![
@@ -170,7 +170,11 @@ async fn test_golden_path_summary_index_component_availability() -> Result<()> {
     for component in &optional_components {
         if let Some(path) = component_paths.get(component) {
             let metadata = fs::metadata(path).await?;
-            println!("✅ Optional component {}: {} bytes", component, metadata.len());
+            println!(
+                "✅ Optional component {}: {} bytes",
+                component,
+                metadata.len()
+            );
         } else {
             println!("ℹ️  Optional component {} not present", component);
         }
@@ -208,8 +212,10 @@ async fn test_golden_path_summary_reader_functionality() -> Result<()> {
 
                 match summary_result {
                     Ok(Some(entry)) => {
-                        println!("✅ Summary entry found for key: offset={}, size={}",
-                                 entry.offset, entry.size);
+                        println!(
+                            "✅ Summary entry found for key: offset={}, size={}",
+                            entry.offset, entry.size
+                        );
                     }
                     Ok(None) => {
                         println!("ℹ️  No summary entry for key (expected)");
@@ -222,10 +228,15 @@ async fn test_golden_path_summary_reader_functionality() -> Result<()> {
 
             // Test summary statistics
             if let Ok(stats) = summary_reader.get_summary_stats().await {
-                println!("✅ Summary stats: entries={}, total_size={}",
-                         stats.entry_count, stats.total_size);
+                println!(
+                    "✅ Summary stats: entries={}, total_size={}",
+                    stats.entry_count, stats.total_size
+                );
 
-                assert!(stats.entry_count >= 0, "Summary should have valid entry count");
+                assert!(
+                    stats.entry_count >= 0,
+                    "Summary should have valid entry count"
+                );
             }
 
             println!("✅ Summary reader functionality validated");
@@ -267,8 +278,10 @@ async fn test_golden_path_index_reader_functionality() -> Result<()> {
 
                 match index_result {
                     Ok(Some(entry)) => {
-                        println!("✅ Index entry found for key: offset={}, length={}",
-                                 entry.data_offset, entry.data_length);
+                        println!(
+                            "✅ Index entry found for key: offset={}, length={}",
+                            entry.data_offset, entry.data_length
+                        );
                     }
                     Ok(None) => {
                         println!("ℹ️  No index entry for key (expected)");
@@ -284,7 +297,9 @@ async fn test_golden_path_index_reader_functionality() -> Result<()> {
             let range_end = RowKey::from_bytes(b"index_range_end");
 
             let start_time = Instant::now();
-            let range_result = index_reader.lookup_range_entries(&range_start, &range_end).await;
+            let range_result = index_reader
+                .lookup_range_entries(&range_start, &range_end)
+                .await;
             let range_duration = start_time.elapsed();
 
             assert!(
@@ -295,8 +310,11 @@ async fn test_golden_path_index_reader_functionality() -> Result<()> {
 
             match range_result {
                 Ok(entries) => {
-                    println!("✅ Index range lookup found {} entries in {:?}",
-                             entries.len(), range_duration);
+                    println!(
+                        "✅ Index range lookup found {} entries in {:?}",
+                        entries.len(),
+                        range_duration
+                    );
                 }
                 Err(e) => {
                     println!("ℹ️  Index range lookup error (may be expected): {}", e);
@@ -330,10 +348,12 @@ async fn test_golden_path_integrated_summary_index_operations() -> Result<()> {
 
     // Health check to verify components are available
     let health_metrics = reader.health_check().await?;
-    println!("✅ Reader health: index={}, bloom={}, compression={}",
-             health_metrics.index_available,
-             health_metrics.bloom_filter_enabled,
-             health_metrics.compression_enabled);
+    println!(
+        "✅ Reader health: index={}, bloom={}, compression={}",
+        health_metrics.index_available,
+        health_metrics.bloom_filter_enabled,
+        health_metrics.compression_enabled
+    );
 
     for test_key in &test_keys {
         // Test integrated lookup (should use summary -> index -> data)
@@ -350,8 +370,11 @@ async fn test_golden_path_integrated_summary_index_operations() -> Result<()> {
 
         match result {
             Some(value) => {
-                println!("✅ Integrated lookup found value: {} bytes in {:?}",
-                         value.len(), lookup_duration);
+                println!(
+                    "✅ Integrated lookup found value: {} bytes in {:?}",
+                    value.len(),
+                    lookup_duration
+                );
             }
             None => {
                 println!("ℹ️  No data found via integrated lookup (expected for test keys)");
@@ -381,7 +404,9 @@ async fn test_golden_path_summary_index_range_efficiency() -> Result<()> {
         let end_key = RowKey::from_bytes(end_bytes);
 
         let start_time = Instant::now();
-        let results = reader.scan(&table_id, Some(&start_key), Some(&end_key), limit).await?;
+        let results = reader
+            .scan(&table_id, Some(&start_key), Some(&end_key), limit)
+            .await?;
         let scan_duration = start_time.elapsed();
 
         // Summary/index should make range scans efficient
@@ -395,11 +420,17 @@ async fn test_golden_path_summary_index_range_efficiency() -> Result<()> {
         assert!(
             scan_duration.as_millis() < max_duration_ms,
             "Range scan '{}' should be efficient: {:?}ms (max: {}ms)",
-            test_name, scan_duration.as_millis(), max_duration_ms
+            test_name,
+            scan_duration.as_millis(),
+            max_duration_ms
         );
 
-        println!("✅ Range scan '{}': {} entries in {:?}",
-                 test_name, results.len(), scan_duration);
+        println!(
+            "✅ Range scan '{}': {} entries in {:?}",
+            test_name,
+            results.len(),
+            scan_duration
+        );
     }
 
     Ok(())
@@ -443,14 +474,12 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
         );
     }
 
-    println!("✅ Bloom/summary/index coordination verified - all non-existent lookups were efficient");
+    println!(
+        "✅ Bloom/summary/index coordination verified - all non-existent lookups were efficient"
+    );
 
     // Test with potentially existing keys (bloom might pass, then use summary/index)
-    let potential_keys = vec![
-        "potential_key_1",
-        "test_data_key",
-        "sample_entry",
-    ];
+    let potential_keys = vec!["potential_key_1", "test_data_key", "sample_entry"];
 
     for key_str in &potential_keys {
         let test_key = RowKey::from_bytes(key_str.as_bytes());
@@ -472,7 +501,10 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
                 println!("✅ Found key '{}': {} bytes", key_str, value.len());
             }
             None => {
-                println!("ℹ️  Key '{}' not found (bloom passed, but not in data)", key_str);
+                println!(
+                    "ℹ️  Key '{}' not found (bloom passed, but not in data)",
+                    key_str
+                );
             }
         }
     }
@@ -516,7 +548,11 @@ async fn test_golden_path_multi_level_index_traversal() -> Result<()> {
     let min_time = traversal_times.iter().min().unwrap();
 
     println!("✅ Multi-level traversal stats:");
-    println!("   Total: {:?} for {} lookups", total_time, traversal_times.len());
+    println!(
+        "   Total: {:?} for {} lookups",
+        total_time,
+        traversal_times.len()
+    );
     println!("   Average: {:?}", avg_time);
     println!("   Min: {:?}, Max: {:?}", min_time, max_time);
 
@@ -572,13 +608,22 @@ async fn test_golden_path_summary_index_statistics_integration() -> Result<()> {
     // Check updated statistics
     let updated_stats = reader.stats().await?;
 
-    println!("✅ Updated statistics after {} operations:", test_keys.len());
-    println!("   Cache hits: {} -> {}", initial_hits, updated_stats.cache_hits);
-    println!("   Cache misses: {} -> {}", initial_misses, updated_stats.cache_misses);
+    println!(
+        "✅ Updated statistics after {} operations:",
+        test_keys.len()
+    );
+    println!(
+        "   Cache hits: {} -> {}",
+        initial_hits, updated_stats.cache_hits
+    );
+    println!(
+        "   Cache misses: {} -> {}",
+        initial_misses, updated_stats.cache_misses
+    );
 
     // Cache statistics should have changed (hits or misses should increase)
-    let total_operations = (updated_stats.cache_hits + updated_stats.cache_misses)
-                         - (initial_hits + initial_misses);
+    let total_operations =
+        (updated_stats.cache_hits + updated_stats.cache_misses) - (initial_hits + initial_misses);
 
     assert!(
         total_operations >= test_keys.len() as u64,
@@ -601,7 +646,10 @@ async fn test_golden_path_summary_index_consistency_validation() -> Result<()> {
     let full_scan_results = reader.scan(&table_id, None, None, Some(50)).await?;
 
     if !full_scan_results.is_empty() {
-        println!("✅ Full scan found {} entries for consistency validation", full_scan_results.len());
+        println!(
+            "✅ Full scan found {} entries for consistency validation",
+            full_scan_results.len()
+        );
 
         // Test consistency for each key found in scan
         for (key, expected_value) in &full_scan_results {
@@ -630,19 +678,26 @@ async fn test_golden_path_summary_index_consistency_validation() -> Result<()> {
             let range_start = &full_scan_results[0].0;
             let range_end = &full_scan_results[mid_point].0;
 
-            let range_results = reader.scan(&table_id, Some(range_start), Some(range_end), None).await?;
+            let range_results = reader
+                .scan(&table_id, Some(range_start), Some(range_end), None)
+                .await?;
 
             // All range results should be within the specified bounds
             for (range_key, _) in &range_results {
                 assert!(
                     range_key >= range_start && range_key <= range_end,
                     "Range scan result should be within bounds: {:?} not in [{:?}, {:?}]",
-                    range_key, range_start, range_end
+                    range_key,
+                    range_start,
+                    range_end
                 );
             }
 
-            println!("✅ Range consistency validated: {}/{} entries in range",
-                     range_results.len(), full_scan_results.len());
+            println!(
+                "✅ Range consistency validated: {}/{} entries in range",
+                range_results.len(),
+                full_scan_results.len()
+            );
         }
 
         println!("✅ Summary/index/data consistency validation completed");
@@ -662,21 +717,32 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
 
     // Performance integration test: Compare different access patterns
     let test_scenarios = vec![
-        ("sequential_access", (1..=25).map(|i| format!("seq_{:03}", i)).collect::<Vec<_>>()),
-        ("random_access", vec![
-            "random_key_z".to_string(),
-            "random_key_a".to_string(),
-            "random_key_m".to_string(),
-            "random_key_f".to_string(),
-            "random_key_r".to_string(),
-        ]),
-        ("pattern_access", vec![
-            "pattern_aaa".to_string(),
-            "pattern_bbb".to_string(),
-            "pattern_ccc".to_string(),
-            "pattern_ddd".to_string(),
-            "pattern_eee".to_string(),
-        ]),
+        (
+            "sequential_access",
+            (1..=25)
+                .map(|i| format!("seq_{:03}", i))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "random_access",
+            vec![
+                "random_key_z".to_string(),
+                "random_key_a".to_string(),
+                "random_key_m".to_string(),
+                "random_key_f".to_string(),
+                "random_key_r".to_string(),
+            ],
+        ),
+        (
+            "pattern_access",
+            vec![
+                "pattern_aaa".to_string(),
+                "pattern_bbb".to_string(),
+                "pattern_ccc".to_string(),
+                "pattern_ddd".to_string(),
+                "pattern_eee".to_string(),
+            ],
+        ),
     ];
 
     let mut scenario_results = HashMap::new();
@@ -695,27 +761,45 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
         let scenario_duration = start_time.elapsed();
         let avg_duration = scenario_duration / test_keys.len() as u32;
 
-        scenario_results.insert(scenario_name, (scenario_duration, avg_duration, found_count));
+        scenario_results.insert(
+            scenario_name,
+            (scenario_duration, avg_duration, found_count),
+        );
 
         // Performance assertions per scenario
         assert!(
             avg_duration.as_micros() < 10000,
             "Scenario '{}' average lookup should be efficient: {:?}μs",
-            scenario_name, avg_duration.as_micros()
+            scenario_name,
+            avg_duration.as_micros()
         );
 
-        println!("✅ Scenario '{}': {} keys in {:?} (avg: {:?}, found: {})",
-                 scenario_name, test_keys.len(), scenario_duration, avg_duration, found_count);
+        println!(
+            "✅ Scenario '{}': {} keys in {:?} (avg: {:?}, found: {})",
+            scenario_name,
+            test_keys.len(),
+            scenario_duration,
+            avg_duration,
+            found_count
+        );
     }
 
     // Overall performance validation
-    let total_operations: usize = scenario_results.values().map(|(_, _, found)| *found as usize).sum();
-    let total_time: std::time::Duration = scenario_results.values().map(|(duration, _, _)| *duration).sum();
+    let total_operations: usize = scenario_results
+        .values()
+        .map(|(_, _, found)| *found as usize)
+        .sum();
+    let total_time: std::time::Duration = scenario_results
+        .values()
+        .map(|(duration, _, _)| *duration)
+        .sum();
 
     if total_operations > 0 {
         let overall_avg = total_time / total_operations as u32;
-        println!("✅ Overall performance: {} operations in {:?} (avg: {:?})",
-                 total_operations, total_time, overall_avg);
+        println!(
+            "✅ Overall performance: {} operations in {:?} (avg: {:?})",
+            total_operations, total_time, overall_avg
+        );
 
         assert!(
             overall_avg.as_micros() < 15000,

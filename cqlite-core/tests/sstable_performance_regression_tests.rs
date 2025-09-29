@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
+use cqlite_core::Config;
 
 /// Performance baseline for SSTable reader initialization
 const MAX_INIT_TIME_MS: u64 = 100;

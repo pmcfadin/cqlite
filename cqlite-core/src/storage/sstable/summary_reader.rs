@@ -52,11 +52,11 @@ use crate::{
 
 use super::header_spec::get_global_registry;
 use nom::{
-    IResult,
     bytes::complete::take,
     multi::count,
     number::complete::{be_i64, be_u16, be_u32, be_u64},
     sequence::tuple,
+    IResult,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

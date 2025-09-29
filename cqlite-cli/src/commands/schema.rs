@@ -1,8 +1,8 @@
 use crate::cli_types::SchemaCommands;
 use anyhow::{Context, Result};
 use cqlite_core::{
+    schema::{parse_cql_schema, ClusteringColumn, Column, KeyColumn, TableSchema},
     Database,
-    schema::{ClusteringColumn, Column, KeyColumn, TableSchema, parse_cql_schema},
 };
 use serde_json;
 use std::collections::HashMap;

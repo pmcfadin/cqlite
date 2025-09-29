@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
-    Config, Error, Result,
     platform::Platform,
     schema::{
-        CqlType, TableSchema, UdtRegistry,
         discovery::{SchemaDiscoveryConfig, SchemaDiscoveryEngine, SchemaInfo},
+        CqlType, TableSchema, UdtRegistry,
     },
     types::{ComparatorType, UdtTypeDef},
+    Config, Error, Result,
 };
 
 /// Configuration for schema registry
@@ -358,7 +358,7 @@ impl SchemaRegistry {
             }
             None => {
                 drop(schemas); // Release read lock
-                // Try to discover schema if auto-discovery is enabled
+                               // Try to discover schema if auto-discovery is enabled
                 if self.config.enable_auto_discovery {
                     self.auto_discover_schema(keyspace, table).await
                 } else {
@@ -826,6 +826,7 @@ impl SchemaRegistry {
     }
 
     /// Check if two ComparatorTypes are compatible
+    #[allow(clippy::only_used_in_recursion)]
     fn comparators_are_compatible(&self, left: &ComparatorType, right: &ComparatorType) -> bool {
         match (left, right) {
             // Exact matches
@@ -1195,13 +1196,14 @@ impl SchemaRegistry {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn validate_cql_type_udts(
         &self,
         cql_type: &CqlType,
         keyspace: &str,
         udt_registry: &UdtRegistry,
         errors: &mut Vec<ValidationError>,
-        warnings: &mut Vec<ValidationWarning>,
+        _warnings: &mut Vec<ValidationWarning>,
     ) {
         match cql_type {
             CqlType::Udt(udt_name, _) => {
@@ -1215,15 +1217,15 @@ impl SchemaRegistry {
                 }
             }
             CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
-                self.validate_cql_type_udts(inner, keyspace, udt_registry, errors, warnings);
+                self.validate_cql_type_udts(inner, keyspace, udt_registry, errors, _warnings);
             }
             CqlType::Map(key_type, value_type) => {
-                self.validate_cql_type_udts(key_type, keyspace, udt_registry, errors, warnings);
-                self.validate_cql_type_udts(value_type, keyspace, udt_registry, errors, warnings);
+                self.validate_cql_type_udts(key_type, keyspace, udt_registry, errors, _warnings);
+                self.validate_cql_type_udts(value_type, keyspace, udt_registry, errors, _warnings);
             }
             CqlType::Tuple(types) => {
                 for t in types {
-                    self.validate_cql_type_udts(t, keyspace, udt_registry, errors, warnings);
+                    self.validate_cql_type_udts(t, keyspace, udt_registry, errors, _warnings);
                 }
             }
             _ => {} // Primitive types don't need UDT validation
@@ -1515,12 +1517,10 @@ mod tests {
             1,
             "Second registration should emit first version"
         );
-        assert!(
-            history[0]
-                .changes
-                .iter()
-                .any(|change| matches!(change.change_type, SchemaChangeType::ColumnAdded))
-        );
+        assert!(history[0]
+            .changes
+            .iter()
+            .any(|change| matches!(change.change_type, SchemaChangeType::ColumnAdded)));
     }
 
     #[tokio::test]

@@ -63,7 +63,7 @@ pub enum Value {
 }
 
 /// User Defined Type value with structured field access
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UdtValue {
     /// UDT type name
     pub type_name: String,
@@ -74,7 +74,7 @@ pub struct UdtValue {
 }
 
 /// UDT field with name and optional value
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UdtField {
     /// Field name
     pub name: String,
@@ -132,7 +132,7 @@ pub struct TombstoneInfo {
 }
 
 /// Types of tombstones in Cassandra
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TombstoneType {
     /// Row-level deletion (entire row is deleted)
     RowTombstone,
@@ -1129,6 +1129,78 @@ impl From<String> for ColumnId {
 impl From<&str> for ColumnId {
     fn from(name: &str) -> Self {
         Self(name.to_string())
+    }
+}
+
+// Custom Eq implementation for Value to handle floating-point values
+impl Eq for Value {}
+
+// Custom Hash implementation for Value to handle floating-point values
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Value::Null => {}
+            Value::Boolean(b) => b.hash(state),
+            Value::Integer(i) => i.hash(state),
+            Value::BigInt(i) => i.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::Text(s) => s.hash(state),
+            Value::Blob(b) => b.hash(state),
+            Value::Timestamp(t) => t.hash(state),
+            Value::Uuid(u) => u.hash(state),
+            Value::Varint(v) => v.hash(state),
+            Value::Decimal { scale, unscaled } => {
+                scale.hash(state);
+                unscaled.hash(state);
+            }
+            Value::Duration {
+                months,
+                days,
+                nanos,
+            } => {
+                months.hash(state);
+                days.hash(state);
+                nanos.hash(state);
+            }
+            Value::Json(j) => j.to_string().hash(state),
+            Value::TinyInt(i) => i.hash(state),
+            Value::SmallInt(i) => i.hash(state),
+            Value::Float32(f) => f.to_bits().hash(state),
+            Value::List(l) => l.hash(state),
+            Value::Set(s) => s.hash(state),
+            Value::Map(m) => m.hash(state),
+            Value::Tuple(t) => t.hash(state),
+            Value::Udt(u) => u.hash(state),
+            Value::Frozen(f) => f.hash(state),
+            Value::Tombstone(t) => t.hash(state),
+        }
+    }
+}
+
+// Also need to add Hash to these related types
+impl std::hash::Hash for UdtValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.type_name.hash(state);
+        self.keyspace.hash(state);
+        self.fields.hash(state);
+    }
+}
+
+impl std::hash::Hash for UdtField {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.value.hash(state);
+    }
+}
+
+impl std::hash::Hash for TombstoneInfo {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.deletion_time.hash(state);
+        self.tombstone_type.hash(state);
+        self.ttl.hash(state);
+        self.range_start.hash(state);
+        self.range_end.hash(state);
     }
 }
 

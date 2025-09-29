@@ -15,7 +15,7 @@ use cqlite_core::{platform::Platform, storage::StorageEngine};
 
 use cqlite_core::error::Result;
 use cqlite_core::memory::MemoryManager;
-use cqlite_core::{Config, RowKey, Value, types::TableId};
+use cqlite_core::{types::TableId, Config, RowKey, Value};
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;

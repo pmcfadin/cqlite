@@ -7,10 +7,10 @@
 //! - Throughput: >100 MB/s for complex type SSTable parsing
 //! - Latency: <10ms additional latency for complex type queries
 
-use super::types::{CqlTypeId, parse_cql_value};
+use super::types::{parse_cql_value, CqlTypeId};
 use super::vint::{parse_vint, parse_vint_length};
 use crate::types::Value;
-use nom::{IResult, bytes::complete::take, combinator::map_res, number::complete::be_u8};
+use nom::{bytes::complete::take, combinator::map_res, number::complete::be_u8, IResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 

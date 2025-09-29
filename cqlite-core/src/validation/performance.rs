@@ -158,14 +158,13 @@ pub async fn run_test(
 
     // Check against config threshold using default value
     let performance_threshold_ms = 1000u64; // Default performance threshold in ms
-    if elapsed_ms > performance_threshold_ms
-        && result.status == ValidationStatus::Passed {
-            result.status = ValidationStatus::Warning;
-            result.warnings.push(format!(
-                "Performance above config threshold: {}ms > {}ms",
-                elapsed_ms, performance_threshold_ms
-            ));
-        }
+    if elapsed_ms > performance_threshold_ms && result.status == ValidationStatus::Passed {
+        result.status = ValidationStatus::Warning;
+        result.warnings.push(format!(
+            "Performance above config threshold: {}ms > {}ms",
+            elapsed_ms, performance_threshold_ms
+        ));
+    }
 
     result
 }
@@ -240,7 +239,7 @@ impl PerformanceValidator {
                 details: "Performance benchmarks completed successfully".to_string(),
                 metrics: HashMap::new(),
                 recommendations: vec![
-                    "All performance targets met for Cassandra 5+ support".to_string(),
+                    "All performance targets met for Cassandra 5+ support".to_string()
                 ],
                 timestamp: chrono::Utc::now(),
             },
@@ -260,25 +259,17 @@ mod tests {
         assert!(!benchmarks.is_empty());
 
         // Ensure benchmarks focus on Cassandra 5+ features
-        assert!(
-            benchmarks
-                .iter()
-                .any(|b| b.description.contains("Cassandra 5+"))
-        );
-        assert!(
-            benchmarks
-                .iter()
-                .any(|b| b.description.contains("zero-copy"))
-        );
-        assert!(
-            benchmarks
-                .iter()
-                .any(|b| b.description.contains("LZ4, Snappy, Deflate"))
-        );
-        assert!(
-            benchmarks
-                .iter()
-                .any(|b| b.description.contains("CQL types"))
-        );
+        assert!(benchmarks
+            .iter()
+            .any(|b| b.description.contains("Cassandra 5+")));
+        assert!(benchmarks
+            .iter()
+            .any(|b| b.description.contains("zero-copy")));
+        assert!(benchmarks
+            .iter()
+            .any(|b| b.description.contains("LZ4, Snappy, Deflate")));
+        assert!(benchmarks
+            .iter()
+            .any(|b| b.description.contains("CQL types")));
     }
 }

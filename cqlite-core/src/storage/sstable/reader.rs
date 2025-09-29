@@ -10,18 +10,18 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::{
-    Config, Error, Result, RowKey, Value,
-    parser::{SSTableHeader, SSTableParser, header::CassandraVersion, vint::parse_vint_length},
+    parser::{header::CassandraVersion, vint::parse_vint_length, SSTableHeader, SSTableParser},
     platform::Platform,
-    schema::{ClusteringColumn, Column, KeyColumn, TableSchema, registry::ParsingContext},
+    schema::{registry::ParsingContext, ClusteringColumn, Column, KeyColumn, TableSchema},
     types::{ComparatorType, TableId},
+    Config, Error, Result, RowKey, Value,
 };
 
 use super::header_spec::get_global_registry;
@@ -691,7 +691,7 @@ impl SSTableReader {
         path: &Path,
     ) -> Result<SSTableHeader> {
         use crate::parser::header::{
-            CassandraVersion, SUPPORTED_MAGIC_NUMBERS, parse_sstable_header,
+            parse_sstable_header, CassandraVersion, SUPPORTED_MAGIC_NUMBERS,
         };
 
         // Validate minimum header size
@@ -3561,7 +3561,7 @@ impl SSTableReader {
                     name: col_info.name.clone(),
                     data_type: col_info.column_type.clone(),
                     position: clustering_keys.len(),
-                    order: "ASC".to_string(),
+                    order: crate::schema::ClusteringOrder::Asc,
                 });
             }
 

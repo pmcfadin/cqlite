@@ -10,7 +10,7 @@ use crate::schema::CqlType;
 use crate::storage::sstable::bloom::BloomFilter;
 use crate::storage::sstable::compression::{Compression, CompressionStats};
 use crate::storage::sstable::index::IndexEntry;
-use crate::{Config, Result, RowKey, Value, platform::Platform, types::TableId};
+use crate::{platform::Platform, types::TableId, Config, Result, RowKey, Value};
 
 /// Magic bytes for Cassandra OA format identification (4 bytes)
 const CASSANDRA_MAGIC: [u8; 4] = [0x6F, 0x61, 0x00, 0x00];

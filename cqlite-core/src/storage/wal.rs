@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::error::Error;
-use crate::{Config, Result, RowKey, Value, platform::Platform, types::TableId};
+use crate::{platform::Platform, types::TableId, Config, Result, RowKey, Value};
 
 /// WAL entry types
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

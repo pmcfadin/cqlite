@@ -7,7 +7,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::key_digest::KeyDigestComputer;
-    use crate::schema::{KeyColumn, TableSchema, registry::ParsingContext};
+    use crate::schema::{registry::ParsingContext, KeyColumn, TableSchema};
     use crate::types::ComparatorType;
     use proptest::prelude::*;
     use std::collections::HashMap;

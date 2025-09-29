@@ -7,7 +7,7 @@
 //! - Three byte: 110xxxxx xxxxxxxx xxxxxxxx
 //! - Values are ZigZag encoded: 0->0, -1->1, 1->2, -2->3, etc.
 
-use nom::{IResult, bytes::complete::take};
+use nom::{bytes::complete::take, IResult};
 
 /// ZigZag decode an unsigned integer back to signed
 fn zigzag_decode(value: u64) -> i64 {
@@ -92,6 +92,7 @@ pub fn parse_vint_fixed(input: &[u8]) -> IResult<&[u8], i64> {
         if leading_ones >= 8 {
             // Special case: 0xFF (all ones) - no data bits in first byte
             let mut value = 0u64;
+            #[allow(clippy::needless_range_loop)]
             for i in 1..total_bytes {
                 value = (value << 8) | (input[i] as u64);
             }
@@ -106,6 +107,7 @@ pub fn parse_vint_fixed(input: &[u8]) -> IResult<&[u8], i64> {
             let mut value = (first_byte & first_byte_mask) as u64;
 
             // Add remaining bytes
+            #[allow(clippy::needless_range_loop)]
             for i in 1..total_bytes {
                 value = (value << 8) | (input[i] as u64);
             }

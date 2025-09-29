@@ -5,7 +5,7 @@
 
 use cqlite_core::error::{Error, Result};
 use cqlite_core::parser::header::{
-    CassandraVersion, SSTableHeader, parse_sstable_header, serialize_sstable_header,
+    parse_sstable_header, serialize_sstable_header, CassandraVersion, SSTableHeader,
 };
 use cqlite_core::parser::types::{parse_cql_value, serialize_cql_value};
 use cqlite_core::parser::{CqlTypeId, SSTableParser};

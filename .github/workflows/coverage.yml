@@ -1,23 +1,37 @@
-name: Coverage Gate (M1 Issue #51)
+name: Coverage Gate (Phase 2 - 90% Enforcement)
 
 on:
   push:
-    branches: [ main, develop, ci/m1-coverage-realdata-issue51 ]
+    branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
   workflow_dispatch:
+    inputs:
+      coverage_mode:
+        description: 'Coverage analysis mode'
+        required: false
+        default: 'enforced'
+        type: choice
+        options:
+          - 'enforced'
+          - 'comprehensive'
+          - 'baseline'
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  COVERAGE_THRESHOLD: 90
 
 jobs:
   coverage-gate:
-    name: Coverage Gate ≥95% (Core Reading Modules - PRD Compliant)
+    name: Coverage Gate ≥90% (Phase 2 Enforcement)
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 45
+
     strategy:
+      fail-fast: false
       matrix:
-        coverage-type: [core-reading, comprehensive]
+        coverage-type: [enforced, comprehensive]
         
     steps:
     - uses: actions/checkout@v4
@@ -124,8 +138,8 @@ jobs:
         cargo fmt --all --check
         cargo clippy --all-targets --all-features -- -D warnings
     
-    - name: Run Core Reading Coverage (≥35% ENFORCED - Temporary for Issue #89)
-      if: matrix.coverage-type == 'core-reading' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    - name: Run Enforced Coverage Analysis (≥90% REQUIRED - Phase 2)
+      if: matrix.coverage-type == 'enforced'
       env:
         CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
       working-directory: cqlite-core
@@ -137,13 +151,16 @@ jobs:
           echo "❌ CRITICAL: No real Cassandra 5 SSTable files found in test-data/"
           exit 1
         fi
-        echo "📊 Running coverage with $DB_COUNT real Cassandra 5 SSTable files"
-        cargo tarpaulin \
-          --timeout 300 \
-          --fail-under 35 \
-          --packages cqlite-core \
-          --out Html \
-          --output-dir ../validation_artifacts/coverage \
+        echo "📊 Running enforced coverage analysis with $DB_COUNT real Cassandra 5 SSTable files"
+        echo "🎯 Phase 2 requirement: ≥90% coverage for core modules"
+
+        # Use cargo-llvm-cov for more accurate coverage
+        cargo llvm-cov \
+          --package cqlite-core \
+          --lcov --output-path ../validation_artifacts/coverage/lcov.info \
+          --html --output-dir ../validation_artifacts/coverage/html \
+          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
+          --fail-under 90 \
           --verbose
           
     - name: Run Comprehensive Coverage (Informational)
@@ -170,20 +187,100 @@ jobs:
           --fail-under 80 \
           --verbose
           
-    - name: Generate Coverage Badge
-      if: matrix.coverage-type == 'core-reading'
+    - name: Parse Coverage Results and Generate Reports
+      if: matrix.coverage-type == 'enforced'
       run: |
-        mkdir -p validation_artifacts/coverage/badges
-        # Extract coverage percentage from tarpaulin output
-        COVERAGE=$(grep -oP '\d+\.\d+%' validation_artifacts/coverage/tarpaulin-report.html | head -1 | sed 's/%//')
-        if (( $(echo "$COVERAGE >= 80" | bc -l) )); then
-          COLOR="brightgreen"
-        elif (( $(echo "$COVERAGE >= 35" | bc -l) )); then
-          COLOR="yellow"
-        else
-          COLOR="red"
-        fi
-        echo "![Coverage](https://img.shields.io/badge/coverage-${COVERAGE}%25-${COLOR})" > validation_artifacts/coverage/badges/coverage.md
+        mkdir -p validation_artifacts/coverage/reports
+
+        # Parse LCOV results for detailed analysis
+        python3 << 'EOF'
+        import re
+        import json
+        import os
+
+        def parse_lcov_coverage(lcov_file):
+            """Parse LCOV file and extract detailed coverage metrics."""
+            try:
+                with open(lcov_file, 'r') as f:
+                    content = f.read()
+            except FileNotFoundError:
+                print("❌ Coverage file not found")
+                return None
+
+            files = {}
+            current_file = None
+
+            for line in content.split('\n'):
+                if line.startswith('SF:'):
+                    current_file = line[3:]
+                    files[current_file] = {'lines_hit': 0, 'lines_found': 0}
+                elif line.startswith('LH:') and current_file:
+                    files[current_file]['lines_hit'] = int(line[3:])
+                elif line.startswith('LF:') and current_file:
+                    files[current_file]['lines_found'] = int(line[3:])
+
+            # Calculate overall coverage
+            total_hit = sum(f['lines_hit'] for f in files.values())
+            total_found = sum(f['lines_found'] for f in files.values())
+            overall_coverage = (total_hit / total_found * 100) if total_found > 0 else 0
+
+            return {
+                'overall_coverage': overall_coverage,
+                'total_lines': total_found,
+                'covered_lines': total_hit,
+                'files': files
+            }
+
+        # Parse coverage results
+        coverage_data = parse_lcov_coverage("validation_artifacts/coverage/lcov.info")
+
+        if coverage_data:
+            coverage_pct = coverage_data['overall_coverage']
+            print(f"📊 Overall Coverage: {coverage_pct:.2f}%")
+            print(f"📈 Lines Covered: {coverage_data['covered_lines']}/{coverage_data['total_lines']}")
+
+            # Generate badge
+            if coverage_pct >= 90:
+                color = "brightgreen"
+                status = "PASSED"
+            elif coverage_pct >= 80:
+                color = "yellow"
+                status = "WARNING"
+            else:
+                color = "red"
+                status = "FAILED"
+
+            # Create badge markdown
+            badge_md = f"![Coverage](https://img.shields.io/badge/coverage-{coverage_pct:.1f}%25-{color})"
+            with open("validation_artifacts/coverage/reports/coverage-badge.md", "w") as f:
+                f.write(badge_md)
+
+            # Create detailed report
+            report = {
+                "coverage_percentage": coverage_pct,
+                "status": status,
+                "threshold": 90,
+                "total_lines": coverage_data['total_lines'],
+                "covered_lines": coverage_data['covered_lines'],
+                "files": len(coverage_data['files']),
+                "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            }
+
+            with open("validation_artifacts/coverage/reports/coverage-report.json", "w") as f:
+                json.dump(report, f, indent=2)
+
+            print(f"✅ Coverage report generated: {status}")
+
+            # Enforce threshold
+            if coverage_pct < 90:
+                print(f"❌ Coverage gate FAILED: {coverage_pct:.2f}% < 90% (Phase 2 requirement)")
+                exit(1)
+            else:
+                print(f"✅ Coverage gate PASSED: {coverage_pct:.2f}% ≥ 90%")
+        else:
+            print("❌ Failed to parse coverage data")
+            exit(1)
+        EOF
         
     - name: Upload Coverage Reports
       uses: actions/upload-artifact@v4
@@ -192,10 +289,48 @@ jobs:
         path: validation_artifacts/coverage/
         retention-days: 30
         
-    - name: Coverage Gate Status
-      if: matrix.coverage-type == 'core-reading'
+    - name: Integration with Quality Gates
+      if: matrix.coverage-type == 'enforced'
       run: |
-        echo "✅ Core reading modules coverage gate passed (≥35% temporary threshold)"
-        echo "📊 Using ONLY real Cassandra 5 datasets from test-data/datasets/"
-        echo "🚫 Synthetic/mocked test paths excluded from coverage"
-        echo "🔍 Read-path modules: storage/sstable/*, parser/*, parity readers measured"
+        echo "✅ Phase 2 coverage gate enforcement completed"
+        echo "📊 Using real Cassandra 5 datasets from test-data/datasets/"
+        echo "🚫 Test files, examples, and binaries excluded from coverage analysis"
+        echo "🎯 Phase 2 requirement: ≥90% coverage for core reading library"
+        echo "🔄 Coverage results available for coordination with multi-arch and performance gates"
+
+  # Quality gate integration job
+  coverage-quality-gate:
+    name: Coverage Quality Gate Integration
+    runs-on: ubuntu-latest
+    needs: [coverage-gate]
+    if: always()
+
+    steps:
+    - name: Evaluate coverage gate results
+      run: |
+        echo "🎯 Coverage Quality Gate Results:"
+        echo "Status: ${{ needs.coverage-gate.result }}"
+
+        if [ "${{ needs.coverage-gate.result }}" != "success" ]; then
+          echo "❌ Coverage gate failed"
+          echo "💡 Coverage must be ≥90% for Phase 2 requirements"
+          echo "💡 Add more tests to increase coverage"
+          echo "💡 Review uncovered code paths in the HTML report"
+          exit 1
+        fi
+
+        echo "✅ Coverage gate passed!"
+        echo "📊 Core modules meet ≥90% coverage requirement"
+
+  # Store coverage results for coordination
+  store-coverage-results:
+    name: Store Coverage Results
+    runs-on: ubuntu-latest
+    needs: [coverage-quality-gate]
+    if: always()
+
+    steps:
+    - name: Store coverage test results
+      run: |
+        echo "📊 Coverage testing completed with status: ${{ needs.coverage-quality-gate.result }}"
+        echo "🔄 Results available for coordination with multi-arch and performance gates"

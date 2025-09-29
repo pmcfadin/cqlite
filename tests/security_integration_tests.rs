@@ -4,9 +4,9 @@
 //! the codebase is resistant to common attack patterns.
 
 use cqlite_core::security::{
-    SecurityContext, InputSanitizer, 
-    fuzzing::{SecurityFuzzer, FuzzingReport},
+    fuzzing::{FuzzingReport, SecurityFuzzer},
     memory_validator::{MemorySafetyValidator, MemoryValidationConfig},
+    InputSanitizer, SecurityContext,
 };
 use std::panic;
 use std::time::Duration;
@@ -39,37 +39,85 @@ impl SecurityTestSuite {
 
         // 1. Input validation tests
         results.input_validation = self.test_input_validation().await;
-        println!("✅ Input validation tests: {}", if results.input_validation.passed { "PASSED" } else { "FAILED" });
+        println!(
+            "✅ Input validation tests: {}",
+            if results.input_validation.passed {
+                "PASSED"
+            } else {
+                "FAILED"
+            }
+        );
 
         // 2. Memory safety tests
         results.memory_safety = self.test_memory_safety().await;
-        println!("✅ Memory safety tests: {}", if results.memory_safety.passed { "PASSED" } else { "FAILED" });
+        println!(
+            "✅ Memory safety tests: {}",
+            if results.memory_safety.passed {
+                "PASSED"
+            } else {
+                "FAILED"
+            }
+        );
 
         // 3. FFI boundary tests
         results.ffi_security = self.test_ffi_security().await;
-        println!("✅ FFI security tests: {}", if results.ffi_security.passed { "PASSED" } else { "FAILED" });
+        println!(
+            "✅ FFI security tests: {}",
+            if results.ffi_security.passed {
+                "PASSED"
+            } else {
+                "FAILED"
+            }
+        );
 
         // 4. Parser security tests
         results.parser_security = self.test_parser_security().await;
-        println!("✅ Parser security tests: {}", if results.parser_security.passed { "PASSED" } else { "FAILED" });
+        println!(
+            "✅ Parser security tests: {}",
+            if results.parser_security.passed {
+                "PASSED"
+            } else {
+                "FAILED"
+            }
+        );
 
         // 5. Resource exhaustion tests
         results.resource_limits = self.test_resource_limits().await;
-        println!("✅ Resource limit tests: {}", if results.resource_limits.passed { "PASSED" } else { "FAILED" });
+        println!(
+            "✅ Resource limit tests: {}",
+            if results.resource_limits.passed {
+                "PASSED"
+            } else {
+                "FAILED"
+            }
+        );
 
         // 6. Fuzzing tests
         results.fuzzing = self.test_fuzzing_security().await;
-        println!("✅ Fuzzing tests: {}", if results.fuzzing.passed { "PASSED" } else { "FAILED" });
+        println!(
+            "✅ Fuzzing tests: {}",
+            if results.fuzzing.passed {
+                "PASSED"
+            } else {
+                "FAILED"
+            }
+        );
 
-        results.overall_passed = results.input_validation.passed &&
-            results.memory_safety.passed &&
-            results.ffi_security.passed &&
-            results.parser_security.passed &&
-            results.resource_limits.passed &&
-            results.fuzzing.passed;
+        results.overall_passed = results.input_validation.passed
+            && results.memory_safety.passed
+            && results.ffi_security.passed
+            && results.parser_security.passed
+            && results.resource_limits.passed
+            && results.fuzzing.passed;
 
-        println!("\n🔒 Security test suite complete: {}", 
-            if results.overall_passed { "ALL TESTS PASSED" } else { "SOME TESTS FAILED" });
+        println!(
+            "\n🔒 Security test suite complete: {}",
+            if results.overall_passed {
+                "ALL TESTS PASSED"
+            } else {
+                "SOME TESTS FAILED"
+            }
+        );
 
         results
     }
@@ -111,7 +159,10 @@ impl SecurityTestSuite {
         for sql in &sql_injections {
             match self.sanitizer.validate_string_input(sql, "sql") {
                 Ok(_) => {
-                    result.add_failure(&format!("SQL injection not detected: {}", &sql[..sql.len().min(50)]));
+                    result.add_failure(&format!(
+                        "SQL injection not detected: {}",
+                        &sql[..sql.len().min(50)]
+                    ));
                 }
                 Err(_) => {
                     result.add_success(&format!("SQL injection blocked"));
@@ -121,7 +172,10 @@ impl SecurityTestSuite {
 
         // Test 3: Oversized input rejection
         let large_input = "A".repeat(10 * 1024 * 1024); // 10MB
-        match self.sanitizer.validate_string_input(&large_input, "generic") {
+        match self
+            .sanitizer
+            .validate_string_input(&large_input, "generic")
+        {
             Ok(_) => {
                 result.add_failure("Large input not rejected");
             }
@@ -132,7 +186,10 @@ impl SecurityTestSuite {
 
         // Test 4: Binary input validation
         let malicious_binary = vec![0xFF; 1000];
-        match self.sanitizer.validate_binary_input(&malicious_binary, "sstable_header") {
+        match self
+            .sanitizer
+            .validate_binary_input(&malicious_binary, "sstable_header")
+        {
             Ok(_) => {
                 result.add_success("Binary input validation working");
             }
@@ -150,7 +207,10 @@ impl SecurityTestSuite {
 
         // Test 1: Null pointer detection
         let null_ptr = std::ptr::null::<u8>();
-        match self.memory_validator.validate_allocation(null_ptr, 1000, "test_null") {
+        match self
+            .memory_validator
+            .validate_allocation(null_ptr, 1000, "test_null")
+        {
             Ok(_) => {
                 result.add_failure("Null pointer not detected");
             }
@@ -161,7 +221,10 @@ impl SecurityTestSuite {
 
         // Test 2: Oversized allocation detection
         let dummy_ptr = 0x1000 as *const u8;
-        match self.memory_validator.validate_allocation(dummy_ptr, usize::MAX, "test_large") {
+        match self
+            .memory_validator
+            .validate_allocation(dummy_ptr, usize::MAX, "test_large")
+        {
             Ok(_) => {
                 result.add_failure("Oversized allocation not detected");
             }
@@ -175,7 +238,7 @@ impl SecurityTestSuite {
         match self.memory_validator.validate_memory_access(
             test_data.as_ptr(),
             test_data.len(),
-            "test_bounds"
+            "test_bounds",
         ) {
             Ok(_) => {
                 result.add_success("Valid memory access allowed");
@@ -188,7 +251,10 @@ impl SecurityTestSuite {
         // Test 4: Use-after-free detection simulation
         // (In practice, this would test actual freed memory)
         let freed_addr = 0xDEADBEEF as *const u8;
-        match self.memory_validator.validate_memory_access(freed_addr, 100, "test_uaf") {
+        match self
+            .memory_validator
+            .validate_memory_access(freed_addr, 100, "test_uaf")
+        {
             Ok(_) => {
                 // This might be OK if memory tracking is disabled
                 result.add_warning("Use-after-free detection may need improvement");
@@ -382,8 +448,15 @@ impl SecurityTestResults {
     /// Print comprehensive test report
     pub fn print_report(&self) {
         println!("\n🔒 SECURITY TEST REPORT 🔒");
-        println!("=" .repeat(50));
-        println!("Overall Result: {}", if self.overall_passed { "✅ PASSED" } else { "❌ FAILED" });
+        println!("=".repeat(50));
+        println!(
+            "Overall Result: {}",
+            if self.overall_passed {
+                "✅ PASSED"
+            } else {
+                "❌ FAILED"
+            }
+        );
         println!();
 
         let test_results = [
@@ -399,7 +472,7 @@ impl SecurityTestResults {
             test_result.print_summary();
         }
 
-        println!("=" .repeat(50));
+        println!("=".repeat(50));
     }
 }
 
@@ -442,27 +515,31 @@ impl TestResult {
     }
 
     fn print_summary(&self) {
-        let status = if self.passed { "✅ PASSED" } else { "❌ FAILED" };
+        let status = if self.passed {
+            "✅ PASSED"
+        } else {
+            "❌ FAILED"
+        };
         println!("{}: {}", self.test_name, status);
-        
+
         if !self.successes.is_empty() {
             println!("  Successes: {}", self.successes.len());
         }
-        
+
         if !self.failures.is_empty() {
             println!("  Failures: {}", self.failures.len());
             for failure in &self.failures {
                 println!("    ❌ {}", failure);
             }
         }
-        
+
         if !self.warnings.is_empty() {
             println!("  Warnings: {}", self.warnings.len());
             for warning in &self.warnings {
                 println!("    ⚠️  {}", warning);
             }
         }
-        
+
         println!();
     }
 }
@@ -475,13 +552,16 @@ mod tests {
     async fn test_security_suite() {
         let suite = SecurityTestSuite::new();
         let results = suite.run_all_security_tests().await;
-        
+
         results.print_report();
-        
+
         // Assert that critical security tests pass
-        assert!(results.input_validation.passed, "Input validation must pass");
+        assert!(
+            results.input_validation.passed,
+            "Input validation must pass"
+        );
         assert!(results.memory_safety.passed, "Memory safety must pass");
-        
+
         // Overall security should pass
         assert!(results.overall_passed, "Overall security tests must pass");
     }
@@ -492,12 +572,20 @@ mod tests {
         let sanitizer = InputSanitizer::new(context);
 
         // Test path traversal detection
-        assert!(sanitizer.validate_string_input("../../../etc/passwd", "path").is_err());
-        assert!(sanitizer.validate_string_input("/safe/path/file.db", "path").is_ok());
+        assert!(sanitizer
+            .validate_string_input("../../../etc/passwd", "path")
+            .is_err());
+        assert!(sanitizer
+            .validate_string_input("/safe/path/file.db", "path")
+            .is_ok());
 
         // Test SQL injection detection
-        assert!(sanitizer.validate_string_input("SELECT * FROM users; DROP TABLE users;", "sql").is_err());
-        assert!(sanitizer.validate_string_input("SELECT id, name FROM users", "sql").is_ok());
+        assert!(sanitizer
+            .validate_string_input("SELECT * FROM users; DROP TABLE users;", "sql")
+            .is_err());
+        assert!(sanitizer
+            .validate_string_input("SELECT id, name FROM users", "sql")
+            .is_ok());
     }
 
     #[test]
@@ -505,11 +593,15 @@ mod tests {
         let validator = MemorySafetyValidator::new(MemoryValidationConfig::default());
 
         // Test null pointer detection
-        assert!(validator.validate_allocation(std::ptr::null(), 100, "test").is_err());
+        assert!(validator
+            .validate_allocation(std::ptr::null(), 100, "test")
+            .is_err());
 
         // Test valid memory access
         let test_data = vec![1, 2, 3, 4, 5];
-        assert!(validator.validate_memory_access(test_data.as_ptr(), test_data.len(), "test").is_ok());
+        assert!(validator
+            .validate_memory_access(test_data.as_ptr(), test_data.len(), "test")
+            .is_ok());
     }
 
     #[test]

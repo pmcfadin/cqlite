@@ -7,8 +7,8 @@
 use clap::{Arg, Command};
 #[cfg(feature = "benchmarks")]
 use cqlite_tests::{
-    BenchmarkRunnerConfig, PerformanceBenchmarkRunner,
-    performance_benchmark_runner::PerformanceTargets,
+    performance_benchmark_runner::PerformanceTargets, BenchmarkRunnerConfig,
+    PerformanceBenchmarkRunner,
 };
 #[cfg(feature = "benchmarks")]
 use std::path::PathBuf;

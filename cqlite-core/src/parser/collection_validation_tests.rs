@@ -3,7 +3,7 @@
 //! These tests validate that our collection parsing implementation works correctly
 //! with the actual Cassandra 5.0 format and the collections_table schema.
 
-use super::types::{CqlTypeId, parse_list, parse_map, parse_set};
+use super::types::{parse_list, parse_map, parse_set, CqlTypeId};
 use super::vint::encode_vint;
 use super::*;
 use crate::schema::{CqlType, TableSchema};

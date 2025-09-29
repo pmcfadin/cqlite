@@ -49,7 +49,7 @@ use tokio::sync::RwLock;
 #[cfg(feature = "tombstones")]
 use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
-use crate::{Config, Result, RowKey, Value, types::TableId};
+use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// SSTable file identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

@@ -1,10 +1,13 @@
 //! Integration tests for schema-driven parsing with 3 representative tables
-//! 
+//!
 //! These tests demonstrate zero-diff parity validation against sstabledump
 //! for the three representative table types requested by reviewers.
 
 use cqlite_core::{
-    schema::{ParsingContext, SchemaParser, SchemaRegistry, SchemaRegistryConfig, TableSchema, Column, KeyColumn},
+    schema::{
+        Column, KeyColumn, ParsingContext, SchemaParser, SchemaRegistry, SchemaRegistryConfig,
+        TableSchema,
+    },
     types::{ComparatorType, Value},
     Config, Platform,
 };
@@ -40,10 +43,13 @@ impl SchemaIntegrationFixture {
             .await
             .unwrap();
 
-        // Table 2: Collections table with complex nested types  
+        // Table 2: Collections table with complex nested types
         let collections_schema = self.create_collections_table_schema();
         self.registry
-            .register_schema(collections_schema, cqlite_core::schema::SchemaSource::Manual)
+            .register_schema(
+                collections_schema,
+                cqlite_core::schema::SchemaSource::Manual,
+            )
             .await
             .unwrap();
 
@@ -306,7 +312,8 @@ impl SchemaIntegrationFixture {
                 },
                 Column {
                     name: "nested_frozen".to_string(),
-                    data_type: "frozen<map<text,frozen<list<frozen<tuple<text,int>>>>>>".to_string(),
+                    data_type: "frozen<map<text,frozen<list<frozen<tuple<text,int>>>>>>"
+                        .to_string(),
                     nullable: true,
                     default: None,
                 },
@@ -487,7 +494,7 @@ async fn test_udt_frozen_table_parsing_parity() {
     // Note: This test validates the parsing structure even if the UDT isn't fully defined
     let result = parser.parse_column_value("server_info", &frozen_udt_data);
     // We expect this to work with schema-driven parsing once UDTs are registered
-    
+
     // Test 4: Complex nested frozen types
     // frozen<list<frozen<network_interface_type>>>
     let nested_frozen_data = create_complex_nested_frozen_data();
@@ -501,7 +508,7 @@ async fn test_zero_diff_parity_validation() {
 
     // Test parity for all three table schemas
     let table_names = ["simple_table", "collections_table", "udt_frozen_table"];
-    
+
     for table_name in &table_names {
         let context = fixture
             .registry
@@ -512,23 +519,39 @@ async fn test_zero_diff_parity_validation() {
         let parser = SchemaParser::new(context.clone()).unwrap();
 
         // Validate that the schema is complete and ready for parity testing
-        assert!(context.is_complete(), "Schema context must be complete for {}", table_name);
-        
+        assert!(
+            context.is_complete(),
+            "Schema context must be complete for {}",
+            table_name
+        );
+
         // Validate comparator availability for all key columns
         for (i, _) in context.partition_comparators.iter().enumerate() {
-            assert!(i < context.schema.partition_keys.len(), 
-                "Partition comparator {} missing for {}", i, table_name);
+            assert!(
+                i < context.schema.partition_keys.len(),
+                "Partition comparator {} missing for {}",
+                i,
+                table_name
+            );
         }
-        
+
         for (i, _) in context.clustering_comparators.iter().enumerate() {
-            assert!(i < context.schema.clustering_keys.len(),
-                "Clustering comparator {} missing for {}", i, table_name);
+            assert!(
+                i < context.schema.clustering_keys.len(),
+                "Clustering comparator {} missing for {}",
+                i,
+                table_name
+            );
         }
 
         // Validate column comparator completeness
         for column in &context.schema.columns {
-            assert!(context.column_comparators.contains_key(&column.name),
-                "Column comparator missing for '{}' in {}", column.name, table_name);
+            assert!(
+                context.column_comparators.contains_key(&column.name),
+                "Column comparator missing for '{}' in {}",
+                column.name,
+                table_name
+            );
         }
 
         println!("✓ Schema validation passed for table: {}", table_name);
@@ -575,16 +598,16 @@ fn create_list_data(items: &[i64]) -> Vec<u8> {
 fn create_nested_map_list_data() -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(&1i32.to_be_bytes()); // 1 map entry
-    
+
     // Key: "numbers"
     data.extend(create_length_prefixed_text("numbers"));
-    
+
     // Value: List of integers [1, 2, 3]
     data.extend_from_slice(&3i32.to_be_bytes()); // list size
     data.extend_from_slice(&1i32.to_be_bytes());
     data.extend_from_slice(&2i32.to_be_bytes());
     data.extend_from_slice(&3i32.to_be_bytes());
-    
+
     data
 }
 
@@ -600,28 +623,28 @@ fn create_date_data(year: i32, month: u8, day: u8) -> Vec<u8> {
 fn create_frozen_udt_data() -> Vec<u8> {
     // Create a simple frozen UDT with basic fields
     let mut data = Vec::new();
-    
+
     // Field 1: hostname (text)
     data.extend(create_length_prefixed_text("server01"));
-    
+
     // Field 2: cpu_cores (int)
     data.extend_from_slice(&8i32.to_be_bytes());
-    
+
     // Field 3: memory_gb (int)
     data.extend_from_slice(&32i32.to_be_bytes());
-    
+
     data
 }
 
 fn create_complex_nested_frozen_data() -> Vec<u8> {
     // Create complex nested frozen structure
     let mut data = Vec::new();
-    
+
     // Outer list with 1 item
     data.extend_from_slice(&1i32.to_be_bytes());
-    
+
     // Inner frozen UDT
     data.extend(create_frozen_udt_data());
-    
+
     data
 }

@@ -179,6 +179,7 @@ impl NomParser {
     }
 
     /// Convert CQL type string to AST data type
+    #[allow(clippy::only_used_in_recursion)]
     fn convert_cql_type_string_to_ast(&self, type_str: &str) -> Result<CqlDataType> {
         let type_lower = type_str.trim().to_lowercase();
 
@@ -314,7 +315,7 @@ impl NomParser {
                     name: key.name.clone(),
                     data_type,
                     position: pos,
-                    order: "ASC".to_string(),
+                    order: crate::schema::ClusteringOrder::Asc,
                 }
             })
             .collect();
@@ -347,6 +348,7 @@ impl NomParser {
     }
 
     /// Convert AST data type back to string representation
+    #[allow(clippy::only_used_in_recursion)]
     fn convert_ast_type_to_string(&self, ast_type: &CqlDataType) -> String {
         match ast_type {
             CqlDataType::Text => "text".to_string(),
@@ -517,6 +519,7 @@ impl NomParser {
     }
 
     /// Parse data type (placeholder)
+    #[allow(clippy::only_used_in_recursion)]
     fn parse_type_impl(&self, input: &str) -> Result<CqlDataType> {
         let trimmed = input.trim().to_lowercase();
 
@@ -551,8 +554,8 @@ impl NomParser {
 
         if trimmed == "?" {
             Ok(CqlExpression::Parameter(1))
-        } else if trimmed.starts_with(':') {
-            Ok(CqlExpression::NamedParameter(trimmed[1..].to_string()))
+        } else if let Some(stripped) = trimmed.strip_prefix(':') {
+            Ok(CqlExpression::NamedParameter(stripped.to_string()))
         } else if trimmed.starts_with('\'') && trimmed.ends_with('\'') {
             Ok(CqlExpression::Literal(CqlLiteral::String(
                 trimmed[1..trimmed.len() - 1].to_string(),

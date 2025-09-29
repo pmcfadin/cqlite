@@ -8,12 +8,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
 
-use cqlite_core::Config;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::{
-    SSTableReader, index_reader::IndexReader, statistics_reader::StatisticsReader,
-    summary_reader::SummaryReader,
+    index_reader::IndexReader, statistics_reader::StatisticsReader, summary_reader::SummaryReader,
+    SSTableReader,
 };
+use cqlite_core::Config;
 
 /// Test that SSTable component paths are built correctly and files are discovered
 #[tokio::test]
@@ -273,20 +273,16 @@ async fn test_missing_components_graceful_handling() {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-    assert!(
-        IndexReader::open(&missing_index, platform.clone())
-            .await
-            .is_err()
-    );
+    assert!(IndexReader::open(&missing_index, platform.clone())
+        .await
+        .is_err());
     println!("✓ Missing Index.db handled gracefully");
 
     // Test missing Summary.db
     let missing_summary = base_path.join("missing-Summary.db");
-    assert!(
-        SummaryReader::open(&missing_summary, platform.clone())
-            .await
-            .is_err()
-    );
+    assert!(SummaryReader::open(&missing_summary, platform.clone())
+        .await
+        .is_err());
     println!("✓ Missing Summary.db handled gracefully");
 
     // Test missing Statistics.db
@@ -343,11 +339,9 @@ async fn test_malformed_components_handling() {
     fs::write(&corrupted_summary, b"corrupted_summary_data")
         .await
         .unwrap();
-    assert!(
-        SummaryReader::open(&corrupted_summary, platform.clone())
-            .await
-            .is_err()
-    );
+    assert!(SummaryReader::open(&corrupted_summary, platform.clone())
+        .await
+        .is_err());
     println!("✓ Corrupted Summary.db handled gracefully");
 
     // Test corrupted Statistics.db
@@ -355,11 +349,9 @@ async fn test_malformed_components_handling() {
     fs::write(&corrupted_statistics, b"corrupted_statistics_data")
         .await
         .unwrap();
-    assert!(
-        StatisticsReader::open(&corrupted_statistics, platform)
-            .await
-            .is_err()
-    );
+    assert!(StatisticsReader::open(&corrupted_statistics, platform)
+        .await
+        .is_err());
     println!("✓ Corrupted Statistics.db handled gracefully");
 }
 

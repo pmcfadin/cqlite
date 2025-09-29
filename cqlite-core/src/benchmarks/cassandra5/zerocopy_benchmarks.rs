@@ -14,8 +14,8 @@ use std::sync::Arc;
 use crate::{Config, Platform, Result};
 
 use super::{
+    utils::{generate_test_data, MemoryMonitor, PrecisionTimer},
     BenchmarkResult, PRDTargets,
-    utils::{MemoryMonitor, PrecisionTimer, generate_test_data},
 };
 
 /// Zero-copy deserialization benchmarking suite
@@ -463,7 +463,7 @@ impl ZeroCopyBenchmarks {
                 while data.len() < size_bytes {
                     data.extend_from_slice(b"blob_header:");
                     data.extend_from_slice(&(8192u32).to_be_bytes()); // 8KB blob size
-                    // Fill with pseudo-random binary data
+                                                                      // Fill with pseudo-random binary data
                     for i in 0..2048 {
                         data.extend_from_slice(&((i * 0x1234_5678) as u32).to_be_bytes());
                     }

@@ -3,7 +3,7 @@
 //! This module provides extensive testing for collections (List, Set, Map, Tuple)
 //! with real Cassandra data formats and edge cases.
 
-use super::types::{CqlTypeId, parse_list, parse_map, parse_set, parse_tuple};
+use super::types::{parse_list, parse_map, parse_set, parse_tuple, CqlTypeId};
 use super::vint::encode_vint;
 use super::*;
 use crate::types::Value;

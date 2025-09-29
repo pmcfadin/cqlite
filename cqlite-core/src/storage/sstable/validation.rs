@@ -12,8 +12,8 @@ use std::process::Command;
 use crate::storage::sstable::writer::SSTableWriter;
 #[cfg(feature = "experimental")]
 use crate::types::TableId;
-use crate::{Config, platform::Platform};
-use crate::{Result, error::Error};
+use crate::{error::Error, Result};
+use crate::{platform::Platform, Config};
 #[cfg(feature = "experimental")]
 use crate::{RowKey, Value};
 use std::sync::Arc;

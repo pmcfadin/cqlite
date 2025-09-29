@@ -2,14 +2,14 @@
 //! - Compares per-SSTable row counts from our StatisticsReader with JSONL dumps
 
 use cqlite_core::{
-    Config,
     error::Result as CqliteResult,
     platform::Platform,
     storage::sstable::statistics_reader::StatisticsReader,
     testing::dataset_helpers::{
-        DatasetError, derive_reference_paths_from_data_db, list_tables, read_jsonl_rows,
-        resolve_table_to_sstable_path, should_ignore_file,
+        derive_reference_paths_from_data_db, list_tables, read_jsonl_rows,
+        resolve_table_to_sstable_path, should_ignore_file, DatasetError,
     },
+    Config,
 };
 use std::path::PathBuf;
 use std::sync::Arc;

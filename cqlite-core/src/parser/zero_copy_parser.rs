@@ -3,7 +3,7 @@
 //! This module provides zero-copy parsing patterns to reduce string allocations
 //! and improve performance for high-throughput scenarios.
 
-use nom::{IResult, bytes::complete::tag, character::complete::alphanumeric1, sequence::tuple};
+use nom::{bytes::complete::tag, character::complete::alphanumeric1, sequence::tuple, IResult};
 use std::borrow::Cow;
 use std::collections::HashMap;
 

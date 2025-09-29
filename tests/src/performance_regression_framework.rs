@@ -8,7 +8,7 @@
 use cqlite_core::error::Result;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::StorageEngine;
-use cqlite_core::{Config, RowKey, Value, types::TableId};
+use cqlite_core::{types::TableId, Config, RowKey, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
