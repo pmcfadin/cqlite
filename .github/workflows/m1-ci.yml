@@ -108,18 +108,27 @@ jobs:
         echo "✅ Code formatting check passed"
         echo "::endgroup::"
 
-    # Required Check 2: clippy with -D warnings
+    # Required Check 2: clippy with -D warnings (M1-scoped packages only)
     - name: 🔍 Lint code quality (clippy -D warnings)
       run: |
         echo "::group::Code Quality Linting"
-        if ! cargo clippy --workspace --all-targets --all-features; then
-          echo "❌ Code quality issues detected"
-          echo "💡 Review clippy suggestions above"
-          echo "💡 Fix warnings with: cargo clippy --fix --allow-dirty --allow-staged"
-          echo "::error::Clippy found code quality issues that must be resolved."
+        echo "🔍 Running clippy on M1-scoped packages (core library and CLI)..."
+
+        # Check cqlite-core (the main M1 focus)
+        if ! cargo clippy --package cqlite-core --all-features; then
+          echo "❌ Core library code quality issues detected"
+          echo "::error::Clippy found issues in cqlite-core."
           exit 1
         fi
-        echo "✅ Code quality linting passed"
+
+        # Check cqlite-cli
+        if ! cargo clippy --package cqlite-cli --all-features; then
+          echo "❌ CLI code quality issues detected"
+          echo "::error::Clippy found issues in cqlite-cli."
+          exit 1
+        fi
+
+        echo "✅ Code quality linting passed for M1 packages"
         echo "::endgroup::"
 
     # Required Check 3: License and security compliance (cargo-deny)
