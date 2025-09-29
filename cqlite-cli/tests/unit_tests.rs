@@ -482,7 +482,9 @@ mod test_helpers {
     /// Create a sample schema for testing
     #[allow(dead_code)]
     pub fn create_test_schema() -> cqlite_core::schema::TableSchema {
-        use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+        use cqlite_core::schema::{
+            ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema,
+        };
         use std::collections::HashMap;
 
         TableSchema {
@@ -497,7 +499,7 @@ mod test_helpers {
                 name: "created_at".to_string(),
                 data_type: "timestamp".to_string(),
                 position: 0,
-                order: "ASC".to_string(),
+                order: ClusteringOrder::Asc,
             }],
             columns: vec![
                 Column {
