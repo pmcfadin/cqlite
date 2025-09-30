@@ -91,7 +91,7 @@ fn test_ci_crc_corruption_detection() {
     let mut reader3 = Cursor::new(&fake_compressed_data);
 
     // Legacy format should skip CRC validation and proceed to decompression
-    let result = legacy_decompressor.read_data(&mut reader3, 0, 10);
+    let _result = legacy_decompressor.read_data(&mut reader3, 0, 10);
     // We expect this to skip CRC validation (might still fail on LZ4 decompression)
 
     println!("✅ CI Test COMPLETED: CRC corruption detection verified for modern formats, skipped for legacy");

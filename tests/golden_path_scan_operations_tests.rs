@@ -20,14 +20,13 @@ use std::time::Instant;
 use cqlite_core::{
     error::{Error, Result},
     platform::Platform,
-    schema::{registry::SchemaRegistry, TableSchema},
+    schema::registry::SchemaRegistry,
     storage::sstable::{
         reader::SSTableReader,
-        schema_aware_reader::SchemaAwareReader,
         // streaming_reader::StreamingReader, // Not exported
     },
-    types::{ComparatorType, TableId},
-    Config, RowKey, Value,
+    types::TableId,
+    Config, RowKey,
 };
 
 use futures::StreamExt;
@@ -65,7 +64,7 @@ impl GoldenPathScanTestFixture {
 
     /// Setup SSTable reader for wide rows dataset (good for scan testing)
     async fn setup_wide_rows_reader(&self) -> Result<SSTableReader> {
-        let sstable_path = self
+        let _sstable_path = self
             .datasets_path
             .join("test_wide_rows")
             .join("*/nb-*-big-Data.db");

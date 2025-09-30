@@ -490,12 +490,12 @@ async fn test_udt_frozen_table_parsing_parity() {
     // For now, we test that the column parsing structure is correct
     let frozen_udt_data = create_frozen_udt_data();
     // Note: This test validates the parsing structure even if the UDT isn't fully defined
-    let result = parser.parse_column_value("server_info", &frozen_udt_data);
+    let _result = parser.parse_column_value("server_info", &frozen_udt_data);
     // We expect this to work with schema-driven parsing once UDTs are registered
 
     // Test 4: Complex nested frozen types
     // frozen<list<frozen<network_interface_type>>>
-    let nested_frozen_data = create_complex_nested_frozen_data();
+    let _nested_frozen_data = create_complex_nested_frozen_data();
     // This demonstrates the capability to handle deeply nested frozen structures
 }
 

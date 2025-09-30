@@ -62,7 +62,7 @@ impl GoldenPathPartitionTestFixture {
     /// Setup SSTable reader for partition testing (using collections dataset)
     async fn setup_collections_reader(&self) -> Result<SSTableReader> {
         // Try collections dataset first, fallback to test_basic
-        let primary_path = self
+        let _primary_path = self
             .datasets_path
             .join("test_collections")
             .join("*/nb-*-big-Data.db");
@@ -640,7 +640,7 @@ async fn test_golden_path_partition_integration_validation() -> Result<()> {
     let test_partition = RowKey::from(b"integration_test_partition".as_ref());
 
     let start_time = Instant::now();
-    let partition_result = reader.get(&table_id, &test_partition).await?;
+    let _partition_result = reader.get(&table_id, &test_partition).await?;
     let partition_duration = start_time.elapsed();
 
     // 3. Test partition scan with integration

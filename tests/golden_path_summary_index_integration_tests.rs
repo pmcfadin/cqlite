@@ -19,10 +19,7 @@ use std::time::Instant;
 use cqlite_core::{
     error::{Error, Result},
     platform::Platform,
-    schema::{
-        registry::{SchemaRegistry, SchemaRegistryConfig},
-        TableSchema,
-    },
+    schema::registry::{SchemaRegistry, SchemaRegistryConfig},
     storage::sstable::{
         index_reader::IndexReader, reader::SSTableReader, summary_reader::SummaryReader,
     },
@@ -536,7 +533,7 @@ async fn test_golden_path_multi_level_index_traversal() -> Result<()> {
 
     for test_key in &traversal_test_keys {
         let start_time = Instant::now();
-        let result = reader.get(&table_id, test_key).await?;
+        let _result = reader.get(&table_id, test_key).await?;
         let lookup_duration = start_time.elapsed();
 
         traversal_times.push(lookup_duration);
