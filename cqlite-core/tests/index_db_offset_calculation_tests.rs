@@ -22,25 +22,49 @@ use common::sstable_test_utils::{AssertionHelpers, TestContext};
 
 /// Helper function to find a file with a specific pattern in a directory
 async fn find_file_with_pattern(table_path: &std::path::Path, pattern: &str) -> std::path::PathBuf {
-    let mut read_dir = fs::read_dir(table_path).await.unwrap();
+    let read_dir = match fs::read_dir(table_path).await {
+        Ok(dir) => dir,
+        Err(e) => panic!(
+            "Failed to read directory {}: {}",
+            table_path.display(),
+            e
+        ),
+    };
+    let mut read_dir = read_dir;
+    let mut all_files = Vec::new();
 
     while let Some(entry) = read_dir.next_entry().await.unwrap() {
         let path = entry.path();
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            all_files.push(name.to_string());
             if name.contains(pattern) && (pattern.contains(".jsonl") || !name.contains(".jsonl")) {
                 return path;
             }
         }
     }
 
-    panic!("Should find file with pattern: {}", pattern);
+    panic!(
+        "Should find file with pattern '{}' in directory {}. Found {} files: {:?}",
+        pattern,
+        table_path.display(),
+        all_files.len(),
+        all_files
+    );
 }
 
 /// Test that Index.db correctly calculates and stores data offsets using real SSTable data
 #[tokio::test]
 async fn test_data_offset_calculation_from_real_data() {
+    eprintln!(
+        "CQLITE_DATASETS_ROOT = {:?}",
+        std::env::var("CQLITE_DATASETS_ROOT")
+    );
+
     let mut context = TestContext::new("test_basic").await.unwrap();
+    eprintln!("TestContext dataset_path = {:?}", context.dataset_path);
+
     let table_path = context.prepare_sstable("uncompressed_table").await.unwrap();
+    eprintln!("Prepared SSTable at: {}", table_path.display());
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());

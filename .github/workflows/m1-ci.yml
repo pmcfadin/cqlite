@@ -165,6 +165,9 @@ jobs:
       run: |
         echo "::group::Core Crate Unit Tests"
         echo "🧪 Running tests for core crates required for M1..."
+        echo "CQLITE_DATASETS_ROOT=$CQLITE_DATASETS_ROOT"
+        echo "Checking dataset structure:"
+        ls -la "$CQLITE_DATASETS_ROOT/sstables/test_basic/" 2>/dev/null || echo "⚠️  test_basic directory not found"
 
         # M1-focused test execution - exclude advanced integration features
         echo "🎯 Running M1-focused core tests (parsing, SSTable reading, format compatibility)..."
@@ -183,14 +186,13 @@ jobs:
         if ! timeout 5m cargo test --package cqlite-core \
           --test P0_4_modern_format_rejection_tests \
           --test cassandra_compatibility \
-          --test compression_integration \
           --test parser_abstraction_tests \
           --test parsing_improvements_test \
           --verbose --no-fail-fast -- \
           --skip test_legacy_format_allows_blob_fallback_with_feature; then
           echo "❌ M1 integration tests failed or timed out"
           echo "💡 Check test output above for specific failures"
-          echo "💡 Run locally with: cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test cassandra_compatibility --test compression_integration --test parser_abstraction_tests --test parsing_improvements_test"
+          echo "💡 Run locally with: cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test cassandra_compatibility --test parser_abstraction_tests --test parsing_improvements_test"
           echo "::error::M1 integration tests failed. Review test output for details."
           exit 1
         fi

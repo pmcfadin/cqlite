@@ -1,8 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(for file in tests/golden_path_scan_operations_tests.rs tests/golden_path_summary_index_integration_tests.rs)",
-      "Bash(do perl -i -pe 's/(\\s+)(fallback_path|summary_path|index_path|sstable_path|actual_path)\\n(\\s+)\\)\\);/$1$2$3)));/g' \"$file\")"
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh release view:*)",
+      "Bash(curl -fsSL https://github.com/pmcfadin/cqlite/releases/download/datasets-v2/cassandra5-small-with-refs-v2.tar.gz)",
+      "Bash(sha256sum:*)",
+      "Bash(git add:*)",
+      "Bash(curl -fsSL https://github.com/pmcfadin/cqlite/releases/download/datasets-v2/cassandra5-small-full.tar.gz -o /tmp/full.tar.gz)",
+      "Bash(tar:*)",
+      "Bash(CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test index_db_offset_calculation_tests test_data_offset_calculation_from_real_data -- --nocapture)",
+      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test index_db_offset_calculation_tests test_data_offset_calculation_from_real_data -- --nocapture)"
     ],
     "deny": [],
     "ask": []
