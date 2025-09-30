@@ -2,9 +2,11 @@
 
 ## Executive Summary
 
-We've been working to achieve **local/CI parity** for the CQLite M1 milestone pipeline. The goal is to eliminate the slow CI feedback loop by enabling developers to run the exact same tests locally that CI runs, catching issues before pushing.
+We've been working to achieve **local/CI parity** for CQLite CI workflows. The goal is to eliminate the slow CI feedback loop by enabling developers to run the exact same tests locally that CI runs, catching issues before pushing.
 
-**Current Status:** ✅ All M1 CI requirements now pass both locally and should pass in CI.
+**Current Status:** ✅ All active CI workflows have local parity validation scripts.
+
+⚠️ **CRITICAL**: CQLite has **3 active CI workflows** that must all pass. Use `scripts/test-all-ci-locally.sh` to validate ALL workflows before pushing.
 
 ## Background: The Problem We Solved
 
@@ -76,6 +78,28 @@ test-data/datasets/sstables/test_basic/
 
 **Why this matters:** Some tests require actual SSTable binary files to read partition data. In CI with refs-only dataset, these tests must gracefully skip.
 
+## Multi-Workflow CI Architecture
+
+CQLite has **3 active CI workflows** that run on every push. Each must pass for green builds:
+
+### 1. M1 Minimal CI Pipeline
+- **Workflow**: `.github/workflows/m1-ci.yml`
+- **Scope**: `cqlite-core` package only (M1 milestone focus)
+- **Tests**: Library tests, integration tests, doc tests
+- **Local script**: `./scripts/test-m1-ci-locally.sh`
+
+### 2. Main CI (test job)
+- **Workflow**: `.github/workflows/ci.yml`
+- **Scope**: `cqlite-core` package with full dataset
+- **Tests**: All cqlite-core tests with full SSTable files
+- **Command**: `cargo test --package cqlite-core --all-features`
+
+### 3. SSTableDump Parity Gate
+- **Workflow**: `.github/workflows/sstabledump-parity-gate.yml`
+- **Scope**: Parity tests only (sstabledump_parity_*)
+- **Tests**: Validates CQLite output matches Apache Cassandra sstabledump
+- **Dataset**: Uses refs-only (no binary SSTable files)
+
 ## How to Test Locally: Step-by-Step Guide
 
 ### Prerequisites
@@ -84,14 +108,32 @@ test-data/datasets/sstables/test_basic/
 2. **Full test dataset**: Should already be in `test-data/datasets/`
 3. **Environment variable** (optional): `export CQLITE_DATASETS_ROOT=/full/path/to/test-data/datasets`
 
-### Quick Test (Recommended)
+### Quick Test - ALL Workflows (Recommended)
 
 ```bash
-# Run the comprehensive M1 CI test script
-./scripts/test-m1-ci-locally.sh
+# Run ALL CI workflows locally (M1 + Main + SSTableDump)
+./scripts/test-all-ci-locally.sh
 ```
 
-This script runs all 7 M1 CI checks and reports results with counts. If this passes, M1 CI should pass.
+This validates complete CI parity across all 3 workflows. **Use this before every push.**
+
+### Individual Workflow Testing
+
+```bash
+# Test just M1 CI
+./scripts/test-m1-ci-locally.sh
+
+# Test Main CI
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test --package cqlite-core --all-features
+
+# Test SSTableDump Parity (build only, execution needs sstabledump binary)
+env RUSTFLAGS="-D warnings" \
+  cargo test --no-run --release --package cqlite-core \
+    --test sstabledump_parity_statistics \
+    --test sstabledump_parity_index \
+    --test sstabledump_parity_summary
+```
 
 ### Manual Testing (Each Component)
 
@@ -358,10 +400,32 @@ src/bin/hardened_validator.rs                - Removed invalid method call
      };
      ```
 
+### Preventing Future CI Parity Breaks
+
+**Audit CI Commands Regularly:**
+```bash
+# Extract all cargo commands from all workflows
+./scripts/audit-ci-commands.sh
+```
+
+This shows what EVERY workflow runs. Compare output to local test scripts.
+
+**Pre-Push Checklist:**
+1. Run `./scripts/test-all-ci-locally.sh` ✅
+2. Check git status for unexpected changes
+3. Review CI workflow changes if any `.github/workflows/*.yml` files modified
+4. If adding new workflow, update `scripts/test-all-ci-locally.sh`
+
+**When CI Fails After Local Pass:**
+1. Run `./scripts/audit-ci-commands.sh` to see what CI actually runs
+2. Extract failing workflow's exact commands
+3. Run them locally with exact same flags (especially `RUSTFLAGS="-D warnings"`)
+4. Update local test scripts if workflow changed
+
 ### Success Criteria
 
 ✅ Local CI parity is achieved when:
-1. `./scripts/test-m1-ci-locally.sh` consistently passes
+1. `./scripts/test-all-ci-locally.sh` consistently passes (ALL 3 workflows)
 2. CI passes match local passes
 3. No surprise failures in CI after local validation
 4. Team can debug CI failures by reproducing locally
