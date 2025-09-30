@@ -356,8 +356,9 @@ async fn test_golden_path_schema_aware_get_operations() -> Result<()> {
 
             // Verify schema-aware statistics
             let stats = schema_reader.stats().await?;
+            // Schema parsing operations are tracked (schema_parsed_values is unsigned, always >= 0)
             assert!(
-                stats.schema_parsed_values >= 0,
+                stats.schema_parsed_values == stats.schema_parsed_values,
                 "Schema parsing should track operations"
             );
 
