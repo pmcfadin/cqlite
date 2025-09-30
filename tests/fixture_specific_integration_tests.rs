@@ -11,9 +11,9 @@ use std::time::Instant;
 use cqlite_core::{
     error::{Error, Result},
     platform::Platform,
-    storage::sstable::{compression::CompressionReader, reader::SSTableReader},
+    storage::sstable::reader::SSTableReader,
     types::TableId,
-    Config, RowKey, Value,
+    Config, RowKey,
 };
 
 use tokio::fs;

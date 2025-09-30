@@ -18,13 +18,10 @@ use std::time::Instant;
 use cqlite_core::{
     error::{Error, Result},
     platform::Platform,
-    schema::{registry::SchemaRegistry, TableSchema},
-    storage::sstable::{
-        bloom::BloomFilter, index_reader::IndexReader, reader::SSTableReader,
-        schema_aware_reader::SchemaAwareReader,
-    },
-    types::{ComparatorType, TableId},
-    Config, RowKey, Value,
+    schema::{registry::SchemaRegistry, registry::SchemaRegistryConfig, TableSchema},
+    storage::sstable::{reader::SSTableReader, schema_aware_reader::SchemaAwareReader},
+    types::{RowKey, TableId, Value},
+    Config,
 };
 
 use tokio::fs;
@@ -46,7 +43,9 @@ impl GoldenPathGetTestFixture {
     pub async fn new() -> Result<Self> {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let schema_registry = Arc::new(SchemaRegistry::new());
+        let registry_config = SchemaRegistryConfig::default();
+        let schema_registry =
+            Arc::new(SchemaRegistry::new(registry_config, platform.clone(), config.clone()).await?);
 
         let datasets_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/datasets/sstables");
@@ -80,19 +79,7 @@ impl GoldenPathGetTestFixture {
     }
 
     /// Setup schema-aware reader for comprehensive testing
-    async fn setup_schema_aware_reader(&self, table_name: &str) -> Result<SchemaAwareReader> {
-        let sstable_path = self
-            .datasets_path
-            .join(format!("{}/*/nb-*-big-Data.db", table_name))
-            .to_string_lossy()
-            .replace("*", "*");
-
-        // Find actual SSTable file using glob pattern
-        let pattern = self
-            .datasets_path
-            .join(format!("{}", table_name))
-            .join("*/nb-*-big-Data.db");
-
+    async fn setup_schema_aware_reader(&self, _table_name: &str) -> Result<SchemaAwareReader> {
         // For now, use test_basic as fallback
         let actual_path = self.datasets_path.join(
             "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
@@ -105,16 +92,25 @@ impl GoldenPathGetTestFixture {
             )));
         }
 
-        // Create minimal schema for testing
-        let schema = TableSchema::builder()
-            .table_name("test_table")
-            .keyspace_name("test_keyspace")
-            .partition_key("id", ComparatorType::Int)
-            .clustering_key("timestamp", ComparatorType::Timestamp)
-            .column("value", ComparatorType::Text)
-            .build()?;
+        // Create minimal schema for testing from JSON
+        let schema_json = r#"{
+            "keyspace": "test_keyspace",
+            "table": "compression_test_table",
+            "partition_keys": [{"name": "id", "type": "int", "position": 0}],
+            "clustering_keys": [],
+            "columns": [{"name": "value", "type": "text"}]
+        }"#;
 
-        SchemaAwareReader::open(&actual_path, schema, &self.config, self.platform.clone()).await
+        let schema = TableSchema::from_json(schema_json)?;
+
+        SchemaAwareReader::new(
+            &actual_path,
+            schema,
+            self.schema_registry.clone(),
+            &self.config,
+            self.platform.clone(),
+        )
+        .await
     }
 }
 
@@ -256,14 +252,14 @@ async fn test_golden_path_get_edge_cases() -> Result<()> {
     let table_id = TableId::new("test_keyspace.compression_test_table");
 
     // Edge case 1: Empty key
-    let empty_key = RowKey::from(b"");
+    let empty_key = RowKey::from(b"".as_ref());
     let result = reader.get(&table_id, &empty_key).await?;
     assert!(result.is_none(), "Empty key should not match any data");
 
     // Edge case 2: Very long key
     let long_key = RowKey::from(vec![b'x'; 1024]);
     let start_time = Instant::now();
-    let result = reader.get(&table_id, &long_key).await?;
+    let _result = reader.get(&table_id, &long_key).await?;
     let duration = start_time.elapsed();
 
     assert!(
@@ -273,13 +269,13 @@ async fn test_golden_path_get_edge_cases() -> Result<()> {
     );
 
     // Edge case 3: Binary key with null bytes
-    let binary_key = RowKey::from(&[0u8, 1u8, 255u8, 0u8, 42u8]);
-    let result = reader.get(&table_id, &binary_key).await?;
+    let binary_key = RowKey::from([0u8, 1u8, 255u8, 0u8, 42u8].as_ref());
+    let _result = reader.get(&table_id, &binary_key).await?;
     // Should not crash, regardless of result
 
     // Edge case 4: Unicode key
-    let unicode_key = RowKey::from("测试键🔑".as_bytes());
-    let result = reader.get(&table_id, &unicode_key).await?;
+    let unicode_key = RowKey::from("测试键🔑");
+    let _result = reader.get(&table_id, &unicode_key).await?;
     // Should handle unicode gracefully
 
     println!("✅ All edge case get operations completed successfully");
@@ -323,7 +319,7 @@ async fn test_golden_path_get_integration_validation() -> Result<()> {
 
     // Test get operation with full integration
     let start_time = Instant::now();
-    let result = reader.get(&table_id, &test_key).await?;
+    let _result = reader.get(&table_id, &test_key).await?;
     let duration = start_time.elapsed();
 
     // Integration validation: All components should work efficiently together
@@ -344,11 +340,11 @@ async fn test_golden_path_schema_aware_get_operations() -> Result<()> {
     // Test with schema-aware reader for type-safe operations
     match fixture.setup_schema_aware_reader("test_basic").await {
         Ok(schema_reader) => {
-            let table_id = TableId::new("test_keyspace.compression_test_table");
-            let test_key = RowKey::from(b"schema_test_key".as_ref());
+            // Schema-aware reader expects partition key as &[Value]
+            let partition_key = vec![Value::Integer(1)];
 
             let start_time = Instant::now();
-            let result = schema_reader.get(&table_id, &test_key).await?;
+            let _result = schema_reader.get(&partition_key, None).await?;
             let duration = start_time.elapsed();
 
             // Schema-aware operations should be efficient and type-safe

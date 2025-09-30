@@ -11,7 +11,7 @@
 //! - Performance validation for partition operations
 //! - Integration with summary and index components
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -44,7 +44,9 @@ impl GoldenPathPartitionTestFixture {
     pub async fn new() -> Result<Self> {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let schema_registry = Arc::new(SchemaRegistry::new());
+        let registry_config = cqlite_core::schema::registry::SchemaRegistryConfig::default();
+        let schema_registry =
+            Arc::new(SchemaRegistry::new(registry_config, platform.clone(), config.clone()).await?);
 
         let datasets_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/datasets/sstables");

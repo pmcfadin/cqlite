@@ -499,7 +499,7 @@ async fn test_end_to_end_component_integration() -> Result<()> {
     }
 
     // Test 4: Final statistics and health check
-    let final_stats = reader.stats().await?;
+    let _final_stats = reader.stats().await?;
     // NOTE: health_check() method is not currently available
     // let final_health = reader.health_check().await?;
 
@@ -563,7 +563,7 @@ async fn test_component_integration_error_handling() -> Result<()> {
     let edge_cases = vec![
         ("empty_key", RowKey::from(b"")),
         ("large_key", RowKey::from(&vec![b'x'; 1024][..])),
-        ("null_bytes", RowKey::from(&[0u8; 16])),
+        ("null_bytes", RowKey::from([0u8; 16].as_ref())),
     ];
 
     for (case_name, key) in edge_cases {

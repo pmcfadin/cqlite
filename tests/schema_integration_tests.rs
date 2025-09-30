@@ -5,11 +5,8 @@
 
 use cqlite_core::{
     platform::Platform,
-    schema::{
-        Column, KeyColumn, ParsingContext, SchemaParser, SchemaRegistry, SchemaRegistryConfig,
-        TableSchema,
-    },
-    types::{ComparatorType, Value},
+    schema::{Column, KeyColumn, SchemaParser, SchemaRegistry, SchemaRegistryConfig, TableSchema},
+    types::Value,
     Config,
 };
 use std::collections::HashMap;
@@ -517,7 +514,7 @@ async fn test_zero_diff_parity_validation() {
             .await
             .unwrap();
 
-        let parser = SchemaParser::new(context.clone()).unwrap();
+        let _parser = SchemaParser::new(context.clone()).unwrap();
 
         // Validate that the schema is complete and ready for parity testing
         assert!(

@@ -7,7 +7,7 @@
 use cqlite_core::parser::header::CassandraVersion;
 use cqlite_core::storage::sstable::chunk_decompressor::ChunkDecompressor;
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
-use cqlite_core::{Error, Result};
+use cqlite_core::Error;
 use std::io::Cursor;
 
 /// Test that CRC corruption is detected and fails with deterministic error
@@ -39,7 +39,7 @@ fn test_ci_crc_corruption_detection() {
     let mut reader = Cursor::new(&fake_compressed_data);
 
     // Test 1: With valid CRC, decompression should attempt (might fail on actual decompression but CRC should pass)
-    let result = decompressor.read_data(&mut reader, 0, 10);
+    let _result = decompressor.read_data(&mut reader, 0, 10);
     // We expect this to pass CRC validation but possibly fail on LZ4 decompression
 
     // Test 2: Now corrupt the first chunk's CRC

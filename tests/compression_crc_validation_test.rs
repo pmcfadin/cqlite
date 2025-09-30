@@ -5,7 +5,8 @@
 
 use cqlite_core::storage::sstable::chunk_decompressor::ChunkDecompressor;
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
-use cqlite_core::{Error, Result};
+// unused imports: Error and Result - tests compile without them currently
+// use cqlite_core::{Error, Result};
 use std::io::Cursor;
 
 #[cfg(test)]

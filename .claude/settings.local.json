@@ -18,11 +18,19 @@
       "Bash(cargo build)",
       "Bash(env RUSTFLAGS=\"-D warnings -D unused-imports\" cargo build --package cqlite-core --all-features --tests)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --workspace --all-targets --all-features)",
+      "Bash(grep:*)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build:*)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --tests)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test comprehensive_compression_crc_validation --test schema_parity_test)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test comprehensive_compression_crc_validation)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test schema_parity_test)",
-      "Bash(grep:*)"
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --lib --all-features)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --test P0_4_modern_format_rejection_tests)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --test cassandra_compatibility)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --test parser_abstraction_tests)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --test parsing_improvements_test)",
+      "Bash(cargo test:*)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test cassandra_compatibility --test parser_abstraction_tests --test parsing_improvements_test --no-run)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo test --package cqlite-core --lib --no-run)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --all-features)"
     ],
     "deny": [],
     "ask": []

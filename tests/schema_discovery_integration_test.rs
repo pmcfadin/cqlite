@@ -2,8 +2,6 @@
 //! Tests the 7 implemented todo functions with mock data
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 
 #[cfg(test)]
 mod schema_discovery_tests {
@@ -11,12 +9,14 @@ mod schema_discovery_tests {
 
     // Mock the types we need for testing
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct MockValue {
         pub variant: String,
         pub data: String,
     }
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct MockTypeInfo {
         pub type_id: String,
         pub type_params: Vec<String>,
@@ -24,6 +24,7 @@ mod schema_discovery_tests {
     }
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct MockSchemaInfo {
         pub keyspace: String,
         pub table: String,
@@ -31,9 +32,12 @@ mod schema_discovery_tests {
     }
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct MockColumnDefinition {
         pub name: String,
-        pub data_type: String,
+        pub column_type: String,
+        pub kind: String,
+        pub position: usize,
         pub confidence: f64,
     }
 
@@ -102,7 +106,7 @@ mod schema_discovery_tests {
             ));
 
             for column in &schema.columns {
-                cql.push_str(&format!("    {} {},\n", column.name, column.data_type));
+                cql.push_str(&format!("    {} {},\n", column.name, column.column_type));
             }
 
             // Simple primary key (first column)

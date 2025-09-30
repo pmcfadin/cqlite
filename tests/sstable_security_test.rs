@@ -148,7 +148,7 @@ mod security_tests {
             vec![0xFF, 0xFF, 0xFF, 0xFF], // Massive length prefix
         ];
 
-        for test_data in malformed_string_tests {
+        for _test_data in malformed_string_tests {
             // This should be caught by string parsing validation
             // We can't easily test parse_vstring directly since it's not public
             // But the header parser should handle these gracefully

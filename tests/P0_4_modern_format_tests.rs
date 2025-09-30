@@ -160,6 +160,7 @@ async fn test_modern_formats_reject_blob_fallback_static_rows() {
 
 /// Test that legacy formats still work with feature flag
 #[cfg(feature = "legacy-heuristics")]
+#[allow(unexpected_cfgs)]
 #[tokio::test]
 async fn test_legacy_format_allows_blob_fallback_with_feature() {
     let mut state_machine = RowCellStateMachine::new();
@@ -179,6 +180,7 @@ async fn test_legacy_format_allows_blob_fallback_with_feature() {
 
 /// Test that legacy formats fail without feature flag
 #[cfg(not(feature = "legacy-heuristics"))]
+#[allow(unexpected_cfgs)]
 #[tokio::test]
 async fn test_legacy_format_rejects_blob_fallback_without_feature() {
     let mut state_machine = RowCellStateMachine::new();
@@ -206,6 +208,7 @@ async fn test_legacy_format_rejects_blob_fallback_without_feature() {
 
 /// Test that compression heuristics are gated behind feature flag
 #[cfg(feature = "legacy-heuristics")]
+#[allow(unexpected_cfgs)]
 #[tokio::test]
 async fn test_compression_heuristics_gated_behind_feature() {
     // When legacy-heuristics is enabled, heuristic detection should be available
