@@ -24,11 +24,7 @@ use common::sstable_test_utils::{AssertionHelpers, TestContext};
 async fn find_file_with_pattern(table_path: &std::path::Path, pattern: &str) -> std::path::PathBuf {
     let read_dir = match fs::read_dir(table_path).await {
         Ok(dir) => dir,
-        Err(e) => panic!(
-            "Failed to read directory {}: {}",
-            table_path.display(),
-            e
-        ),
+        Err(e) => panic!("Failed to read directory {}: {}", table_path.display(), e),
     };
     let mut read_dir = read_dir;
     let mut all_files = Vec::new();
