@@ -30,7 +30,8 @@
       "Bash(cargo test:*)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test cassandra_compatibility --test parser_abstraction_tests --test parsing_improvements_test --no-run)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo test --package cqlite-core --lib --no-run)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --all-features)"
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --all-features)",
+      "Bash(cargo clippy:*)"
     ],
     "deny": [],
     "ask": []
