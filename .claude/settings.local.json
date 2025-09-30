@@ -21,7 +21,8 @@
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --tests)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test comprehensive_compression_crc_validation --test schema_parity_test)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test comprehensive_compression_crc_validation)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test schema_parity_test)"
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test schema_parity_test)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []
