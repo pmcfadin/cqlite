@@ -9,7 +9,7 @@
 use cqlite_core::parser::header::CassandraVersion;
 use cqlite_core::storage::sstable::chunk_decompressor::ChunkDecompressor;
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
-use cqlite_core::{Error, Result};
+use cqlite_core::Result;
 use std::io::Cursor;
 
 /// Test the complete compression matrix as specified in Issue #34
@@ -285,7 +285,7 @@ fn create_valid_compression_info(algorithm: &str, chunk_size: u32) -> Compressio
 }
 
 /// Test that valid CRC allows processing to continue
-fn test_valid_crc_processing(compression_info: &CompressionInfo) -> Result<()> {
+fn test_valid_crc_processing(compression_info: &CompressionInfo) -> Result<Vec<u8>> {
     let mut decompressor =
         ChunkDecompressor::new(compression_info.clone(), CassandraVersion::V5_0Release)?;
 
@@ -300,9 +300,9 @@ fn test_valid_crc_processing(compression_info: &CompressionInfo) -> Result<()> {
 /// Test that corrupted CRC is detected with deterministic error
 fn test_corrupted_crc_detection(
     compression_info: &CompressionInfo,
-    algorithm: &str,
-    chunk_size: u32,
-) -> Result<()> {
+    _algorithm: &str,
+    _chunk_size: u32,
+) -> Result<Vec<u8>> {
     let mut corrupted_info = compression_info.clone();
 
     // Corrupt the first chunk's CRC

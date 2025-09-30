@@ -10,7 +10,18 @@
       "Bash(curl -fsSL https://github.com/pmcfadin/cqlite/releases/download/datasets-v2/cassandra5-small-full.tar.gz -o /tmp/full.tar.gz)",
       "Bash(tar:*)",
       "Bash(CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test index_db_offset_calculation_tests test_data_offset_calculation_from_real_data -- --nocapture)",
-      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test index_db_offset_calculation_tests test_data_offset_calculation_from_real_data -- --nocapture)"
+      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test index_db_offset_calculation_tests test_data_offset_calculation_from_real_data -- --nocapture)",
+      "Bash(cargo fmt:*)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --all-features)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-cli --all-features)",
+      "Bash(cargo build:*)",
+      "Bash(cargo build)",
+      "Bash(env RUSTFLAGS=\"-D warnings -D unused-imports\" cargo build --package cqlite-core --all-features --tests)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --workspace --all-targets --all-features)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --tests)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test comprehensive_compression_crc_validation --test schema_parity_test)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test comprehensive_compression_crc_validation)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --test schema_parity_test)"
     ],
     "deny": [],
     "ask": []

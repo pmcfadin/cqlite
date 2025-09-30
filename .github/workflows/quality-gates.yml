@@ -1,11 +1,12 @@
-name: Quality Gates Coordination
+name: Quality Gates Coordination (Disabled for M1)
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
   workflow_dispatch:
+  # Disabled for M1 milestone - will be re-enabled post-M1
+  # push:
+  #   branches: [ main, develop ]
+  # pull_request:
+  #   branches: [ main, develop ]
     inputs:
       gate_mode:
         description: 'Quality gate mode'

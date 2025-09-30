@@ -2,7 +2,10 @@
 
 use cqlite_core::{
     platform::Platform,
-    schema::{ParsingContext, SchemaParser, SchemaRegistry, SchemaRegistryConfig, TableSchema},
+    schema::{
+        ClusteringColumn, ClusteringOrder, SchemaParser, SchemaRegistry, SchemaRegistryConfig,
+        TableSchema,
+    },
     types::ComparatorType,
     Config,
 };
@@ -10,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Test fixture for schema-driven parsing validation
+#[allow(dead_code)]
 struct SchemaParityTestFixture {
     registry: Arc<SchemaRegistry>,
     platform: Arc<Platform>,
@@ -77,10 +81,11 @@ impl SchemaParityTestFixture {
                 data_type: "uuid".to_string(),
                 position: 0,
             }],
-            clustering_keys: vec![cqlite_core::schema::KeyColumn {
+            clustering_keys: vec![ClusteringColumn {
                 name: "timestamp".to_string(),
                 data_type: "timestamp".to_string(),
                 position: 0,
+                order: ClusteringOrder::Asc,
             }],
             columns: vec![
                 cqlite_core::schema::Column {
@@ -142,15 +147,17 @@ impl SchemaParityTestFixture {
                 },
             ],
             clustering_keys: vec![
-                cqlite_core::schema::KeyColumn {
+                ClusteringColumn {
                     name: "date".to_string(),
                     data_type: "date".to_string(),
                     position: 0,
+                    order: ClusteringOrder::Asc,
                 },
-                cqlite_core::schema::KeyColumn {
+                ClusteringColumn {
                     name: "sequence".to_string(),
                     data_type: "bigint".to_string(),
                     position: 1,
+                    order: ClusteringOrder::Asc,
                 },
             ],
             columns: vec![

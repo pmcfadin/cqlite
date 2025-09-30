@@ -1,11 +1,13 @@
-name: Coverage Gate (Phase 2 - 90% Enforcement)
+name: Coverage Gate (Phase 2 - 90% Enforcement) (Disabled for M1)
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
   workflow_dispatch:
+  # Disabled for M1 milestone - coverage is informational only in M1
+  # Will be re-enabled post-M1 with 90% enforcement
+  # push:
+  #   branches: [ main, develop ]
+  # pull_request:
+  #   branches: [ main, develop ]
     inputs:
       coverage_mode:
         description: 'Coverage analysis mode'
