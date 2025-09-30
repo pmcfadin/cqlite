@@ -80,7 +80,14 @@ test-data/datasets/sstables/test_basic/
 
 ## Multi-Workflow CI Architecture
 
-CQLite has **3 active CI workflows** that run on every push. Each must pass for green builds:
+CQLite has **3 active CI workflows** that run on every push to `main`. Each must pass for green builds:
+
+**Note**: Other workflows exist but are M1-disabled:
+- Quality Gates Coordination (workflow_dispatch only)
+- Coverage Gate (workflow_dispatch only)
+- Performance Regression Detection (workflow_dispatch only)
+- Multi-Architecture Testing (workflow_dispatch only)
+- Release (only runs on version tags `v*`, not regular pushes)
 
 ### 1. M1 Minimal CI Pipeline
 - **Workflow**: `.github/workflows/m1-ci.yml`
