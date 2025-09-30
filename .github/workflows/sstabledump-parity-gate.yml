@@ -231,7 +231,7 @@ jobs:
           echo "🛡️ Pre-test dataset provenance validation..."
           ci/scripts/ensure_real_dataset.sh "$CQLITE_DATASETS_ROOT sstabledump_parity_statistics"
 
-          cargo test --release --test sstabledump_parity_statistics -- --nocapture
+          cargo test --release --package cqlite-core --test sstabledump_parity_statistics -- --nocapture
           echo "::endgroup::"
 
       - name: Run Index.db Parity Tests (Skipped for refs-only)
@@ -264,16 +264,16 @@ jobs:
           echo "🛡️ Pre-test dataset provenance validation..."
           ci/scripts/ensure_real_dataset.sh "$CQLITE_DATASETS_ROOT sstabledump_parity_summary"
 
-          cargo test --release --test sstabledump_parity_summary -- --nocapture
+          cargo test --release --package cqlite-core --test sstabledump_parity_summary -- --nocapture
           echo "::endgroup::"
 
       - name: Generate JUnit Test Reports
         if: always()
         run: |
           # Convert test output to JUnit XML format
-          cargo test --release --test sstabledump_parity_statistics -- --format json > statistics_results.json || true
-          cargo test --release --test sstabledump_parity_index -- --format json > index_results.json || true  
-          cargo test --release --test sstabledump_parity_summary -- --format json > summary_results.json || true
+          cargo test --release --package cqlite-core --test sstabledump_parity_statistics -- --format json > statistics_results.json || true
+          cargo test --release --package cqlite-core --test sstabledump_parity_index -- --format json > index_results.json || true
+          cargo test --release --package cqlite-core --test sstabledump_parity_summary -- --format json > summary_results.json || true
           
           # Generate summary report
           cat > parity_summary.md << 'EOF'
