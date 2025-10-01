@@ -20,6 +20,9 @@ use tokio::io::AsyncReadExt;
 
 use super::summary_reader::SummaryReader;
 
+/// Size of each index entry in Cassandra 5.x BIG format (2-byte marker + 16-byte token digest)
+const INDEX_ENTRY_SIZE: usize = 18;
+
 /// Index.db file header
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexHeader {
@@ -345,7 +348,7 @@ fn parse_simple_partition_key_with_offset<'a>(
 
     // Calculate data offset using Summary.db correlation if available
     let (data_offset, data_size) = if let Some(summary) = summary_reader {
-        calculate_data_offset_from_summary(summary, key_digest, entry_index)
+        calculate_data_offset_from_summary(summary, entry_index)
     } else {
         // Without Summary.db, we cannot determine offsets accurately (Issue #92)
         // Return 0 to indicate unknown offset - callers must handle this case
@@ -385,7 +388,6 @@ fn parse_simple_partition_key_with_offset<'a>(
 /// 4. For Index.db entries between Summary samples, interpolate based on file positions
 fn calculate_data_offset_from_summary(
     summary_reader: &SummaryReader,
-    _key_digest: &[u8],
     entry_index: usize,
 ) -> (u64, u32) {
     let entries = summary_reader.get_entries();
@@ -394,8 +396,8 @@ fn calculate_data_offset_from_summary(
         return (0, 0);
     }
 
-    // Calculate Index.db byte position for this entry (simple format: 2-byte marker + 16-byte token = 18 bytes/entry)
-    let index_byte_position = (entry_index * 18) as u64;
+    // Calculate Index.db byte position for this entry
+    let index_byte_position = (entry_index * INDEX_ENTRY_SIZE) as u64;
 
     // Strategy 1: Find exact match by index_offset
     if let Some(exact_match) = entries
