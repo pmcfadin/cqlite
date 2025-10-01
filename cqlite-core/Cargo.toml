@@ -109,12 +109,13 @@ path = "src/bin/sstabledump_parity_validator.rs"
 
 
 [features]
-default = ["all-compression", "metrics", "experimental", "legacy-heuristics"]
+# M1 defaults: Modern Cassandra 5+ with authoritative metadata only (no heuristics)
+default = ["all-compression", "metrics", "experimental"]
 
 # Compression features - properly feature-gated
 lz4 = ["dep:lz4_flex"]
 snappy = ["dep:snap"]
-deflate = ["dep:flate2"]  
+deflate = ["dep:flate2"]
 zstd = ["dep:zstd"]
 all-compression = ["lz4", "snappy", "deflate", "zstd"]
 
@@ -123,7 +124,8 @@ metrics = []
 pest = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]
 
-# Legacy heuristics support (for backward compatibility only)
+# Legacy heuristics support (backward compatibility for pre-5.0 formats)
+# NOT enabled in default CI configuration - opt-in only
 legacy-heuristics = []
 
 # CI zero tolerance - treat warnings as errors

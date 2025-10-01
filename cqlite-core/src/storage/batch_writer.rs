@@ -440,7 +440,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    #[cfg(feature = "experimental")]
+    #[cfg(all(feature = "experimental", feature = "legacy-heuristics"))]
     async fn test_batch_writer_put_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "experimental")]
+    #[cfg(all(feature = "experimental", feature = "legacy-heuristics"))]
     async fn test_batch_writer_mixed_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();

@@ -1011,9 +1011,9 @@ impl RowCellStateMachine {
                 // Legacy formats can use basic parsing as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Basic fallback parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
-                    ));
+                    ))
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
@@ -1043,9 +1043,9 @@ impl RowCellStateMachine {
                 // Legacy formats can create fallback rows as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Fallback row creation requires legacy-heuristics feature for legacy compatibility.".to_string()
-                    ));
+                    ))
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
@@ -1100,9 +1100,9 @@ impl RowCellStateMachine {
                 // Legacy formats can parse as single cell as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Single cell parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
-                    ));
+                    ))
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
@@ -1129,9 +1129,9 @@ impl RowCellStateMachine {
                 // Legacy formats can use pattern parsing as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Pattern-based parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
-                    ));
+                    ))
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
@@ -1159,9 +1159,9 @@ impl RowCellStateMachine {
                 // Legacy formats can use byte analysis as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Byte analysis parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
-                    ));
+                    ))
                 }
                 #[cfg(feature = "legacy-heuristics")]
                 {
@@ -1222,9 +1222,9 @@ impl RowCellStateMachine {
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
                     if self.schema.is_none() {
-                        return Err(Error::Schema(format!(
-                            "Schema is required for parsing. Enable legacy-heuristics feature for schema-less blob fallback support."
-                        )));
+                        return Err(Error::Schema(
+                            "Schema is required for parsing. Enable legacy-heuristics feature for schema-less blob fallback support.".to_string()
+                        ));
                     }
                 }
                 // With legacy-heuristics feature enabled, legacy formats can proceed without schema

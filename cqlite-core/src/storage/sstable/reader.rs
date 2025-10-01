@@ -2815,9 +2815,9 @@ impl SSTableReader {
                 }
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Non-schema key parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
-                    ));
+                    ))
                 }
             }
         }
@@ -3134,9 +3134,9 @@ impl SSTableReader {
                 }
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Blob fallback requires legacy-heuristics feature for legacy compatibility.".to_string()
-                    ));
+                    ))
                 }
             }
         }
@@ -3490,9 +3490,9 @@ impl SSTableReader {
                 }
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {
-                    return Err(Error::Schema(
+                    Err(Error::Schema(
                         "Generic UDT fabrication requires legacy-heuristics feature for legacy compatibility.".to_string()
-                    ));
+                    ))
                 }
             }
         }

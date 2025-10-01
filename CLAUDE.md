@@ -158,10 +158,10 @@ Reference files in JSONL format are also required for validation (`.jsonl` files
 ### Feature Flags
 
 #### Active Features (M1)
-- `default = ["all-compression", "metrics", "experimental", "legacy-heuristics"]`
+- `default = ["all-compression", "metrics", "experimental"]`
 - `all-compression`: Includes lz4, snappy, deflate, zstd
 - `experimental`: SSTable writing and M1 functionality
-- `legacy-heuristics`: Backward compatibility support
+- `legacy-heuristics`: **NOT in default** - Opt-in for backward compatibility with pre-5.0 formats
 
 #### Disabled Features (M2+)
 - `antlr`: ANTLR4 parser integration
@@ -183,6 +183,11 @@ Currently on **M1: Core Reading Library** focusing on:
 - Basic read operations
 - Index-based partition lookups
 - Real test data validation (no mocks in integration tests)
+- **No-heuristics mandate** (Issue #28): Modern Cassandra 5 paths use authoritative metadata only
+  - Header/format/compression detection uses structured metadata, not guessing
+  - Schema-aware decoding enforced when schema present
+  - Blob fallbacks removed from modern paths
+  - Legacy heuristics gated behind opt-in `legacy-heuristics` feature (NOT in CI)
 
 ### Code Quality Standards
 

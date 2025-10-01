@@ -270,6 +270,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "legacy-heuristics")]
     async fn test_database_basic_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::test_config();

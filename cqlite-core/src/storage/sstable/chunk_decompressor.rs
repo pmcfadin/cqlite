@@ -413,20 +413,18 @@ pub fn create_decompressor_from_file(
 ) -> Result<ChunkDecompressor> {
     let compression_data = std::fs::read(compression_info_path).map_err(Error::Io)?;
 
+    // Parse CompressionInfo with fallback for legacy formats
+    #[cfg(feature = "legacy-heuristics")]
     let compression_info = CompressionInfo::parse(&compression_data)
-        .or_else(|_parse_err| {
-            #[cfg(feature = "legacy-heuristics")]
-            {
-                CompressionInfo::parse_alternative_format(&compression_data)
-            }
-            #[cfg(not(feature = "legacy-heuristics"))]
-            {
-                Err(crate::error::Error::InvalidFormat(format!(
-                    "Failed to parse CompressionInfo.db in standard format. Enable legacy-heuristics feature for fallback support. Original error: {}",
-                    _parse_err
-                )))
-            }
-        })?;
+        .or_else(|_| CompressionInfo::parse_alternative_format(&compression_data))?;
+
+    #[cfg(not(feature = "legacy-heuristics"))]
+    let compression_info = CompressionInfo::parse(&compression_data).map_err(|parse_err| {
+        crate::error::Error::InvalidFormat(format!(
+            "Failed to parse CompressionInfo.db in standard format. Enable legacy-heuristics feature for fallback support. Original error: {}",
+            parse_err
+        ))
+    })?;
 
     println!("📋 Loaded compression info:");
     println!("   Algorithm: {}", compression_info.algorithm);

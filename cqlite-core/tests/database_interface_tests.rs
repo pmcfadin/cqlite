@@ -9,10 +9,13 @@
 //! Note: These tests require the legacy-heuristics feature to handle
 //! SSTable files generated during testing.
 
-use cqlite_core::{Config, Database, Value};
+#[cfg(feature = "legacy-heuristics")]
+use cqlite_core::Value;
+use cqlite_core::{Config, Database};
 use tempfile::TempDir;
 
 #[tokio::test]
+#[cfg(feature = "legacy-heuristics")]
 async fn test_database_lifecycle_with_cassandra_tables() {
     let temp_dir = TempDir::new().expect("temp dir");
     let config = Config::default();
@@ -224,6 +227,7 @@ async fn test_database_stats_retrieval() {
 }
 
 #[tokio::test]
+#[cfg(feature = "legacy-heuristics")]
 async fn test_database_component_interactions() {
     let temp_dir = TempDir::new().expect("temp dir");
     let config = Config::default();

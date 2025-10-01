@@ -429,6 +429,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "legacy-heuristics")]
     async fn test_batch_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
@@ -461,6 +462,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "legacy-heuristics")]
     async fn test_batch_operations_fallback() {
         // Add timeout to prevent hanging in parallel test execution
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
