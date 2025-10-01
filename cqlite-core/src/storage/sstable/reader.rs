@@ -2768,6 +2768,39 @@ impl SSTableReader {
         self.actual_header_size
     }
 
+    /// Get the Cassandra version from the SSTable header
+    pub fn cassandra_version(&self) -> crate::parser::header::CassandraVersion {
+        self.header.cassandra_version
+    }
+
+    /// Get the SSTable format version string
+    pub fn format_version(&self) -> Result<String> {
+        // Extract format version from the file path
+        // SSTable files follow pattern: {version}-{generation}-{size}-{component}.db
+        let filename = self
+            .file_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .ok_or_else(|| {
+                Error::InvalidPath(format!("Invalid SSTable filename: {:?}", self.file_path))
+            })?;
+
+        let parts: Vec<&str> = filename.split('-').collect();
+        if parts.is_empty() {
+            return Err(Error::InvalidFormat(format!(
+                "Cannot extract format version from filename: {}",
+                filename
+            )));
+        }
+
+        Ok(parts[0].to_string())
+    }
+
+    /// Get a reference to the SSTable header
+    pub fn header(&self) -> &SSTableHeader {
+        &self.header
+    }
+
     /// Extract write time from entry metadata (placeholder implementation)
     pub fn extract_write_time_from_entry(&self, _key: &RowKey, value: &Value) -> i64 {
         // In a full implementation, this would extract the write timestamp from the SSTable entry

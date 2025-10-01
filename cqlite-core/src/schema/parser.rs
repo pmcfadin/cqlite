@@ -81,7 +81,8 @@ impl SchemaParser {
     }
 
     /// Parse a column value using the schema's column type
-    pub fn parse_column_value(&self, column_name: &str, data: &[u8]) -> Result<Value> {
+    /// Returns the parsed value and the number of bytes consumed
+    pub fn parse_column_value(&self, column_name: &str, data: &[u8]) -> Result<(Value, usize)> {
         let comparator = self
             .context
             .get_column_comparator(column_name)
@@ -102,8 +103,7 @@ impl SchemaParser {
 
         // Use the provided comparator directly instead of re-parsing the type string
         // This avoids issues with UDT types that may not be resolvable from string alone
-        let (value, _) = self.parse_value_with_provided_comparator(data, comparator)?;
-        Ok(value)
+        self.parse_value_with_provided_comparator(data, comparator)
     }
 
     /// Parse a value using a specific comparator and type string
@@ -457,6 +457,7 @@ impl SchemaParser {
     }
 
     /// Parse a row with all column values using schema
+    /// Returns a HashMap of column names to values with deterministic consumed-byte tracking
     pub fn parse_row(&self, data: &[u8]) -> Result<HashMap<String, Value>> {
         let mut row = HashMap::new();
         let mut offset = 0;
@@ -484,11 +485,10 @@ impl SchemaParser {
                 }
             }
 
-            let value = self.parse_column_value(&column.name, &data[offset..])?;
+            // Parse column value and track exact consumed bytes
+            let (value, consumed) = self.parse_column_value(&column.name, &data[offset..])?;
             row.insert(column.name.clone(), value);
-
-            // Calculate consumed bytes (this would need to be tracked in parse_column_value)
-            // For now, we'll need to enhance parse_column_value to return consumed bytes
+            offset += consumed;
         }
 
         Ok(row)

@@ -155,11 +155,11 @@ impl SchemaAwareReader {
         // Open underlying SSTable reader
         let reader = SSTableReader::open(path, config, platform.clone()).await?;
 
-        // Detect SSTable format
-        let format = Self::detect_format(&reader).await?;
+        // Detect SSTable format from filename
+        let format = Self::detect_format(&reader)?;
 
         // Get Cassandra version from header
-        let version = Self::extract_version(&reader)?;
+        let version = reader.cassandra_version();
 
         Ok(Self {
             file_path: path.to_path_buf(),
@@ -264,18 +264,13 @@ impl SchemaAwareReader {
         })
     }
 
-    /// Detect SSTable format from reader
-    async fn detect_format(_reader: &SSTableReader) -> Result<SSTableFormat> {
-        // Use the existing format detector from the reader
-        // This is a simplified implementation - in practice, you'd access the reader's format
-        Ok(SSTableFormat::V5x("oa".to_string())) // Default to Cassandra 5.x format
-    }
+    /// Detect SSTable format from reader using filename and format detector
+    fn detect_format(reader: &SSTableReader) -> Result<SSTableFormat> {
+        use super::format_detector::FormatDetector;
 
-    /// Extract Cassandra version from reader
-    fn extract_version(_reader: &SSTableReader) -> Result<CassandraVersion> {
-        // Extract version from the reader's header
-        // This is a simplified implementation
-        Ok(CassandraVersion::V5_0Release)
+        let format_version = reader.format_version()?;
+        let detector = FormatDetector::new();
+        detector.detect_from_version(&format_version)
     }
 
     /// Get a value by partition and clustering keys with schema-driven parsing
@@ -409,15 +404,12 @@ impl SchemaAwareReader {
                 break; // No more data
             }
 
-            // Parse column value using schema parser
-            let column_value = self
+            // Parse column value using schema parser with exact consumed-byte tracking
+            let (column_value, consumed) = self
                 .schema_parser
                 .parse_column_value(&column.name, &value_bytes[offset..])?;
 
-            // Calculate consumed bytes (simplified - would need proper length encoding)
-            let consumed = self.estimate_value_length(&column_value)?;
             offset += consumed;
-
             column_values.insert(column.name.clone(), column_value);
         }
 
@@ -543,12 +535,6 @@ impl SchemaAwareReader {
             total_length += serialized.len();
         }
         Ok(total_length)
-    }
-
-    fn estimate_value_length(&self, value: &Value) -> Result<usize> {
-        // Estimate the byte length of a value
-        // This would properly handle variable-length encoding in a real implementation
-        Ok(value.as_bytes().map(|b| b.len()).unwrap_or(0))
     }
 
     fn get_table_id(&self) -> crate::types::TableId {

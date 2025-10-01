@@ -131,8 +131,9 @@ mod parser_tests {
         let result = parser.parse_column_value("name", &data);
 
         assert!(result.is_ok());
-        let value = result.unwrap();
+        let (value, consumed) = result.unwrap();
         assert_eq!(value, Value::Text("hello".to_string()));
+        assert_eq!(consumed, 9); // 4 bytes length + 5 bytes content
     }
 
     #[test]
@@ -145,8 +146,9 @@ mod parser_tests {
         let result = parser.parse_column_value("data", &data);
 
         assert!(result.is_ok());
-        let value = result.unwrap();
+        let (value, consumed) = result.unwrap();
         assert_eq!(value, Value::Blob(vec![1, 2, 3]));
+        assert_eq!(consumed, 7); // 4 bytes length + 3 bytes content
     }
 
     #[test]
@@ -165,7 +167,7 @@ mod parser_tests {
         let result = parser.parse_column_value("tags", &data);
 
         assert!(result.is_ok());
-        let value = result.unwrap();
+        let (value, _consumed) = result.unwrap();
         match value {
             Value::List(elements) => {
                 assert_eq!(elements.len(), 2);
@@ -242,8 +244,9 @@ mod parser_tests {
         let result = parser.parse_column_value("user_id", &data);
         assert!(result.is_ok());
 
-        let value = result.unwrap();
+        let (value, consumed) = result.unwrap();
         assert!(matches!(value, Value::Uuid(_)));
+        assert_eq!(consumed, 16); // UUID is always 16 bytes
     }
 
     #[test]
@@ -287,6 +290,7 @@ mod parser_tests {
 
         let result = parser.parse_column_value("nested", &data);
         assert!(result.is_ok());
+        let (_value, _consumed) = result.unwrap();
     }
 
     #[test]
@@ -323,7 +327,7 @@ mod parser_tests {
         let result = parser.parse_column_value("frozen_set", &data);
         assert!(result.is_ok());
 
-        let value = result.unwrap();
+        let (value, _consumed) = result.unwrap();
         assert!(matches!(value, Value::Frozen(_)));
     }
 
@@ -552,7 +556,7 @@ mod parser_tests {
         }
         assert!(result.is_ok());
 
-        let value = result.unwrap();
+        let (value, _consumed) = result.unwrap();
         assert!(matches!(value, Value::Frozen(_)));
 
         // Verify nested structure
@@ -582,7 +586,8 @@ mod parser_tests {
         for data in &serialized_values {
             let result = parser.parse_column_value("name", data);
             assert!(result.is_ok());
-            parsed_values.push(result.unwrap());
+            let (value, _consumed) = result.unwrap();
+            parsed_values.push(value);
         }
 
         // Verify ordering is preserved
@@ -620,7 +625,8 @@ mod parser_tests {
         for data in &int_data_values {
             let result = parser.parse_column_value("id", data);
             assert!(result.is_ok());
-            parsed_int_values.push(result.unwrap());
+            let (value, _consumed) = result.unwrap();
+            parsed_int_values.push(value);
         }
 
         // Verify integer ordering
