@@ -424,6 +424,9 @@ impl SchemaParser {
                 }
             }
 
+            // Non-null field: parse the field data directly (no per-field length prefix)
+            // Note: The overall UDT may have a length prefix, but individual fields within
+            // the UDT are serialized without their own length prefixes
             let (value, consumed) =
                 self.parse_typed_value(&data[offset..], field_type, &field_comparator)?;
             field_values.push(crate::types::UdtField {
