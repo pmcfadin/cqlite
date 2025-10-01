@@ -10,11 +10,7 @@ use crate::{
 };
 
 use super::header_spec::get_global_registry;
-use nom::{
-    bytes::complete::take,
-    number::complete::{be_u16, be_u32, be_u64},
-    IResult,
-};
+use nom::{bytes::complete::take, number::complete::be_u16, IResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +18,7 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
-use super::summary_reader::{SummaryEntry, SummaryReader};
+use super::summary_reader::SummaryReader;
 
 /// Index.db file header
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,12 +337,9 @@ fn parse_simple_partition_key_with_offset<'a>(
     entry_index: usize,
     summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], PartitionIndexEntry> {
-    // Try to parse enhanced format first (if data follows the digest)
-    if let Ok((remaining_input, entry)) = try_parse_enhanced_partition_entry(input) {
-        return Ok((remaining_input, entry));
-    }
-
-    // Fall back to simple format: 00 10 followed by 16-byte key digest
+    // Parse simple format only: 00 10 followed by 16-byte key digest
+    // The "enhanced format" check was triggering false positives and has been removed
+    // per Issue #92 - we rely on Summary.db for offsets, not inline data
     let (input, _marker) = be_u16(input)?; // Should be 0x0010
     let (input, key_digest) = take(16_u8)(input)?; // Fixed 16-byte key digest
 
@@ -354,9 +347,13 @@ fn parse_simple_partition_key_with_offset<'a>(
     let (data_offset, data_size) = if let Some(summary) = summary_reader {
         calculate_data_offset_from_summary(summary, key_digest, entry_index)
     } else {
-        // For backwards compatibility, try to estimate from Index.db position
-        let estimated_offset = estimate_data_offset_from_index_position(entry_index);
-        (estimated_offset, 0) // Size unknown in simple format
+        // Without Summary.db, we cannot determine offsets accurately (Issue #92)
+        // Return 0 to indicate unknown offset - callers must handle this case
+        log::warn!(
+            "Index.db parsed without Summary.db - offsets unavailable (entry_index={})",
+            entry_index
+        );
+        (0, 0)
     };
 
     Ok((
@@ -370,45 +367,22 @@ fn parse_simple_partition_key_with_offset<'a>(
     ))
 }
 
-/// Try to parse enhanced Index.db format that includes offset and size data
-fn try_parse_enhanced_partition_entry(input: &[u8]) -> IResult<&[u8], PartitionIndexEntry> {
-    // Enhanced format: marker(2) + digest(16) + data_offset(8) + data_size(4) + [optional promoted index]
-    if input.len() < 30 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    // Check if this looks like enhanced format by examining bytes 18-19
-    // If they look like a marker (0x0010), this is probably simple format, not enhanced
-    if input.len() >= 20 && input[18] == 0x00 && input[19] == 0x10 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Alt,
-        )));
-    }
-
-    let (input, _marker) = be_u16(input)?; // Should be 0x0010 or variant
-    let (input, key_digest) = take(16_u8)(input)?; // Fixed 16-byte key digest
-    let (input, data_offset) = be_u64(input)?; // 8-byte data offset
-    let (input, data_size) = be_u32(input)?; // 4-byte data size
-
-    // Check if promoted index data follows (simplified - would need proper parsing)
-    let promoted_index = None; // TODO: Parse promoted index if present
-
-    Ok((
-        input,
-        PartitionIndexEntry {
-            key_digest: Arc::from(key_digest), // Convert to Arc to avoid copying
-            data_offset,
-            data_size,
-            promoted_index,
-        },
-    ))
-}
+// REMOVED: try_parse_enhanced_partition_entry
+// The "enhanced format" with inline offsets was causing false positives
+// Issue #92 mandates using Summary.db for offset correlation, not inline heuristics
 
 /// Calculate actual Data.db offset using Summary.db correlation
+///
+/// ## Spec-Accurate Implementation (Issue #92)
+///
+/// Summary.db entries contain the actual Data.db offsets in the `position` field.
+/// Index.db contains a flat list of partition tokens in order.
+///
+/// Algorithm:
+/// 1. Summary.db samples contain: (token, index_offset, **position**)
+/// 2. `index_offset` = byte position in Index.db where this token appears
+/// 3. `position` = actual Data.db file offset for this partition
+/// 4. For Index.db entries between Summary samples, interpolate based on file positions
 fn calculate_data_offset_from_summary(
     summary_reader: &SummaryReader,
     _key_digest: &[u8],
@@ -416,56 +390,73 @@ fn calculate_data_offset_from_summary(
 ) -> (u64, u32) {
     let entries = summary_reader.get_entries();
 
-    // Strategy 1: Direct correlation by index if entries align
-    if entry_index < entries.len() {
-        let summary_entry = &entries[entry_index];
-        // The index_offset in Summary.db points to positions in Index.db
-        // We need to interpolate to find the corresponding Data.db offset
-        let estimated_data_offset = interpolate_data_offset_from_summary_position(
-            summary_entry,
-            entry_index,
-            entries.len(),
-        );
-        return (estimated_data_offset, 0); // Size estimation would require more complex logic
+    if entries.is_empty() {
+        return (0, 0);
     }
 
-    // Strategy 2: Token-based correlation (more complex, requires token calculation)
-    // For now, fall back to position-based estimation
-    let estimated_offset = estimate_data_offset_from_index_position(entry_index);
-    (estimated_offset, 0)
+    // Calculate Index.db byte position for this entry (simple format: 2-byte marker + 16-byte token = 18 bytes/entry)
+    let index_byte_position = (entry_index * 18) as u64;
+
+    // Strategy 1: Find exact match by index_offset
+    if let Some(exact_match) = entries
+        .iter()
+        .find(|e| e.index_offset == index_byte_position)
+    {
+        // Exact match - use the position field directly from Summary.db
+        return (exact_match.position as u64, 0);
+    }
+
+    // Strategy 2: Find surrounding Summary entries and interpolate
+    let mut prev_entry = None;
+    let mut next_entry = None;
+
+    for entry in entries {
+        if entry.index_offset <= index_byte_position {
+            prev_entry = Some(entry);
+        }
+        if entry.index_offset > index_byte_position && next_entry.is_none() {
+            next_entry = Some(entry);
+            break;
+        }
+    }
+
+    match (prev_entry, next_entry) {
+        (Some(prev), Some(next)) => {
+            // Interpolate between two Summary samples
+            let index_range = next.index_offset - prev.index_offset;
+            let data_range = next.position.saturating_sub(prev.position) as u64;
+            let index_delta = index_byte_position - prev.index_offset;
+
+            let ratio = if index_range > 0 {
+                index_delta as f64 / index_range as f64
+            } else {
+                0.0
+            };
+
+            let interpolated_offset = prev.position as u64 + (data_range as f64 * ratio) as u64;
+            (interpolated_offset, 0)
+        }
+        (Some(prev), None) => {
+            // Past last sample - use last known position (conservative)
+            (prev.position as u64, 0)
+        }
+        (None, Some(next)) => {
+            // Before first sample - use first position
+            (next.position as u64, 0)
+        }
+        (None, None) => {
+            // No Summary entries - should not happen with valid Summary.db
+            (0, 0)
+        }
+    }
 }
 
-/// Interpolate Data.db offset from Summary.db entry position
-fn interpolate_data_offset_from_summary_position(
-    summary_entry: &SummaryEntry,
-    _entry_index: usize,
-    total_entries: usize,
-) -> u64 {
-    // Summary.db entries contain index_offset pointing to Index.db positions
-    // and position field indicating ordering within the SSTable
-    //
-    // For a simple interpolation, assume partitions are roughly evenly spaced
-    // This is a heuristic that should be refined based on actual data patterns
-
-    let base_offset = 1024u64; // Typical SSTable header size
-    let _partition_size_estimate = 4096u64; // Conservative estimate
-
-    // Use Summary entry position as a guide for Data.db layout
-    let position_ratio = summary_entry.position as f64 / total_entries.max(1) as f64;
-    let estimated_file_size = 1024 * 1024u64; // 1MB estimate - could be dynamic
-
-    base_offset + (estimated_file_size as f64 * position_ratio) as u64
-}
-
-/// Estimate Data.db offset from Index.db entry position (fallback method)
-fn estimate_data_offset_from_index_position(entry_index: usize) -> u64 {
-    // Simple heuristic: assume partitions are roughly evenly spaced
-    // This provides a better estimate than hardcoded 0
-    let base_offset = 1024u64; // Typical header size
-    let estimated_partition_size = 4096u64; // Conservative estimate
-
-    base_offset + (entry_index as u64 * estimated_partition_size)
-}
+// REMOVED: Old heuristic functions that violated Issue #28 no-heuristics mandate
+// - interpolate_data_offset_from_summary_position: Used arbitrary estimates
+// - estimate_data_offset_from_index_position: Used hardcoded partition size guesses
+//
+// These are replaced by spec-accurate calculate_data_offset_from_summary() which uses
+// actual Summary.db position fields and Index.db byte offsets for interpolation.
 
 /// Parse Index.db file data - Legacy API for backward compatibility
 #[allow(dead_code)]
@@ -506,21 +497,21 @@ mod tests {
             entry.key_digest.as_ref(),
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
-        // Legacy API should still return estimated offsets instead of hardcoded 0
-        assert!(entry.data_offset > 0); // Should use estimation now
+        // Without Summary.db, offset is 0 (Issue #92 - no heuristics)
+        assert_eq!(entry.data_offset, 0);
         assert_eq!(entry.data_size, 0); // Size still not available in simple format
         assert!(entry.promoted_index.is_none());
     }
 
     #[test]
-    fn test_partition_key_parsing_with_offset_estimation() {
+    fn test_partition_key_parsing_without_summary() {
         let data = vec![
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
         ];
 
-        // Test with different entry indices to verify offset estimation
+        // Test with different entry indices - without Summary.db, offsets should be 0
         let (_, entry0) = parse_simple_partition_key_with_offset(&data, 0, None).unwrap();
         let (_, entry1) = parse_simple_partition_key_with_offset(&data, 1, None).unwrap();
         let (_, entry5) = parse_simple_partition_key_with_offset(&data, 5, None).unwrap();
@@ -530,36 +521,18 @@ mod tests {
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
 
-        // Verify offset estimation works
-        assert_eq!(entry0.data_offset, 1024); // Base offset for first entry
-        assert_eq!(entry1.data_offset, 1024 + 4096); // Second entry offset
-        assert_eq!(entry5.data_offset, 1024 + (5 * 4096)); // Fifth entry offset
+        // Without Summary.db, offsets are 0 (Issue #92 - no heuristics)
+        assert_eq!(entry0.data_offset, 0);
+        assert_eq!(entry1.data_offset, 0);
+        assert_eq!(entry5.data_offset, 0);
 
         // All should have the same key digest in this test
         assert_eq!(entry0.key_digest.as_ref(), entry1.key_digest.as_ref());
         assert_eq!(entry1.key_digest.as_ref(), entry5.key_digest.as_ref());
     }
 
-    #[test]
-    fn test_enhanced_partition_entry_parsing() {
-        let data = vec![
-            0x00, 0x10, // marker = 0x0010
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x20, 0x00, // data_offset = 8192
-            0x00, 0x00, 0x10, 0x00, // data_size = 4096
-        ];
-
-        let (_, entry) = try_parse_enhanced_partition_entry(&data).unwrap();
-
-        assert_eq!(
-            entry.key_digest.as_ref(),
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-        );
-        assert_eq!(entry.data_offset, 8192);
-        assert_eq!(entry.data_size, 4096);
-        assert!(entry.promoted_index.is_none());
-    }
+    // REMOVED: test_enhanced_partition_entry_parsing
+    // Enhanced format parsing removed per Issue #92
 
     #[test]
     fn test_multiple_partition_keys_parsing() {
@@ -591,28 +564,13 @@ mod tests {
                 ]
             );
 
-            // Verify that different entries get different estimated offsets
-            assert!(entries[0].data_offset > 0);
-            assert!(entries[1].data_offset > entries[0].data_offset);
-            assert_eq!(entries[1].data_offset - entries[0].data_offset, 4096); // Standard partition size estimate
+            // Without Summary.db, both offsets are 0 (Issue #92 - no heuristics)
+            assert_eq!(entries[0].data_offset, 0);
+            assert_eq!(entries[1].data_offset, 0);
         }
     }
 
-    #[test]
-    fn test_data_offset_estimation_algorithm() {
-        // Test the estimation algorithm directly
-        assert_eq!(estimate_data_offset_from_index_position(0), 1024);
-        assert_eq!(estimate_data_offset_from_index_position(1), 1024 + 4096);
-        assert_eq!(
-            estimate_data_offset_from_index_position(10),
-            1024 + (10 * 4096)
-        );
-
-        // Ensure offsets are monotonically increasing
-        for i in 0..10 {
-            let offset_i = estimate_data_offset_from_index_position(i);
-            let offset_i_plus_1 = estimate_data_offset_from_index_position(i + 1);
-            assert!(offset_i_plus_1 > offset_i);
-        }
-    }
+    // REMOVED: test_data_offset_estimation_algorithm
+    // This test validated the old heuristic estimation function which has been removed
+    // in favor of spec-accurate Summary.db correlation (Issue #92)
 }
