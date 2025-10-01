@@ -21,6 +21,13 @@ async fn test_index_without_summary_returns_zero() {
     );
 
     let index_path = PathBuf::from(format!("{}/nb-1-big-Index.db", sstable_dir));
+
+    // Skip test if dataset not available (CI uses refs-only mode)
+    if !index_path.exists() {
+        println!("⏭️  Skipping test: Index.db file not present in dataset (refs-only mode)");
+        return;
+    }
+
     let config = Config::memory_optimized();
     let platform = Arc::new(
         Platform::new(&config)
