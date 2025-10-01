@@ -24,14 +24,18 @@ fn test_chunked_reader_lz4_direct() {
     let datasets = datasets_root();
 
     // Direct path to known LZ4-compressed table
-    let table_dir = datasets.join("sstables/test_timeseries/tick_data-706fe650934a11f08d448925b7a9e804");
+    let table_dir =
+        datasets.join("sstables/test_timeseries/tick_data-706fe650934a11f08d448925b7a9e804");
 
     let ci_path = table_dir.join("nb-1-big-CompressionInfo.db");
     let data_path = table_dir.join("nb-1-big-Data.db");
 
     // Skip if test data not available
     if !ci_path.exists() || !data_path.exists() {
-        println!("⚠️  LZ4 test data not available at {:?} - skipping", table_dir);
+        println!(
+            "⚠️  LZ4 test data not available at {:?} - skipping",
+            table_dir
+        );
         return;
     }
 
@@ -39,7 +43,8 @@ fn test_chunked_reader_lz4_direct() {
 
     // Parse CompressionInfo
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
-    let compression_info = CompressionInfo::parse(&ci_data).expect("Failed to parse CompressionInfo");
+    let compression_info =
+        CompressionInfo::parse(&ci_data).expect("Failed to parse CompressionInfo");
 
     println!("  Algorithm: {}", compression_info.algorithm);
     println!("  Chunk length: {} bytes", compression_info.chunk_length);
@@ -74,7 +79,9 @@ fn test_chunked_reader_lz4_direct() {
     if compression_info_arc.chunk_offsets.len() > 1 {
         let large_size = (compression_info_arc.chunk_length as usize) * 2;
         let mut large_buffer = vec![0u8; large_size];
-        let bytes_read = reader.read(&mut large_buffer).expect("Failed to read large buffer");
+        let bytes_read = reader
+            .read(&mut large_buffer)
+            .expect("Failed to read large buffer");
         assert!(bytes_read > 0);
         println!("  ✅ Multi-chunk read: {} bytes", bytes_read);
     }
@@ -86,20 +93,25 @@ fn test_chunked_reader_snappy_direct() {
     let datasets = datasets_root();
 
     // Direct path to known Snappy-compressed table
-    let table_dir = datasets.join("sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804");
+    let table_dir =
+        datasets.join("sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804");
 
     let ci_path = table_dir.join("nb-1-big-CompressionInfo.db");
     let data_path = table_dir.join("nb-1-big-Data.db");
 
     if !ci_path.exists() || !data_path.exists() {
-        println!("⚠️  Snappy test data not available at {:?} - skipping", table_dir);
+        println!(
+            "⚠️  Snappy test data not available at {:?} - skipping",
+            table_dir
+        );
         return;
     }
 
     println!("✅ Testing Snappy ChunkedDataReader with: {:?}", ci_path);
 
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
-    let compression_info = CompressionInfo::parse(&ci_data).expect("Failed to parse CompressionInfo");
+    let compression_info =
+        CompressionInfo::parse(&ci_data).expect("Failed to parse CompressionInfo");
 
     println!("  Algorithm: {}", compression_info.algorithm);
     assert!(compression_info.algorithm.to_uppercase().contains("SNAPPY"));
@@ -122,7 +134,8 @@ fn test_chunked_reader_snappy_direct() {
 #[test]
 fn test_seek_trait_implementation() {
     let datasets = datasets_root();
-    let table_dir = datasets.join("sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804");
+    let table_dir =
+        datasets.join("sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804");
 
     let ci_path = table_dir.join("nb-1-big-CompressionInfo.db");
     let data_path = table_dir.join("nb-1-big-Data.db");
@@ -135,7 +148,8 @@ fn test_seek_trait_implementation() {
     println!("✅ Testing Seek trait implementation");
 
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
-    let compression_info = CompressionInfo::parse(&ci_data).expect("Failed to parse CompressionInfo");
+    let compression_info =
+        CompressionInfo::parse(&ci_data).expect("Failed to parse CompressionInfo");
 
     let data_file = fs::File::open(&data_path).expect("Failed to open Data.db");
     let file_size = data_file.metadata().expect("Failed to get metadata").len();
@@ -164,7 +178,9 @@ fn test_seek_trait_implementation() {
     // Test seeking across chunk boundary (if multi-chunk)
     if compression_info.chunk_offsets.len() > 1 {
         let chunk_boundary = compression_info.chunk_length as u64;
-        let pos = reader.seek(SeekFrom::Start(chunk_boundary + 10)).expect("Failed to seek");
+        let pos = reader
+            .seek(SeekFrom::Start(chunk_boundary + 10))
+            .expect("Failed to seek");
         assert_eq!(pos, chunk_boundary + 10);
 
         let mut buf = vec![0u8; 20];
@@ -178,7 +194,8 @@ fn test_seek_trait_implementation() {
 #[test]
 fn test_row_assembly_across_chunks() {
     let datasets = datasets_root();
-    let table_dir = datasets.join("sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804");
+    let table_dir =
+        datasets.join("sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804");
 
     let ci_path = table_dir.join("nb-1-big-CompressionInfo.db");
     let data_path = table_dir.join("nb-1-big-Data.db");
@@ -191,7 +208,8 @@ fn test_row_assembly_across_chunks() {
     println!("✅ Testing row assembly across chunk boundaries");
 
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
-    let compression_info = CompressionInfo::parse(&ci_data).expect("Failed to parse CompressionInfo");
+    let compression_info =
+        CompressionInfo::parse(&ci_data).expect("Failed to parse CompressionInfo");
 
     // Only test if multi-chunk
     if compression_info.chunk_offsets.len() < 2 {
@@ -209,11 +227,15 @@ fn test_row_assembly_across_chunks() {
     // Seek to near end of first chunk
     let chunk_len = compression_info.chunk_length as u64;
     let near_boundary = chunk_len - 50;
-    reader.seek(SeekFrom::Start(near_boundary)).expect("Failed to seek");
+    reader
+        .seek(SeekFrom::Start(near_boundary))
+        .expect("Failed to seek");
 
     // Read across chunk boundary
     let mut spanning_buffer = vec![0u8; 200];
-    let bytes_read = reader.read(&mut spanning_buffer).expect("Failed to read spanning buffer");
+    let bytes_read = reader
+        .read(&mut spanning_buffer)
+        .expect("Failed to read spanning buffer");
 
     assert!(bytes_read > 0);
     assert_eq!(reader.position(), near_boundary + bytes_read as u64);
