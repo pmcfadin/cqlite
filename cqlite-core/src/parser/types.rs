@@ -1724,6 +1724,270 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
     }
 }
 
+// ============================================================================
+// Buffer Consumption Validation Helpers (Issue #61)
+// ============================================================================
+
+/// Assert that all input bytes have been consumed during parsing
+///
+/// This helper enforces complete buffer consumption to prevent silent data
+/// truncation in collection and UDT parsing. Per Issue #61 acceptance criteria,
+/// all parsers must validate full consumption.
+///
+/// # Arguments
+/// * `remaining` - The remaining bytes after parsing
+/// * `context` - Description of parsing context for error messages
+///
+/// # Returns
+/// * `Ok(())` if buffer is fully consumed
+/// * `Err` if bytes remain unconsumed
+#[inline]
+#[allow(dead_code)] // Will be used in collection parsing functions
+pub(crate) fn assert_full_buffer_consumption(remaining: &[u8], context: &str) -> Result<()> {
+    if !remaining.is_empty() {
+        return Err(Error::corruption(format!(
+            "Buffer not fully consumed in {}: {} bytes remaining",
+            context,
+            remaining.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Validate that a parsed element consumed its entire allocated buffer
+///
+/// Used within collection parsing to ensure each element's buffer is fully
+/// consumed before moving to the next element.
+#[inline]
+#[allow(dead_code)] // Will be used in collection parsing functions
+pub(crate) fn validate_element_consumption<'a>(
+    _input: &'a [u8],
+    remaining: &'a [u8],
+    element_index: usize,
+    collection_type: &str,
+) -> Result<()> {
+    if !remaining.is_empty() {
+        return Err(Error::corruption(format!(
+            "{} element {} did not consume full buffer: {} bytes remaining",
+            collection_type,
+            element_index,
+            remaining.len()
+        )));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Schema-Aware Collection Parsing (Issue #61)
+// ============================================================================
+
+/// Parse list with schema-driven element decoding
+///
+/// Uses provided schema to deterministically decode list elements, ensuring
+/// no heuristic fallbacks per Issue #28. Validates full buffer consumption
+/// for each element per Issue #61.
+///
+/// # Arguments
+/// * `input` - Raw bytes to parse
+/// * `element_schema` - Schema for list elements
+///
+/// # Returns
+/// * Parsed list value with fully consumed input
+pub fn parse_list_with_schema<'a>(
+    input: &'a [u8],
+    element_schema: &CqlType,
+) -> IResult<&'a [u8], Value> {
+    let (input, count) = parse_vint_length(input)?;
+
+    // Validate count to prevent memory exhaustion
+    const MAX_COLLECTION_SIZE: usize = 1_000_000;
+    if count > MAX_COLLECTION_SIZE {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+
+    if count == 0 {
+        return Ok((input, Value::List(Vec::new())));
+    }
+
+    let mut elements = Vec::with_capacity(count);
+    let mut remaining = input;
+
+    for i in 0..count {
+        // Parse element length prefix (can be -1 for null)
+        let (new_remaining, element_length) = parse_vint(remaining)?;
+        remaining = new_remaining;
+
+        let element = if element_length == -1 {
+            Value::Null
+        } else if element_length < 0 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                remaining,
+                nom::error::ErrorKind::Verify,
+            )));
+        } else {
+            let (new_remaining, element_data) = take(element_length as usize)(remaining)?;
+            remaining = new_remaining;
+
+            // Parse using schema-driven decoding (no heuristics)
+            let (element_remaining, element_value) =
+                parse_cql_value_with_schema(element_data, element_schema)?;
+
+            // Validate element consumed its full buffer (Issue #61)
+            validate_element_consumption(element_data, element_remaining, i, "List").map_err(
+                |_e| {
+                    nom::Err::Error(nom::error::Error::new(
+                        element_data,
+                        nom::error::ErrorKind::Verify,
+                    ))
+                },
+            )?;
+
+            element_value
+        };
+
+        elements.push(element);
+    }
+
+    Ok((remaining, Value::List(elements)))
+}
+
+/// Parse map with schema-driven key/value decoding
+///
+/// Uses provided schemas to deterministically decode map entries, ensuring
+/// no heuristic fallbacks per Issue #28. Validates full buffer consumption
+/// for each key and value per Issue #61.
+pub fn parse_map_with_schema<'a>(
+    input: &'a [u8],
+    key_schema: &CqlType,
+    value_schema: &CqlType,
+) -> IResult<&'a [u8], Value> {
+    let (input, count) = parse_vint_length(input)?;
+
+    // Validate count to prevent memory exhaustion
+    const MAX_COLLECTION_SIZE: usize = 1_000_000;
+    if count > MAX_COLLECTION_SIZE {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+
+    if count == 0 {
+        return Ok((input, Value::Map(Vec::new())));
+    }
+
+    let mut pairs = Vec::with_capacity(count);
+    let mut remaining = input;
+
+    for i in 0..count {
+        // Parse key length
+        let (new_remaining, key_length) = parse_vint(remaining)?;
+        remaining = new_remaining;
+
+        let key = if key_length == -1 {
+            Value::Null
+        } else if key_length < 0 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                remaining,
+                nom::error::ErrorKind::Verify,
+            )));
+        } else {
+            let (new_remaining, key_data) = take(key_length as usize)(remaining)?;
+            remaining = new_remaining;
+
+            let (key_remaining, key_value) = parse_cql_value_with_schema(key_data, key_schema)?;
+            validate_element_consumption(key_data, key_remaining, i, "Map key").map_err(|_e| {
+                nom::Err::Error(nom::error::Error::new(
+                    key_data,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?;
+
+            key_value
+        };
+
+        // Parse value length
+        let (new_remaining, value_length) = parse_vint(remaining)?;
+        remaining = new_remaining;
+
+        let value = if value_length == -1 {
+            Value::Null
+        } else if value_length < 0 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                remaining,
+                nom::error::ErrorKind::Verify,
+            )));
+        } else {
+            let (new_remaining, value_data) = take(value_length as usize)(remaining)?;
+            remaining = new_remaining;
+
+            let (value_remaining, value_value) =
+                parse_cql_value_with_schema(value_data, value_schema)?;
+            validate_element_consumption(value_data, value_remaining, i, "Map value").map_err(
+                |_e| {
+                    nom::Err::Error(nom::error::Error::new(
+                        value_data,
+                        nom::error::ErrorKind::Verify,
+                    ))
+                },
+            )?;
+
+            value_value
+        };
+
+        pairs.push((key, value));
+    }
+
+    Ok((remaining, Value::Map(pairs)))
+}
+
+/// Parse CQL value using schema (no heuristics)
+///
+/// Schema-driven parser that never falls back to heuristics. Used by
+/// schema-aware collection parsers to ensure deterministic decoding.
+fn parse_cql_value_with_schema<'a>(input: &'a [u8], schema: &CqlType) -> IResult<&'a [u8], Value> {
+    match schema {
+        CqlType::Boolean => parse_boolean(input),
+        CqlType::TinyInt => parse_tinyint(input),
+        CqlType::SmallInt => parse_smallint(input),
+        CqlType::Int => parse_int(input),
+        CqlType::BigInt => parse_bigint(input),
+        CqlType::Float => parse_float(input),
+        CqlType::Double => parse_double(input),
+        CqlType::Text | CqlType::Ascii | CqlType::Varchar => parse_text(input),
+        CqlType::Blob => parse_blob(input),
+        CqlType::Uuid | CqlType::TimeUuid => parse_uuid(input),
+        CqlType::Timestamp => parse_timestamp(input),
+        CqlType::Date => parse_date(input),
+        CqlType::Time => parse_time(input),
+        CqlType::Duration => parse_duration(input),
+        CqlType::Inet => parse_inet(input),
+        CqlType::Decimal => parse_decimal(input),
+        CqlType::List(element_type) => parse_list_with_schema(input, element_type),
+        CqlType::Set(element_type) => {
+            let (remaining, Value::List(elements)) = parse_list_with_schema(input, element_type)?
+            else {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            };
+            Ok((remaining, Value::Set(elements)))
+        }
+        CqlType::Map(key_type, value_type) => parse_map_with_schema(input, key_type, value_type),
+        CqlType::Tuple(_) => parse_tuple(input),
+        CqlType::Udt(_, _) => parse_udt(input),
+        CqlType::Frozen(inner) => parse_cql_value_with_schema(input, inner),
+        CqlType::Custom(_) => {
+            // Custom types require additional metadata, parse as blob
+            parse_blob(input)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
