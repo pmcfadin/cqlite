@@ -30,11 +30,17 @@
       "Bash(pwd)",
       "Bash(ls *)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy:*)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy*)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build:*)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core:*)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core)"
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core)",
+      "Bash(gh issue list:*)",
+      "Bash(*cargo clippy*)",
+      "Bash(*cargo test*)",
+      "Bash(git add:*)",
+      "Bash(git push*)"
     ],
     "deny": [
       "Bash(rm -rf /)",

@@ -30,7 +30,6 @@ use std::{
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
-    process::Command,
 };
 
 /// Test configuration for Index.db parity validation
@@ -354,19 +353,31 @@ async fn validate_table_index_parity(
     let jsonl_iter =
         read_jsonl_rows(&data_jsonl).map_err(|e| cqlite_core::Error::corruption(e.to_string()))?;
 
-    // For now, we assert that we can parse JSONL and have non-zero partitions
-    let mut jsonl_row_total: usize = 0;
-    for v in jsonl_iter {
-        if let Some(rows) = v.get("rows").and_then(|r| r.as_array()) {
-            jsonl_row_total += rows.len();
-        }
+    // For Index.db, validate partition count is reasonable (Issue #31)
+    // Note: JSONL has one line per partition, Index.db may have more due to:
+    // - Multiple SSTables for same table
+    // - Compaction state differences
+    // So we just validate non-zero partitions exist
+    let mut jsonl_partition_count: usize = 0;
+    for _v in jsonl_iter {
+        jsonl_partition_count += 1;
     }
+
     if partition_entries.is_empty() {
         validation_result
             .errors
-            .push("No partition entries found".to_string());
+            .push("No partition entries found in Index.db".to_string());
     }
-    validation_result.perfect_parity = !partition_entries.is_empty() && jsonl_row_total > 0;
+
+    if jsonl_partition_count == 0 {
+        validation_result
+            .errors
+            .push("No partitions found in JSONL reference".to_string());
+    }
+
+    // Basic validation: both Index.db and JSONL have non-zero partitions
+    // Perfect parity means both exist (count differences acceptable due to SSTable compaction)
+    validation_result.perfect_parity = !partition_entries.is_empty() && jsonl_partition_count > 0;
 
     // Special validation for wide partition tables (promoted index)
     if table_info.table == "wide_partition_table" && promoted_count > 0 {
@@ -575,7 +586,7 @@ async fn validate_promoted_index_paths(
     Ok(())
 }
 
-/// Run sstabledump on the Data.db file to get reference output
+/// Run sstabledump on the Data.db file to get reference output (DEPRECATED - Issue #89)
 #[allow(dead_code)]
 async fn run_sstabledump_on_data(
     data_file: &Path,
@@ -584,7 +595,7 @@ async fn run_sstabledump_on_data(
     // Try to find sstabledump in PATH
     let sstabledump_cmd = "sstabledump";
 
-    let output = Command::new(sstabledump_cmd)
+    let output = tokio::process::Command::new(sstabledump_cmd)
         .arg("-k") // Include keys
         .arg("-i") // Include index information
         .arg(data_file)

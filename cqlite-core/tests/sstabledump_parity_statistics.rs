@@ -11,9 +11,9 @@ use cqlite_core::{
     storage::sstable::statistics_reader::StatisticsReader,
     testing::dataset_helpers::{
         derive_reference_paths_from_data_db, list_tables, load_metadata,
-        parse_sstablemetadata_text, resolve_table_to_sstable_path, should_ignore_file,
-        DatasetError, TableInfo,
+        resolve_table_to_sstable_path, should_ignore_file, DatasetError, TableInfo,
     },
+    validation::parity_comparator::{ParityStatus, StatisticsComparator},
     Config,
 };
 use serde_json;
@@ -220,7 +220,7 @@ impl StatisticsParityValidator {
         Ok(result)
     }
 
-    /// Compare CQLite Statistics.db with precomputed references (Rust-only)
+    /// Compare CQLite Statistics.db with precomputed references (Rust-only, Issue #31)
     fn compare_with_precomputed_references(
         &self,
         statistics_path: &Path,
@@ -251,54 +251,35 @@ impl StatisticsParityValidator {
                 Some(format!("Reference not found: {}", stats_txt.display())),
             ));
         }
-        let stats_map = match parse_sstablemetadata_text(&stats_txt) {
-            Ok(m) => m,
-            Err(e) => {
-                return Ok((
-                    false,
-                    Some(format!("Could not parse sstablemetadata: {}", e)),
-                ));
-            }
-        };
 
-        // Compare row counts if present in metadata
-        let our_count = statistics_reader.row_count();
-        let mut ref_count: Option<u64> = None;
-        for (k, v) in &stats_map {
-            let key = k.to_ascii_lowercase();
-            if key.contains("estimated") && key.contains("partition") && key.contains("count") {
-                if let Ok(n) = v
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .replace(",", "")
-                    .parse::<u64>()
-                {
-                    ref_count = Some(n);
-                    break;
-                }
-            }
-            if key.contains("row") && key.contains("count") {
-                if let Ok(n) = v
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .replace(",", "")
-                    .parse::<u64>()
-                {
-                    ref_count = Some(n);
-                    break;
-                }
-            }
-        }
+        // Read reference file
+        let ref_text = std::fs::read_to_string(&stats_txt).map_err(|e| {
+            cqlite_core::Error::corruption(format!("Failed to read reference: {}", e))
+        })?;
 
-        if let Some(n) = ref_count {
-            Ok((our_count == n, None))
-        } else {
-            Ok((
-                false,
-                Some("Row/partition count not found in sstablemetadata".to_string()),
-            ))
+        // Generate our output in sstablemetadata format
+        let our_text = statistics_reader.generate_report(false);
+
+        // Use parity comparator for normalized comparison (Issue #31)
+        let comparator = StatisticsComparator::new();
+        let parity_result = comparator.compare(&our_text, &ref_text);
+
+        match parity_result.status {
+            ParityStatus::Perfect => Ok((true, None)),
+            ParityStatus::MinorDiscrepancies => {
+                // Accept minor discrepancies (formatting only)
+                Ok((
+                    true,
+                    Some(format!(
+                        "Minor formatting differences: {}",
+                        parity_result.summary
+                    )),
+                ))
+            }
+            ParityStatus::MajorFailure => {
+                let diff_report = StatisticsComparator::generate_diff_report(&parity_result);
+                Ok((false, Some(format!("Parity failure:\n{}", diff_report))))
+            }
         }
     }
 

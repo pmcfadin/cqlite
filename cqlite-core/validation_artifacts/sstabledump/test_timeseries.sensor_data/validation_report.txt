@@ -10,7 +10,239 @@ Total validation time: 0ms
 
 Errors:
 CHECKSUM FAILURE: Statistics.db checksum validation failed for canonical dataset
-Row/partition count not found in sstablemetadata
+Parity failure:
+❌ 36 critical data differences detected
+
+Field-by-field differences:
+  🔴 [Minimum timestamp]
+    Expected: 09/16/2025 22:14:26 (1758060866408084)
+    Actual:   <missing>
+
+  🔴 [StaticColumns]
+    Expected: 
+    Actual:   <missing>
+
+  🔴 [Duration]
+    Expected: Days: 0 Hours: 0 Minutes: 0 Seconds: 1
+    Actual:   <missing>
+
+  🔴 [Bloom Filter FP chance]
+    Expected: 0.01
+    Actual:   <missing>
+
+  🔴 [totalColumnsSet]
+    Expected: 12000
+    Actual:   <missing>
+
+  🔴 [RegularColumns]
+    Expected: battery_level:org.apache.cassandra.db.marshal.ByteType, temperature:org.apache.cassandra.db.marshal.FloatType, humidity:org.apache.cassandra.db.marshal.FloatType, location:org.apache.cassandra.db.marshal.UTF8Type, pressure:org.apache.cassandra.db.marshal.DoubleType, status:org.apache.cassandra.db.marshal.UTF8Type
+    Actual:   <missing>
+
+  🔴 [Maximum timestamp]
+    Expected: 09/16/2025 22:14:28 (1758060868067566)
+    Actual:   <missing>
+
+  🔴 [Originating host id]
+    Expected: 854168a6-2382-45bc-8cc9-96be1cc98db6
+    Actual:   <missing>
+
+  🔴 [KeyType]
+    Expected: org.apache.cassandra.db.marshal.UUIDType
+    Actual:   <missing>
+
+  🔴 [totalRows]
+    Expected: 2000
+    Actual:   <missing>
+
+  🔴 [Local token space coverage]
+    Expected: NaN
+    Actual:   <missing>
+
+  🔴 [Last token]
+    Expected: 8765707163418730821 (332a8ea2-e0c6-4b1f-8c7b-699ba4529bca)
+    Actual:   <missing>
+
+  🔴 [Estimated tombstone drop times]
+    Expected: 
+    Actual:   <missing>
+
+  🔴 [Compressor]
+    Expected: org.apache.cassandra.io.compress.LZ4Compressor
+    Actual:   <missing>
+
+  🔴 [Estimated droppable tombstones]
+    Expected: 0.0
+    Actual:   <missing>
+
+  🔴 [ClusteringTypes]
+    Expected: [org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)]
+    Actual:   <missing>
+
+  🔴 [IsTransient]
+    Expected: false
+    Actual:   <missing>
+
+  🔴 [SSTable]
+    Expected: /data/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804/nb-1-big
+    Actual:   <missing>
+
+  🔴 [EncodingStats minTTL]
+    Expected: 0
+    Actual:   <missing>
+
+  🔴 [SSTable min local deletion time]
+    Expected: no tombstones (9223372036854775807)
+    Actual:   <missing>
+
+  🔴 [Column Count]
+    Expected: 
+    Actual:   <missing>
+
+  🔴 [Compression ratio]
+    Expected: 0.7149801840698048
+    Actual:   <missing>
+
+  🔴 [Estimated cardinality]
+    Expected: 10
+    Actual:   <missing>
+
+  🔴 [Replay positions covered]
+    Expected: {CommitLogPosition(segmentId=1758060774809, position=113820)=CommitLogPosition(segmentId=1758060774809, position=2811531)}
+    Actual:   <missing>
+
+  🔴 [EncodingStats minLocalDeletionTime]
+    Expected: 09/22/2015 00:00:00 (1442880000)
+    Actual:   <missing>
+
+  🔴 [Partitioner]
+    Expected: org.apache.cassandra.dht.Murmur3Partitioner
+    Actual:   <missing>
+
+  🔴 [SSTable Level]
+    Expected: 0
+    Actual:   <missing>
+
+  🔴 [TTL min]
+    Expected: 0
+    Actual:   <missing>
+
+  🔴 [Partition Size]
+    Expected: 
+    Actual:   <missing>
+
+  🔴 [TTL max]
+    Expected: 0
+    Actual:   <missing>
+
+  🔴 [SSTable max local deletion time]
+    Expected: no tombstones (9223372036854775807)
+    Actual:   <missing>
+
+  🔴 [Pending repair]
+    Expected: --
+    Actual:   <missing>
+
+  🔴 [Covered clusterings]
+    Expected: [2025-09-16T21:49:53.406Z, 2025-08-17T22:28:50.406Z]
+    Actual:   <missing>
+
+  🔴 [Repaired at]
+    Expected: 0
+    Actual:   <missing>
+
+  🔴 [EncodingStats minTimestamp]
+    Expected: 09/16/2025 22:14:26 (1758060866408084)
+    Actual:   <missing>
+
+  🔴 [First token]
+    Expected: -8250280355008762178 (af464b96-50f4-480c-bb5d-7d12ecaeec8d)
+    Actual:   <missing>
+
+  🟡 [- From]
+    Expected: <not in reference>
+    Actual:   2025-10-01 22:04:37 UTC
+
+  🟡 [- Live rows]
+    Expected: <not in reference>
+    Actual:   90
+
+  🟡 [- Average rows per partition]
+    Expected: <not in reference>
+    Actual:   10.0
+
+  🟡 [- Algorithm]
+    Expected: <not in reference>
+    Actual:   LZ4
+
+  🟡 [- Large partitions (>1MB)]
+    Expected: <not in reference>
+    Actual:   5.0%
+
+  🟡 [- Compressed size]
+    Expected: <not in reference>
+    Actual:   0.04 MB
+
+  🟡 [- Partitions]
+    Expected: <not in reference>
+    Actual:   10
+
+  🟡 [- Average size]
+    Expected: <not in reference>
+    Actual:   4.30 KB
+
+  🟡 [- Original size]
+    Expected: <not in reference>
+    Actual:   0.06 MB
+
+  🟡 [- To]
+    Expected: <not in reference>
+    Actual:   2025-10-02 22:04:37 UTC
+
+  🟡 [- **Health Score**]
+    Expected: <not in reference>
+    Actual:   92.0/100
+
+  🟡 [- **Compression Efficiency**]
+    Expected: <not in reference>
+    Actual:   66.67%
+
+  🟡 [- Tombstones]
+    Expected: <not in reference>
+    Actual:   10
+
+  🟡 [- **Time Range**]
+    Expected: <not in reference>
+    Actual:   1.0 days
+
+  🟡 [- **Total Rows**]
+    Expected: <not in reference>
+    Actual:   101
+
+  🟡 [- Speed]
+    Expected: <not in reference>
+    Actual:   150.0 MB/s (compress), 300.0 MB/s (decompress)
+
+  🟡 [- **Largest Partition**]
+    Expected: <not in reference>
+    Actual:   0.04 MB
+
+  🟡 [- Ratio]
+    Expected: <not in reference>
+    Actual:   66.67%
+
+  🟡 [- Total rows]
+    Expected: <not in reference>
+    Actual:   101
+
+  🟡 [- Range]
+    Expected: <not in reference>
+    Actual:   0.43 KB - 0.04 MB
+
+  🟡 [- **Live Data**]
+    Expected: <not in reference>
+    Actual:   89.11%
+
+
 
 Detailed Statistics:
 # SSTable Statistics Report
@@ -31,8 +263,8 @@ Detailed Statistics:
 - Average rows per partition: 10.0
 
 ## Timestamp Range
-- From: 2025-09-30 15:47:54 UTC
-- To: 2025-10-01 15:47:54 UTC
+- From: 2025-10-01 22:04:37 UTC
+- To: 2025-10-02 22:04:37 UTC
 
 ## Compression
 - Algorithm: LZ4

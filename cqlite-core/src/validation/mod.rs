@@ -30,6 +30,9 @@ pub mod sstabledump_parity;
 // Issue #31 Hardened validator parser for cross-version complex type validation
 pub mod hardened_validator_parser;
 
+// Issue #31 Parity comparator for Rust-only validation
+pub mod parity_comparator;
+
 #[cfg(test)]
 pub mod sstabledump_parity_integration_test;
 
