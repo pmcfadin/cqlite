@@ -13,7 +13,10 @@
       "Bash(else echo \"Script not found, running individual CI steps\")",
       "Bash(fi)",
       "Bash(./scripts/test-all-ci-locally.sh:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstabledump_parity_summary --quiet)"
     ],
     "deny": [],
     "ask": []
