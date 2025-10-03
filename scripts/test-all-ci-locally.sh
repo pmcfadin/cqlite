@@ -98,8 +98,18 @@ cargo test --no-run --release --package cqlite-core \
   --test sstabledump_parity_index \
   --test sstabledump_parity_summary
 
-echo "✅ SSTableDump parity tests compiled successfully"
-echo "Note: Actual test execution requires sstabledump binary and datasets"
+echo "Step 3: Run Statistics.db parity tests"
+cargo test --release --package cqlite-core \
+  --test sstabledump_parity_statistics \
+  -- --nocapture
+
+echo "Step 4: Run Summary.db parity tests"
+cargo test --release --package cqlite-core \
+  --test sstabledump_parity_summary \
+  -- --nocapture
+
+echo "✅ SSTableDump parity tests passed"
+echo "Note: Index.db tests skipped (Issue #89 - refs-only datasets)"
 '
 
 # Summary
