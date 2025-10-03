@@ -11,7 +11,9 @@
       "Bash(if [ -f ./scripts/test-all-ci-locally.sh ])",
       "Bash(then ./scripts/test-all-ci-locally.sh)",
       "Bash(else echo \"Script not found, running individual CI steps\")",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(./scripts/test-all-ci-locally.sh:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
