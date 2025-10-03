@@ -113,8 +113,8 @@ fn generate_corruption_test(
     }
 
     // Per-chunk CRCs (intentionally wrong for testing)
-    for i in 0..4 {
-        let crc = 0xDEADBEEF + i; // Obviously wrong CRC
+    for i in 0..4u32 {
+        let crc: u32 = 0xDEADBEEF + i; // Obviously wrong CRC
         compression_info_data.extend_from_slice(&crc.to_be_bytes());
     }
 
@@ -195,7 +195,7 @@ fn validate_corrupted_file(path: &Path) -> Result<(), Box<dyn std::error::Error>
     use cqlite_core::storage::sstable::compression_info::CompressionInfo;
 
     let data = fs::read(path)?;
-    let info = CompressionInfo::parse(&data)?;
+    let _info = CompressionInfo::parse(&data)?;
 
     // If we got here, validation passed (it shouldn't for corrupted files)
     Ok(())

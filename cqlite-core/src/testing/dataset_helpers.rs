@@ -63,7 +63,13 @@ fn get_datasets_root() -> PathBuf {
     if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
         PathBuf::from(root)
     } else {
-        PathBuf::from("../test-data/datasets")
+        // Use compile-time manifest dir to calculate workspace root
+        // CARGO_MANIFEST_DIR points to cqlite-core/, parent is workspace root
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .parent()
+            .map(|workspace| workspace.join("test-data/datasets"))
+            .unwrap_or_else(|| PathBuf::from("test-data/datasets"))
     }
 }
 

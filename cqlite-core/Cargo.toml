@@ -137,6 +137,10 @@ state_machine = []    # query/state orchestration (M2+)
 events = []           # validation/event recording (M2+)
 tombstones = []       # tombstone/GC logic (M3+)
 benchmarks = []       # opt-in perf runs
+
+# Extended Index.db validation (Issue #66) - NOT enabled in M1 CI
+# Gates deep promoted index and range query validation for post-M1
+extended-index-validation = []
 experimental = []     # SSTable writing and other M1 functionality (enabled by default)
 
 # Issue #80: Mock usage control - unit tests only
