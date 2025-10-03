@@ -31,8 +31,8 @@ Detailed Statistics:
 - Average rows per partition: 10.0
 
 ## Timestamp Range
-- From: 2025-10-02 22:19:10 UTC
-- To: 2025-10-03 22:19:10 UTC
+- From: 2025-10-02 22:27:32 UTC
+- To: 2025-10-03 22:27:32 UTC
 
 ## Compression
 - Algorithm: LZ4
