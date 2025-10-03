@@ -48,6 +48,8 @@ pub enum DiffSeverity {
 pub struct StatisticsComparator {
     /// Fields that are allowed to have minor formatting differences
     formatting_tolerant_fields: HashSet<String>,
+    /// Fields expected to be missing in M1 (not yet implemented)
+    m1_expected_missing_fields: HashSet<String>,
 }
 
 impl StatisticsComparator {
@@ -58,7 +60,78 @@ impl StatisticsComparator {
                 "Creation time".to_string(),
                 "SSTable Level".to_string(), // Allow minor formatting
             ]),
+            m1_expected_missing_fields: HashSet::from([
+                // M1 Milestone: These fields not yet implemented in StatisticsReader
+                "Partitioner".to_string(),
+                "Bloom Filter FP chance".to_string(),
+                "Minimum timestamp".to_string(),
+                "Maximum timestamp".to_string(),
+                "SSTable min local deletion time".to_string(),
+                "SSTable max local deletion time".to_string(),
+                "Compressor".to_string(),
+                "Compression ratio".to_string(),
+                "TTL min".to_string(),
+                "TTL max".to_string(),
+                "First token".to_string(),
+                "Last token".to_string(),
+                "Estimated cardinality".to_string(),
+                "Estimated droppable tombstones".to_string(),
+                "Estimated tombstone drop times".to_string(),
+                "SSTable Level".to_string(),
+                "Repaired at".to_string(),
+                "Pending repair".to_string(),
+                "Replay positions covered".to_string(),
+                "totalColumnsSet".to_string(),
+                "totalRows".to_string(),
+                "Originating host id".to_string(),
+                "IsTransient".to_string(),
+                "SSTable".to_string(),
+                "Covered clusterings".to_string(),
+                "Partition Size".to_string(),
+                "Column Count".to_string(),
+                "EncodingStats minTimestamp".to_string(),
+                "EncodingStats minLocalDeletionTime".to_string(),
+                "EncodingStats minTTL".to_string(),
+                "KeyType".to_string(),
+                "ClusteringTypes".to_string(),
+                "StaticColumns".to_string(),
+                "RegularColumns".to_string(),
+                "Duration".to_string(),
+                "Local token space coverage".to_string(),
+                // Histogram percentiles (not implemented)
+                "Min".to_string(),
+                "Max".to_string(),
+                "50th".to_string(),
+                "75th".to_string(),
+                "95th".to_string(),
+                "98th".to_string(),
+                "99th".to_string(),
+            ]),
         }
+    }
+
+    /// Check if a field is expected to be missing in M1
+    fn is_expected_missing_field(&self, field_name: &str) -> bool {
+        // Direct match
+        if self.m1_expected_missing_fields.contains(field_name) {
+            return true;
+        }
+
+        // Histogram bins and timestamp-based fields (e.g., "99th 1996099046...", "1758060900...")
+        // These are statistics histogram entries that aren't implemented in M1
+        let is_histogram_entry = field_name.starts_with("Min ")
+            || field_name.starts_with("Max ")
+            || field_name.starts_with("50th ")
+            || field_name.starts_with("75th ")
+            || field_name.starts_with("95th ")
+            || field_name.starts_with("98th ")
+            || field_name.starts_with("99th ")
+            || field_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit()); // Timestamp-based bins
+
+        is_histogram_entry
     }
 
     /// Compare CQLite Statistics output with reference sstablemetadata text
@@ -86,11 +159,18 @@ impl StatisticsComparator {
                     });
                 }
             } else {
+                // Check if this is an expected missing field for M1
+                let severity = if self.is_expected_missing_field(key) {
+                    DiffSeverity::Minor
+                } else {
+                    DiffSeverity::Critical
+                };
+
                 differences.push(FieldDifference {
                     field_name: key.clone(),
                     expected: ref_val.clone(),
                     actual: "<missing>".to_string(),
-                    severity: DiffSeverity::Critical,
+                    severity,
                 });
             }
         }

@@ -16,7 +16,11 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstabledump_parity_summary --quiet)"
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstabledump_parity_summary --quiet)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test sstabledump_parity_statistics -- --nocapture)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstabledump_parity_statistics --quiet)"
     ],
     "deny": [],
     "ask": []
