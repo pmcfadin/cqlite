@@ -1,8 +1,51 @@
-//! Comprehensive SSTable Validation Framework - Issue #17
+//! CQLite Validation Framework
 //!
-//! This module provides comprehensive validation for SSTable reading operations
-//! with a focus on accuracy, cqlsh compatibility, and performance metrics.
-//! Enhanced for Issue #17 with robust error handling and Cassandra 5+ support.
+//! This crate provides comprehensive validation tools and frameworks for CQLite SSTable parsing.
+//! It includes validation for data integrity, format compatibility, error handling, and
+//! parity checking against Apache Cassandra's sstabledump tool.
+//!
+//! # Overview
+//!
+//! The validation crate is organized into several key modules:
+//!
+//! - **Core Validation Framework** (`core`) - Base validation infrastructure
+//! - **Data Integrity** (`data_integrity`) - Checksum and data integrity validation
+//! - **Error Handling** (`error_handling`) - Robust error handling validation
+//! - **Format Compatibility** (`format_compatibility`) - Cross-version format validation
+//! - **Real-time Monitoring** (`real_time`) - Live validation monitoring
+//! - **Reporting** (`reports`) - Comprehensive validation report generation
+//! - **SSTableDump Parity** (`sstabledump_parity`) - Validation against Cassandra's sstabledump
+//! - **Hardened Parser** (`hardened_validator_parser`) - Cross-version complex type validation
+//! - **Parity Comparator** (`parity_comparator`) - Rust-only validation comparison
+//!
+//! # Features
+//!
+//! - `benchmarks`: Enable performance benchmarking validation (optional)
+//!
+//! # Binary Tools
+//!
+//! This crate provides several validation binaries:
+//!
+//! - `memory_safety_validator` - Memory safety validation tool
+//! - `sstabledump_parity_validator` - SSTableDump parity validation tool
+//! - `issue_17_validation_demo` - Comprehensive validation framework demo
+//! - `validate_test_sstables` - SSTable directory validation tool
+//!
+//! # Example
+//!
+//! ```no_run
+//! use cqlite_validation::{ValidationEngine, ValidationConfig};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let config = ValidationConfig::default();
+//!     let mut engine = ValidationEngine::new(config);
+//!     let summary = engine.run_validation_suite().await;
+//!
+//!     println!("Validation pass rate: {:.1}%", summary.pass_rate());
+//!     Ok(())
+//! }
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,47 +127,9 @@ pub enum ValidationStatus {
     Timeout,
 }
 
-// Legacy validation configuration - using core::ValidationConfig instead
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub struct ValidationConfig {
-//     pub timeout_seconds: u64,
-//     pub memory_limit_mb: u64,
-//     pub accuracy_threshold: f64,      // Minimum accuracy score (0.0 - 1.0)
-//     pub performance_threshold_ms: u64, // Maximum acceptable time
-//     pub enable_regression_tests: bool,
-//     pub enable_performance_tests: bool,
-//     pub enable_edge_case_tests: bool,
-//     pub cqlsh_reference_path: Option<String>,
-//     pub test_data_paths: Vec<String>,
-//     pub output_formats: Vec<String>,  // json, csv, table
-// }
-
-//     fn default() -> Self {
-//         Self {
-//             timeout_seconds: 30,
-//             memory_limit_mb: 512,
-//             accuracy_threshold: 0.95,        // 95% accuracy required
-//             performance_threshold_ms: 5000,  // 5 second max
-//             enable_regression_tests: true,
-//             enable_performance_tests: true,
-//             enable_edge_case_tests: true,
-//             cqlsh_reference_path: None,
-//             test_data_paths: vec![
-//                 "test-env/cassandra5/data/cassandra5-sstables".to_string(),
-//                 "test-env/cassandra5/sstables".to_string(),
-//             ],
-//             output_formats: vec![
-//                 "json".to_string(),
-//                 "csv".to_string(),
-//                 "table".to_string(),
-//             ],
-//         }
-//     }
-// }
-
 /// Main validation engine
 pub struct ValidationEngine {
-    config: crate::validation::core::ValidationConfig,
+    config: crate::core::ValidationConfig,
     results: Vec<ValidationResult>,
 }
 
@@ -506,7 +511,7 @@ pub struct Issue17ValidationFramework {
 
 impl Issue17ValidationFramework {
     /// Create a new Issue #17 validation framework
-    pub fn new() -> crate::error::Result<Self> {
+    pub fn new() -> cqlite_core::error::Result<Self> {
         let core_framework = std::sync::Arc::new(core::ValidationFramework::new(
             core::ValidationConfig::default(),
         )?);
@@ -532,7 +537,7 @@ impl Issue17ValidationFramework {
     /// Run comprehensive validation with all Issue #17 components
     pub async fn run_comprehensive_validation(
         &mut self,
-    ) -> crate::error::Result<reports::ValidationReport> {
+    ) -> cqlite_core::error::Result<reports::ValidationReport> {
         let mut main_report = reports::ValidationReport::new("Issue #17 Comprehensive Validation");
 
         // 1. Data Integrity Validation
@@ -653,7 +658,7 @@ impl Issue17ValidationFramework {
     }
 
     /// Get real-time validation status
-    pub fn get_realtime_status(&self) -> crate::error::Result<real_time::ValidationEvent> {
+    pub fn get_realtime_status(&self) -> cqlite_core::error::Result<real_time::ValidationEvent> {
         self.realtime_validator.get_current_status()
     }
 
@@ -661,7 +666,7 @@ impl Issue17ValidationFramework {
     pub async fn generate_report(
         &self,
         report: reports::ValidationReport,
-    ) -> crate::error::Result<reports::ValidationReport> {
+    ) -> cqlite_core::error::Result<reports::ValidationReport> {
         self.report_generator.generate_report(report).await
     }
 
@@ -674,7 +679,7 @@ impl Issue17ValidationFramework {
     pub fn generate_json_report(
         &self,
         report: &reports::ValidationReport,
-    ) -> crate::error::Result<String> {
+    ) -> cqlite_core::error::Result<String> {
         self.report_generator.generate_json_report(report)
     }
 

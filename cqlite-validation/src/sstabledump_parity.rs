@@ -5,7 +5,7 @@
 //! evidence for Issue #25 to prove that we've eliminated all heuristic parsing
 //! in favor of schema-driven, specification-compliant parsing.
 
-use crate::error::{Error, Result};
+use cqlite_core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,

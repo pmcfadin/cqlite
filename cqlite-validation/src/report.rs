@@ -3,7 +3,7 @@
 //! This module provides comprehensive reporting capabilities for
 //! validation results, performance metrics, and analysis summaries.
 
-use crate::error::{Error, Result};
+use cqlite_core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;

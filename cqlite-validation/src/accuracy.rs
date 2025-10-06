@@ -3,7 +3,7 @@
 //! This module provides comprehensive validation of data parsing accuracy
 //! by comparing CQLite output with reference cqlsh output.
 
-use crate::validation::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
+use crate::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;

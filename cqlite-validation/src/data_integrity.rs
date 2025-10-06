@@ -4,9 +4,9 @@
 //! It validates data consistency, corruption detection, and format integrity.
 
 use super::reports::{ValidationSection, ValidationSectionStatus};
-use crate::error::{Error, Result};
-use crate::storage::sstable::reader::SSTableReader;
-use crate::types::Value;
+use cqlite_core::error::{Error, Result};
+use cqlite_core::storage::sstable::reader::SSTableReader;
+use cqlite_core::types::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -675,8 +675,8 @@ impl DataIntegrityValidator {
 
         // Create a mock reader - in real implementation would be actual SSTableReader
         // For now, create mock config and platform
-        let config = crate::config::Config::default();
-        let platform = std::sync::Arc::new(crate::platform::Platform::new(&config).await?);
+        let config = cqlite_core::config::Config::default();
+        let platform = std::sync::Arc::new(cqlite_core::platform::Platform::new(&config).await?);
         SSTableReader::open(path, &config, platform).await
     }
 

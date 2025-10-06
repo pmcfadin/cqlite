@@ -3,7 +3,7 @@
 //! This module provides comprehensive error handling validation for Issue #17.
 //! It tests robust error handling for corrupted/unsupported files and recovery strategies.
 
-use crate::error::{Error, Result};
+use cqlite_core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

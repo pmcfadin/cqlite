@@ -2,7 +2,7 @@
 //!
 //! This module provides real-time monitoring and validation for Issue #17.
 
-use crate::error::Result;
+use cqlite_core::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

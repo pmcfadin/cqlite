@@ -4,7 +4,7 @@
 //! spec-accurate readers produce identical output to Cassandra's sstabledump.
 
 use super::sstabledump_parity::*;
-use crate::error::Result;
+use cqlite_core::error::Result;
 use std::path::PathBuf;
 use tempfile::TempDir;
 

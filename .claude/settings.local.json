@@ -27,6 +27,6 @@
     "ask": []
   },
   "customCommands": {
-    "code-quailty": "/agent switch rust-code-reviewer && /review --scope changes --strict && /exec cargo fmt --all && /exec cargo clippy --workspace --all-targets --all-features -- -D warnings && /exec cargo check --workspace --all-features && /exec cargo test --workspace --all-features"
+    "code-quality": "/agent switch rust-code-reviewer && /review --scope changes --strict && /exec cargo fmt --all && /exec cargo clippy --workspace --all-targets --all-features -- -D warnings && /exec cargo check --workspace --all-features && /exec cargo test --workspace --all-features"
   }
 }

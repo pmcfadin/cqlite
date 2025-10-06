@@ -54,7 +54,6 @@ pub mod statistics_test;
 pub mod types;
 #[cfg(test)]
 pub mod udt_tests;
-pub mod validation;
 pub mod vint;
 pub mod vint_fixed;
 
@@ -119,7 +118,6 @@ pub use enhanced_statistics_parser::*;
 pub use header::*;
 pub use statistics::*;
 pub use types::*;
-pub use validation::*;
 pub use vint::*;
 
 // Re-export M3 performance modules

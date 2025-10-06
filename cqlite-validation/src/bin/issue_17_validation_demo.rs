@@ -7,7 +7,7 @@
 //! - Real-time monitoring
 //! - Comprehensive reporting
 
-use cqlite_core::validation::Issue17ValidationFramework;
+use cqlite_validation::Issue17ValidationFramework;
 use std::time::Instant;
 
 #[tokio::main]
@@ -78,11 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("📋 Validation Section Details:");
             for section in &report.sections {
                 let status_icon = match section.status {
-                    cqlite_core::validation::ValidationSectionStatus::Passed => "✅",
-                    cqlite_core::validation::ValidationSectionStatus::Failed => "❌",
-                    cqlite_core::validation::ValidationSectionStatus::Warning => "⚠️",
-                    cqlite_core::validation::ValidationSectionStatus::Error => "🚨",
-                    cqlite_core::validation::ValidationSectionStatus::Skipped => "⏭️",
+                    cqlite_validation::ValidationSectionStatus::Passed => "✅",
+                    cqlite_validation::ValidationSectionStatus::Failed => "❌",
+                    cqlite_validation::ValidationSectionStatus::Warning => "⚠️",
+                    cqlite_validation::ValidationSectionStatus::Error => "🚨",
+                    cqlite_validation::ValidationSectionStatus::Skipped => "⏭️",
                 };
 
                 println!("   {} {}: {}", status_icon, section.name, section.details);

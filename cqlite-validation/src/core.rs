@@ -2,7 +2,7 @@
 //!
 //! This module provides the core validation framework that coordinates all validation activities.
 
-use crate::error::Result;
+use cqlite_core::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -4,7 +4,7 @@
 //!
 //! This module provides performance validation and benchmarking for Issue #17.
 
-use crate::validation::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
+use crate::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -171,7 +171,9 @@ pub async fn run_test(
 
 impl PerformanceValidator {
     /// Create a new performance validator
-    pub fn new(framework: Arc<super::core::ValidationFramework>) -> crate::error::Result<Self> {
+    pub fn new(
+        framework: Arc<super::core::ValidationFramework>,
+    ) -> cqlite_core::error::Result<Self> {
         let benchmarks = Self::create_default_benchmarks();
 
         Ok(Self {
@@ -224,7 +226,9 @@ impl PerformanceValidator {
     }
 
     /// Run all performance benchmarks (placeholder implementation)
-    pub async fn run_benchmarks(&self) -> crate::error::Result<super::reports::ValidationReport> {
+    pub async fn run_benchmarks(
+        &self,
+    ) -> cqlite_core::error::Result<super::reports::ValidationReport> {
         log::info!("Starting Cassandra 5+ performance benchmarks");
 
         let mut report = super::reports::ValidationReport::new("Performance Benchmarks");

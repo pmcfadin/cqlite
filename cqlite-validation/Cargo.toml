@@ -1,0 +1,78 @@
+[package]
+name = "cqlite-validation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Validation tools and frameworks for CQLite SSTable parsing"
+publish = false
+
+[dependencies]
+# Core cqlite dependency
+cqlite-core = { path = "../cqlite-core" }
+
+# Async runtime - required for validation tests
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time", "process"] }
+
+# Serialization - required for validation results, configs, and reports
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling - required for validation error types
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Date/time handling - required for validation timestamps and metrics
+chrono = { version = "0.4", features = ["serde"] }
+
+# Parsing - nom required by hardened_validator_parser.rs for binary parsing
+nom = "7.1"
+
+# Terminal output - required for validation tool CLIs
+colored = { workspace = true }
+
+# CLI argument parsing - required for validation binaries
+clap = { workspace = true }
+
+# Logging - required for validation tool diagnostics
+log = { workspace = true }
+env_logger = { workspace = true }
+
+# Async trait support - potentially needed for validation interfaces
+async-trait = "0.1.88"
+
+# UUID generation - required for validation IDs
+uuid = { version = "1.10", features = ["v4"] }
+
+[dev-dependencies]
+# Testing utilities
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
+
+# Validation binaries
+[[bin]]
+name = "memory_safety_validator"
+path = "src/bin/memory_safety_validator.rs"
+
+[[bin]]
+name = "sstabledump_parity_validator"
+path = "src/bin/sstabledump_parity_validator.rs"
+
+[[bin]]
+name = "issue_17_validation_demo"
+path = "src/bin/issue_17_validation_demo.rs"
+
+[[bin]]
+name = "validate_test_sstables"
+path = "src/bin/validate_test_sstables.rs"
+
+[features]
+# Performance benchmarking feature (conditionally compiled in validation/performance.rs)
+benchmarks = []
+
+[lints]
+workspace = true

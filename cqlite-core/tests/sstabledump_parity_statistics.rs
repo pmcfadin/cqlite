@@ -13,9 +13,9 @@ use cqlite_core::{
         derive_reference_paths_from_data_db, list_tables, load_metadata,
         resolve_table_to_sstable_path, should_ignore_file, DatasetError, TableInfo,
     },
-    validation::parity_comparator::{ParityStatus, StatisticsComparator},
     Config,
 };
+use cqlite_validation::parity_comparator::{ParityStatus, StatisticsComparator};
 use serde_json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

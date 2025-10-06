@@ -3,7 +3,7 @@
 //! This module provides comprehensive regression testing capabilities
 //! to ensure SSTable parsing accuracy and performance over time.
 
-use crate::error::Result;
+use cqlite_core::error::Result;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -95,9 +95,7 @@ impl RegressionTestSuite {
 }
 
 /// Generate test cases for regression testing
-pub fn generate_test_cases(
-    _config: &crate::validation::ValidationConfig,
-) -> Result<Vec<RegressionTestCase>> {
+pub fn generate_test_cases(_config: &crate::ValidationConfig) -> Result<Vec<RegressionTestCase>> {
     let cases = vec![RegressionTestCase {
         name: "basic_sstable_parsing".to_string(),
         description: "Basic SSTable parsing regression test".to_string(),
@@ -111,7 +109,7 @@ pub fn generate_test_cases(
 /// Run a regression test
 pub async fn run_test(
     test_case: &RegressionTestCase,
-    _config: &crate::validation::ValidationConfig,
+    _config: &crate::ValidationConfig,
 ) -> Result<RegressionTestResult> {
     // Basic test implementation
     Ok(RegressionTestResult {

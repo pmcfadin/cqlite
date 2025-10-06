@@ -5,7 +5,7 @@
 //! It includes comprehensive validation, performance benchmarks, and version-specific
 //! format handling.
 
-use crate::{
+use cqlite_core::{
     error::{Error, Result},
     parser::{
         complex_types::{ComplexTypeParser, TypeCategory},
@@ -1354,7 +1354,7 @@ impl HardenedValidatorParser {
     /// Parse UDT with embedded schema (fallback)
     fn parse_udt_embedded_schema(&self, data: &[u8], _version: CassandraVersion) -> Result<Value> {
         // Use existing embedded schema parser as fallback
-        let (_, value) = crate::parser::types::parse_udt(data).map_err(|_| {
+        let (_, value) = cqlite_core::parser::types::parse_udt(data).map_err(|_| {
             Error::corruption("Failed to parse UDT with embedded schema".to_string())
         })?;
         Ok(value)

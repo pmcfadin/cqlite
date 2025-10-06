@@ -2,7 +2,7 @@
 //!
 //! This module provides comprehensive report generation for Issue #17 validation results.
 
-use crate::error::{Error, Result};
+use cqlite_core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

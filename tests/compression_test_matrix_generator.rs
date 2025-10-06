@@ -5,13 +5,12 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// Generate test SSTable files with specific compression settings
 pub fn generate_compression_test_matrix() -> Result<(), Box<dyn std::error::Error>> {
     let algorithms = vec!["LZ4", "Snappy", "Zstd", "Deflate"];
-    let chunk_sizes = vec!["4KB", "16KB", "64KB"];
-    let chunk_bytes = vec![4096, 16384, 65536];
+    let chunk_sizes = ["4KB", "16KB", "64KB"];
+    let chunk_bytes = [4096, 16384, 65536];
 
     // Create test data directory
     let test_data_dir = Path::new("test-data");

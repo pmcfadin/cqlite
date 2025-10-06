@@ -18,7 +18,6 @@ pub mod platform;
 pub mod query;
 pub mod schema;
 pub mod storage;
-pub mod validation;
 
 // Docker integration for testing
 pub mod docker;

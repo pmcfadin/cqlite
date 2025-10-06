@@ -5,11 +5,9 @@
 //! tolerance evidence for Issue #25 implementation.
 
 use clap::{Arg, Command};
-use cqlite_core::{
-    error::Result,
-    validation::sstabledump_parity::{
-        ParityStatus, SStableDumpParityConfig, SStableDumpParityValidator,
-    },
+use cqlite_core::error::Result;
+use cqlite_validation::sstabledump_parity::{
+    ParityStatus, SStableDumpParityConfig, SStableDumpParityValidator,
 };
 use std::path::PathBuf;
 

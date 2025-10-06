@@ -19,7 +19,7 @@ This document defines how our AI agents should deliver high-quality Rust changes
 3. **Plan before typing.** Outline the changes (control flow, data structures, new types). Keep the plan small and verifiable.
 4. **Implement deliberately.** Modify only what the plan requires. Match existing style: module layout, naming, error propagation, logging.
 5. **Self-review.** Reread the diff. Remove unused imports, dead code, and speculative helpers. Confirm ownership semantics and lifetimes are intentional.
-6. **Validate.** Run the narrowest meaningful checks: unit tests for touched crates, `cargo fmt`, `cargo clippy`, or the specific `just` recipe. Capture failures and fix them; do not rely on humans to interpret compiler output. Use `/code-quailty` when you need the full post-change sweep (rust-code-reviewer + fmt/clippy/check/tests).
+6. **Validate.** Run the narrowest meaningful checks: unit tests for touched crates, `cargo fmt`, `cargo clippy`, or the specific `just` recipe. Capture failures and fix them; do not rely on humans to interpret compiler output. Use `/custom code-quality` when you need the full post-change sweep (rust-code-reviewer + fmt/clippy/check/tests).
 7. **Report succinctly.** Summarize the change, list validations, and call out skipped work or risks. Provide file:line references for reviewers.
 
 ---

@@ -3,7 +3,7 @@
 //! This module provides comprehensive format compatibility validation for Issue #17.
 //! It validates format version compatibility and ensures proper handling across versions.
 
-use crate::error::{Error, Result};
+use cqlite_core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -226,7 +226,7 @@ pub enum RecommendationUrgency {
 
 impl FormatCompatibilityValidator {
     /// Create a new format compatibility validator
-    pub fn new(config: CompatibilityConfig) -> crate::error::Result<Self> {
+    pub fn new(config: CompatibilityConfig) -> cqlite_core::error::Result<Self> {
         Ok(Self {
             config,
             results: HashMap::new(),
@@ -236,7 +236,7 @@ impl FormatCompatibilityValidator {
     /// Validate format compatibility
     pub async fn validate_format_compatibility(
         &mut self,
-    ) -> crate::error::Result<FormatCompatibilityResult> {
+    ) -> cqlite_core::error::Result<FormatCompatibilityResult> {
         let mut result = FormatCompatibilityResult {
             compatibility_score: 0.95, // Placeholder high score
             version_results: HashMap::new(),
@@ -282,7 +282,9 @@ impl FormatCompatibilityValidator {
 
 impl FormatValidator {
     /// Create a new format validator
-    pub fn new(_framework: Arc<super::core::ValidationFramework>) -> crate::error::Result<Self> {
+    pub fn new(
+        _framework: Arc<super::core::ValidationFramework>,
+    ) -> cqlite_core::error::Result<Self> {
         let config = CompatibilityConfig::default();
         let version_support = Self::create_version_support();
 
@@ -1372,7 +1374,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_format_validator_creation() {
-        use crate::validation::{ValidationConfig, ValidationFramework};
+        use crate::{core::ValidationFramework, ValidationConfig};
         let framework = Arc::new(ValidationFramework::new(ValidationConfig::default()).unwrap());
         let validator = FormatValidator::new(framework);
         assert!(validator.is_ok());
@@ -1380,7 +1382,7 @@ mod tests {
 
     #[test]
     fn test_version_comparison() {
-        use crate::validation::{ValidationConfig, ValidationFramework};
+        use crate::{core::ValidationFramework, ValidationConfig};
         let validator = FormatValidator::new(Arc::new(
             ValidationFramework::new(ValidationConfig::default()).unwrap(),
         ))
@@ -1423,10 +1425,8 @@ mod tests {
     #[test]
     fn test_compatibility_matrix() {
         let validator = FormatValidator::new(Arc::new(
-            crate::validation::ValidationFramework::new(
-                crate::validation::ValidationConfig::default(),
-            )
-            .unwrap(),
+            crate::core::ValidationFramework::new(crate::core::ValidationConfig::default())
+                .unwrap(),
         ))
         .unwrap();
 
@@ -1452,10 +1452,8 @@ mod tests {
     #[test]
     fn test_migration_recommendations() {
         let validator = FormatValidator::new(Arc::new(
-            crate::validation::ValidationFramework::new(
-                crate::validation::ValidationConfig::default(),
-            )
-            .unwrap(),
+            crate::core::ValidationFramework::new(crate::core::ValidationConfig::default())
+                .unwrap(),
         ))
         .unwrap();
 

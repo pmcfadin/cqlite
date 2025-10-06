@@ -86,10 +86,7 @@ tempfile = "3.8"
 rand = "0.8"
 tokio-test = "0.4"
 insta = "1.34"
-
-[[bin]]
-name = "memory_safety_validator"
-path = "src/bin/memory_safety_validator.rs"
+cqlite-validation = { path = "../cqlite-validation" }
 
 [[bin]]
 name = "benchmark_streaming"
@@ -102,11 +99,6 @@ path = "src/bin/test_streaming_performance.rs"
 [[bin]]
 name = "performance_baseline_runner"
 path = "src/bin/performance_baseline_runner.rs"
-
-[[bin]]
-name = "sstabledump_parity_validator"
-path = "src/bin/sstabledump_parity_validator.rs"
-
 
 [features]
 # M1 defaults: Modern Cassandra 5+ with authoritative metadata only (no heuristics)

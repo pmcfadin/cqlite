@@ -3,7 +3,7 @@
 //! This module validates that CQLite output formats are compatible with cqlsh
 //! and other Cassandra tools, ensuring seamless integration.
 
-use crate::validation::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
+use crate::{ValidationConfig, ValidationResult, ValidationStatus, ValidationType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;

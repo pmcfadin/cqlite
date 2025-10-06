@@ -5,7 +5,10 @@
 
 use cqlite_core::{
     platform::Platform,
-    schema::{Column, KeyColumn, SchemaParser, SchemaRegistry, SchemaRegistryConfig, TableSchema},
+    schema::{
+        ClusteringColumn, ClusteringOrder, Column, KeyColumn, SchemaParser, SchemaRegistry,
+        SchemaRegistryConfig, TableSchema,
+    },
     types::Value,
     Config,
 };
@@ -68,10 +71,11 @@ impl SchemaIntegrationFixture {
                 data_type: "uuid".to_string(),
                 position: 0,
             }],
-            clustering_keys: vec![KeyColumn {
+            clustering_keys: vec![ClusteringColumn {
                 name: "timestamp".to_string(),
                 data_type: "timestamp".to_string(),
                 position: 0,
+                order: ClusteringOrder::Asc,
             }],
             columns: vec![
                 Column {
@@ -138,15 +142,17 @@ impl SchemaIntegrationFixture {
                 },
             ],
             clustering_keys: vec![
-                KeyColumn {
+                ClusteringColumn {
                     name: "event_time".to_string(),
                     data_type: "timestamp".to_string(),
                     position: 0,
+                    order: ClusteringOrder::Asc,
                 },
-                KeyColumn {
+                ClusteringColumn {
                     name: "sequence_id".to_string(),
                     data_type: "bigint".to_string(),
                     position: 1,
+                    order: ClusteringOrder::Asc,
                 },
             ],
             columns: vec![
@@ -231,20 +237,23 @@ impl SchemaIntegrationFixture {
                 },
             ],
             clustering_keys: vec![
-                KeyColumn {
+                ClusteringColumn {
                     name: "day".to_string(),
                     data_type: "date".to_string(),
                     position: 0,
+                    order: ClusteringOrder::Asc,
                 },
-                KeyColumn {
+                ClusteringColumn {
                     name: "hour".to_string(),
                     data_type: "tinyint".to_string(),
                     position: 1,
+                    order: ClusteringOrder::Asc,
                 },
-                KeyColumn {
+                ClusteringColumn {
                     name: "minute".to_string(),
                     data_type: "tinyint".to_string(),
                     position: 2,
+                    order: ClusteringOrder::Asc,
                 },
             ],
             columns: vec![
@@ -355,19 +364,22 @@ async fn test_simple_table_parsing_parity() {
     let name_data = create_length_prefixed_text("John Doe");
     let result = parser.parse_column_value("name", &name_data);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Value::Text("John Doe".to_string()));
+    let (value, _bytes_read) = result.unwrap();
+    assert_eq!(value, Value::Text("John Doe".to_string()));
 
     // Test 4: Parse integer column
     let age_data = 30i32.to_be_bytes().to_vec();
     let result = parser.parse_column_value("age", &age_data);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Value::Integer(30));
+    let (value, _bytes_read) = result.unwrap();
+    assert_eq!(value, Value::Integer(30));
 
     // Test 5: Parse boolean column
     let active_data = vec![1u8]; // true
     let result = parser.parse_column_value("active", &active_data);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Value::Boolean(true));
+    let (value, _bytes_read) = result.unwrap();
+    assert_eq!(value, Value::Boolean(true));
 }
 
 #[tokio::test]
@@ -407,7 +419,8 @@ async fn test_collections_table_parsing_parity() {
     let set_data = create_set_data(&["tag1", "tag2", "tag3"]);
     let result = parser.parse_column_value("tags", &set_data);
     assert!(result.is_ok());
-    if let Value::Set(elements) = result.unwrap() {
+    let (value, _bytes_read) = result.unwrap();
+    if let Value::Set(elements) = value {
         assert_eq!(elements.len(), 3);
     } else {
         panic!("Expected Set value");
@@ -417,7 +430,8 @@ async fn test_collections_table_parsing_parity() {
     let map_data = create_map_data(&[("cpu", 75.5), ("memory", 82.3), ("disk", 45.1)]);
     let result = parser.parse_column_value("metrics", &map_data);
     assert!(result.is_ok());
-    if let Value::Map(entries) = result.unwrap() {
+    let (value, _bytes_read) = result.unwrap();
+    if let Value::Map(entries) = value {
         assert_eq!(entries.len(), 3);
     } else {
         panic!("Expected Map value");
@@ -427,7 +441,8 @@ async fn test_collections_table_parsing_parity() {
     let list_data = create_list_data(&[100i64, 200i64, 300i64]);
     let result = parser.parse_column_value("samples", &list_data);
     assert!(result.is_ok());
-    if let Value::List(elements) = result.unwrap() {
+    let (value, _bytes_read) = result.unwrap();
+    if let Value::List(elements) = value {
         assert_eq!(elements.len(), 3);
         assert_eq!(elements[0], Value::BigInt(100));
         assert_eq!(elements[1], Value::BigInt(200));
@@ -440,7 +455,8 @@ async fn test_collections_table_parsing_parity() {
     let nested_data = create_nested_map_list_data();
     let result = parser.parse_column_value("nested_data", &nested_data);
     assert!(result.is_ok());
-    if let Value::Map(entries) = result.unwrap() {
+    let (value, _bytes_read) = result.unwrap();
+    if let Value::Map(entries) = value {
         assert!(!entries.is_empty());
         // Verify nested structure
         for (_, value) in entries {
