@@ -20,6 +20,9 @@ pub enum CompressionAlgorithm {
     Zstd,
 }
 
+/// Maximum allowed decompressed size to prevent memory exhaustion attacks (128MB)
+const MAX_DECOMPRESSED_SIZE: usize = 128 * 1024 * 1024;
+
 impl From<String> for CompressionAlgorithm {
     fn from(s: String) -> Self {
         match s.to_uppercase().as_str() {
@@ -60,6 +63,20 @@ pub struct StreamingDecompressor {
     config: ChunkedDecompressionConfig,
     bytes_processed: usize,
     bytes_output: usize,
+}
+
+/// Validates that decompressed size does not exceed safety limits
+///
+/// # Security
+/// Prevents decompression bomb attacks by rejecting sizes > 128MB
+fn validate_decompression_size(uncompressed_size: usize) -> Result<()> {
+    if uncompressed_size > MAX_DECOMPRESSED_SIZE {
+        return Err(Error::storage(format!(
+            "Decompression bomb protection: size {} exceeds limit {} (128MB)",
+            uncompressed_size, MAX_DECOMPRESSED_SIZE
+        )));
+    }
+    Ok(())
 }
 
 /// Compression handler
@@ -190,7 +207,22 @@ impl Compression {
                 {
                     use lz4_flex::decompress_size_prepended;
 
-                    // Use proper LZ4 decompression based on CompressionInfo.db metadata
+                    // LZ4 format: 4-byte size prefix (little-endian) + compressed data
+                    if data.len() < 4 {
+                        return Err(Error::storage("Invalid LZ4 data: too short".to_string()));
+                    }
+
+                    // Extract uncompressed size (4 bytes, little-endian for LZ4)
+                    let uncompressed_size =
+                        u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+                    // Validate size to prevent decompression bombs
+                    // SECURITY: lz4_flex::decompress_size_prepended does NOT validate the size
+                    // prefix before allocating memory, making it vulnerable to memory exhaustion
+                    // attacks if a malicious file contains an excessively large size value.
+                    validate_decompression_size(uncompressed_size)?;
+
+                    // Decompress using library function (now safe after validation)
                     decompress_size_prepended(data)
                         .map_err(|e| Error::storage(format!("LZ4 decompression failed: {}", e)))
                 }
@@ -212,6 +244,9 @@ impl Compression {
                     // Extract uncompressed size (4 bytes, big-endian)
                     let uncompressed_size =
                         u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+                    // Validate size to prevent decompression bombs
+                    validate_decompression_size(uncompressed_size)?;
 
                     // Decompress the actual data (skip first 4 bytes)
                     let compressed_data = &data[4..];
@@ -255,6 +290,9 @@ impl Compression {
                     let uncompressed_size =
                         u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
 
+                    // Validate size to prevent decompression bombs
+                    validate_decompression_size(uncompressed_size)?;
+
                     // Decompress the actual data (skip first 4 bytes)
                     let compressed_data = &data[4..];
                     let mut decoder = DeflateDecoder::new(compressed_data);
@@ -294,6 +332,9 @@ impl Compression {
                     // Extract uncompressed size (4 bytes, big-endian)
                     let uncompressed_size =
                         u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+                    // Validate size to prevent decompression bombs
+                    validate_decompression_size(uncompressed_size)?;
 
                     // Decompress the actual data (skip first 4 bytes)
                     let compressed_data = &data[4..];
@@ -1080,6 +1121,76 @@ mod tests {
 
         let result = reader.read_streaming(&chunks).unwrap();
         assert_eq!(result, b"chunk1chunk2chunk3");
+    }
+
+    #[test]
+    fn test_decompression_bomb_protection() {
+        // Test protection against malicious size claims for all algorithms
+        // Using 200MB claim (exceeds 128MB limit) to test protection
+
+        // Snappy: Create data claiming 200MB uncompressed size
+        #[cfg(feature = "snappy")]
+        {
+            let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+            let malicious_size: u32 = 200 * 1024 * 1024; // 200MB claim (exceeds 128MB limit)
+            let mut malicious_data = malicious_size.to_be_bytes().to_vec();
+            malicious_data.extend_from_slice(&[0u8; 10]); // Some fake compressed data
+
+            let result = compression.decompress(&malicious_data);
+            assert!(result.is_err(), "Should reject malicious Snappy size");
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Decompression bomb"));
+        }
+
+        // Deflate: Create data claiming 200MB uncompressed size
+        #[cfg(feature = "deflate")]
+        {
+            let compression = Compression::new(CompressionAlgorithm::Deflate).unwrap();
+            let malicious_size: u32 = 200 * 1024 * 1024; // 200MB claim (exceeds 128MB limit)
+            let mut malicious_data = malicious_size.to_be_bytes().to_vec();
+            malicious_data.extend_from_slice(&[0u8; 10]); // Some fake compressed data
+
+            let result = compression.decompress(&malicious_data);
+            assert!(result.is_err(), "Should reject malicious Deflate size");
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Decompression bomb"));
+        }
+
+        // Zstd: Create data claiming 200MB uncompressed size
+        #[cfg(feature = "zstd")]
+        {
+            let compression = Compression::new(CompressionAlgorithm::Zstd).unwrap();
+            let malicious_size: u32 = 200 * 1024 * 1024; // 200MB claim (exceeds 128MB limit)
+            let mut malicious_data = malicious_size.to_be_bytes().to_vec();
+            malicious_data.extend_from_slice(&[0u8; 10]); // Some fake compressed data
+
+            let result = compression.decompress(&malicious_data);
+            assert!(result.is_err(), "Should reject malicious Zstd size");
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Decompression bomb"));
+        }
+
+        // LZ4: Create data claiming 200MB uncompressed size
+        #[cfg(feature = "lz4")]
+        {
+            let compression = Compression::new(CompressionAlgorithm::Lz4).unwrap();
+            let malicious_size: u32 = 200 * 1024 * 1024; // 200MB claim (exceeds 128MB limit)
+            let mut malicious_data = malicious_size.to_le_bytes().to_vec(); // LZ4 uses little-endian
+            malicious_data.extend_from_slice(&[0u8; 10]); // Some fake compressed data
+
+            let result = compression.decompress(&malicious_data);
+            assert!(result.is_err(), "Should reject malicious LZ4 size");
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Decompression bomb"));
+        }
     }
 
     #[test]
