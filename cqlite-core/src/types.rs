@@ -20,8 +20,10 @@ pub enum Value {
     Boolean(bool),
     /// 32-bit signed integer
     Integer(i32),
-    /// 64-bit signed integer  
+    /// 64-bit signed integer
     BigInt(i64),
+    /// Cassandra Counter type (distributed increment-only counter with CRDT semantics)
+    Counter(i64),
     /// 64-bit floating point number
     Float(f64),
     /// UTF-8 string
@@ -293,6 +295,7 @@ impl Value {
             Value::Boolean(_) => CqlType::Boolean,
             Value::Integer(_) => CqlType::Int,
             Value::BigInt(_) => CqlType::BigInt,
+            Value::Counter(_) => CqlType::Counter, // Counter type (will be added to CqlType)
             Value::Float(_) => CqlType::Double,
             Value::Text(_) => CqlType::Text,
             Value::Blob(_) => CqlType::Blob,
@@ -523,6 +526,7 @@ impl Value {
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Value::BigInt(i) => Some(*i),
+            Value::Counter(i) => Some(*i),
             Value::Integer(i) => Some(*i as i64),
             Value::TinyInt(i) => Some(*i as i64),
             Value::SmallInt(i) => Some(*i as i64),
@@ -537,6 +541,7 @@ impl Value {
             Value::Float32(f) => Some(*f as f64),
             Value::Integer(i) => Some(*i as f64),
             Value::BigInt(i) => Some(*i as f64),
+            Value::Counter(i) => Some(*i as f64),
             Value::TinyInt(i) => Some(*i as f64),
             Value::SmallInt(i) => Some(*i as f64),
             _ => None,
@@ -589,6 +594,7 @@ impl Value {
             Value::SmallInt(_) => 2,
             Value::Integer(_) => 4,
             Value::BigInt(_) => 8,
+            Value::Counter(_) => 8,
             Value::Float32(_) => 4,
             Value::Float(_) => 8,
             Value::Text(s) => 4 + s.len(), // VInt length + content
@@ -777,6 +783,7 @@ impl PartialOrd for Value {
             (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
             (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
             (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
+            (Value::Counter(a), Value::Counter(b)) => a.partial_cmp(b),
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
             (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
             (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
@@ -799,6 +806,7 @@ impl fmt::Display for Value {
             Value::Boolean(b) => write!(f, "{}", b),
             Value::Integer(i) => write!(f, "{}", i),
             Value::BigInt(i) => write!(f, "{}", i),
+            Value::Counter(i) => write!(f, "counter:{}", i),
             Value::Float(fl) => write!(f, "{}", fl),
             Value::Text(s) => write!(f, "'{}'", s),
             Value::Blob(b) => write!(f, "BLOB({} bytes)", b.len()),
@@ -1164,6 +1172,7 @@ impl std::hash::Hash for Value {
             Value::Boolean(b) => b.hash(state),
             Value::Integer(i) => i.hash(state),
             Value::BigInt(i) => i.hash(state),
+            Value::Counter(i) => i.hash(state),
             Value::Float(f) => f.to_bits().hash(state),
             Value::Text(s) => s.hash(state),
             Value::Blob(b) => b.hash(state),
@@ -1328,6 +1337,7 @@ mod tests {
             Value::Boolean(true),
             Value::Integer(42),
             Value::BigInt(9223372036854775807i64),
+            Value::Counter(1000000i64),
             Value::Float(std::f64::consts::PI),
             Value::Text("test string".to_string()),
             Value::Blob(vec![1, 2, 3, 4]),
@@ -1374,15 +1384,16 @@ mod tests {
         assert_eq!(values[1].as_bool(), Some(true));
         assert_eq!(values[2].as_i32(), Some(42));
         assert_eq!(values[3].as_i64(), Some(9223372036854775807i64));
-        assert_eq!(values[4].as_f64(), Some(std::f64::consts::PI));
-        assert_eq!(values[5].as_str(), Some("test string"));
-        assert_eq!(values[6].as_bytes(), Some([1u8, 2, 3, 4].as_slice()));
+        assert_eq!(values[4].as_i64(), Some(1000000i64)); // Counter
+        assert_eq!(values[5].as_f64(), Some(std::f64::consts::PI));
+        assert_eq!(values[6].as_str(), Some("test string"));
+        assert_eq!(values[7].as_bytes(), Some([1u8, 2, 3, 4].as_slice()));
 
         // Test is_null, is_tombstone, is_deleted
         assert!(values[0].is_null());
-        assert!(values[22].is_tombstone());
+        assert!(values[23].is_tombstone());
         assert!(values[0].is_deleted());
-        assert!(values[22].is_deleted());
+        assert!(values[23].is_deleted());
 
         // Test size_estimate for all variants
         for value in &values {

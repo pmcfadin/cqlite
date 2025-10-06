@@ -267,6 +267,7 @@ impl MemTable {
             Some(Value::Boolean(_)) => 1,
             Some(Value::Integer(_)) => 4,
             Some(Value::BigInt(_)) => 8,
+            Some(Value::Counter(_)) => 8,
             Some(Value::Float(_)) => 8,
             Some(Value::Text(s)) => s.len(),
             Some(Value::Blob(b)) => b.len(),

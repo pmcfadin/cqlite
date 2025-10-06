@@ -676,6 +676,7 @@ impl ToJson for Value {
                 serde_json::Value::Object(json_map)
             }
             Value::BigInt(i) => serde_json::Value::Number((*i).into()),
+            Value::Counter(c) => serde_json::Value::Number((*c).into()),
             Value::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
             Value::Uuid(uuid) => {
                 use base64::Engine;

@@ -159,6 +159,15 @@ impl KeyDigestComputer {
                 ]);
                 Ok(Value::BigInt(value))
             }
+            ComparatorType::Counter => {
+                if bytes.len() != 8 {
+                    return Err(Error::corruption("Invalid counter bytes".to_string()));
+                }
+                let value = i64::from_be_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+                Ok(Value::Counter(value))
+            }
             ComparatorType::Float32 => {
                 if bytes.len() != 4 {
                     return Err(Error::corruption("Invalid float32 bytes".to_string()));

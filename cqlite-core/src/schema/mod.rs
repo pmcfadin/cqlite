@@ -164,6 +164,7 @@ pub enum CqlType {
     SmallInt,
     Int,
     BigInt,
+    Counter,
     Float,
     Double,
     Decimal,
@@ -496,6 +497,7 @@ impl UdtRegistry {
             CqlType::SmallInt => "smallint".to_string(),
             CqlType::Int => "int".to_string(),
             CqlType::BigInt => "bigint".to_string(),
+            CqlType::Counter => "counter".to_string(),
             CqlType::Float => "float".to_string(),
             CqlType::Double => "double".to_string(),
             CqlType::Text | CqlType::Varchar => "text".to_string(),
@@ -858,6 +860,7 @@ impl CqlType {
                 | "integer"
                 | "bigint"
                 | "long"
+                | "counter"
                 | "float"
                 | "double"
                 | "decimal"
@@ -892,6 +895,7 @@ impl CqlType {
             "smallint" => Ok(CqlType::SmallInt),
             "int" | "integer" => Ok(CqlType::Int),
             "bigint" | "long" => Ok(CqlType::BigInt),
+            "counter" => Ok(CqlType::Counter),
             "float" => Ok(CqlType::Float),
             "double" => Ok(CqlType::Double),
             "decimal" => Ok(CqlType::Decimal),
@@ -917,6 +921,7 @@ impl CqlType {
             CqlType::SmallInt => Some(2),
             CqlType::Int => Some(4),
             CqlType::BigInt => Some(8),
+            CqlType::Counter => Some(8),
             CqlType::Float => Some(4),
             CqlType::Double => Some(8),
             CqlType::Timestamp => Some(8),

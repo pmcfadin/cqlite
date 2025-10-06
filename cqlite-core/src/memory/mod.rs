@@ -329,6 +329,7 @@ impl MemoryManager {
             Value::Boolean(_) => 1,
             Value::Integer(_) => 4,
             Value::BigInt(_) => 8,
+            Value::Counter(_) => 8,
             Value::Float(_) => 8,
             Value::Text(s) => s.len(),
             Value::Blob(b) => b.len(),

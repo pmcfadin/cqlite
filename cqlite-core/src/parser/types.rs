@@ -103,7 +103,8 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
         CqlTypeId::Tinyint => parse_tinyint(input),
         CqlTypeId::Smallint => parse_smallint(input),
         CqlTypeId::Int => parse_int(input),
-        CqlTypeId::BigInt | CqlTypeId::Counter => parse_bigint(input),
+        CqlTypeId::BigInt => parse_bigint(input),
+        CqlTypeId::Counter => parse_counter(input),
         CqlTypeId::Float => parse_float(input),
         CqlTypeId::Double => parse_double(input),
         CqlTypeId::Ascii | CqlTypeId::Varchar => {
@@ -181,7 +182,8 @@ pub fn parse_cql_value_raw(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], V
         CqlTypeId::Tinyint => parse_tinyint(input),
         CqlTypeId::Smallint => parse_smallint(input),
         CqlTypeId::Int => parse_int(input),
-        CqlTypeId::BigInt | CqlTypeId::Counter => parse_bigint(input),
+        CqlTypeId::BigInt => parse_bigint(input),
+        CqlTypeId::Counter => parse_counter(input),
         CqlTypeId::Float => parse_float(input),
         CqlTypeId::Double => parse_double(input),
         CqlTypeId::Ascii | CqlTypeId::Varchar => {
@@ -239,6 +241,11 @@ pub fn parse_int(input: &[u8]) -> IResult<&[u8], Value> {
 /// Parse a bigint (signed 64-bit integer)
 pub fn parse_bigint(input: &[u8]) -> IResult<&[u8], Value> {
     map(be_i64, Value::BigInt)(input)
+}
+
+/// Parse a counter (signed 64-bit integer with counter semantics)
+pub fn parse_counter(input: &[u8]) -> IResult<&[u8], Value> {
+    map(be_i64, Value::Counter)(input)
 }
 
 /// Parse a float (32-bit floating point)
@@ -1055,6 +1062,7 @@ fn cql_type_to_type_id(cql_type: &CqlType) -> CqlTypeId {
         CqlType::SmallInt => CqlTypeId::Smallint,
         CqlType::Int => CqlTypeId::Int,
         CqlType::BigInt => CqlTypeId::BigInt,
+        CqlType::Counter => CqlTypeId::Counter,
         CqlType::Float => CqlTypeId::Float,
         CqlType::Double => CqlTypeId::Double,
         CqlType::Text | CqlType::Ascii | CqlType::Varchar => CqlTypeId::Varchar,
@@ -1390,7 +1398,8 @@ fn create_empty_value(type_id: CqlTypeId) -> Result<Value> {
         CqlTypeId::Tinyint => Ok(Value::TinyInt(0)),
         CqlTypeId::Smallint => Ok(Value::SmallInt(0)),
         CqlTypeId::Int => Ok(Value::Integer(0)),
-        CqlTypeId::BigInt | CqlTypeId::Counter => Ok(Value::BigInt(0)),
+        CqlTypeId::BigInt => Ok(Value::BigInt(0)),
+        CqlTypeId::Counter => Ok(Value::Counter(0)),
         CqlTypeId::Float => Ok(Value::Float32(0.0)),
         CqlTypeId::Double => Ok(Value::Float(0.0)),
         CqlTypeId::Ascii | CqlTypeId::Varchar => Ok(Value::Text(String::new())),
@@ -1425,6 +1434,10 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
         Value::BigInt(i) => {
             result.push(CqlTypeId::BigInt as u8);
             result.extend_from_slice(&i.to_be_bytes());
+        }
+        Value::Counter(c) => {
+            result.push(CqlTypeId::Counter as u8);
+            result.extend_from_slice(&c.to_be_bytes());
         }
         Value::Float(f) => {
             result.push(CqlTypeId::Double as u8);
@@ -1702,6 +1715,7 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
         Value::Boolean(_) => CqlTypeId::Boolean,
         Value::Integer(_) => CqlTypeId::Int,
         Value::BigInt(_) => CqlTypeId::BigInt,
+        Value::Counter(_) => CqlTypeId::Counter,
         Value::Float(_) => CqlTypeId::Double,
         Value::Text(_) => CqlTypeId::Varchar,
         Value::Blob(_) => CqlTypeId::Blob,
@@ -1955,6 +1969,7 @@ fn parse_cql_value_with_schema<'a>(input: &'a [u8], schema: &CqlType) -> IResult
         CqlType::SmallInt => parse_smallint(input),
         CqlType::Int => parse_int(input),
         CqlType::BigInt => parse_bigint(input),
+        CqlType::Counter => parse_counter(input),
         CqlType::Float => parse_float(input),
         CqlType::Double => parse_double(input),
         CqlType::Text | CqlType::Ascii | CqlType::Varchar => parse_text(input),

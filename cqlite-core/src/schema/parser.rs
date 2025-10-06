@@ -143,6 +143,7 @@ impl SchemaParser {
             CqlType::SmallInt => self.parse_smallint(data),
             CqlType::Int => self.parse_int(data),
             CqlType::BigInt => self.parse_bigint(data),
+            CqlType::Counter => self.parse_counter(data),
             CqlType::Float => self.parse_float(data),
             CqlType::Double => self.parse_double(data),
             CqlType::Text | CqlType::Varchar | CqlType::Ascii => self.parse_text(data),
@@ -204,6 +205,16 @@ impl SchemaParser {
         bytes.copy_from_slice(&data[0..8]);
         let value = i64::from_be_bytes(bytes);
         Ok((Value::BigInt(value), 8))
+    }
+
+    fn parse_counter(&self, data: &[u8]) -> Result<(Value, usize)> {
+        if data.len() < 8 {
+            return Err(Error::schema("Insufficient data for counter".to_string()));
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&data[0..8]);
+        let value = i64::from_be_bytes(bytes);
+        Ok((Value::Counter(value), 8))
     }
 
     fn parse_float(&self, data: &[u8]) -> Result<(Value, usize)> {
@@ -506,6 +517,7 @@ impl SchemaParser {
             ComparatorType::SmallInt => Ok(CqlType::SmallInt),
             ComparatorType::Int => Ok(CqlType::Int),
             ComparatorType::BigInt => Ok(CqlType::BigInt),
+            ComparatorType::Counter => Ok(CqlType::Counter),
             ComparatorType::Float32 => Ok(CqlType::Float),
             ComparatorType::Float => Ok(CqlType::Double),
             ComparatorType::Text => Ok(CqlType::Text),

@@ -182,6 +182,7 @@ impl ByteComparableEncoder {
             Value::SmallInt(i) => self.encode_smallint(*i),
             Value::Integer(i) => self.encode_int(*i),
             Value::BigInt(i) => self.encode_bigint(*i),
+            Value::Counter(c) => self.encode_bigint(*c), // Counter encoded as bigint
             Value::Float32(f) => self.encode_float32(*f),
             Value::Float(f) => self.encode_double(*f),
             Value::Text(s) => self.encode_text(s),

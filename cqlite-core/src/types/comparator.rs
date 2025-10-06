@@ -24,6 +24,8 @@ pub enum ComparatorType {
     Int,
     /// 64-bit signed integer comparator
     BigInt,
+    /// Counter type comparator (stored as 64-bit signed integer)
+    Counter,
     /// 32-bit floating point comparator
     Float32,
     /// 64-bit floating point comparator
@@ -73,6 +75,7 @@ impl ComparatorType {
             CqlType::SmallInt => ComparatorType::SmallInt,
             CqlType::Int => ComparatorType::Int,
             CqlType::BigInt => ComparatorType::BigInt,
+            CqlType::Counter => ComparatorType::Counter,
             CqlType::Float => ComparatorType::Float32,
             CqlType::Double => ComparatorType::Float,
             CqlType::Text | CqlType::Varchar => ComparatorType::Text,
@@ -157,6 +160,7 @@ impl ComparatorType {
             ComparatorType::SmallInt => self.compare_smallint(left, right),
             ComparatorType::Int => self.compare_int(left, right),
             ComparatorType::BigInt => self.compare_bigint(left, right),
+            ComparatorType::Counter => self.compare_bigint(left, right), // Counter uses same comparison as bigint
             ComparatorType::Float32 => self.compare_float32(left, right),
             ComparatorType::Float => self.compare_float(left, right),
             ComparatorType::Text => self.compare_text(left, right),
@@ -224,6 +228,7 @@ impl ComparatorType {
             ComparatorType::SmallInt => "smallint",
             ComparatorType::Int => "int",
             ComparatorType::BigInt => "bigint",
+            ComparatorType::Counter => "counter",
             ComparatorType::Float32 => "float",
             ComparatorType::Float => "double",
             ComparatorType::Text => "text",
@@ -252,6 +257,7 @@ impl ComparatorType {
             | ComparatorType::SmallInt
             | ComparatorType::Int
             | ComparatorType::BigInt
+            | ComparatorType::Counter
             | ComparatorType::Float32
             | ComparatorType::Float
             | ComparatorType::Text

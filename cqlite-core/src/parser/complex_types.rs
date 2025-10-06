@@ -285,6 +285,7 @@ impl ComplexTypeParser {
                 map(tag_no_case("smallint"), |_| CqlType::SmallInt),
                 map(tag_no_case("int"), |_| CqlType::Int),
                 map(tag_no_case("bigint"), |_| CqlType::BigInt),
+                map(tag_no_case("counter"), |_| CqlType::Counter),
                 map(tag_no_case("float"), |_| CqlType::Float),
                 map(tag_no_case("double"), |_| CqlType::Double),
                 map(tag_no_case("decimal"), |_| CqlType::Decimal),
@@ -332,6 +333,7 @@ impl ComplexTypeParser {
             | CqlType::SmallInt
             | CqlType::Int
             | CqlType::BigInt
+            | CqlType::Counter
             | CqlType::Float
             | CqlType::Double
             | CqlType::Text
@@ -366,6 +368,7 @@ impl ComplexTypeParser {
             CqlType::SmallInt => Some(2),
             CqlType::Int => Some(4),
             CqlType::BigInt => Some(8),
+            CqlType::Counter => Some(8),
             CqlType::Float => Some(4),
             CqlType::Double => Some(8),
             CqlType::Timestamp => Some(8),
@@ -385,6 +388,7 @@ impl ComplexTypeParser {
             | CqlType::SmallInt
             | CqlType::Int
             | CqlType::BigInt
+            | CqlType::Counter
             | CqlType::Float
             | CqlType::Double
             | CqlType::Decimal
@@ -494,6 +498,7 @@ impl ComplexTypeParser {
             CqlType::SmallInt => "smallint".to_string(),
             CqlType::Int => "int".to_string(),
             CqlType::BigInt => "bigint".to_string(),
+            CqlType::Counter => "counter".to_string(),
             CqlType::Float => "float".to_string(),
             CqlType::Double => "double".to_string(),
             CqlType::Decimal => "decimal".to_string(),

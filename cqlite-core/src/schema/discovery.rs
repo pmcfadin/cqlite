@@ -774,6 +774,7 @@ impl TypeInferenceEngine {
             Value::Text(_) => "text".to_string(),
             Value::Integer(_) => "int".to_string(),
             Value::BigInt(_) => "bigint".to_string(),
+            Value::Counter(_) => "counter".to_string(),
             Value::Float(_) => "double".to_string(),
             Value::Boolean(_) => "boolean".to_string(),
             Value::Uuid(_) => "uuid".to_string(),

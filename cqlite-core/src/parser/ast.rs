@@ -743,7 +743,7 @@ impl From<CqlDataType> for CqlType {
             CqlDataType::Frozen(inner) => CqlType::Frozen(Box::new((*inner).into())),
             CqlDataType::Custom(name) => CqlType::Custom(name),
             CqlDataType::Varint => CqlType::BigInt, // Map varint to bigint
-            CqlDataType::Counter => CqlType::BigInt, // Map counter to bigint
+            CqlDataType::Counter => CqlType::Counter,
         }
     }
 }
@@ -756,6 +756,7 @@ impl From<CqlType> for CqlDataType {
             CqlType::SmallInt => CqlDataType::SmallInt,
             CqlType::Int => CqlDataType::Int,
             CqlType::BigInt => CqlDataType::BigInt,
+            CqlType::Counter => CqlDataType::Counter,
             CqlType::Float => CqlDataType::Float,
             CqlType::Double => CqlDataType::Double,
             CqlType::Decimal => CqlDataType::Decimal,
@@ -857,6 +858,6 @@ mod tests {
         assert_eq!(big_int, CqlType::BigInt);
 
         let counter_type = CqlType::from(CqlDataType::Counter);
-        assert_eq!(counter_type, CqlType::BigInt);
+        assert_eq!(counter_type, CqlType::Counter);
     }
 }
