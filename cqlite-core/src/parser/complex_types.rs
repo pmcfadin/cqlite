@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use nom::{
     branch::alt,
-    bytes::complete::tag_no_case,
+    bytes::complete::{tag_no_case, take_while1},
     character::complete::{char, multispace0},
     combinator::map,
     sequence::tuple,
@@ -135,9 +135,9 @@ impl ComplexTypeParser {
         context: &TypeParsingContext,
     ) -> Result<ParsedType> {
         // Check nesting depth
-        if context.depth > context.max_depth {
+        if context.depth >= context.max_depth {
             return Err(Error::Schema(format!(
-                "Type nesting too deep: {} > {}",
+                "Type nesting too deep: {} >= {}",
                 context.depth, context.max_depth
             )));
         }
@@ -190,7 +190,7 @@ impl ComplexTypeParser {
         input: &'a str,
         context: &TypeParsingContext,
     ) -> IResult<&'a str, CqlType> {
-        if context.depth > 10 {
+        if context.depth >= context.max_depth {
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::TooLarge,
@@ -215,11 +215,59 @@ impl ComplexTypeParser {
                 )),
                 |(_, _, _, _, inner_type, _, _)| CqlType::Frozen(Box::new(inner_type)),
             ),
+            // Tuple types
+            self.parse_tuple_type(context),
             // Collection types
             self.parse_collection_type(context),
             // Primitive types
             self.parse_primitive_type(),
+            // UDT or Custom types (last alternative)
+            self.parse_udt_or_custom_type(context),
         ))(input)
+    }
+
+    fn parse_tuple_type<'a>(
+        &'a self,
+        context: &'a TypeParsingContext,
+    ) -> impl Fn(&str) -> IResult<&str, CqlType> + 'a {
+        move |input| {
+            // Parse "tuple<"
+            let (input, _) = tag_no_case("tuple")(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char('<')(input)?;
+            let (input, _) = multispace0(input)?;
+
+            // Parse comma-separated list of types
+            let mut element_types = Vec::new();
+            let mut remaining = input;
+
+            loop {
+                // Parse next element type with increased depth
+                let mut new_context = context.clone();
+                new_context.depth += 1;
+
+                let (input, element_type) =
+                    self.parse_cql_type_internal(remaining, &new_context)?;
+                element_types.push(element_type);
+
+                // Check for comma (more elements) or closing '>'
+                let (input, _) = multispace0(input)?;
+
+                // Try to parse comma
+                if let Ok((input, _)) = char::<_, nom::error::Error<_>>(',')(input) {
+                    let (input, _) = multispace0(input)?;
+                    remaining = input;
+                    continue;
+                }
+
+                // Must be closing '>'
+                let (input, _) = char('>')(input)?;
+                remaining = input;
+                break;
+            }
+
+            Ok((remaining, CqlType::Tuple(element_types)))
+        }
     }
 
     fn parse_collection_type<'a>(
@@ -305,6 +353,34 @@ impl ComplexTypeParser {
         }
     }
 
+    fn parse_udt_or_custom_type<'a>(
+        &'a self,
+        context: &'a TypeParsingContext,
+    ) -> impl Fn(&str) -> IResult<&str, CqlType> + 'a {
+        move |input| {
+            // Parse identifier (type name) - alphanumeric and underscore
+            let (remaining, type_name) =
+                take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+
+            // Try to resolve as UDT if registry and keyspace provided
+            if let (Some(registry), Some(keyspace)) = (&self.udt_registry, &context.keyspace) {
+                if let Some(udt_def) = registry.get_udt(keyspace, type_name) {
+                    // Convert UdtTypeDef fields to CqlType format
+                    let fields: Vec<(String, CqlType)> = udt_def
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.field_type.clone()))
+                        .collect();
+
+                    return Ok((remaining, CqlType::Udt(type_name.to_string(), fields)));
+                }
+            }
+
+            // Fallback to Custom type
+            Ok((remaining, CqlType::Custom(type_name.to_string())))
+        }
+    }
+
     fn analyze_parsed_type(
         &self,
         cql_type: CqlType,
@@ -353,6 +429,18 @@ impl ComplexTypeParser {
             }
             CqlType::Map(key, value) => {
                 10 + self.calculate_complexity_score(key) + self.calculate_complexity_score(value)
+            }
+            CqlType::Tuple(elements) => {
+                10 + elements
+                    .iter()
+                    .map(|e| self.calculate_complexity_score(e))
+                    .sum::<u32>()
+            }
+            CqlType::Udt(_, fields) => {
+                15 + fields
+                    .iter()
+                    .map(|(_, field_type)| self.calculate_complexity_score(field_type))
+                    .sum::<u32>()
             }
             CqlType::Frozen(inner) => 2 + self.calculate_complexity_score(inner),
             CqlType::Custom(_) => 7,
@@ -405,11 +493,14 @@ impl ComplexTypeParser {
 
             CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) => TypeCategory::Collection,
 
+            CqlType::Tuple(_) => TypeCategory::Tuple,
+
             CqlType::Frozen(inner) => match self.categorize_type(inner) {
                 TypeCategory::Collection => TypeCategory::Frozen,
                 other => other,
             },
 
+            CqlType::Udt(_, _) => TypeCategory::UserDefined,
             CqlType::Custom(_) => TypeCategory::UserDefined,
             _ => TypeCategory::Primitive,
         }
@@ -423,9 +514,11 @@ impl ComplexTypeParser {
         let is_frozen = matches!(cql_type, CqlType::Frozen(_));
         let nesting_level = context.depth as u32;
 
-        let (element_count, is_map) = match cql_type {
-            CqlType::Map(_, _) => (None, true),
-            _ => (None, false),
+        let (element_count, is_map, udt_field_count) = match cql_type {
+            CqlType::Map(_, _) => (None, true, None),
+            CqlType::Tuple(elements) => (Some(elements.len()), false, None),
+            CqlType::Udt(_, fields) => (None, false, Some(fields.len())),
+            _ => (None, false, None),
         };
 
         TypeMetadata {
@@ -433,7 +526,7 @@ impl ComplexTypeParser {
             nesting_level,
             element_count,
             is_map,
-            udt_field_count: None,
+            udt_field_count,
             version: None,
         }
     }
@@ -521,6 +614,13 @@ impl ComplexTypeParser {
                 self.format_cql_type(value)
             ),
 
+            CqlType::Tuple(elements) => {
+                let formatted_elements: Vec<String> =
+                    elements.iter().map(|e| self.format_cql_type(e)).collect();
+                format!("tuple<{}>", formatted_elements.join(", "))
+            }
+
+            CqlType::Udt(name, _) => name.clone(),
             CqlType::Frozen(inner) => format!("frozen<{}>", self.format_cql_type(inner)),
             CqlType::Custom(name) => name.clone(),
             _ => "text".to_string(),
@@ -660,6 +760,348 @@ mod tests {
             assert_eq!(*inner, CqlType::Text);
         } else {
             panic!("Expected List<Text> type");
+        }
+    }
+
+    #[test]
+    fn test_tuple_parsing_homogeneous() {
+        let parser = ComplexTypeParser::new();
+
+        let result = parser.parse_type("tuple<int, int, int>").unwrap();
+        assert!(matches!(result.cql_type, CqlType::Tuple(_)));
+        assert_eq!(result.category, TypeCategory::Tuple);
+
+        if let CqlType::Tuple(elements) = result.cql_type {
+            assert_eq!(elements.len(), 3);
+            assert_eq!(elements[0], CqlType::Int);
+            assert_eq!(elements[1], CqlType::Int);
+            assert_eq!(elements[2], CqlType::Int);
+        } else {
+            panic!("Expected Tuple type");
+        }
+    }
+
+    #[test]
+    fn test_tuple_parsing_heterogeneous() {
+        let parser = ComplexTypeParser::new();
+
+        let result = parser.parse_type("tuple<int, text, bigint>").unwrap();
+
+        if let CqlType::Tuple(elements) = result.cql_type {
+            assert_eq!(elements.len(), 3);
+            assert_eq!(elements[0], CqlType::Int);
+            assert_eq!(elements[1], CqlType::Text);
+            assert_eq!(elements[2], CqlType::BigInt);
+        } else {
+            panic!("Expected Tuple type");
+        }
+
+        assert_eq!(result.category, TypeCategory::Tuple);
+        assert!(result.complexity_score > 10);
+    }
+
+    #[test]
+    fn test_tuple_nested_with_collections() {
+        let parser = ComplexTypeParser::new();
+
+        let result = parser
+            .parse_type("tuple<int, list<text>, frozen<set<bigint>>>")
+            .unwrap();
+
+        if let CqlType::Tuple(elements) = result.cql_type {
+            assert_eq!(elements.len(), 3);
+            assert_eq!(elements[0], CqlType::Int);
+
+            // Check list<text>
+            if let CqlType::List(inner) = &elements[1] {
+                assert_eq!(**inner, CqlType::Text);
+            } else {
+                panic!("Expected List type for second element");
+            }
+
+            // Check frozen<set<bigint>>
+            if let CqlType::Frozen(inner) = &elements[2] {
+                if let CqlType::Set(set_inner) = &**inner {
+                    assert_eq!(**set_inner, CqlType::BigInt);
+                } else {
+                    panic!("Expected Set inside Frozen for third element");
+                }
+            } else {
+                panic!("Expected Frozen type for third element");
+            }
+        } else {
+            panic!("Expected Tuple type");
+        }
+    }
+
+    #[test]
+    fn test_tuple_format_string() {
+        let parser = ComplexTypeParser::new();
+
+        let result = parser.parse_type("tuple<int, text, bigint>").unwrap();
+        let formatted = parser.convert_type_to_string(&result.cql_type);
+        assert_eq!(formatted, "tuple<int, text, bigint>");
+    }
+
+    #[test]
+    fn test_tuple_metadata() {
+        let parser = ComplexTypeParser::new();
+
+        let result = parser.parse_type("tuple<int, text, bigint>").unwrap();
+
+        assert_eq!(result.metadata.element_count, Some(3));
+        assert!(!result.metadata.is_map);
+        assert!(result.metadata.udt_field_count.is_none());
+    }
+
+    #[test]
+    fn test_frozen_tuple() {
+        let parser = ComplexTypeParser::new();
+
+        let result = parser.parse_type("frozen<tuple<int, text>>").unwrap();
+
+        assert!(result.metadata.is_frozen);
+        // Category is determined by inner type (Tuple), not Frozen wrapper
+        assert_eq!(result.category, TypeCategory::Tuple);
+
+        if let CqlType::Frozen(inner) = result.cql_type {
+            if let CqlType::Tuple(elements) = *inner {
+                assert_eq!(elements.len(), 2);
+                assert_eq!(elements[0], CqlType::Int);
+                assert_eq!(elements[1], CqlType::Text);
+            } else {
+                panic!("Expected Tuple inside Frozen");
+            }
+        } else {
+            panic!("Expected Frozen type");
+        }
+    }
+
+    #[test]
+    fn test_udt_resolution_with_registry() {
+        use crate::types::UdtTypeDef;
+
+        let mut registry = UdtRegistry::new();
+
+        // Create a simple UDT
+        let address_udt = UdtTypeDef::new("test_ks".to_string(), "address".to_string())
+            .with_field("street".to_string(), CqlType::Text, false)
+            .with_field("city".to_string(), CqlType::Text, false)
+            .with_field("zip".to_string(), CqlType::Int, true);
+
+        registry.register_udt(address_udt);
+
+        let parser = ComplexTypeParser::new().with_udt_registry(registry);
+
+        let context = TypeParsingContext {
+            keyspace: Some("test_ks".to_string()),
+            depth: 0,
+            max_depth: 32,
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        let result = parser.parse_type_with_context("address", &context).unwrap();
+
+        if let CqlType::Udt(name, fields) = result.cql_type {
+            assert_eq!(name, "address");
+            assert_eq!(fields.len(), 3);
+            assert_eq!(fields[0].0, "street");
+            assert_eq!(fields[0].1, CqlType::Text);
+            assert_eq!(fields[1].0, "city");
+            assert_eq!(fields[1].1, CqlType::Text);
+            assert_eq!(fields[2].0, "zip");
+            assert_eq!(fields[2].1, CqlType::Int);
+        } else {
+            panic!("Expected UDT type, got {:?}", result.cql_type);
+        }
+
+        assert_eq!(result.category, TypeCategory::UserDefined);
+    }
+
+    #[test]
+    fn test_udt_fallback_to_custom() {
+        let parser = ComplexTypeParser::new();
+
+        let context = TypeParsingContext {
+            keyspace: Some("test_ks".to_string()),
+            depth: 0,
+            max_depth: 32,
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        // Without registry, unknown types should fallback to Custom
+        let result = parser
+            .parse_type_with_context("unknown_type", &context)
+            .unwrap();
+
+        assert!(matches!(result.cql_type, CqlType::Custom(_)));
+        if let CqlType::Custom(name) = result.cql_type {
+            assert_eq!(name, "unknown_type");
+        }
+        assert_eq!(result.category, TypeCategory::UserDefined);
+    }
+
+    #[test]
+    fn test_udt_without_keyspace() {
+        use crate::types::UdtTypeDef;
+
+        let mut registry = UdtRegistry::new();
+        let udt = UdtTypeDef::new("test_ks".to_string(), "mytype".to_string()).with_field(
+            "field1".to_string(),
+            CqlType::Int,
+            false,
+        );
+        registry.register_udt(udt);
+
+        let parser = ComplexTypeParser::new().with_udt_registry(registry);
+
+        let context = TypeParsingContext {
+            keyspace: None, // No keyspace provided
+            depth: 0,
+            max_depth: 32,
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        // Without keyspace, should fallback to Custom
+        let result = parser.parse_type_with_context("mytype", &context).unwrap();
+
+        assert!(matches!(result.cql_type, CqlType::Custom(_)));
+    }
+
+    #[test]
+    fn test_udt_metadata() {
+        use crate::types::UdtTypeDef;
+
+        let mut registry = UdtRegistry::new();
+        let udt = UdtTypeDef::new("test_ks".to_string(), "person".to_string())
+            .with_field("name".to_string(), CqlType::Text, false)
+            .with_field("age".to_string(), CqlType::Int, false);
+        registry.register_udt(udt);
+
+        let parser = ComplexTypeParser::new().with_udt_registry(registry);
+
+        let context = TypeParsingContext {
+            keyspace: Some("test_ks".to_string()),
+            depth: 0,
+            max_depth: 32,
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        let result = parser.parse_type_with_context("person", &context).unwrap();
+
+        assert_eq!(result.metadata.udt_field_count, Some(2));
+        assert!(!result.metadata.is_map);
+        assert!(result.metadata.element_count.is_none());
+    }
+
+    #[test]
+    fn test_depth_limit_with_nested_tuples() {
+        let parser = ComplexTypeParser::new();
+
+        let context = TypeParsingContext {
+            keyspace: None,
+            depth: 0,
+            max_depth: 3, // Small limit to test enforcement
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        // This should succeed (depth 0 -> 1 -> 2)
+        let result = parser.parse_type_with_context("tuple<int, tuple<text, int>>", &context);
+        assert!(result.is_ok());
+
+        // This should fail (depth 0 -> 1 -> 2 -> 3, which equals max_depth)
+        let context_strict = TypeParsingContext {
+            keyspace: None,
+            depth: 0,
+            max_depth: 2,
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        let result =
+            parser.parse_type_with_context("tuple<int, tuple<text, int>>", &context_strict);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_depth_limit_boundary() {
+        let parser = ComplexTypeParser::new();
+
+        // Test that depth == max_depth is rejected
+        let context = TypeParsingContext {
+            keyspace: None,
+            depth: 2,
+            max_depth: 2,
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        let result = parser.parse_type_with_context("int", &context);
+        assert!(result.is_err(), "depth == max_depth should fail");
+
+        // Verify error message
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Type nesting too deep"),
+            "Expected depth error message, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_complex_nested_type() {
+        use crate::types::UdtTypeDef;
+
+        let mut registry = UdtRegistry::new();
+
+        // Create UDT with tuple field
+        let location_udt = UdtTypeDef::new("test_ks".to_string(), "location".to_string())
+            .with_field(
+                "coordinates".to_string(),
+                CqlType::Tuple(vec![CqlType::Double, CqlType::Double]),
+                false,
+            )
+            .with_field("name".to_string(), CqlType::Text, true);
+
+        registry.register_udt(location_udt);
+
+        let parser = ComplexTypeParser::new().with_udt_registry(registry);
+
+        let context = TypeParsingContext {
+            keyspace: Some("test_ks".to_string()),
+            depth: 0,
+            max_depth: 32,
+            dependencies: Vec::new(),
+            type_hints: HashMap::new(),
+        };
+
+        // Parse frozen<list<location>>
+        let result = parser
+            .parse_type_with_context("frozen<list<location>>", &context)
+            .unwrap();
+
+        if let CqlType::Frozen(inner) = result.cql_type {
+            if let CqlType::List(list_inner) = *inner {
+                if let CqlType::Udt(name, fields) = *list_inner {
+                    assert_eq!(name, "location");
+                    assert_eq!(fields.len(), 2);
+
+                    // Check that the coordinates field is a tuple
+                    assert_eq!(fields[0].0, "coordinates");
+                    assert!(matches!(fields[0].1, CqlType::Tuple(_)));
+                } else {
+                    panic!("Expected UDT inside List");
+                }
+            } else {
+                panic!("Expected List inside Frozen");
+            }
+        } else {
+            panic!("Expected Frozen type");
         }
     }
 }
