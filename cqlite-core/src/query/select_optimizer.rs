@@ -8,7 +8,7 @@
 //! - Parallel execution planning
 
 use super::select_ast::*;
-use crate::{schema::SchemaManager, storage::StorageEngine, Result, TableId, Value};
+use crate::{error::Error, schema::SchemaManager, storage::StorageEngine, Result, TableId, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 

@@ -11,7 +11,8 @@
       "Bash(wc -l echo \"\" echo \"File 4: storage/manifest.rs\" echo \"Production code (lines 1-330):\" sed -n '1,330p' /Users/patrick/local_projects/cqlite/cqlite-core/src/storage/manifest.rs)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --lib --quiet)",
       "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --lib --quiet)",
-      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib)"
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --lib)"
     ],
     "deny": [],
     "ask": []
