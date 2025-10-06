@@ -285,7 +285,9 @@ async fn test_malformed_component_files() {
                         println!("✓ Token range iteration handled malformed Summary.db");
                     }
                     "Statistics.db" => {
-                        let _result = reader.stats().await.unwrap_or_default();
+                        let _result = reader.stats().await
+                            .cloned()
+                            .unwrap_or_default();
                         println!("✓ Statistics access handled malformed Statistics.db");
                     }
                     _ => {

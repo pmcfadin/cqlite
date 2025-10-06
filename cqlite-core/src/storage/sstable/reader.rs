@@ -506,8 +506,8 @@ impl SSTableReader {
     }
 
     /// Get reader statistics
-    pub async fn stats(&self) -> Result<SSTableReaderStats> {
-        Ok(self.stats.clone())
+    pub async fn stats(&self) -> Result<&SSTableReaderStats> {
+        Ok(&self.stats)
     }
 
     /// Calculate current cache hit rate from atomic counters
@@ -1211,7 +1211,7 @@ impl SSTableReader {
     ) -> Result<Option<CompressionReader>> {
         // Strategy 1: Check header compression info
         if header.compression.algorithm != "NONE" {
-            let algorithm = CompressionAlgorithm::from(header.compression.algorithm.clone());
+            let algorithm = CompressionAlgorithm::from(header.compression.algorithm.as_str());
             debug!("Header indicates compression: {:?}", algorithm);
 
             // Validate compression algorithm is supported
@@ -1724,7 +1724,7 @@ impl SSTableReader {
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {
-            let compression = Compression::new(compression_reader.algorithm().clone())?;
+            let compression = Compression::new(*compression_reader.algorithm())?;
             match compression.decompress(&buffer) {
                 Ok(decompressed) => decompressed,
                 Err(e) => {
@@ -1743,23 +1743,8 @@ impl SSTableReader {
             buffer
         };
 
-        // Create cache entry
-        let _cached_block = CachedBlock {
-            meta: BlockMeta {
-                offset: block_offset,
-                compressed_size: size,
-                uncompressed_size: data.len() as u32,
-                checksum: 0,                        // Would calculate if needed
-                first_key: RowKey::new(Vec::new()), // Would parse if needed
-                last_key: RowKey::new(Vec::new()),  // Would parse if needed
-                entry_count: 0,                     // Would count if needed
-            },
-            data: data.clone(),
-            entries: None, // Lazy-loaded
-            last_access: std::time::Instant::now(),
-        };
-
-        // Note: In a full implementation, we would use Mutex<HashMap> for thread-safe cache
+        // Note: Cache entry creation removed - not used in current implementation
+        // In a full implementation, we would use Mutex<HashMap> for thread-safe cache
         // For now, we skip caching but maintain metrics tracking
         Ok(data)
     }
@@ -1770,7 +1755,7 @@ impl SSTableReader {
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {
-            let compression = Compression::new(compression_reader.algorithm().clone())?;
+            let compression = Compression::new(*compression_reader.algorithm())?;
             match compression.decompress(&buffer) {
                 Ok(decompressed) => {
                     log::debug!(
@@ -2372,7 +2357,7 @@ impl SSTableReader {
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {
-            let compression = Compression::new(compression_reader.algorithm().clone())?;
+            let compression = Compression::new(*compression_reader.algorithm())?;
             match compression.decompress(block_data) {
                 Ok(decompressed) => {
                     println!(

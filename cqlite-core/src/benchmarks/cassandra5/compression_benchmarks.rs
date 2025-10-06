@@ -71,19 +71,19 @@ impl CompressionBenchmarks {
 
                 // Test compression performance
                 let compress_result = self
-                    .benchmark_compression(&test_data, algorithm.clone(), size_mb, targets)
+                    .benchmark_compression(&test_data, *algorithm, size_mb, targets)
                     .await?;
                 results.push(compress_result);
 
                 // Test decompression performance
                 let decompress_result = self
-                    .benchmark_decompression(&test_data, algorithm.clone(), size_mb, targets)
+                    .benchmark_decompression(&test_data, *algorithm, size_mb, targets)
                     .await?;
                 results.push(decompress_result);
 
                 // Test round-trip performance
                 let roundtrip_result = self
-                    .benchmark_roundtrip(&test_data, algorithm.clone(), size_mb, targets)
+                    .benchmark_roundtrip(&test_data, *algorithm, size_mb, targets)
                     .await?;
                 results.push(roundtrip_result);
             }
@@ -110,7 +110,7 @@ impl CompressionBenchmarks {
         let algo_name = format!("{:?}", algorithm);
         let benchmark_name = format!("Compression_{}_{}MB", algo_name, size_mb);
 
-        let compression = Compression::new(algorithm.clone())?;
+        let compression = Compression::new(algorithm)?;
         let mut memory_monitor = MemoryMonitor::new();
 
         // Warm up
@@ -197,7 +197,7 @@ impl CompressionBenchmarks {
         let algo_name = format!("{:?}", algorithm);
         let benchmark_name = format!("Decompression_{}_{}MB", algo_name, size_mb);
 
-        let compression = Compression::new(algorithm.clone())?;
+        let compression = Compression::new(algorithm)?;
 
         // First, compress the data
         let compressed_data = compression.compress(test_data)?;
@@ -301,7 +301,7 @@ impl CompressionBenchmarks {
         let algo_name = format!("{:?}", algorithm);
         let benchmark_name = format!("Roundtrip_{}_{}MB", algo_name, size_mb);
 
-        let compression = Compression::new(algorithm.clone())?;
+        let compression = Compression::new(algorithm)?;
         let mut memory_monitor = MemoryMonitor::new();
 
         // Benchmark full round-trip
@@ -400,7 +400,7 @@ impl CompressionBenchmarks {
             let num_chunks = (1000.0 / chunk_size_mb) as usize; // 20 chunks for 1GB
 
             let benchmark_name = format!("LargeFile_{}_1GB", algo_name);
-            let compression = Compression::new(algorithm.clone())?;
+            let compression = Compression::new(algorithm)?;
             let mut memory_monitor = MemoryMonitor::new();
 
             let timer = PrecisionTimer::start();

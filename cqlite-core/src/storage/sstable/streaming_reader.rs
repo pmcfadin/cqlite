@@ -618,7 +618,7 @@ impl StreamingSSTableReader {
                     let chunk_end = (chunk_start + chunk_size).min(compressed_data.len());
                     let chunk = &compressed_data[chunk_start..chunk_end];
 
-                    let mut reader = CompressionReader::new(compression_reader.algorithm().clone());
+                    let mut reader = CompressionReader::new(*compression_reader.algorithm());
                     let chunk_decompressed = reader.read(chunk)?;
                     decompressed.extend_from_slice(&chunk_decompressed);
 
@@ -631,7 +631,7 @@ impl StreamingSSTableReader {
                 Ok(decompressed)
             } else {
                 // Small chunk, decompress directly
-                let mut reader = CompressionReader::new(compression_reader.algorithm().clone());
+                let mut reader = CompressionReader::new(*compression_reader.algorithm());
                 reader.read(compressed_data)
             }
         } else {

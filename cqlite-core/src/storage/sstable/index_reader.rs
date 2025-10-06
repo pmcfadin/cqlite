@@ -77,8 +77,13 @@ pub struct IndexData {
     pub header: IndexHeader,
     /// All partition index entries
     pub partition_entries: Vec<PartitionIndexEntry>,
-    /// Lookup table for efficient partition access - uses Arc to avoid copying key digests
-    /// This eliminates memory explosion from cloning large numbers of partition digests
+    /// Lookup table for efficient partition access - uses Arc<[u8]> as key type
+    ///
+    /// ## Zero-Copy Design (Issue #107, Problem 1)
+    ///
+    /// - Keys are `Arc<[u8]>` to enable reference counting without cloning digest bytes
+    /// - Lookups use `&[u8]` directly via Borrow trait (zero heap allocations)
+    /// - `Arc<[u8]>` implements `Borrow<[u8]>` enabling HashMap::get(&[u8]) without temporary Arc creation
     pub key_lookup: HashMap<Arc<[u8]>, usize>,
 }
 
@@ -149,13 +154,19 @@ impl IndexReader {
     }
 
     /// Look up a partition by key digest
+    ///
+    /// ## Zero-Allocation Optimization (Issue #107)
+    ///
+    /// This method performs HashMap lookup without heap allocation by leveraging
+    /// the `Borrow` trait. Since `Arc<[u8]>` implements `Borrow<[u8]>`, we can
+    /// lookup using `&[u8]` directly without creating a temporary Arc.
+    ///
+    /// **Before:** `let key_arc: Arc<[u8]> = key_digest.into();` (heap allocation per query)
+    /// **After:** Direct `get(key_digest)` using Borrow trait (zero allocations)
     pub fn lookup_partition(&self, key_digest: &[u8]) -> Option<&PartitionIndexEntry> {
-        // Create a temporary Arc for lookup without cloning the original data
-        // This allows efficient lookup while maintaining zero-copy semantics
-        let key_arc: Arc<[u8]> = key_digest.into();
         self.index_data
             .key_lookup
-            .get(&key_arc)
+            .get(key_digest)
             .and_then(|&index| self.index_data.partition_entries.get(index))
     }
 
@@ -575,4 +586,46 @@ mod tests {
     // REMOVED: test_data_offset_estimation_algorithm
     // This test validated the old heuristic estimation function which has been removed
     // in favor of spec-accurate Summary.db correlation (Issue #92)
+
+    #[test]
+    fn test_borrow_trait_zero_allocation_lookup() {
+        // Test Issue #107 fix: Verify that lookup_partition uses Borrow trait
+        // to avoid heap allocation on every lookup
+
+        // Create index data with two partition entries
+        let data = vec![
+            0x00, 0x10, // marker = 0x0010
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x00, 0x10, // marker = 0x0010
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2
+            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
+        ];
+
+        let (_, index_data) = parse_index_data(&data).unwrap();
+
+        // Prepare lookup keys as slices (NOT Arc)
+        let key1: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let key2: &[u8] = &[
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+            0x1F, 0x20,
+        ];
+        let key_not_found: &[u8] = &[0xFF; 16];
+
+        // Test lookups - these should use Borrow trait without creating Arc
+        // The key_lookup HashMap has Arc<[u8]> keys but accepts &[u8] for get()
+        let result1 = index_data.key_lookup.get(key1);
+        let result2 = index_data.key_lookup.get(key2);
+        let result3 = index_data.key_lookup.get(key_not_found);
+
+        assert!(result1.is_some(), "Should find first key");
+        assert!(result2.is_some(), "Should find second key");
+        assert!(result3.is_none(), "Should not find non-existent key");
+
+        assert_eq!(*result1.unwrap(), 0, "First key should map to index 0");
+        assert_eq!(*result2.unwrap(), 1, "Second key should map to index 1");
+
+        // Verify the actual entries match
+        assert_eq!(index_data.partition_entries[0].key_digest.as_ref(), key1);
+        assert_eq!(index_data.partition_entries[1].key_digest.as_ref(), key2);
+    }
 }

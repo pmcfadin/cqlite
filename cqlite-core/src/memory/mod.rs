@@ -1,7 +1,9 @@
 //! Memory management for CQLite
 
+use lru::LruCache;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::{types::TableId, Config, Result, Value};
@@ -23,35 +25,27 @@ pub struct MemoryManager {
 }
 
 /// Block cache for storage blocks
-#[derive(Debug)]
 struct BlockCache {
-    /// Cached blocks
-    blocks: HashMap<BlockKey, Arc<Block>>,
+    /// LRU cache for blocks (provides O(1) get/put)
+    cache: LruCache<BlockKey, Arc<Block>>,
 
-    /// Maximum cache size
+    /// Maximum cache size in bytes
     max_size: usize,
 
-    /// Current size
+    /// Current size in bytes
     current_size: usize,
-
-    /// LRU ordering
-    lru_order: Vec<BlockKey>,
 }
 
 /// Row cache for frequently accessed rows
-#[derive(Debug)]
 struct RowCache {
-    /// Cached rows
-    rows: HashMap<RowKey, Arc<CachedRow>>,
+    /// LRU cache for rows (provides O(1) get/put)
+    cache: LruCache<RowKey, Arc<CachedRow>>,
 
-    /// Maximum cache size
+    /// Maximum cache size in bytes
     max_size: usize,
 
-    /// Current size
+    /// Current size in bytes
     current_size: usize,
-
-    /// LRU ordering
-    lru_order: Vec<RowKey>,
 }
 
 /// Buffer pool for memory allocation
@@ -90,8 +84,8 @@ struct Block {
     /// Block size
     size: usize,
 
-    /// Last access time
-    last_access: std::time::Instant,
+    /// Last access time (reserved for future LRU enhancements)
+    _last_access: std::time::Instant,
 }
 
 /// Cached row
@@ -134,29 +128,15 @@ impl MemoryManager {
 
         let mut cache = self.block_cache.write();
 
-        // Check if block exists and clone it before any mutations
-        let block_option = cache.blocks.get(&key).map(Arc::clone);
-
-        if let Some(block) = block_option {
-            // Update LRU order (now safe since we don't hold immutable borrow)
-            if let Some(pos) = cache.lru_order.iter().position(|k| k == &key) {
-                cache.lru_order.remove(pos);
-            }
-            cache.lru_order.push(key);
-
-            // Update access time
-            let mut block_clone = block.clone();
-            if let Some(block_mut) = Arc::get_mut(&mut block_clone) {
-                block_mut.last_access = std::time::Instant::now();
-            }
-
+        // LruCache::get() is O(1) and automatically updates LRU order
+        if let Some(block) = cache.cache.get(&key) {
             // Update stats
             {
                 let mut stats = self.stats.write();
                 stats.block_cache_hits += 1;
             }
 
-            Some(block)
+            Some(Arc::clone(block))
         } else {
             // Update stats
             {
@@ -177,27 +157,25 @@ impl MemoryManager {
 
         let block = Arc::new(Block {
             size: data.len(),
-            last_access: std::time::Instant::now(),
+            _last_access: std::time::Instant::now(),
         });
 
         let mut cache = self.block_cache.write();
 
-        // Check if we need to evict
-        while cache.current_size + block.size > cache.max_size && !cache.blocks.is_empty() {
-            if let Some(evict_key) = cache.lru_order.first().cloned() {
-                cache.lru_order.remove(0);
-                if let Some(evicted_block) = cache.blocks.remove(&evict_key) {
-                    cache.current_size -= evicted_block.size;
-                }
+        // Evict LRU entries until we have space
+        while cache.current_size + block.size > cache.max_size {
+            // LruCache::pop_lru() is O(1) and removes the least recently used entry
+            if let Some((_, evicted_block)) = cache.cache.pop_lru() {
+                cache.current_size -= evicted_block.size;
             } else {
+                // Cache is empty, stop eviction
                 break;
             }
         }
 
-        // Add new block
+        // LruCache::put() is O(1) and automatically updates LRU order
         cache.current_size += block.size;
-        cache.blocks.insert(key.clone(), block);
-        cache.lru_order.push(key);
+        cache.cache.put(key, block);
     }
 
     /// Get a row from cache
@@ -209,23 +187,15 @@ impl MemoryManager {
 
         let mut cache = self.row_cache.write();
 
-        // Check if row exists and clone it before any mutations
-        let row_option = cache.rows.get(&key).map(Arc::clone);
-
-        if let Some(row) = row_option {
-            // Update LRU order (now safe since we don't hold immutable borrow)
-            if let Some(pos) = cache.lru_order.iter().position(|k| k == &key) {
-                cache.lru_order.remove(pos);
-            }
-            cache.lru_order.push(key);
-
+        // LruCache::get() is O(1) and automatically updates LRU order
+        if let Some(row) = cache.cache.get(&key) {
             // Update stats
             {
                 let mut stats = self.stats.write();
                 stats.row_cache_hits += 1;
             }
 
-            Some(row)
+            Some(Arc::clone(row))
         } else {
             // Update stats
             {
@@ -249,22 +219,20 @@ impl MemoryManager {
 
         let mut cache = self.row_cache.write();
 
-        // Check if we need to evict
-        while cache.current_size + row.size > cache.max_size && !cache.rows.is_empty() {
-            if let Some(evict_key) = cache.lru_order.first().cloned() {
-                cache.lru_order.remove(0);
-                if let Some(evicted_row) = cache.rows.remove(&evict_key) {
-                    cache.current_size -= evicted_row.size;
-                }
+        // Evict LRU entries until we have space
+        while cache.current_size + row.size > cache.max_size {
+            // LruCache::pop_lru() is O(1) and removes the least recently used entry
+            if let Some((_, evicted_row)) = cache.cache.pop_lru() {
+                cache.current_size -= evicted_row.size;
             } else {
+                // Cache is empty, stop eviction
                 break;
             }
         }
 
-        // Add new row
+        // LruCache::put() is O(1) and automatically updates LRU order
         cache.current_size += row.size;
-        cache.rows.insert(key.clone(), row);
-        cache.lru_order.push(key);
+        cache.cache.put(key, row);
     }
 
     /// Allocate buffer from pool
@@ -333,15 +301,13 @@ impl MemoryManager {
     pub fn clear_caches(&self) {
         {
             let mut cache = self.block_cache.write();
-            cache.blocks.clear();
-            cache.lru_order.clear();
+            cache.cache.clear();
             cache.current_size = 0;
         }
 
         {
             let mut cache = self.row_cache.write();
-            cache.rows.clear();
-            cache.lru_order.clear();
+            cache.cache.clear();
             cache.current_size = 0;
         }
     }
@@ -390,24 +356,50 @@ impl MemoryManager {
     }
 }
 
+impl std::fmt::Debug for BlockCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockCache")
+            .field("max_size", &self.max_size)
+            .field("current_size", &self.current_size)
+            .field("cache_len", &self.cache.len())
+            .finish()
+    }
+}
+
 impl BlockCache {
     fn new(max_size: usize) -> Self {
+        // LruCache requires NonZeroUsize for capacity
+        // We use a reasonable default capacity (1000 entries) for the LRU structure
+        // The actual memory limit is enforced separately via max_size
+        let capacity = NonZeroUsize::new(1000).expect("capacity must be non-zero");
         Self {
-            blocks: HashMap::new(),
+            cache: LruCache::new(capacity),
             max_size,
             current_size: 0,
-            lru_order: Vec::new(),
         }
+    }
+}
+
+impl std::fmt::Debug for RowCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowCache")
+            .field("max_size", &self.max_size)
+            .field("current_size", &self.current_size)
+            .field("cache_len", &self.cache.len())
+            .finish()
     }
 }
 
 impl RowCache {
     fn new(max_size: usize) -> Self {
+        // LruCache requires NonZeroUsize for capacity
+        // We use a reasonable default capacity (1000 entries) for the LRU structure
+        // The actual memory limit is enforced separately via max_size
+        let capacity = NonZeroUsize::new(1000).expect("capacity must be non-zero");
         Self {
-            rows: HashMap::new(),
+            cache: LruCache::new(capacity),
             max_size,
             current_size: 0,
-            lru_order: Vec::new(),
         }
     }
 }

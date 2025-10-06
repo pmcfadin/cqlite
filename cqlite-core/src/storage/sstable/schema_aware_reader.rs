@@ -418,7 +418,7 @@ impl SchemaAwareReader {
 
     /// Get reader statistics including schema-aware metrics
     pub async fn stats(&self) -> Result<SchemaAwareStats> {
-        let base_stats = self.reader.stats().await?;
+        let base_stats = self.reader.stats().await?.clone();
 
         Ok(SchemaAwareStats {
             base_stats,

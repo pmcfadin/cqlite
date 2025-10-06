@@ -278,7 +278,7 @@ impl SSTableWriter {
             let stats = CompressionStats::calculate(
                 self.current_block.len() as u64,
                 compressed.len() as u64,
-                compression.algorithm().clone(),
+                *compression.algorithm(),
             );
             self.compression_stats.push(stats);
 

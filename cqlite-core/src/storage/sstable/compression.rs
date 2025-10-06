@@ -5,7 +5,7 @@ use std::io::Read;
 // use async_trait::async_trait; // Commented out - unused
 
 /// Compression algorithms supported
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub enum CompressionAlgorithm {
     /// No compression
     None,
@@ -25,6 +25,12 @@ const MAX_DECOMPRESSED_SIZE: usize = 128 * 1024 * 1024;
 
 impl From<String> for CompressionAlgorithm {
     fn from(s: String) -> Self {
+        Self::from(s.as_str())
+    }
+}
+
+impl From<&str> for CompressionAlgorithm {
+    fn from(s: &str) -> Self {
         match s.to_uppercase().as_str() {
             "NONE" => CompressionAlgorithm::None,
             "LZ4" | "LZ4COMPRESSOR" => CompressionAlgorithm::Lz4,
@@ -191,7 +197,7 @@ impl Compression {
         config: ChunkedDecompressionConfig,
     ) -> StreamingDecompressor {
         StreamingDecompressor {
-            algorithm: self.algorithm.clone(),
+            algorithm: self.algorithm,
             config,
             bytes_processed: 0,
             bytes_output: 0,
@@ -1252,7 +1258,7 @@ impl CompressionReader {
 
     /// Read and decompress data
     pub fn read(&mut self, compressed_data: &[u8]) -> Result<Vec<u8>> {
-        let compression = Compression::new(self.algorithm.clone())?;
+        let compression = Compression::new(self.algorithm)?;
         compression.decompress(compressed_data)
     }
 
@@ -1474,7 +1480,7 @@ impl CompressionInfo {
 
     /// Get compression algorithm enum from string
     pub fn get_algorithm(&self) -> CompressionAlgorithm {
-        CompressionAlgorithm::from(self.algorithm.clone())
+        CompressionAlgorithm::from(self.algorithm.as_str())
     }
 
     /// Get total number of chunks
