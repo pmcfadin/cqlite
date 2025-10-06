@@ -61,10 +61,7 @@ async fn test_no_heuristics_without_summary() {
 #[ignore = "Temporarily disabled - new SSTable formats need header parser updates"]
 async fn test_partition_lookup_correct_offsets() {
     let mut context = TestContext::new("test_basic").await.unwrap();
-    let sstable_path = context
-        .prepare_sstable("simple_table")
-        .await
-        .unwrap();
+    let sstable_path = context.prepare_sstable("simple_table").await.unwrap();
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
