@@ -598,7 +598,7 @@ mod integration_tests {
                 name: "created_at".to_string(),
                 data_type: "timestamp".to_string(),
                 position: 0,
-                order: "DESC".to_string(),
+                order: cqlite_core::schema::ClusteringOrder::Desc,
             }],
             columns: vec![
                 Column {

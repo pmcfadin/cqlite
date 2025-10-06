@@ -25,7 +25,7 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
     let fixture_path = manifest_dir.join("tests/fixtures/cassandra5/minimal/simple_table/Data.db");
 
     // Skip if fixture doesn't exist
-    if !fs::metadata(&fixture_path).await.is_ok() {
+    if fs::metadata(&fixture_path).await.is_err() {
         println!("ℹ️  Minimal fixture not found, skipping test. Run create_fixtures.py to enable.");
         return Ok(());
     }
@@ -111,7 +111,7 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
         // Fallback to real dataset
         let real_path = manifest_dir.join("test-data/datasets/sstables/test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db");
 
-        if !fs::metadata(&real_path).await.is_ok() {
+        if fs::metadata(&real_path).await.is_err() {
             println!("ℹ️  No test data available, skipping range scan test");
             return Ok(());
         }

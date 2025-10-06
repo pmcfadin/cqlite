@@ -1,0 +1,300 @@
+//! Data access methods for SSTableReader
+//!
+//! This module contains all methods related to reading data from SSTables,
+//! including point lookups, range scans, and sequential access.
+
+use super::SSTableReader;
+use crate::types::{TableId, Value};
+use crate::{Error, Result, RowKey};
+use log::{debug, warn};
+use std::io::SeekFrom;
+use tokio::io::AsyncSeekExt;
+
+impl SSTableReader {
+    /// Get a value by key from the SSTable
+    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // First check bloom filter if available
+        if let Some(bloom_filter) = &self.bloom_filter {
+            if !bloom_filter.might_contain(key.as_bytes()) {
+                return Ok(None);
+            }
+        }
+
+        // Use index for efficient lookup if available
+        if let Some(index) = &self.index {
+            if let Some(entry) = index.find_entry(table_id, key).await? {
+                return self.read_value_at_offset(entry.offset, entry.size).await;
+            }
+        } else {
+            // Fallback to sequential scan
+            return self.scan_for_key(table_id, key).await;
+        }
+
+        Ok(None)
+    }
+
+    /// Scan a range of keys
+    pub async fn scan(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        let mut results = Vec::new();
+        let mut count = 0;
+
+        // Use index for efficient range scan if available
+        if let Some(index) = &self.index {
+            let entries = index.get_range(table_id, start_key, end_key)?;
+
+            for entry in entries {
+                if let Some(limit) = limit {
+                    if count >= limit {
+                        break;
+                    }
+                }
+
+                if let Some(value) = self.read_value_at_offset(entry.offset, entry.size).await? {
+                    results.push((entry.key.clone(), value));
+                    count += 1;
+                }
+            }
+        } else {
+            // Fallback to sequential scan
+            results = self
+                .sequential_scan(table_id, start_key, end_key, limit)
+                .await?;
+        }
+
+        Ok(results)
+    }
+
+    /// Get all entries in the SSTable (for compaction)
+    pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
+        let mut results = Vec::new();
+
+        // Reset to beginning of data section
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+
+        // Read all blocks sequentially
+        while let Some(block) = self.read_next_block().await? {
+            let entries = self.parse_block_entries(&block)?;
+            results.extend(entries);
+        }
+
+        Ok(results)
+    }
+
+    /// Read value at a specific offset with caching
+    pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<Value>> {
+        use crate::parser::header::CassandraVersion;
+        use crate::storage::sstable::compression::Compression;
+
+        // Use cached reading with metrics tracking
+        let buffer = self.get_cached_data(offset, size).await?;
+
+        // Decompress if needed
+        let data = if let Some(compression_reader) = &self.compression_reader {
+            let compression = Compression::new(*compression_reader.algorithm())?;
+            match compression.decompress(&buffer) {
+                Ok(decompressed) => {
+                    debug!(
+                        "Successfully decompressed {} bytes to {} bytes",
+                        buffer.len(),
+                        decompressed.len()
+                    );
+                    decompressed
+                }
+                Err(e) => {
+                    // For modern formats (4.x/5.x), decompression failure is an error
+                    if self.header.cassandra_version != CassandraVersion::Legacy {
+                        return Err(Error::corruption(format!(
+                            "Decompression failed for modern format at offset={}, size={}, algorithm={:?}: {}",
+                            offset,
+                            size,
+                            compression_reader.algorithm(),
+                            e
+                        )));
+                    } else {
+                        // Only allow fallback for legacy formats
+                        warn!(
+                            "Decompression failed for legacy format ({}), using raw data",
+                            e
+                        );
+                        debug!(
+                            "First 32 bytes of raw data: {:02x?}",
+                            &buffer[..std::cmp::min(32, buffer.len())]
+                        );
+                        buffer
+                    }
+                }
+            }
+        } else {
+            buffer
+        };
+
+        // TODO: Parse value using schema-driven type information
+        // For now, preserve raw data until schema is available
+        let value = Value::Blob(data.to_vec());
+
+        // Extract write time from value (placeholder - would need to be parsed from SSTable)
+        let _write_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as i64)
+            .unwrap_or_else(|e| {
+                warn!("Failed to get system time: {}; using fallback value 0", e);
+                0
+            });
+
+        // Filter out tombstones and expired data
+        if !self.filter_tombstone(&value) {
+            return Ok(None);
+        }
+
+        Ok(Some(value))
+    }
+
+    /// Read block with caching support and hit/miss tracking
+    async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
+        use crate::parser::header::CassandraVersion;
+        use crate::storage::sstable::compression::Compression;
+        use tokio::io::AsyncReadExt;
+
+        // Calculate block identifier based on offset and size
+        let _block_id = block_offset;
+
+        // For now, always read from disk and track as cache miss
+        self.record_cache_miss();
+
+        // Read from disk
+        let mut file = self.file.lock().await;
+        file.seek(SeekFrom::Start(block_offset)).await?;
+
+        let mut buffer = vec![0u8; size as usize];
+        file.read_exact(&mut buffer).await?;
+        drop(file); // Release file lock early
+
+        // Decompress if needed
+        let data = if let Some(compression_reader) = &self.compression_reader {
+            let compression = Compression::new(*compression_reader.algorithm())?;
+            match compression.decompress(&buffer) {
+                Ok(decompressed) => decompressed,
+                Err(e) => {
+                    // Handle decompression errors based on format
+                    if self.header.cassandra_version != CassandraVersion::Legacy {
+                        return Err(Error::corruption(format!(
+                            "Decompression failed at offset={}, size={}: {}",
+                            block_offset, size, e
+                        )));
+                    } else {
+                        buffer // Fall back to raw data for legacy formats
+                    }
+                }
+            }
+        } else {
+            buffer
+        };
+
+        Ok(data)
+    }
+
+    async fn scan_for_key(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+
+        // Sequential scan through blocks
+        while let Some(block) = self.read_next_block().await? {
+            let entries = self.parse_block_entries(&block)?;
+
+            for (entry_table_id, entry_key, entry_value) in entries {
+                if entry_table_id == *table_id && entry_key == *key {
+                    // Extract write time from entry metadata
+                    let _write_time = self.extract_write_time_from_entry(&entry_key, &entry_value);
+
+                    // Filter out tombstones and expired data
+                    if !self.filter_tombstone(&entry_value) {
+                        return Ok(None);
+                    }
+
+                    return Ok(Some(entry_value));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub(super) async fn sequential_scan(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        let mut results = Vec::new();
+        let mut count = 0;
+
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+
+        // Sequential scan through blocks
+        while let Some(block) = self.read_next_block().await? {
+            let entries = self.parse_block_entries(&block)?;
+
+            for (entry_table_id, entry_key, entry_value) in entries {
+                if entry_table_id != *table_id {
+                    continue;
+                }
+
+                // Check key range
+                if let Some(start) = start_key {
+                    if entry_key < *start {
+                        continue;
+                    }
+                }
+
+                if let Some(end) = end_key {
+                    if entry_key > *end {
+                        continue;
+                    }
+                }
+
+                // Extract write time from entry metadata
+                let _write_time = self.extract_write_time_from_entry(&entry_key, &entry_value);
+
+                // Filter out tombstones and expired data
+                if !self.filter_tombstone(&entry_value) {
+                    continue;
+                }
+
+                results.push((entry_key, entry_value));
+                count += 1;
+
+                if let Some(limit) = limit {
+                    if count >= limit {
+                        return Ok(results);
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Read next block with enhanced error handling and streaming support
+    pub(super) async fn read_next_block(&self) -> Result<Option<Vec<u8>>> {
+        use super::block_io;
+        block_io::read_next_block(&self.file, &self.header.cassandra_version, &self.config).await
+    }
+}
