@@ -141,7 +141,7 @@ impl MemorySafetyTests {
             // Test buffer pool operations
             let mut buffers = Vec::new();
             for _ in 0..100 {
-                let buffer = memory_manager.allocate_buffer(4096);
+                let buffer = memory_manager.allocate_buffer(4096).unwrap();
                 buffers.push(buffer);
             }
 

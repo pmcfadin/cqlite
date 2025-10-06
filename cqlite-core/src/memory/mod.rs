@@ -65,6 +65,9 @@ struct BufferPool {
 
     /// Total memory used
     total_memory: usize,
+
+    /// Maximum memory allowed
+    max_memory: usize,
 }
 
 /// Block key for cache lookup
@@ -265,20 +268,41 @@ impl MemoryManager {
     }
 
     /// Allocate buffer from pool
-    pub fn allocate_buffer(&self, size: usize) -> Vec<u8> {
+    pub fn allocate_buffer(&self, size: usize) -> Result<Vec<u8>> {
         let mut pool = self.buffer_pool.write();
 
         if let Some(buffers) = pool.free_buffers.get_mut(&size) {
             if let Some(buffer) = buffers.pop() {
                 pool.allocated_count += 1;
-                return buffer;
+                pool.total_memory += size;
+
+                // Update stats
+                let mut stats = self.stats.write();
+                stats.buffer_allocations += 1;
+                stats.total_memory_used = pool.total_memory;
+
+                return Ok(buffer);
             }
+        }
+
+        // Check memory limit before allocating new buffer
+        if pool.total_memory + size > pool.max_memory {
+            return Err(crate::Error::Memory(format!(
+                "Memory limit exceeded: requested {} bytes would exceed limit of {} bytes (current usage: {} bytes)",
+                size, pool.max_memory, pool.total_memory
+            )));
         }
 
         // Allocate new buffer
         pool.allocated_count += 1;
         pool.total_memory += size;
-        vec![0u8; size]
+
+        // Update stats
+        let mut stats = self.stats.write();
+        stats.buffer_allocations += 1;
+        stats.total_memory_used = pool.total_memory;
+
+        Ok(vec![0u8; size])
     }
 
     /// Return buffer to pool
@@ -289,8 +313,14 @@ impl MemoryManager {
         buffer.resize(size, 0);
 
         let mut pool = self.buffer_pool.write();
+        pool.total_memory -= size;
         pool.free_buffers.entry(size).or_default().push(buffer);
         pool.allocated_count -= 1;
+
+        // Update stats
+        let mut stats = self.stats.write();
+        stats.buffer_deallocations += 1;
+        stats.total_memory_used = pool.total_memory;
     }
 
     /// Get memory statistics
@@ -383,11 +413,12 @@ impl RowCache {
 }
 
 impl BufferPool {
-    fn new(_max_memory: usize) -> Self {
+    fn new(max_memory: usize) -> Self {
         Self {
             free_buffers: HashMap::new(),
             allocated_count: 0,
             total_memory: 0,
+            max_memory,
         }
     }
 }
@@ -543,13 +574,13 @@ mod tests {
         let manager = MemoryManager::new(&config).unwrap();
 
         let size = 1024;
-        let buffer = manager.allocate_buffer(size);
+        let buffer = manager.allocate_buffer(size).unwrap();
         assert_eq!(buffer.len(), size);
 
         manager.deallocate_buffer(buffer);
 
         // Should reuse buffer
-        let buffer2 = manager.allocate_buffer(size);
+        let buffer2 = manager.allocate_buffer(size).unwrap();
         assert_eq!(buffer2.len(), size);
     }
 
@@ -568,5 +599,131 @@ mod tests {
 
         assert!(manager.get_block(&table_id, 1).is_none());
         assert!(manager.get_row(&table_id, "k1").is_none());
+    }
+
+    #[test]
+    fn test_memory_limit_enforcement() {
+        let mut config = Config::default();
+        config.memory.max_memory = 128 * 1024 * 1024; // 128MB
+        let manager = MemoryManager::new(&config).unwrap();
+
+        // Allocate buffers up to the limit
+        let buffer1 = manager
+            .allocate_buffer(64 * 1024 * 1024)
+            .expect("first 64MB should succeed");
+        let buffer2 = manager
+            .allocate_buffer(64 * 1024 * 1024)
+            .expect("second 64MB should succeed");
+
+        // Try to exceed the limit
+        let result = manager.allocate_buffer(1024);
+        assert!(result.is_err(), "allocation exceeding limit should fail");
+
+        // Verify error message
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("Memory limit exceeded"),
+                "error should mention memory limit"
+            );
+        }
+
+        // Verify stats
+        let stats = manager.stats().unwrap();
+        assert_eq!(
+            stats.buffer_allocations, 2,
+            "should have 2 successful allocations"
+        );
+        assert_eq!(
+            stats.total_memory_used,
+            128 * 1024 * 1024,
+            "should be at memory limit"
+        );
+
+        // Deallocate and verify we can allocate again
+        manager.deallocate_buffer(buffer1);
+        let stats = manager.stats().unwrap();
+        assert_eq!(stats.buffer_deallocations, 1);
+        assert_eq!(
+            stats.total_memory_used,
+            64 * 1024 * 1024,
+            "memory should be freed"
+        );
+
+        // Should be able to allocate again after freeing
+        let buffer3 = manager
+            .allocate_buffer(32 * 1024 * 1024)
+            .expect("allocation after free should succeed");
+
+        // Clean up remaining buffers
+        manager.deallocate_buffer(buffer2);
+        manager.deallocate_buffer(buffer3);
+
+        let final_stats = manager.stats().unwrap();
+        assert_eq!(
+            final_stats.total_memory_used, 0,
+            "all memory should be freed"
+        );
+    }
+
+    #[test]
+    fn test_memory_limit_with_buffer_reuse() {
+        let mut config = Config::default();
+        config.memory.max_memory = 128 * 1024 * 1024; // 128MB
+        let manager = MemoryManager::new(&config).unwrap();
+
+        // Allocate two 64MB buffers to reach limit
+        let buffer1 = manager
+            .allocate_buffer(64 * 1024 * 1024)
+            .expect("first 64MB should succeed");
+        let buffer2 = manager
+            .allocate_buffer(64 * 1024 * 1024)
+            .expect("second 64MB should succeed");
+
+        // Deallocate first buffer - it goes to free pool
+        manager.deallocate_buffer(buffer1);
+
+        let stats = manager.stats().unwrap();
+        assert_eq!(
+            stats.total_memory_used,
+            64 * 1024 * 1024,
+            "should have 64MB in use after deallocation"
+        );
+
+        // Allocate same size - should REUSE buffer from free pool
+        let buffer3 = manager
+            .allocate_buffer(64 * 1024 * 1024)
+            .expect("reuse should succeed");
+
+        // Critical: reused buffer should still count toward memory limit
+        let stats = manager.stats().unwrap();
+        assert_eq!(
+            stats.total_memory_used,
+            128 * 1024 * 1024,
+            "reused buffer should count toward memory limit"
+        );
+
+        // Now at limit again - allocation should fail
+        let result = manager.allocate_buffer(1024);
+        assert!(
+            result.is_err(),
+            "allocation should fail when limit reached via buffer reuse"
+        );
+
+        // Verify error message
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("Memory limit exceeded"),
+                "error should mention memory limit"
+            );
+        }
+
+        // Clean up
+        manager.deallocate_buffer(buffer2);
+        manager.deallocate_buffer(buffer3);
+
+        let final_stats = manager.stats().unwrap();
+        assert_eq!(final_stats.total_memory_used, 0, "all memory freed");
     }
 }
