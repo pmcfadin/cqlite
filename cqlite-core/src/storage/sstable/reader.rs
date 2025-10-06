@@ -1812,8 +1812,11 @@ impl SSTableReader {
         // Extract write time from value (placeholder - would need to be parsed from SSTable)
         let _write_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
+            .map(|d| d.as_micros() as i64)
+            .unwrap_or_else(|e| {
+                warn!("Failed to get system time: {}; using fallback value 0", e);
+                0
+            });
 
         // Filter out tombstones and expired data
         if !self.filter_tombstone(&value) {
@@ -1842,8 +1845,11 @@ impl SSTableReader {
         if let Some(ttl) = self.extract_ttl_from_value(value) {
             let current_time = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
+                .map(|d| d.as_micros() as i64)
+                .unwrap_or_else(|e| {
+                    warn!("Failed to get system time: {}; using fallback value 0", e);
+                    0
+                });
 
             if current_time > write_time + ttl {
                 // Value has expired
@@ -1974,8 +1980,11 @@ impl SSTableReader {
                 // In a full implementation, write time would be extracted from SSTable entry metadata
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_micros() as i64
+                    .map(|d| d.as_micros() as i64)
+                    .unwrap_or_else(|e| {
+                        warn!("Failed to get system time: {}; using fallback value 0", e);
+                        0
+                    })
             }
         }
     }
@@ -2811,8 +2820,11 @@ impl SSTableReader {
                 // Default to current time - in reality this would be parsed from SSTable metadata
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_micros() as i64
+                    .map(|d| d.as_micros() as i64)
+                    .unwrap_or_else(|e| {
+                        warn!("Failed to get system time: {}; using fallback value 0", e);
+                        0
+                    })
             }
         }
     }
@@ -4047,14 +4059,28 @@ impl SSTableReader {
         Ok(None)
     }
 
-    /// Get token coverage from Statistics.db reader  
+    /// Get token coverage from Statistics.db reader
     pub async fn get_token_coverage(&self) -> Result<Option<(i64, i64)>> {
         if let Some(summary_reader) = &self.summary_reader {
             // Get token range from Summary.db instead of Statistics.db
             let summary_data = summary_reader.get_entries();
             if !summary_data.is_empty() {
-                let min_token = summary_data.first().unwrap().token;
-                let max_token = summary_data.last().unwrap().token;
+                let min_token = summary_data
+                    .first()
+                    .ok_or_else(|| {
+                        Error::corruption(
+                            "Summary data is unexpectedly empty after non-empty check",
+                        )
+                    })?
+                    .token;
+                let max_token = summary_data
+                    .last()
+                    .ok_or_else(|| {
+                        Error::corruption(
+                            "Summary data is unexpectedly empty after non-empty check",
+                        )
+                    })?
+                    .token;
                 log::debug!(
                     "Retrieved token coverage from Summary.db: {} to {}",
                     min_token,

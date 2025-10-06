@@ -5,6 +5,7 @@
 //! and range queries.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,9 +25,7 @@ pub struct MemTableEntry {
 impl MemTableEntry {
     /// Create a new entry with current timestamp
     pub fn new(value: Option<Value>, sequence: u64) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
             .as_micros() as u64;
 
         Self {
@@ -331,36 +330,37 @@ mod tests {
     use crate::types::TableId;
 
     #[test]
-    fn test_memtable_basic_operations() {
+    fn test_memtable_basic_operations() -> Result<()> {
         let config = Config::default();
-        let mut memtable = MemTable::new(&config).unwrap();
+        let mut memtable = MemTable::new(&config)?;
 
         let table_id = TableId::new("test_table");
         let key = RowKey::from("test_key");
         let value = Value::Text("test_value".to_string());
 
         // Test put
-        memtable.put(&table_id, key.clone(), value.clone()).unwrap();
+        memtable.put(&table_id, key.clone(), value.clone())?;
         assert_eq!(memtable.len(), 1);
         assert!(memtable.size() > 0);
 
         // Test get
-        let retrieved = memtable.get(&table_id, &key).unwrap();
+        let retrieved = memtable.get(&table_id, &key)?;
         assert_eq!(retrieved, Some(value));
 
         // Test delete
-        memtable.delete(&table_id, key.clone()).unwrap();
-        let retrieved = memtable.get(&table_id, &key).unwrap();
+        memtable.delete(&table_id, key.clone())?;
+        let retrieved = memtable.get(&table_id, &key)?;
         assert_eq!(retrieved, None);
 
         // Entry should still exist as tombstone
         assert_eq!(memtable.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn test_memtable_scan() {
+    fn test_memtable_scan() -> Result<()> {
         let config = Config::default();
-        let mut memtable = MemTable::new(&config).unwrap();
+        let mut memtable = MemTable::new(&config)?;
 
         let table_id = TableId::new("test_table");
 
@@ -368,30 +368,30 @@ mod tests {
         for i in 0..10 {
             let key = RowKey::from(format!("key_{:02}", i));
             let value = Value::Integer(i);
-            memtable.put(&table_id, key, value).unwrap();
+            memtable.put(&table_id, key, value)?;
         }
 
         // Test scan all
-        let results = memtable.scan(&table_id, None, None, None).unwrap();
+        let results = memtable.scan(&table_id, None, None, None)?;
         assert_eq!(results.len(), 10);
 
         // Test scan with limit
-        let results = memtable.scan(&table_id, None, None, Some(5)).unwrap();
+        let results = memtable.scan(&table_id, None, None, Some(5))?;
         assert_eq!(results.len(), 5);
 
         // Test scan with range
         let start_key = RowKey::from("key_03");
         let end_key = RowKey::from("key_07");
         let results = memtable
-            .scan(&table_id, Some(&start_key), Some(&end_key), None)
-            .unwrap();
+            .scan(&table_id, Some(&start_key), Some(&end_key), None)?;
         assert_eq!(results.len(), 4); // key_03, key_04, key_05, key_06
+        Ok(())
     }
 
     #[test]
-    fn test_memtable_flush() {
+    fn test_memtable_flush() -> Result<()> {
         let config = Config::default();
-        let mut memtable = MemTable::new(&config).unwrap();
+        let mut memtable = MemTable::new(&config)?;
 
         let table_id = TableId::new("test_table");
         let key1 = RowKey::from("key1");
@@ -401,33 +401,32 @@ mod tests {
 
         // Insert data
         memtable
-            .put(&table_id, key1.clone(), value1.clone())
-            .unwrap();
+            .put(&table_id, key1.clone(), value1.clone())?;
         memtable
-            .put(&table_id, key2.clone(), value2.clone())
-            .unwrap();
+            .put(&table_id, key2.clone(), value2.clone())?;
 
         // Delete one key
-        memtable.delete(&table_id, key1.clone()).unwrap();
+        memtable.delete(&table_id, key1.clone())?;
 
         // Flush should only return non-tombstone entries
-        let flushed = memtable.flush().unwrap();
+        let flushed = memtable.flush()?;
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0], (table_id, key2, value2));
+        Ok(())
     }
 
     #[test]
-    fn test_memtable_stats() {
+    fn test_memtable_stats() -> Result<()> {
         let config = Config::default();
-        let mut memtable = MemTable::new(&config).unwrap();
+        let mut memtable = MemTable::new(&config)?;
 
         let table_id = TableId::new("test_table");
         let key = RowKey::from("test_key");
         let value = Value::Text("test_value".to_string());
 
         // Insert and delete
-        memtable.put(&table_id, key.clone(), value).unwrap();
-        memtable.delete(&table_id, key).unwrap();
+        memtable.put(&table_id, key.clone(), value)?;
+        memtable.delete(&table_id, key)?;
 
         let stats = memtable.stats();
         assert_eq!(stats.entry_count, 1);
@@ -435,5 +434,6 @@ mod tests {
         assert_eq!(stats.tombstone_count, 1);
         assert!(stats.size_bytes > 0);
         assert!(stats.sequence_number > 0);
+        Ok(())
     }
 }

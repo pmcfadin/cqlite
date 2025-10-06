@@ -196,7 +196,8 @@ impl KeyDigestComputer {
                 if bytes.len() != 16 {
                     return Err(Error::corruption("Invalid UUID bytes".to_string()));
                 }
-                let uuid_bytes: [u8; 16] = bytes.try_into().unwrap();
+                let uuid_bytes: [u8; 16] = bytes.try_into()
+                    .map_err(|_| Error::invalid_format("Invalid UUID byte length"))?;
                 Ok(Value::Uuid(uuid_bytes))
             }
             // For complex types, we need more sophisticated parsing
@@ -328,18 +329,19 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_digest_fallback() {
+    fn test_simple_digest_fallback() -> Result<()> {
         let computer = KeyDigestComputer::new();
         let key_bytes = b"test_key";
 
-        let digest = computer.compute_simple_digest(key_bytes).unwrap();
+        let digest = computer.compute_simple_digest(key_bytes)?;
 
         // Digest should be 4 bytes (32-bit Murmur3 hash)
         assert_eq!(digest.len(), 4);
 
         // Test deterministic
-        let digest2 = computer.compute_simple_digest(key_bytes).unwrap();
+        let digest2 = computer.compute_simple_digest(key_bytes)?;
         assert_eq!(digest, digest2);
+        Ok(())
     }
 
     #[test]

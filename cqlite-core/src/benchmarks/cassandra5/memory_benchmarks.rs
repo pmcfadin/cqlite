@@ -388,7 +388,7 @@ impl MemoryBenchmarks {
 
         // Sort by file size
         let mut sorted_results = results.to_vec();
-        sorted_results.sort_by(|a, b| a.file_size_mb.partial_cmp(&b.file_size_mb).unwrap());
+        sorted_results.sort_by(|a, b| a.file_size_mb.partial_cmp(&b.file_size_mb).unwrap_or(std::cmp::Ordering::Equal));
 
         // Calculate average scaling factor
         let mut scaling_factors = Vec::new();

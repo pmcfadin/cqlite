@@ -16,9 +16,9 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=56010)=CommitLogPosition(segmentId=1758060774809, position=2811531)}
+Replay positions covered: {CommitLogPosition(segmentId=1759713042248, position=56018)=CommitLogPosition(segmentId=1759713042248, position=2793560)}
 totalColumnsSet: 3
 totalRows: 1
 Estimated tombstone drop times: 

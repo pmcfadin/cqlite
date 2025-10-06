@@ -1,28 +1,22 @@
 {
   "permissions": {
     "allow": [
-      "Bash(gh issue:*)",
-      "Bash(cargo build:*)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --workspace --all-targets --all-features)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --test sstabledump_parity_statistics --test sstabledump_parity_index --test sstabledump_parity_summary)",
-      "Bash(cargo fmt:*)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --all-targets --all-features)",
-      "Bash(cargo test:*)",
-      "Bash(if [ -f ./scripts/test-all-ci-locally.sh ])",
-      "Bash(then ./scripts/test-all-ci-locally.sh)",
-      "Bash(else echo \"Script not found, running individual CI steps\")",
-      "Bash(fi)",
-      "Bash(./scripts/test-all-ci-locally.sh:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstabledump_parity_summary --quiet)",
-      "Bash(gh run view:*)",
-      "Bash(gh run list:*)",
-      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test sstabledump_parity_statistics -- --nocapture)",
-      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --test sstabledump_parity_statistics --quiet)"
+      "Bash(/tmp/count_lib_unwraps.sh:*)",
+      "Bash(/tmp/count_unwraps.sh:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib query::parser --quiet)",
+      "Bash(/tmp/check_all_files.sh:*)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --lib)",
+      "Bash(wc -l echo \"\" echo \"File 2: query/select_optimizer.rs\" echo \"Production code (lines 1-670):\" sed -n '1,670p' /Users/patrick/local_projects/cqlite/cqlite-core/src/query/select_optimizer.rs)",
+      "Bash(wc -l echo \"\" echo \"File 3: storage/batch_writer.rs\" echo \"Production code (lines 1-436):\" sed -n '1,436p' /Users/patrick/local_projects/cqlite/cqlite-core/src/storage/batch_writer.rs)",
+      "Bash(wc -l echo \"\" echo \"File 4: storage/manifest.rs\" echo \"Production code (lines 1-330):\" sed -n '1,330p' /Users/patrick/local_projects/cqlite/cqlite-core/src/storage/manifest.rs)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --lib --quiet)",
+      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --lib --quiet)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib)"
     ],
     "deny": [],
     "ask": []
+  },
+  "customCommands": {
+    "code-quailty": "/agent switch rust-code-reviewer && /review --scope changes --strict && /exec cargo fmt --all && /exec cargo clippy --workspace --all-targets --all-features -- -D warnings && /exec cargo check --workspace --all-features && /exec cargo test --workspace --all-features"
   }
 }

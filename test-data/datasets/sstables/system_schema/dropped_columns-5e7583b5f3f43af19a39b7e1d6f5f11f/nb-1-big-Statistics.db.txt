@@ -1,10 +1,10 @@
 SSTable: /data/system_schema/dropped_columns-5e7583b5f3f43af19a39b7e1d6f5f11f/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
-Minimum timestamp: 09/16/2025 22:12:56 (1758060776601000)
-Maximum timestamp: 09/16/2025 22:12:56 (1758060776601001)
+Minimum timestamp: 10/06/2025 01:10:43 (1759713043880000)
+Maximum timestamp: 10/06/2025 01:10:43 (1759713043880001)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 09/16/2025 22:12:56 (1758060776)
+SSTable min local deletion time: 10/06/2025 01:10:43 (1759713043)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
 Compression ratio: 0.9494949494949495
@@ -16,14 +16,14 @@ Covered clusterings: [local:thrift_version, local:thrift_version]
 Estimated droppable tombstones: 0.5
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=28)=CommitLogPosition(segmentId=1758060774809, position=45276)}
+Replay positions covered: {CommitLogPosition(segmentId=1759713042248, position=28)=CommitLogPosition(segmentId=1759713042248, position=45276)}
 totalColumnsSet: 3
 totalRows: 1
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1758060780 (09/16/2025 22:13:00) |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1759713060 (10/06/2025 01:11:00) |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -59,8 +59,8 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 2
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 09/16/2025 22:12:56 (1758060776)
-EncodingStats minTimestamp: 09/16/2025 22:12:56 (1758060776601000)
+EncodingStats minLocalDeletionTime: 10/06/2025 01:10:43 (1759713043)
+EncodingStats minTimestamp: 10/06/2025 01:10:43 (1759713043880000)
 KeyType: org.apache.cassandra.db.marshal.UTF8Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.UTF8Type, org.apache.cassandra.db.marshal.UTF8Type]
 StaticColumns: 

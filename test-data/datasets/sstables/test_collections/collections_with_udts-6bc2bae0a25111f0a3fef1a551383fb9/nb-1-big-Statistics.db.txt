@@ -1,0 +1,66 @@
+SSTable: /data/test_collections/collections_with_udts-6bc2bae0a25111f0a3fef1a551383fb9/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.1
+Minimum timestamp: 10/06/2025 01:12:07 (1759713127226361)
+Maximum timestamp: 10/06/2025 01:12:07 (1759713127610072)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 10/06/2025 01:12:07 (1759713127)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.7042378968539003
+TTL min: 0
+TTL max: 0
+First token: -8985330087606713292 (e94f10e8-6d74-4da3-ae2f-e3d92cf68976)
+Last token: 8815584356724292571 (b1a3b6ae-abd0-47d6-b781-fb5a4d8d5f55)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.6666666666666666
+SSTable Level: 0
+Repaired at: 0
+Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1759713042248, position=97564)=CommitLogPosition(segmentId=1759713042248, position=2793560)}
+totalColumnsSet: 200
+totalRows: 50
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1759713180 (10/06/2025 01:13:00) |   200 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   770 (770 B)  |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      770 (770 B)
+   75th      770 (770 B)
+   95th      770 (770 B)
+   98th      770 (770 B)
+   99th      770 (770 B)
+   Min       643 (643 B)
+   Max       770 (770 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   6       |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      6
+   75th      6
+   95th      6
+   98th      6
+   99th      6
+   Min       6
+   Max       6
+Local token space coverage: NaN
+Estimated cardinality: 50
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 10/06/2025 01:12:07 (1759713127)
+EncodingStats minTimestamp: 10/06/2025 01:12:07 (1759713127226361)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: emergency_contacts:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_collections,636f6e746163745f696e666f,656d61696c:org.apache.cassandra.db.marshal.UTF8Type,70686f6e65:org.apache.cassandra.db.marshal.UTF8Type,61646472657373:org.apache.cassandra.db.marshal.UserType(test_collections,616464726573735f74797065,737472656574:org.apache.cassandra.db.marshal.UTF8Type,63697479:org.apache.cassandra.db.marshal.UTF8Type,7374617465:org.apache.cassandra.db.marshal.UTF8Type,7a69705f636f6465:org.apache.cassandra.db.marshal.UTF8Type,636f756e747279:org.apache.cassandra.db.marshal.UTF8Type)))), addresses:org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_collections,616464726573735f74797065,737472656574:org.apache.cassandra.db.marshal.UTF8Type,63697479:org.apache.cassandra.db.marshal.UTF8Type,7374617465:org.apache.cassandra.db.marshal.UTF8Type,7a69705f636f6465:org.apache.cassandra.db.marshal.UTF8Type,636f756e747279:org.apache.cassandra.db.marshal.UTF8Type))), locations_visited:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.SimpleDateType,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_collections,616464726573735f74797065,737472656574:org.apache.cassandra.db.marshal.UTF8Type,63697479:org.apache.cassandra.db.marshal.UTF8Type,7374617465:org.apache.cassandra.db.marshal.UTF8Type,7a69705f636f6465:org.apache.cassandra.db.marshal.UTF8Type,636f756e747279:org.apache.cassandra.db.marshal.UTF8Type))), contacts:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_collections,636f6e746163745f696e666f,656d61696c:org.apache.cassandra.db.marshal.UTF8Type,70686f6e65:org.apache.cassandra.db.marshal.UTF8Type,61646472657373:org.apache.cassandra.db.marshal.UserType(test_collections,616464726573735f74797065,737472656574:org.apache.cassandra.db.marshal.UTF8Type,63697479:org.apache.cassandra.db.marshal.UTF8Type,7374617465:org.apache.cassandra.db.marshal.UTF8Type,7a69705f636f6465:org.apache.cassandra.db.marshal.UTF8Type,636f756e747279:org.apache.cassandra.db.marshal.UTF8Type))))
+IsTransient: false

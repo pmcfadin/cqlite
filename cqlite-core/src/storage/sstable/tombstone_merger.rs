@@ -509,7 +509,7 @@ mod tests {
             },
         ];
 
-        let result = merger.merge_generations(values).unwrap();
+        let result = merger.merge_generations(values).ok_or_else(|| Error::internal("Operation failed"))?;
         assert!(result.is_none()); // Tombstone wins
     }
 
@@ -527,7 +527,7 @@ mod tests {
             },
         }];
 
-        let result = merger.merge_generations(values).unwrap();
+        let result = merger.merge_generations(values).ok_or_else(|| Error::internal("Operation failed"))?;
         // Should return TTL tombstone
         assert!(result.is_some());
         assert!(result.unwrap().is_tombstone());
@@ -637,7 +637,7 @@ mod tests {
             },
         ];
 
-        let result = merger.merge_generations(values).unwrap();
+        let result = merger.merge_generations(values).ok_or_else(|| Error::internal("Operation failed"))?;
 
         // The newest value (30 at time 3000) should win
         assert!(result.is_some());
@@ -664,7 +664,7 @@ mod tests {
         }
 
         let start = std::time::Instant::now();
-        let result = merger.batch_merge_with_tombstones(entries, 1000).unwrap();
+        let result = merger.batch_merge_with_tombstones(entries, 1000).ok_or_else(|| Error::internal("Operation failed"))?;
         let duration = start.elapsed();
 
         assert_eq!(result.len(), 10000);

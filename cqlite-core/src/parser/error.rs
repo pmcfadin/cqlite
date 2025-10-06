@@ -600,7 +600,7 @@ pub mod utils {
         }
 
         if errors.len() == 1 {
-            return errors.into_iter().next().unwrap();
+            return errors.into_iter().next().unwrap_or_else(|| ParserError::internal("No error"));
         }
 
         let messages: Vec<String> = errors.iter().map(|e| e.message()).collect();

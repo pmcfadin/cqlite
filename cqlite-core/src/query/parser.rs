@@ -129,29 +129,39 @@ impl QueryParser {
         let mut values = Vec::new();
 
         // Check if this is explicit column syntax: INSERT INTO table (columns) VALUES (...)
-        if sql.contains("(") && sql.find("(").unwrap() < sql.find("VALUES").unwrap_or(sql.len()) {
-            // Explicit column syntax
-            // Extract table name
-            if let Some(table_part) = self.extract_between(sql, "INTO", "(") {
-                let table_name = table_part.trim();
-                table = Some(TableId::new(table_name));
-            }
+        let paren_pos = sql.find("(");
+        let values_pos = sql.find("VALUES").unwrap_or(sql.len());
+        if let Some(pos) = paren_pos {
+            if pos < values_pos {
+                // Explicit column syntax
+                // Extract table name
+                if let Some(table_part) = self.extract_between(sql, "INTO", "(") {
+                    let table_name = table_part.trim();
+                    table = Some(TableId::new(table_name));
+                }
 
-            // Extract columns
-            if let Some(columns_part) = self.extract_between(sql, "(", ")") {
-                columns = columns_part
-                    .split(',')
-                    .map(|col| col.trim().to_string())
-                    .collect();
+                // Extract columns
+                if let Some(columns_part) = self.extract_between(sql, "(", ")") {
+                    columns = columns_part
+                        .split(',')
+                        .map(|col| col.trim().to_string())
+                        .collect();
+                }
+            } else {
+                // Implicit column syntax: INSERT INTO table VALUES (...)
+                // Extract table name (between INTO and VALUES)
+                if let Some(table_part) = self.extract_between(sql, "INTO", "VALUES") {
+                    let table_name = table_part.trim();
+                    table = Some(TableId::new(table_name));
+                }
+                // columns will remain empty - executor should use table schema
             }
         } else {
-            // Implicit column syntax: INSERT INTO table VALUES (...)
-            // Extract table name (between INTO and VALUES)
+            // No parenthesis found - treat as implicit column syntax
             if let Some(table_part) = self.extract_between(sql, "INTO", "VALUES") {
                 let table_name = table_part.trim();
                 table = Some(TableId::new(table_name));
             }
-            // columns will remain empty - executor should use table schema
         }
 
         // Extract values

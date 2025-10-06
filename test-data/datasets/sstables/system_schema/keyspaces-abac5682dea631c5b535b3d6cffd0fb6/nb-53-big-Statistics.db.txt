@@ -2,12 +2,12 @@ SSTable: /data/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-53-bi
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (1)
-Maximum timestamp: 09/16/2025 22:13:58 (1758060838142000)
-Duration: Days: 20347 Hours: 22 Minutes: 13 Seconds: 58
-SSTable min local deletion time: 09/16/2025 22:12:56 (1758060776)
+Maximum timestamp: 10/06/2025 01:11:46 (1759713106499000)
+Duration: Days: 20367 Hours: 1 Minutes: 11 Seconds: 46
+SSTable min local deletion time: 10/06/2025 01:10:43 (1759713043)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
-Compression ratio: 0.3393994540491356
+Compression ratio: 0.33848953594176523
 TTL min: 0
 TTL max: 0
 First token: -5882736283116946676 (system_auth)
@@ -16,14 +16,14 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.1111111111111111
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=28)=CommitLogPosition(segmentId=1758060774809, position=171196)}
+Replay positions covered: {CommitLogPosition(segmentId=1759713042248, position=28)=CommitLogPosition(segmentId=1759713042248, position=170297)}
 totalColumnsSet: 18
 totalRows: 9
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1758060780 (09/16/2025 22:13:00) |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1759713060 (10/06/2025 01:11:00) |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -59,7 +59,7 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 9
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 09/16/2025 22:12:56 (1758060776)
+EncodingStats minLocalDeletionTime: 10/06/2025 01:10:43 (1759713043)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (1)
 KeyType: org.apache.cassandra.db.marshal.UTF8Type
 ClusteringTypes: []

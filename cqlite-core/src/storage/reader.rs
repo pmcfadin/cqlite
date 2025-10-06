@@ -129,7 +129,7 @@ impl SchemaAwareSSTableReader {
     
     /// Initialize memory maps for all SSTable components
     fn initialize_memory_maps(&self) -> Result<()> {
-        let mut maps = self.memory_maps.write().unwrap();
+        let mut maps = self.memory_maps.write().unwrap_or_else(|e| e.into_inner());
         
         // Map each component if it exists
         maps.data = self.map_component("Data.db")?;
@@ -165,8 +165,8 @@ impl SchemaAwareSSTableReader {
     
     /// Build metadata cache for performance
     fn build_metadata_cache(&self) -> Result<()> {
-        let maps = self.memory_maps.read().unwrap();
-        let mut cache = self.metadata_cache.write().unwrap();
+        let maps = self.memory_maps.read().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.metadata_cache.write().unwrap_or_else(|e| e.into_inner());
         
         // Parse index file to build partition lookup
         if let Some(ref index_data) = maps.index {
@@ -233,12 +233,12 @@ impl SchemaAwareSSTableReader {
         let key_bytes = self.encode_partition_key(partition_key)?;
         
         // Look up partition in index
-        let cache = self.metadata_cache.read().unwrap();
+        let cache = self.metadata_cache.read().unwrap_or_else(|e| e.into_inner());
         let data_offset = cache.partition_index.get(&key_bytes)
             .ok_or_else(|| Error::not_found(format!("Partition key not found: {:?}", partition_key)))?;
         
         // Read partition data
-        let maps = self.memory_maps.read().unwrap();
+        let maps = self.memory_maps.read().unwrap_or_else(|e| e.into_inner());
         let data_mmap = maps.data.as_ref()
             .ok_or_else(|| Error::storage("Data file not available".to_string()))?;
         
@@ -274,11 +274,11 @@ impl SchemaAwareSSTableReader {
     pub fn scan_partition(&self, partition_key: &PartitionKey) -> Result<PartitionIterator> {
         let key_bytes = self.encode_partition_key(partition_key)?;
         
-        let cache = self.metadata_cache.read().unwrap();
+        let cache = self.metadata_cache.read().unwrap_or_else(|e| e.into_inner());
         let data_offset = cache.partition_index.get(&key_bytes)
             .ok_or_else(|| Error::not_found(format!("Partition key not found: {:?}", partition_key)))?;
         
-        let maps = self.memory_maps.read().unwrap();
+        let maps = self.memory_maps.read().unwrap_or_else(|e| e.into_inner());
         let data_mmap = maps.data.as_ref()
             .ok_or_else(|| Error::storage("Data file not available".to_string()))?;
         
@@ -653,7 +653,7 @@ impl SchemaAwareSSTableReader {
     
     /// Flush all memory maps and file handles
     pub fn flush(&self) -> Result<()> {
-        let mut maps = self.memory_maps.write().unwrap();
+        let mut maps = self.memory_maps.write().unwrap_or_else(|e| e.into_inner());
         
         // Flush any file handles (for write operations)
         for (name, file) in &mut maps.file_handles {

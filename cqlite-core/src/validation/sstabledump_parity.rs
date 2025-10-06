@@ -704,48 +704,55 @@ impl SStableDumpParityValidator {
     }
 
     /// Generate detailed validation report
-    pub fn generate_evidence_report(&self, result: &SStableDumpParityResult) -> String {
+    pub fn generate_evidence_report(&self, result: &SStableDumpParityResult) -> Result<String> {
         let mut report = String::new();
 
-        writeln!(report, "# SSTableDump Parity Validation Report").unwrap();
-        writeln!(report, "## Issue #25: Zero Tolerance Evidence").unwrap();
-        writeln!(report).unwrap();
+        writeln!(report, "# SSTableDump Parity Validation Report")
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report, "## Issue #25: Zero Tolerance Evidence")
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "**Validation Timestamp:** {}",
             result.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         )
-        .unwrap();
-        writeln!(report, "**Overall Status:** {:?}", result.status).unwrap();
-        writeln!(report).unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report, "**Overall Status:** {:?}", result.status)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Summary statistics
-        writeln!(report, "## Summary").unwrap();
+        writeln!(report, "## Summary")
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Total Files Tested:** {}",
             result.total_files_tested
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Perfect Parity:** {}",
             result.perfect_parity_count
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Files with Discrepancies:** {}",
             result.discrepancy_count
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Total Discrepancies Found:** {}",
             result.discrepancy_summary.total_discrepancies
         )
-        .unwrap();
-        writeln!(report).unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Parity evidence
         match result.status {
@@ -754,66 +761,78 @@ impl SStableDumpParityValidator {
                     report,
                     "## ✅ ZERO TOLERANCE EVIDENCE: PERFECT PARITY ACHIEVED"
                 )
-                .unwrap();
-                writeln!(report).unwrap();
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 writeln!(
                     report,
                     "Our spec-accurate, schema-driven readers produce **IDENTICAL** output"
                 )
-                .unwrap();
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 writeln!(
                     report,
                     "to Cassandra's sstabledump tool with **ZERO DISCREPANCIES**."
                 )
-                .unwrap();
-                writeln!(report).unwrap();
-                writeln!(report, "This proves that Issue #25 implementation:").unwrap();
-                writeln!(report, "- ✅ Eliminates ALL heuristic parsing").unwrap();
-                writeln!(report, "- ✅ Uses schema-driven type resolution").unwrap();
-                writeln!(report, "- ✅ Follows Cassandra specification exactly").unwrap();
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "This proves that Issue #25 implementation:")
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "- ✅ Eliminates ALL heuristic parsing")
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "- ✅ Uses schema-driven type resolution")
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "- ✅ Follows Cassandra specification exactly")
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 writeln!(
                     report,
                     "- ✅ Achieves zero tolerance for parsing discrepancies"
                 )
-                .unwrap();
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
             }
             _ => {
-                writeln!(report, "## ⚠️ DISCREPANCIES FOUND - REQUIRES ATTENTION").unwrap();
-                writeln!(report).unwrap();
-                writeln!(report, "**Critical Issues:**").unwrap();
+                writeln!(report, "## ⚠️ DISCREPANCIES FOUND - REQUIRES ATTENTION")
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "**Critical Issues:**")
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 for issue in &result.discrepancy_summary.critical_issues {
-                    writeln!(report, "- {}", issue).unwrap();
+                    writeln!(report, "- {}", issue)
+                        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 }
-                writeln!(report).unwrap();
+                writeln!(report)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
             }
         }
 
         // Performance metrics and guardrails
-        writeln!(report, "## Performance Metrics & Guardrails").unwrap();
+        writeln!(report, "## Performance Metrics & Guardrails")
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Total Validation Time:** {}ms",
             result.performance_metrics.total_validation_time_ms
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Average Time per File:** {:.2}ms",
             result.performance_metrics.avg_time_per_file_ms
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Performance vs Baseline:** {:.2}x",
             result.performance_metrics.performance_ratio
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Peak Memory Usage:** {:.1} MB",
             result.performance_metrics.peak_memory_usage_mb
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Guardrail status
         let guardrails_status = if result
@@ -825,11 +844,14 @@ impl SStableDumpParityValidator {
         } else {
             "⚠️ SOME GUARDRAILS FAILED"
         };
-        writeln!(report, "- **Guardrail Status:** {}", guardrails_status).unwrap();
-        writeln!(report).unwrap();
+        writeln!(report, "- **Guardrail Status:** {}", guardrails_status)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Detailed guardrail results
-        writeln!(report, "### Performance Guardrail Details").unwrap();
+        writeln!(report, "### Performance Guardrail Details")
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         for guardrail in &result
             .performance_metrics
             .guardrail_results
@@ -847,28 +869,30 @@ impl SStableDumpParityValidator {
                 guardrail.units,
                 guardrail.description
             )
-            .unwrap();
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         }
-        writeln!(report).unwrap();
+        writeln!(report)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Baseline comparison details
         let baseline = &result
             .performance_metrics
             .guardrail_results
             .baseline_comparison;
-        writeln!(report, "### Baseline Performance Comparison").unwrap();
+        writeln!(report, "### Baseline Performance Comparison")
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Current Performance:** {:.1} ms/MB",
             baseline.current_ms_per_mb
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Baseline Performance:** {:.1} ms/MB",
             baseline.baseline_ms_per_mb
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Performance Ratio:** {:.2}x ({})",
@@ -881,34 +905,36 @@ impl SStableDumpParityValidator {
                 "Within acceptable range"
             }
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Regression Threshold:** {:.2}x ({}% slower allowed)",
             baseline.regression_threshold,
             (baseline.regression_threshold - 1.0) * 100.0
         )
-        .unwrap();
-        writeln!(report).unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Throughput analysis
         let throughput = &result
             .performance_metrics
             .guardrail_results
             .throughput_guardrails;
-        writeln!(report, "### Throughput Analysis").unwrap();
+        writeln!(report, "### Throughput Analysis")
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Processing Throughput:** {:.2} MB/s",
             throughput.throughput_mb_per_sec
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Minimum Required:** {:.2} MB/s",
             throughput.min_throughput_mb_per_sec
         )
-        .unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "- **Meets Minimum:** {}",
@@ -918,13 +944,16 @@ impl SStableDumpParityValidator {
                 "❌ No"
             }
         )
-        .unwrap();
-        writeln!(report).unwrap();
+        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report)
+            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Detailed file results
         if !result.file_results.is_empty() {
-            writeln!(report, "## Detailed File Results").unwrap();
-            writeln!(report).unwrap();
+            writeln!(report, "## Detailed File Results")
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+            writeln!(report)
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
             for (i, file_result) in result.file_results.iter().enumerate() {
                 let status_emoji = match file_result.status {
@@ -933,38 +962,46 @@ impl SStableDumpParityValidator {
                     _ => "❌",
                 };
 
+                let file_name = file_result.file_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<invalid filename>");
+
                 writeln!(
                     report,
-                    "### {} File {}: {:?}",
+                    "### {} File {}: {}",
                     status_emoji,
                     i + 1,
-                    file_result.file_path.file_name().unwrap_or_default()
+                    file_name
                 )
-                .unwrap();
-                writeln!(report, "- **Status:** {:?}", file_result.status).unwrap();
-                writeln!(report, "- **Total Rows:** {}", file_result.total_rows).unwrap();
-                writeln!(report, "- **Matching Rows:** {}", file_result.matching_rows).unwrap();
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "- **Status:** {:?}", file_result.status)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "- **Total Rows:** {}", file_result.total_rows)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "- **Matching Rows:** {}", file_result.matching_rows)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 writeln!(
                     report,
                     "- **Discrepancies:** {}",
                     file_result.discrepancies.len()
                 )
-                .unwrap();
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 writeln!(
                     report,
                     "- **File Size:** {} bytes",
                     file_result.file_size_bytes
                 )
-                .unwrap();
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 writeln!(
                     report,
                     "- **Validation Time:** {}ms",
                     file_result.validation_time_ms
                 )
-                .unwrap();
+                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
                 if !file_result.discrepancies.is_empty() {
-                    writeln!(report, "  #### Discrepancies:").unwrap();
+                    writeln!(report, "  #### Discrepancies:")
+                        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                     for (j, disc) in file_result.discrepancies.iter().enumerate() {
                         writeln!(
                             report,
@@ -978,19 +1015,23 @@ impl SStableDumpParityValidator {
                                 String::new()
                             }
                         )
-                        .unwrap();
-                        writeln!(report, "     - Expected: `{}`", disc.expected_value).unwrap();
-                        writeln!(report, "     - Actual: `{}`", disc.actual_value).unwrap();
+                        .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                        writeln!(report, "     - Expected: `{}`", disc.expected_value)
+                            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                        writeln!(report, "     - Actual: `{}`", disc.actual_value)
+                            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                         if !disc.context.is_empty() {
-                            writeln!(report, "     - Context: {}", disc.context).unwrap();
+                            writeln!(report, "     - Context: {}", disc.context)
+                                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                         }
                     }
                 }
-                writeln!(report).unwrap();
+                writeln!(report)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
             }
         }
 
-        report
+        Ok(report)
     }
 }
 

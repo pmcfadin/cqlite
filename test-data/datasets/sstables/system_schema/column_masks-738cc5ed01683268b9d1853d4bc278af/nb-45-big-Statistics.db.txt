@@ -1,13 +1,13 @@
 SSTable: /data/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
-Minimum timestamp: 09/16/2025 22:12:56 (1758060776601000)
-Maximum timestamp: 09/16/2025 22:13:58 (1758060838296000)
-Duration: Days: 0 Hours: 0 Minutes: 1 Seconds: 1
-SSTable min local deletion time: 09/16/2025 22:12:56 (1758060776)
-SSTable max local deletion time: 09/16/2025 22:13:58 (1758060838)
+Minimum timestamp: 10/06/2025 01:10:43 (1759713043880000)
+Maximum timestamp: 10/06/2025 01:11:46 (1759713106609000)
+Duration: Days: 0 Hours: 0 Minutes: 1 Seconds: 2
+SSTable min local deletion time: 10/06/2025 01:10:43 (1759713043)
+SSTable max local deletion time: 10/06/2025 01:11:46 (1759713106)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
-Compression ratio: 0.3704382994732882
+Compression ratio: 0.37020316027088035
 TTL min: 0
 TTL max: 0
 First token: -4911109968640856406 (system_schema)
@@ -16,15 +16,15 @@ Covered clusterings: [IndexInfo:index_name, wide_partition_table:value_column]
 Estimated droppable tombstones: 102.5
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=28)=CommitLogPosition(segmentId=1758060774809, position=180721)}
+Replay positions covered: {CommitLogPosition(segmentId=1759713042248, position=28)=CommitLogPosition(segmentId=1759713042248, position=180754)}
 totalColumnsSet: 0
 totalRows: 613
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1758060780 (09/16/2025 22:13:00) |   247 ( 40) OOOOOOOOOOOOOOOOOOOO
-   1758060840 (09/16/2025 22:14:00) |   368 ( 59) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1759713060 (10/06/2025 01:11:00) |   247 ( 40) OOOOOOOOOOOOOOOOOOOO
+   1759713120 (10/06/2025 01:12:00) |   368 ( 59) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -63,8 +63,8 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 6
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 09/16/2025 22:12:56 (1758060776)
-EncodingStats minTimestamp: 09/16/2025 22:12:56 (1758060776601000)
+EncodingStats minLocalDeletionTime: 10/06/2025 01:10:43 (1759713043)
+EncodingStats minTimestamp: 10/06/2025 01:10:43 (1759713043880000)
 KeyType: org.apache.cassandra.db.marshal.UTF8Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.UTF8Type, org.apache.cassandra.db.marshal.UTF8Type]
 StaticColumns: 

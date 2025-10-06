@@ -488,9 +488,7 @@ impl PerformanceRegressionFramework {
 
     /// Establish new performance baseline
     fn establish_baseline(&mut self, results: &[M3BenchmarkResult]) -> Result<()> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs();
 
         let baseline = BaselineData {
@@ -809,8 +807,8 @@ mod tests {
         };
 
         // Store and load
-        storage.store_baseline(&baseline).unwrap();
-        let loaded = storage.load_baseline().unwrap();
+        storage.store_baseline(&baseline).ok_or_else(|| Error::internal("Operation failed"))?;
+        let loaded = storage.load_baseline().ok_or_else(|| Error::internal("Operation failed"))?;
 
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();

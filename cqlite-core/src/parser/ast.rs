@@ -659,7 +659,9 @@ impl CqlIdentifier {
         }
 
         // First character must be letter or underscore
-        let first = self.name.chars().next().unwrap();
+        let Some(first) = self.name.chars().next() else {
+            return false;
+        };
         if !first.is_ascii_alphabetic() && first != '_' {
             return false;
         }

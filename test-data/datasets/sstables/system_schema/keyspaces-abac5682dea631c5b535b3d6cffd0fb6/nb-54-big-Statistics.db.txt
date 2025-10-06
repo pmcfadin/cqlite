@@ -1,8 +1,8 @@
 SSTable: /data/system_schema/keyspaces-abac5682dea631c5b535b3d6cffd0fb6/nb-54-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
-Minimum timestamp: 09/16/2025 22:13:58 (1758060838205000)
-Maximum timestamp: 09/16/2025 22:13:58 (1758060838205000)
+Minimum timestamp: 10/06/2025 01:11:46 (1759713106567000)
+Maximum timestamp: 10/06/2025 01:11:46 (1759713106567000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
 SSTable min local deletion time: no tombstones (9223372036854775807)
 SSTable max local deletion time: no tombstones (9223372036854775807)
@@ -16,9 +16,9 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=171196)=CommitLogPosition(segmentId=1758060774809, position=178325)}
+Replay positions covered: {CommitLogPosition(segmentId=1759713042248, position=170297)=CommitLogPosition(segmentId=1759713042248, position=178358)}
 totalColumnsSet: 2
 totalRows: 1
 Estimated tombstone drop times: 
@@ -57,7 +57,7 @@ Local token space coverage: NaN
 Estimated cardinality: 1
 EncodingStats minTTL: 0
 EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
-EncodingStats minTimestamp: 09/16/2025 22:13:58 (1758060838205000)
+EncodingStats minTimestamp: 10/06/2025 01:11:46 (1759713106567000)
 KeyType: org.apache.cassandra.db.marshal.UTF8Type
 ClusteringTypes: []
 StaticColumns: 

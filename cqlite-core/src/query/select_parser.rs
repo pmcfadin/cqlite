@@ -757,7 +757,8 @@ impl SelectParser {
         }
 
         if or_exprs.len() == 1 {
-            Ok(or_exprs.into_iter().next().unwrap())
+            or_exprs.into_iter().next()
+                .ok_or_else(|| Error::internal("Empty OR expression vector"))
         } else {
             Ok(WhereExpression::Or(or_exprs))
         }
@@ -774,7 +775,8 @@ impl SelectParser {
         }
 
         if and_exprs.len() == 1 {
-            Ok(and_exprs.into_iter().next().unwrap())
+            and_exprs.into_iter().next()
+                .ok_or_else(|| Error::internal("Empty AND expression vector"))
         } else {
             Ok(WhereExpression::And(and_exprs))
         }

@@ -297,7 +297,7 @@ static GLOBAL_REGISTRY: OnceLock<Mutex<ParserRegistry>> = OnceLock::new();
 /// Get the global parser registry
 fn with_global_registry<T>(f: impl FnOnce(&mut ParserRegistry) -> T) -> T {
     let registry = GLOBAL_REGISTRY.get_or_init(|| Mutex::new(ParserRegistry::new()));
-    let mut guard = registry.lock().unwrap();
+    let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
 }
 

@@ -750,7 +750,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_vint_reading() {
+    fn test_vint_reading() -> Result<()> {
         let reader = BulletproofReader {
             info: SSTableInfo::from_path(&std::path::PathBuf::from("nb-1-big-Data.db")).unwrap(),
             base_dir: std::path::PathBuf::new(),
@@ -761,21 +761,22 @@ mod tests {
         // Test simple VInt (single byte)
         // Value 5 ZigZag-encodes to 10 (0x0A)
         let data = [0x0A]; // Value 5 in ZigZag VInt encoding
-        let (value, bytes_read) = reader.read_vint(&data).unwrap();
+        let (value, bytes_read) = reader.read_vint(&data)?;
         assert_eq!(value, 5);
         assert_eq!(bytes_read, 1);
 
         // Test multi-byte VInt
         // Value 128 ZigZag-encodes to 256, which needs [0x81, 0x00]
         let data = [0x81, 0x00]; // Value 128 in ZigZag VInt encoding (256 raw -> 128 decoded)
-        let (value, bytes_read) = reader.read_vint(&data).unwrap();
+        let (value, bytes_read) = reader.read_vint(&data)?;
         assert_eq!(value, 128);
         assert_eq!(bytes_read, 2);
 
         // Test legacy varint for backwards compatibility
         let data = [0x80, 0x01]; // Value 128 in legacy varint
-        let (value, bytes_read) = reader.read_varint(&data).unwrap();
+        let (value, bytes_read) = reader.read_varint(&data)?;
         assert_eq!(value, 128);
         assert_eq!(bytes_read, 2);
+        Ok(())
     }
 }

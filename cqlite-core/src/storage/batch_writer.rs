@@ -309,7 +309,7 @@ impl BatchWriter {
     fn current_timestamp(&self) -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_micros() as u64
     }
 
@@ -442,7 +442,7 @@ mod tests {
     #[tokio::test]
     #[cfg(all(feature = "experimental", feature = "legacy-heuristics"))]
     async fn test_batch_writer_put_operations() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new()?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
@@ -493,7 +493,7 @@ mod tests {
     #[tokio::test]
     #[cfg(all(feature = "experimental", feature = "legacy-heuristics"))]
     async fn test_batch_writer_mixed_operations() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new()?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
@@ -542,8 +542,8 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "experimental")]
-    async fn test_batch_writer_builder() {
-        let temp_dir = TempDir::new().unwrap();
+    async fn test_batch_writer_builder() -> Result<()> {
+        let temp_dir = TempDir::new()?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
@@ -565,5 +565,6 @@ mod tests {
 
         assert_eq!(writer.auto_flush_size, 100);
         assert_eq!(writer.auto_flush_interval, Duration::from_millis(50));
+        Ok(())
     }
 }

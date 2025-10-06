@@ -196,7 +196,7 @@ impl SelectOptimizer {
             return Ok(plan);
         }
 
-        let table_id = self.extract_table_id(statement.from_clause.as_ref().unwrap())?;
+        let table_id = self.extract_table_id(statement.from_clause.as_ref().ok_or_else(|| Error::internal("Missing FROM clause"))?)?;
         let table_stats = self.get_table_statistics(&table_id).await?;
 
         // Step 2: Analyze WHERE clause for predicate pushdown
@@ -218,7 +218,7 @@ impl SelectOptimizer {
             estimated_cost: self.estimate_scan_cost(&table_stats, &plan.sstable_predicates),
         };
         plan.execution_steps.push(scan_step);
-        plan.estimated_cost += plan.execution_steps.last().unwrap().cost();
+        plan.estimated_cost += plan.execution_steps.last().ok_or_else(|| Error::internal("Empty collection"))?.cost();
 
         // Step 5: Plan additional filtering (for predicates that can't be pushed down)
         if let Some(ref where_clause) = statement.where_clause {
@@ -242,18 +242,12 @@ impl SelectOptimizer {
                 plan: agg_plan.clone(),
                 estimated_cost: self.estimate_aggregation_cost(&agg_plan, plan.estimated_rows),
             };
-            plan.aggregation_plan = Some(agg_plan);
+            plan.aggregation_plan = Some(agg_plan.clone());
             plan.execution_steps.push(agg_step);
-            plan.estimated_cost += plan.execution_steps.last().unwrap().cost();
+            plan.estimated_cost += plan.execution_steps.last().ok_or_else(|| Error::internal("Empty collection"))?.cost();
 
             // Aggregation typically reduces row count significantly
-            plan.estimated_rows = if plan
-                .aggregation_plan
-                .as_ref()
-                .unwrap()
-                .group_by_columns
-                .is_empty()
-            {
+            plan.estimated_rows = if agg_plan.group_by_columns.is_empty() {
                 1 // Single aggregate result
             } else {
                 (plan.estimated_rows as f64 * 0.01).max(1.0) as u64 // Assume 1% unique groups
@@ -267,7 +261,7 @@ impl SelectOptimizer {
                 estimated_cost: self.estimate_sort_cost(plan.estimated_rows),
             };
             plan.execution_steps.push(sort_step);
-            plan.estimated_cost += plan.execution_steps.last().unwrap().cost();
+            plan.estimated_cost += plan.execution_steps.last().ok_or_else(|| Error::internal("Empty collection"))?.cost();
         }
 
         // Step 8: Plan limit
@@ -675,7 +669,7 @@ mod tests {
     use tempfile::TempDir;
 
     async fn create_test_optimizer() -> SelectOptimizer {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new()?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
         let storage = Arc::new(

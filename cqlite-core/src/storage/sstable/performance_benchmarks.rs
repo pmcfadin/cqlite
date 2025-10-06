@@ -350,7 +350,7 @@ impl PerformanceBenchmarks {
         if !results.is_empty() {
             let fastest = results
                 .iter()
-                .max_by(|a, b| a.ops_per_second.partial_cmp(&b.ops_per_second).unwrap())
+                .max_by(|a, b| a.ops_per_second.partial_cmp(&b.ops_per_second).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap();
             let most_efficient = results
                 .iter()

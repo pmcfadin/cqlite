@@ -389,7 +389,7 @@ impl ParserBenchmarks {
         if let Some(slowest) = self
             .results
             .iter()
-            .min_by(|a, b| a.throughput_mbs.partial_cmp(&b.throughput_mbs).unwrap())
+            .min_by(|a, b| a.throughput_mbs.partial_cmp(&b.throughput_mbs).unwrap_or(std::cmp::Ordering::Equal))
         {
             report.push_str(&format!(
                 "- Slowest component: {} ({:.2} MB/s)\n",
@@ -400,7 +400,7 @@ impl ParserBenchmarks {
         if let Some(fastest) = self
             .results
             .iter()
-            .max_by(|a, b| a.throughput_mbs.partial_cmp(&b.throughput_mbs).unwrap())
+            .max_by(|a, b| a.throughput_mbs.partial_cmp(&b.throughput_mbs).unwrap_or(std::cmp::Ordering::Equal))
         {
             report.push_str(&format!(
                 "- Fastest component: {} ({:.2} MB/s)\n",

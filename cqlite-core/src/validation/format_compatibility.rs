@@ -640,7 +640,7 @@ impl FormatValidator {
         file_path: &Path,
     ) -> Result<CompatibilityCheck> {
         let start_time = Instant::now();
-        let file_name = file_path.file_name().unwrap().to_string_lossy();
+        let file_name = file_path.file_name().ok_or_else(|| Error::internal("Invalid file path"))?.to_string_lossy();
 
         // Attempt to read and validate the file format
         let (status, details) = match self.read_and_validate_file(file_path).await {

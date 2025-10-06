@@ -38,7 +38,7 @@ async fn test_sstabledump_parity_validation_framework() -> Result<()> {
     assert_eq!(result.status, ParityStatus::ValidationFailed); // Expected since no files found
 
     // Validate evidence report generation
-    let evidence_report = validator.generate_evidence_report(&result);
+    let evidence_report = validator.generate_evidence_report(&result).unwrap();
     assert!(evidence_report.contains("SSTableDump Parity Validation Report"));
     assert!(evidence_report.contains("Issue #25: Zero Tolerance Evidence"));
     assert!(evidence_report.contains("ValidationFailed")); // Expected status
@@ -187,7 +187,7 @@ fn test_zero_tolerance_evidence_generation() {
     // Generate evidence report
     let config = SStableDumpParityConfig::default();
     let validator = SStableDumpParityValidator::new(config).unwrap();
-    let evidence_report = validator.generate_evidence_report(&perfect_result);
+    let evidence_report = validator.generate_evidence_report(&perfect_result).unwrap();
 
     // Validate perfect parity evidence
     assert!(evidence_report.contains("ZERO TOLERANCE EVIDENCE: PERFECT PARITY ACHIEVED"));
@@ -298,7 +298,7 @@ fn test_major_discrepancy_detection() {
     // Generate evidence report
     let config = SStableDumpParityConfig::default();
     let validator = SStableDumpParityValidator::new(config).unwrap();
-    let evidence_report = validator.generate_evidence_report(&major_discrepancies_result);
+    let evidence_report = validator.generate_evidence_report(&major_discrepancies_result).unwrap();
 
     // Validate major discrepancy detection
     assert!(evidence_report.contains("DISCREPANCIES FOUND - REQUIRES ATTENTION"));

@@ -3,15 +3,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::error::{Error, Result};
 
 /// Header validation utilities for SSTable components
 mod header_validation {
-    use anyhow::{anyhow, Result};
     use std::fs::File;
     use std::io::{BufReader, Read};
     use std::path::Path;
+
+    use crate::error::{Error, Result};
 
     /// Validate that all component files have consistent headers
     pub fn validate_component_headers(
@@ -64,27 +66,33 @@ mod header_validation {
         let mut reader = BufReader::new(file);
         let mut header_bytes = vec![0u8; 32]; // Read first 32 bytes for header analysis
 
-        reader
-            .read_exact(&mut header_bytes)
-            .map_err(|e| anyhow!("Failed to read header from {:?}: {}", path, e))?;
+        reader.read_exact(&mut header_bytes).map_err(|e| {
+            Error::corruption(format!("Failed to read header from {:?}: {}", path, e))
+        })?;
 
         // Parse generation from filename as fallback
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("Invalid filename: {:?}", path))?;
+            .ok_or_else(|| Error::invalid_path(format!("Invalid filename: {:?}", path)))?;
 
         let generation = if let Some(dash_pos) = filename.find('-') {
             let second_part = &filename[dash_pos + 1..];
             if let Some(second_dash) = second_part.find('-') {
-                second_part[..second_dash]
-                    .parse::<u32>()
-                    .map_err(|_| anyhow!("Invalid generation in filename: {}", filename))?
+                second_part[..second_dash].parse::<u32>().map_err(|_| {
+                    Error::invalid_format(format!("Invalid generation in filename: {}", filename))
+                })?
             } else {
-                return Err(anyhow!("Invalid SSTable filename format: {}", filename));
+                return Err(Error::invalid_format(format!(
+                    "Invalid SSTable filename format: {}",
+                    filename
+                )));
             }
         } else {
-            return Err(anyhow!("Invalid SSTable filename format: {}", filename));
+            return Err(Error::invalid_format(format!(
+                "Invalid SSTable filename format: {}",
+                filename
+            )));
         };
 
         // For now, use a placeholder table ID (in real implementation, this would be extracted from the binary header)
@@ -148,7 +156,7 @@ pub enum SSTableComponent {
 }
 
 impl FromStr for SSTableComponent {
-    type Err = anyhow::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
@@ -162,7 +170,10 @@ impl FromStr for SSTableComponent {
             "TOC.txt" => Ok(SSTableComponent::TOC),
             "Partitions.db" => Ok(SSTableComponent::Partitions),
             "Rows.db" => Ok(SSTableComponent::Rows),
-            _ => Err(anyhow!("Unknown SSTable component: {}", s)),
+            _ => Err(Error::invalid_format(format!(
+                "Unknown SSTable component: {}",
+                s
+            ))),
         }
     }
 }
@@ -389,17 +400,28 @@ impl SSTableDirectory {
         let path = path.as_ref();
 
         if !path.exists() {
-            return Err(anyhow!("Directory does not exist: {:?}", path));
+            return Err(Error::invalid_path(format!(
+                "Directory does not exist: {:?}",
+                path
+            )));
         }
 
         if !path.is_dir() {
-            return Err(anyhow!("Path is not a directory: {:?}", path));
+            return Err(Error::invalid_path(format!(
+                "Path is not a directory: {:?}",
+                path
+            )));
         }
 
         // Check directory permissions
         match fs::read_dir(path) {
             Ok(_) => (),
-            Err(e) => return Err(anyhow!("Cannot read directory {:?}: {}", path, e)),
+            Err(e) => {
+                return Err(Error::storage(format!(
+                    "Cannot read directory {:?}: {}",
+                    path, e
+                )))
+            }
         }
 
         Ok(())
@@ -416,7 +438,7 @@ impl SSTableDirectory {
         let dir_name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow!("Invalid directory path: {:?}", path))?;
+            .ok_or_else(|| Error::invalid_path(format!("Invalid directory path: {:?}", path)))?;
 
         let table_name = extract_table_name(dir_name)?;
 
@@ -639,10 +661,10 @@ impl SSTableDirectory {
         if let Some(toc_path) = generation.components.get(&SSTableComponent::TOC) {
             parse_toc_file(toc_path)
         } else {
-            Err(anyhow!(
+            Err(Error::not_found(format!(
                 "No TOC.txt file found for generation {}",
                 generation.generation
-            ))
+            )))
         }
     }
 
@@ -687,12 +709,13 @@ impl SSTableDirectory {
                 } else {
                     0
                 };
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "<invalid>".to_string());
                 summary.push_str(&format!(
                     "  {:?}: {} (exists: {}, size: {} bytes)\n",
-                    component,
-                    path.file_name().unwrap().to_string_lossy(),
-                    file_exists,
-                    file_size
+                    component, filename, file_exists, file_size
                 ));
             }
 
@@ -712,7 +735,10 @@ fn extract_table_name(dir_name: &str) -> Result<String> {
     if let Some(hyphen_pos) = dir_name.rfind('-') {
         let table_name = &dir_name[..hyphen_pos];
         if table_name.is_empty() {
-            return Err(anyhow!("Empty table name in directory: {}", dir_name));
+            return Err(Error::invalid_path(format!(
+                "Empty table name in directory: {}",
+                dir_name
+            )));
         }
         Ok(table_name.to_string())
     } else {
@@ -723,8 +749,8 @@ fn extract_table_name(dir_name: &str) -> Result<String> {
 
 /// Scan directory for SSTable files and group by generation
 fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SSTableGeneration>> {
-    let entries =
-        fs::read_dir(path).with_context(|| format!("Failed to read directory: {:?}", path))?;
+    let entries = fs::read_dir(path)
+        .map_err(|e| Error::storage(format!("Failed to read directory: {:?}: {}", path, e)))?;
 
     let mut generations_map: HashMap<(u32, String), SSTableGeneration> = HashMap::new();
     let mut found_files = 0;
@@ -769,15 +795,18 @@ fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SSTableGenera
 
     // Enhanced validation and reporting
     if found_files == 0 {
-        return Err(anyhow!("Directory appears to be empty: {:?}", path));
+        return Err(Error::not_found(format!(
+            "Directory appears to be empty: {:?}",
+            path
+        )));
     }
 
     if valid_sstable_files == 0 {
-        return Err(anyhow!(
+        return Err(Error::invalid_format(format!(
             "No valid SSTable files found in directory: {:?}. Found {} files total, but none match the expected SSTable naming pattern (e.g., nb-1-big-Data.db)",
             path,
             found_files
-        ));
+        )));
     }
 
     // Sort generations by number (newest first)
@@ -807,9 +836,12 @@ fn parse_sstable_filename(filename: &str) -> Result<Option<(u32, String, SSTable
     }
 
     // Extract generation number (second part)
-    let generation: u32 = parts[1]
-        .parse()
-        .with_context(|| format!("Invalid generation number in filename: {}", filename))?;
+    let generation: u32 = parts[1].parse().map_err(|_| {
+        Error::invalid_format(format!(
+            "Invalid generation number in filename: {}",
+            filename
+        ))
+    })?;
 
     // Extract format (third part)
     let format = parts[2].to_string();
@@ -830,18 +862,27 @@ pub fn parse_toc_file_detailed<P: AsRef<Path>>(
 
     // Enhanced file validation
     if !path_ref.exists() {
-        return Err(anyhow!("TOC.txt file does not exist: {:?}", path_ref));
+        return Err(Error::not_found(format!(
+            "TOC.txt file does not exist: {:?}",
+            path_ref
+        )));
     }
 
     if !path_ref.is_file() {
-        return Err(anyhow!("TOC.txt path is not a file: {:?}", path_ref));
+        return Err(Error::invalid_path(format!(
+            "TOC.txt path is not a file: {:?}",
+            path_ref
+        )));
     }
 
     let content = fs::read_to_string(path_ref)
-        .with_context(|| format!("Failed to read TOC file: {:?}", path_ref))?;
+        .map_err(|e| Error::storage(format!("Failed to read TOC file: {:?}: {}", path_ref, e)))?;
 
     if content.trim().is_empty() {
-        return Err(anyhow!("TOC.txt file is empty: {:?}", path_ref));
+        return Err(Error::corruption(format!(
+            "TOC.txt file is empty: {:?}",
+            path_ref
+        )));
     }
 
     let mut components = Vec::new();
@@ -888,8 +929,8 @@ pub fn parse_toc_file<P: AsRef<Path>>(path: P) -> Result<Vec<SSTableComponent>> 
 
 /// Scan directory for secondary index subdirectories
 fn scan_secondary_indexes(path: &Path, table_name: &str) -> Result<Vec<SecondaryIndex>> {
-    let entries =
-        fs::read_dir(path).with_context(|| format!("Failed to read directory: {:?}", path))?;
+    let entries = fs::read_dir(path)
+        .map_err(|e| Error::storage(format!("Failed to read directory: {:?}: {}", path, e)))?;
 
     let mut secondary_indexes = Vec::new();
 
@@ -1225,12 +1266,12 @@ fn validate_file_integrity(path: &Path) -> Result<bool> {
         return Ok(false);
     }
 
-    let _metadata =
-        fs::metadata(path).with_context(|| format!("Cannot read metadata for {:?}", path))?;
+    let _metadata = fs::metadata(path)
+        .map_err(|e| Error::storage(format!("Cannot read metadata for {:?}: {}", path, e)))?;
 
     // Check if file is readable
     let _file = fs::File::open(path)
-        .with_context(|| format!("Cannot open file for reading: {:?}", path))?;
+        .map_err(|e| Error::storage(format!("Cannot open file for reading: {:?}: {}", path, e)))?;
 
     // For now, consider file valid if it exists and is readable
     // In a full implementation, this could include checksums, format validation, etc.
@@ -1251,11 +1292,18 @@ pub fn test_all_directories<P: AsRef<Path>>(
     let mut results = Vec::new();
 
     if !base_path.exists() {
-        return Err(anyhow!("Base test path does not exist: {:?}", base_path));
+        return Err(Error::invalid_path(format!(
+            "Base test path does not exist: {:?}",
+            base_path
+        )));
     }
 
-    let entries = fs::read_dir(base_path)
-        .with_context(|| format!("Cannot read test directory: {:?}", base_path))?;
+    let entries = fs::read_dir(base_path).map_err(|e| {
+        Error::storage(format!(
+            "Cannot read test directory: {:?}: {}",
+            base_path, e
+        ))
+    })?;
 
     for entry in entries {
         let entry = entry?;

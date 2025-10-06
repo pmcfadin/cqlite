@@ -1,13 +1,13 @@
 SSTable: /data/system/sstable_activity_v2-62efe31f3be8310c8d298963439c1288/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
-Minimum timestamp: 09/16/2025 22:13:51 (1758060831233000)
-Maximum timestamp: 09/16/2025 22:13:58 (1758060838314006)
+Minimum timestamp: 10/06/2025 01:11:38 (1759713098842001)
+Maximum timestamp: 10/06/2025 01:11:46 (1759713106644000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 7
-SSTable min local deletion time: 09/16/2025 22:13:51 (1758060831)
-SSTable max local deletion time: 09/16/2025 22:13:58 (1758060838)
+SSTable min local deletion time: 10/06/2025 01:11:38 (1759713098)
+SSTable max local deletion time: 10/06/2025 01:11:46 (1759713106)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
-Compression ratio: 0.2754464285714286
+Compression ratio: 0.2714285714285714
 TTL min: 0
 TTL max: 0
 First token: -9177897078410576584 (system_schema:column_masks:30)
@@ -16,14 +16,14 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 1.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 854168a6-2382-45bc-8cc9-96be1cc98db6
+Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1758060774809, position=468)=CommitLogPosition(segmentId=1758060774809, position=2811531)}
+Replay positions covered: {CommitLogPosition(segmentId=1759713042248, position=460)=CommitLogPosition(segmentId=1759713042248, position=2793560)}
 totalColumnsSet: 0
 totalRows: 0
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1758060840 (09/16/2025 22:14:00) |   191 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1759713120 (10/06/2025 01:12:00) |   191 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -59,8 +59,8 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 191
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 09/16/2025 22:13:51 (1758060831)
-EncodingStats minTimestamp: 09/16/2025 22:13:51 (1758060831233000)
+EncodingStats minLocalDeletionTime: 10/06/2025 01:11:38 (1759713098)
+EncodingStats minTimestamp: 10/06/2025 01:11:38 (1759713098842001)
 KeyType: org.apache.cassandra.db.marshal.CompositeType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.UTF8Type)
 ClusteringTypes: []
 StaticColumns: 

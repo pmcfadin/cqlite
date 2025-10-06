@@ -1,1 +1,1 @@
-{"table kind":"REGULAR","partition":{"key":["local"],"position":19},"rows":[{"type":"row","position":19,"liveness_info":{"tstamp":"2025-09-16T22:13:58.340Z"},"cells":[{"name":"schema_version","value":"d517a951-4d45-386a-9d08-99b9f093a7fb"}]}]}
+{"table kind":"REGULAR","partition":{"key":["local"],"position":19},"rows":[{"type":"row","position":19,"liveness_info":{"tstamp":"2025-10-06T01:11:46.664Z"},"cells":[{"name":"schema_version","value":"e4c7e3ac-81f9-3929-89cd-b74616edb936"}]}]}

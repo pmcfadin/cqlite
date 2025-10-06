@@ -233,18 +233,20 @@ impl QueryPlanner {
         });
 
         // Step 2: Filter (if needed)
-        if query.where_clause.is_some() && plan_type != PlanType::PointLookup {
-            steps.push(ExecutionStep {
-                step_type: StepType::Filter,
-                columns: vec![],
-                conditions: query.where_clause.as_ref().unwrap().conditions.clone(),
-                cost: table_stats.row_count as f64 * self.cost_model.row_scan_cost * 0.1,
-                parallelization: ParallelizationInfo {
-                    can_parallelize: true,
-                    suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
-                    partition_key: None,
-                },
-            });
+        if let Some(where_clause) = &query.where_clause {
+            if plan_type != PlanType::PointLookup {
+                steps.push(ExecutionStep {
+                    step_type: StepType::Filter,
+                    columns: vec![],
+                    conditions: where_clause.conditions.clone(),
+                    cost: table_stats.row_count as f64 * self.cost_model.row_scan_cost * 0.1,
+                    parallelization: ParallelizationInfo {
+                        can_parallelize: true,
+                        suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
+                        partition_key: None,
+                    },
+                });
+            }
         }
 
         // Step 3: Sort (if needed)

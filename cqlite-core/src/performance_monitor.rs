@@ -161,16 +161,17 @@ impl PerformanceMonitor {
             },
         ];
 
-        let mut baselines_map = self.baselines.lock().unwrap();
+        let mut baselines_map = self.baselines.lock().unwrap_or_else(|e| e.into_inner());
         for baseline in baselines {
             baselines_map.insert(baseline.metric_name.clone(), baseline);
         }
     }
 
+
     /// Record a performance measurement
     pub fn record_measurement(&self, metric_name: &str, value: f64, unit: &str) {
         let baseline = {
-            let baselines = self.baselines.lock().unwrap();
+            let baselines = self.baselines.lock().unwrap_or_else(|e| e.into_inner());
             baselines.get(metric_name).cloned()
         };
 
@@ -197,7 +198,7 @@ impl PerformanceMonitor {
 
         // Store measurement
         {
-            let mut measurements = self.measurements.lock().unwrap();
+            let mut measurements = self.measurements.lock().unwrap_or_else(|e| e.into_inner());
             measurements.push(measurement.clone());
 
             // Keep only last 1000 measurements per metric
@@ -271,7 +272,7 @@ impl PerformanceMonitor {
 
         // Store alert
         {
-            let mut alerts = self.alerts.lock().unwrap();
+            let mut alerts = self.alerts.lock().unwrap_or_else(|e| e.into_inner());
             alerts.push(alert.clone());
         }
 
@@ -308,9 +309,9 @@ impl PerformanceMonitor {
 
     /// Generate performance report
     pub fn generate_performance_report(&self) -> String {
-        let baselines = self.baselines.lock().unwrap();
-        let measurements = self.measurements.lock().unwrap();
-        let alerts = self.alerts.lock().unwrap();
+        let baselines = self.baselines.lock().unwrap_or_else(|e| e.into_inner());
+        let measurements = self.measurements.lock().unwrap_or_else(|e| e.into_inner());
+        let alerts = self.alerts.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut report = String::new();
         report.push_str("🎯 CQLite Performance Monitoring Report\n");
@@ -493,13 +494,13 @@ impl PerformanceMonitor {
 
     /// Export baseline data for persistence
     pub fn export_baselines(&self) -> Vec<PerformanceBaseline> {
-        let baselines = self.baselines.lock().unwrap();
+        let baselines = self.baselines.lock().unwrap_or_else(|e| e.into_inner());
         baselines.values().cloned().collect()
     }
 
     /// Import baseline data
     pub fn import_baselines(&self, baselines: Vec<PerformanceBaseline>) {
-        let mut baselines_map = self.baselines.lock().unwrap();
+        let mut baselines_map = self.baselines.lock().unwrap_or_else(|e| e.into_inner());
         for baseline in baselines {
             baselines_map.insert(baseline.metric_name.clone(), baseline);
         }
@@ -507,7 +508,7 @@ impl PerformanceMonitor {
 
     /// Get recent alerts
     pub fn get_recent_alerts(&self, hours: u64) -> Vec<PerformanceAlert> {
-        let alerts = self.alerts.lock().unwrap();
+        let alerts = self.alerts.lock().unwrap_or_else(|e| e.into_inner());
         let cutoff = current_timestamp() - (hours * 3600);
         alerts
             .iter()
@@ -521,7 +522,7 @@ impl PerformanceMonitor {
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_else(|_| Duration::from_secs(0))
         .as_secs()
 }
 

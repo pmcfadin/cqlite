@@ -4,7 +4,7 @@
 //! to ensure they produce identical results to Cassandra's implementation.
 
 use super::*;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use std::collections::HashMap;
 
 /// Validation framework for parser components
@@ -191,7 +191,7 @@ impl ParserValidator {
         if !result.passed {
             println!(
                 "❌ VInt roundtrip validation failed: {}",
-                result.error.unwrap()
+                result.error.ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
             println!(
@@ -275,7 +275,7 @@ impl ParserValidator {
         if !result.passed {
             println!(
                 "❌ VInt bit pattern validation failed: {}",
-                result.error.unwrap()
+                result.error.ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
             println!("✅ VInt bit pattern validation passed");
@@ -349,7 +349,7 @@ impl ParserValidator {
         if !result.passed {
             println!(
                 "❌ VInt boundary validation failed: {}",
-                result.error.unwrap()
+                result.error.ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
             println!("✅ VInt boundary validation passed");
@@ -458,7 +458,7 @@ impl ParserValidator {
         if !result.passed {
             println!(
                 "❌ VInt performance validation failed: {}",
-                result.error.unwrap()
+                result.error.ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
             println!(

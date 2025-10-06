@@ -20,25 +20,19 @@ impl TimeProvider {
 
     /// Get current time as microseconds since epoch
     pub fn now_micros(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
             .as_micros() as u64
     }
 
     /// Get current time as milliseconds since epoch
     pub fn now_millis(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
             .as_millis() as u64
     }
 
     /// Get current time as seconds since epoch
     pub fn now_secs(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs()
     }
 
