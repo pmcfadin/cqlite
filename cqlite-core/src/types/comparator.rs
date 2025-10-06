@@ -84,6 +84,7 @@ impl ComparatorType {
             CqlType::Timestamp => ComparatorType::Timestamp,
             CqlType::Uuid => ComparatorType::Uuid,
             CqlType::TimeUuid => ComparatorType::Uuid, // Map TimeUuid to Uuid for simplicity
+            CqlType::Varint => ComparatorType::Varint,
             CqlType::List(element_type) => {
                 let element_comparator = Self::from_cql_type(element_type)?;
                 ComparatorType::List(Box::new(element_comparator))

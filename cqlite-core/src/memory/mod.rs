@@ -330,7 +330,10 @@ impl MemoryManager {
             Value::Text(s) => s.len(),
             Value::Blob(b) => b.len(),
             Value::Timestamp(_) => 8,
+            Value::Date(_) => 4,
+            Value::Time(_) => 8,
             Value::Uuid(_) => 16,
+            Value::Inet(bytes) => bytes.len(),
             Value::Json(json) => json.to_string().len(),
             Value::List(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
             Value::Map(map) => map

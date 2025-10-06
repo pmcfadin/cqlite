@@ -32,6 +32,10 @@ pub enum Value {
     Blob(Vec<u8>),
     /// Timestamp (microseconds since Unix epoch)
     Timestamp(i64),
+    /// Date (days since Unix epoch: 1970-01-01)
+    Date(i32),
+    /// Time (nanoseconds since midnight)
+    Time(i64),
     /// UUID as 16 bytes
     Uuid([u8; 16]),
     /// Variable-length integer
@@ -62,6 +66,8 @@ pub enum Value {
     Frozen(Box<Value>),
     /// Tombstone marker indicating deleted data
     Tombstone(TombstoneInfo),
+    /// IP address (4 bytes for IPv4, 16 bytes for IPv6)
+    Inet(Vec<u8>),
 }
 
 /// User Defined Type value with structured field access
@@ -300,6 +306,8 @@ impl Value {
             Value::Text(_) => CqlType::Text,
             Value::Blob(_) => CqlType::Blob,
             Value::Timestamp(_) => CqlType::Timestamp,
+            Value::Time(_) => CqlType::Time,
+            Value::Date(_) => CqlType::Date,
             Value::Uuid(_) => CqlType::Uuid,
             Value::Json(_) => CqlType::Text, // JSON stored as text
             Value::TinyInt(_) => CqlType::TinyInt,
@@ -349,10 +357,11 @@ impl Value {
                 CqlType::Udt(udt.type_name.clone(), fields)
             }
             Value::Frozen(inner) => CqlType::Frozen(Box::new(inner.data_type())),
-            Value::Varint(_) => CqlType::Custom("varint".to_string()),
+            Value::Varint(_) => CqlType::Varint,
             Value::Decimal { .. } => CqlType::Decimal,
             Value::Duration { .. } => CqlType::Duration,
             Value::Tombstone(_) => CqlType::Text, // Tombstones don't have a specific type
+            Value::Inet(_) => CqlType::Inet,
         }
     }
 
@@ -534,6 +543,22 @@ impl Value {
         }
     }
 
+    /// Try to convert this value to a date (days since epoch)
+    pub fn as_date(&self) -> Option<i32> {
+        match self {
+            Value::Date(d) => Some(*d),
+            _ => None,
+        }
+    }
+
+    /// Try to convert this value to a time (nanoseconds since midnight)
+    pub fn as_time(&self) -> Option<i64> {
+        match self {
+            Value::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
+
     /// Try to convert this value to a float
     pub fn as_f64(&self) -> Option<f64> {
         match self {
@@ -561,6 +586,14 @@ impl Value {
         match self {
             Value::Blob(b) => Some(b),
             Value::Text(s) => Some(s.as_bytes()),
+            _ => None,
+        }
+    }
+
+    /// Try to convert this value to IP address bytes
+    pub fn as_inet_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Inet(bytes) => Some(bytes),
             _ => None,
         }
     }
@@ -600,7 +633,10 @@ impl Value {
             Value::Text(s) => 4 + s.len(), // VInt length + content
             Value::Blob(b) => 4 + b.len(), // VInt length + content
             Value::Timestamp(_) => 8,
+            Value::Time(_) => 8, // i64 = 8 bytes
+            Value::Date(_) => 4, // i32 = 4 bytes
             Value::Uuid(_) => 16,
+            Value::Inet(addr) => 4 + addr.len(), // VInt length + bytes
             Value::Json(j) => {
                 let json_str = j.to_string();
                 4 + json_str.len()
@@ -788,10 +824,14 @@ impl PartialOrd for Value {
             (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
             (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
+            (Value::Time(a), Value::Time(b)) => a.partial_cmp(b),
+            (Value::Date(a), Value::Date(b)) => a.partial_cmp(b),
             (Value::Uuid(a), Value::Uuid(b)) => a.partial_cmp(b),
             (Value::TinyInt(a), Value::TinyInt(b)) => a.partial_cmp(b),
             (Value::SmallInt(a), Value::SmallInt(b)) => a.partial_cmp(b),
             (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b),
+
+            (Value::Inet(a), Value::Inet(b)) => a.partial_cmp(b),
 
             // For complex types, compare by string representation
             (a, b) => a.to_string().partial_cmp(&b.to_string()),
@@ -811,6 +851,20 @@ impl fmt::Display for Value {
             Value::Text(s) => write!(f, "'{}'", s),
             Value::Blob(b) => write!(f, "BLOB({} bytes)", b.len()),
             Value::Timestamp(ts) => write!(f, "TIMESTAMP({})", ts),
+            Value::Time(nanos) => {
+                // Convert nanoseconds to HH:MM:SS.nnnnnnnnn format
+                let total_seconds = nanos / 1_000_000_000;
+                let hours = total_seconds / 3600;
+                let minutes = (total_seconds % 3600) / 60;
+                let seconds = total_seconds % 60;
+                let remaining_nanos = nanos % 1_000_000_000;
+                write!(
+                    f,
+                    "TIME({:02}:{:02}:{:02}.{:09})",
+                    hours, minutes, seconds, remaining_nanos
+                )
+            }
+            Value::Date(days) => write!(f, "DATE({})", days),
             Value::Uuid(uuid) => {
                 write!(f, "UUID({})", hex::encode(uuid))
             }
@@ -874,7 +928,7 @@ impl fmt::Display for Value {
             Value::Frozen(inner) => {
                 write!(f, "FROZEN({})", inner)
             }
-            Value::Varint(data) => write!(f, "VARINT({:?})", data),
+            Value::Varint(data) => write!(f, "VARINT(0x{})", hex::encode(data)),
             Value::Decimal { scale, unscaled } => {
                 write!(f, "DECIMAL(scale={}, unscaled={:?})", scale, unscaled)
             }
@@ -883,6 +937,19 @@ impl fmt::Display for Value {
                 days,
                 nanos,
             } => write!(f, "DURATION({}M {}D {}ns)", months, days, nanos),
+            Value::Inet(bytes) => {
+                if bytes.len() == 4 {
+                    // IPv4: 192.168.1.1
+                    write!(f, "{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
+                } else if bytes.len() == 16 {
+                    // IPv6: 2001:db8::1 (simplified - just show hex groups)
+                    write!(f, "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15])
+                } else {
+                    write!(f, "INET({} bytes)", bytes.len())
+                }
+            }
             Value::Tombstone(info) => match info.tombstone_type {
                 TombstoneType::RowTombstone => write!(f, "TOMBSTONE(ROW@{})", info.deletion_time),
                 TombstoneType::CellTombstone => write!(f, "TOMBSTONE(CELL@{})", info.deletion_time),
@@ -1177,6 +1244,8 @@ impl std::hash::Hash for Value {
             Value::Text(s) => s.hash(state),
             Value::Blob(b) => b.hash(state),
             Value::Timestamp(t) => t.hash(state),
+            Value::Time(t) => t.hash(state),
+            Value::Date(d) => d.hash(state),
             Value::Uuid(u) => u.hash(state),
             Value::Varint(v) => v.hash(state),
             Value::Decimal { scale, unscaled } => {
@@ -1203,6 +1272,7 @@ impl std::hash::Hash for Value {
             Value::Udt(u) => u.hash(state),
             Value::Frozen(f) => f.hash(state),
             Value::Tombstone(t) => t.hash(state),
+            Value::Inet(i) => i.hash(state),
         }
     }
 }

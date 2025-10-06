@@ -770,6 +770,7 @@ impl From<CqlType> for CqlDataType {
             CqlType::TimeUuid => CqlDataType::TimeUuid,
             CqlType::Inet => CqlDataType::Inet,
             CqlType::Duration => CqlDataType::Duration,
+            CqlType::Varint => CqlDataType::Custom("varint".to_string()),
             CqlType::List(inner) => CqlDataType::List(Box::new((*inner).into())),
             CqlType::Set(inner) => CqlDataType::Set(Box::new((*inner).into())),
             CqlType::Map(key, value) => {

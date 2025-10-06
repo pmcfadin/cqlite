@@ -771,6 +771,13 @@ impl ToJson for Value {
                 }
                 serde_json::Value::Object(json_obj)
             }
+            Value::Date(d) => serde_json::Value::Number((*d).into()),
+            Value::Time(t) => serde_json::Value::Number((*t).into()),
+            Value::Inet(bytes) => {
+                use base64::Engine;
+                let engine = base64::engine::general_purpose::STANDARD;
+                serde_json::Value::String(engine.encode(bytes))
+            }
         }
     }
 }

@@ -179,6 +179,7 @@ pub enum CqlType {
     TimeUuid,
     Inet,
     Duration,
+    Varint,
 
     // Collection types (implemented as tuples)
     List(Box<CqlType>),
@@ -510,6 +511,7 @@ impl UdtRegistry {
             CqlType::TimeUuid => "timeuuid".to_string(),
             CqlType::Inet => "inet".to_string(),
             CqlType::Duration => "duration".to_string(),
+            CqlType::Varint => "varint".to_string(),
             CqlType::Decimal => "decimal".to_string(),
             CqlType::List(inner) => format!("list<{}>", self.format_cql_type(inner)),
             CqlType::Set(inner) => format!("set<{}>", self.format_cql_type(inner)),
@@ -909,6 +911,7 @@ impl CqlType {
             "timeuuid" => Ok(CqlType::TimeUuid),
             "inet" => Ok(CqlType::Inet),
             "duration" => Ok(CqlType::Duration),
+            "varint" => Ok(CqlType::Varint),
             _ => Ok(CqlType::Custom(type_str.to_string())),
         }
     }
@@ -935,7 +938,8 @@ impl CqlType {
             | CqlType::Varchar
             | CqlType::Blob
             | CqlType::Decimal
-            | CqlType::Duration => None,
+            | CqlType::Duration
+            | CqlType::Varint => None,
             // Collections and complex types are variable
             CqlType::List(_)
             | CqlType::Set(_)

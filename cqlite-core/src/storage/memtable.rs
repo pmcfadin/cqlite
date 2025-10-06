@@ -272,6 +272,9 @@ impl MemTable {
             Some(Value::Text(s)) => s.len(),
             Some(Value::Blob(b)) => b.len(),
             Some(Value::Timestamp(_)) => 8,
+            Some(Value::Date(_)) => 4,
+            Some(Value::Time(_)) => 8,
+            Some(Value::Inet(bytes)) => bytes.len(),
             Some(Value::Uuid(_)) => 16,
             Some(Value::Json(j)) => j.to_string().len(),
             Some(Value::List(l)) => l

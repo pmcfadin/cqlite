@@ -290,24 +290,19 @@ pub fn parse_timestamp(input: &[u8]) -> IResult<&[u8], Value> {
 
 /// Parse date (32-bit days since epoch)
 pub fn parse_date(input: &[u8]) -> IResult<&[u8], Value> {
-    map(be_u32, |days| {
-        // Convert days since epoch (1970-01-01) to microseconds
-        let microseconds = (days as i64) * 24 * 60 * 60 * 1_000_000;
-        Value::Timestamp(microseconds)
-    })(input)
+    map(be_u32, |days| Value::Date(days as i32))(input)
 }
 
 /// Parse time (64-bit nanoseconds since midnight)
 pub fn parse_time(input: &[u8]) -> IResult<&[u8], Value> {
-    map(be_i64, |nanos| {
-        // Convert nanoseconds to microseconds
-        Value::Timestamp(nanos / 1000)
-    })(input)
+    map(be_i64, Value::Time)(input)
 }
 
 /// Parse varint (variable-length integer)
 pub fn parse_varint(input: &[u8]) -> IResult<&[u8], Value> {
-    map(parse_vint, Value::BigInt)(input)
+    let (input, length) = parse_vint_length(input)?;
+    let (input, bytes) = take(length)(input)?;
+    Ok((input, Value::Varint(bytes.to_vec())))
 }
 
 /// Parse decimal (scale + unscaled value)
@@ -338,9 +333,7 @@ pub fn parse_duration(input: &[u8]) -> IResult<&[u8], Value> {
 pub fn parse_inet(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, length) = parse_vint_length(input)?;
     let (input, bytes) = take(length)(input)?;
-
-    // Store as blob for now, could be converted to proper IP address type
-    Ok((input, Value::Blob(bytes.to_vec())))
+    Ok((input, Value::Inet(bytes.to_vec())))
 }
 
 /// Parse list using enhanced Cassandra 5+ parser with fallback to legacy format
@@ -1075,6 +1068,7 @@ fn cql_type_to_type_id(cql_type: &CqlType) -> CqlTypeId {
         CqlType::Decimal => CqlTypeId::Decimal,
         CqlType::Duration => CqlTypeId::Duration,
         CqlType::Inet => CqlTypeId::Inet,
+        CqlType::Varint => CqlTypeId::Varint,
         CqlType::List(_) => CqlTypeId::List,
         CqlType::Set(_) => CqlTypeId::Set,
         CqlType::Map(_, _) => CqlTypeId::Map,
@@ -1458,6 +1452,14 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
             let millis = ts / 1000; // Convert microseconds to milliseconds
             result.extend_from_slice(&millis.to_be_bytes());
         }
+        Value::Date(days) => {
+            result.push(CqlTypeId::Date as u8);
+            result.extend_from_slice(&days.to_be_bytes());
+        }
+        Value::Time(nanos) => {
+            result.push(CqlTypeId::Time as u8);
+            result.extend_from_slice(&nanos.to_be_bytes());
+        }
         Value::Uuid(uuid) => {
             result.push(CqlTypeId::Uuid as u8);
             result.extend_from_slice(uuid);
@@ -1525,6 +1527,11 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
         Value::TinyInt(i) => {
             result.push(CqlTypeId::Tinyint as u8);
             result.push(*i as u8);
+        }
+        Value::Inet(bytes) => {
+            result.push(CqlTypeId::Inet as u8);
+            result.extend_from_slice(&encode_vint(bytes.len() as i64));
+            result.extend_from_slice(bytes);
         }
         Value::SmallInt(i) => {
             result.push(CqlTypeId::Smallint as u8);
@@ -1697,8 +1704,11 @@ fn serialize_value_without_type_prefix(value: &Value) -> Result<Vec<u8>> {
             let millis = ts / 1000; // Convert microseconds to milliseconds
             Ok(millis.to_be_bytes().to_vec())
         }
+        Value::Date(days) => Ok(days.to_be_bytes().to_vec()),
+        Value::Time(nanos) => Ok(nanos.to_be_bytes().to_vec()),
         Value::Uuid(uuid) => Ok(uuid.to_vec()),
         Value::TinyInt(i) => Ok(vec![*i as u8]),
+        Value::Inet(bytes) => Ok(bytes.clone()),
         Value::SmallInt(i) => Ok(i.to_be_bytes().to_vec()),
         Value::Float32(f) => Ok(f.to_be_bytes().to_vec()),
         // For complex types, fall back to full serialization and strip type byte
@@ -1720,9 +1730,12 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
         Value::Text(_) => CqlTypeId::Varchar,
         Value::Blob(_) => CqlTypeId::Blob,
         Value::Timestamp(_) => CqlTypeId::Timestamp,
+        Value::Date(_) => CqlTypeId::Date,
+        Value::Time(_) => CqlTypeId::Time,
         Value::Uuid(_) => CqlTypeId::Uuid,
         Value::Json(_) => CqlTypeId::Varchar,
         Value::TinyInt(_) => CqlTypeId::Tinyint,
+        Value::Inet(_) => CqlTypeId::Inet,
         Value::SmallInt(_) => CqlTypeId::Smallint,
         Value::Float32(_) => CqlTypeId::Float,
         Value::List(_) => CqlTypeId::List,
@@ -1981,6 +1994,7 @@ fn parse_cql_value_with_schema<'a>(input: &'a [u8], schema: &CqlType) -> IResult
         CqlType::Duration => parse_duration(input),
         CqlType::Inet => parse_inet(input),
         CqlType::Decimal => parse_decimal(input),
+        CqlType::Varint => parse_varint(input),
         CqlType::List(element_type) => parse_list_with_schema(input, element_type),
         CqlType::Set(element_type) => {
             let (remaining, Value::List(elements)) = parse_list_with_schema(input, element_type)?

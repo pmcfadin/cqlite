@@ -222,6 +222,15 @@ impl ByteComparableEncoder {
                 self.buffer.push(0xFF); // Special tombstone marker
                 Ok(())
             }
+            Value::Date(d) => {
+                self.buffer.push(type_prefixes::DATE);
+                self.encode_int(*d)
+            }
+            Value::Time(t) => {
+                self.buffer.push(type_prefixes::TIME);
+                self.encode_bigint(*t)
+            }
+            Value::Inet(bytes) => self.encode_blob(bytes),
         }
     }
 
