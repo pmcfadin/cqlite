@@ -26,7 +26,7 @@ fn deserialize_cql_value(serialized: &[u8], expected_type: CqlTypeId) -> crate::
 
     // Parse the value data (skip the type prefix)
     let (_, value) = parse_cql_value(&serialized[1..], expected_type)
-        .map_err(|e| crate::Error::sql_parse(format!("Parse error: {:?}", e)))?;
+        .map_err(|e| crate::Error::cql_parse(format!("Parse error: {:?}", e)))?;
 
     Ok(value)
 }

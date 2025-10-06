@@ -204,7 +204,7 @@ impl ReplDataApi {
         // Validate keyspace exists
         let keyspaces = self.list_keyspaces().await?;
         if !keyspaces.contains(&keyspace.to_string()) {
-            return Err(Error::SqlParse(format!(
+            return Err(Error::CqlParse(format!(
                 "Keyspace '{}' does not exist",
                 keyspace
             )));

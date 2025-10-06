@@ -29,9 +29,9 @@ pub enum Error {
     #[error("Schema error: {0}")]
     Schema(String),
 
-    /// SQL parsing errors
-    #[error("SQL parse error: {0}")]
-    SqlParse(String),
+    /// CQL parsing errors
+    #[error("CQL parse error: {0}")]
+    CqlParse(String),
 
     /// Invalid format error (for SSTable parsing)
     #[error("Invalid format: {0}")]
@@ -146,9 +146,9 @@ impl Error {
         Self::Schema(msg.into())
     }
 
-    /// Create a SQL parse error
-    pub fn sql_parse(msg: impl Into<String>) -> Self {
-        Self::SqlParse(msg.into())
+    /// Create a CQL parse error
+    pub fn cql_parse(msg: impl Into<String>) -> Self {
+        Self::CqlParse(msg.into())
     }
 
     /// Create an invalid format error
@@ -268,7 +268,7 @@ impl Error {
             // These errors are typically not recoverable
             Error::Corruption(_) => false,
             Error::Schema(_) => false,
-            Error::SqlParse(_) => false,
+            Error::CqlParse(_) => false,
             Error::Configuration(_) => false,
 
             // Context-dependent errors
@@ -308,7 +308,7 @@ impl Error {
             Error::Serialization { .. } => ErrorCategory::Data,
             Error::Corruption(_) => ErrorCategory::Data,
             Error::Schema(_) => ErrorCategory::Schema,
-            Error::SqlParse(_) => ErrorCategory::Query,
+            Error::CqlParse(_) => ErrorCategory::Query,
             Error::QueryExecution(_) => ErrorCategory::Query,
             Error::TypeConversion(_) => ErrorCategory::Data,
             Error::Configuration(_) => ErrorCategory::Configuration,
@@ -422,7 +422,7 @@ where
     I: std::fmt::Debug,
 {
     fn from(err: nom::Err<nom::error::Error<I>>) -> Self {
-        Error::SqlParse(format!("Parse error: {:?}", err))
+        Error::CqlParse(format!("Parse error: {:?}", err))
     }
 }
 
@@ -466,7 +466,7 @@ mod tests {
             nom::error::ErrorKind::Tag,
         ));
         let error = Error::from(nom_err);
-        assert!(matches!(error, Error::SqlParse(_)));
+        assert!(matches!(error, Error::CqlParse(_)));
     }
 
     #[test]
@@ -508,7 +508,7 @@ mod tests {
     fn test_error_categories() {
         assert_eq!(Error::storage("test").category(), ErrorCategory::Storage);
         assert_eq!(Error::schema("test").category(), ErrorCategory::Schema);
-        assert_eq!(Error::sql_parse("test").category(), ErrorCategory::Query);
+        assert_eq!(Error::cql_parse("test").category(), ErrorCategory::Query);
     }
 
     #[test]
@@ -524,7 +524,7 @@ mod tests {
         let _ = Error::serialization("test");
         let _ = Error::corruption("test");
         let _ = Error::schema("test");
-        let _ = Error::sql_parse("test");
+        let _ = Error::cql_parse("test");
         let _ = Error::invalid_format("test");
         let _ = Error::unsupported_format("test");
         let _ = Error::invalid_path("test");
@@ -552,7 +552,7 @@ mod tests {
         // Test all error categories for coverage
         assert_eq!(Error::serialization("test").category(), ErrorCategory::Data);
         assert_eq!(Error::corruption("test").category(), ErrorCategory::Data);
-        assert_eq!(Error::sql_parse("test").category(), ErrorCategory::Query);
+        assert_eq!(Error::cql_parse("test").category(), ErrorCategory::Query);
         assert_eq!(
             Error::invalid_format("test").category(),
             ErrorCategory::Data
@@ -620,7 +620,7 @@ mod tests {
         assert!(Error::compaction("test").is_recoverable());
 
         assert!(!Error::serialization("test").is_recoverable());
-        assert!(!Error::sql_parse("test").is_recoverable());
+        assert!(!Error::cql_parse("test").is_recoverable());
         assert!(!Error::invalid_format("test").is_recoverable());
         assert!(!Error::unsupported_format("test").is_recoverable());
         assert!(!Error::invalid_path("test").is_recoverable());

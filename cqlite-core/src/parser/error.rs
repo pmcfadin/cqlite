@@ -366,7 +366,7 @@ impl From<ParserError> for Error {
         match err {
             ParserError::SyntaxError { message, .. }
             | ParserError::SemanticError { message, .. }
-            | ParserError::LexicalError { message, .. } => Error::sql_parse(message),
+            | ParserError::LexicalError { message, .. } => Error::cql_parse(message),
             ParserError::BackendError { message, .. }
             | ParserError::InternalError { message, .. } => Error::internal(message),
             ParserError::TypeError { message, .. } => Error::type_conversion(message),
@@ -665,7 +665,7 @@ mod tests {
         let parser_err = ParserError::syntax("Expected token", SourcePosition::start());
         let core_err: Error = parser_err.into();
 
-        // Should convert to SQL parse error
-        assert!(matches!(core_err, Error::SqlParse(_)));
+        // Should convert to CQL parse error
+        assert!(matches!(core_err, Error::CqlParse(_)));
     }
 }

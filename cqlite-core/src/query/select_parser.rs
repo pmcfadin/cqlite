@@ -171,7 +171,7 @@ impl Tokenizer {
             }
         }
 
-        Err(Error::sql_parse("Unterminated string literal"))
+        Err(Error::cql_parse("Unterminated string literal"))
     }
 
     fn read_number(&mut self) -> Result<Token> {
@@ -194,12 +194,12 @@ impl Tokenizer {
         if has_dot {
             let float_val = value
                 .parse::<f64>()
-                .map_err(|_| Error::sql_parse(format!("Invalid float: {}", value)))?;
+                .map_err(|_| Error::cql_parse(format!("Invalid float: {}", value)))?;
             Ok(Token::Float(float_val))
         } else {
             let int_val = value
                 .parse::<i64>()
-                .map_err(|_| Error::sql_parse(format!("Invalid integer: {}", value)))?;
+                .map_err(|_| Error::cql_parse(format!("Invalid integer: {}", value)))?;
             Ok(Token::Integer(int_val))
         }
     }
@@ -296,7 +296,7 @@ impl Tokenizer {
                         self.advance();
                         return Ok(Token::NotEqual);
                     }
-                    return Err(Error::sql_parse("Unexpected character: !"));
+                    return Err(Error::cql_parse("Unexpected character: !"));
                 }
                 Some('<') => {
                     if self.peek() == Some('=') {
@@ -346,7 +346,7 @@ impl Tokenizer {
                             if next_id.to_uppercase() == "BY" {
                                 Token::GroupBy
                             } else {
-                                return Err(Error::sql_parse("Expected BY after GROUP"));
+                                return Err(Error::cql_parse("Expected BY after GROUP"));
                             }
                         }
                         "HAVING" => Token::Having,
@@ -357,7 +357,7 @@ impl Tokenizer {
                             if next_id.to_uppercase() == "BY" {
                                 Token::OrderBy
                             } else {
-                                return Err(Error::sql_parse("Expected BY after ORDER"));
+                                return Err(Error::cql_parse("Expected BY after ORDER"));
                             }
                         }
                         "LIMIT" => Token::Limit,
@@ -390,7 +390,7 @@ impl Tokenizer {
                     return Ok(token);
                 }
                 Some(ch) => {
-                    return Err(Error::sql_parse(format!("Unexpected character: {}", ch)));
+                    return Err(Error::cql_parse(format!("Unexpected character: {}", ch)));
                 }
             }
         }
@@ -424,13 +424,13 @@ impl SelectParser {
                 self.advance()?;
                 Ok(())
             } else {
-                Err(Error::sql_parse(format!(
+                Err(Error::cql_parse(format!(
                     "Expected {:?}, found {:?}",
                     expected, current
                 )))
             }
         } else {
-            Err(Error::sql_parse("Unexpected end of input"))
+            Err(Error::cql_parse("Unexpected end of input"))
         }
     }
 
@@ -495,7 +495,7 @@ impl SelectParser {
                 self.advance()?;
                 Some(n as u64)
             } else {
-                return Err(Error::sql_parse("Expected integer after OFFSET"));
+                return Err(Error::cql_parse("Expected integer after OFFSET"));
             }
         } else {
             None
@@ -567,7 +567,7 @@ impl SelectParser {
                 self.advance()?;
                 return Ok(SelectExpression::Aliased(Box::new(expr), alias));
             }
-            return Err(Error::sql_parse("Expected alias name after AS"));
+            return Err(Error::cql_parse("Expected alias name after AS"));
         }
 
         Ok(expr)
@@ -626,7 +626,7 @@ impl SelectParser {
                             self.advance()?;
                             Ok(SelectExpression::Column(ColumnRef::qualified(name, column)))
                         } else {
-                            Err(Error::sql_parse(
+                            Err(Error::cql_parse(
                                 "Expected column name after table qualifier",
                             ))
                         }
@@ -665,7 +665,7 @@ impl SelectParser {
                 self.expect(Token::RightParen)?;
                 Ok(expr)
             }
-            _ => Err(Error::sql_parse(format!(
+            _ => Err(Error::cql_parse(format!(
                 "Unexpected token in expression: {:?}",
                 self.current_token
             ))),
@@ -737,7 +737,7 @@ impl SelectParser {
                 Ok(FromClause::Table(TableId::new(table_name)))
             }
         } else {
-            Err(Error::sql_parse("Expected table name in FROM clause"))
+            Err(Error::cql_parse("Expected table name in FROM clause"))
         }
     }
 
@@ -878,7 +878,7 @@ impl SelectParser {
                 }
             }
             _ => {
-                return Err(Error::sql_parse(format!(
+                return Err(Error::cql_parse(format!(
                     "Expected comparison operator, found {:?}",
                     self.current_token
                 )));
@@ -939,7 +939,7 @@ impl SelectParser {
                             column: column_name,
                         });
                     } else {
-                        return Err(Error::sql_parse(
+                        return Err(Error::cql_parse(
                             "Expected column name after dot in GROUP BY",
                         ));
                     }
@@ -948,7 +948,7 @@ impl SelectParser {
                     columns.push(ColumnRef::new(name));
                 }
             } else {
-                return Err(Error::sql_parse("Expected column name in GROUP BY"));
+                return Err(Error::cql_parse("Expected column name in GROUP BY"));
             }
 
             if self.current_token == Some(Token::Comma) {
@@ -1002,7 +1002,7 @@ impl SelectParser {
                 per_partition: false, // TODO: Add PER PARTITION support
             })
         } else {
-            Err(Error::sql_parse("Expected integer after LIMIT"))
+            Err(Error::cql_parse("Expected integer after LIMIT"))
         }
     }
 }
