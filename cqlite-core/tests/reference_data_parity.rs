@@ -95,8 +95,12 @@ async fn test_data_jsonl_vs_statistics_row_counts() -> CqliteResult<()> {
                         // Skip nb-format files (Issue #105 - parsing not yet implemented)
                         if e.to_string().contains("Failed to parse Statistics.db")
                             || e.to_string().contains("not yet implemented")
-                            || e.to_string().contains("UnsupportedFormat") {
-                            println!("Skipping nb-format Statistics.db (parsing deferred to M2): {}", stat_path.display());
+                            || e.to_string().contains("UnsupportedFormat")
+                        {
+                            println!(
+                                "Skipping nb-format Statistics.db (parsing deferred to M2): {}",
+                                stat_path.display()
+                            );
                             continue;
                         }
                         println!("Open Statistics failed: {}", e);
