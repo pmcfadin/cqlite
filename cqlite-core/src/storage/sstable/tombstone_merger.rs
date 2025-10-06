@@ -486,7 +486,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic_tombstone_merge() {
+    fn test_basic_tombstone_merge() -> Result<()> {
         let merger = TombstoneMerger::with_time(5000);
 
         // Regular value followed by tombstone
@@ -511,10 +511,12 @@ mod tests {
 
         let result = merger.merge_generations(values)?;
         assert!(result.is_none()); // Tombstone wins
+
+        Ok(())
     }
 
     #[test]
-    fn test_ttl_expiration() {
+    fn test_ttl_expiration() -> Result<()> {
         let merger = TombstoneMerger::with_time(5000);
 
         // Value with expired TTL
@@ -531,6 +533,8 @@ mod tests {
         // Should return TTL tombstone
         assert!(result.is_some());
         assert!(result.unwrap().is_tombstone());
+
+        Ok(())
     }
 
     #[test]
@@ -598,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enhanced_multi_generation_merge() {
+    fn test_enhanced_multi_generation_merge() -> Result<()> {
         let merger = TombstoneMerger::with_time(10000);
 
         // Test complex scenario with multiple generations and types
@@ -642,10 +646,12 @@ mod tests {
         // The newest value (30 at time 3000) should win
         assert!(result.is_some());
         assert_eq!(result.unwrap(), Value::Integer(30));
+
+        Ok(())
     }
 
     #[test]
-    fn test_batch_processing_performance() {
+    fn test_batch_processing_performance() -> Result<()> {
         let merger = TombstoneMerger::with_time(5000);
 
         // Create a large batch of entries
@@ -669,6 +675,8 @@ mod tests {
 
         assert_eq!(result.len(), 10000);
         assert!(duration.as_millis() < 1000); // Should complete within 1 second
+
+        Ok(())
     }
 
     #[test]

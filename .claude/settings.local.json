@@ -14,7 +14,8 @@
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --lib)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --workspace --all-targets --all-features)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --workspace --all-targets --all-features --quiet)"
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --workspace --all-targets --all-features --quiet)",
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --all-targets --all-features --quiet)"
     ],
     "deny": [],
     "ask": []

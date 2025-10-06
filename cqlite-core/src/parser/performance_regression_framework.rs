@@ -739,7 +739,6 @@ impl std::fmt::Display for RegressionSeverity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
     use tempfile::TempDir;
 
     #[test]
@@ -797,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn test_baseline_storage() {
+    fn test_baseline_storage() -> Result<()> {
         let temp_dir = TempDir::new().unwrap();
         let storage = BaselineStorage::new(temp_dir.path().join("test_baseline.json"));
 
@@ -817,5 +816,7 @@ mod tests {
         let loaded = loaded.unwrap();
         assert_eq!(loaded.timestamp, 1234567890);
         assert_eq!(loaded.git_commit, Some("abc123".to_string()));
+
+        Ok(())
     }
 }
