@@ -196,7 +196,12 @@ impl SelectOptimizer {
             return Ok(plan);
         }
 
-        let table_id = self.extract_table_id(statement.from_clause.as_ref().ok_or_else(|| Error::internal("Missing FROM clause"))?)?;
+        let table_id = self.extract_table_id(
+            statement
+                .from_clause
+                .as_ref()
+                .ok_or_else(|| Error::internal("Missing FROM clause"))?,
+        )?;
         let table_stats = self.get_table_statistics(&table_id).await?;
 
         // Step 2: Analyze WHERE clause for predicate pushdown
@@ -218,7 +223,11 @@ impl SelectOptimizer {
             estimated_cost: self.estimate_scan_cost(&table_stats, &plan.sstable_predicates),
         };
         plan.execution_steps.push(scan_step);
-        plan.estimated_cost += plan.execution_steps.last().ok_or_else(|| Error::internal("Empty collection"))?.cost();
+        plan.estimated_cost += plan
+            .execution_steps
+            .last()
+            .ok_or_else(|| Error::internal("Empty collection"))?
+            .cost();
 
         // Step 5: Plan additional filtering (for predicates that can't be pushed down)
         if let Some(ref where_clause) = statement.where_clause {
@@ -244,7 +253,11 @@ impl SelectOptimizer {
             };
             plan.aggregation_plan = Some(agg_plan.clone());
             plan.execution_steps.push(agg_step);
-            plan.estimated_cost += plan.execution_steps.last().ok_or_else(|| Error::internal("Empty collection"))?.cost();
+            plan.estimated_cost += plan
+                .execution_steps
+                .last()
+                .ok_or_else(|| Error::internal("Empty collection"))?
+                .cost();
 
             // Aggregation typically reduces row count significantly
             plan.estimated_rows = if agg_plan.group_by_columns.is_empty() {
@@ -261,7 +274,11 @@ impl SelectOptimizer {
                 estimated_cost: self.estimate_sort_cost(plan.estimated_rows),
             };
             plan.execution_steps.push(sort_step);
-            plan.estimated_cost += plan.execution_steps.last().ok_or_else(|| Error::internal("Empty collection"))?.cost();
+            plan.estimated_cost += plan
+                .execution_steps
+                .last()
+                .ok_or_else(|| Error::internal("Empty collection"))?
+                .cost();
         }
 
         // Step 8: Plan limit

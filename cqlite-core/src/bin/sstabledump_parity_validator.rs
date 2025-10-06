@@ -188,7 +188,8 @@ async fn main() -> Result<()> {
     // Generate comprehensive evidence report
     println!();
     println!("📋 Generating comprehensive evidence report...");
-    let evidence_report = validator.generate_evidence_report(&result)
+    let evidence_report = validator
+        .generate_evidence_report(&result)
         .expect("Failed to generate evidence report");
 
     // Save report to file if specified

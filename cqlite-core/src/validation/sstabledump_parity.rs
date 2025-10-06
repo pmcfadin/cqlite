@@ -711,8 +711,7 @@ impl SStableDumpParityValidator {
             .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(report, "## Issue #25: Zero Tolerance Evidence")
             .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
-        writeln!(report)
-            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report).map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(
             report,
             "**Validation Timestamp:** {}",
@@ -721,8 +720,7 @@ impl SStableDumpParityValidator {
         .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         writeln!(report, "**Overall Status:** {:?}", result.status)
             .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
-        writeln!(report)
-            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report).map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Summary statistics
         writeln!(report, "## Summary")
@@ -751,8 +749,7 @@ impl SStableDumpParityValidator {
             result.discrepancy_summary.total_discrepancies
         )
         .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
-        writeln!(report)
-            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report).map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Parity evidence
         match result.status {
@@ -846,8 +843,7 @@ impl SStableDumpParityValidator {
         };
         writeln!(report, "- **Guardrail Status:** {}", guardrails_status)
             .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
-        writeln!(report)
-            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report).map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Detailed guardrail results
         writeln!(report, "### Performance Guardrail Details")
@@ -871,8 +867,7 @@ impl SStableDumpParityValidator {
             )
             .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
         }
-        writeln!(report)
-            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report).map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Baseline comparison details
         let baseline = &result
@@ -913,8 +908,7 @@ impl SStableDumpParityValidator {
             (baseline.regression_threshold - 1.0) * 100.0
         )
         .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
-        writeln!(report)
-            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report).map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Throughput analysis
         let throughput = &result
@@ -945,8 +939,7 @@ impl SStableDumpParityValidator {
             }
         )
         .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
-        writeln!(report)
-            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+        writeln!(report).map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
 
         // Detailed file results
         if !result.file_results.is_empty() {
@@ -962,18 +955,14 @@ impl SStableDumpParityValidator {
                     _ => "❌",
                 };
 
-                let file_name = file_result.file_path.file_name()
+                let file_name = file_result
+                    .file_path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("<invalid filename>");
 
-                writeln!(
-                    report,
-                    "### {} File {}: {}",
-                    status_emoji,
-                    i + 1,
-                    file_name
-                )
-                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                writeln!(report, "### {} File {}: {}", status_emoji, i + 1, file_name)
+                    .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 writeln!(report, "- **Status:** {:?}", file_result.status)
                     .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
                 writeln!(report, "- **Total Rows:** {}", file_result.total_rows)
@@ -1016,13 +1005,16 @@ impl SStableDumpParityValidator {
                             }
                         )
                         .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
-                        writeln!(report, "     - Expected: `{}`", disc.expected_value)
-                            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
-                        writeln!(report, "     - Actual: `{}`", disc.actual_value)
-                            .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                        writeln!(report, "     - Expected: `{}`", disc.expected_value).map_err(
+                            |e| Error::internal(format!("Failed to write report: {}", e)),
+                        )?;
+                        writeln!(report, "     - Actual: `{}`", disc.actual_value).map_err(
+                            |e| Error::internal(format!("Failed to write report: {}", e)),
+                        )?;
                         if !disc.context.is_empty() {
-                            writeln!(report, "     - Context: {}", disc.context)
-                                .map_err(|e| Error::internal(format!("Failed to write report: {}", e)))?;
+                            writeln!(report, "     - Context: {}", disc.context).map_err(|e| {
+                                Error::internal(format!("Failed to write report: {}", e))
+                            })?;
                         }
                     }
                 }

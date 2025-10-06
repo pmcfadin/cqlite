@@ -167,7 +167,6 @@ impl PerformanceMonitor {
         }
     }
 
-
     /// Record a performance measurement
     pub fn record_measurement(&self, metric_name: &str, value: f64, unit: &str) {
         let baseline = {

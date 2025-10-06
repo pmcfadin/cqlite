@@ -362,10 +362,12 @@ impl QueryEngine {
         let total_time = start_time.elapsed();
         let avg_time =
             execution_times.iter().sum::<std::time::Duration>() / execution_times.len() as u32;
-        let min_time = execution_times.iter().min()
-            .ok_or_else(|| Error::query_execution("No execution times recorded for analysis".to_string()))?;
-        let max_time = execution_times.iter().max()
-            .ok_or_else(|| Error::query_execution("No execution times recorded for analysis".to_string()))?;
+        let min_time = execution_times.iter().min().ok_or_else(|| {
+            Error::query_execution("No execution times recorded for analysis".to_string())
+        })?;
+        let max_time = execution_times.iter().max().ok_or_else(|| {
+            Error::query_execution("No execution times recorded for analysis".to_string())
+        })?;
 
         // Calculate standard deviation
         let variance = execution_times

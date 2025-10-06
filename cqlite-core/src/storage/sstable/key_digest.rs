@@ -196,7 +196,8 @@ impl KeyDigestComputer {
                 if bytes.len() != 16 {
                     return Err(Error::corruption("Invalid UUID bytes".to_string()));
                 }
-                let uuid_bytes: [u8; 16] = bytes.try_into()
+                let uuid_bytes: [u8; 16] = bytes
+                    .try_into()
                     .map_err(|_| Error::invalid_format("Invalid UUID byte length"))?;
                 Ok(Value::Uuid(uuid_bytes))
             }

@@ -239,7 +239,12 @@ impl DataIntegrityValidator {
                 file_size
             );
             checks.push(IntegrityCheck {
-                name: format!("file_size_{}", path.file_name().ok_or_else(|| Error::internal("Invalid file path"))?.to_string_lossy()),
+                name: format!(
+                    "file_size_{}",
+                    path.file_name()
+                        .ok_or_else(|| Error::internal("Invalid file path"))?
+                        .to_string_lossy()
+                ),
                 check_type: IntegrityCheckType::FormatStructure,
                 status: IntegrityStatus::Skipped,
                 details: format!("File too large: {} bytes", file_size),
@@ -284,7 +289,10 @@ impl DataIntegrityValidator {
     /// Validate checksum integrity
     async fn validate_checksum(&self, path: &Path) -> Result<IntegrityCheck> {
         let start_time = Instant::now();
-        let file_name = path.file_name().ok_or_else(|| Error::internal("Invalid file path"))?.to_string_lossy();
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| Error::internal("Invalid file path"))?
+            .to_string_lossy();
 
         // Read file contents
         let contents = fs::read(path)
@@ -313,7 +321,10 @@ impl DataIntegrityValidator {
     /// Validate format structure
     async fn validate_format_structure(&self, path: &Path) -> Result<IntegrityCheck> {
         let start_time = Instant::now();
-        let file_name = path.file_name().ok_or_else(|| Error::internal("Invalid file path"))?.to_string_lossy();
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| Error::internal("Invalid file path"))?
+            .to_string_lossy();
 
         let mut status = IntegrityStatus::Passed;
         let mut error_message = None;
@@ -349,7 +360,10 @@ impl DataIntegrityValidator {
     /// Validate data types
     async fn validate_data_types(&self, path: &Path) -> Result<Vec<IntegrityCheck>> {
         let start_time = Instant::now();
-        let file_name = path.file_name().ok_or_else(|| Error::internal("Invalid file path"))?.to_string_lossy();
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| Error::internal("Invalid file path"))?
+            .to_string_lossy();
         let mut checks = Vec::new();
 
         match self.open_sstable_reader(path).await {
@@ -378,7 +392,10 @@ impl DataIntegrityValidator {
     /// Validate collections
     async fn validate_collections(&self, path: &Path) -> Result<Vec<IntegrityCheck>> {
         let start_time = Instant::now();
-        let file_name = path.file_name().ok_or_else(|| Error::internal("Invalid file path"))?.to_string_lossy();
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| Error::internal("Invalid file path"))?
+            .to_string_lossy();
         let mut checks = Vec::new();
 
         match self.open_sstable_reader(path).await {
@@ -407,7 +424,10 @@ impl DataIntegrityValidator {
     /// Detect corruption
     async fn detect_corruption(&self, path: &Path) -> Result<IntegrityCheck> {
         let start_time = Instant::now();
-        let file_name = path.file_name().ok_or_else(|| Error::internal("Invalid file path"))?.to_string_lossy();
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| Error::internal("Invalid file path"))?
+            .to_string_lossy();
 
         let mut status = IntegrityStatus::Passed;
         let mut error_message = None;

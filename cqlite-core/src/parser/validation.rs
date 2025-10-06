@@ -191,7 +191,9 @@ impl ParserValidator {
         if !result.passed {
             println!(
                 "❌ VInt roundtrip validation failed: {}",
-                result.error.ok_or_else(|| Error::internal("Expected error but found none"))?
+                result
+                    .error
+                    .ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
             println!(
@@ -275,7 +277,9 @@ impl ParserValidator {
         if !result.passed {
             println!(
                 "❌ VInt bit pattern validation failed: {}",
-                result.error.ok_or_else(|| Error::internal("Expected error but found none"))?
+                result
+                    .error
+                    .ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
             println!("✅ VInt bit pattern validation passed");
@@ -349,7 +353,9 @@ impl ParserValidator {
         if !result.passed {
             println!(
                 "❌ VInt boundary validation failed: {}",
-                result.error.ok_or_else(|| Error::internal("Expected error but found none"))?
+                result
+                    .error
+                    .ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
             println!("✅ VInt boundary validation passed");
@@ -458,7 +464,9 @@ impl ParserValidator {
         if !result.passed {
             println!(
                 "❌ VInt performance validation failed: {}",
-                result.error.ok_or_else(|| Error::internal("Expected error but found none"))?
+                result
+                    .error
+                    .ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
             println!(

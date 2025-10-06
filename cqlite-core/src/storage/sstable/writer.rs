@@ -1,9 +1,9 @@
 //! SSTable writer implementation with Cassandra 5+ compatibility
 
 use std::io::Write;
-use std::time::Duration;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::Error;
@@ -112,7 +112,9 @@ impl SSTableWriter {
             None
         };
 
-        let created_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_micros() as u64;
 
         let mut writer = Self {
@@ -331,7 +333,9 @@ impl SSTableWriter {
         // [Partition Key Length][Partition Key][Clustering Key Length][Clustering Key][Timestamp][Value]
 
         // Timestamp (8 bytes, big-endian, in microseconds)
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_micros() as u64;
         data.extend_from_slice(&timestamp.to_be_bytes());
 
@@ -656,7 +660,9 @@ impl SSTableWriter {
             return 0.0;
         }
 
-        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_micros() as u64
             - self.created_at;
 

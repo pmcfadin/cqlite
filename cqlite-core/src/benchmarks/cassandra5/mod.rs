@@ -255,7 +255,11 @@ impl Cassandra5PerformanceSuite {
                 .unwrap();
             let most_efficient = results
                 .iter()
-                .min_by(|a, b| a.memory_usage_mb.partial_cmp(&b.memory_usage_mb).unwrap_or(std::cmp::Ordering::Equal))
+                .min_by(|a, b| {
+                    a.memory_usage_mb
+                        .partial_cmp(&b.memory_usage_mb)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .unwrap();
 
             println!("\n🏆 TOP PERFORMERS");

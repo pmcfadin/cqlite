@@ -298,7 +298,9 @@ fn test_major_discrepancy_detection() {
     // Generate evidence report
     let config = SStableDumpParityConfig::default();
     let validator = SStableDumpParityValidator::new(config).unwrap();
-    let evidence_report = validator.generate_evidence_report(&major_discrepancies_result).unwrap();
+    let evidence_report = validator
+        .generate_evidence_report(&major_discrepancies_result)
+        .unwrap();
 
     // Validate major discrepancy detection
     assert!(evidence_report.contains("DISCREPANCIES FOUND - REQUIRES ATTENTION"));

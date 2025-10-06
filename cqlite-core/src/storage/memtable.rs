@@ -5,8 +5,8 @@
 //! and range queries.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{types::TableId, Config, Result, RowKey, Value};
@@ -25,7 +25,9 @@ pub struct MemTableEntry {
 impl MemTableEntry {
     /// Create a new entry with current timestamp
     pub fn new(value: Option<Value>, sequence: u64) -> Self {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(|_| Duration::from_secs(0))
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_micros() as u64;
 
         Self {
@@ -382,8 +384,7 @@ mod tests {
         // Test scan with range
         let start_key = RowKey::from("key_03");
         let end_key = RowKey::from("key_07");
-        let results = memtable
-            .scan(&table_id, Some(&start_key), Some(&end_key), None)?;
+        let results = memtable.scan(&table_id, Some(&start_key), Some(&end_key), None)?;
         assert_eq!(results.len(), 4); // key_03, key_04, key_05, key_06
         Ok(())
     }
@@ -400,10 +401,8 @@ mod tests {
         let value2 = Value::Text("value2".to_string());
 
         // Insert data
-        memtable
-            .put(&table_id, key1.clone(), value1.clone())?;
-        memtable
-            .put(&table_id, key2.clone(), value2.clone())?;
+        memtable.put(&table_id, key1.clone(), value1.clone())?;
+        memtable.put(&table_id, key2.clone(), value2.clone())?;
 
         // Delete one key
         memtable.delete(&table_id, key1.clone())?;
