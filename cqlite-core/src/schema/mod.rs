@@ -52,6 +52,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Table schema definition loaded from JSON
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -965,9 +966,9 @@ impl CqlType {
 pub struct SchemaManager {
     #[allow(dead_code)]
     storage: Arc<StorageEngine>,
-    schemas: HashMap<String, TableSchema>,
-    /// UDT registry for managing User Defined Types
-    pub udt_registry: UdtRegistry,
+    schemas: Arc<RwLock<HashMap<String, TableSchema>>>,
+    /// UDT registry for managing User Defined Types (internal, use accessor methods)
+    pub(crate) udt_registry: Arc<RwLock<UdtRegistry>>,
 }
 
 impl SchemaManager {
@@ -980,27 +981,27 @@ impl SchemaManager {
 
         Ok(Self {
             storage,
-            schemas: HashMap::new(),
-            udt_registry: UdtRegistry::new(),
+            schemas: Arc::new(RwLock::new(HashMap::new())),
+            udt_registry: Arc::new(RwLock::new(UdtRegistry::new())),
         })
     }
 
     /// Create a new schema manager with storage
     pub async fn new_with_storage(storage: Arc<StorageEngine>, _config: &Config) -> Result<Self> {
-        let mut manager = Self {
+        let manager = Self {
             storage,
-            schemas: HashMap::new(),
-            udt_registry: UdtRegistry::new(),
+            schemas: Arc::new(RwLock::new(HashMap::new())),
+            udt_registry: Arc::new(RwLock::new(UdtRegistry::new())),
         };
 
         // Load built-in UDT definitions for Cassandra 5.0 compatibility
-        manager.load_default_udts();
+        manager.load_default_udts().await;
 
         Ok(manager)
     }
 
     /// Load default UDT definitions that are commonly used in Cassandra
-    fn load_default_udts(&mut self) {
+    async fn load_default_udts(&self) {
         // Common address UDT used in many Cassandra schemas
         let address_udt = UdtTypeDef::new("test_keyspace".to_string(), "address".to_string())
             .with_field("street".to_string(), CqlType::Text, true)
@@ -1009,7 +1010,7 @@ impl SchemaManager {
             .with_field("zip_code".to_string(), CqlType::Text, true)
             .with_field("country".to_string(), CqlType::Text, true);
 
-        self.udt_registry.register_udt(address_udt);
+        self.udt_registry.write().await.register_udt(address_udt);
 
         // Enhanced person UDT with nested address
         let person_udt = UdtTypeDef::new("test_keyspace".to_string(), "person".to_string())
@@ -1036,7 +1037,7 @@ impl SchemaManager {
                 true,
             );
 
-        self.udt_registry.register_udt(person_udt);
+        self.udt_registry.write().await.register_udt(person_udt);
 
         // Company UDT with nested person and address relationships
         let company_udt = UdtTypeDef::new("test_keyspace".to_string(), "company".to_string())
@@ -1062,28 +1063,41 @@ impl SchemaManager {
             )
             .with_field("founded_year".to_string(), CqlType::Int, true);
 
-        self.udt_registry.register_udt(company_udt);
+        self.udt_registry.write().await.register_udt(company_udt);
     }
 
     /// Register a new UDT type definition
-    pub fn register_udt(&mut self, udt_def: UdtTypeDef) {
-        self.udt_registry.register_udt(udt_def);
+    pub async fn register_udt(&self, udt_def: UdtTypeDef) {
+        self.udt_registry.write().await.register_udt(udt_def);
     }
 
-    /// Get a UDT definition
-    pub fn get_udt(&self, keyspace: &str, name: &str) -> Option<&UdtTypeDef> {
-        self.udt_registry.get_udt(keyspace, name)
+    /// Get a UDT definition (returns a cloned UdtTypeDef)
+    pub async fn get_udt(&self, keyspace: &str, name: &str) -> Option<UdtTypeDef> {
+        self.udt_registry
+            .read()
+            .await
+            .get_udt(keyspace, name)
+            .cloned()
     }
 
     /// Load schema for a table
-    pub async fn load_schema(&mut self, table_name: &str) -> Result<&TableSchema> {
-        if !self.schemas.contains_key(table_name) {
-            // Try to load from storage or default
-            let schema = self.create_default_schema(table_name);
-            self.schemas.insert(table_name.to_string(), schema);
+    pub async fn load_schema(&self, table_name: &str) -> Result<TableSchema> {
+        // Read lock first to check if schema exists
+        let schemas = self.schemas.read().await;
+        if let Some(schema) = schemas.get(table_name) {
+            return Ok(schema.clone());
         }
+        drop(schemas); // Explicit drop before write lock
 
-        Ok(self.schemas.get(table_name).unwrap())
+        // Create default schema
+        let schema = self.create_default_schema(table_name);
+
+        // Write lock to insert
+        self.schemas
+            .write()
+            .await
+            .insert(table_name.to_string(), schema.clone());
+        Ok(schema)
     }
 
     /// Create a default schema for unknown tables
@@ -1108,31 +1122,36 @@ impl SchemaManager {
     }
 
     /// Parse and register a schema from a CQL CREATE TABLE statement
-    pub fn parse_and_register_cql_schema(&mut self, cql: &str) -> Result<&TableSchema> {
+    pub async fn parse_and_register_cql_schema(&self, cql: &str) -> Result<TableSchema> {
         let schema = cql_parser::parse_cql_schema(cql)?;
         let table_key = format!("{}.{}", schema.keyspace, schema.table);
-        self.schemas.insert(table_key.clone(), schema);
-        Ok(self.schemas.get(&table_key).unwrap())
+        self.schemas
+            .write()
+            .await
+            .insert(table_key.clone(), schema.clone());
+        Ok(schema)
     }
 
     /// Find schema by table name with optional keyspace matching
-    pub fn find_schema_by_table(
+    pub async fn find_schema_by_table(
         &self,
         keyspace: &Option<String>,
         table: &str,
-    ) -> Option<&TableSchema> {
+    ) -> Option<TableSchema> {
+        let schemas = self.schemas.read().await;
+
         // First try exact match if keyspace provided
         if let Some(ks) = keyspace {
             let key = format!("{}.{}", ks, table);
-            if let Some(schema) = self.schemas.get(&key) {
-                return Some(schema);
+            if let Some(schema) = schemas.get(&key) {
+                return Some(schema.clone());
             }
         }
 
         // Then try to find any schema matching the table name
-        self.schemas
+        schemas
             .values()
-            .find(|&schema| {
+            .find(|schema| {
                 cql_parser::table_name_matches(
                     &Some(schema.keyspace.clone()),
                     &schema.table,
@@ -1140,7 +1159,7 @@ impl SchemaManager {
                     table,
                 )
             })
-            .map(|v| v as _)
+            .cloned()
     }
 
     /// Extract table information from CQL without full parsing
@@ -1156,8 +1175,8 @@ impl SchemaManager {
     /// Get table schema by name (async for compatibility)
     pub async fn get_table_schema(&self, table_name: &str) -> Result<TableSchema> {
         // Try to find schema by table name
-        if let Some(schema) = self.find_schema_by_table(&None, table_name) {
-            Ok(schema.clone())
+        if let Some(schema) = self.find_schema_by_table(&None, table_name).await {
+            Ok(schema)
         } else {
             Err(Error::Schema(format!(
                 "Table schema not found: {}",
@@ -1246,5 +1265,47 @@ mod tests {
 
         // This should succeed as we allow custom types
         assert!(TableSchema::from_json(invalid_type).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_schema_access() {
+        // Create a SchemaManager for testing concurrent access
+        let config = Config::default();
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            StorageEngine::open(temp_dir.path(), &config, platform)
+                .await
+                .unwrap(),
+        );
+
+        let manager = Arc::new(
+            SchemaManager::new_with_storage(storage, &config)
+                .await
+                .unwrap(),
+        );
+
+        // Spawn 10 concurrent tasks accessing 3 different tables
+        let mut handles = vec![];
+        for i in 0..10 {
+            let m = Arc::clone(&manager);
+            let handle = tokio::spawn(async move {
+                let table = format!("table_{}", i % 3); // 3 different tables, concurrent access
+                m.load_schema(&table).await.unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify schemas were created
+        let schemas = manager.schemas.read().await;
+        assert!(schemas.len() <= 3); // At most 3 unique tables
+        assert!(schemas.contains_key("table_0"));
+        assert!(schemas.contains_key("table_1"));
+        assert!(schemas.contains_key("table_2"));
     }
 }
