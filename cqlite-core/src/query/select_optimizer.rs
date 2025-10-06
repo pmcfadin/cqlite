@@ -685,7 +685,7 @@ mod tests {
     use crate::{platform::Platform, schema::SchemaManager, storage::StorageEngine, Config};
     use tempfile::TempDir;
 
-    async fn create_test_optimizer() -> SelectOptimizer {
+    async fn create_test_optimizer() -> Result<SelectOptimizer> {
         let temp_dir = TempDir::new()?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
@@ -696,12 +696,12 @@ mod tests {
         );
         let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 
-        SelectOptimizer { schema, storage }
+        Ok(SelectOptimizer { schema, storage })
     }
 
     #[tokio::test]
     async fn test_predicate_extraction() {
-        let _optimizer = create_test_optimizer().await;
+        let _optimizer = create_test_optimizer().await.unwrap();
         // This would test the predicate extraction logic
         // Implementation depends on having mock schema/storage
     }
@@ -715,7 +715,7 @@ mod tests {
             column_statistics: HashMap::new(),
         };
 
-        let optimizer = create_test_optimizer().await;
+        let optimizer = create_test_optimizer().await.unwrap();
 
         let cost = optimizer.estimate_scan_cost(&stats, &[]);
         assert!(cost > 0.0);

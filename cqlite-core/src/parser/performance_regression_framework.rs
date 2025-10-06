@@ -739,6 +739,7 @@ impl std::fmt::Display for RegressionSeverity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
     use tempfile::TempDir;
 
     #[test]
@@ -809,12 +810,8 @@ mod tests {
         };
 
         // Store and load
-        storage
-            .store_baseline(&baseline)
-            .ok_or_else(|| Error::internal("Operation failed"))?;
-        let loaded = storage
-            .load_baseline()
-            .ok_or_else(|| Error::internal("Operation failed"))?;
+        storage.store_baseline(&baseline)?;
+        let loaded = storage.load_baseline()?;
 
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();

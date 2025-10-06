@@ -441,7 +441,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(all(feature = "experimental", feature = "legacy-heuristics"))]
-    async fn test_batch_writer_put_operations() {
+    async fn test_batch_writer_put_operations() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
@@ -488,11 +488,13 @@ mod tests {
         let stats = writer.stats();
         assert_eq!(stats.total_entries, 2);
         assert_eq!(stats.total_batches, 1);
+
+        Ok(())
     }
 
     #[tokio::test]
     #[cfg(all(feature = "experimental", feature = "legacy-heuristics"))]
-    async fn test_batch_writer_mixed_operations() {
+    async fn test_batch_writer_mixed_operations() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
@@ -538,6 +540,8 @@ mod tests {
         let stats = writer.stats();
         assert_eq!(stats.total_entries, 3);
         assert!(stats.write_throughput > 0.0);
+
+        Ok(())
     }
 
     #[tokio::test]
