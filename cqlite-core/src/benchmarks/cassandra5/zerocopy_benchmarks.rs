@@ -317,7 +317,7 @@ impl ZeroCopyBenchmarks {
                 details,
             })
         } else {
-            Err(crate::Error::validation(
+            Err(crate::Error::invalid_operation(
                 "Missing results for comparison".to_string(),
             ))
         }

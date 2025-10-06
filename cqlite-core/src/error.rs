@@ -14,8 +14,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     /// Serialization/deserialization errors
-    #[error("Serialization error: {0}")]
-    Serialization(String),
+    #[error("Serialization error: {message}")]
+    Serialization {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// Data corruption errors
     #[error("Data corruption: {0}")]
@@ -77,10 +81,6 @@ pub enum Error {
     #[error("Not found: {0}")]
     NotFound(String),
 
-    /// Query errors
-    #[error("Query error: {0}")]
-    Query(String),
-
     /// Table errors
     #[error("Table error: {0}")]
     Table(String),
@@ -130,7 +130,10 @@ pub enum Error {
 impl Error {
     /// Create a serialization error
     pub fn serialization(msg: impl Into<String>) -> Self {
-        Self::Serialization(msg.into())
+        Self::Serialization {
+            message: msg.into(),
+            source: None,
+        }
     }
 
     /// Create a corruption error
@@ -244,18 +247,13 @@ impl Error {
         Self::Internal(msg.into())
     }
 
-    /// Create a validation error
-    pub fn validation(msg: impl Into<String>) -> Self {
-        Self::InvalidOperation(msg.into())
-    }
-
     /// Create an invalid input error
     pub fn invalid_input(msg: impl Into<String>) -> Self {
         Self::InvalidInput(msg.into())
     }
 
     /// Create a parse error
-    pub fn parser(msg: impl Into<String>) -> Self {
+    pub fn parse(msg: impl Into<String>) -> Self {
         Self::Parse(msg.into())
     }
 
@@ -286,13 +284,12 @@ impl Error {
             Error::Compaction(_) => true,
 
             // New error types
-            Error::Query(_) => false,
             Error::Table(_) => false,
 
             #[cfg(target_arch = "wasm32")]
             Error::Wasm(_) => false,
 
-            Error::Serialization(_) => false,
+            Error::Serialization { .. } => false,
             Error::Internal(_) => false,
             Error::Parse(_) => false,
             Error::InvalidInput(_) => false,
@@ -308,7 +305,7 @@ impl Error {
     pub fn category(&self) -> ErrorCategory {
         match self {
             Error::Io(_) => ErrorCategory::System,
-            Error::Serialization(_) => ErrorCategory::Data,
+            Error::Serialization { .. } => ErrorCategory::Data,
             Error::Corruption(_) => ErrorCategory::Data,
             Error::Schema(_) => ErrorCategory::Schema,
             Error::SqlParse(_) => ErrorCategory::Query,
@@ -327,7 +324,6 @@ impl Error {
             Error::Compaction(_) => ErrorCategory::Storage,
 
             // New error types
-            Error::Query(_) => ErrorCategory::Query,
             Error::Table(_) => ErrorCategory::Schema,
 
             #[cfg(target_arch = "wasm32")]
@@ -403,14 +399,20 @@ impl fmt::Display for ErrorCategory {
 /// Convert from bincode errors
 impl From<bincode::Error> for Error {
     fn from(err: bincode::Error) -> Self {
-        Error::Serialization(err.to_string())
+        Error::Serialization {
+            message: err.to_string(),
+            source: Some(Box::new(err)),
+        }
     }
 }
 
 /// Convert from serde_json errors
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
-        Error::Serialization(err.to_string())
+        Error::Serialization {
+            message: err.to_string(),
+            source: Some(Box::new(err)),
+        }
     }
 }
 
@@ -451,12 +453,12 @@ mod tests {
         let io_err = std::io::Error::other("test error");
         let bincode_err = bincode::Error::new(bincode::ErrorKind::Io(io_err));
         let error = Error::from(bincode_err);
-        assert!(matches!(error, Error::Serialization(_)));
+        assert!(matches!(error, Error::Serialization { .. }));
 
         // Test serde_json error conversion (covers line 406-407)
         let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
         let error = Error::from(json_err);
-        assert!(matches!(error, Error::Serialization(_)));
+        assert!(matches!(error, Error::Serialization { .. }));
 
         // Test nom error conversion (covers line 416-417)
         let nom_err = nom::Err::Error(nom::error::Error::new(
@@ -489,12 +491,7 @@ mod tests {
 
     #[test]
     fn test_new_error_types_coverage() {
-        // Test Query error (covers line 285-286, 325-326)
-        let query_err = Error::Query("query error".to_string());
-        assert!(!query_err.is_recoverable()); // line 285-286
-        assert_eq!(query_err.category(), ErrorCategory::Query); // line 325-326
-
-        // Test Table error (line 286, 326)
+        // Test Table error
         let table_err = Error::Table("table error".to_string());
         assert!(!table_err.is_recoverable());
         assert_eq!(table_err.category(), ErrorCategory::Schema);
@@ -546,9 +543,8 @@ mod tests {
         let _ = Error::index("test");
         let _ = Error::compaction("test");
         let _ = Error::internal("test");
-        let _ = Error::validation("test");
         let _ = Error::invalid_input("test");
-        let _ = Error::parser("test");
+        let _ = Error::parse("test");
     }
 
     #[test]
@@ -611,7 +607,7 @@ mod tests {
         assert_eq!(Error::compaction("test").category(), ErrorCategory::Storage);
         assert_eq!(Error::internal("test").category(), ErrorCategory::Internal);
         assert_eq!(Error::invalid_input("test").category(), ErrorCategory::Data);
-        assert_eq!(Error::parser("test").category(), ErrorCategory::Data);
+        assert_eq!(Error::parse("test").category(), ErrorCategory::Data);
     }
 
     #[test]
@@ -638,7 +634,7 @@ mod tests {
         assert!(!Error::constraint_violation("test").is_recoverable());
         assert!(!Error::internal("test").is_recoverable());
         assert!(!Error::invalid_input("test").is_recoverable());
-        assert!(!Error::parser("test").is_recoverable());
+        assert!(!Error::parse("test").is_recoverable());
     }
 
     #[test]

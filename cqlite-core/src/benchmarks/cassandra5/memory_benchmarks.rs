@@ -322,7 +322,7 @@ impl MemoryBenchmarks {
             .collect();
 
         if memory_results.is_empty() {
-            return Err(crate::Error::validation(
+            return Err(crate::Error::invalid_operation(
                 "No memory results to analyze".to_string(),
             ));
         }

@@ -44,7 +44,9 @@ impl SSTableReader {
         if let Some(base_name) = extract_sstable_base_name(data_file_path) {
             let index_path = data_file_path
                 .parent()
-                .ok_or_else(|| Error::validation("Cannot determine parent directory for Index.db"))?
+                .ok_or_else(|| {
+                    Error::invalid_operation("Cannot determine parent directory for Index.db")
+                })?
                 .join(format!("{}-Index.db", base_name));
 
             if tokio::fs::metadata(&index_path).await.is_ok() {
@@ -123,7 +125,7 @@ impl SSTableReader {
             let filter_path = data_file_path
                 .parent()
                 .ok_or_else(|| {
-                    Error::validation("Cannot determine parent directory for Filter.db")
+                    Error::invalid_operation("Cannot determine parent directory for Filter.db")
                 })?
                 .join(format!("{}-Filter.db", base_name));
 
@@ -282,7 +284,7 @@ impl SSTableReader {
         };
 
         let parent_dir = data_path.parent().ok_or_else(|| {
-            Error::validation("Cannot determine parent directory for component files")
+            Error::invalid_operation("Cannot determine parent directory for component files")
         })?;
 
         // Standard Cassandra 5+ component file types with criticality flags

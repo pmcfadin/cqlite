@@ -87,7 +87,7 @@ impl SSTableReader {
         #[cfg(not(feature = "legacy-heuristics"))]
         {
             // For modern builds, reject simple digest to force schema-driven approach
-            Err(crate::error::Error::validation(
+            Err(crate::error::Error::invalid_operation(
                 "Schema-driven digest required for Index.db lookup in modern format. \
                  Enable 'legacy-heuristics' feature only for legacy compatibility testing.",
             ))

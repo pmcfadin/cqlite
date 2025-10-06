@@ -204,7 +204,7 @@ impl ReplDataApi {
         // Validate keyspace exists
         let keyspaces = self.list_keyspaces().await?;
         if !keyspaces.contains(&keyspace.to_string()) {
-            return Err(Error::Query(format!(
+            return Err(Error::SqlParse(format!(
                 "Keyspace '{}' does not exist",
                 keyspace
             )));
@@ -234,7 +234,7 @@ impl ReplDataApi {
 
         // Ensure we have a keyspace
         let keyspace = context.keyspace.as_ref().ok_or_else(|| {
-            Error::Query("No keyspace selected. Use 'USE keyspace;' first.".to_string())
+            Error::InvalidState("No keyspace selected. Use 'USE keyspace;' first.".to_string())
         })?;
 
         // Apply context limits
@@ -332,7 +332,7 @@ impl ReplDataApi {
             context
                 .keyspace
                 .as_ref()
-                .ok_or_else(|| Error::Query("No keyspace selected".to_string()))?
+                .ok_or_else(|| Error::InvalidState("No keyspace selected".to_string()))?
                 .clone()
         };
 
@@ -389,7 +389,7 @@ impl ReplDataApi {
             context
                 .keyspace
                 .as_ref()
-                .ok_or_else(|| Error::Query("No keyspace selected".to_string()))?
+                .ok_or_else(|| Error::InvalidState("No keyspace selected".to_string()))?
                 .clone()
         };
 

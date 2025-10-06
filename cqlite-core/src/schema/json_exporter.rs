@@ -327,7 +327,7 @@ impl JsonExporter {
         } else {
             serde_json::to_string(&collection)
         }
-        .map_err(|e| Error::Serialization(e.to_string()))
+        .map_err(|e| Error::serialization(e.to_string()))
     }
 
     // Private implementation methods
@@ -765,7 +765,7 @@ impl JsonExporter {
         } else {
             serde_json::to_string(json_schema)
         }
-        .map_err(|e| Error::Serialization(e.to_string()))
+        .map_err(|e| Error::serialization(e.to_string()))
     }
 }
 

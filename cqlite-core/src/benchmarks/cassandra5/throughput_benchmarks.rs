@@ -303,7 +303,7 @@ impl ThroughputBenchmarks {
                 details,
             })
         } else {
-            Err(crate::Error::validation(
+            Err(crate::Error::invalid_operation(
                 "Missing results for throughput comparison".to_string(),
             ))
         }

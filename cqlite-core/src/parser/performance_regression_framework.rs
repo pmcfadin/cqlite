@@ -190,7 +190,7 @@ impl BaselineStorage {
         }
 
         let json = serde_json::to_string_pretty(baseline).map_err(|e| {
-            crate::Error::Serialization(format!("Failed to serialize baseline: {}", e))
+            crate::Error::serialization(format!("Failed to serialize baseline: {}", e))
         })?;
 
         fs::write(&self.storage_path, json)
@@ -208,7 +208,7 @@ impl BaselineStorage {
             .map_err(|e| crate::Error::storage(format!("Failed to read baseline file: {}", e)))?;
 
         let baseline: BaselineData = serde_json::from_str(&content)
-            .map_err(|e| crate::Error::Serialization(format!("Failed to parse baseline: {}", e)))?;
+            .map_err(|e| crate::Error::serialization(format!("Failed to parse baseline: {}", e)))?;
 
         Ok(Some(baseline))
     }
