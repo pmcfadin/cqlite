@@ -1,1 +1,0 @@
-./scripts/docker/test-docker-infrastructure.sh: line 287: ./target/release/sstabledump-validator: No such file or directory
