@@ -70,6 +70,10 @@ path = "src/bin/issue_17_validation_demo.rs"
 name = "validate_test_sstables"
 path = "src/bin/validate_test_sstables.rs"
 
+[[bin]]
+name = "hardened-validator"
+path = "src/bin/hardened_validator.rs"
+
 [features]
 # Performance benchmarking feature (conditionally compiled in validation/performance.rs)
 benchmarks = []

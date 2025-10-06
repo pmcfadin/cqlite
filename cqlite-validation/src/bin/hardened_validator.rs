@@ -2,13 +2,10 @@
 //! Command-line interface for comprehensive cross-version complex type validation
 
 use clap::{Arg, Command};
-use cqlite_core::{
-    error::Result,
-    schema::UdtRegistry,
-    validation::hardened_validator_parser::{
-        CassandraVersion, HardenedValidatorConfig, HardenedValidatorParser, MemoryLimits,
-        PerformanceTargets,
-    },
+use cqlite_core::{error::Result, schema::UdtRegistry};
+use cqlite_validation::hardened_validator_parser::{
+    CassandraVersion, HardenedValidatorConfig, HardenedValidatorParser, MemoryLimits,
+    PerformanceTargets, ValidationStatus,
 };
 use log::{error, info, warn};
 use std::{path::PathBuf, process, time::Instant};
@@ -407,19 +404,19 @@ async fn main() {
 
     // Determine exit code based on validation status
     let exit_code = match validation_result.status {
-        cqlite_core::validation::hardened_validator_parser::ValidationStatus::Perfect => {
+        ValidationStatus::Perfect => {
             info!("🎉 Perfect validation achieved! 0% false positives/negatives.");
             0
         }
-        cqlite_core::validation::hardened_validator_parser::ValidationStatus::MinorIssues => {
+        ValidationStatus::MinorIssues => {
             warn!("⚠️  Minor issues detected. Review the report for details.");
             0 // Still success, but with warnings
         }
-        cqlite_core::validation::hardened_validator_parser::ValidationStatus::MajorIssues => {
+        ValidationStatus::MajorIssues => {
             error!("🔴 Major issues require attention before production use.");
             1
         }
-        cqlite_core::validation::hardened_validator_parser::ValidationStatus::Failed => {
+        ValidationStatus::Failed => {
             error!("❌ Validation failed. Parser not ready for production.");
             2
         }
