@@ -254,10 +254,10 @@ fn test_error_conversion_to_core_error() {
     // Test syntax error conversion
     let syntax_err = ParserError::syntax("Parse error", pos.clone());
     let core_err: cqlite_core::error::Error = syntax_err.into();
-    // Should convert to SQL parse error - verify error message contains expected text
+    // Should convert to CQL parse error - verify error message contains expected text
     assert!(
         core_err.to_string().contains("Parse error")
-            || matches!(core_err, cqlite_core::error::Error::SqlParse(_))
+            || matches!(core_err, cqlite_core::error::Error::CqlParse(_))
     );
 
     // Test semantic error conversion
@@ -265,7 +265,7 @@ fn test_error_conversion_to_core_error() {
     let core_err: cqlite_core::error::Error = semantic_err.into();
     assert!(
         core_err.to_string().contains("Semantic issue")
-            || matches!(core_err, cqlite_core::error::Error::SqlParse(_))
+            || matches!(core_err, cqlite_core::error::Error::CqlParse(_))
     );
 
     // Test lexical error conversion
@@ -273,7 +273,7 @@ fn test_error_conversion_to_core_error() {
     let core_err: cqlite_core::error::Error = lexical_err.into();
     assert!(
         core_err.to_string().contains("Lexical problem")
-            || matches!(core_err, cqlite_core::error::Error::SqlParse(_))
+            || matches!(core_err, cqlite_core::error::Error::CqlParse(_))
     );
 
     // Test backend error conversion
