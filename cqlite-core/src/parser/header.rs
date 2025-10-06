@@ -37,6 +37,12 @@ pub enum CassandraVersion {
     V5_0FormatC,
     /// Cassandra 5.0 Format D (from test data)
     V5_0FormatD,
+    /// Cassandra 5.0 Format E (composite keys)
+    V5_0FormatE,
+    /// Cassandra 5.0 Format F (TTL support)
+    V5_0FormatF,
+    /// Cassandra 5.0 Format G (counters)
+    V5_0FormatG,
 }
 
 impl CassandraVersion {
@@ -53,6 +59,9 @@ impl CassandraVersion {
             CassandraVersion::V5_0SummaryFormat => 0x0000_0080, // Cassandra 5.0 Summary.db format
             CassandraVersion::V5_0FormatC => 0x8c33_0000, // Cassandra 5.0 Format C
             CassandraVersion::V5_0FormatD => 0x4325_0000, // Cassandra 5.0 Format D
+            CassandraVersion::V5_0FormatE => 0x4225_0000, // Cassandra 5.0 Format E (composite keys)
+            CassandraVersion::V5_0FormatF => 0xEA22_0000, // Cassandra 5.0 Format F (TTL support)
+            CassandraVersion::V5_0FormatG => 0xAF03_0000, // Cassandra 5.0 Format G (counters)
         }
     }
 
@@ -89,6 +98,15 @@ impl CassandraVersion {
             // Cassandra 5.0 Format D (from test data)
             0x4325_0000 => Some(CassandraVersion::V5_0FormatD),
 
+            // Cassandra 5.0 Format E (composite keys)
+            0x4225_0000 => Some(CassandraVersion::V5_0FormatE),
+
+            // Cassandra 5.0 Format F (TTL support)
+            0xEA22_0000 => Some(CassandraVersion::V5_0FormatF),
+
+            // Cassandra 5.0 Format G (counters)
+            0xAF03_0000 => Some(CassandraVersion::V5_0FormatG),
+
             _ => None,
         }
     }
@@ -106,6 +124,9 @@ impl CassandraVersion {
             CassandraVersion::V5_0SummaryFormat => "Cassandra 5.0 Summary.db format",
             CassandraVersion::V5_0FormatC => "Cassandra 5.0 Format C",
             CassandraVersion::V5_0FormatD => "Cassandra 5.0 Format D",
+            CassandraVersion::V5_0FormatE => "Cassandra 5.0 Format E (composite keys)",
+            CassandraVersion::V5_0FormatF => "Cassandra 5.0 Format F (TTL support)",
+            CassandraVersion::V5_0FormatG => "Cassandra 5.0 Format G (counters)",
         }
     }
 }
@@ -125,6 +146,9 @@ pub const SUPPORTED_MAGIC_NUMBERS: &[u32] = &[
     0x0000_0080, // Cassandra 5.0 Summary.db format
     0x8c33_0000, // Cassandra 5.0 Format C
     0x4325_0000, // Cassandra 5.0 Format D
+    0x4225_0000, // Cassandra 5.0 Format E (composite keys)
+    0xEA22_0000, // Cassandra 5.0 Format F (TTL support)
+    0xAF03_0000, // Cassandra 5.0 Format G (counters)
     0x2C00_0000, // Extended format variant A
     0xC302_0000, // Extended format variant B
     0xF81E_0000, // Extended format variant C
@@ -265,7 +289,10 @@ pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion
         CassandraVersion::V5_0NewBig
         | CassandraVersion::V5_0Bti
         | CassandraVersion::V5_0FormatC
-        | CassandraVersion::V5_0FormatD => {
+        | CassandraVersion::V5_0FormatD
+        | CassandraVersion::V5_0FormatE
+        | CassandraVersion::V5_0FormatF
+        | CassandraVersion::V5_0FormatG => {
             // Newer formats may have different version schemes
             // Accept a wider range of versions for forward compatibility
             // V5_0FormatC uses 0xF21F, V5_0FormatD uses 0xF209

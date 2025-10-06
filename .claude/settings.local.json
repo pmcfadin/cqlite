@@ -15,7 +15,13 @@
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build --package cqlite-core --lib)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --workspace --all-targets --all-features)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --workspace --all-targets --all-features --quiet)",
-      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --all-targets --all-features --quiet)"
+      "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy --package cqlite-core --all-targets --all-features --quiet)",
+      "Bash(for file in test-data/datasets/sstables/test_basic/*/nb-1-big-Data.db)",
+      "Bash(hexdump:*)",
+      "Bash(for dir in */)",
+      "Bash(do echo \"=== $dir ===\")",
+      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test index_db_parsing_regression_tests test_partition_lookup_correct_offsets --quiet)",
+      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test index_db_parsing_regression_tests --quiet)"
     ],
     "deny": [],
     "ask": []
