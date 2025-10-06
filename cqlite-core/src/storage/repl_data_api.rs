@@ -3,6 +3,8 @@
 //! This module provides a high-level API for accessing SSTable data from the REPL.
 //! It integrates with the data manager to provide efficient, cached access to real
 //! Cassandra data with support for interactive queries and exploration.
+//!
+//! This module requires the `state_machine` feature for query functionality.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

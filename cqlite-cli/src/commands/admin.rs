@@ -1,8 +1,10 @@
 use crate::cli_types::AdminCommands;
 use anyhow::Result;
+#[cfg(feature = "state_machine")]
 use chrono;
 use cqlite_core::Database;
 
+#[cfg(feature = "state_machine")]
 pub async fn handle_admin_command(database: &Database, command: AdminCommands) -> Result<()> {
     match command {
         AdminCommands::Info => show_database_info(database).await,
@@ -15,6 +17,16 @@ pub async fn handle_admin_command(database: &Database, command: AdminCommands) -
     }
 }
 
+#[cfg(not(feature = "state_machine"))]
+pub async fn handle_admin_command(_database: &Database, _command: AdminCommands) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Admin commands requiring query execution are not available in M1.\n\
+         Build with --features state_machine or use SSTableReader directly.\n\
+         See CLAUDE.md for M1 API examples."
+    ))
+}
+
+#[cfg(feature = "state_machine")]
 async fn show_database_info(database: &Database) -> Result<()> {
     println!("Database Information:");
 
@@ -49,12 +61,15 @@ async fn show_database_info(database: &Database) -> Result<()> {
                 stats.memory_stats.block_cache_hits
             );
 
-            println!("Query Engine Stats:");
-            println!("  - Total queries: {}", stats.query_stats.total_queries);
-            println!(
-                "  - Average execution time: {} μs",
-                stats.query_stats.avg_execution_time_us
-            );
+            #[cfg(feature = "state_machine")]
+            {
+                println!("Query Engine Stats:");
+                println!("  - Total queries: {}", stats.query_stats.total_queries);
+                println!(
+                    "  - Average execution time: {} μs",
+                    stats.query_stats.avg_execution_time_us
+                );
+            }
         }
         Err(e) => {
             println!("Failed to get database statistics: {}", e);
@@ -64,6 +79,7 @@ async fn show_database_info(database: &Database) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 async fn compact_database(database: &Database) -> Result<()> {
     println!("Starting database compaction...");
 
@@ -80,6 +96,7 @@ async fn compact_database(database: &Database) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 async fn backup_database(database: &Database, output: &std::path::Path) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
     use serde_json;
@@ -242,6 +259,7 @@ async fn backup_database(database: &Database, output: &std::path::Path) -> Resul
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 async fn create_basic_backup(
     _database: &Database,
     writer: &mut std::io::BufWriter<std::fs::File>,
@@ -276,6 +294,7 @@ async fn create_basic_backup(
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 async fn restore_database(database: &Database, input: &std::path::Path) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
     use std::fs::File;

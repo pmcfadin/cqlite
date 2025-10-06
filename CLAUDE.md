@@ -165,7 +165,10 @@ Reference files in JSONL format are also required for validation (`.jsonl` files
 
 #### Disabled Features (M2+)
 - `antlr`: ANTLR4 parser integration
-- `state_machine`: Advanced query state orchestration
+- `state_machine`: Advanced query state orchestration (gates entire `query` module at module level)
+  - When disabled, no query code is compiled into M1 builds
+  - Query engine, planner, executor, prepared statements, and caching are all excluded
+  - Use SSTableReader and storage layer directly for M1 reading operations
 - `events`: Validation event recording
 - `tombstones`: Tombstone and garbage collection logic
 - `benchmarks`: Performance benchmark suite
@@ -173,6 +176,58 @@ Reference files in JSONL format are also required for validation (`.jsonl` files
 #### Test Infrastructure Features
 - `test-infrastructure`: Enhanced TestContext framework
 - `docker-integration`: Docker-based integration testing
+
+#### Query Module Gating (Issue #108)
+The entire `query` module is gated behind the `state_machine` feature, which is **DISABLED by default** in M1:
+- Query orchestration, planning, caching, and prepared statements are M2+ features
+- The `Database` struct's query-related methods (`execute()`, `prepare()`, `explain()`) require `state_machine` feature
+- For M1 basic SSTable reading, use the storage layer directly (see M1 API Examples below)
+- **Note**: DashMap and parking_lot dependencies remain required as they're used by the storage layer
+
+To enable query functionality (M2+ development):
+```bash
+cargo build --features state_machine
+```
+
+### M1 API Usage Examples
+
+For M1 milestone (basic SSTable reading), use the storage layer directly without query engine:
+
+#### Opening and Reading an SSTable
+```rust
+use cqlite_core::storage::sstable::reader::SSTableReader;
+
+// Open an SSTable
+let reader = SSTableReader::open("path/to/Data.db").await?;
+
+// Read all entries
+let entries = reader.get_all_entries().await?;
+
+for (table_id, row_key, value) in entries {
+    println!("Table: {}, Key: {:?}, Value: {:?}", table_id, row_key, value);
+}
+```
+
+#### Using Index-Based Partition Lookups
+```rust
+use cqlite_core::storage::sstable::index_reader::IndexReader;
+
+let index = IndexReader::new("path/to/Index.db").await?;
+let partition_offset = index.lookup_partition(&partition_key)?;
+// Use offset to read specific partition from Data.db
+```
+
+#### Working with SSTable Directory
+```rust
+use cqlite_core::storage::sstable::directory::SSTableDirectory;
+
+let dir = SSTableDirectory::discover("/path/to/sstable/dir").await?;
+for component in dir.components() {
+    println!("Component: {:?}", component);
+}
+```
+
+**Note**: The high-level `Database` API with query execution requires the `state_machine` feature and is not available in default M1 builds.
 
 ## Development Guidelines
 

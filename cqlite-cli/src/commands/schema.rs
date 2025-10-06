@@ -8,6 +8,7 @@ use serde_json;
 use std::collections::HashMap;
 use std::path::Path;
 
+#[cfg(feature = "state_machine")]
 pub async fn handle_schema_command(database: &Database, command: SchemaCommands) -> Result<()> {
     match command {
         SchemaCommands::List => list_tables(database).await,
@@ -17,6 +18,16 @@ pub async fn handle_schema_command(database: &Database, command: SchemaCommands)
     }
 }
 
+#[cfg(not(feature = "state_machine"))]
+pub async fn handle_schema_command(_database: &Database, _command: SchemaCommands) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Schema commands requiring query execution are not available in M1.\n\
+         Build with --features state_machine or use SSTableReader directly.\n\
+         See CLAUDE.md for M1 API examples."
+    ))
+}
+
+#[cfg(feature = "state_machine")]
 #[allow(dead_code)]
 async fn list_tables(_database: &Database) -> Result<()> {
     // TODO: Implement actual table listing from database
@@ -29,6 +40,7 @@ async fn list_tables(_database: &Database) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 #[allow(dead_code)]
 async fn describe_table(_database: &Database, table: &str) -> Result<()> {
     // TODO: Implement actual table description from database schema
@@ -42,6 +54,7 @@ async fn describe_table(_database: &Database, table: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 async fn create_table_from_file(database: &Database, file: &Path) -> Result<()> {
     println!("Creating table from DDL file: {}", file.display());
 
@@ -66,6 +79,7 @@ async fn create_table_from_file(database: &Database, file: &Path) -> Result<()> 
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 async fn drop_table(database: &Database, table: &str, force: bool) -> Result<()> {
     if !force {
         // Ask for confirmation

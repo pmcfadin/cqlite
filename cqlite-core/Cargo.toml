@@ -102,6 +102,11 @@ path = "src/bin/test_streaming_performance.rs"
 name = "performance_baseline_runner"
 path = "src/bin/performance_baseline_runner.rs"
 
+[[bin]]
+name = "sstable_data_demo"
+path = "src/bin/sstable_data_demo.rs"
+required-features = ["state_machine"]
+
 [[bench]]
 name = "partition_lookup"
 harness = false

@@ -15,6 +15,7 @@ pub mod benchmarks;
 pub mod memory;
 pub mod performance_monitor;
 pub mod platform;
+#[cfg(feature = "state_machine")]
 pub mod query;
 pub mod schema;
 pub mod storage;
@@ -39,10 +40,13 @@ pub use crate::{
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::{
-    memory::MemoryManager, platform::Platform, query::QueryEngine, schema::SchemaManager,
-    storage::StorageEngine,
-};
+use crate::{memory::MemoryManager, platform::Platform, storage::StorageEngine};
+
+#[cfg(feature = "state_machine")]
+use crate::schema::SchemaManager;
+
+#[cfg(feature = "state_machine")]
+use crate::query::QueryEngine;
 
 /// Main database handle
 ///
@@ -51,6 +55,7 @@ use crate::{
 #[derive(Debug)]
 pub struct Database {
     storage: Arc<StorageEngine>,
+    #[cfg(feature = "state_machine")]
     query: Arc<QueryEngine>,
     memory: Arc<MemoryManager>,
     config: Config,
@@ -94,9 +99,11 @@ impl Database {
         let storage = Arc::new(StorageEngine::open(path, &config, platform.clone()).await?);
 
         // Initialize schema manager
+        #[cfg(feature = "state_machine")]
         let schema = Arc::new(SchemaManager::new_with_storage(storage.clone(), &config).await?);
 
-        // Initialize query engine
+        // Initialize query engine (only when feature enabled)
+        #[cfg(feature = "state_machine")]
         let query = Arc::new(QueryEngine::new(
             storage.clone(),
             schema.clone(),
@@ -106,6 +113,7 @@ impl Database {
 
         Ok(Self {
             storage,
+            #[cfg(feature = "state_machine")]
             query,
             memory,
             config,
@@ -137,6 +145,7 @@ impl Database {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # });
     /// ```
+    #[cfg(feature = "state_machine")]
     pub async fn execute(&self, sql: &str) -> Result<query::result::QueryResult> {
         let result = self.query.execute(sql).await;
 
@@ -160,6 +169,7 @@ impl Database {
     /// # Errors
     ///
     /// Returns an error if SQL syntax is invalid or references non-existent objects
+    #[cfg(feature = "state_machine")]
     pub async fn prepare(&self, sql: &str) -> Result<std::sync::Arc<query::PreparedQuery>> {
         self.query.prepare(sql).await
     }
@@ -173,6 +183,7 @@ impl Database {
     /// # Errors
     ///
     /// Returns an error if SQL syntax is invalid
+    #[cfg(feature = "state_machine")]
     pub async fn explain(&self, sql: &str) -> Result<query::ExplainResult> {
         self.query.explain(sql).await
     }
@@ -182,6 +193,7 @@ impl Database {
         Ok(DatabaseStats {
             storage_stats: self.storage.stats().await?,
             memory_stats: self.memory.stats()?,
+            #[cfg(feature = "state_machine")]
             query_stats: self.query.stats(),
         })
     }
@@ -220,6 +232,7 @@ impl Clone for Database {
     fn clone(&self) -> Self {
         Self {
             storage: self.storage.clone(),
+            #[cfg(feature = "state_machine")]
             query: self.query.clone(),
             memory: self.memory.clone(),
             config: self.config.clone(),
@@ -232,18 +245,21 @@ impl Clone for Database {
 pub struct DatabaseStats {
     /// Storage engine statistics
     pub storage_stats: storage::StorageStats,
-    /// Memory manager statistics  
+    /// Memory manager statistics
     pub memory_stats: memory::MemoryStats,
     /// Query engine statistics
+    #[cfg(feature = "state_machine")]
     pub query_stats: query::QueryStats,
 }
 
 /// A prepared SQL statement that can be executed multiple times
+#[cfg(feature = "state_machine")]
 #[derive(Debug)]
 pub struct PreparedStatement {
     statement: query::PreparedQuery,
 }
 
+#[cfg(feature = "state_machine")]
 impl PreparedStatement {
     /// Execute the prepared statement with the given parameters
     pub async fn execute(&self, params: &[Value]) -> Result<query::result::QueryResult> {
@@ -252,6 +268,7 @@ impl PreparedStatement {
 }
 
 // Re-export query result types for convenience
+#[cfg(feature = "state_machine")]
 pub use query::result::{QueryResult, QueryRow};
 
 #[cfg(test)]
@@ -269,7 +286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "legacy-heuristics")]
+    #[cfg(all(feature = "legacy-heuristics", feature = "state_machine"))]
     async fn test_database_basic_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::test_config();

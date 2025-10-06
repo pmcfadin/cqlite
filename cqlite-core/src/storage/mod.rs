@@ -8,6 +8,7 @@ pub mod sstable;
 pub mod wal;
 
 // REPL data access components
+#[cfg(feature = "state_machine")]
 pub mod repl_data_api;
 pub mod schema_discovery;
 pub mod sstable_data_manager;

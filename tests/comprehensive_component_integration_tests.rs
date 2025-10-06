@@ -126,12 +126,33 @@ impl ComponentIntegrationTestFixture {
 
     /// Create test table schema
     fn create_test_schema(&self) -> Result<TableSchema> {
-        TableSchema::builder()
-            .table_name("test_table")
-            .keyspace_name("test_keyspace")
-            .partition_key("id", ComparatorType::Int)
-            .column("data", ComparatorType::Text)
-            .build()
+        use cqlite_core::schema::{Column, KeyColumn};
+
+        Ok(TableSchema {
+            keyspace: "test_keyspace".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                position: 0,
+                data_type: "int".to_string(),
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                },
+                Column {
+                    name: "data".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+            ],
+            comments: HashMap::new(),
+        })
     }
 }
 
@@ -188,8 +209,8 @@ async fn test_partition_lookup_component_integration() -> Result<()> {
     // Test 1: Basic partition lookup with component integration
     let test_keys = vec![
         RowKey::from(&1i32.to_be_bytes()[..]), // Integer key 1 (from fixture)
-        RowKey::from(b"test_partition_key"),
-        RowKey::from(b"non_existent_key"),
+        RowKey::from(b"test_partition_key".as_slice()),
+        RowKey::from(b"non_existent_key".as_slice()),
     ];
 
     println!("🔍 Testing partition lookups with component integration:");
@@ -212,10 +233,13 @@ async fn test_partition_lookup_component_integration() -> Result<()> {
                 assert!(!value.is_empty(), "Value should not be empty");
 
                 // For minimal fixture, expect "test" value
-                if value.len() == 4 && &value == b"test" {
+                if value.len() == 4 && value.as_bytes().map_or(false, |b| b == b"test") {
                     println!(
                         "    📋 Found expected fixture value: {:?}",
-                        String::from_utf8_lossy(&value)
+                        value
+                            .as_bytes()
+                            .map(String::from_utf8_lossy)
+                            .unwrap_or_default()
                     );
                 }
             }
@@ -389,7 +413,7 @@ async fn test_decompression_component_integration() -> Result<()> {
         total_value_size += value.len();
 
         // Additional validation for specific known data
-        if value.len() == 4 && value == b"test" {
+        if value.len() == 4 && value.as_bytes().map_or(false, |b| b == b"test") {
             println!("  📋 Found expected test value");
         }
     }
@@ -561,7 +585,7 @@ async fn test_component_integration_error_handling() -> Result<()> {
 
     // Test 3: Edge case operations
     let edge_cases = vec![
-        ("empty_key", RowKey::from(b"")),
+        ("empty_key", RowKey::from(b"".as_slice())),
         ("large_key", RowKey::from(&vec![b'x'; 1024][..])),
         ("null_bytes", RowKey::from([0u8; 16].as_ref())),
     ];

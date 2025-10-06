@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use crate::cli::{ExportFormat, ImportFormat, OutputFormat};
+use crate::cli::OutputFormat;
+#[cfg(feature = "state_machine")]
+use crate::cli::{ExportFormat, ImportFormat};
+#[cfg(feature = "state_machine")]
+use indicatif::{ProgressBar, ProgressStyle};
 // use crate::formatter::CqlshTableFormatter;
 // use crate::data_parser::{RealDataParser, ParsedRow};
 
@@ -139,15 +143,18 @@ impl QueryResult {
 // use crate::query_executor::{QueryExecutor, QueryExecutorConfig};
 // use crate::table_scanner::{TableScanner, ScanStrategy, ScanConfig};
 use anyhow::{Context, Result};
+#[cfg(feature = "state_machine")]
+use cqlite_core::Database;
 use cqlite_core::{
     schema::{parse_cql_schema, ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema},
     storage::sstable::{bulletproof_reader::BulletproofReader, reader::SSTableReader},
-    Database,
 };
+#[cfg(feature = "state_machine")]
 use csv::WriterBuilder;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
+#[cfg(feature = "state_machine")]
 use std::fs::File;
+#[cfg(feature = "state_machine")]
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -159,6 +166,7 @@ pub mod schema;
 pub mod docker;
 pub mod info;
 
+#[cfg(feature = "state_machine")]
 pub async fn execute_query(
     database: &Database,
     query: &str,
@@ -280,7 +288,23 @@ pub async fn execute_query(
     Ok(())
 }
 
+#[cfg(not(feature = "state_machine"))]
+pub async fn execute_query(
+    _database: &cqlite_core::Database,
+    _query: &str,
+    _explain: bool,
+    _timing: bool,
+    _format: OutputFormat,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Query execution is not available in M1.\n\
+         Build with --features state_machine to enable this feature.\n\
+         See CLAUDE.md for M1 API examples."
+    ))
+}
+
 /// Print results in CSV format
+#[cfg(feature = "state_machine")]
 fn print_csv_format(result: &cqlite_core::query::result::QueryResult) -> Result<()> {
     use std::io::{self};
 
@@ -309,6 +333,7 @@ fn print_csv_format(result: &cqlite_core::query::result::QueryResult) -> Result<
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 pub async fn import_data(
     database: &Database,
     file: &Path,
@@ -394,7 +419,22 @@ pub async fn import_data(
     Ok(())
 }
 
+#[cfg(not(feature = "state_machine"))]
+pub async fn import_data(
+    _database: &cqlite_core::Database,
+    _file: &Path,
+    _format: crate::cli::ImportFormat,
+    _table: Option<&str>,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Data import is not available in M1.\n\
+         Build with --features state_machine to enable this feature.\n\
+         See CLAUDE.md for M1 API examples."
+    ))
+}
+
 /// Import CSV data into the specified table
+#[cfg(feature = "state_machine")]
 async fn import_csv_data(
     database: &Database,
     file: &Path,
@@ -488,6 +528,7 @@ async fn import_csv_data(
 }
 
 /// Import JSON data into the specified table
+#[cfg(feature = "state_machine")]
 async fn import_json_data(
     database: &Database,
     file: &Path,
@@ -572,6 +613,7 @@ async fn import_json_data(
 }
 
 /// Execute a batch of INSERT statements
+#[cfg(feature = "state_machine")]
 async fn execute_batch_statements(
     database: &Database,
     statements: &mut Vec<String>,
@@ -596,6 +638,7 @@ async fn execute_batch_statements(
 }
 
 /// Get table columns for schema validation
+#[cfg(feature = "state_machine")]
 async fn get_table_columns(database: &Database, table: &str) -> Result<Vec<String>> {
     let query = format!("SELECT column_name FROM system.columns WHERE table_name = '{table}'");
     match database.execute(&query).await {
@@ -612,6 +655,7 @@ async fn get_table_columns(database: &Database, table: &str) -> Result<Vec<Strin
     }
 }
 
+#[cfg(feature = "state_machine")]
 pub async fn export_data(
     database: &Database,
     source: &str,
@@ -706,7 +750,22 @@ pub async fn export_data(
     Ok(())
 }
 
+#[cfg(not(feature = "state_machine"))]
+pub async fn export_data(
+    _database: &cqlite_core::Database,
+    _source: &str,
+    _file: &Path,
+    _format: crate::cli::ExportFormat,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Data export is not available in M1.\n\
+         Build with --features state_machine to enable this feature.\n\
+         See CLAUDE.md for M1 API examples."
+    ))
+}
+
 /// Export query result to CSV format
+#[cfg(feature = "state_machine")]
 async fn export_to_csv(
     result: &cqlite_core::query::result::QueryResult,
     file: &Path,
@@ -748,6 +807,7 @@ async fn export_to_csv(
 }
 
 /// Export query result to JSON format
+#[cfg(feature = "state_machine")]
 async fn export_to_json(
     result: &cqlite_core::query::result::QueryResult,
     file: &Path,
@@ -808,6 +868,7 @@ async fn export_to_json(
 }
 
 /// Export query result to SQL INSERT statements
+#[cfg(feature = "state_machine")]
 async fn export_to_sql(
     result: &cqlite_core::query::result::QueryResult,
     file: &Path,
@@ -1383,6 +1444,7 @@ fn display_yaml_format(rows: &[ParsedRow]) -> Result<()> {
 }
 
 /// Export SSTable data to file
+#[cfg(feature = "state_machine")]
 pub async fn export_sstable(
     sstable_path: &Path,
     schema_path: &Path,
@@ -1422,6 +1484,7 @@ pub async fn export_sstable(
 }
 
 /// Export SSTable data as JSON
+#[cfg(feature = "state_machine")]
 async fn export_as_json(
     reader: &SSTableReader,
     schema: &TableSchema,
@@ -1456,6 +1519,7 @@ async fn export_as_json(
 }
 
 /// Export SSTable data as CSV
+#[cfg(feature = "state_machine")]
 async fn export_as_csv(
     reader: &SSTableReader,
     schema: &TableSchema,
@@ -1501,6 +1565,7 @@ async fn export_as_csv(
 }
 
 /// Export SSTable data as SQL INSERT statements
+#[cfg(feature = "state_machine")]
 async fn export_as_sql(
     reader: &SSTableReader,
     schema: &TableSchema,

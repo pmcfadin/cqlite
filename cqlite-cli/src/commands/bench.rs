@@ -1,11 +1,16 @@
 use crate::cli_types::BenchCommands;
 use anyhow::Result;
+#[cfg(feature = "state_machine")]
 use chrono;
 use cqlite_core::Database;
+#[cfg(feature = "state_machine")]
 use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(feature = "state_machine")]
 use std::sync::Arc;
+#[cfg(feature = "state_machine")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "state_machine")]
 pub async fn handle_bench_command(database: &Database, command: BenchCommands) -> Result<()> {
     match command {
         BenchCommands::Read {
@@ -34,6 +39,16 @@ pub async fn handle_bench_command(database: &Database, command: BenchCommands) -
     }
 }
 
+#[cfg(not(feature = "state_machine"))]
+pub async fn handle_bench_command(_database: &Database, _command: BenchCommands) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Benchmark commands requiring query execution are not available in M1.\n\
+         Build with --features state_machine or use SSTableReader directly.\n\
+         See CLAUDE.md for M1 API examples."
+    ))
+}
+
+#[cfg(feature = "state_machine")]
 async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Result<()> {
     let _database = Arc::new(database.clone());
     println!("📚 Running read benchmark");
@@ -140,6 +155,7 @@ async fn run_read_benchmark(database: &Database, ops: u64, threads: u32) -> Resu
 }
 
 /// Simple read benchmark using system queries when benchmark table is not available
+#[cfg(feature = "state_machine")]
 async fn run_simple_read_benchmark(database: &Database, ops: u64, _threads: u32) -> Result<()> {
     let pb = create_progress_bar(ops, "Simple reads");
     let start = Instant::now();
@@ -177,6 +193,7 @@ async fn run_simple_read_benchmark(database: &Database, ops: u64, _threads: u32)
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Result<()> {
     let _database = Arc::new(database.clone());
     println!("✏️  Running write benchmark");
@@ -288,6 +305,7 @@ async fn run_write_benchmark(database: &Database, ops: u64, threads: u32) -> Res
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 async fn run_mixed_benchmark(
     database: &Database,
     read_pct: u8,
@@ -536,6 +554,7 @@ async fn run_mixed_benchmark(
 }
 
 /// Simple mixed benchmark using system queries when benchmark table is not available
+#[cfg(feature = "state_machine")]
 async fn run_simple_mixed_benchmark(
     database: &Database,
     read_pct: u8,
@@ -578,6 +597,7 @@ async fn run_simple_mixed_benchmark(
     Ok(())
 }
 
+#[cfg(feature = "state_machine")]
 fn create_progress_bar(total: u64, prefix: &str) -> ProgressBar {
     let pb = ProgressBar::new(total);
     pb.set_style(
@@ -593,6 +613,7 @@ fn create_progress_bar(total: u64, prefix: &str) -> ProgressBar {
 }
 
 /// Setup benchmark table for performance testing
+#[cfg(feature = "state_machine")]
 async fn setup_benchmark_table(database: &Database) -> Result<()> {
     let create_table_sql = r#"
         CREATE TABLE IF NOT EXISTS benchmark_table (
@@ -612,6 +633,7 @@ async fn setup_benchmark_table(database: &Database) -> Result<()> {
 }
 
 /// Populate benchmark table with test data
+#[cfg(feature = "state_machine")]
 async fn populate_benchmark_data(database: &Database, num_rows: u64) -> Result<u64> {
     // Check if table already has data
     match database
