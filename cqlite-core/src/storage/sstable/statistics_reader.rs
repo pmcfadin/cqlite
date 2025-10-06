@@ -69,13 +69,21 @@ impl StatisticsReader {
             }
         };
 
-        // Validate checksum if present (for enhanced parser, checksums are handled differently)
+        // Checksum validation: DEFERRED TO M2 MILESTONE
+        //
+        // The nb-format Statistics.db checksum algorithm is not yet implemented (Issue #28).
+        // The checksum field (header.checksum) contains a value but we cannot validate it
+        // without knowing the exact algorithm Cassandra 5.0+ uses for this file format.
+        //
+        // Known limitations:
+        // - Files with corrupt data may be silently accepted
+        // - No data integrity guarantee for Statistics.db parsing
+        // - M2 milestone will implement proper CRC32/Adler32/other validation
+        //
+        // This limitation is explicitly documented rather than silently ignored.
+        // Statistics.db is metadata-only (not critical path) so risk is acceptable for M1.
         if statistics.header.checksum != 0 {
-            // For nb format, the checksum field may not be a simple CRC32
-            // Skip validation for now as the format is more complex
-            // For nb format, the checksum field may not be a simple CRC32
-            // Skip validation for now as the format is more complex
-            // TODO: Add proper checksum validation for nb format
+            // Checksum present but not validated - this is a known M1 limitation
         }
 
         Ok(Self {

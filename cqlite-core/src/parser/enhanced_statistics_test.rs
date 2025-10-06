@@ -345,24 +345,22 @@ mod tests {
         assert_eq!(header.version, 4);
         assert_eq!(header.statistics_kind, 0x26291b05);
         assert_eq!(header.data_length, 44);
-        assert_eq!(header.metadata2, 101); // This becomes our row count estimate
+        assert_eq!(header.metadata2, 101);
 
-        // Test statistics extraction
+        // Test statistics extraction now returns error per Issue #28
         let dummy_binary_data = vec![0u8; 1000];
         let result = parse_nb_format_statistics_data(&dummy_binary_data, &header);
-        assert!(result.is_ok(), "Statistics data extraction should succeed");
+        assert!(
+            result.is_err(),
+            "Statistics data extraction should return error (deferred to M2)"
+        );
 
-        let (row_stats, timestamp_stats, table_stats, partition_stats, compression_stats) =
-            result.unwrap();
-
-        // Validate extracted statistics
-        assert_eq!(row_stats.total_rows, 101); // Should match metadata2
-        assert!(row_stats.live_rows > 0);
-        assert!(row_stats.partition_count > 0);
-        assert!(timestamp_stats.max_timestamp > timestamp_stats.min_timestamp);
-        assert!(table_stats.disk_size > 0);
-        assert!(partition_stats.avg_partition_size > 0.0);
-        assert_eq!(compression_stats.algorithm, "LZ4");
+        // Verify error message contains expected content
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            assert!(error_msg.contains("deferred to M2"));
+            assert!(error_msg.contains("Issue #28"));
+        }
     }
 
     /// Test fallback parser behavior
@@ -373,7 +371,7 @@ mod tests {
         let result = parse_statistics_with_fallback(&invalid_data);
         assert!(result.is_err(), "Invalid data should fail to parse");
 
-        // Test with valid header but no data
+        // Test with valid header - should now fail since parsing is deferred to M2
         let minimal_data = vec![
             0x00, 0x00, 0x00, 0x04, // version = 4
             0x26, 0x29, 0x1b, 0x05, // statistics_kind
@@ -386,6 +384,9 @@ mod tests {
         ];
 
         let result = parse_statistics_with_fallback(&minimal_data);
-        assert!(result.is_ok(), "Valid header should parse successfully");
+        assert!(
+            result.is_err(),
+            "Valid header should fail since statistics parsing is deferred to M2"
+        );
     }
 }

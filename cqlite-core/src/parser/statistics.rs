@@ -239,38 +239,90 @@ pub fn parse_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> 
     ))
 }
 
-/// Parse the Statistics.db file header - legacy format support
-/// This function is kept for backward compatibility
+/// Parse the Statistics.db file header with authoritative format detection
+///
+/// Statistics.db format is definitively identified by the version field:
+/// - **Version 4**: 'nb' (new big) format - Cassandra 5.0+ enhanced statistics
+///     - Structure: version(4) + statistics_kind(4) + reserved(4) + data_length(4) +
+///       metadata1(4) + metadata2(4) + metadata3(4) + checksum(4) = 32 bytes
+///     - Authoritative marker: version == 4
+///     - Used by: Cassandra 5.0+ with 'nb' SSTable format
+///
+/// - **Versions 1-3**: Legacy format - pre-Cassandra 5.0 statistics
+///     - Structure: version(4) + table_id(16) + section_count(4) + file_size(8) + checksum(4) = 36 bytes
+///     - Authoritative marker: version in range 1..=3
+///     - Used by: Cassandra 3.x and 4.x
+///
+/// Any other version number is unsupported and results in a parse error.
 pub fn parse_statistics_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> {
-    let (input, version) = be_u32(input)?;
+    let (remaining, version) = be_u32(input)?;
 
-    // Check if this looks like the new 'nb' format
-    if version == 4 && input.len() >= 28 {
-        // This is likely the new format, parse accordingly
-        let (input, statistics_kind) = be_u32(input)?;
-        let (input, _reserved) = be_u32(input)?;
-        let (input, data_length) = be_u32(input)?;
-        let (input, metadata1) = be_u32(input)?;
-        let (input, metadata2) = be_u32(input)?;
-        let (input, metadata3) = be_u32(input)?;
-        let (input, checksum) = be_u32(input)?;
+    match version {
+        // nb-format: Cassandra 5.0+ enhanced statistics (version 4)
+        // This is the authoritative format identifier - no heuristics needed
+        4 => parse_nb_format_header(remaining, version),
 
-        return Ok((
+        // Legacy format: Cassandra 3.x/4.x statistics (versions 1-3)
+        // Definitively identified by version range
+        1..=3 => parse_legacy_format_header(remaining, version),
+
+        // Unknown/unsupported version - fail explicitly
+        // This ensures we never silently misparse corrupt or future formats
+        _ => Err(nom::Err::Error(nom::error::Error::new(
             input,
-            StatisticsHeader {
-                version,
-                statistics_kind,
-                data_length,
-                metadata1,
-                metadata2,
-                metadata3,
-                checksum,
-                table_id: None, // Will be populated later if found
-            },
-        ));
+            nom::error::ErrorKind::Verify,
+        ))),
     }
+}
 
-    // Legacy format parsing
+/// Parse nb-format (version 4) Statistics.db header
+///
+/// Format structure (Cassandra 5.0+):
+/// ```text
+/// [0..4]   version: u32          = 4 (nb-format identifier)
+/// [4..8]   statistics_kind: u32  (statistics type/kind identifier)
+/// [8..12]  reserved: u32         (reserved field, typically 0)
+/// [12..16] data_length: u32      (length of statistics data section)
+/// [16..20] metadata1: u32        (metadata field 1)
+/// [20..24] metadata2: u32        (metadata field 2)
+/// [24..28] metadata3: u32        (metadata field 3)
+/// [28..32] checksum: u32         (CRC32 checksum)
+/// ```
+fn parse_nb_format_header(input: &[u8], version: u32) -> IResult<&[u8], StatisticsHeader> {
+    let (input, statistics_kind) = be_u32(input)?;
+    let (input, _reserved) = be_u32(input)?;
+    let (input, data_length) = be_u32(input)?;
+    let (input, metadata1) = be_u32(input)?;
+    let (input, metadata2) = be_u32(input)?;
+    let (input, metadata3) = be_u32(input)?;
+    let (input, checksum) = be_u32(input)?;
+
+    Ok((
+        input,
+        StatisticsHeader {
+            version,
+            statistics_kind,
+            data_length,
+            metadata1,
+            metadata2,
+            metadata3,
+            checksum,
+            table_id: None, // nb-format does not include table_id in header
+        },
+    ))
+}
+
+/// Parse legacy format (versions 1-3) Statistics.db header
+///
+/// Format structure (Cassandra 3.x/4.x):
+/// ```text
+/// [0..4]   version: u32          = 1, 2, or 3 (legacy format identifier)
+/// [4..20]  table_id: [u8; 16]    (UUID of the table)
+/// [20..24] section_count: u32    (number of statistics sections)
+/// [24..32] file_size: u64        (total file size)
+/// [32..36] checksum: u32         (CRC32 checksum)
+/// ```
+fn parse_legacy_format_header(input: &[u8], version: u32) -> IResult<&[u8], StatisticsHeader> {
     let (input, table_id_raw) = take(16u8)(input)?;
     let mut table_id_array = [0u8; 16];
     table_id_array.copy_from_slice(table_id_raw);
@@ -704,6 +756,97 @@ mod tests {
         // assert_eq!(header.section_count, 5); // Field not available
         // assert_eq!(header.file_size, 4096); // Field not available
         assert_eq!(header.checksum, 0x12345678);
+    }
+
+    #[test]
+    fn test_nb_format_authoritative_detection() {
+        // nb-format (version 4) - should parse as nb-format
+        let nb_data = vec![
+            0x00, 0x00, 0x00, 0x04, // version = 4 (authoritative nb-format marker)
+            0x26, 0x29, 0x1b, 0x05, // statistics_kind
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x2c, // data_length = 44
+            0x00, 0x00, 0x00, 0x01, // metadata1 = 1
+            0x00, 0x00, 0x00, 0x65, // metadata2 = 101
+            0x00, 0x00, 0x00, 0x02, // metadata3 = 2
+            0x00, 0x00, 0x14, 0xd4, // checksum = 5332
+        ];
+
+        let result = parse_statistics_header(&nb_data);
+        assert!(result.is_ok());
+
+        let (_, header) = result.unwrap();
+        assert_eq!(header.version, 4);
+        assert_eq!(header.statistics_kind, 0x26291b05);
+        assert_eq!(header.data_length, 44);
+        assert!(header.table_id.is_none()); // nb-format has no table_id
+    }
+
+    #[test]
+    fn test_legacy_format_authoritative_detection() {
+        // Legacy format (version 2) - should parse as legacy
+        let legacy_data = vec![
+            0x00, 0x00, 0x00, 0x02, // version = 2 (authoritative legacy marker)
+            // table_id (16 bytes)
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x00, 0x00, 0x00, 0x00, 0x0A, // section_count = 10
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, // file_size = 65536
+            0xAB, 0xCD, 0xEF, 0x12, // checksum
+        ];
+
+        let result = parse_statistics_header(&legacy_data);
+        assert!(result.is_ok());
+
+        let (_, header) = result.unwrap();
+        assert_eq!(header.version, 2);
+        assert_eq!(header.statistics_kind, 0); // legacy format doesn't use this
+        assert!(header.table_id.is_some()); // legacy format has table_id
+    }
+
+    #[test]
+    fn test_unsupported_version_rejection() {
+        // Version 0 - should be rejected
+        let invalid_v0 = vec![
+            0x00, 0x00, 0x00, 0x00, // version = 0 (invalid)
+            0x00, 0x00, 0x00, 0x00, // ...rest doesn't matter
+        ];
+        assert!(parse_statistics_header(&invalid_v0).is_err());
+
+        // Version 5 - should be rejected (future/unknown version)
+        let invalid_v5 = vec![
+            0x00, 0x00, 0x00, 0x05, // version = 5 (unsupported)
+            0x00, 0x00, 0x00, 0x00, // ...rest doesn't matter
+        ];
+        assert!(parse_statistics_header(&invalid_v5).is_err());
+
+        // Version 255 - should be rejected
+        let invalid_v255 = vec![
+            0x00, 0x00, 0x00, 0xFF, // version = 255 (unsupported)
+            0x00, 0x00, 0x00, 0x00, // ...rest doesn't matter
+        ];
+        assert!(parse_statistics_header(&invalid_v255).is_err());
+    }
+
+    #[test]
+    fn test_no_heuristics_version_4_with_short_input() {
+        // Previous implementation used heuristic: version == 4 && input.len() >= 28
+        // New implementation uses ONLY version number - no length check heuristic
+        // This test ensures we don't fall back to legacy parsing with short input
+
+        let short_nb_data = vec![
+            0x00, 0x00, 0x00, 0x04, // version = 4 (authoritative nb-format)
+            0x26, 0x29, 0x1b, 0x05, // statistics_kind
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00,
+            0x2c, // data_length = 44
+                  // Missing remaining fields - should fail parsing, not switch formats
+        ];
+
+        let result = parse_statistics_header(&short_nb_data);
+        // Should fail because version 4 DEFINITIVELY means nb-format
+        // and nb-format requires 32 bytes. This is NOT a heuristic,
+        // it's the authoritative format specification.
+        assert!(result.is_err());
     }
 
     #[test]
