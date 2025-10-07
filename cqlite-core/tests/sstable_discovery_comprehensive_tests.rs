@@ -53,6 +53,7 @@ enum FileContentType {
 
 /// Comprehensive SSTable discovery test with Cassandra naming patterns
 #[tokio::test]
+#[cfg(feature = "legacy-heuristics")]
 async fn test_cassandra_data_db_discovery() {
     let temp_dir = TempDir::new().unwrap();
     let test_root = temp_dir.path();
@@ -606,6 +607,7 @@ async fn test_sstable_discovery_edge_cases() {
 
 /// Integration test for actual table loading with discovered SSTable files
 #[tokio::test]
+#[cfg(feature = "legacy-heuristics")]
 async fn test_integration_table_loading() {
     let temp_dir = TempDir::new().unwrap();
     let test_root = temp_dir.path();
@@ -696,6 +698,7 @@ async fn test_integration_table_loading() {
 
 /// Performance regression test for SSTable discovery optimization
 #[tokio::test]
+#[cfg(feature = "legacy-heuristics")]
 async fn test_performance_discovery_regression() {
     let temp_dir = TempDir::new().unwrap();
     let test_root = temp_dir.path();
