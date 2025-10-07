@@ -21,7 +21,10 @@ pub mod schema;
 pub mod storage;
 
 // Docker integration for testing
+#[cfg(feature = "docker-integration")]
 pub mod docker;
+// Testing utilities - hidden from public docs via #[doc(hidden)] but available for integration tests
+#[doc(hidden)]
 pub mod testing;
 
 // Memory safety testing modules

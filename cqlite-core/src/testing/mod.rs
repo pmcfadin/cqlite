@@ -1,7 +1,9 @@
 /// Testing utilities module
+#[cfg(feature = "docker-integration")]
 pub mod cassandra_test;
 pub mod dataset_helpers;
 
+#[cfg(feature = "docker-integration")]
 pub use cassandra_test::{CassandraTestRunner, ComparisonResult, TestResult, TestSuiteResult};
 pub use dataset_helpers::{
     // Root-agnostic helpers
