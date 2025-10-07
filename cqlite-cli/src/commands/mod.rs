@@ -165,6 +165,7 @@ pub mod schema;
 
 pub mod docker;
 pub mod info;
+pub mod read_sstable;
 
 #[cfg(feature = "state_machine")]
 pub async fn execute_query(

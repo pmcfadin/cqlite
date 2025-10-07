@@ -17,6 +17,7 @@ mod output;
 mod script_executor;
 
 use cli_types::{AdminCommands, Cli, Commands};
+use commands::info::execute_info_command;
 // mod data_parser;
 // mod formatter; // New cqlsh-compatible formatter
 // mod interactive;
@@ -166,18 +167,14 @@ async fn run_main() -> Result<()> {
             format,
             limit,
             skip,
-            keys_only: _,
-            raw: _,
-            verbose: _,
+            keys_only,
+            raw,
+            verbose,
         }) => {
-            // Since ReadSstable in cli_types.rs doesn't have schema, we'll need to modify this
-            // For now, create a minimal implementation that works with the new structure
-            println!("📖 Reading SSTable: {}", file.display());
-            println!("Format: {}, Limit: {:?}, Skip: {}", format, limit, skip);
-            println!(
-                "Note: SSTable reading functionality needs to be updated for new CLI structure"
-            );
-            Ok(())
+            commands::read_sstable::execute_read_sstable_command(
+                &file, format, limit, skip, keys_only, raw, verbose,
+            )
+            .await
         }
         Some(Commands::Info {
             path,
@@ -186,16 +183,16 @@ async fn run_main() -> Result<()> {
         }) => {
             match path {
                 Some(path) => {
-                    // Check if the path exists
-                    if !path.exists() {
-                        eprintln!("Error: Path does not exist: {}", path.display());
-                        std::process::exit(1);
-                    }
-
-                    println!("📋 Displaying information for: {}", path.display());
-                    println!("Format: {}, Detailed: {}", format, detailed);
-                    println!("Note: Info functionality needs to be updated for new CLI structure");
-                    Ok(())
+                    execute_info_command(
+                        &path,
+                        detailed,
+                        format,
+                        false, // validate - default to false
+                        cli.schema.as_deref(),
+                        cli.auto_detect,
+                        cli.cassandra_version.clone(),
+                    )
+                    .await
                 }
                 None => {
                     println!("📋 Displaying database information");
