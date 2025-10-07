@@ -1,4 +1,4 @@
-name: M1 Minimal CI Pipeline (Core Reading Library)
+name: "CI: Core Library (minimal)"
 
 on:
   push:
@@ -18,9 +18,9 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # Core M1 Requirements - Ubuntu Only
+  # Core validation - Ubuntu Only
   m1-core-validation:
-    name: 🎯 M1 Core Validation (Ubuntu)
+    name: 🎯 Core Validation (Ubuntu)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     continue-on-error: false
@@ -100,10 +100,19 @@ jobs:
       run: |
         echo "::group::Code Formatting Check"
         if ! cargo fmt --all -- --check; then
-          echo "❌ Code formatting issues detected"
-          echo "💡 Fix with: cargo fmt --all"
-          echo "::error::Code formatting check failed. Run 'cargo fmt --all' to fix."
-          exit 1
+          echo "⚠️ cargo fmt reported an error; falling back to tracked files only"
+          FILES=$(git ls-files '*.rs')
+          if [ -z "$FILES" ]; then
+            echo "ℹ️ No Rust files found to format"
+            echo "::endgroup::"
+            exit 0
+          fi
+          if ! rustfmt --edition 2021 --check $FILES; then
+            echo "❌ Code formatting issues detected"
+            echo "💡 Fix with: cargo fmt --all"
+            echo "::error::Code formatting check failed. Run 'cargo fmt --all' to fix."
+            exit 1
+          fi
         fi
         echo "✅ Code formatting check passed"
         echo "::endgroup::"
@@ -227,9 +236,9 @@ jobs:
         echo "✅ Core library build passed"
         echo "::endgroup::"
 
-  # SSTableDump Parity Harness (Required for M1)
+  # SSTableDump Parity Harness
   sstabledump-parity-m1:
-    name: 🔄 SSTableDump Parity Harness (M1 Required)
+    name: 🔄 SSTableDump Parity Harness
     runs-on: ubuntu-latest
     timeout-minutes: 35
     continue-on-error: false
@@ -587,9 +596,9 @@ jobs:
         
         echo "::endgroup::"
 
-  # M1 Coverage Analysis (Informational)
+  # Coverage Analysis (informational)
   m1-coverage-analysis:
-    name: 📊 M1 Coverage Analysis (Informational)
+    name: 📊 Coverage Analysis (informational)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true  # Non-blocking for M1
@@ -760,9 +769,9 @@ jobs:
         
         echo "::endgroup::"
 
-  # M1 Success Summary
+  # Pipeline Summary
   m1-pipeline-summary:
-    name: 🎉 M1 Pipeline Summary  
+    name: 🎉 Pipeline Summary  
     runs-on: ubuntu-latest
     needs: [m1-core-validation, sstabledump-parity-m1, m1-coverage-analysis]
     if: always()

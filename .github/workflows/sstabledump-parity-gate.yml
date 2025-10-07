@@ -1,4 +1,4 @@
-name: SSTableDump Parity Gate (Issue #38)
+name: "CI: SSTableDump Parity Gate"
 
 on:
   pull_request:

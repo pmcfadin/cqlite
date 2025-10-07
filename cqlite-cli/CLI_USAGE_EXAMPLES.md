@@ -1,53 +1,61 @@
-# CQLite CLI Usage Examples
+# CQLite CLI Usage Examples (M2)
 
-This document demonstrates the CLI tool commands that have been implemented.
+This document shows one‑shot and REPL usage aligned with the M2 CLI spec.
 
 ## Core Commands
 
-### Reading SSTable Files
+### One‑Shot Queries Against Local Data (recommended during dev)
 
 ```bash
-# Read SSTable with schema and display as table (default)
-cqlite read /path/to/users.sstable --schema schema_example.json
+# Absolute paths for repo test-data
+SCHEMA=/Users/patrick/local_projects/cqlite/test-data/schemas
+DATA_DIR=/Users/patrick/local_projects/cqlite/test-data/datasets
 
-# Limit output to 50 rows
-cqlite read /path/to/users.sstable --schema schema_example.json --limit 50
-
-# Skip first 100 rows, show next 25
-cqlite read /path/to/users.sstable --schema schema_example.json --skip 100 --limit 25
+# Execute a simple query, cqlsh-style table output
+cargo run -p cqlite-cli -- \
+  --schema "$SCHEMA" \
+  --data-dir "$DATA_DIR" \
+  -e "SELECT * FROM ks.users LIMIT 5" --out table
 
 # Output as JSON
-cqlite read /path/to/users.sstable --schema schema_example.json --format json
+cargo run -p cqlite-cli -- \
+  --schema "$SCHEMA" \
+  --data-dir "$DATA_DIR" \
+  -e "SELECT id, name FROM ks.users LIMIT 3" --out json
 
 # Output as CSV
-cqlite read /path/to/users.sstable --schema schema_example.json --format csv
+cargo run -p cqlite-cli -- \
+  --schema "$SCHEMA" \
+  --data-dir "$DATA_DIR" \
+  -e "SELECT id, email FROM ks.users LIMIT 3" --out csv
 
-# Output as YAML
-cqlite read /path/to/users.sstable --schema schema_example.json --format yaml
+# Run a script of statements
+cargo run -p cqlite-cli -- \
+  --schema "$SCHEMA" \
+  --data-dir "$DATA_DIR" \
+  -f statements.cql --out table
 ```
 
-### Schema Validation
+### REPL (Interactive)
 
 ```bash
-# Validate a schema JSON file
-cqlite schema validate schema_example.json
+cargo run -p cqlite-cli -- repl
 
-# Example successful validation output:
-# ✅ Schema validation successful!
-# Table: users
-# Columns: 4
-#   1. id (UUID)
-#   2. name (Text)
-#   3. email (Text) 
-#   4. created_at (Timestamp)
-# Primary key: id
+# In REPL:
+:config data-dir /Users/patrick/local_projects/cqlite/test-data/datasets
+:schema load /Users/patrick/local_projects/cqlite/test-data/schemas
+:status
+:keyspaces
+:tables
+DESCRIBE ks.users;
+SELECT id, name FROM users LIMIT 5;
 ```
 
-### SSTable Information
+### SSTable Information (low-level helpers)
 
 ```bash
 # Show SSTable metadata and statistics
-cqlite info /path/to/users.sstable
+cargo run -p cqlite-cli -- info /path/to/users.sstable
 
 # Example output:
 # SSTable Information
@@ -59,17 +67,14 @@ cqlite info /path/to/users.sstable
 # Format version: 3.11
 ```
 
-### Export Data
+### Export Data (JSON/CSV)
 
 ```bash
 # Export SSTable data to JSON file
-cqlite export dummy --sstable /path/to/users.sstable --schema schema_example.json /path/to/output.json --format json
+cargo run -p cqlite-cli -- export dummy --sstable /path/to/users.sstable --schema "$SCHEMA" /tmp/output.json --format json
 
 # Export to CSV
-cqlite export dummy --sstable /path/to/users.sstable --schema schema_example.json /path/to/output.csv --format csv
-
-# Export to SQL INSERT statements
-cqlite export dummy --sstable /path/to/users.sstable --schema schema_example.json /path/to/output.sql --format sql
+cargo run -p cqlite-cli -- export dummy --sstable /path/to/users.sstable --schema "$SCHEMA" /tmp/output.csv --format csv
 ```
 
 ## Key Features Implemented
@@ -111,13 +116,14 @@ cqlite export dummy --sstable /path/to/users.sstable --schema schema_example.jso
 - Skip functionality for pagination
 - Progress tracking for large files
 
-## Command Structure
+## Command Structure (M2)
 
 ### Main Commands
-- `cqlite read <sstable> --schema <json>` - Read and display SSTable data
-- `cqlite info <sstable>` - Show SSTable information
-- `cqlite schema validate <json>` - Validate schema file
-- `cqlite export <source> --sstable <path> --schema <json> <output> --format <format>` - Export data
+- `cqlite --schema <PATH> --data-dir <DIR> -e <CQL> --out <table|json|csv>`
+- `cqlite --schema <PATH> --data-dir <DIR> -f <CQL_FILE> --out <table|json|csv>`
+- `cqlite repl` (interactive)
+- `cqlite info <sstable_or_dir>`
+- `cqlite read-sstable <sstable_or_dir> --schema <FILE> --format <table|json|csv>`
 
 ### Global Options
 - `--format <table|json|csv|yaml>` - Output format (default: table)
@@ -125,12 +131,16 @@ cqlite export dummy --sstable /path/to/users.sstable --schema schema_example.jso
 - `--quiet` - Suppress output
 - `--config <file>` - Configuration file path
 
-### Read Command Options
-- `--limit <n>` - Maximum number of rows to display
-- `--skip <n>` - Number of rows to skip
-- `--schema <path>` - Schema JSON file (required)
+### One‑Shot Options
+- `--schema <FILE|DIR>` - Schema sources (CQL/JSON), repeatable
+- `--data-dir <DIR>` - Cassandra data root directory
+- `-e/--execute <CQL>` - Execute a single statement
+- `-f/--file <CQL_FILE>` - Execute statements from file
+- `--out <table|json|csv>` - Output format (default table)
+- `--limit <n>` - Maximum number of rows
+- `--page-size <n>` - Reader/display pagination size
 
-## Example Schema File
+## Example Schema File (JSON)
 
 ```json
 {
@@ -157,26 +167,9 @@ cqlite export dummy --sstable /path/to/users.sstable --schema schema_example.jso
 }
 ```
 
-## Implementation Status
+## Environment Variables
 
-✅ **Completed**:
-- CLI argument parsing with clap
-- Command structure and routing
-- Schema validation functionality
-- SSTable reading framework
-- Multiple output format support
-- Progress bar integration
-- Error handling and user feedback
-- Help text and documentation
-
-⏳ **Dependencies**:
-- Core library compilation issues must be resolved
-- SSTableReader implementation needs completion
-- TableSchema deserialization must be working
-
-🔄 **Next Steps**:
-1. Fix core library compilation errors
-2. Test CLI with real SSTable files
-3. Add integration tests
-4. Performance optimization
-5. Add more export formats (Parquet)
+```bash
+export CQLITE_SCHEMA=/Users/patrick/local_projects/cqlite/test-data/schemas
+export CQLITE_DATA_DIR=/Users/patrick/local_projects/cqlite/test-data/datasets
+```

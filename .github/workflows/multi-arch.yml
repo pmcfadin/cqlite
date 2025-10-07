@@ -1,4 +1,4 @@
-name: Multi-Architecture Testing (Disabled for M1)
+name: "CI: Multi-Architecture Testing"
 
 on:
   workflow_dispatch:

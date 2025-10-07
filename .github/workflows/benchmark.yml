@@ -1,4 +1,4 @@
-name: Performance Regression Detection (Disabled for M1)
+name: "CI: Performance Regression"
 
 on:
   workflow_dispatch:

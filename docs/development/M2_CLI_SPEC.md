@@ -279,9 +279,70 @@ cqlite> :quit
 
 ---
 
-### Acceptance for M2
+### Acceptance for M2 (final)
 
-- One‑shot: Run query against local SSTable data with provided schema, JSON/CSV/table outputs.
-- REPL: Configure `data-dir` and `schema`, list keyspaces/tables, describe a table, execute `SELECT`, view `:status` and `:health`.
-- cqlsh‑compatible table formatting for `--out table` and REPL printing.
+- One‑shot mode
+  - Supports `--schema <FILE|DIR>` (CQL/JSON), `--data-dir <DIR>`, `-e/--execute <CQL>` and `-f/--file <CQL_FILE>`.
+  - Executes read‑only `SELECT` with `WHERE` on primary/partition key and `LIMIT`; honors `--limit`, `--page-size`, `--no-color`.
+  - Output formats: `--out table|json|csv` produce correct rows; table matches cqlsh formatting for headers, separators, and row count.
+  - Helpful errors for missing/invalid schema and unset `--data-dir` (with next‑step hints); non‑zero exit codes on failure.
+
+- REPL mode
+  - Launch via `cqlite repl` (or default `cqlite`) and accept: `:config`, `:schema list|load|show|refresh`, `:status`, `:health`, `:use`, `:keyspaces`, `:tables`, `DESCRIBE`/`DESC`, `SELECT ... LIMIT`.
+  - Maintains session defaults (data‑dir, page‑size, timing, keyspace); history enabled; `:source <FILE>` executes statements.
+  - Renders query results with cqlsh‑compatible table formatting; respects `--no-color`.
+
+- Status & Health
+  - `:status` scans `data-dir`, shows discovery timestamp, keyspaces/tables, schema coverage summary (tables with schema, tables missing schema, schemas without data), version hints, and Green/Yellow/Red badge per spec.
+  - `:health` validates config and environment (data‑dir readability/layout, schema parse success with counts, codec availability, config coherence) and surfaces actionable tips.
+
+- Documentation & Tests
+  - CLI usage docs include one‑shot and REPL examples using repository `test-data` paths; CLI help text is accurate.
+  - Integration tests cover one‑shot JSON/CSV/table output, REPL essentials (`:config`, `:schema`, `:status`, `:tables`, `DESCRIBE`, `SELECT`), and golden snapshots for table formatting.
+
+- Platforms & Performance
+  - Works on macOS/Linux developer environments against local datasets; no explicit performance targets in M2 beyond functional responsiveness.
+
+---
+
+### Prioritized Scope (M2)
+
+- Must‑have
+  - One‑shot flags and execution path wired to core query engine.
+  - REPL with `:config`, `:schema`, `:status`, `:health`, `:use`, `:keyspaces`, `:tables`, `DESCRIBE`/`DESC`, and `SELECT` subset.
+  - cqlsh‑compatible table formatting, plus JSON/CSV writers.
+  - Data‑dir discovery and schema coverage reporting.
+  - Updated docs and integration tests using `test-data`.
+
+- Should‑have
+  - `:config save [FILE]` persistence and env var overrides.
+  - `:schema unload <NAME>|all`.
+
+- Out‑of‑scope for M2 (deferred)
+  - Parquet output (M3), TUI mode, advanced SELECT optimizer (`state_machine`), DML/DDL mutations, remote cluster connectivity.
+
+---
+
+### Test Data & Fixtures
+
+- Default local paths for development and tests:
+  - `--data-dir` = `/Users/patrick/local_projects/cqlite/test-data/datasets`
+  - `--schema` = `/Users/patrick/local_projects/cqlite/test-data/schemas`
+- Optional environment variables to simplify invocation:
+  - `CQLITE_DATA_DIR=/Users/patrick/local_projects/cqlite/test-data/datasets`
+  - `CQLITE_SCHEMA=/Users/patrick/local_projects/cqlite/test-data/schemas`
+- Regeneration scripts (when needed): `test-data/scripts/start-clean.sh`, `test-data/scripts/export.sh`.
+
+---
+
+### Exit Codes
+
+- `0` success; `2` invalid CLI args; `3` schema errors; `4` data‑dir/discovery errors; `5` query execution errors.
+
+---
+
+### Documentation Deliverables
+
+- Update `cqlite-cli/CLI_USAGE_EXAMPLES.md` with one‑shot and REPL flows using `test-data`.
+- Ensure `--help` output matches this spec (flags, subcommands, examples).
 
