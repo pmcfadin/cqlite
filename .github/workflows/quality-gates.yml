@@ -1,4 +1,4 @@
-name: Quality Gates Coordination (Disabled for M1)
+name: CI: Quality Gates Coordination
 
 on:
   workflow_dispatch:
