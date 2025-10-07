@@ -15,6 +15,12 @@ pub mod config;
 // CLI types module - re-exports from main
 pub mod cli_types;
 
+// Formatter module for table output
+pub mod formatter;
+
+// Output writers for QueryResult (Issue #119)
+pub mod output;
+
 #[cfg(test)]
 pub mod test_infrastructure;
 

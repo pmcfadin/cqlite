@@ -53,6 +53,9 @@ csv = "1.3"
 # Hex encoding for blob display
 hex = "0.4"
 
+# Big integer support for varint/decimal
+num-bigint = "0.4"
+
 # Configuration parsing
 toml = { workspace = true }
 serde_yaml = { workspace = true }
@@ -63,6 +66,9 @@ chrono = { workspace = true }
 
 # Regular expressions
 regex = "1.10"
+
+# Base64 encoding for binary data display
+base64 = "0.21"
 
 # Development dependencies
 [dev-dependencies]

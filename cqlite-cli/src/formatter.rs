@@ -5,7 +5,6 @@
 
 use cqlite_core::storage::sstable::bulletproof_reader::SSTableEntry;
 
-
 /// Constants for cqlsh-compatible formatting
 pub const COLUMN_SEPARATOR: &str = " | ";
 pub const HEADER_BORDER_CHAR: char = '-';
@@ -56,43 +55,48 @@ impl CqlshTableFormatter {
     pub fn from_sstable_entries(&mut self, entries: &[SSTableEntry], table_name: &str) {
         // Set default headers based on known schema
         self.column_headers = vec!["id".to_string(), "data".to_string()];
-        
+
         // Convert entries to rows
         for entry in entries {
             let mut row = Vec::new();
-            
-            // Add partition key (usually UUID)
-            row.push(entry.partition_key.clone());
-            
+
+            // Add partition key (using 'key' field from SSTableEntry, formatted as hex)
+            row.push(hex::encode(entry.key.as_bytes()));
+
             // Add format info as a simple representation of the data
             row.push(entry.format_info.clone());
-            
+
             // Ensure row has correct number of columns
             while row.len() < self.column_headers.len() {
                 row.push(String::new());
             }
-            
+
             self.rows.push(row);
         }
-        
-        println!("📊 Formatted {} entries from {} into table format", entries.len(), table_name);
+
+        println!(
+            "📊 Formatted {} entries from {} into table format",
+            entries.len(),
+            table_name
+        );
     }
 
     /// Calculate optimal column widths (cqlsh algorithm)
     fn calculate_column_widths(&self) -> Vec<usize> {
-        let column_count = self.column_headers.len().max(
-            self.rows.first().map(|r| r.len()).unwrap_or(0)
-        );
-        
+        let column_count = self
+            .column_headers
+            .len()
+            .max(self.rows.first().map(|r| r.len()).unwrap_or(0));
+
         let mut widths = vec![0; column_count];
-        
+
         // Start with header widths
         for (i, header) in self.column_headers.iter().enumerate() {
             if i < widths.len() {
                 widths[i] = header.chars().count();
             }
         }
-        
+
         // Expand based on data content
         for row in &self.rows {
             for (i, cell) in row.iter().enumerate() {
@@ -101,7 +105,7 @@ impl CqlshTableFormatter {
                 }
             }
         }
-        
+
         widths
     }
 
@@ -157,14 +161,14 @@ impl CqlshTableFormatter {
     fn format_separator_line(&self, widths: &[usize]) -> String {
         let mut separator = String::new();
         separator.push(HEADER_BORDER_CHAR);
-        
+
         for (i, &width) in widths.iter().enumerate() {
             if i > 0 {
                 separator.push_str(HEADER_SEPARATOR_JUNCTION);
             }
             separator.push_str(&HEADER_BORDER_CHAR.to_string().repeat(width));
         }
-        
+
         separator.push(HEADER_BORDER_CHAR);
         separator
     }
@@ -193,30 +197,41 @@ impl CqlshTableFormatter {
     /// Format as JSON for API compatibility
     pub fn format_as_json(&self) -> serde_json::Value {
         let mut result = serde_json::Map::new();
-        
-        result.insert("format".to_string(), serde_json::Value::String("table".to_string()));
-        result.insert("headers".to_string(), serde_json::json!(self.column_headers));
+
+        result.insert(
+            "format".to_string(),
+            serde_json::Value::String("table".to_string()),
+        );
+        result.insert(
+            "headers".to_string(),
+            serde_json::json!(self.column_headers),
+        );
         result.insert("rows".to_string(), serde_json::json!(self.rows));
-        result.insert("row_count".to_string(), serde_json::Value::Number(self.rows.len().into()));
-        
+        result.insert(
+            "row_count".to_string(),
+            serde_json::Value::Number(self.rows.len().into()),
+        );
+
         serde_json::Value::Object(result)
     }
 
     /// Create formatter from JSON data
     pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
         let mut formatter = Self::new();
-        
+
         if let Some(headers) = value.get("headers").and_then(|h| h.as_array()) {
-            formatter.column_headers = headers.iter()
+            formatter.column_headers = headers
+                .iter()
                 .filter_map(|h| h.as_str())
                 .map(|s| s.to_string())
                 .collect();
         }
-        
+
         if let Some(rows) = value.get("rows").and_then(|r| r.as_array()) {
             for row in rows {
                 if let Some(row_array) = row.as_array() {
-                    let row_data: Vec<String> = row_array.iter()
+                    let row_data: Vec<String> = row_array
+                        .iter()
                         .filter_map(|cell| cell.as_str())
                         .map(|s| s.to_string())
                         .collect();
@@ -224,7 +239,7 @@ impl CqlshTableFormatter {
                 }
             }
         }
-        
+
         Ok(formatter)
     }
 
@@ -253,9 +268,9 @@ impl CqlshTableFormatter {
 
     /// Check if a value looks like a UUID
     fn is_uuid_like(&self, value: &str) -> bool {
-        value.len() == 36 && 
-        value.chars().filter(|&c| c == '-').count() == 4 &&
-        value.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        value.len() == 36
+            && value.chars().filter(|&c| c == '-').count() == 4
+            && value.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
     }
 
     /// Set color support
@@ -280,20 +295,20 @@ pub fn format_sstable_entries_as_table(entries: &[SSTableEntry], table_name: &st
 pub fn format_for_cqlsh_comparison(entries: &[SSTableEntry]) -> String {
     let mut formatter = CqlshTableFormatter::new();
     formatter.set_headers(vec!["id".to_string(), "data".to_string()]);
-    
+
     for entry in entries {
-        let mut row = vec![entry.partition_key.clone()];
-        
+        let mut row = vec![hex::encode(entry.key.as_bytes())];
+
         // Add format info as data representation
         if entry.format_info.is_empty() {
             row.push(String::new());
         } else {
             row.push(entry.format_info.clone());
         }
-        
+
         formatter.add_row(row);
     }
-    
+
     formatter.format()
 }
 

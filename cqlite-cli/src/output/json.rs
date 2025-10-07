@@ -1,0 +1,419 @@
+//! JSON output writer for QueryResult
+//!
+//! Emits deterministic JSON with keys in column order (as defined in metadata.columns).
+//! This ensures that JSON object keys appear in the same order as columns, NOT in
+//! arbitrary HashMap iteration order.
+
+use cqlite_core::query::QueryResult;
+use cqlite_core::Value;
+use serde_json::{json, Map, Value as JsonValue};
+use std::error::Error as StdError;
+
+/// JSON writer for QueryResult
+pub struct JSONWriter;
+
+impl JSONWriter {
+    /// Write QueryResult to JSON string with deterministic key ordering
+    ///
+    /// # Key Ordering Guarantee
+    ///
+    /// JSON object keys will appear in the SAME order as columns in `metadata.columns`.
+    /// This is critical for testing and ensures deterministic output regardless of
+    /// HashMap iteration order.
+    ///
+    /// # Example
+    ///
+    /// If metadata.columns = [c, b, a], the JSON will be:
+    /// ```json
+    /// [
+    ///   {"c": 1, "b": 2, "a": 3}
+    /// ]
+    /// ```
+    /// NOT {"a": 3, "b": 2, "c": 1}
+    ///
+    /// # Arguments
+    ///
+    /// * `result` - The query result to convert to JSON
+    ///
+    /// # Returns
+    ///
+    /// Pretty-printed JSON string or error
+    pub fn write(result: &QueryResult) -> Result<String, Box<dyn StdError>> {
+        let mut rows_json = Vec::new();
+
+        for row in &result.rows {
+            // CRITICAL: Use LinkedHashMap-like pattern by iterating columns in order
+            let mut row_obj = Map::new();
+
+            // Iterate columns in metadata order, NOT HashMap order!
+            for col in &result.metadata.columns {
+                let value_opt = row.values.get(&col.name);
+                let json_value = match value_opt {
+                    Some(value) => Self::value_to_json(value),
+                    None => JsonValue::Null,
+                };
+                row_obj.insert(col.name.clone(), json_value);
+            }
+
+            rows_json.push(JsonValue::Object(row_obj));
+        }
+
+        // Pretty-print for readability
+        serde_json::to_string_pretty(&rows_json).map_err(|e| e.into())
+    }
+
+    /// Convert a CQLite Value to a serde_json::Value
+    ///
+    /// Uses string representations for complex types to ensure human readability.
+    fn value_to_json(value: &Value) -> JsonValue {
+        match value {
+            Value::Null => JsonValue::Null,
+            Value::Boolean(b) => JsonValue::Bool(*b),
+            Value::Integer(i) => JsonValue::Number((*i).into()),
+            Value::BigInt(i) => JsonValue::Number((*i).into()),
+            Value::Counter(c) => JsonValue::Number((*c).into()),
+            Value::TinyInt(i) => JsonValue::Number((*i as i64).into()),
+            Value::SmallInt(i) => JsonValue::Number((*i as i64).into()),
+            Value::Float(f) => serde_json::Number::from_f64(*f)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null),
+            Value::Float32(f) => serde_json::Number::from_f64(*f as f64)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null),
+            Value::Text(s) => JsonValue::String(s.clone()),
+            Value::Blob(b) => {
+                use base64::Engine;
+                let engine = base64::engine::general_purpose::STANDARD;
+                JsonValue::String(engine.encode(b))
+            }
+            Value::Timestamp(ts) => JsonValue::Number((*ts).into()),
+            Value::Date(d) => JsonValue::Number((*d).into()),
+            Value::Time(t) => JsonValue::Number((*t).into()),
+            Value::Uuid(uuid) => {
+                // Format UUID as standard hyphenated string
+                let uuid_str = format!(
+                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    uuid[0], uuid[1], uuid[2], uuid[3],
+                    uuid[4], uuid[5],
+                    uuid[6], uuid[7],
+                    uuid[8], uuid[9],
+                    uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
+                );
+                JsonValue::String(uuid_str)
+            }
+            Value::Varint(data) => {
+                use base64::Engine;
+                let engine = base64::engine::general_purpose::STANDARD;
+                JsonValue::String(engine.encode(data))
+            }
+            Value::Decimal { scale, unscaled } => {
+                use base64::Engine;
+                let engine = base64::engine::general_purpose::STANDARD;
+                json!({
+                    "scale": scale,
+                    "unscaled": engine.encode(unscaled)
+                })
+            }
+            Value::Duration {
+                months,
+                days,
+                nanos,
+            } => {
+                json!({
+                    "months": months,
+                    "days": days,
+                    "nanos": nanos
+                })
+            }
+            Value::Json(j) => j.clone(),
+            Value::List(list) => {
+                let json_list: Vec<JsonValue> = list.iter().map(Self::value_to_json).collect();
+                JsonValue::Array(json_list)
+            }
+            Value::Set(set) => {
+                let json_list: Vec<JsonValue> = set.iter().map(Self::value_to_json).collect();
+                JsonValue::Array(json_list)
+            }
+            Value::Map(map) => {
+                // Maps are Vec<(Value, Value)> in CQLite
+                // Represent as array of {"key": k, "value": v} objects for clarity
+                let entries: Vec<JsonValue> = map
+                    .iter()
+                    .map(|(k, v)| {
+                        json!({
+                            "key": Self::value_to_json(k),
+                            "value": Self::value_to_json(v)
+                        })
+                    })
+                    .collect();
+                JsonValue::Array(entries)
+            }
+            Value::Tuple(tuple) => {
+                let json_list: Vec<JsonValue> = tuple.iter().map(Self::value_to_json).collect();
+                JsonValue::Array(json_list)
+            }
+            Value::Udt(udt) => {
+                let mut udt_obj = Map::new();
+                udt_obj.insert(
+                    "_type".to_string(),
+                    JsonValue::String(udt.type_name.clone()),
+                );
+
+                // Preserve field order from UDT definition
+                for field in &udt.fields {
+                    let field_json = match &field.value {
+                        Some(value) => Self::value_to_json(value),
+                        None => JsonValue::Null,
+                    };
+                    udt_obj.insert(field.name.clone(), field_json);
+                }
+
+                JsonValue::Object(udt_obj)
+            }
+            Value::Frozen(boxed_value) => Self::value_to_json(boxed_value),
+            Value::Tombstone(info) => {
+                json!({
+                    "type": "tombstone",
+                    "deletion_time": info.deletion_time,
+                    "tombstone_type": format!("{:?}", info.tombstone_type),
+                    "ttl": info.ttl
+                })
+            }
+            Value::Inet(bytes) => {
+                // Format as IP address string if possible
+                if bytes.len() == 4 {
+                    JsonValue::String(format!(
+                        "{}.{}.{}.{}",
+                        bytes[0], bytes[1], bytes[2], bytes[3]
+                    ))
+                } else if bytes.len() == 16 {
+                    // IPv6 - use std::net::Ipv6Addr for canonical formatting
+                    use std::net::Ipv6Addr;
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(bytes);
+                    let addr = Ipv6Addr::from(octets);
+                    JsonValue::String(addr.to_string())
+                } else {
+                    // Invalid length, encode as base64
+                    use base64::Engine;
+                    let engine = base64::engine::general_purpose::STANDARD;
+                    JsonValue::String(engine.encode(bytes))
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cqlite_core::query::{ColumnInfo, QueryRow};
+    use cqlite_core::{RowKey, Value};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_deterministic_key_ordering() {
+        // Create QueryResult with columns in reverse alphabetical order: [c, b, a]
+        let mut result = QueryResult::new();
+
+        // Set metadata with columns in specific order
+        result.metadata.columns = vec![
+            ColumnInfo::new(
+                "c".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                0,
+            ),
+            ColumnInfo::new(
+                "b".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                1,
+            ),
+            ColumnInfo::new(
+                "a".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                2,
+            ),
+        ];
+
+        // Add a row
+        let mut values = HashMap::new();
+        values.insert("a".to_string(), Value::Integer(1));
+        values.insert("b".to_string(), Value::Integer(2));
+        values.insert("c".to_string(), Value::Integer(3));
+
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        result.rows.push(row);
+
+        // Write to JSON
+        let json_str = JSONWriter::write(&result).unwrap();
+
+        // Parse to verify structure
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.len(), 1);
+
+        let row_obj = parsed[0].as_object().unwrap();
+
+        // CRITICAL: Verify key order matches column order [c, b, a], NOT [a, b, c]
+        let keys: Vec<&String> = row_obj.keys().collect();
+        assert_eq!(keys, vec!["c", "b", "a"], "Keys must be in column order");
+
+        // Verify JSON string representation has keys in correct order
+        assert!(
+            json_str.find("\"c\"").unwrap() < json_str.find("\"b\"").unwrap(),
+            "Key 'c' must appear before 'b' in JSON string"
+        );
+        assert!(
+            json_str.find("\"b\"").unwrap() < json_str.find("\"a\"").unwrap(),
+            "Key 'b' must appear before 'a' in JSON string"
+        );
+    }
+
+    #[test]
+    fn test_null_values() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![ColumnInfo::new(
+            "nullable_col".to_string(),
+            cqlite_core::types::DataType::Text,
+            true,
+            0,
+        )];
+
+        // Row with missing value (should be null)
+        let values = HashMap::new(); // Empty - no value for nullable_col
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        result.rows.push(row);
+
+        let json_str = JSONWriter::write(&result).unwrap();
+        assert!(
+            json_str.contains("null"),
+            "Missing values should be JSON null"
+        );
+    }
+
+    #[test]
+    fn test_value_types() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![
+            ColumnInfo::new(
+                "int_col".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                0,
+            ),
+            ColumnInfo::new(
+                "text_col".to_string(),
+                cqlite_core::types::DataType::Text,
+                false,
+                1,
+            ),
+            ColumnInfo::new(
+                "bool_col".to_string(),
+                cqlite_core::types::DataType::Boolean,
+                false,
+                2,
+            ),
+        ];
+
+        let mut values = HashMap::new();
+        values.insert("int_col".to_string(), Value::Integer(42));
+        values.insert("text_col".to_string(), Value::Text("hello".to_string()));
+        values.insert("bool_col".to_string(), Value::Boolean(true));
+
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        result.rows.push(row);
+
+        let json_str = JSONWriter::write(&result).unwrap();
+
+        // Verify values are correctly represented
+        assert!(json_str.contains("42"));
+        assert!(json_str.contains("\"hello\""));
+        assert!(json_str.contains("true"));
+    }
+
+    #[test]
+    fn test_empty_result() {
+        let result = QueryResult::new();
+        let json_str = JSONWriter::write(&result).unwrap();
+
+        // Empty result should be empty array
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.len(), 0);
+    }
+
+    #[test]
+    fn test_multiple_rows() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![ColumnInfo::new(
+            "id".to_string(),
+            cqlite_core::types::DataType::Integer,
+            false,
+            0,
+        )];
+
+        // Add multiple rows
+        for i in 1..=3 {
+            let mut values = HashMap::new();
+            values.insert("id".to_string(), Value::Integer(i));
+            let row = QueryRow::with_values(RowKey::new(vec![i as u8]), values);
+            result.rows.push(row);
+        }
+
+        let json_str = JSONWriter::write(&result).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.len(), 3);
+    }
+
+    #[test]
+    fn test_uuid_formatting() {
+        let uuid_bytes = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
+        ];
+
+        let json_val = JSONWriter::value_to_json(&Value::Uuid(uuid_bytes));
+        let uuid_str = json_val.as_str().unwrap();
+
+        // Should be formatted as hyphenated UUID
+        assert_eq!(uuid_str, "12345678-9abc-def0-1122-334455667788");
+    }
+
+    #[test]
+    fn test_list_value() {
+        let list_value = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
+
+        let json_val = JSONWriter::value_to_json(&list_value);
+        assert!(json_val.is_array());
+
+        let array = json_val.as_array().unwrap();
+        assert_eq!(array.len(), 3);
+        assert_eq!(array[0], serde_json::json!(1));
+        assert_eq!(array[1], serde_json::json!(2));
+        assert_eq!(array[2], serde_json::json!(3));
+    }
+
+    #[test]
+    fn test_map_value() {
+        let map_value = Value::Map(vec![
+            (Value::Text("key1".to_string()), Value::Integer(1)),
+            (Value::Text("key2".to_string()), Value::Integer(2)),
+        ]);
+
+        let json_val = JSONWriter::value_to_json(&map_value);
+        assert!(json_val.is_array());
+
+        let array = json_val.as_array().unwrap();
+        assert_eq!(array.len(), 2);
+
+        // Each entry should have "key" and "value" fields
+        let entry1 = array[0].as_object().unwrap();
+        assert_eq!(entry1.get("key").unwrap().as_str().unwrap(), "key1");
+        assert_eq!(entry1.get("value").unwrap().as_i64().unwrap(), 1);
+    }
+}
