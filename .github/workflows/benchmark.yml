@@ -1,4 +1,4 @@
-name: CI: Performance Regression
+name: "CI: Performance Regression"
 
 on:
   workflow_dispatch:

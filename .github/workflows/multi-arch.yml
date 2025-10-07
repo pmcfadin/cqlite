@@ -1,4 +1,4 @@
-name: CI: Multi-Architecture Testing
+name: "CI: Multi-Architecture Testing"
 
 on:
   workflow_dispatch:

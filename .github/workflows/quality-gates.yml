@@ -1,4 +1,4 @@
-name: CI: Quality Gates Coordination
+name: "CI: Quality Gates Coordination"
 
 on:
   workflow_dispatch:

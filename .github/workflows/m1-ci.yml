@@ -1,4 +1,4 @@
-name: CI: Core Library (minimal)
+name: "CI: Core Library (minimal)"
 
 on:
   push:

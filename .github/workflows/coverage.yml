@@ -1,4 +1,4 @@
-name: CI: Coverage Gate (90%)
+name: "CI: Coverage Gate (90%)"
 
 on:
   workflow_dispatch:

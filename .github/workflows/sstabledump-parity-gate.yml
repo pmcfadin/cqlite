@@ -1,4 +1,4 @@
-name: CI: SSTableDump Parity Gate
+name: "CI: SSTableDump Parity Gate"
 
 on:
   pull_request:
