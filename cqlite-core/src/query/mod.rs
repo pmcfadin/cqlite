@@ -12,6 +12,7 @@
 
 pub mod engine;
 pub mod executor;
+pub mod m2_select_validator;
 pub mod parser;
 pub mod planner;
 pub mod prepared;
@@ -37,6 +38,7 @@ pub use engine::{
 pub use executor::{
     QueryExecutor, QueryResult as ExecutorQueryResult, QueryRow as ExecutorQueryRow,
 };
+pub use m2_select_validator::{M2SelectValidator, SelectValidationResult, UnsupportedFeature};
 pub use parser::QueryParser;
 pub use planner::{ExecutionStep, IndexSelection, PlanType, QueryHints, QueryPlan, QueryPlanner};
 pub use prepared::{

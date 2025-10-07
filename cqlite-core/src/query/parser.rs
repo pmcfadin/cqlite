@@ -5,8 +5,8 @@
 //! be executed by the query engine.
 
 use super::{
-    ComparisonOperator, Condition, OrderByClause, ParsedQuery, QueryType, SortDirection,
-    WhereClause,
+    m2_select_validator::M2SelectValidator, ComparisonOperator, Condition, OrderByClause,
+    ParsedQuery, QueryType, SortDirection, WhereClause,
 };
 use crate::{Config, Error, Result, TableId, Value};
 use std::collections::HashMap;
@@ -50,6 +50,10 @@ impl QueryParser {
 
     /// Parse SELECT statement
     fn parse_select(&self, sql: &str) -> Result<ParsedQuery> {
+        // M2: Validate SELECT query against supported subset
+        let validator = M2SelectValidator;
+        validator.validate_select(sql)?;
+
         let mut columns = Vec::new();
         let mut table = None;
         let mut where_clause = None;

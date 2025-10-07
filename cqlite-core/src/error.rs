@@ -125,6 +125,10 @@ pub enum Error {
     /// Invalid input error
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// Unsupported query error
+    #[error("Unsupported query: {0}")]
+    UnsupportedQuery(String),
 }
 
 impl Error {
@@ -257,6 +261,11 @@ impl Error {
         Self::Parse(msg.into())
     }
 
+    /// Create an unsupported query error
+    pub fn unsupported_query(msg: impl Into<String>) -> Self {
+        Self::UnsupportedQuery(msg.into())
+    }
+
     /// Check if this error is recoverable
     pub fn is_recoverable(&self) -> bool {
         match self {
@@ -298,6 +307,7 @@ impl Error {
             Error::InvalidPath(_) => false,
             Error::InvalidState(_) => false,
             Error::Timeout(_) => false,
+            Error::UnsupportedQuery(_) => false,
         }
     }
 
@@ -337,6 +347,7 @@ impl Error {
             Error::InvalidPath(_) => ErrorCategory::System,
             Error::InvalidState(_) => ErrorCategory::Logic,
             Error::Timeout(_) => ErrorCategory::System,
+            Error::UnsupportedQuery(_) => ErrorCategory::Query,
         }
     }
 }
