@@ -55,6 +55,7 @@ fn create_cli_with_flags(
 }
 
 #[test]
+#[serial]
 fn test_defaults_when_no_config() {
     // No config file, no env vars, no flags
     let cli = create_cli_with_flags(None, None, None, None, None, None, None, None, false);

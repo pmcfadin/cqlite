@@ -144,6 +144,24 @@ Notes:
 - Precedence: CLI flags > env vars > config file > defaults.
 - `:config save [FILE]` writes current effective config.
 
+#### Environment Variables
+
+The following environment variables are supported (Issue #126):
+
+- `CQLITE_DATA_DIR` - Cassandra data directory root (overrides config file `data_directory`)
+- `CQLITE_SCHEMA` - Schema file path(s), comma-separated for multiple (overrides config file `schema_paths`)
+- `CQLITE_LIMIT` - Maximum rows for queries (overrides config file `query_limit`)
+- `CQLITE_PAGE_SIZE` - Page size for pagination (overrides config file `repl.page_size`)
+- `CQLITE_NO_COLOR` - Disable colored output (values: `1`, `true`, `yes`, `on`)
+- `CQLITE_OUT` - Output format (values: `table`, `json`, `csv`)
+
+Example usage:
+```bash
+export CQLITE_DATA_DIR=/Users/patrick/local_projects/cqlite/test-data/datasets
+export CQLITE_SCHEMA=/path/to/schemas
+cqlite -e "SELECT * FROM ks.users LIMIT 5"
+```
+
 ---
 
 ### Compatibility Notes (cqlsh)
