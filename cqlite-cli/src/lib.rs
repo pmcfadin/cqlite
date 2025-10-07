@@ -21,6 +21,9 @@ pub mod formatter;
 // Output writers for QueryResult (Issue #119)
 pub mod output;
 
+// Script executor for CQL script files (Issue #122)
+pub mod script_executor;
+
 #[cfg(all(test, feature = "state_machine"))]
 pub mod test_infrastructure;
 

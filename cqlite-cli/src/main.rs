@@ -13,6 +13,7 @@ mod commands;
 mod config;
 mod formatter;
 mod output;
+mod script_executor;
 
 use cli_types::{AdminCommands, Cli, Commands};
 // mod data_parser;
@@ -52,6 +53,33 @@ async fn main() -> Result<()> {
 
     // Initialize the database engine
     let database = initialize_database(&db_path, &config).await?;
+
+    // Create output config for query execution
+    let output_config = config::OutputConfig::from_cli(cli.no_color, cli.limit, cli.page_size);
+
+    // Handle --file flag (script execution) - takes precedence over subcommands
+    if let Some(file_path) = cli.file {
+        return script_executor::execute_script_file(
+            &file_path,
+            &database,
+            &output_config,
+            cli.format,
+        )
+        .await;
+    }
+
+    // Handle --execute flag (single statement execution) - takes precedence over subcommands
+    if let Some(query) = cli.execute {
+        return commands::execute_query(
+            &database,
+            &query,
+            false, // explain
+            false, // timing
+            cli.format,
+            &output_config,
+        )
+        .await;
+    }
 
     match cli.command {
         Some(Commands::Repl { tui: _ }) => {
