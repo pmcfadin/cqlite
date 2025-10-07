@@ -145,7 +145,10 @@ fn test_cqlite_schema_single_path() {
     let config = Config::load(None, &cli).unwrap();
 
     assert_eq!(config.schema_paths.len(), 1);
-    assert_eq!(config.schema_paths[0], PathBuf::from("/single/path/schema.cql"));
+    assert_eq!(
+        config.schema_paths[0],
+        PathBuf::from("/single/path/schema.cql")
+    );
 
     env::remove_var("CQLITE_SCHEMA");
 }
@@ -153,13 +156,19 @@ fn test_cqlite_schema_single_path() {
 #[test]
 #[serial]
 fn test_cqlite_schema_with_spaces_in_paths() {
-    env::set_var("CQLITE_SCHEMA", "/path/with spaces/schema.cql,/another/path.cql");
+    env::set_var(
+        "CQLITE_SCHEMA",
+        "/path/with spaces/schema.cql,/another/path.cql",
+    );
 
     let cli = create_cli_with_flags(None, None, None, None, None, None, None, None, false);
     let config = Config::load(None, &cli).unwrap();
 
     assert_eq!(config.schema_paths.len(), 2);
-    assert_eq!(config.schema_paths[0], PathBuf::from("/path/with spaces/schema.cql"));
+    assert_eq!(
+        config.schema_paths[0],
+        PathBuf::from("/path/with spaces/schema.cql")
+    );
     assert_eq!(config.schema_paths[1], PathBuf::from("/another/path.cql"));
 
     env::remove_var("CQLITE_SCHEMA");
@@ -297,7 +306,10 @@ fn test_cqlite_data_dir_with_tilde() {
     let config = Config::load(None, &cli).unwrap();
 
     // PathBuf accepts tilde literally (expansion is shell responsibility)
-    assert_eq!(config.data_directory, Some(PathBuf::from("~/cassandra/data")));
+    assert_eq!(
+        config.data_directory,
+        Some(PathBuf::from("~/cassandra/data"))
+    );
 
     env::remove_var("CQLITE_DATA_DIR");
 }
