@@ -4,9 +4,15 @@
 //! It provides comprehensive parsing for complex SELECT statements including:
 //! - Advanced WHERE clauses with all operators
 //! - Aggregation functions and GROUP BY
-//! - ORDER BY and LIMIT clauses  
+//! - ORDER BY and LIMIT clauses
 //! - Collection operations
 //! - Subqueries and JOINs (future)
+
+// CQL (Cassandra Query Language) Reference:
+// https://cassandra.apache.org/doc/latest/cassandra/developing/cql/cql_singlefile.html
+//
+// This implements CQL v3.4.3+ for Apache Cassandra 5.0+
+// CQL is NOT SQL - it's a query language specifically designed for Cassandra's distributed architecture.
 
 use super::select_ast::*;
 use crate::{Error, Result, TableId, Value};

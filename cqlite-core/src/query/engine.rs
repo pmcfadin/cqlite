@@ -3,6 +3,12 @@
 //! This module provides the main query engine that coordinates between
 //! parsing, planning, and execution of CQL queries.
 
+// CQL (Cassandra Query Language) Reference:
+// https://cassandra.apache.org/doc/latest/cassandra/developing/cql/cql_singlefile.html
+//
+// This implements CQL v3.4.3+ for Apache Cassandra 5.0+
+// CQL is NOT SQL - it's a query language specifically designed for Cassandra's distributed architecture.
+
 use super::{
     executor::{QueryExecutor, QueryResult},
     parser::QueryParser,

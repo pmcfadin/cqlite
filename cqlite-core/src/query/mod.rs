@@ -4,11 +4,17 @@
 //! CQL parsing and the storage engine. It includes:
 //!
 //! - CQL query parsing and validation
-//! - Query planning and optimization  
+//! - Query planning and optimization
 //! - Query execution with storage integration
 //! - Prepared statement support
 //! - Result set management
 //! - REVOLUTIONARY SELECT parser for direct SSTable access
+
+// CQL (Cassandra Query Language) Reference:
+// https://cassandra.apache.org/doc/latest/cassandra/developing/cql/cql_singlefile.html
+//
+// This implements CQL v3.4.3+ for Apache Cassandra 5.0+
+// CQL is NOT SQL - it's a query language specifically designed for Cassandra's distributed architecture.
 
 pub mod engine;
 pub mod executor;
