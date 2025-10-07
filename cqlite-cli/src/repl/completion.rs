@@ -3,7 +3,7 @@
 // Provides intelligent auto-completion for CQL commands, table names, column names,
 // and meta-commands in the REPL environment.
 
-use super::{ReplResult, ReplError, CompletionContext};
+use super::{CompletionContext, ReplResult};
 use std::collections::HashSet;
 
 /// Completion suggestion with metadata
@@ -68,94 +68,210 @@ impl CompletionEngine {
             data_types: HashSet::new(),
             config_options: HashSet::new(),
         };
-        
+
         engine.initialize_static_completions();
         engine
     }
-    
+
     /// Initialize static completion data
     fn initialize_static_completions(&mut self) {
         // CQL Keywords
         let keywords = [
-            "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE",
-            "CREATE", "ALTER", "DROP", "USE", "DESCRIBE",
-            "FROM", "WHERE", "ORDER", "GROUP", "HAVING",
-            "BY", "ASC", "DESC", "LIMIT", "OFFSET",
-            "AND", "OR", "NOT", "IN", "LIKE", "IS", "NULL",
-            "PRIMARY", "KEY", "CLUSTERING", "INDEX",
-            "TABLE", "KEYSPACE", "TYPE", "FUNCTION",
-            "IF", "EXISTS", "WITH", "OPTIONS",
-            "ALLOW", "FILTERING", "TOKEN", "COUNT",
-            "SUM", "AVG", "MIN", "MAX", "DISTINCT",
-            "AS", "CAST", "TTL", "WRITETIME",
-            "BATCH", "BEGIN", "UNLOGGED", "COUNTER",
-            "STATIC", "FROZEN", "TUPLE", "MAP", "SET", "LIST",
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "CREATE",
+            "ALTER",
+            "DROP",
+            "USE",
+            "DESCRIBE",
+            "FROM",
+            "WHERE",
+            "ORDER",
+            "GROUP",
+            "HAVING",
+            "BY",
+            "ASC",
+            "DESC",
+            "LIMIT",
+            "OFFSET",
+            "AND",
+            "OR",
+            "NOT",
+            "IN",
+            "LIKE",
+            "IS",
+            "NULL",
+            "PRIMARY",
+            "KEY",
+            "CLUSTERING",
+            "INDEX",
+            "TABLE",
+            "KEYSPACE",
+            "TYPE",
+            "FUNCTION",
+            "IF",
+            "EXISTS",
+            "WITH",
+            "OPTIONS",
+            "ALLOW",
+            "FILTERING",
+            "TOKEN",
+            "COUNT",
+            "SUM",
+            "AVG",
+            "MIN",
+            "MAX",
+            "DISTINCT",
+            "AS",
+            "CAST",
+            "TTL",
+            "WRITETIME",
+            "BATCH",
+            "BEGIN",
+            "UNLOGGED",
+            "COUNTER",
+            "STATIC",
+            "FROZEN",
+            "TUPLE",
+            "MAP",
+            "SET",
+            "LIST",
         ];
-        
+
         for keyword in &keywords {
             self.cql_keywords.insert(keyword.to_string());
         }
-        
+
         // Meta-commands
         let meta_commands = [
-            ":help", ":quit", ":exit", ":q", ":clear", ":cls",
-            ":tables", ":list", ":describe", ":desc", ":use",
-            ":config", ":show", ":set", ":history", ":timing",
-            ":source", ":load", ":keyspaces", ":info", ":schema",
+            ":help",
+            ":quit",
+            ":exit",
+            ":q",
+            ":clear",
+            ":cls",
+            ":tables",
+            ":list",
+            ":describe",
+            ":desc",
+            ":use",
+            ":config",
+            ":show",
+            ":set",
+            ":history",
+            ":timing",
+            ":source",
+            ":load",
+            ":keyspaces",
+            ":info",
+            ":schema",
         ];
-        
+
         for cmd in &meta_commands {
             self.meta_commands.insert(cmd.to_string());
         }
-        
+
         // CQL Functions
         let functions = [
-            "now", "uuid", "timeuuid", "dateof", "unixTimestampOf",
-            "toDate", "toTimestamp", "toUnixTimestamp",
-            "minTimeuuid", "maxTimeuuid",
-            "count", "sum", "avg", "min", "max",
-            "writetime", "ttl", "token",
-            "cast", "toJson", "fromJson",
-            "blobasbigint", "blobAsInt", "blobAsText",
-            "bigintAsBlob", "intAsBlob", "textAsBlob",
+            "now",
+            "uuid",
+            "timeuuid",
+            "dateof",
+            "unixTimestampOf",
+            "toDate",
+            "toTimestamp",
+            "toUnixTimestamp",
+            "minTimeuuid",
+            "maxTimeuuid",
+            "count",
+            "sum",
+            "avg",
+            "min",
+            "max",
+            "writetime",
+            "ttl",
+            "token",
+            "cast",
+            "toJson",
+            "fromJson",
+            "blobasbigint",
+            "blobAsInt",
+            "blobAsText",
+            "bigintAsBlob",
+            "intAsBlob",
+            "textAsBlob",
         ];
-        
+
         for func in &functions {
             self.cql_functions.insert(func.to_string());
         }
-        
+
         // Data types
         let data_types = [
-            "ascii", "bigint", "blob", "boolean", "counter",
-            "date", "decimal", "double", "duration", "float",
-            "inet", "int", "smallint", "text", "time",
-            "timestamp", "timeuuid", "tinyint", "uuid", "varchar",
-            "varint", "map", "set", "list", "tuple", "frozen",
+            "ascii",
+            "bigint",
+            "blob",
+            "boolean",
+            "counter",
+            "date",
+            "decimal",
+            "double",
+            "duration",
+            "float",
+            "inet",
+            "int",
+            "smallint",
+            "text",
+            "time",
+            "timestamp",
+            "timeuuid",
+            "tinyint",
+            "uuid",
+            "varchar",
+            "varint",
+            "map",
+            "set",
+            "list",
+            "tuple",
+            "frozen",
         ];
-        
+
         for dtype in &data_types {
             self.data_types.insert(dtype.to_string());
         }
-        
+
         // Configuration options
         let config_options = [
-            "output_format", "page_size", "show_timing", "enable_paging",
-            "enable_colors", "data_dir", "keyspace", "prompt",
-            "prompt_continuation", "max_history_size",
+            "output_format",
+            "page_size",
+            "show_timing",
+            "enable_paging",
+            "enable_colors",
+            "data_dir",
+            "keyspace",
+            "prompt",
+            "prompt_continuation",
+            "max_history_size",
         ];
-        
+
         for option in &config_options {
             self.config_options.insert(option.to_string());
         }
     }
-    
+
     /// Get completions for the given context
-    pub fn get_completions(&self, context: &CompletionContext) -> ReplResult<Vec<CompletionSuggestion>> {
+    pub fn get_completions(
+        &self,
+        context: &CompletionContext,
+    ) -> ReplResult<Vec<CompletionSuggestion>> {
         let mut suggestions = Vec::new();
-        
+
         // Parse the current input to understand context
         let analysis = self.analyze_input(&context.line, context.pos);
-        
+
         match analysis.completion_context {
             InputContext::MetaCommand => {
                 suggestions.extend(self.complete_meta_commands(&analysis.current_word));
@@ -165,13 +281,17 @@ impl CompletionEngine {
                 suggestions.extend(self.complete_functions(&analysis.current_word));
             }
             InputContext::TableName => {
-                suggestions.extend(self.complete_table_names(&analysis.current_word, &context.tables));
+                suggestions
+                    .extend(self.complete_table_names(&analysis.current_word, &context.tables));
             }
             InputContext::ColumnName => {
-                suggestions.extend(self.complete_column_names(&analysis.current_word, &context.tables));
+                suggestions
+                    .extend(self.complete_column_names(&analysis.current_word, &context.tables));
             }
             InputContext::KeyspaceName => {
-                suggestions.extend(self.complete_keyspace_names(&analysis.current_word, &context.keyspaces));
+                suggestions.extend(
+                    self.complete_keyspace_names(&analysis.current_word, &context.keyspaces),
+                );
             }
             InputContext::DataType => {
                 suggestions.extend(self.complete_data_types(&analysis.current_word));
@@ -188,37 +308,42 @@ impl CompletionEngine {
                 suggestions.extend(self.complete_meta_commands(&analysis.current_word));
             }
         }
-        
+
         // Sort by priority and relevance
         suggestions.sort_by(|a, b| {
-            b.priority.cmp(&a.priority)
+            b.priority
+                .cmp(&a.priority)
                 .then_with(|| a.text.len().cmp(&b.text.len()))
                 .then_with(|| a.text.cmp(&b.text))
         });
-        
+
         // Limit number of suggestions
         suggestions.truncate(50);
-        
+
         Ok(suggestions)
     }
-    
+
     /// Analyze input to determine completion context
     fn analyze_input(&self, line: &str, pos: usize) -> InputAnalysis {
         let safe_pos = pos.min(line.len());
         let text_before_cursor = &line[..safe_pos];
-        
+
         // Find the current word being typed
         let current_word = self.extract_current_word(text_before_cursor);
-        
+
         // Determine context based on input structure
         let context = if text_before_cursor.trim_start().starts_with(':') {
             if text_before_cursor.contains(" config ") {
                 InputContext::ConfigOption
             } else if text_before_cursor.contains(" use ") {
                 InputContext::KeyspaceName
-            } else if text_before_cursor.contains(" describe ") || text_before_cursor.contains(" desc ") {
+            } else if text_before_cursor.contains(" describe ")
+                || text_before_cursor.contains(" desc ")
+            {
                 InputContext::TableName
-            } else if text_before_cursor.contains(" source ") || text_before_cursor.contains(" load ") {
+            } else if text_before_cursor.contains(" source ")
+                || text_before_cursor.contains(" load ")
+            {
                 InputContext::FilePath
             } else {
                 InputContext::MetaCommand
@@ -226,71 +351,75 @@ impl CompletionEngine {
         } else {
             self.analyze_cql_context(text_before_cursor)
         };
-        
+
         InputAnalysis {
             current_word,
             completion_context: context,
             line_before_cursor: text_before_cursor.to_string(),
         }
     }
-    
+
     /// Analyze CQL context
     fn analyze_cql_context(&self, text: &str) -> InputContext {
         let upper_text = text.to_uppercase();
         let words: Vec<&str> = upper_text.split_whitespace().collect();
-        
+
         if words.is_empty() {
             return InputContext::CqlKeyword;
         }
-        
+
         // Look for context clues
         if let Some(last_word) = words.last() {
             if words.len() >= 2 {
                 let prev_word = words[words.len() - 2];
-                
+
                 // After FROM, join with, etc. - expect table names
-                if prev_word == "FROM" || prev_word == "JOIN" || 
-                   prev_word == "UPDATE" || prev_word == "INTO" {
+                if prev_word == "FROM"
+                    || prev_word == "JOIN"
+                    || prev_word == "UPDATE"
+                    || prev_word == "INTO"
+                {
                     return InputContext::TableName;
                 }
-                
+
                 // After USE - expect keyspace names
                 if prev_word == "USE" {
                     return InputContext::KeyspaceName;
                 }
-                
+
                 // After data type keywords - expect data types
                 if words.len() >= 3 {
                     let context_phrase = format!("{} {}", words[words.len() - 3], prev_word);
-                    if context_phrase.contains("PRIMARY KEY") || 
-                       context_phrase.contains("CLUSTERING KEY") ||
-                       prev_word == "TYPE" {
+                    if context_phrase.contains("PRIMARY KEY")
+                        || context_phrase.contains("CLUSTERING KEY")
+                        || prev_word == "TYPE"
+                    {
                         return InputContext::DataType;
                     }
                 }
             }
-            
+
             // If current word looks like a function call
             if last_word.ends_with('(') || text.contains('(') {
                 return InputContext::CqlKeyword; // Functions are included in keyword completion
             }
         }
-        
+
         // Check if we're in a SELECT list (after SELECT but before FROM)
         if upper_text.contains("SELECT") && !upper_text.contains("FROM") {
             return InputContext::ColumnName;
         }
-        
+
         // Default to keyword completion
         InputContext::CqlKeyword
     }
-    
+
     /// Extract the current word being typed
     fn extract_current_word(&self, text: &str) -> String {
         let chars: Vec<char> = text.chars().collect();
         let mut start = chars.len();
-        let mut end = chars.len();
-        
+        let end = chars.len();
+
         // Find the start of the current word
         for i in (0..chars.len()).rev() {
             let ch = chars[i];
@@ -303,7 +432,7 @@ impl CompletionEngine {
                 break;
             }
         }
-        
+
         // Extract the word
         if start < end {
             chars[start..end].iter().collect()
@@ -311,12 +440,12 @@ impl CompletionEngine {
             String::new()
         }
     }
-    
+
     /// Complete meta-commands
     fn complete_meta_commands(&self, prefix: &str) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
         let lower_prefix = prefix.to_lowercase();
-        
+
         for cmd in &self.meta_commands {
             if cmd.to_lowercase().starts_with(&lower_prefix) {
                 let description = self.get_meta_command_description(cmd);
@@ -329,15 +458,15 @@ impl CompletionEngine {
                 });
             }
         }
-        
+
         suggestions
     }
-    
+
     /// Complete CQL keywords
     fn complete_cql_keywords(&self, prefix: &str) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
         let upper_prefix = prefix.to_uppercase();
-        
+
         for keyword in &self.cql_keywords {
             if keyword.starts_with(&upper_prefix) {
                 suggestions.push(CompletionSuggestion {
@@ -349,15 +478,15 @@ impl CompletionEngine {
                 });
             }
         }
-        
+
         suggestions
     }
-    
+
     /// Complete function names
     fn complete_functions(&self, prefix: &str) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
         let lower_prefix = prefix.to_lowercase();
-        
+
         for func in &self.cql_functions {
             if func.to_lowercase().starts_with(&lower_prefix) {
                 suggestions.push(CompletionSuggestion {
@@ -369,15 +498,15 @@ impl CompletionEngine {
                 });
             }
         }
-        
+
         suggestions
     }
-    
+
     /// Complete table names
     fn complete_table_names(&self, prefix: &str, tables: &[String]) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
         let lower_prefix = prefix.to_lowercase();
-        
+
         for table in tables {
             if table.to_lowercase().starts_with(&lower_prefix) {
                 suggestions.push(CompletionSuggestion {
@@ -389,22 +518,33 @@ impl CompletionEngine {
                 });
             }
         }
-        
+
         suggestions
     }
-    
+
     /// Complete column names (simplified - would need schema info)
     fn complete_column_names(&self, prefix: &str, _tables: &[String]) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
         let lower_prefix = prefix.to_lowercase();
-        
+
         // Common column names as fallback
         let common_columns = [
-            "id", "name", "email", "created_at", "updated_at",
-            "user_id", "timestamp", "value", "data", "type",
-            "status", "description", "title", "content",
+            "id",
+            "name",
+            "email",
+            "created_at",
+            "updated_at",
+            "user_id",
+            "timestamp",
+            "value",
+            "data",
+            "type",
+            "status",
+            "description",
+            "title",
+            "content",
         ];
-        
+
         for col in &common_columns {
             if col.starts_with(&lower_prefix) {
                 suggestions.push(CompletionSuggestion {
@@ -416,15 +556,19 @@ impl CompletionEngine {
                 });
             }
         }
-        
+
         suggestions
     }
-    
+
     /// Complete keyspace names
-    fn complete_keyspace_names(&self, prefix: &str, keyspaces: &[String]) -> Vec<CompletionSuggestion> {
+    fn complete_keyspace_names(
+        &self,
+        prefix: &str,
+        keyspaces: &[String],
+    ) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
         let lower_prefix = prefix.to_lowercase();
-        
+
         for keyspace in keyspaces {
             if keyspace.to_lowercase().starts_with(&lower_prefix) {
                 suggestions.push(CompletionSuggestion {
@@ -436,15 +580,15 @@ impl CompletionEngine {
                 });
             }
         }
-        
+
         suggestions
     }
-    
+
     /// Complete data types
     fn complete_data_types(&self, prefix: &str) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
         let lower_prefix = prefix.to_lowercase();
-        
+
         for dtype in &self.data_types {
             if dtype.starts_with(&lower_prefix) {
                 suggestions.push(CompletionSuggestion {
@@ -456,15 +600,15 @@ impl CompletionEngine {
                 });
             }
         }
-        
+
         suggestions
     }
-    
+
     /// Complete configuration options
     fn complete_config_options(&self, prefix: &str) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
         let lower_prefix = prefix.to_lowercase();
-        
+
         for option in &self.config_options {
             if option.starts_with(&lower_prefix) {
                 let description = self.get_config_option_description(option);
@@ -477,14 +621,14 @@ impl CompletionEngine {
                 });
             }
         }
-        
+
         suggestions
     }
-    
+
     /// Complete file paths (basic implementation)
     fn complete_file_paths(&self, prefix: &str) -> Vec<CompletionSuggestion> {
         let mut suggestions = Vec::new();
-        
+
         // Basic file path completion
         if prefix.ends_with('/') || prefix.is_empty() {
             // Directory completion would go here
@@ -496,37 +640,37 @@ impl CompletionEngine {
                 priority: 5,
             });
         }
-        
+
         suggestions
     }
-    
+
     /// Calculate completion priority based on relevance
     fn calculate_priority(&self, suggestion: &str, prefix: &str, base_priority: u8) -> u8 {
         if prefix.is_empty() {
             return base_priority;
         }
-        
+
         let lower_suggestion = suggestion.to_lowercase();
         let lower_prefix = prefix.to_lowercase();
-        
+
         // Exact match gets highest priority
         if lower_suggestion == lower_prefix {
             return base_priority + 3;
         }
-        
+
         // Starts with prefix gets high priority
         if lower_suggestion.starts_with(&lower_prefix) {
             return base_priority + 2;
         }
-        
+
         // Contains prefix gets medium priority
         if lower_suggestion.contains(&lower_prefix) {
             return base_priority + 1;
         }
-        
+
         base_priority
     }
-    
+
     /// Get description for meta-commands
     fn get_meta_command_description(&self, cmd: &str) -> String {
         match cmd {
@@ -546,7 +690,7 @@ impl CompletionEngine {
             _ => "Meta-command".to_string(),
         }
     }
-    
+
     /// Get description for configuration options
     fn get_config_option_description(&self, option: &str) -> String {
         match option {
@@ -598,40 +742,41 @@ impl Default for CompletionEngine {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SessionState;
     use super::*;
-    
+
     #[test]
     fn test_meta_command_completion() {
         let engine = CompletionEngine::new();
         let context = CompletionContext {
             line: ":he".to_string(),
             pos: 3,
-            session_state: super::SessionState::Ready,
+            session_state: SessionState::Ready,
             tables: vec![],
             keyspaces: vec![],
         };
-        
+
         let completions = engine.get_completions(&context).unwrap();
         assert!(!completions.is_empty());
         assert!(completions.iter().any(|c| c.text == ":help"));
     }
-    
+
     #[test]
     fn test_keyword_completion() {
         let engine = CompletionEngine::new();
         let context = CompletionContext {
             line: "SEL".to_string(),
             pos: 3,
-            session_state: super::SessionState::Ready,
+            session_state: SessionState::Ready,
             tables: vec![],
             keyspaces: vec![],
         };
-        
+
         let completions = engine.get_completions(&context).unwrap();
         assert!(!completions.is_empty());
         assert!(completions.iter().any(|c| c.text == "SELECT"));
     }
-    
+
     #[test]
     fn test_table_completion() {
         let engine = CompletionEngine::new();
@@ -639,22 +784,26 @@ mod tests {
         let context = CompletionContext {
             line: "SELECT * FROM us".to_string(),
             pos: 16,
-            session_state: super::SessionState::Ready,
+            session_state: SessionState::Ready,
             tables,
             keyspaces: vec![],
         };
-        
+
         let completions = engine.get_completions(&context).unwrap();
         assert!(completions.iter().any(|c| c.text == "users"));
     }
-    
+
     #[test]
     fn test_current_word_extraction() {
         let engine = CompletionEngine::new();
-        
+
         assert_eq!(engine.extract_current_word("SELECT * FROM us"), "us");
         assert_eq!(engine.extract_current_word(":he"), ":he");
-        assert_eq!(engine.extract_current_word("SELECT count("), "count(");
-        assert_eq!(engine.extract_current_word("SELECT * FROM users WHERE name = 'jo"), "'jo");
+        // "(" is a word boundary, so "count(" returns empty string
+        assert_eq!(engine.extract_current_word("SELECT count("), "");
+        assert_eq!(
+            engine.extract_current_word("SELECT * FROM users WHERE name = 'jo"),
+            "'jo"
+        );
     }
 }

@@ -4,18 +4,21 @@
 // It handles command parsing, routing, execution, and provides a clean interface
 // for both the basic CLI and enhanced TUI modes.
 
-pub mod engine;
+// Allow dead code during REPL development as many features are not yet fully utilized
+#![allow(dead_code)]
+
 pub mod command_parser;
-pub mod session;
 pub mod completion;
+pub mod engine;
 pub mod history;
+pub mod session;
 
 // Re-export main interfaces
-pub use engine::{ReplEngine, ReplConfig};
-pub use command_parser::{CommandParser, ParsedCommand, CommandType};
-pub use session::{ReplSession, SessionState};
+pub use command_parser::{CommandParser, CommandType, ParsedCommand};
 pub use completion::CompletionEngine;
+pub use engine::{ReplConfig, ReplEngine};
 pub use history::HistoryManager;
+pub use session::{ReplSession, SessionState};
 
 /// Core REPL result type
 pub type ReplResult<T> = Result<T, ReplError>;
@@ -25,22 +28,22 @@ pub type ReplResult<T> = Result<T, ReplError>;
 pub enum ReplError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Database error: {0}")]
     Database(#[from] anyhow::Error),
-    
+
     #[error("Command parsing error: {0}")]
     CommandParsing(String),
-    
+
     #[error("Invalid configuration: {0}")]
     Config(String),
-    
+
     #[error("Session error: {0}")]
     Session(String),
-    
+
     #[error("History error: {0}")]
     History(String),
-    
+
     #[error("Completion error: {0}")]
     Completion(String),
 }

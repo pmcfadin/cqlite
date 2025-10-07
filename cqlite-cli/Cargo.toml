@@ -108,7 +108,8 @@ cargo-llvm-cov = "0.5"          # LLVM coverage
 trybuild = "1.0"                # Compile-fail testing
 
 [features]
-default = ["interactive", "tui"]
+# M2+ production defaults: Interactive REPL with query engine
+default = ["interactive", "tui", "state_machine"]
 interactive = []
 tui = ["ratatui", "crossterm"]
 benchmarks = []

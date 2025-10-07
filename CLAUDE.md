@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CQLite is a high-performance Rust library providing local Apache Cassandra SSTable access. It enables reading and writing Cassandra data files without cluster dependencies, built for performance and safety with planned bindings for Python, NodeJS, and WASM.
 
-**Project Status**: Early Development (M1 Milestone - Core Reading Library)
+**Project Status**: Active Development (M2+ Milestone - Query Engine & CQL Support)
+
+**Note**: M1 (Core Reading Library) is complete. M2+ adds query execution, CQL parsing, and high-level database APIs.
 
 ## Essential Commands
 
@@ -157,18 +159,16 @@ Reference files in JSONL format are also required for validation (`.jsonl` files
 
 ### Feature Flags
 
-#### Active Features (M1)
-- `default = ["all-compression", "metrics", "experimental"]`
-- `all-compression`: Includes lz4, snappy, deflate, zstd
-- `experimental`: SSTable writing and M1 functionality
+#### Active Features (M2+ Default Build)
+- `default = ["all-compression", "metrics", "experimental", "state_machine"]`
+- `all-compression`: Includes lz4, snappy, deflate, zstd compression support
+- `metrics`: Performance monitoring and telemetry
+- `experimental`: SSTable writing and experimental functionality
+- `state_machine`: **NOW ENABLED BY DEFAULT** - Query engine, planner, executor, prepared statements, and caching
 - `legacy-heuristics`: **NOT in default** - Opt-in for backward compatibility with pre-5.0 formats
 
-#### Disabled Features (M2+)
-- `antlr`: ANTLR4 parser integration
-- `state_machine`: Advanced query state orchestration (gates entire `query` module at module level)
-  - When disabled, no query code is compiled into M1 builds
-  - Query engine, planner, executor, prepared statements, and caching are all excluded
-  - Use SSTableReader and storage layer directly for M1 reading operations
+#### Optional Features (M2+)
+- `antlr`: ANTLR4 parser integration (alternative to nom)
 - `events`: Validation event recording
 - `tombstones`: Tombstone and garbage collection logic
 - `benchmarks`: Performance benchmark suite
@@ -177,23 +177,25 @@ Reference files in JSONL format are also required for validation (`.jsonl` files
 - `test-infrastructure`: Enhanced TestContext framework
 - `docker-integration`: Docker-based integration testing
 
-#### Query Module Gating (Issue #108)
-The entire `query` module is gated behind the `state_machine` feature, which is **DISABLED by default** in M1:
-- Query orchestration, planning, caching, and prepared statements are M2+ features
-- The `Database` struct's query-related methods (`execute()`, `prepare()`, `explain()`) require `state_machine` feature
-- For M1 basic SSTable reading, use the storage layer directly (see M1 API Examples below)
-- **Note**: DashMap and parking_lot dependencies remain required as they're used by the storage layer
+#### Query Module Status (Issue #108)
+The entire `query` module is gated behind the `state_machine` feature, which is **ENABLED by default** in M2+ builds:
+- Query orchestration, planning, caching, and prepared statements are core functionality
+- The `Database` struct's query-related methods (`execute()`, `prepare()`, `explain()`) are available by default
+- M2+ standard development includes full query engine capabilities
+- **Historical Note**: During M1 milestone, `state_machine` was disabled by default
 
-To enable query functionality (M2+ development):
+To build minimal/M1-compatible binaries (storage layer only, no query engine):
 ```bash
-cargo build --features state_machine
+cargo build --no-default-features --features all-compression,metrics
 ```
 
-### M1 API Usage Examples
+### Low-Level Storage API Examples
 
-For M1 milestone (basic SSTable reading), use the storage layer directly without query engine.
+**M2+ Development Note**: These examples show low-level storage layer APIs for minimal builds or advanced use cases. Standard M2+ development should use the high-level `Database` API with query execution (see Query Engine section above).
 
-**Important**: All M1 SSTable APIs require Platform and Config initialization:
+**For Minimal Builds**: When building with `--no-default-features` (M1 compatibility mode), use the storage layer directly without query engine.
+
+**Important**: All SSTable APIs require Platform and Config initialization:
 
 ```rust
 use std::sync::Arc;
@@ -270,13 +272,15 @@ if let Some(latest) = dir.latest_generation() {
 }
 ```
 
-**Note**: The high-level `Database` API with query execution requires the `state_machine` feature and is not available in default M1 builds.
+**Note**: The high-level `Database` API with query execution is available by default in M2+ builds. Use these low-level APIs only for minimal builds (`--no-default-features`) or when direct SSTable access is required.
 
 ## Development Guidelines
 
 ### Milestone Context
 
-Currently on **M1: Core Reading Library** focusing on:
+Currently on **M2+: Query Engine & CQL Support** building on completed M1 foundation:
+
+**M1 Complete** (Core Reading Library):
 - SSTable format parsing (Cassandra 5.0+ with BTI)
 - Basic read operations
 - Index-based partition lookups
@@ -287,12 +291,19 @@ Currently on **M1: Core Reading Library** focusing on:
   - Blob fallbacks removed from modern paths
   - Legacy heuristics gated behind opt-in `legacy-heuristics` feature (NOT in CI)
 
+**M2+ In Progress** (Query Engine):
+- CQL SELECT statement parsing and execution
+- Query planning and optimization
+- Prepared statement support
+- High-level `Database` API with query methods
+- Multi-partition query execution
+
 ### Code Quality Standards
 
-1. **Clippy Configuration**: Workspace uses M1-balanced clippy settings
+1. **Clippy Configuration**: Workspace uses balanced clippy settings for velocity
    - `correctness` and `suspicious`: deny
    - `perf`, `style`, `complexity`: warn
-   - Pedantic checks allowed during M1 for velocity
+   - Pedantic checks allowed during rapid development
 
 2. **Test Requirements**:
    - All integration tests must use real SSTable data
@@ -311,15 +322,15 @@ Currently on **M1: Core Reading Library** focusing on:
 
 ### Running CI Locally
 
-The M1 CI pipeline validates:
+The CI pipeline validates:
 1. Compilation without warnings (`RUSTFLAGS="-D warnings"`)
 2. Clippy correctness and suspicious checks
-3. All tests pass with real Cassandra 5.0 data
+3. All tests pass with real Cassandra 5.0 data (including query engine tests)
 4. Code coverage tracking (90% minimum target)
 
 Reproduce CI locally:
 ```bash
-# Full CI validation sequence
+# Full CI validation sequence (includes query engine)
 env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 cargo fmt --check
 env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --quiet
@@ -364,7 +375,7 @@ test result: FAILED. <X> tests exceeded timeout
 Solution: Use `timeout` wrapper or increase test timeout in CI
 
 **Compilation Errors with Features**:
-Ensure you're not enabling M2+ features (antlr, state_machine, events) during M1 development.
+The default build includes the query engine (`state_machine` feature). For minimal builds without query support, use `--no-default-features`.
 
 ### Performance Issues
 
@@ -380,7 +391,7 @@ Ensure you're not enabling M2+ features (antlr, state_machine, events) during M1
 - **Parser Entry**: `cqlite-core/src/parser/mod.rs`
 - **Error Definitions**: `cqlite-core/src/error.rs`
 - **Test Utilities**: `cqlite-core/tests/common/`
-- **CI Configuration**: `.github/workflows/m1-ci.yml`
+- **CI Configuration**: `.github/workflows/` (M1 and M2+ pipelines)
 - **Coverage Config**: `Cargo.toml` → `[package.metadata.coverage]`
 
 ## Resources

@@ -24,6 +24,9 @@ pub mod output;
 // Script executor for CQL script files (Issue #122)
 pub mod script_executor;
 
+// REPL engine module (Issue #16)
+pub mod repl;
+
 #[cfg(all(test, feature = "state_machine"))]
 pub mod test_infrastructure;
 

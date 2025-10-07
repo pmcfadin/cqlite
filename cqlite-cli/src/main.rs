@@ -21,10 +21,10 @@ use cli_types::{AdminCommands, Cli, Commands};
 // mod interactive;
 // mod pagination;
 // mod query_executor;
-// mod repl; // Core REPL engine
-// mod repl_data_integration; // REPL data integration
-// mod table_scanner;
-// mod tui;
+mod repl; // Core REPL engine
+          // mod repl_data_integration; // REPL data integration
+          // mod table_scanner;
+          // mod tui;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -82,9 +82,34 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Repl { tui: _ }) => {
-            println!("REPL mode temporarily disabled during compilation fixes");
-            Ok(())
+        Some(Commands::Repl { tui }) => {
+            // Create REPL configuration
+            let repl_config = repl::ReplConfig {
+                mode: if tui {
+                    repl::ReplMode::Tui
+                } else {
+                    repl::ReplMode::Basic
+                },
+                enable_history: true,
+                enable_completion: true,
+                enable_colors: !cli.no_color,
+                output_format: repl::OutputFormat::Table,
+                max_history_size: 1000,
+                page_size: cli.page_size.unwrap_or(50),
+                show_timing: false,
+                enable_paging: true,
+                prompt: "cqlite> ".to_string(),
+                prompt_continuation: "    -> ".to_string(),
+            };
+
+            // Initialize and run REPL engine
+            let mut engine = repl::ReplEngine::new(repl_config, &db_path, config, database)
+                .map_err(|e| anyhow::anyhow!("Failed to initialize REPL: {}", e))?;
+
+            engine
+                .run()
+                .await
+                .map_err(|e| anyhow::anyhow!("REPL error: {}", e))
         }
         Some(Commands::Query {
             query,

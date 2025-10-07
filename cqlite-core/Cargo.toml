@@ -117,8 +117,8 @@ name = "m1_performance"
 harness = false
 
 [features]
-# M1 defaults: Modern Cassandra 5+ with authoritative metadata only (no heuristics)
-default = ["all-compression", "metrics", "experimental"]
+# M2+ production defaults: Full query engine enabled
+default = ["all-compression", "metrics", "experimental", "state_machine"]
 
 # Compression features - properly feature-gated
 lz4 = ["dep:lz4_flex"]
