@@ -191,14 +191,34 @@ cargo build --features state_machine
 
 ### M1 API Usage Examples
 
-For M1 milestone (basic SSTable reading), use the storage layer directly without query engine:
+For M1 milestone (basic SSTable reading), use the storage layer directly without query engine.
+
+**Important**: All M1 SSTable APIs require Platform and Config initialization:
+
+```rust
+use std::sync::Arc;
+use std::path::Path;
+use cqlite_core::{Config, Platform};
+
+// Initialize required components (reuse across multiple operations)
+let config = Config::default();
+let platform = Arc::new(Platform::new(&config).await?);
+```
 
 #### Opening and Reading an SSTable
 ```rust
 use cqlite_core::storage::sstable::reader::SSTableReader;
+use std::sync::Arc;
+use std::path::Path;
+use cqlite_core::{Config, Platform};
 
-// Open an SSTable
-let reader = SSTableReader::open("path/to/Data.db").await?;
+// Initialize Platform and Config
+let config = Config::default();
+let platform = Arc::new(Platform::new(&config).await?);
+
+// Open an SSTable (requires path as &Path, &Config, and Arc<Platform>)
+let path = Path::new("path/to/Data.db");
+let reader = SSTableReader::open(path, &config, platform.clone()).await?;
 
 // Read all entries
 let entries = reader.get_all_entries().await?;
@@ -211,8 +231,19 @@ for (table_id, row_key, value) in entries {
 #### Using Index-Based Partition Lookups
 ```rust
 use cqlite_core::storage::sstable::index_reader::IndexReader;
+use std::sync::Arc;
+use std::path::Path;
+use cqlite_core::{Config, Platform};
 
-let index = IndexReader::new("path/to/Index.db").await?;
+// Initialize Platform and Config
+let config = Config::default();
+let platform = Arc::new(Platform::new(&config).await?);
+
+// Open Index.db (method is 'open', not 'new')
+let index_path = Path::new("path/to/Index.db");
+let index = IndexReader::open(index_path, platform.clone()).await?;
+
+// Look up partition offset
 let partition_offset = index.lookup_partition(&partition_key)?;
 // Use offset to read specific partition from Data.db
 ```
@@ -220,10 +251,22 @@ let partition_offset = index.lookup_partition(&partition_key)?;
 #### Working with SSTable Directory
 ```rust
 use cqlite_core::storage::sstable::directory::SSTableDirectory;
+use std::path::Path;
 
-let dir = SSTableDirectory::discover("/path/to/sstable/dir").await?;
-for component in dir.components() {
-    println!("Component: {:?}", component);
+// Scan directory (method is 'scan', not 'discover', and is NOT async)
+let dir = SSTableDirectory::scan(Path::new("/path/to/sstable/dir"))?;
+
+// Iterate over generations (not 'components')
+for generation in &dir.generations {
+    println!("Generation: {}", generation.generation);
+    for (component_type, component_path) in &generation.components {
+        println!("  Component: {:?} at {:?}", component_type, component_path);
+    }
+}
+
+// Access latest generation
+if let Some(latest) = dir.latest_generation() {
+    println!("Latest generation: {}", latest.generation);
 }
 ```
 
