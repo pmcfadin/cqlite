@@ -16,10 +16,13 @@
 //! - `ORDER BY` clause
 //! - `ALLOW FILTERING`
 //! - Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
-//! - `GROUP BY` clause
-//! - `HAVING` clause
-//! - `JOIN` operations
+//! - `GROUP BY` clause (SQL-only, not in CQL)
+//! - `HAVING` clause (SQL-only, not in CQL)
+//! - `JOIN` operations (SQL-only, not in CQL)
 //! - Range operators: `>`, `<`, `>=`, `<=`, `!=`, `<>`
+//!
+//! Note: GROUP BY, HAVING, and JOINs are SQL features that do not exist in CQL.
+//! We detect them to provide helpful error messages for users coming from SQL backgrounds.
 //!
 //! ## Example Usage
 //!
@@ -27,9 +30,9 @@
 //! use cqlite_core::query::m2_select_validator::M2SelectValidator;
 //!
 //! let validator = M2SelectValidator;
-//! let sql = "SELECT * FROM users WHERE user_id = 123";
+//! let cql = "SELECT * FROM users WHERE user_id = 123";
 //!
-//! let result = validator.validate_select(sql)?;
+//! let result = validator.validate_select(cql)?;
 //! assert!(result.has_partition_key_filter);
 //! assert!(result.unsupported_features.is_empty());
 //! ```
@@ -98,7 +101,7 @@ impl M2SelectValidator {
     ///
     /// # Arguments
     ///
-    /// * `sql` - The SQL query string to validate
+    /// * `sql` - The CQL query string to validate
     ///
     /// # Returns
     ///

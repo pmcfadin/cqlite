@@ -1,7 +1,7 @@
 //! CQL query parser for CQLite
 //!
 //! This module provides parsing capabilities for CQL (Cassandra Query Language)
-//! queries. It converts SQL text into structured query representations that can
+//! queries. It converts CQL text into structured query representations that can
 //! be executed by the query engine.
 
 use super::{

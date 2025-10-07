@@ -181,7 +181,7 @@ pub struct ParsedQuery {
     pub order_by: Vec<OrderByClause>,
     /// LIMIT clause
     pub limit: Option<usize>,
-    /// Original SQL text
+    /// Original CQL text
     pub sql: String,
 }
 

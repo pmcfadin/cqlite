@@ -591,7 +591,7 @@ impl SelectExecutor {
 
     /// Simple LIKE pattern matching
     fn match_like_pattern(&self, text: &str, pattern: &str) -> bool {
-        // Simple implementation - convert SQL LIKE to regex-like matching
+        // Simple implementation - convert CQL LIKE to regex-like matching
         let regex_pattern = pattern.replace('%', ".*").replace('_', ".");
 
         if let Ok(regex) = regex::Regex::new(&format!("^{}$", regex_pattern)) {

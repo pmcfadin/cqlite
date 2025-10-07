@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Prepared query statement
 #[derive(Debug)]
 pub struct PreparedQuery {
-    /// Original SQL text
+    /// Original CQL text
     pub sql: String,
     /// Parsed query
     pub parsed_query: ParsedQuery,
@@ -180,7 +180,7 @@ impl PreparedQuery {
         &self.parameters
     }
 
-    /// Get SQL text
+    /// Get CQL text
     pub fn sql(&self) -> &str {
         &self.sql
     }
@@ -222,7 +222,7 @@ impl PreparedQuery {
         let mut parameters = Vec::new();
 
         // Simple parameter extraction - in a real implementation, this would
-        // analyze the SQL text for parameter placeholders like ? or :name
+        // analyze the CQL text for parameter placeholders like ? or :name
 
         // For demonstration, we'll assume queries with WHERE clauses have parameters
         if parsed_query.where_clause.is_some() {
@@ -267,7 +267,7 @@ pub struct PreparedQueryStats {
 
 /// Prepared statement builder
 pub struct PreparedQueryBuilder {
-    /// SQL text
+    /// CQL text
     sql: String,
     /// Parameter metadata
     parameters: Vec<ParameterMetadata>,

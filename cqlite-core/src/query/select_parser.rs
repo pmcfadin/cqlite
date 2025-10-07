@@ -14,7 +14,7 @@ use crate::{Error, Result, TableId, Value};
 /// Advanced CQL SELECT parser
 #[derive(Debug)]
 pub struct SelectParser {
-    /// Input SQL text
+    /// Input CQL text
     #[allow(dead_code)]
     input: String,
     /// Current position in input
