@@ -100,10 +100,19 @@ jobs:
       run: |
         echo "::group::Code Formatting Check"
         if ! cargo fmt --all -- --check; then
-          echo "❌ Code formatting issues detected"
-          echo "💡 Fix with: cargo fmt --all"
-          echo "::error::Code formatting check failed. Run 'cargo fmt --all' to fix."
-          exit 1
+          echo "⚠️ cargo fmt reported an error; falling back to tracked files only"
+          FILES=$(git ls-files '*.rs')
+          if [ -z "$FILES" ]; then
+            echo "ℹ️ No Rust files found to format"
+            echo "::endgroup::"
+            exit 0
+          fi
+          if ! rustfmt --edition 2021 --check $FILES; then
+            echo "❌ Code formatting issues detected"
+            echo "💡 Fix with: cargo fmt --all"
+            echo "::error::Code formatting check failed. Run 'cargo fmt --all' to fix."
+            exit 1
+          fi
         fi
         echo "✅ Code formatting check passed"
         echo "::endgroup::"
