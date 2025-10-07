@@ -1,0 +1,6 @@
+---
+source: cqlite-cli/tests/one_shot_e2e_tests.rs
+assertion_line: 643
+expression: output
+---
+
