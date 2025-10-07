@@ -13,6 +13,7 @@
 /// - 5: query execution errors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
+#[allow(dead_code)] // Success variant used for completeness per spec
 pub enum CliExitCode {
     /// Successful execution
     Success = 0,
