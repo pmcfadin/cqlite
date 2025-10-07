@@ -11,6 +11,7 @@ mod cli;
 mod cli_types;
 mod commands;
 mod config;
+mod error;
 mod formatter;
 mod output;
 mod script_executor;
@@ -27,7 +28,17 @@ mod repl; // Core REPL engine
           // mod tui;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    // Run main logic and handle exit codes
+    if let Err(e) = run_main().await {
+        let exit_code = error::classify_error(&e);
+        error::print_error(&e, exit_code);
+        std::process::exit(exit_code.as_i32());
+    }
+}
+
+/// Main CLI logic that returns Result for proper error handling
+async fn run_main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging based on verbosity

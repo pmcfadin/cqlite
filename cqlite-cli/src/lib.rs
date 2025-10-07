@@ -11,6 +11,7 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod error;
 
 // CLI types module - re-exports from main
 pub mod cli_types;

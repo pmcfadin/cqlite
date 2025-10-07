@@ -10,6 +10,7 @@ use std::path::Path;
 
 use crate::cli::OutputFormat;
 use crate::config::OutputConfig;
+use crate::error::{print_error, CliExitCode};
 
 /// Execute a CQL script file containing multiple statements
 ///
@@ -93,17 +94,17 @@ pub async fn execute_script_file(
         )
         .await
         {
-            // Print error with statement context
+            // Print error with statement context and helpful hint
             eprintln!(
                 "Error executing statement {} in {}",
                 statement_num,
                 file_path.display()
             );
             eprintln!("Statement: {}", statement);
-            eprintln!("Error: {}", e);
+            print_error(&e, CliExitCode::QueryExecutionError);
 
             // Exit with code 5 as per M2_CLI_SPEC.md line 340
-            std::process::exit(5);
+            std::process::exit(CliExitCode::QueryExecutionError.as_i32());
         }
     }
 
