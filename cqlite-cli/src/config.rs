@@ -32,6 +32,25 @@ pub struct Config {
     pub enable_paging: Option<bool>,
     #[serde(default)]
     pub no_color: bool,
+
+    // M2 one-shot mode fields
+    /// Schema file paths (supports multiple sources)
+    #[serde(default)]
+    pub schema_paths: Vec<PathBuf>,
+
+    /// One-shot execution query (from -e flag)
+    #[serde(skip)]
+    pub execution_query: Option<String>,
+
+    /// One-shot execution file (from -f flag)
+    #[serde(skip)]
+    pub execution_file: Option<PathBuf>,
+
+    /// Output mode for query results (table/json/csv)
+    pub output_mode: Option<String>,
+
+    /// Maximum rows for queries
+    pub query_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,19 +162,22 @@ impl Default for Config {
             page_size: None,
             enable_paging: None,
             no_color: false,
+            schema_paths: Vec::new(),
+            execution_query: None,
+            execution_file: None,
+            output_mode: None,
+            query_limit: None,
         }
     }
 }
 
 impl Config {
-    pub fn load(config_path: Option<PathBuf>) -> Result<Self> {
-        let config = if let Some(path) = config_path {
-            Self::load_from_file(&path)?
-        } else {
-            Self::load_default()?
-        };
-
-        Ok(config)
+    pub fn load(config_path: Option<PathBuf>, cli: &crate::cli_types::Cli) -> Result<Self> {
+        Ok(ConfigBuilder::from_defaults()
+            .with_file(config_path)?
+            .with_env()?
+            .with_flags(cli)
+            .build())
     }
 
     fn load_from_file(path: &Path) -> Result<Self> {
@@ -178,6 +200,7 @@ impl Config {
         Ok(config)
     }
 
+    #[allow(dead_code)]
     fn load_default() -> Result<Self> {
         // Look for config file in standard locations
         let config_paths = [
@@ -257,5 +280,134 @@ impl Default for ReplConfig {
             prompt_continuation: "    -> ".to_string(),
             history_file: None,
         }
+    }
+}
+
+/// Builder for Config with precedence: flags > env > file > defaults
+pub struct ConfigBuilder {
+    config: Config,
+}
+
+impl ConfigBuilder {
+    /// Start with default configuration
+    pub fn from_defaults() -> Self {
+        Self {
+            config: Config::default(),
+        }
+    }
+
+    /// Layer config file (overrides defaults)
+    pub fn with_file(mut self, path: Option<PathBuf>) -> Result<Self> {
+        if let Some(p) = path {
+            let loaded = Config::load_from_file(&p)?;
+            // Merge loaded config, preserving defaults for unset fields
+            self.config = loaded;
+        }
+        Ok(self)
+    }
+
+    /// Layer environment variables (overrides file and defaults)
+    pub fn with_env(mut self) -> Result<Self> {
+        use std::env;
+
+        // CQLITE_DATA_DIR
+        if let Ok(val) = env::var("CQLITE_DATA_DIR") {
+            self.config.data_directory = Some(PathBuf::from(val));
+        }
+
+        // CQLITE_SCHEMA (can be comma-separated paths)
+        if let Ok(val) = env::var("CQLITE_SCHEMA") {
+            let paths: Vec<PathBuf> = val.split(',').map(|s| PathBuf::from(s.trim())).collect();
+            self.config.schema_paths.extend(paths);
+        }
+
+        // CQLITE_LIMIT
+        if let Ok(val) = env::var("CQLITE_LIMIT") {
+            let limit: usize = val.parse().with_context(|| "Invalid CQLITE_LIMIT value")?;
+            if limit == 0 {
+                return Err(anyhow::anyhow!("CQLITE_LIMIT must be greater than 0"));
+            }
+            self.config.query_limit = Some(limit);
+        }
+
+        // CQLITE_PAGE_SIZE
+        if let Ok(val) = env::var("CQLITE_PAGE_SIZE") {
+            let page_size: usize = val
+                .parse()
+                .with_context(|| "Invalid CQLITE_PAGE_SIZE value")?;
+            if page_size == 0 {
+                return Err(anyhow::anyhow!("CQLITE_PAGE_SIZE must be greater than 0"));
+            }
+            self.config.repl.page_size = page_size;
+        }
+
+        // CQLITE_NO_COLOR
+        if let Ok(val) = env::var("CQLITE_NO_COLOR") {
+            let no_color = matches!(val.to_lowercase().as_str(), "1" | "true" | "yes" | "on");
+            self.config.no_color = no_color;
+            self.config.output.colors = !no_color;
+        }
+
+        // CQLITE_OUT
+        if let Ok(val) = env::var("CQLITE_OUT") {
+            self.config.output_mode = Some(val);
+        }
+
+        Ok(self)
+    }
+
+    /// Layer CLI flags (highest precedence)
+    ///
+    /// Note: CLI flags completely override environment variables and config file
+    /// values for the same setting. For example, --schema replaces CQLITE_SCHEMA
+    /// entirely rather than merging paths. This ensures clear precedence semantics.
+    pub fn with_flags(mut self, cli: &crate::cli_types::Cli) -> Self {
+        // Schema path
+        if let Some(ref schema) = cli.schema {
+            self.config.schema_paths = vec![schema.clone()];
+        }
+
+        // Data directory
+        if let Some(ref data_dir) = cli.data_dir {
+            self.config.data_directory = Some(data_dir.clone());
+        }
+
+        // Execute query
+        if let Some(ref query) = cli.execute {
+            self.config.execution_query = Some(query.clone());
+        }
+
+        // Execute file
+        if let Some(ref file) = cli.file {
+            self.config.execution_file = Some(file.clone());
+        }
+
+        // Output mode
+        if let Some(ref out) = cli.out {
+            self.config.output_mode = Some(out.as_str().to_string());
+        }
+
+        // Limit
+        if let Some(limit) = cli.limit {
+            self.config.query_limit = Some(limit);
+        }
+
+        // Page size
+        if let Some(page_size) = cli.page_size {
+            self.config.repl.page_size = page_size;
+        }
+
+        // No color
+        if cli.no_color {
+            self.config.no_color = true;
+            self.config.output.colors = false;
+        }
+
+        self
+    }
+
+    /// Build final configuration
+    pub fn build(self) -> Config {
+        self.config
     }
 }

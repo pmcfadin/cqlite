@@ -3,10 +3,29 @@
 //! This module contains all the CLI command structures and enums
 //! that are used throughout the application.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::cli::{ExportFormat, ImportFormat, InfoOutputFormat, OutputFormat};
+
+/// Output mode for query results (distinct from display format)
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OutputMode {
+    Table,
+    Json,
+    Csv,
+}
+
+impl OutputMode {
+    /// Convert OutputMode to its string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutputMode::Table => "table",
+            OutputMode::Json => "json",
+            OutputMode::Csv => "csv",
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "cqlite")]
@@ -41,6 +60,38 @@ pub struct Cli {
     /// Override Cassandra version for compatibility (e.g., 3.11, 4.0, 5.0)
     #[arg(long, value_name = "VERSION")]
     pub cassandra_version: Option<String>,
+
+    /// Schema file or directory (.cql or .json)
+    #[arg(long, value_name = "PATH")]
+    pub schema: Option<PathBuf>,
+
+    /// Cassandra data directory root (e.g., /var/lib/cassandra/data)
+    #[arg(long, value_name = "DIR", env = "CQLITE_DATA_DIR")]
+    pub data_dir: Option<PathBuf>,
+
+    /// Execute a single CQL statement (one-shot mode)
+    #[arg(short = 'e', long, value_name = "CQL")]
+    pub execute: Option<String>,
+
+    /// Execute statements from a CQL file
+    #[arg(short = 'f', long, value_name = "FILE")]
+    pub file: Option<PathBuf>,
+
+    /// Output format for query results (distinct from display format)
+    #[arg(long, value_enum)]
+    pub out: Option<OutputMode>,
+
+    /// Maximum number of rows to return
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+
+    /// Pagination size for reading and display
+    #[arg(long, value_name = "N")]
+    pub page_size: Option<usize>,
+
+    /// Disable colored output
+    #[arg(long)]
+    pub no_color: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,

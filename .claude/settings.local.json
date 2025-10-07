@@ -21,7 +21,16 @@
       "Bash(for dir in */)",
       "Bash(do echo \"=== $dir ===\")",
       "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test index_db_parsing_regression_tests test_partition_lookup_correct_offsets --quiet)",
-      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test index_db_parsing_regression_tests --quiet)"
+      "Bash(env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core --test index_db_parsing_regression_tests --quiet)",
+      "Bash(cargo build:*)",
+      "Bash(gh issue list:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo test --package cqlite-core --lib --quiet)",
+      "Bash(cargo bench:*)",
+      "Bash(gh issue view:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo bench --package cqlite-core --bench m1_performance)",
+      "Bash(find:*)",
+      "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets RUST_BACKTRACE=1 cargo bench --package cqlite-core --bench m1_performance)",
+      "Bash(gh issue edit:*)"
     ],
     "deny": [],
     "ask": []

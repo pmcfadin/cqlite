@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
     info!("Starting CQLite CLI v{}", env!("CARGO_PKG_VERSION"));
 
     // Load configuration
-    let config = config::Config::load(cli.config)?;
+    let config = config::Config::load(cli.config.clone(), &cli)?;
 
     // Initialize database connection
     let db_path = cli
