@@ -173,6 +173,7 @@ pub async fn execute_query(
     explain: bool,
     timing: bool,
     format: OutputFormat,
+    config: &crate::config::OutputConfig,
 ) -> Result<()> {
     use std::time::Instant;
 
@@ -230,8 +231,18 @@ pub async fn execute_query(
     // Display results based on format
     match format {
         OutputFormat::Table => {
-            // Use the built-in Display implementation for table format
-            println!("{result}");
+            // Use TableWriter for cqlsh-compatible formatting
+            #[cfg(feature = "state_machine")]
+            {
+                use crate::output::table::TableWriter;
+                let table_output = TableWriter::write(&result, config)
+                    .map_err(|e| anyhow::anyhow!("Failed to format table output: {}", e))?;
+                println!("{}", table_output);
+            }
+            #[cfg(not(feature = "state_machine"))]
+            {
+                println!("{result}");
+            }
         }
         OutputFormat::Json => {
             let json_result = result.to_json();
@@ -295,6 +306,7 @@ pub async fn execute_query(
     _explain: bool,
     _timing: bool,
     _format: OutputFormat,
+    _config: &crate::config::OutputConfig,
 ) -> Result<()> {
     Err(anyhow::anyhow!(
         "Query execution is not available in M1.\n\

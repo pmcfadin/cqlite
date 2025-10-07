@@ -47,11 +47,13 @@ impl CqlshTableFormatter {
     }
 
     /// Add multiple rows
+    #[allow(dead_code)]
     pub fn add_rows(&mut self, rows: Vec<Vec<String>>) {
         self.rows.extend(rows);
     }
 
     /// Convert SSTable entries to formatted table
+    #[allow(dead_code)]
     pub fn from_sstable_entries(&mut self, entries: &[SSTableEntry], table_name: &str) {
         // Set default headers based on known schema
         self.column_headers = vec!["id".to_string(), "data".to_string()];
@@ -174,27 +176,32 @@ impl CqlshTableFormatter {
     }
 
     /// Clear all data
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.column_headers.clear();
         self.rows.clear();
     }
 
     /// Get row count
+    #[allow(dead_code)]
     pub fn row_count(&self) -> usize {
         self.rows.len()
     }
 
     /// Get column count
+    #[allow(dead_code)]
     pub fn column_count(&self) -> usize {
         self.column_headers.len()
     }
 
     /// Check if table is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty() && self.column_headers.is_empty()
     }
 
     /// Format as JSON for API compatibility
+    #[allow(dead_code)]
     pub fn format_as_json(&self) -> serde_json::Value {
         let mut result = serde_json::Map::new();
 
@@ -216,6 +223,7 @@ impl CqlshTableFormatter {
     }
 
     /// Create formatter from JSON data
+    #[allow(dead_code)]
     pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
         let mut formatter = Self::new();
 
@@ -244,6 +252,7 @@ impl CqlshTableFormatter {
     }
 
     /// Apply data type specific formatting
+    #[allow(dead_code)]
     pub fn format_cell_value(&self, value: &str, column_name: &str) -> String {
         // Handle special formatting based on column type/name
         match column_name.to_lowercase().as_str() {
@@ -279,12 +288,14 @@ impl CqlshTableFormatter {
     }
 
     /// Enable/disable row count display
+    #[allow(dead_code)]
     pub fn set_show_row_count(&mut self, show: bool) {
         self.show_row_count = show;
     }
 }
 
 /// Utility function to format SSTable entries for display
+#[allow(dead_code)]
 pub fn format_sstable_entries_as_table(entries: &[SSTableEntry], table_name: &str) -> String {
     let mut formatter = CqlshTableFormatter::new();
     formatter.from_sstable_entries(entries, table_name);
@@ -292,6 +303,7 @@ pub fn format_sstable_entries_as_table(entries: &[SSTableEntry], table_name: &st
 }
 
 /// Format data for cqlsh comparison
+#[allow(dead_code)]
 pub fn format_for_cqlsh_comparison(entries: &[SSTableEntry]) -> String {
     let mut formatter = CqlshTableFormatter::new();
     formatter.set_headers(vec!["id".to_string(), "data".to_string()]);

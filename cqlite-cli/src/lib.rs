@@ -21,7 +21,7 @@ pub mod formatter;
 // Output writers for QueryResult (Issue #119)
 pub mod output;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))]
 pub mod test_infrastructure;
 
 // Re-export commonly used types for testing
@@ -31,5 +31,5 @@ pub use cli::{ExportFormat, ImportFormat, OutputFormat};
 pub use cli_types::{AdminCommands, BenchCommands, Cli, Commands, SchemaCommands};
 pub use config::Config;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))]
 pub use test_infrastructure::*;

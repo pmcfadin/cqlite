@@ -20,6 +20,7 @@ use tempfile::TempDir;
 mod config_tests {
     use super::*;
     use cqlite_cli::config::Config;
+    use cqlite_cli::Cli;
 
     #[test]
     fn test_default_config() -> Result<()> {
@@ -73,7 +74,9 @@ prompt_continuation = "    -> "
 "#,
         )?;
 
-        let config = Config::load(Some(config_path))?;
+        // Create a minimal CLI for testing
+        let cli = Cli::parse_from(&["cqlite"]);
+        let config = Config::load(Some(config_path), &cli)?;
 
         assert_eq!(config.performance.cache_size_mb, 256);
         assert_eq!(config.performance.query_timeout_ms, 60000);
@@ -97,7 +100,9 @@ cache_size_mb = -10
 "#,
         )?;
 
-        let result = Config::load(Some(config_path));
+        // Create a minimal CLI for testing
+        let cli = Cli::parse_from(&["cqlite"]);
+        let result = Config::load(Some(config_path), &cli);
         assert!(result.is_err(), "Should reject negative cache size");
 
         Ok(())
@@ -142,7 +147,9 @@ prompt_continuation = "    -> "
 "#,
         )?;
 
-        let config = Config::load(Some(config_path))?;
+        // Create a minimal CLI for testing
+        let cli = Cli::parse_from(&["cqlite"]);
+        let config = Config::load(Some(config_path), &cli)?;
 
         // Should use explicit values from TOML
         assert_eq!(config.performance.cache_size_mb, 256);

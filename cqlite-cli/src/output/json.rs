@@ -10,6 +10,7 @@ use serde_json::{json, Map, Value as JsonValue};
 use std::error::Error as StdError;
 
 /// JSON writer for QueryResult
+#[allow(dead_code)]
 pub struct JSONWriter;
 
 impl JSONWriter {
@@ -38,6 +39,7 @@ impl JSONWriter {
     /// # Returns
     ///
     /// Pretty-printed JSON string or error
+    #[allow(dead_code)]
     pub fn write(result: &QueryResult) -> Result<String, Box<dyn StdError>> {
         let mut rows_json = Vec::new();
 
@@ -65,6 +67,7 @@ impl JSONWriter {
     /// Convert a CQLite Value to a serde_json::Value
     ///
     /// Uses string representations for complex types to ensure human readability.
+    #[allow(dead_code)]
     fn value_to_json(value: &Value) -> JsonValue {
         match value {
             Value::Null => JsonValue::Null,

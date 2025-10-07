@@ -27,6 +27,7 @@ use csv::WriterBuilder;
 use super::value_fmt::ValueFormatter;
 
 /// CSV writer for QueryResult
+#[allow(dead_code)]
 pub struct CSVWriter;
 
 impl CSVWriter {
@@ -44,6 +45,7 @@ impl CSVWriter {
     /// - Column order is stable across all rows
     /// - Null values render as empty strings
     /// - Special CSV characters are properly escaped by the csv crate
+    #[allow(dead_code)]
     pub fn write(result: &QueryResult) -> Result<String, Box<dyn std::error::Error>> {
         // Create an in-memory CSV writer
         let mut wtr = WriterBuilder::new().from_writer(Vec::new());

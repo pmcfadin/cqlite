@@ -19,9 +19,13 @@ pub mod table;
 pub mod value_fmt;
 
 #[cfg(feature = "state_machine")]
+#[allow(unused_imports)]
 pub use csv::CSVWriter;
 #[cfg(feature = "state_machine")]
+#[allow(unused_imports)]
 pub use json::JSONWriter;
 #[cfg(feature = "state_machine")]
+#[allow(unused_imports)]
 pub use table::TableWriter;
+#[allow(unused_imports)]
 pub use value_fmt::ValueFormatter;

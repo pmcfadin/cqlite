@@ -3,6 +3,7 @@
 //! This module provides a writer that adapts QueryResult to the existing
 //! CqlshTableFormatter for consistent cqlsh-compatible table output.
 
+use crate::config::OutputConfig;
 use crate::formatter::CqlshTableFormatter;
 use crate::output::value_fmt::ValueFormatter;
 use cqlite_core::query::QueryResult;
@@ -18,6 +19,7 @@ impl TableWriter {
     ///
     /// # Arguments
     /// * `result` - The query result to format
+    /// * `config` - Output configuration for color support and row limits
     ///
     /// # Returns
     /// Formatted table string with headers, data rows, and row count footer
@@ -27,8 +29,16 @@ impl TableWriter {
     /// - Right-aligns numeric columns via CqlshTableFormatter
     /// - Prints `(N rows)` footer matching cqlsh style
     /// - Handles missing values as empty cells (null convention)
-    pub fn write(result: &QueryResult) -> Result<String, Box<dyn std::error::Error>> {
+    /// - Applies color settings from config
+    /// - Respects row limit from config (truncates display if set)
+    pub fn write(
+        result: &QueryResult,
+        config: &OutputConfig,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let mut formatter = CqlshTableFormatter::new();
+
+        // Apply color support from config
+        formatter.set_color_support(config.color_enabled);
 
         // Extract headers from metadata.columns in order
         // This is the single source of truth for column names and order
@@ -41,8 +51,15 @@ impl TableWriter {
 
         formatter.set_headers(headers);
 
+        // Apply row limit if specified in config
+        let rows_to_display = if let Some(limit) = config.limit {
+            &result.rows[..result.rows.len().min(limit)]
+        } else {
+            &result.rows
+        };
+
         // Add rows in column order from metadata
-        for row in &result.rows {
+        for row in rows_to_display {
             let row_data: Vec<String> = result
                 .metadata
                 .columns
@@ -74,7 +91,8 @@ mod tests {
     #[test]
     fn test_empty_result() {
         let result = QueryResult::new();
-        let output = TableWriter::write(&result).unwrap();
+        let config = OutputConfig::default();
+        let output = TableWriter::write(&result, &config).unwrap();
         assert!(
             output.is_empty(),
             "Empty result should produce empty output"
@@ -102,7 +120,8 @@ mod tests {
 
         result.rows = vec![row1, row2];
 
-        let output = TableWriter::write(&result).unwrap();
+        let config = OutputConfig::default();
+        let output = TableWriter::write(&result, &config).unwrap();
 
         // Verify headers are present
         assert!(output.contains("id"), "Output should contain 'id' header");
@@ -139,7 +158,8 @@ mod tests {
 
         result.rows = vec![row];
 
-        let output = TableWriter::write(&result).unwrap();
+        let config = OutputConfig::default();
+        let output = TableWriter::write(&result, &config).unwrap();
 
         // The output should follow metadata.columns order (z_last before a_first)
         // We can verify this by checking the position of headers in the output
@@ -167,7 +187,8 @@ mod tests {
 
         result.rows = vec![row];
 
-        let output = TableWriter::write(&result).unwrap();
+        let config = OutputConfig::default();
+        let output = TableWriter::write(&result, &config).unwrap();
 
         // Should not crash and should handle missing value
         assert!(output.contains("id"));
@@ -193,12 +214,114 @@ mod tests {
             result.rows.push(row);
         }
 
-        let output = TableWriter::write(&result).unwrap();
+        let config = OutputConfig::default();
+        let output = TableWriter::write(&result, &config).unwrap();
 
         // Should show (5 rows)
         assert!(
             output.contains("(5 rows)"),
             "Output should contain '(5 rows)' footer"
+        );
+    }
+
+    #[test]
+    fn test_config_limit() {
+        let mut result = QueryResult::new();
+
+        result.metadata.columns = vec![ColumnInfo::new(
+            "id".to_string(),
+            DataType::Integer,
+            false,
+            0,
+        )];
+
+        // Add 10 rows
+        for i in 1..=10 {
+            let mut row = QueryRow::new(RowKey::new(vec![i as u8]));
+            row.set("id".to_string(), Value::Integer(i));
+            result.rows.push(row);
+        }
+
+        // Apply limit of 3 rows
+        let config = OutputConfig {
+            color_enabled: true,
+            limit: Some(3),
+            page_size: None,
+        };
+        let output = TableWriter::write(&result, &config).unwrap();
+
+        // Should only show first 3 rows
+        assert!(output.contains("1"), "Output should contain row 1");
+        assert!(output.contains("2"), "Output should contain row 2");
+        assert!(output.contains("3"), "Output should contain row 3");
+
+        // Should show (3 rows) in footer, not (10 rows)
+        assert!(
+            output.contains("(3 rows)"),
+            "Output should contain '(3 rows)' footer"
+        );
+    }
+
+    #[test]
+    fn test_config_no_limit() {
+        let mut result = QueryResult::new();
+
+        result.metadata.columns = vec![ColumnInfo::new(
+            "id".to_string(),
+            DataType::Integer,
+            false,
+            0,
+        )];
+
+        // Add 5 rows
+        for i in 1..=5 {
+            let mut row = QueryRow::new(RowKey::new(vec![i as u8]));
+            row.set("id".to_string(), Value::Integer(i));
+            result.rows.push(row);
+        }
+
+        // No limit
+        let config = OutputConfig {
+            color_enabled: true,
+            limit: None,
+            page_size: None,
+        };
+        let output = TableWriter::write(&result, &config).unwrap();
+
+        // Should show all 5 rows
+        assert!(
+            output.contains("(5 rows)"),
+            "Output should contain '(5 rows)' footer"
+        );
+    }
+
+    #[test]
+    fn test_config_colors_disabled() {
+        let mut result = QueryResult::new();
+
+        result.metadata.columns = vec![ColumnInfo::new(
+            "id".to_string(),
+            DataType::Integer,
+            false,
+            0,
+        )];
+
+        let mut row = QueryRow::new(RowKey::new(vec![1]));
+        row.set("id".to_string(), Value::Integer(1));
+        result.rows = vec![row];
+
+        // Disable colors
+        let config = OutputConfig {
+            color_enabled: false,
+            limit: None,
+            page_size: None,
+        };
+        let output = TableWriter::write(&result, &config).unwrap();
+
+        // Output should not contain ANSI color codes (e.g., \x1b[)
+        assert!(
+            !output.contains("\x1b["),
+            "Output should not contain ANSI color codes when colors are disabled"
         );
     }
 }

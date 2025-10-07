@@ -11,6 +11,8 @@ mod cli;
 mod cli_types;
 mod commands;
 mod config;
+mod formatter;
+mod output;
 
 use cli_types::{AdminCommands, Cli, Commands};
 // mod data_parser;
@@ -60,7 +62,19 @@ async fn main() -> Result<()> {
             query,
             explain,
             timing,
-        }) => commands::execute_query(&database, &query, explain, timing, cli.format).await,
+        }) => {
+            let output_config =
+                config::OutputConfig::from_cli(cli.no_color, cli.limit, cli.page_size);
+            commands::execute_query(
+                &database,
+                &query,
+                explain,
+                timing,
+                cli.format,
+                &output_config,
+            )
+            .await
+        }
         Some(Commands::Import {
             file,
             format,

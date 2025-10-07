@@ -9,7 +9,7 @@ pub struct Config {
     #[serde(default)]
     pub connection: ConnectionConfig,
     #[serde(default)]
-    pub output: OutputConfig,
+    pub output: OutputSettings,
     #[serde(default)]
     pub performance: PerformanceConfig,
     #[serde(default)]
@@ -71,14 +71,14 @@ impl Default for ConnectionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutputConfig {
+pub struct OutputSettings {
     pub max_rows: Option<usize>,
     pub pager: Option<String>,
     pub colors: bool,
     pub timestamp_format: String,
 }
 
-impl Default for OutputConfig {
+impl Default for OutputSettings {
     fn default() -> Self {
         Self {
             max_rows: Some(1000),
@@ -150,7 +150,7 @@ impl Default for Config {
         Self {
             default_database: None,
             connection: ConnectionConfig::default(),
-            output: OutputConfig::default(),
+            output: OutputSettings::default(),
             performance: PerformanceConfig::default(),
             logging: LoggingConfig::default(),
             repl: ReplConfig::default(),
@@ -279,6 +279,79 @@ impl Default for ReplConfig {
             prompt: "cqlite> ".to_string(),
             prompt_continuation: "    -> ".to_string(),
             history_file: None,
+        }
+    }
+}
+
+/// Configuration for table formatter output behavior
+///
+/// This struct controls how query results are formatted and displayed,
+/// including color support, row limits, and pagination settings.
+#[derive(Debug, Clone)]
+pub struct OutputConfig {
+    /// Whether to enable colored output in table formatting.
+    /// This is the inverse of the `--no-color` CLI flag.
+    /// When `true`, output will include ANSI color codes for better readability.
+    pub color_enabled: bool,
+
+    /// Maximum number of rows to display in query results.
+    /// When `None`, all rows will be displayed.
+    /// This can be used to prevent overwhelming output from large result sets.
+    pub limit: Option<usize>,
+
+    /// Number of rows per page for pagination.
+    /// When `None`, pagination is disabled and all rows are shown at once.
+    /// Default is 50 rows per page, matching cqlsh behavior.
+    #[allow(dead_code)]
+    pub page_size: Option<usize>,
+}
+
+impl OutputConfig {
+    /// Create a new OutputConfig from CLI arguments
+    ///
+    /// # Arguments
+    ///
+    /// * `no_color` - The `--no-color` flag value from CLI (inverted to `color_enabled`)
+    /// * `limit` - Maximum number of rows to display (from `--limit` flag)
+    /// * `page_size` - Rows per page for pagination (from `--page-size` flag)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cqlite_cli::config::OutputConfig;
+    ///
+    /// // Create config with colors enabled, no limit, default pagination
+    /// let config = OutputConfig::from_cli(false, None, None);
+    /// assert!(config.color_enabled);
+    /// assert_eq!(config.page_size, Some(50));
+    ///
+    /// // Create config with colors disabled, limit of 100 rows
+    /// let config = OutputConfig::from_cli(true, Some(100), Some(25));
+    /// assert!(!config.color_enabled);
+    /// assert_eq!(config.limit, Some(100));
+    /// assert_eq!(config.page_size, Some(25));
+    /// ```
+    pub fn from_cli(no_color: bool, limit: Option<usize>, page_size: Option<usize>) -> Self {
+        Self {
+            color_enabled: !no_color,
+            limit,
+            page_size: page_size.or(Some(50)),
+        }
+    }
+}
+
+impl Default for OutputConfig {
+    /// Default output configuration
+    ///
+    /// Returns an OutputConfig with:
+    /// - `color_enabled`: `true` (colors enabled by default)
+    /// - `limit`: `None` (no row limit)
+    /// - `page_size`: `Some(50)` (50 rows per page, matching cqlsh)
+    fn default() -> Self {
+        Self {
+            color_enabled: true,
+            limit: None,
+            page_size: Some(50),
         }
     }
 }
