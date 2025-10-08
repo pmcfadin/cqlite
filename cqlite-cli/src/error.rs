@@ -121,7 +121,7 @@ pub fn classify_error(err: &anyhow::Error) -> CliExitCode {
 ///
 /// Formats error output consistently across the CLI with:
 /// - Error message with full context chain
-/// - Category-specific hint for resolution
+/// - Context-aware hint for resolution
 ///
 /// # Examples
 ///
@@ -129,20 +129,74 @@ pub fn classify_error(err: &anyhow::Error) -> CliExitCode {
 /// use anyhow::anyhow;
 /// use cqlite_cli::error::{print_error, classify_error};
 ///
-/// let err = anyhow!("Schema file not found");
+/// let err = anyhow!("Unsupported query: JOIN not supported");
 /// let exit_code = classify_error(&err);
 /// print_error(&err, exit_code);
 /// // Output:
-/// // Error: Schema file not found
-/// // Hint: Use ':schema load <file>' or '--schema <path>' to provide schema
+/// // Error: Unsupported query: JOIN not supported
+/// //
+/// // Hint: Supported SELECT features in M2:
+/// //   • SELECT with WHERE on partition/primary key
+/// //   ...
 /// ```
 pub fn print_error(err: &anyhow::Error, exit_code: CliExitCode) {
     eprintln!("Error: {:#}", err);
 
-    let hint = exit_code.hint();
+    let hint = get_error_hint(err, exit_code);
     if !hint.is_empty() {
-        eprintln!("Hint: {}", hint);
+        eprintln!("\nHint: {}", hint);
     }
+}
+
+/// Get context-aware hint based on error details and exit code
+///
+/// Provides enhanced hints for specific error categories, particularly
+/// for unsupported query features per M2_CLI_SPEC.md
+///
+/// # Examples
+///
+/// ```no_run
+/// use anyhow::anyhow;
+/// use cqlite_cli::error::{get_error_hint, classify_error};
+///
+/// let err = anyhow!("Unsupported query: JOIN not supported");
+/// let exit_code = classify_error(&err);
+/// let hint = get_error_hint(&err, exit_code);
+/// assert!(hint.contains("Supported SELECT features"));
+/// ```
+pub fn get_error_hint(err: &anyhow::Error, exit_code: CliExitCode) -> String {
+    // For query execution errors, check if it's an unsupported query
+    if matches!(exit_code, CliExitCode::QueryExecutionError) {
+        let err_text = format!("{:#}", err).to_lowercase();
+
+        // Detect unsupported query pattern from core Error::UnsupportedQuery
+        if err_text.contains("unsupported query") || err_text.contains("not supported") {
+            return build_unsupported_query_hint();
+        }
+    }
+
+    // Fall back to standard hint from CliExitCode
+    exit_code.hint().to_string()
+}
+
+/// Build detailed hint for unsupported query features
+///
+/// Provides specific guidance on what SELECT features are supported in M2
+/// as defined in M2_CLI_SPEC.md lines 303-306, 328-330
+fn build_unsupported_query_hint() -> String {
+    let mut hint = String::new();
+    hint.push_str("Supported SELECT features in M2:\n");
+    hint.push_str("  • SELECT with WHERE on partition/primary key\n");
+    hint.push_str("  • LIMIT clause for result pagination\n");
+    hint.push_str("  • DESCRIBE/DESC for schema information\n");
+    hint.push_str("  • USE for keyspace switching\n\n");
+    hint.push_str("Examples:\n");
+    hint.push_str("  SELECT * FROM users WHERE id = ? LIMIT 10\n");
+    hint.push_str("  DESCRIBE TABLE keyspace.users\n");
+    hint.push_str("  USE my_keyspace\n\n");
+    hint.push_str("Not supported: JOIN, subqueries, advanced aggregations\n");
+    hint.push_str("See: cqlite-cli/CLI_USAGE_EXAMPLES.md");
+    hint
 }
 
 #[cfg(test)]
@@ -214,5 +268,51 @@ mod tests {
         assert_eq!(CliExitCode::SchemaError.as_i32(), 3);
         assert_eq!(CliExitCode::DataDirError.as_i32(), 4);
         assert_eq!(CliExitCode::QueryExecutionError.as_i32(), 5);
+    }
+
+    #[test]
+    fn test_unsupported_query_detection() {
+        let err = anyhow!("Unsupported query: JOIN operations not supported");
+        let exit_code = classify_error(&err);
+        assert_eq!(exit_code, CliExitCode::QueryExecutionError);
+
+        let hint = get_error_hint(&err, exit_code);
+        assert!(hint.contains("Supported SELECT features"));
+        assert!(hint.contains("WHERE on partition/primary key"));
+        assert!(hint.contains("LIMIT"));
+        assert!(hint.contains("DESCRIBE"));
+    }
+
+    #[test]
+    fn test_unsupported_query_hint_format() {
+        let err = anyhow!("Query feature not supported");
+        let exit_code = CliExitCode::QueryExecutionError;
+        let hint = get_error_hint(&err, exit_code);
+
+        // Verify hint contains required sections
+        assert!(hint.contains("Supported SELECT features"));
+        assert!(hint.contains("Examples:"));
+        assert!(hint.contains("Not supported"));
+        assert!(hint.contains("CLI_USAGE_EXAMPLES.md"));
+    }
+
+    #[test]
+    fn test_regular_query_error_hint() {
+        let err = anyhow!("Query execution failed: timeout");
+        let exit_code = classify_error(&err);
+        let hint = get_error_hint(&err, exit_code);
+
+        // Should get standard hint, not unsupported query hint
+        assert_eq!(
+            hint,
+            "Check query syntax and ensure required data is available"
+        );
+    }
+
+    #[test]
+    fn test_exit_code_5_for_unsupported_queries() {
+        let err = anyhow!("Unsupported query: subquery not allowed");
+        let exit_code = classify_error(&err);
+        assert_eq!(exit_code.as_i32(), 5);
     }
 }
