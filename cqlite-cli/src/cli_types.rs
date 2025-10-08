@@ -29,7 +29,10 @@ impl OutputMode {
 
 #[derive(Parser)]
 #[command(name = "cqlite")]
-#[command(about = "CQLite - High-performance embedded database with CQL support")]
+#[command(about = "CQLite - Local SSTable query tool with cqlsh-compatible interface")]
+#[command(
+    long_about = "CQLite provides cqlsh-compatible access to Apache Cassandra 5.0 SSTables locally without cluster dependencies. Supports interactive REPL and one-shot query modes."
+)]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(author = "CQLite Team")]
 pub struct Cli {
@@ -37,15 +40,15 @@ pub struct Cli {
     #[arg(short, long, value_name = "FILE")]
     pub database: Option<PathBuf>,
 
-    /// Configuration file path
+    /// Load config (TOML/YAML/JSON). Precedence: flags > env > file > defaults
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
-    /// Verbose output (-v, -vv, -vvv)
+    /// Verbose output (-v, -vv, -vvv for increasing verbosity)
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Quiet mode (suppress output)
+    /// Quiet mode (suppress non-essential output)
     #[arg(short, long)]
     pub quiet: bool,
 
@@ -53,44 +56,44 @@ pub struct Cli {
     #[arg(long, value_enum, default_value = "table")]
     pub format: OutputFormat,
 
-    /// Auto-detect SSTable format version
+    /// Enable best-effort auto detection (format/version) when available
     #[arg(long)]
     pub auto_detect: bool,
 
-    /// Override Cassandra version for compatibility (e.g., 3.11, 4.0, 5.0)
-    #[arg(long, value_name = "VERSION")]
+    /// Hint (e.g., 5.0) for format compatibility
+    #[arg(long, value_name = "VER")]
     pub cassandra_version: Option<String>,
 
-    /// Schema file or directory (.cql or .json)
-    #[arg(long, value_name = "PATH")]
+    /// File (.cql or .json) or directory containing schemas. Repeatable; order defines precedence
+    #[arg(long, value_name = "PATH", env = "CQLITE_SCHEMA")]
     pub schema: Option<PathBuf>,
 
     /// Cassandra data directory root (e.g., /var/lib/cassandra/data)
     #[arg(long, value_name = "DIR", env = "CQLITE_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
-    /// Execute a single CQL statement (one-shot mode)
+    /// Execute a single CQL statement in one-shot mode
     #[arg(short = 'e', long, value_name = "CQL")]
     pub execute: Option<String>,
 
-    /// Execute statements from a CQL file
-    #[arg(short = 'f', long, value_name = "FILE")]
+    /// Execute statements from a file (semicolon-terminated)
+    #[arg(short = 'f', long, value_name = "CQL_FILE")]
     pub file: Option<PathBuf>,
 
-    /// Output format for query results (distinct from display format)
-    #[arg(long, value_enum)]
+    /// Output format for query results (table = cqlsh-compatible)
+    #[arg(long, value_enum, env = "CQLITE_OUT")]
     pub out: Option<OutputMode>,
 
-    /// Maximum number of rows to return
-    #[arg(long, value_name = "N")]
+    /// Cap rows
+    #[arg(long, value_name = "N", env = "CQLITE_LIMIT")]
     pub limit: Option<usize>,
 
-    /// Pagination size for reading and display
-    #[arg(long, value_name = "N")]
+    /// Reader and display pagination size
+    #[arg(long, value_name = "N", env = "CQLITE_PAGE_SIZE")]
     pub page_size: Option<usize>,
 
     /// Disable colored output
-    #[arg(long)]
+    #[arg(long, env = "CQLITE_NO_COLOR")]
     pub no_color: bool,
 
     #[command(subcommand)]
@@ -99,13 +102,19 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start interactive REPL mode
+    /// Start interactive REPL mode with cqlsh-compatible commands
+    #[command(
+        long_about = "Interactive REPL supporting meta-commands (:config, :schema, :status, :health) and CQL queries (SELECT, DESCRIBE, USE). Launch with 'cqlite repl' or default 'cqlite'."
+    )]
     Repl {
         /// Enable TUI mode
         #[arg(long)]
         tui: bool,
     },
-    /// Execute a CQL query
+    /// Execute CQL queries against local SSTable data
+    #[command(
+        long_about = "Friendly wrapper for one-shot query execution. Example: cqlite query --schema schemas/ --data-dir ./test-data -e \"SELECT * FROM ks.users LIMIT 5\" --out json"
+    )]
     Query {
         /// CQL query to execute
         query: String,
@@ -162,10 +171,13 @@ pub enum Commands {
         #[command(subcommand)]
         command: BenchCommands,
     },
-    /// Read and display SSTable contents with intelligent formatting
+    /// Low-level SSTable inspection and reading
     #[command(name = "read-sstable")]
+    #[command(
+        long_about = "Direct SSTable inspection bypassing schema. Example: cqlite read-sstable ./test-data/datasets/sstables/test_basic/simple_table/na-1-big-Data.db --schema schema.cql --format table"
+    )]
     ReadSstable {
-        /// SSTable file path
+        /// SSTable file or directory path
         file: PathBuf,
         /// Output format
         #[arg(short, long, value_enum, default_value = "table")]
@@ -186,7 +198,10 @@ pub enum Commands {
         #[arg(long)]
         verbose: bool,
     },
-    /// Display database or SSTable information
+    /// Display file metadata and statistics
+    #[command(
+        long_about = "Show SSTable or database file metadata, stats, and optional validation. Example: cqlite info ./test-data/datasets/sstables/test_basic --format json --detailed"
+    )]
     Info {
         /// Target file or database path
         path: Option<PathBuf>,
