@@ -19,7 +19,12 @@ impl FileSystem {
         Ok(fs::metadata(path).await.is_ok())
     }
 
-    /// Create directory
+    /// Create directory (single level)
+    pub async fn create_dir(&self, path: &Path) -> Result<()> {
+        fs::create_dir(path).await.map_err(Error::from)
+    }
+
+    /// Create directory (with all parent directories)
     pub async fn create_dir_all(&self, path: &Path) -> Result<()> {
         fs::create_dir_all(path).await.map_err(Error::from)
     }

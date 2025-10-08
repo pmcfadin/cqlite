@@ -51,6 +51,15 @@ pub struct Config {
 
     /// Maximum rows for queries
     pub query_limit: Option<usize>,
+
+    // Version hint resolution (Issue #130)
+    /// Cassandra version hint from CLI flag (for precedence chain)
+    #[serde(skip)]
+    pub cassandra_version: Option<String>,
+
+    /// Resolved version information (computed async after config load)
+    #[serde(skip)]
+    pub resolved_version: Option<cqlite_core::version_hints::ResolvedVersion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +176,8 @@ impl Default for Config {
             execution_file: None,
             output_mode: None,
             query_limit: None,
+            cassandra_version: None,
+            resolved_version: None,
         }
     }
 }
@@ -178,6 +189,67 @@ impl Config {
             .with_env()?
             .with_flags(cli)
             .build())
+    }
+
+    /// Resolve Cassandra version using precedence chain (Issue #130)
+    ///
+    /// This method implements the version hint precedence:
+    /// 1. User override (--cassandra-version flag)
+    /// 2. SSTable metadata
+    /// 3. metadata.yml
+    /// 4. Unknown
+    ///
+    /// # Arguments
+    ///
+    /// * `platform` - Platform abstraction for file I/O
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only for fatal I/O errors. Missing metadata is not an error.
+    pub async fn resolve_version(
+        &mut self,
+        platform: std::sync::Arc<cqlite_core::Platform>,
+    ) -> Result<()> {
+        use cqlite_core::version_hints::VersionHintResolver;
+        use std::path::PathBuf;
+
+        // Use data_directory if available, otherwise use current directory
+        let default_path = PathBuf::from(".");
+        let data_dir = self
+            .data_directory
+            .as_deref()
+            .unwrap_or(default_path.as_path());
+
+        self.resolved_version = Some(
+            VersionHintResolver::resolve(self.cassandra_version.clone(), data_dir, platform)
+                .await?,
+        );
+
+        Ok(())
+    }
+
+    /// Get resolved version information for display/diagnostics
+    ///
+    /// Returns `None` if version resolution has not been performed yet.
+    /// Call `resolve_version()` first to populate this field.
+    pub fn version_info(&self) -> Option<&cqlite_core::version_hints::ResolvedVersion> {
+        self.resolved_version.as_ref()
+    }
+
+    /// Get version string for display (returns "unknown" if not resolved)
+    pub fn version_string(&self) -> String {
+        self.resolved_version
+            .as_ref()
+            .map(|rv| rv.version_or_unknown().to_string())
+            .unwrap_or_else(|| "not resolved".to_string())
+    }
+
+    /// Get version source description
+    pub fn version_source(&self) -> String {
+        self.resolved_version
+            .as_ref()
+            .map(|rv| rv.source.description().to_string())
+            .unwrap_or_else(|| "not resolved".to_string())
     }
 
     fn load_from_file(path: &Path) -> Result<Self> {
@@ -476,11 +548,211 @@ impl ConfigBuilder {
             self.config.output.colors = false;
         }
 
+        // Cassandra version hint (Issue #130)
+        if let Some(ref version) = cli.cassandra_version {
+            self.config.cassandra_version = Some(version.clone());
+        }
+
         self
     }
 
     /// Build final configuration
     pub fn build(self) -> Config {
         self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli_types::Cli;
+    use clap::Parser;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_cassandra_version_flag_passed_to_config() {
+        // Parse CLI args with cassandra_version flag
+        let cli = Cli::parse_from(&[
+            "cqlite",
+            "--cassandra-version",
+            "5.0",
+            "--data-dir",
+            "/tmp/data",
+        ]);
+
+        // Build config
+        let config = Config::load(None, &cli).unwrap();
+
+        // Verify cassandra_version was captured
+        assert_eq!(config.cassandra_version, Some("5.0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_version_resolution_user_override() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create CLI with user override
+        let cli = Cli::parse_from(&[
+            "cqlite",
+            "--cassandra-version",
+            "5.0",
+            "--data-dir",
+            temp_dir.path().to_str().unwrap(),
+        ]);
+
+        // Build config
+        let mut config = Config::load(None, &cli).unwrap();
+
+        // Initialize platform and resolve version
+        let core_config = cqlite_core::Config::default();
+        let platform = Arc::new(cqlite_core::Platform::new(&core_config).await.unwrap());
+
+        config.resolve_version(platform).await.unwrap();
+
+        // Verify user override takes precedence
+        let version_info = config.version_info().unwrap();
+        assert_eq!(
+            version_info.source,
+            cqlite_core::version_hints::VersionSource::UserFlag
+        );
+        assert_eq!(version_info.version, Some("5.0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_version_resolution_metadata_yml() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create metadata.yml with version
+        let metadata_content = "cassandra_version: \"4.0\"\nkeyspaces: []\n";
+        let metadata_path = temp_dir.path().join("metadata.yml");
+        std::fs::write(&metadata_path, metadata_content).unwrap();
+
+        // Create CLI without user override
+        let cli = Cli::parse_from(&["cqlite", "--data-dir", temp_dir.path().to_str().unwrap()]);
+
+        // Build config
+        let mut config = Config::load(None, &cli).unwrap();
+
+        // Initialize platform and resolve version
+        let core_config = cqlite_core::Config::default();
+        let platform = Arc::new(cqlite_core::Platform::new(&core_config).await.unwrap());
+
+        config.resolve_version(platform).await.unwrap();
+
+        // Verify metadata.yml was used
+        let version_info = config.version_info().unwrap();
+        assert_eq!(
+            version_info.source,
+            cqlite_core::version_hints::VersionSource::DatasetMetadata
+        );
+        assert_eq!(version_info.version, Some("4.0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_version_resolution_unknown() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create CLI without version and no metadata.yml
+        let cli = Cli::parse_from(&["cqlite", "--data-dir", temp_dir.path().to_str().unwrap()]);
+
+        // Build config
+        let mut config = Config::load(None, &cli).unwrap();
+
+        // Initialize platform and resolve version
+        let core_config = cqlite_core::Config::default();
+        let platform = Arc::new(cqlite_core::Platform::new(&core_config).await.unwrap());
+
+        config.resolve_version(platform).await.unwrap();
+
+        // Verify unknown fallback
+        let version_info = config.version_info().unwrap();
+        assert_eq!(
+            version_info.source,
+            cqlite_core::version_hints::VersionSource::Unknown
+        );
+        assert_eq!(version_info.version, None);
+        assert_eq!(version_info.version_or_unknown(), "unknown");
+    }
+
+    #[tokio::test]
+    async fn test_version_precedence_user_overrides_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create metadata.yml with version 4.0
+        let metadata_content = "cassandra_version: \"4.0\"\nkeyspaces: []\n";
+        let metadata_path = temp_dir.path().join("metadata.yml");
+        std::fs::write(&metadata_path, metadata_content).unwrap();
+
+        // Create CLI with user override 5.0
+        let cli = Cli::parse_from(&[
+            "cqlite",
+            "--cassandra-version",
+            "5.0",
+            "--data-dir",
+            temp_dir.path().to_str().unwrap(),
+        ]);
+
+        // Build config
+        let mut config = Config::load(None, &cli).unwrap();
+
+        // Initialize platform and resolve version
+        let core_config = cqlite_core::Config::default();
+        let platform = Arc::new(cqlite_core::Platform::new(&core_config).await.unwrap());
+
+        config.resolve_version(platform).await.unwrap();
+
+        // Verify user override takes precedence over metadata.yml
+        let version_info = config.version_info().unwrap();
+        assert_eq!(
+            version_info.source,
+            cqlite_core::version_hints::VersionSource::UserFlag
+        );
+        assert_eq!(version_info.version, Some("5.0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_version_string_helpers() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create CLI with version
+        let cli = Cli::parse_from(&[
+            "cqlite",
+            "--cassandra-version",
+            "5.0",
+            "--data-dir",
+            temp_dir.path().to_str().unwrap(),
+        ]);
+
+        // Build config
+        let mut config = Config::load(None, &cli).unwrap();
+
+        // Before resolution
+        assert_eq!(config.version_string(), "not resolved");
+        assert_eq!(config.version_source(), "not resolved");
+
+        // After resolution
+        let core_config = cqlite_core::Config::default();
+        let platform = Arc::new(cqlite_core::Platform::new(&core_config).await.unwrap());
+        config.resolve_version(platform).await.unwrap();
+
+        assert_eq!(config.version_string(), "5.0");
+        assert!(config.version_source().contains("User-provided flag"));
+    }
+
+    #[test]
+    fn test_config_default_includes_version_fields() {
+        let config = Config::default();
+        assert_eq!(config.cassandra_version, None);
+        assert_eq!(config.resolved_version, None);
+    }
+
+    #[test]
+    fn test_config_builder_preserves_version_flag() {
+        let cli = Cli::parse_from(&["cqlite", "--cassandra-version", "4.0"]);
+
+        let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
+
+        assert_eq!(config.cassandra_version, Some("4.0".to_string()));
     }
 }

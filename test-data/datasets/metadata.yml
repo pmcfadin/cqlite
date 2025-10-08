@@ -1,3 +1,4 @@
+cassandra_version: "5.0"
 keyspaces:
 - name: test_basic
   tables:

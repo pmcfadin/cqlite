@@ -10,6 +10,7 @@ pub mod parser;
 // pub mod performance;
 // pub mod security; // Security framework for comprehensive protection
 pub mod types;
+pub mod version_hints;
 
 pub mod benchmarks;
 pub mod memory;
@@ -37,13 +38,14 @@ pub mod memory_safety_tests;
 pub use crate::{
     config::Config,
     error::{Error, Result},
+    platform::Platform,
     types::*,
 };
 
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::{memory::MemoryManager, platform::Platform, storage::StorageEngine};
+use crate::{memory::MemoryManager, storage::StorageEngine};
 
 #[cfg(feature = "state_machine")]
 use crate::schema::SchemaManager;
