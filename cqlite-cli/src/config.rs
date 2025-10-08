@@ -58,7 +58,9 @@ pub struct Config {
     pub cassandra_version: Option<String>,
 
     /// Resolved version information (computed async after config load)
+    /// TODO(Issue #130): Used by :status meta-command (not yet implemented)
     #[serde(skip)]
+    #[allow(dead_code)]
     pub resolved_version: Option<cqlite_core::version_hints::ResolvedVersion>,
 }
 
@@ -206,6 +208,9 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error only for fatal I/O errors. Missing metadata is not an error.
+    ///
+    /// TODO(Issue #130): Used by :status meta-command (not yet implemented)
+    #[allow(dead_code)]
     pub async fn resolve_version(
         &mut self,
         platform: std::sync::Arc<cqlite_core::Platform>,
@@ -232,11 +237,17 @@ impl Config {
     ///
     /// Returns `None` if version resolution has not been performed yet.
     /// Call `resolve_version()` first to populate this field.
+    ///
+    /// TODO(Issue #130): Used by :status meta-command (not yet implemented)
+    #[allow(dead_code)]
     pub fn version_info(&self) -> Option<&cqlite_core::version_hints::ResolvedVersion> {
         self.resolved_version.as_ref()
     }
 
     /// Get version string for display (returns "unknown" if not resolved)
+    ///
+    /// TODO(Issue #130): Used by :status meta-command (not yet implemented)
+    #[allow(dead_code)]
     pub fn version_string(&self) -> String {
         self.resolved_version
             .as_ref()
@@ -245,6 +256,9 @@ impl Config {
     }
 
     /// Get version source description
+    ///
+    /// TODO(Issue #130): Used by :status meta-command (not yet implemented)
+    #[allow(dead_code)]
     pub fn version_source(&self) -> String {
         self.resolved_version
             .as_ref()
