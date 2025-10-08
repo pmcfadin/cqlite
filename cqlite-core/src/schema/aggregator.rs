@@ -105,11 +105,12 @@ pub struct SchemaLoadWarning {
 /// Intermediate parsed schema data before registry insertion
 #[derive(Debug, Clone)]
 struct ParsedSchema {
-    /// Keyspace name
+    /// Keyspace name (for context only; tables/udts are now keyed by qualified names)
+    #[allow(dead_code)]
     keyspace: String,
-    /// Table schemas (keyed by table name)
+    /// Table schemas (keyed by qualified name: "keyspace.table")
     tables: HashMap<String, TableSchema>,
-    /// UDT definitions (keyed by UDT name)
+    /// UDT definitions (keyed by qualified name: "keyspace.typename")
     udts: HashMap<String, UdtTypeDef>,
 }
 
@@ -248,8 +249,19 @@ impl SchemaAggregator {
                     let error_type = match &e {
                         Error::Io(_) => LoadErrorType::FileRead,
                         Error::CqlParse(_) => LoadErrorType::InvalidCql,
-                        Error::Schema(_) if e.to_string().contains("Invalid JSON") => {
-                            LoadErrorType::InvalidJson
+                        Error::Schema(_) => {
+                            // Schema errors are structural validation failures
+                            // Check message for JSON vs general validation
+                            let msg = e.to_string();
+                            if msg.contains("Invalid JSON")
+                                || msg.contains("JSON")
+                                || msg.contains("json")
+                            {
+                                LoadErrorType::InvalidJson
+                            } else {
+                                // Missing partition_keys, bad clustering config, etc.
+                                LoadErrorType::ValidationFailed
+                            }
                         }
                         _ => {
                             // Fallback: check error message for clues
@@ -259,7 +271,8 @@ impl SchemaAggregator {
                             } else if msg.contains("CQL") || msg.contains("parse") {
                                 LoadErrorType::InvalidCql
                             } else {
-                                LoadErrorType::FileRead // Default fallback
+                                // Unknown error types default to validation failure, not I/O
+                                LoadErrorType::ValidationFailed
                             }
                         }
                     };
@@ -418,7 +431,9 @@ impl SchemaAggregator {
                         udt_def = udt_def.with_field(field_name, field_type, true);
                     }
 
-                    udts.insert(type_name, udt_def);
+                    // Key by fully-qualified name (keyspace.typename) to avoid multi-keyspace collisions
+                    let qualified_name = format!("{}.{}", udt_keyspace, type_name);
+                    udts.insert(qualified_name, udt_def);
                 }
                 Err(e) => {
                     errors.push(format!(
@@ -439,7 +454,10 @@ impl SchemaAggregator {
                         keyspace = Some(table_schema.keyspace.clone());
                     }
 
-                    tables.insert(table_schema.table.clone(), table_schema);
+                    // Key by fully-qualified name (keyspace.table) to avoid multi-keyspace collisions
+                    let qualified_name =
+                        format!("{}.{}", table_schema.keyspace, table_schema.table);
+                    tables.insert(qualified_name, table_schema);
                 }
                 Err(e) => {
                     errors.push(format!(
@@ -698,9 +716,12 @@ impl SchemaAggregator {
         let mut udt_map: HashMap<String, (String, UdtTypeDef)> = HashMap::new(); // key: keyspace.udt_name -> (keyspace, UdtTypeDef)
 
         for parsed in &parsed_schemas {
-            for (udt_name, udt_def) in &parsed.udts {
-                let key = format!("{}.{}", parsed.keyspace, udt_name);
-                udt_map.insert(key, (parsed.keyspace.clone(), udt_def.clone()));
+            for (qualified_name, udt_def) in &parsed.udts {
+                // qualified_name is already "keyspace.typename" from parse_cql_file
+                udt_map.insert(
+                    qualified_name.clone(),
+                    (udt_def.keyspace.clone(), udt_def.clone()),
+                );
             }
         }
 
@@ -740,9 +761,9 @@ impl SchemaAggregator {
         let mut table_map: HashMap<String, TableSchema> = HashMap::new();
 
         for parsed in &parsed_schemas {
-            for (table_name, table_schema) in &parsed.tables {
-                let key = format!("{}.{}", parsed.keyspace, table_name);
-                table_map.insert(key, table_schema.clone());
+            for (qualified_name, table_schema) in &parsed.tables {
+                // qualified_name is already "keyspace.table" from parse_cql_file
+                table_map.insert(qualified_name.clone(), table_schema.clone());
             }
         }
 
@@ -1575,5 +1596,107 @@ mod tests {
             result.errors[0].error_type,
             LoadErrorType::CircularUdtDependency
         ));
+    }
+
+    #[tokio::test]
+    async fn test_multi_keyspace_cql_file_no_collision() {
+        let (mut aggregator, temp_dir) = setup_test_aggregator().await;
+
+        // CQL file with UDTs and tables from TWO different keyspaces
+        let cql_content = r#"
+        CREATE TYPE ks_a.address (
+            street text,
+            city text
+        );
+
+        CREATE TYPE ks_b.address (
+            country text,
+            postal_code text
+        );
+
+        CREATE TABLE ks_a.users (
+            id uuid PRIMARY KEY,
+            addr frozen<address>
+        );
+
+        CREATE TABLE ks_b.customers (
+            id uuid PRIMARY KEY,
+            location frozen<address>
+        );
+        "#;
+
+        let cql_path = write_file(temp_dir.path(), "multi_ks.cql", cql_content);
+        let result = aggregator.load_from_paths(&[cql_path]).await.unwrap();
+
+        // Both UDTs should be loaded (no collision)
+        assert_eq!(
+            result.udts_loaded, 2,
+            "Expected 2 UDTs from different keyspaces"
+        );
+        assert_eq!(
+            result.schemas_loaded, 2,
+            "Expected 2 tables from different keyspaces"
+        );
+        assert!(
+            result.errors.is_empty(),
+            "Expected no errors, got: {:?}",
+            result.errors
+        );
+
+        // Verify both UDTs are registered with correct keyspaces
+        let udt_registry = aggregator.udt_registry.read().await;
+        assert!(
+            udt_registry.contains_udt("ks_a", "address"),
+            "ks_a.address should be registered"
+        );
+        assert!(
+            udt_registry.contains_udt("ks_b", "address"),
+            "ks_b.address should be registered"
+        );
+
+        // Verify both tables are registered with correct keyspaces
+        let registry = aggregator.registry.read().await;
+        let schema_a = registry.get_schema("ks_a", "users").await.unwrap();
+        assert_eq!(schema_a.keyspace, "ks_a");
+        assert_eq!(schema_a.table, "users");
+
+        let schema_b = registry.get_schema("ks_b", "customers").await.unwrap();
+        assert_eq!(schema_b.keyspace, "ks_b");
+        assert_eq!(schema_b.table, "customers");
+    }
+
+    #[tokio::test]
+    async fn test_error_schema_validation_not_mislabeled_as_file_read() {
+        let (mut aggregator, temp_dir) = setup_test_aggregator().await;
+
+        // JSON file with structural validation error (missing partition_keys)
+        let invalid_schema = r#"
+        {
+            "keyspace": "ks",
+            "table": "broken_table",
+            "columns": [
+                {"name": "id", "type": "uuid"},
+                {"name": "data", "type": "text"}
+            ]
+        }
+        "#;
+
+        let path = write_file(temp_dir.path(), "invalid_schema.json", invalid_schema);
+        let result = aggregator.load_from_paths(&[path]).await.unwrap();
+
+        // Should fail with ValidationFailed, NOT FileRead
+        assert_eq!(result.schemas_loaded, 0);
+        assert!(!result.errors.is_empty());
+        assert!(
+            matches!(result.errors[0].error_type, LoadErrorType::ValidationFailed),
+            "Expected ValidationFailed for missing partition_keys, got: {:?}",
+            result.errors[0].error_type
+        );
+        assert!(
+            result.errors[0].message.contains("partition_keys")
+                || result.errors[0].message.contains("primary_key"),
+            "Error message should mention missing keys: {}",
+            result.errors[0].message
+        );
     }
 }
