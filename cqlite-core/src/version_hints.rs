@@ -254,14 +254,17 @@ impl VersionHintResolver {
                 }
                 Err(e) => {
                     // Distinguish between "not found" and actual I/O errors
-                    // Platform fs::read_file returns Io error for not found
-                    if e.to_string().contains("No such file or directory")
-                        || e.to_string().contains("not found")
-                    {
-                        continue;
+                    // Use ErrorKind instead of string matching for robustness
+                    match &e {
+                        Error::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => {
+                            // File not found - continue searching other paths
+                            continue;
+                        }
+                        _ => {
+                            // Real I/O error - propagate it
+                            return Err(e);
+                        }
                     }
-                    // Propagate real I/O errors
-                    return Err(e);
                 }
             }
         }
@@ -485,5 +488,24 @@ mod tests {
 
         assert_eq!(resolved.source, VersionSource::UserFlag);
         assert_eq!(resolved.version, Some("4.0-override".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_not_found_error_robustness() {
+        // This test verifies that the ErrorKind-based approach correctly handles
+        // NotFound errors regardless of OS locale or error message wording.
+        // It demonstrates the fix for the brittle string-based error detection.
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(crate::Platform::new(&config).await.unwrap());
+
+        // No metadata.yml exists - should continue search and return Unknown
+        let resolved = VersionHintResolver::resolve(None, temp_dir.path(), platform)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.source, VersionSource::Unknown);
+        assert_eq!(resolved.version, None);
     }
 }

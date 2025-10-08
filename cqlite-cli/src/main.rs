@@ -67,7 +67,8 @@ async fn run_main() -> Result<()> {
     let database = initialize_database(&db_path, &config).await?;
 
     // Create output config for query execution
-    let output_config = config::OutputConfig::from_cli(cli.no_color, cli.limit, cli.page_size);
+    let output_config =
+        config::OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
 
     // Handle --file flag (script execution) - takes precedence over subcommands
     if let Some(file_path) = cli.file {
@@ -129,7 +130,7 @@ async fn run_main() -> Result<()> {
             timing,
         }) => {
             let output_config =
-                config::OutputConfig::from_cli(cli.no_color, cli.limit, cli.page_size);
+                config::OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
             commands::execute_query(
                 &database,
                 &query,

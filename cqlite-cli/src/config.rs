@@ -393,35 +393,61 @@ pub struct OutputConfig {
 }
 
 impl OutputConfig {
-    /// Create a new OutputConfig from CLI arguments
+    /// Create a new OutputConfig from resolved Config and CLI flags
+    ///
+    /// This method respects the precedence chain: CLI flags > env vars > config file > defaults.
+    /// The `Config` object passed in has already resolved this chain via ConfigBuilder.
     ///
     /// # Arguments
     ///
-    /// * `no_color` - The `--no-color` flag value from CLI (inverted to `color_enabled`)
-    /// * `limit` - Maximum number of rows to display (from `--limit` flag)
-    /// * `page_size` - Rows per page for pagination (from `--page-size` flag)
+    /// * `config` - The resolved Config object containing env/file/default values
+    /// * `no_color_flag` - The `--no-color` CLI flag (if present, overrides config)
+    /// * `limit_flag` - The `--limit` CLI flag (if present, overrides config)
+    /// * `page_size_flag` - The `--page-size` CLI flag (if present, overrides config)
+    ///
+    /// # Precedence
+    ///
+    /// - `color_enabled`: --no-color flag > CQLITE_NO_COLOR env > config.output.colors > default (true)
+    /// - `limit`: --limit flag > CQLITE_LIMIT env > config.query_limit > default (None)
+    /// - `page_size`: --page-size flag > CQLITE_PAGE_SIZE env > config.repl.page_size > default (50)
     ///
     /// # Examples
     ///
     /// ```
-    /// use cqlite_cli::config::OutputConfig;
+    /// use cqlite_cli::config::{Config, OutputConfig};
+    /// use cqlite_cli::cli_types::Cli;
+    /// use clap::Parser;
     ///
-    /// // Create config with colors enabled, no limit, default pagination
-    /// let config = OutputConfig::from_cli(false, None, None);
-    /// assert!(config.color_enabled);
-    /// assert_eq!(config.page_size, Some(50));
+    /// // Create config with defaults
+    /// let cli = Cli::parse_from(&["cqlite"]);
+    /// let config = Config::load(None, &cli).unwrap();
+    /// let output = OutputConfig::from_cli(&config, false, None, None);
+    /// assert!(output.color_enabled);
+    /// assert_eq!(output.page_size, Some(50));
     ///
-    /// // Create config with colors disabled, limit of 100 rows
-    /// let config = OutputConfig::from_cli(true, Some(100), Some(25));
-    /// assert!(!config.color_enabled);
-    /// assert_eq!(config.limit, Some(100));
-    /// assert_eq!(config.page_size, Some(25));
+    /// // CLI flag overrides config
+    /// let output = OutputConfig::from_cli(&config, true, Some(100), Some(25));
+    /// assert!(!output.color_enabled);
+    /// assert_eq!(output.limit, Some(100));
+    /// assert_eq!(output.page_size, Some(25));
     /// ```
-    pub fn from_cli(no_color: bool, limit: Option<usize>, page_size: Option<usize>) -> Self {
+    pub fn from_cli(
+        config: &Config,
+        no_color_flag: bool,
+        limit_flag: Option<usize>,
+        page_size_flag: Option<usize>,
+    ) -> Self {
         Self {
-            color_enabled: !no_color,
-            limit,
-            page_size: page_size.or(Some(50)),
+            // CLI flag overrides config value
+            color_enabled: if no_color_flag {
+                false
+            } else {
+                config.output.colors
+            },
+            // CLI flag overrides config.query_limit (which already has env/file/default precedence)
+            limit: limit_flag.or(config.query_limit),
+            // CLI flag overrides config.repl.page_size (which already has env/file/default precedence)
+            page_size: page_size_flag.or(Some(config.repl.page_size)),
         }
     }
 }
@@ -477,7 +503,7 @@ impl ConfigBuilder {
         // CQLITE_SCHEMA (can be comma-separated paths)
         if let Ok(val) = env::var("CQLITE_SCHEMA") {
             let paths: Vec<PathBuf> = val.split(',').map(|s| PathBuf::from(s.trim())).collect();
-            self.config.schema_paths.extend(paths);
+            self.config.schema_paths = paths; // Replace, not extend (Issue #126)
         }
 
         // CQLITE_LIMIT
@@ -581,6 +607,7 @@ mod tests {
     use super::*;
     use crate::cli_types::Cli;
     use clap::Parser;
+    use serial_test::serial;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -768,5 +795,362 @@ mod tests {
         let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
 
         assert_eq!(config.cassandra_version, Some("4.0".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn test_env_var_replaces_config_file_schema_paths() {
+        use std::env;
+
+        // Set up environment variable
+        env::set_var("CQLITE_SCHEMA", "/env/path1,/env/path2");
+
+        // Create config with file-based schema paths
+        let mut config = Config::default();
+        config.schema_paths = vec![PathBuf::from("/file/path1"), PathBuf::from("/file/path2")];
+
+        // Apply env vars
+        let builder = ConfigBuilder { config };
+        let result = builder.with_env().unwrap();
+
+        // Verify env var REPLACED file paths, not extended
+        assert_eq!(result.config.schema_paths.len(), 2);
+        assert_eq!(result.config.schema_paths[0], PathBuf::from("/env/path1"));
+        assert_eq!(result.config.schema_paths[1], PathBuf::from("/env/path2"));
+
+        // Clean up
+        env::remove_var("CQLITE_SCHEMA");
+    }
+
+    #[test]
+    #[serial]
+    fn test_env_var_single_schema_path_replaces_multiple() {
+        use std::env;
+
+        // Set up environment variable with single path
+        env::set_var("CQLITE_SCHEMA", "/env/single/path");
+
+        // Create config with multiple file-based schema paths
+        let mut config = Config::default();
+        config.schema_paths = vec![
+            PathBuf::from("/file/path1"),
+            PathBuf::from("/file/path2"),
+            PathBuf::from("/file/path3"),
+        ];
+
+        // Apply env vars
+        let builder = ConfigBuilder { config };
+        let result = builder.with_env().unwrap();
+
+        // Verify single env path replaced all file paths
+        assert_eq!(result.config.schema_paths.len(), 1);
+        assert_eq!(
+            result.config.schema_paths[0],
+            PathBuf::from("/env/single/path")
+        );
+
+        // Clean up
+        env::remove_var("CQLITE_SCHEMA");
+    }
+
+    #[test]
+    #[serial]
+    fn test_cli_flag_overrides_env_var_schema() {
+        use std::env;
+
+        // Set up environment variable
+        env::set_var("CQLITE_SCHEMA", "/env/path1,/env/path2");
+
+        // Create config with file paths and apply env
+        let mut config = Config::default();
+        config.schema_paths = vec![PathBuf::from("/file/path")];
+
+        let builder = ConfigBuilder { config };
+        let result = builder.with_env().unwrap();
+
+        // At this point, env var should have replaced file paths
+        assert_eq!(result.config.schema_paths.len(), 2);
+
+        // Now apply CLI flag
+        let cli = Cli::parse_from(&["cqlite", "--schema", "/cli/path"]);
+        let final_config = result.with_flags(&cli).build();
+
+        // Verify CLI flag replaced everything
+        assert_eq!(final_config.schema_paths.len(), 1);
+        assert_eq!(final_config.schema_paths[0], PathBuf::from("/cli/path"));
+
+        // Clean up
+        env::remove_var("CQLITE_SCHEMA");
+    }
+
+    #[test]
+    #[serial]
+    fn test_schema_precedence_chain_complete() {
+        use std::env;
+
+        // Test: file < env < CLI flag
+
+        // Start with file-based config
+        let mut config = Config::default();
+        config.schema_paths = vec![PathBuf::from("/file/path")];
+
+        // Apply env var (should replace file)
+        env::set_var("CQLITE_SCHEMA", "/env/path");
+        let builder = ConfigBuilder { config };
+        let with_env = builder.with_env().unwrap();
+        assert_eq!(
+            with_env.config.schema_paths,
+            vec![PathBuf::from("/env/path")]
+        );
+
+        // Apply CLI flag (should replace env)
+        let cli = Cli::parse_from(&["cqlite", "--schema", "/cli/path"]);
+        let final_config = with_env.with_flags(&cli).build();
+        assert_eq!(final_config.schema_paths, vec![PathBuf::from("/cli/path")]);
+
+        // Clean up
+        env::remove_var("CQLITE_SCHEMA");
+    }
+
+    #[test]
+    #[serial]
+    fn test_no_env_var_preserves_file_schema() {
+        use std::env;
+
+        // Make sure env var is NOT set
+        env::remove_var("CQLITE_SCHEMA");
+
+        // Create config with file-based schema paths
+        let mut config = Config::default();
+        config.schema_paths = vec![PathBuf::from("/file/path1"), PathBuf::from("/file/path2")];
+
+        // Apply env vars (should not change anything)
+        let builder = ConfigBuilder { config };
+        let result = builder.with_env().unwrap();
+
+        // Verify file paths are preserved
+        assert_eq!(result.config.schema_paths.len(), 2);
+        assert_eq!(result.config.schema_paths[0], PathBuf::from("/file/path1"));
+        assert_eq!(result.config.schema_paths[1], PathBuf::from("/file/path2"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_env_var_with_whitespace_trimming() {
+        use std::env;
+
+        // Set up environment variable with whitespace
+        env::set_var("CQLITE_SCHEMA", " /path1 , /path2 , /path3 ");
+
+        // Create config
+        let config = Config::default();
+
+        // Apply env vars
+        let builder = ConfigBuilder { config };
+        let result = builder.with_env().unwrap();
+
+        // Verify paths are trimmed
+        assert_eq!(result.config.schema_paths.len(), 3);
+        assert_eq!(result.config.schema_paths[0], PathBuf::from("/path1"));
+        assert_eq!(result.config.schema_paths[1], PathBuf::from("/path2"));
+        assert_eq!(result.config.schema_paths[2], PathBuf::from("/path3"));
+
+        // Clean up
+        env::remove_var("CQLITE_SCHEMA");
+    }
+
+    // OutputConfig precedence chain tests (Issue #118)
+
+    #[test]
+    #[serial]
+    fn test_output_config_uses_defaults_when_no_flags_or_env() {
+        use std::env;
+
+        // Ensure no env vars are set
+        env::remove_var("CQLITE_LIMIT");
+        env::remove_var("CQLITE_PAGE_SIZE");
+        env::remove_var("CQLITE_NO_COLOR");
+
+        // Create CLI with no flags
+        let cli = Cli::parse_from(&["cqlite"]);
+
+        // Build config (should have defaults)
+        let config = Config::load(None, &cli).unwrap();
+
+        // Create OutputConfig with no CLI flags
+        let output = OutputConfig::from_cli(&config, false, None, None);
+
+        // Verify defaults
+        assert!(output.color_enabled); // Default is true
+        assert_eq!(output.limit, None); // Default is None
+        assert_eq!(output.page_size, Some(50)); // Default is 50
+    }
+
+    #[test]
+    #[serial]
+    fn test_output_config_env_vars_override_defaults() {
+        use std::env;
+
+        // Set env vars
+        env::set_var("CQLITE_LIMIT", "100");
+        env::set_var("CQLITE_PAGE_SIZE", "25");
+        env::set_var("CQLITE_NO_COLOR", "true");
+
+        // Create CLI with no flags
+        let cli = Cli::parse_from(&["cqlite"]);
+
+        // Build config (should pick up env vars)
+        let config = Config::load(None, &cli).unwrap();
+
+        // Create OutputConfig with no CLI flags
+        let output = OutputConfig::from_cli(&config, false, None, None);
+
+        // Verify env vars were used
+        assert!(!output.color_enabled); // CQLITE_NO_COLOR=true
+        assert_eq!(output.limit, Some(100)); // CQLITE_LIMIT=100
+        assert_eq!(output.page_size, Some(25)); // CQLITE_PAGE_SIZE=25
+
+        // Clean up
+        env::remove_var("CQLITE_LIMIT");
+        env::remove_var("CQLITE_PAGE_SIZE");
+        env::remove_var("CQLITE_NO_COLOR");
+    }
+
+    #[test]
+    #[serial]
+    fn test_output_config_cli_flags_override_env_vars() {
+        use std::env;
+
+        // Set env vars
+        env::set_var("CQLITE_LIMIT", "100");
+        env::set_var("CQLITE_PAGE_SIZE", "25");
+        env::set_var("CQLITE_NO_COLOR", "false");
+
+        // Create CLI with flags (should override env)
+        let cli = Cli::parse_from(&[
+            "cqlite",
+            "--limit",
+            "200",
+            "--page-size",
+            "10",
+            "--no-color",
+        ]);
+
+        // Build config
+        let config = Config::load(None, &cli).unwrap();
+
+        // Create OutputConfig with CLI flags
+        let output = OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
+
+        // Verify CLI flags overrode env vars
+        assert!(!output.color_enabled); // --no-color flag
+        assert_eq!(output.limit, Some(200)); // --limit 200
+        assert_eq!(output.page_size, Some(10)); // --page-size 10
+
+        // Clean up
+        env::remove_var("CQLITE_LIMIT");
+        env::remove_var("CQLITE_PAGE_SIZE");
+        env::remove_var("CQLITE_NO_COLOR");
+    }
+
+    #[test]
+    #[serial]
+    fn test_output_config_partial_cli_flags_preserve_env_vars() {
+        use std::env;
+
+        // Set env vars
+        env::set_var("CQLITE_LIMIT", "100");
+        env::set_var("CQLITE_PAGE_SIZE", "25");
+
+        // Create CLI with only --no-color flag
+        let cli = Cli::parse_from(&["cqlite", "--no-color"]);
+
+        // Build config
+        let config = Config::load(None, &cli).unwrap();
+
+        // Create OutputConfig with partial CLI flags
+        let output = OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
+
+        // Verify: --no-color overrides, but env vars are used for limit/page_size
+        assert!(!output.color_enabled); // --no-color flag
+        assert_eq!(output.limit, Some(100)); // From CQLITE_LIMIT env
+        assert_eq!(output.page_size, Some(25)); // From CQLITE_PAGE_SIZE env
+
+        // Clean up
+        env::remove_var("CQLITE_LIMIT");
+        env::remove_var("CQLITE_PAGE_SIZE");
+    }
+
+    #[test]
+    #[serial]
+    fn test_output_config_no_color_flag_false_preserves_env() {
+        use std::env;
+
+        // Set env var to disable colors
+        env::set_var("CQLITE_NO_COLOR", "true");
+
+        // Create CLI without --no-color flag
+        let cli = Cli::parse_from(&["cqlite"]);
+
+        // Build config (should pick up env var)
+        let config = Config::load(None, &cli).unwrap();
+
+        // Create OutputConfig with no_color_flag=false (no flag provided)
+        let output = OutputConfig::from_cli(&config, false, None, None);
+
+        // Verify env var was respected
+        assert!(!output.color_enabled); // CQLITE_NO_COLOR=true from env
+
+        // Clean up
+        env::remove_var("CQLITE_NO_COLOR");
+    }
+
+    #[test]
+    #[serial]
+    fn test_output_config_complete_precedence_chain() {
+        use std::env;
+
+        // Test the complete chain: flags > env > defaults
+
+        // Step 1: Defaults only
+        env::remove_var("CQLITE_LIMIT");
+        env::remove_var("CQLITE_PAGE_SIZE");
+        env::remove_var("CQLITE_NO_COLOR");
+
+        let cli = Cli::parse_from(&["cqlite"]);
+        let config = Config::load(None, &cli).unwrap();
+        let output = OutputConfig::from_cli(&config, false, None, None);
+
+        assert!(output.color_enabled);
+        assert_eq!(output.limit, None);
+        assert_eq!(output.page_size, Some(50));
+
+        // Step 2: Env vars override defaults
+        env::set_var("CQLITE_LIMIT", "150");
+        env::set_var("CQLITE_PAGE_SIZE", "30");
+        env::set_var("CQLITE_NO_COLOR", "true");
+
+        let cli = Cli::parse_from(&["cqlite"]);
+        let config = Config::load(None, &cli).unwrap();
+        let output = OutputConfig::from_cli(&config, false, None, None);
+
+        assert!(!output.color_enabled);
+        assert_eq!(output.limit, Some(150));
+        assert_eq!(output.page_size, Some(30));
+
+        // Step 3: CLI flags override env vars
+        let cli = Cli::parse_from(&["cqlite", "--limit", "300", "--page-size", "15"]);
+        let config = Config::load(None, &cli).unwrap();
+        let output = OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
+
+        // CLI flags override env, but --no-color not provided so env var still applies
+        assert!(!output.color_enabled); // Still from CQLITE_NO_COLOR env
+        assert_eq!(output.limit, Some(300)); // From --limit flag
+        assert_eq!(output.page_size, Some(15)); // From --page-size flag
+
+        // Clean up
+        env::remove_var("CQLITE_LIMIT");
+        env::remove_var("CQLITE_PAGE_SIZE");
+        env::remove_var("CQLITE_NO_COLOR");
     }
 }

@@ -204,6 +204,273 @@ fn table_options(input: &str) -> IResult<&str, HashMap<String, String>> {
     Ok((input, options.into_iter().collect()))
 }
 
+/// Split CQL file content into individual statements (semicolon-delimited)
+/// Respects string literals and comments to avoid splitting inside them
+pub fn split_cql_statements(input: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current_statement = String::new();
+    let mut in_string = false;
+    let mut in_single_line_comment = false;
+    let mut in_multi_line_comment = false;
+    let mut escape_next = false;
+
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        // Handle escape sequences in strings
+        if escape_next {
+            current_statement.push(c);
+            escape_next = false;
+            i += 1;
+            continue;
+        }
+
+        // Check for multi-line comment start
+        if !in_string
+            && !in_single_line_comment
+            && !in_multi_line_comment
+            && i + 1 < chars.len()
+            && c == '/'
+            && chars[i + 1] == '*'
+        {
+            in_multi_line_comment = true;
+            current_statement.push(c);
+            current_statement.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        // Check for multi-line comment end
+        if in_multi_line_comment && i + 1 < chars.len() && c == '*' && chars[i + 1] == '/' {
+            in_multi_line_comment = false;
+            current_statement.push(c);
+            current_statement.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        // Check for single-line comment start
+        if !in_string
+            && !in_multi_line_comment
+            && !in_single_line_comment
+            && i + 1 < chars.len()
+            && c == '-'
+            && chars[i + 1] == '-'
+        {
+            in_single_line_comment = true;
+            current_statement.push(c);
+            current_statement.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        // Handle newline (ends single-line comment)
+        if c == '\n' {
+            in_single_line_comment = false;
+            current_statement.push(c);
+            i += 1;
+            continue;
+        }
+
+        // Skip processing if inside a comment
+        if in_single_line_comment || in_multi_line_comment {
+            current_statement.push(c);
+            i += 1;
+            continue;
+        }
+
+        // Handle string literals (single quotes)
+        if c == '\'' {
+            in_string = !in_string;
+            current_statement.push(c);
+            i += 1;
+            continue;
+        }
+
+        // Handle escape in string
+        if in_string && c == '\\' {
+            escape_next = true;
+            current_statement.push(c);
+            i += 1;
+            continue;
+        }
+
+        // Handle semicolon (statement separator)
+        if !in_string && c == ';' {
+            let trimmed = current_statement.trim();
+            if !trimmed.is_empty() {
+                statements.push(trimmed.to_string());
+            }
+            current_statement.clear();
+            i += 1;
+            continue;
+        }
+
+        current_statement.push(c);
+        i += 1;
+    }
+
+    // Add final statement if non-empty
+    let trimmed = current_statement.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_string());
+    }
+
+    // Clean up statements: remove leading/trailing comment-only lines
+    statements
+        .into_iter()
+        .map(|stmt| strip_leading_trailing_comments(&stmt))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Strip leading and trailing comment-only lines from a statement
+fn strip_leading_trailing_comments(stmt: &str) -> String {
+    let lines: Vec<&str> = stmt.lines().collect();
+    let mut start = 0;
+    let mut end = lines.len();
+
+    // Find first non-comment line
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("--") && !trimmed.starts_with("/*") {
+            start = i;
+            break;
+        }
+    }
+
+    // Find last non-comment line
+    for (i, line) in lines.iter().enumerate().rev() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("--") && !trimmed.ends_with("*/") {
+            end = i + 1;
+            break;
+        }
+    }
+
+    if start >= end {
+        return String::new();
+    }
+
+    lines[start..end].join("\n")
+}
+
+#[cfg(test)]
+mod tests_splitter {
+    use super::*;
+
+    #[test]
+    fn test_split_with_comments() {
+        let cql = r#"
+        -- Comment
+        CREATE TYPE test.udt (field text);
+
+        /* Multi-line
+           comment */
+        CREATE TABLE test.tbl (id int PRIMARY KEY);
+        "#;
+
+        let stmts = split_cql_statements(cql);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("CREATE TYPE"));
+        assert!(!stmts[0].contains("--"));
+        assert!(stmts[1].contains("CREATE TABLE"));
+    }
+}
+
+/// Statement type classification
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatementType {
+    CreateTable,
+    CreateType,
+    Other(String),
+}
+
+/// Classify a CQL statement by type
+pub fn classify_statement(statement: &str) -> StatementType {
+    let normalized = statement.trim().to_lowercase();
+
+    // Remove leading whitespace and comments
+    let normalized = normalized
+        .lines()
+        .map(|line| {
+            // Remove single-line comments
+            if let Some(pos) = line.find("--") {
+                &line[..pos]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<&str>>()
+        .join(" ");
+
+    let normalized = normalized.trim();
+
+    if normalized.starts_with("create table")
+        || normalized.starts_with("create table if not exists")
+    {
+        StatementType::CreateTable
+    } else if normalized.starts_with("create type")
+        || normalized.starts_with("create type if not exists")
+    {
+        StatementType::CreateType
+    } else {
+        StatementType::Other(
+            normalized
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string(),
+        )
+    }
+}
+
+/// Parse CREATE TYPE statement to extract UDT definition
+#[allow(clippy::type_complexity)]
+pub fn parse_create_type(
+    input: &str,
+) -> IResult<&str, (String, Option<String>, Vec<(String, String)>)> {
+    let (input, _) = ws(input)?;
+    let (input, _) = keyword("create")(input)?;
+    let (input, _) = ws1(input)?;
+    let (input, _) = keyword("type")(input)?;
+    let (input, _) = ws1(input)?;
+
+    // Optional IF NOT EXISTS
+    let (input, _) = opt(tuple((
+        keyword("if"),
+        ws1,
+        keyword("not"),
+        ws1,
+        keyword("exists"),
+        ws1,
+    )))(input)?;
+
+    // Type name (qualified or unqualified)
+    let (input, (keyspace, type_name)) = qualified_table_name(input)?;
+
+    let (input, _) = ws(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws(input)?;
+
+    // Parse field definitions
+    let (input, fields) = separated_list1(
+        tuple((ws, char(','), ws)),
+        map(
+            tuple((identifier, ws1, cql_type)),
+            |(name, _, field_type)| (name, field_type),
+        ),
+    )(input)?;
+
+    let (input, _) = ws(input)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((input, (type_name, keyspace, fields)))
+}
+
 /// Parse a complete CREATE TABLE statement
 pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
     let (input, _) = ws(input)?;
