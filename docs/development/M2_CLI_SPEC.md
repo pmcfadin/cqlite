@@ -42,7 +42,7 @@
 - `-v/--verbose`, `-q/--quiet`, `--no-color`.
 
 Notes:
-- `--schema` and `--data-dir` populate the REPL session defaults if `repl` is subsequently launched.
+- `--schema` and `--data-dir` populate the REPL session defaults if `repl` is subsequently launched, and MUST trigger ingestion (dataset discovery + schema loading) for one‑shot execution so SELECT reads SSTables.
 - Config file keys align with `cqlite-cli/src/config.rs` (`data_directory`, `default_keyspace`, `repl.*`, etc.).
 
 ---
@@ -302,6 +302,7 @@ cqlite> :quit
 - One‑shot mode
   - Supports `--schema <FILE|DIR>` (CQL/JSON), `--data-dir <DIR>`, `-e/--execute <CQL>` and `-f/--file <CQL_FILE>`.
   - Executes read‑only `SELECT` with `WHERE` on primary/partition key and `LIMIT`; honors `--limit`, `--page-size`, `--no-color`.
+  - Ingestion: With `--schema` and `--data-dir`, query execution MUST read from SSTables discovered under `data-dir` using the loaded schema catalog (not the embedded DB).
   - Output formats: `--out table|json|csv` produce correct rows; table matches cqlsh formatting for headers, separators, and row count.
   - Helpful errors for missing/invalid schema and unset `--data-dir` (with next‑step hints); non‑zero exit codes on failure.
 
@@ -309,6 +310,7 @@ cqlite> :quit
   - Launch via `cqlite repl` (or default `cqlite`) and accept: `:config`, `:schema list|load|show|refresh`, `:status`, `:health`, `:use`, `:keyspaces`, `:tables`, `DESCRIBE`/`DESC`, `SELECT ... LIMIT`.
   - Maintains session defaults (data‑dir, page‑size, timing, keyspace); history enabled; `:source <FILE>` executes statements.
   - Renders query results with cqlsh‑compatible table formatting; respects `--no-color`.
+  - Shares ingestion/discovery with one‑shot: `:schema load`, `:config data-dir`, and `:status` use the same catalog and discovery used by one‑shot execution.
 
 - Status & Health
   - `:status` scans `data-dir`, shows discovery timestamp, keyspaces/tables, schema coverage summary (tables with schema, tables missing schema, schemas without data), version hints, and Green/Yellow/Red badge per spec.
@@ -326,10 +328,10 @@ cqlite> :quit
 ### Prioritized Scope (M2)
 
 - Must‑have
-  - One‑shot flags and execution path wired to core query engine.
+  - One‑shot flags and execution path wired to core query engine with ingestion (schema catalog + dataset discovery) so SELECT reads SSTables.
   - REPL with `:config`, `:schema`, `:status`, `:health`, `:use`, `:keyspaces`, `:tables`, `DESCRIBE`/`DESC`, and `SELECT` subset.
   - cqlsh‑compatible table formatting, plus JSON/CSV writers.
-  - Data‑dir discovery and schema coverage reporting.
+  - Data‑dir discovery and schema coverage reporting, shared between one‑shot and REPL.
   - Updated docs and integration tests using `test-data`.
 
 - Should‑have

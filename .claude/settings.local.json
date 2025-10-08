@@ -30,7 +30,10 @@
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets cargo bench --package cqlite-core --bench m1_performance)",
       "Bash(find:*)",
       "Bash(env CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets RUST_BACKTRACE=1 cargo bench --package cqlite-core --bench m1_performance)",
-      "Bash(gh issue edit:*)"
+      "Bash(gh issue edit:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(git checkout:*)",
+      "Bash(git pull:*)"
     ],
     "deny": [],
     "ask": []

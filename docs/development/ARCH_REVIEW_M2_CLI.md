@@ -818,3 +818,33 @@ October 7, 2025
 **Document Version**: 1.0  
 **Status**: Final Review  
 **Distribution**: Product, Engineering, QA
+
+## Review Request: M2 spec update – ingestion/discovery wiring for one-shot and REPL
+
+- **Subject**: M2 spec update – ingestion/discovery wiring for one-shot and REPL; request for review
+
+### Summary
+- We clarified in `docs/development/M2_CLI_SPEC.md` that when `--schema` and `--data-dir` are provided, one-shot MUST perform dataset discovery + schema loading before query execution, and SELECT must read from SSTables using the schema catalog (not the embedded DB).
+- REPL (`:schema load`, `:config data-dir`, `:status`) MUST reuse the same ingestion/discovery service as one-shot to keep catalog and coverage consistent.
+- Prioritized scope updated to state “one-shot wired with ingestion (schema catalog + dataset discovery)” and “discovery shared between one-shot and REPL.”
+
+### Review asks
+- Confirm the ingestion interface between CLI and core (catalog construction, discovery summary, error surfaces).
+- Confirm storage bridge responsibilities and where the SSTable-backed reader is attached in the query engine lifecycle.
+- Confirm exit-code mapping for ingestion failures (3 for schema errors; 4 for data-dir/discovery).
+- Confirm that REPL and one-shot share a single ingestion path (no divergence).
+
+### Links
+- Spec: `docs/development/M2_CLI_SPEC.md`
+- Review doc to annotate: `docs/development/ARCH_REVIEW_M2_CLI.md`
+- Epic: #117 (Epic: M2–CLI)
+
+### Next steps after review
+- Create issues (under epic #117):
+  - M2: Wire ingestion (schema catalog + dataset discovery) into one-shot SELECT path (P1)
+  - M2: Implement dataset discovery service, shared with REPL (P1)
+  - M2: Attach SSTable-backed storage bridge for QueryEngine under ingestion (P1)
+  - M2: REPL `:schema load` and `:status` handlers wired to ingestion/discovery (P1)
+  - M2: Integration tests asserting non-empty rows from `test-data` via one-shot and REPL (P1)
+  - M2: CI one-shot smoke on `test-data` with exit codes and snapshot checks (P1)
+  - P2: Docs/help refresh and examples; optional temporary fallback for `-e SELECT` → `read-sstable` when ingestion unavailable
