@@ -74,6 +74,34 @@ impl CliExitCode {
 /// assert_eq!(classify_error(&err), CliExitCode::DataDirError);
 /// ```
 pub fn classify_error(err: &anyhow::Error) -> CliExitCode {
+    // First, try to downcast to cqlite_core::Error for precise classification
+    if let Some(core_err) = err.downcast_ref::<cqlite_core::Error>() {
+        return match core_err {
+            // Exit code 3: Schema loading errors
+            cqlite_core::Error::Schema(_) | cqlite_core::Error::Table(_) => {
+                CliExitCode::SchemaError
+            }
+
+            // Exit code 4: Data directory / SSTable discovery errors
+            cqlite_core::Error::Io(_)
+            | cqlite_core::Error::Storage(_)
+            | cqlite_core::Error::InvalidPath(_)
+            | cqlite_core::Error::NotFound(_)
+            | cqlite_core::Error::Index(_) => CliExitCode::DataDirError,
+
+            // Exit code 5: Query execution / unsupported query failures
+            cqlite_core::Error::QueryExecution(_)
+            | cqlite_core::Error::CqlParse(_)
+            | cqlite_core::Error::UnsupportedQuery(_)
+            | cqlite_core::Error::Parse(_)
+            | cqlite_core::Error::InvalidInput(_) => CliExitCode::QueryExecutionError,
+
+            // Other errors default to query execution error
+            _ => CliExitCode::QueryExecutionError,
+        };
+    }
+
+    // Fall back to string-based classification for non-core errors
     let err_chain = format!("{:#}", err);
     let err_lower = err_chain.to_lowercase();
 
@@ -314,5 +342,114 @@ mod tests {
         let err = anyhow!("Unsupported query: subquery not allowed");
         let exit_code = classify_error(&err);
         assert_eq!(exit_code.as_i32(), 5);
+    }
+
+    #[test]
+    fn test_classify_core_schema_errors() {
+        // Test direct cqlite_core::Error::Schema mapping
+        let core_err = cqlite_core::Error::schema("Invalid schema definition");
+        let anyhow_err = anyhow::Error::new(core_err);
+        assert_eq!(classify_error(&anyhow_err), CliExitCode::SchemaError);
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 3);
+
+        // Test cqlite_core::Error::Table mapping
+        let table_err = cqlite_core::Error::Table("Table not found".to_string());
+        let anyhow_err = anyhow::Error::new(table_err);
+        assert_eq!(classify_error(&anyhow_err), CliExitCode::SchemaError);
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 3);
+    }
+
+    #[test]
+    fn test_classify_core_discovery_errors() {
+        // Test cqlite_core::Error::Io mapping
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let core_err = cqlite_core::Error::from(io_err);
+        let anyhow_err = anyhow::Error::new(core_err);
+        assert_eq!(classify_error(&anyhow_err), CliExitCode::DataDirError);
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 4);
+
+        // Test cqlite_core::Error::Storage mapping
+        let storage_err = cqlite_core::Error::storage("SSTable not accessible");
+        let anyhow_err = anyhow::Error::new(storage_err);
+        assert_eq!(classify_error(&anyhow_err), CliExitCode::DataDirError);
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 4);
+
+        // Test cqlite_core::Error::InvalidPath mapping
+        let path_err = cqlite_core::Error::invalid_path("/nonexistent/path");
+        let anyhow_err = anyhow::Error::new(path_err);
+        assert_eq!(classify_error(&anyhow_err), CliExitCode::DataDirError);
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 4);
+
+        // Test cqlite_core::Error::NotFound mapping
+        let not_found_err = cqlite_core::Error::not_found("Resource not found");
+        let anyhow_err = anyhow::Error::new(not_found_err);
+        assert_eq!(classify_error(&anyhow_err), CliExitCode::DataDirError);
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 4);
+
+        // Test cqlite_core::Error::Index mapping
+        let index_err = cqlite_core::Error::index("Index read failure");
+        let anyhow_err = anyhow::Error::new(index_err);
+        assert_eq!(classify_error(&anyhow_err), CliExitCode::DataDirError);
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 4);
+    }
+
+    #[test]
+    fn test_classify_core_query_errors() {
+        // Test cqlite_core::Error::QueryExecution mapping
+        let query_err = cqlite_core::Error::query_execution("Query failed");
+        let anyhow_err = anyhow::Error::new(query_err);
+        assert_eq!(
+            classify_error(&anyhow_err),
+            CliExitCode::QueryExecutionError
+        );
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 5);
+
+        // Test cqlite_core::Error::CqlParse mapping
+        let parse_err = cqlite_core::Error::cql_parse("Invalid SELECT syntax");
+        let anyhow_err = anyhow::Error::new(parse_err);
+        assert_eq!(
+            classify_error(&anyhow_err),
+            CliExitCode::QueryExecutionError
+        );
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 5);
+
+        // Test cqlite_core::Error::UnsupportedQuery mapping
+        let unsupported_err = cqlite_core::Error::unsupported_query("JOIN not supported");
+        let anyhow_err = anyhow::Error::new(unsupported_err);
+        assert_eq!(
+            classify_error(&anyhow_err),
+            CliExitCode::QueryExecutionError
+        );
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 5);
+
+        // Test cqlite_core::Error::Parse mapping
+        let parse_err = cqlite_core::Error::parse("Parse failure");
+        let anyhow_err = anyhow::Error::new(parse_err);
+        assert_eq!(
+            classify_error(&anyhow_err),
+            CliExitCode::QueryExecutionError
+        );
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 5);
+
+        // Test cqlite_core::Error::InvalidInput mapping
+        let invalid_input_err = cqlite_core::Error::invalid_input("Invalid query input");
+        let anyhow_err = anyhow::Error::new(invalid_input_err);
+        assert_eq!(
+            classify_error(&anyhow_err),
+            CliExitCode::QueryExecutionError
+        );
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 5);
+    }
+
+    #[test]
+    fn test_classify_core_other_errors_default() {
+        // Test that other core errors default to QueryExecutionError
+        let corruption_err = cqlite_core::Error::corruption("Data corrupted");
+        let anyhow_err = anyhow::Error::new(corruption_err);
+        assert_eq!(
+            classify_error(&anyhow_err),
+            CliExitCode::QueryExecutionError
+        );
+        assert_eq!(classify_error(&anyhow_err).as_i32(), 5);
     }
 }

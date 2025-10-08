@@ -21,6 +21,10 @@ pub mod query;
 pub mod schema;
 pub mod storage;
 
+// Ingestion module for one-shot schema & SSTable discovery
+#[cfg(feature = "state_machine")]
+pub mod ingestion;
+
 // Docker integration for testing
 #[cfg(feature = "docker-integration")]
 pub mod docker;

@@ -7,6 +7,9 @@ use cqlite_core::{Config as CoreConfig, Database};
 use std::path::PathBuf;
 use tracing::info;
 
+#[cfg(feature = "state_machine")]
+use cqlite_core::ingestion::{ingest, IngestionConfig};
+
 mod cli;
 mod cli_types;
 mod commands;
@@ -63,7 +66,39 @@ async fn run_main() -> Result<()> {
         .or(config.default_database.clone())
         .unwrap_or_else(|| PathBuf::from("cqlite.db"));
 
-    // Initialize the database engine
+    // Initialize the database engine - check for ingestion path first
+    #[cfg(feature = "state_machine")]
+    let database = if cli.schema.is_some() && cli.data_dir.is_some() {
+        // One-shot ingestion path: load schema and discover SSTables
+        info!("Using one-shot ingestion mode");
+
+        let ingestion_config = IngestionConfig {
+            schema_paths: vec![cli.schema.clone().unwrap()],
+            data_dir: cli.data_dir.clone().unwrap(),
+            version_hint: cli.cassandra_version.clone(),
+            core_config: create_core_config(&config)?,
+        };
+
+        match ingest(ingestion_config).await {
+            Ok(result) => {
+                info!(
+                    "Ingestion complete: {} schemas loaded, {} SSTables found",
+                    result.schema_load_result.schemas_loaded,
+                    result.discovery_summary.sstables_found
+                );
+                result.database
+            }
+            Err(e) => {
+                // Error will be classified by error.rs for proper exit codes
+                return Err(anyhow::anyhow!("Ingestion failed: {}", e));
+            }
+        }
+    } else {
+        // Original Database::open() path for backward compatibility
+        initialize_database(&db_path, &config).await?
+    };
+
+    #[cfg(not(feature = "state_machine"))]
     let database = initialize_database(&db_path, &config).await?;
 
     // Create output config for query execution
