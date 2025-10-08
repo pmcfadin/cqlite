@@ -509,10 +509,11 @@ impl SchemaAggregator {
     ) -> Result<Option<ParsedSchema>> {
         let table_schema = self.convert_minimal_to_table_schema(minimal)?;
         let keyspace = table_schema.keyspace.clone();
-        let table_name = table_schema.table.clone();
 
         let mut tables = HashMap::new();
-        tables.insert(table_name, table_schema);
+        // Key by fully-qualified name (keyspace.table) to avoid multi-keyspace collisions
+        let qualified_name = format!("{}.{}", table_schema.keyspace, table_schema.table);
+        tables.insert(qualified_name, table_schema);
 
         Ok(Some(ParsedSchema {
             keyspace,
@@ -534,13 +535,17 @@ impl SchemaAggregator {
         // Parse UDTs
         for udt_json in full.udts {
             let udt_def = self.convert_json_udt_to_typedef(&keyspace, udt_json)?;
-            udts.insert(udt_def.name.clone(), udt_def);
+            // Key by fully-qualified name (keyspace.typename) to avoid multi-keyspace collisions
+            let qualified_name = format!("{}.{}", udt_def.keyspace, udt_def.name);
+            udts.insert(qualified_name, udt_def);
         }
 
         // Parse tables
         for table_json in full.tables {
             let table_schema = self.convert_json_table_to_table_schema(&keyspace, table_json)?;
-            tables.insert(table_schema.table.clone(), table_schema);
+            // Key by fully-qualified name (keyspace.table) to avoid multi-keyspace collisions
+            let qualified_name = format!("{}.{}", table_schema.keyspace, table_schema.table);
+            tables.insert(qualified_name, table_schema);
         }
 
         Ok(Some(ParsedSchema {
@@ -1697,6 +1702,112 @@ mod tests {
                 || result.errors[0].message.contains("primary_key"),
             "Error message should mention missing keys: {}",
             result.errors[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_keyspace_json_files_no_collision() {
+        let (mut aggregator, temp_dir) = setup_test_aggregator().await;
+
+        // First JSON file for keyspace ks_a
+        let json_ks_a = r#"
+        {
+            "keyspace": "ks_a",
+            "udts": [
+                {
+                    "name": "address",
+                    "fields": [
+                        {"name": "street", "type": "text"},
+                        {"name": "city", "type": "text"}
+                    ]
+                }
+            ],
+            "tables": [
+                {
+                    "name": "users",
+                    "columns": [
+                        {"name": "id", "type": "uuid"},
+                        {"name": "name", "type": "text"}
+                    ],
+                    "partition_keys": ["id"]
+                }
+            ]
+        }
+        "#;
+
+        // Second JSON file for keyspace ks_b with SAME UDT and table names
+        let json_ks_b = r#"
+        {
+            "keyspace": "ks_b",
+            "udts": [
+                {
+                    "name": "address",
+                    "fields": [
+                        {"name": "country", "type": "text"},
+                        {"name": "postal_code", "type": "text"}
+                    ]
+                }
+            ],
+            "tables": [
+                {
+                    "name": "users",
+                    "columns": [
+                        {"name": "id", "type": "uuid"},
+                        {"name": "email", "type": "text"}
+                    ],
+                    "partition_keys": ["id"]
+                }
+            ]
+        }
+        "#;
+
+        let path_a = write_file(temp_dir.path(), "ks_a.json", json_ks_a);
+        let path_b = write_file(temp_dir.path(), "ks_b.json", json_ks_b);
+
+        let result = aggregator.load_from_paths(&[path_a, path_b]).await.unwrap();
+
+        // Both UDTs and both tables should be loaded (no collision)
+        assert_eq!(
+            result.udts_loaded, 2,
+            "Expected 2 UDTs from different keyspaces"
+        );
+        assert_eq!(
+            result.schemas_loaded, 2,
+            "Expected 2 tables from different keyspaces"
+        );
+        assert!(
+            result.errors.is_empty(),
+            "Expected no errors, got: {:?}",
+            result.errors
+        );
+
+        // Verify both UDTs are registered with correct keyspaces
+        let udt_registry = aggregator.udt_registry.read().await;
+        assert!(
+            udt_registry.contains_udt("ks_a", "address"),
+            "ks_a.address should be registered"
+        );
+        assert!(
+            udt_registry.contains_udt("ks_b", "address"),
+            "ks_b.address should be registered"
+        );
+
+        // Verify both tables are registered with correct keyspaces and different columns
+        let registry = aggregator.registry.read().await;
+        let schema_a = registry.get_schema("ks_a", "users").await.unwrap();
+        assert_eq!(schema_a.keyspace, "ks_a");
+        assert_eq!(schema_a.table, "users");
+        assert!(
+            schema_a.columns.iter().any(|c| c.name == "name"),
+            "ks_a.users should have 'name' column"
+        );
+
+        let schema_b = registry.get_schema("ks_b", "users").await.unwrap();
+        assert_eq!(schema_b.keyspace, "ks_b");
+        assert_eq!(schema_b.table, "users");
+        assert!(
+            schema_b.columns.iter().any(|c| c.name == "email"),
+            "ks_b.users should have 'email' column"
         );
     }
 }
