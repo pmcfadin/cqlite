@@ -1,0 +1,19 @@
+{
+  "keyspace": "test_collections",
+  "tables": [
+    {
+      "name": "collection_table",
+      "columns": [
+        { "name": "id", "type": "uuid" },
+        { "name": "tags", "type": "set<text>" },
+        { "name": "scores", "type": "list<int>" },
+        { "name": "properties", "type": "map<text,text>" },
+        { "name": "numbers_set", "type": "set<int>" },
+        { "name": "ordered_values", "type": "list<timestamp>" },
+        { "name": "metadata_map", "type": "map<text,bigint>" }
+      ],
+      "partition_keys": ["id"],
+      "clustering_keys": []
+    }
+  ]
+}

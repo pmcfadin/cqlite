@@ -4,12 +4,19 @@
 //! Cassandra tables for schema-aware SSTable reading. It supports both
 //! JSON-based schema definitions and CQL CREATE TABLE statement parsing.
 
+pub mod aggregator;
 pub mod cql_parser;
 pub mod discovery;
 #[cfg(feature = "experimental")]
 pub mod json_exporter;
 pub mod parser;
 pub mod registry;
+
+// Re-export aggregator components
+pub use aggregator::{
+    AggregatorConfig, LoadErrorType, LoadResult, SchemaAggregator, SchemaLoadError,
+    SchemaLoadWarning,
+};
 
 // Re-export CQL parsing functions
 pub use cql_parser::{

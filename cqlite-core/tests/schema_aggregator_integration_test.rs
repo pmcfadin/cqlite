@@ -1,0 +1,723 @@
+//! Integration tests for Schema Aggregator (Issue #128)
+//!
+//! These tests validate schema loading, merging, and aggregation from multiple sources
+//! using real schema files from test-data/schemas/.
+
+use cqlite_core::{
+    schema::registry::{SchemaRegistry, SchemaRegistryConfig},
+    schema::{AggregatorConfig, LoadErrorType, SchemaAggregator, UdtRegistry},
+    Config,
+};
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tempfile::TempDir;
+use tokio::sync::RwLock;
+
+/// Helper to create a test aggregator with clean registries
+async fn setup_test_aggregator() -> (
+    SchemaAggregator,
+    Arc<RwLock<SchemaRegistry>>,
+    Arc<RwLock<UdtRegistry>>,
+) {
+    let config = Config::default();
+    let platform = Arc::new(cqlite_core::platform::Platform::new(&config).await.unwrap());
+
+    let registry_config = SchemaRegistryConfig::default();
+    let registry = Arc::new(RwLock::new(
+        SchemaRegistry::new(registry_config, platform, config.clone())
+            .await
+            .unwrap(),
+    ));
+    let udt_registry = Arc::new(RwLock::new(UdtRegistry::new()));
+
+    let aggregator_config = AggregatorConfig::default();
+    let aggregator =
+        SchemaAggregator::new(registry.clone(), udt_registry.clone(), aggregator_config);
+
+    (aggregator, registry, udt_registry)
+}
+
+/// Helper to write a file to a temporary directory
+fn write_temp_file(dir: &TempDir, name: &str, content: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn test_load_mixed_cql_and_json() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+
+    // Use real test-data/schemas directory containing both .cql and .json files
+    let schemas_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-data/schemas");
+
+    // Verify directory exists
+    assert!(
+        schemas_dir.exists(),
+        "Test data directory not found: {:?}",
+        schemas_dir
+    );
+
+    let result = aggregator
+        .load_from_paths(&[schemas_dir])
+        .await
+        .expect("Failed to load schemas");
+
+    // Verify both CQL and JSON files were loaded
+    assert!(result.schemas_loaded > 0, "No schemas were loaded");
+    println!(
+        "Loaded {} schemas with {} UDTs",
+        result.schemas_loaded, result.udts_loaded
+    );
+
+    // Print errors if any
+    for error in &result.errors {
+        println!("Load error: {:?}", error.message);
+    }
+
+    // Verify that specific schemas are registered
+    let registry_guard = registry.read().await;
+
+    // basic-types.json should be loaded
+    let basic_schema = registry_guard
+        .get_schema("test_basic", "simple_table")
+        .await;
+    assert!(basic_schema.is_ok(), "basic-types.json schema not loaded");
+
+    // collections.json should be loaded
+    let collections_schema = registry_guard
+        .get_schema("test_collections", "collection_table")
+        .await;
+    assert!(
+        collections_schema.is_ok(),
+        "collections.json schema not loaded"
+    );
+}
+
+#[tokio::test]
+async fn test_two_pass_udt_resolution() {
+    let (mut aggregator, registry, udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create UDT definition first
+    let udt_json = r#"{
+        "keyspace": "test_keyspace",
+        "udts": [
+            {
+                "name": "address_type",
+                "fields": [
+                    {"name": "street", "type": "text"},
+                    {"name": "city", "type": "text"},
+                    {"name": "zip", "type": "int"}
+                ]
+            }
+        ],
+        "tables": []
+    }"#;
+
+    // Create table that uses the UDT
+    let table_json = r#"{
+        "keyspace": "test_keyspace",
+        "tables": [
+            {
+                "name": "users",
+                "columns": [
+                    {"name": "id", "type": "uuid"},
+                    {"name": "name", "type": "text"},
+                    {"name": "address", "type": "frozen<address_type>"}
+                ],
+                "partition_keys": ["id"],
+                "clustering_keys": []
+            }
+        ]
+    }"#;
+
+    // Write files in order that requires two-pass loading
+    let udt_path = write_temp_file(&temp_dir, "01_udt.json", udt_json);
+    let table_path = write_temp_file(&temp_dir, "02_table.json", table_json);
+
+    let result = aggregator
+        .load_from_paths(&[udt_path, table_path])
+        .await
+        .expect("Failed to load UDT schemas");
+
+    println!(
+        "Loaded {} schemas with {} UDTs",
+        result.schemas_loaded, result.udts_loaded
+    );
+
+    // Print any errors
+    for error in &result.errors {
+        println!("UDT load error: {:?}", error.message);
+    }
+
+    // Verify UDT was loaded in pass 1
+    assert_eq!(result.udts_loaded, 1, "Expected 1 UDT to be loaded");
+
+    // Verify table was loaded in pass 2
+    assert_eq!(result.schemas_loaded, 1, "Expected 1 table to be loaded");
+
+    // Verify UDT is in UDT registry
+    let udt_registry_guard = udt_registry.read().await;
+    assert!(
+        udt_registry_guard.contains_udt("test_keyspace", "address_type"),
+        "UDT 'address_type' not registered"
+    );
+
+    // Verify table is in schema registry
+    let registry_guard = registry.read().await;
+    let users_schema = registry_guard.get_schema("test_keyspace", "users").await;
+    assert!(users_schema.is_ok(), "Table 'users' not registered");
+
+    // Verify table has the UDT column
+    let schema = users_schema.unwrap();
+    let address_col = schema.get_column("address");
+    assert!(address_col.is_some(), "Address column not found");
+    assert_eq!(
+        address_col.unwrap().data_type,
+        "frozen<address_type>",
+        "Address column type mismatch"
+    );
+}
+
+#[tokio::test]
+async fn test_last_wins_merge_strategy() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create two versions of the same table schema
+    let first_version = r#"{
+        "keyspace": "test_ks",
+        "table": "users",
+        "columns": [
+            {"name": "id", "type": "uuid"},
+            {"name": "name", "type": "text"}
+        ],
+        "partition_keys": ["id"],
+        "clustering_keys": []
+    }"#;
+
+    let second_version = r#"{
+        "keyspace": "test_ks",
+        "table": "users",
+        "columns": [
+            {"name": "id", "type": "uuid"},
+            {"name": "name", "type": "text"},
+            {"name": "email", "type": "text"},
+            {"name": "age", "type": "int"}
+        ],
+        "partition_keys": ["id"],
+        "clustering_keys": []
+    }"#;
+
+    let path1 = write_temp_file(&temp_dir, "users_v1.json", first_version);
+    let path2 = write_temp_file(&temp_dir, "users_v2.json", second_version);
+
+    // Load in specific order
+    let result = aggregator
+        .load_from_paths(&[path1, path2])
+        .await
+        .expect("Failed to load schemas");
+
+    // Last wins, so we should have 1 schema (the second one)
+    assert_eq!(
+        result.schemas_loaded, 1,
+        "Expected 1 schema after last-wins merge"
+    );
+    assert!(result.errors.is_empty(), "Expected no errors");
+
+    // Verify the schema has 4 columns (from second definition)
+    let registry_guard = registry.read().await;
+    let schema = registry_guard
+        .get_schema("test_ks", "users")
+        .await
+        .expect("Schema not found");
+
+    assert_eq!(schema.columns.len(), 4, "Expected 4 columns");
+    assert!(
+        schema.get_column("email").is_some(),
+        "Email column from v2 not found"
+    );
+    assert!(
+        schema.get_column("age").is_some(),
+        "Age column from v2 not found"
+    );
+}
+
+#[tokio::test]
+async fn test_directory_lexical_ordering() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create files in non-lexical order: c.json, a.json, b.json
+    // They should be processed in lexical order: a, b, c
+    let c_content = r#"{
+        "keyspace": "ks",
+        "table": "table_c",
+        "columns": [{"name": "id", "type": "uuid"}],
+        "partition_keys": ["id"]
+    }"#;
+
+    let a_content = r#"{
+        "keyspace": "ks",
+        "table": "table_a",
+        "columns": [{"name": "id", "type": "uuid"}],
+        "partition_keys": ["id"]
+    }"#;
+
+    let b_content = r#"{
+        "keyspace": "ks",
+        "table": "table_b",
+        "columns": [{"name": "id", "type": "uuid"}],
+        "partition_keys": ["id"]
+    }"#;
+
+    // Write in random order
+    write_temp_file(&temp_dir, "c.json", c_content);
+    write_temp_file(&temp_dir, "a.json", a_content);
+    write_temp_file(&temp_dir, "b.json", b_content);
+
+    let result = aggregator
+        .load_from_paths(&[temp_dir.path().to_path_buf()])
+        .await
+        .expect("Failed to load schemas");
+
+    assert_eq!(result.schemas_loaded, 3, "Expected 3 schemas loaded");
+    assert!(result.errors.is_empty(), "Expected no errors");
+
+    // Verify all tables are registered
+    let registry_guard = registry.read().await;
+    assert!(
+        registry_guard.get_schema("ks", "table_a").await.is_ok(),
+        "table_a not found"
+    );
+    assert!(
+        registry_guard.get_schema("ks", "table_b").await.is_ok(),
+        "table_b not found"
+    );
+    assert!(
+        registry_guard.get_schema("ks", "table_c").await.is_ok(),
+        "table_c not found"
+    );
+}
+
+#[tokio::test]
+async fn test_error_collection_graceful_degradation() {
+    let (mut aggregator, _registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create mix of valid and invalid schemas
+    let valid_schema = r#"{
+        "keyspace": "ks",
+        "table": "valid_table",
+        "columns": [{"name": "id", "type": "uuid"}],
+        "partition_keys": ["id"]
+    }"#;
+
+    let invalid_json = r#"{"keyspace": "ks", "table": "broken""#; // Missing closing brace
+
+    let missing_partition_key = r#"{
+        "keyspace": "ks",
+        "table": "no_pk",
+        "columns": [{"name": "id", "type": "uuid"}],
+        "partition_keys": []
+    }"#;
+
+    write_temp_file(&temp_dir, "valid.json", valid_schema);
+    write_temp_file(&temp_dir, "broken.json", invalid_json);
+    write_temp_file(&temp_dir, "no_pk.json", missing_partition_key);
+
+    let result = aggregator
+        .load_from_paths(&[temp_dir.path().to_path_buf()])
+        .await
+        .expect("load_from_paths should return Ok with errors collected");
+
+    // Verify graceful degradation
+    assert!(
+        result.schemas_loaded > 0,
+        "At least one valid schema should load"
+    );
+    assert!(
+        !result.errors.is_empty(),
+        "Should have collected errors from invalid schemas"
+    );
+
+    println!("Loaded {} schemas", result.schemas_loaded);
+    println!("Collected {} errors:", result.errors.len());
+    for error in &result.errors {
+        println!("  - {:?}: {}", error.error_type, error.message);
+    }
+
+    // Verify specific error types
+    let has_invalid_json_error = result
+        .errors
+        .iter()
+        .any(|e| matches!(e.error_type, LoadErrorType::InvalidJson));
+    assert!(has_invalid_json_error, "Expected InvalidJson error");
+}
+
+#[tokio::test]
+async fn test_full_json_format_with_multiple_tables() {
+    let (mut aggregator, registry, udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Full-format JSON with multiple tables and UDTs
+    let full_format = r#"{
+        "keyspace": "full_ks",
+        "udts": [
+            {
+                "name": "contact_info",
+                "fields": [
+                    {"name": "email", "type": "text"},
+                    {"name": "phone", "type": "text"}
+                ]
+            }
+        ],
+        "tables": [
+            {
+                "name": "users",
+                "columns": [
+                    {"name": "id", "type": "uuid"},
+                    {"name": "name", "type": "text"}
+                ],
+                "partition_keys": ["id"],
+                "clustering_keys": []
+            },
+            {
+                "name": "products",
+                "columns": [
+                    {"name": "product_id", "type": "uuid"},
+                    {"name": "title", "type": "text"},
+                    {"name": "price", "type": "decimal"}
+                ],
+                "partition_keys": ["product_id"],
+                "clustering_keys": []
+            },
+            {
+                "name": "orders",
+                "columns": [
+                    {"name": "order_id", "type": "uuid"},
+                    {"name": "customer_id", "type": "uuid"},
+                    {"name": "total", "type": "decimal"}
+                ],
+                "partition_keys": ["order_id"],
+                "clustering_keys": []
+            }
+        ]
+    }"#;
+
+    let path = write_temp_file(&temp_dir, "full_schema.json", full_format);
+
+    let result = aggregator
+        .load_from_paths(&[path])
+        .await
+        .expect("Failed to load full-format schema");
+
+    assert_eq!(result.schemas_loaded, 3, "Expected 3 tables loaded");
+    assert_eq!(result.udts_loaded, 1, "Expected 1 UDT loaded");
+    assert!(result.errors.is_empty(), "Expected no errors");
+
+    // Verify all tables are registered
+    let registry_guard = registry.read().await;
+    assert!(
+        registry_guard.get_schema("full_ks", "users").await.is_ok(),
+        "users table not found"
+    );
+    assert!(
+        registry_guard
+            .get_schema("full_ks", "products")
+            .await
+            .is_ok(),
+        "products table not found"
+    );
+    assert!(
+        registry_guard.get_schema("full_ks", "orders").await.is_ok(),
+        "orders table not found"
+    );
+
+    // Verify UDT is registered
+    let udt_registry_guard = udt_registry.read().await;
+    assert!(
+        udt_registry_guard.contains_udt("full_ks", "contact_info"),
+        "contact_info UDT not found"
+    );
+}
+
+#[tokio::test]
+async fn test_clustering_keys_and_ordering() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let schema_with_clustering = r#"{
+        "keyspace": "ks",
+        "table": "time_series",
+        "columns": [
+            {"name": "sensor_id", "type": "uuid"},
+            {"name": "timestamp", "type": "timestamp"},
+            {"name": "value", "type": "double"}
+        ],
+        "partition_keys": ["sensor_id"],
+        "clustering_keys": [
+            {"name": "timestamp", "type": "timestamp", "order": "DESC"}
+        ]
+    }"#;
+
+    let path = write_temp_file(&temp_dir, "time_series.json", schema_with_clustering);
+
+    let result = aggregator
+        .load_from_paths(&[path])
+        .await
+        .expect("Failed to load schema with clustering keys");
+
+    assert_eq!(result.schemas_loaded, 1);
+    assert!(result.errors.is_empty());
+
+    let registry_guard = registry.read().await;
+    let schema = registry_guard
+        .get_schema("ks", "time_series")
+        .await
+        .expect("Schema not found");
+
+    assert_eq!(schema.clustering_keys.len(), 1);
+    assert_eq!(schema.clustering_keys[0].name, "timestamp");
+    assert_eq!(
+        schema.clustering_keys[0].order,
+        cqlite_core::schema::ClusteringOrder::Desc
+    );
+}
+
+#[tokio::test]
+async fn test_composite_partition_keys() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Minimal format doesn't support multi-element partition_keys with position
+    // Use full format instead
+    let composite_key_schema = r#"{
+        "keyspace": "ks",
+        "tables": [
+            {
+                "name": "multi_tenant",
+                "columns": [
+                    {"name": "tenant_id", "type": "uuid"},
+                    {"name": "user_id", "type": "uuid"},
+                    {"name": "data", "type": "text"}
+                ],
+                "partition_keys": ["tenant_id", "user_id"],
+                "clustering_keys": []
+            }
+        ]
+    }"#;
+
+    let path = write_temp_file(&temp_dir, "multi_tenant.json", composite_key_schema);
+
+    let result = aggregator
+        .load_from_paths(&[path])
+        .await
+        .expect("Failed to load composite key schema");
+
+    assert_eq!(result.schemas_loaded, 1);
+    assert!(result.errors.is_empty());
+
+    let registry_guard = registry.read().await;
+    let schema = registry_guard
+        .get_schema("ks", "multi_tenant")
+        .await
+        .expect("Schema not found");
+
+    assert_eq!(schema.partition_keys.len(), 2);
+    assert_eq!(schema.partition_keys[0].name, "tenant_id");
+    assert_eq!(schema.partition_keys[1].name, "user_id");
+}
+
+#[tokio::test]
+async fn test_recursive_directory_scanning() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create nested directory structure
+    let nested_dir = temp_dir.path().join("level1").join("level2");
+    std::fs::create_dir_all(&nested_dir).unwrap();
+
+    let root_schema = r#"{
+        "keyspace": "ks",
+        "table": "root_table",
+        "columns": [{"name": "id", "type": "uuid"}],
+        "partition_keys": ["id"]
+    }"#;
+
+    let nested_schema = r#"{
+        "keyspace": "ks",
+        "table": "nested_table",
+        "columns": [{"name": "id", "type": "uuid"}],
+        "partition_keys": ["id"]
+    }"#;
+
+    // Write to root and nested directories
+    write_temp_file(&temp_dir, "root.json", root_schema);
+    let nested_path = nested_dir.join("nested.json");
+    let mut nested_file = std::fs::File::create(&nested_path).unwrap();
+    nested_file.write_all(nested_schema.as_bytes()).unwrap();
+
+    let result = aggregator
+        .load_from_paths(&[temp_dir.path().to_path_buf()])
+        .await
+        .expect("Failed to load from nested directories");
+
+    assert_eq!(
+        result.schemas_loaded, 2,
+        "Expected 2 schemas from recursive scan"
+    );
+    assert!(result.errors.is_empty());
+
+    let registry_guard = registry.read().await;
+    assert!(registry_guard.get_schema("ks", "root_table").await.is_ok());
+    assert!(registry_guard
+        .get_schema("ks", "nested_table")
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn test_primary_key_synonym_support() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Use primary_key instead of partition_keys (synonym)
+    let schema_with_primary_key = r#"{
+        "keyspace": "ks",
+        "table": "legacy_table",
+        "columns": [
+            {"name": "id", "type": "uuid"},
+            {"name": "data", "type": "text"}
+        ],
+        "primary_key": ["id"]
+    }"#;
+
+    let path = write_temp_file(&temp_dir, "legacy.json", schema_with_primary_key);
+
+    let result = aggregator
+        .load_from_paths(&[path])
+        .await
+        .expect("Failed to load schema with primary_key synonym");
+
+    assert_eq!(result.schemas_loaded, 1);
+    assert!(result.errors.is_empty());
+
+    let registry_guard = registry.read().await;
+    let schema = registry_guard
+        .get_schema("ks", "legacy_table")
+        .await
+        .expect("Schema not found");
+
+    assert_eq!(schema.partition_keys.len(), 1);
+    assert_eq!(schema.partition_keys[0].name, "id");
+}
+
+#[tokio::test]
+async fn test_data_type_alias_support() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Use "data_type" alias instead of "type"
+    let schema_with_alias = r#"{
+        "keyspace": "ks",
+        "table": "alias_table",
+        "columns": [
+            {"name": "id", "data_type": "uuid"},
+            {"name": "value", "data_type": "text"}
+        ],
+        "partition_keys": ["id"]
+    }"#;
+
+    let path = write_temp_file(&temp_dir, "alias.json", schema_with_alias);
+
+    let result = aggregator
+        .load_from_paths(&[path])
+        .await
+        .expect("Failed to load schema with data_type alias");
+
+    assert_eq!(result.schemas_loaded, 1);
+    assert!(result.errors.is_empty());
+
+    let registry_guard = registry.read().await;
+    let schema = registry_guard
+        .get_schema("ks", "alias_table")
+        .await
+        .expect("Schema not found");
+
+    assert_eq!(schema.columns.len(), 2);
+    assert_eq!(schema.get_column("value").unwrap().data_type, "text");
+}
+
+#[tokio::test]
+async fn test_unsupported_file_extensions_are_skipped() {
+    let (mut aggregator, _registry, _udt_registry) = setup_test_aggregator().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create files with various extensions
+    let valid_path = write_temp_file(
+        &temp_dir,
+        "valid.json",
+        r#"{"keyspace":"ks","table":"t","columns":[{"name":"id","type":"uuid"}],"partition_keys":["id"]}"#,
+    );
+    let txt_path = write_temp_file(&temp_dir, "readme.txt", "This is a readme");
+    let xml_path = write_temp_file(&temp_dir, "data.xml", "<data></data>");
+    let py_path = write_temp_file(&temp_dir, "script.py", "print('hello')");
+
+    // Load from individual file paths to trigger warning generation
+    let result = aggregator
+        .load_from_paths(&[valid_path, txt_path, xml_path, py_path])
+        .await
+        .expect("Should complete despite unsupported files");
+
+    // Only the .json file should be loaded
+    assert_eq!(result.schemas_loaded, 1, "Only .json file should be loaded");
+
+    // Warnings should be generated for unsupported files (3 warnings for .txt, .xml, .py)
+    assert!(
+        result.warnings.len() >= 3,
+        "Expected at least 3 warnings for unsupported file types, got {}",
+        result.warnings.len()
+    );
+}
+
+#[tokio::test]
+async fn test_collection_types_in_schemas() {
+    let (mut aggregator, registry, _udt_registry) = setup_test_aggregator().await;
+
+    // Load real collections.json file
+    let collections_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-data/schemas/collections.json");
+
+    assert!(collections_path.exists(), "collections.json not found");
+
+    let result = aggregator
+        .load_from_paths(&[collections_path])
+        .await
+        .expect("Failed to load collections schema");
+
+    assert_eq!(result.schemas_loaded, 1);
+    assert!(result.errors.is_empty());
+
+    let registry_guard = registry.read().await;
+    let schema = registry_guard
+        .get_schema("test_collections", "collection_table")
+        .await
+        .expect("collection_table not found");
+
+    // Verify collection type columns exist
+    assert!(schema.get_column("tags").is_some());
+    assert!(schema.get_column("scores").is_some());
+    assert!(schema.get_column("properties").is_some());
+
+    // Verify types
+    assert_eq!(schema.get_column("tags").unwrap().data_type, "set<text>");
+    assert_eq!(schema.get_column("scores").unwrap().data_type, "list<int>");
+    assert_eq!(
+        schema.get_column("properties").unwrap().data_type,
+        "map<text,text>"
+    );
+}

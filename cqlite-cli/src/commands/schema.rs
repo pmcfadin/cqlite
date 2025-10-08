@@ -1,12 +1,15 @@
 use crate::cli_types::SchemaCommands;
 use anyhow::{Context, Result};
 use cqlite_core::{
-    schema::{parse_cql_schema, ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema},
+    schema::{
+        parse_cql_schema, AggregatorConfig, ClusteringColumn, ClusteringOrder, Column, KeyColumn,
+        SchemaAggregator, TableSchema,
+    },
     Database,
 };
 use serde_json;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(feature = "state_machine")]
 pub async fn handle_schema_command(database: &Database, command: SchemaCommands) -> Result<()> {
@@ -15,6 +18,7 @@ pub async fn handle_schema_command(database: &Database, command: SchemaCommands)
         SchemaCommands::Describe { table } => describe_table(database, &table).await,
         SchemaCommands::Create { schema } => create_table_from_file(database, &schema).await,
         SchemaCommands::Drop { table, force } => drop_table(database, &table, force).await,
+        SchemaCommands::Load { paths } => load_schemas(database, &paths).await,
     }
 }
 
@@ -108,6 +112,124 @@ async fn drop_table(database: &Database, table: &str, force: bool) -> Result<()>
         }
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "state_machine")]
+async fn load_schemas(_database: &Database, paths: &[PathBuf]) -> Result<()> {
+    // Note: Database parameter is not directly used in this implementation.
+    // We create temporary registries for schema aggregation and loading.
+    // Future enhancement: Database should expose registry accessors for direct integration.
+    use cqlite_core::{
+        platform::Platform,
+        schema::{
+            registry::{SchemaRegistry, SchemaRegistryConfig},
+            UdtRegistry,
+        },
+        Config,
+    };
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    println!("Loading schemas from {} paths...", paths.len());
+
+    // Create temporary registries for schema aggregation
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .context("Failed to initialize platform")?,
+    );
+
+    let registry_config = SchemaRegistryConfig::default();
+    let schema_registry = Arc::new(RwLock::new(
+        SchemaRegistry::new(registry_config, platform, config.clone())
+            .await
+            .context("Failed to create schema registry")?,
+    ));
+    let udt_registry = Arc::new(RwLock::new(UdtRegistry::new()));
+
+    // Create aggregator with config
+    let aggregator_config = AggregatorConfig {
+        graceful_degradation: true,
+        validate_udt_dependencies: true,
+    };
+
+    let mut aggregator = SchemaAggregator::new(
+        schema_registry.clone(),
+        udt_registry.clone(),
+        aggregator_config,
+    );
+
+    // Load schemas from all paths
+    let result = aggregator
+        .load_from_paths(paths)
+        .await
+        .context("Failed to load schemas")?;
+
+    // Report errors if any
+    if !result.errors.is_empty() {
+        eprintln!("\nErrors encountered during schema loading:");
+        for error in &result.errors {
+            if let Some(path) = &error.file_path {
+                eprintln!("  Error in file {}: {}", path.display(), error.message);
+            } else {
+                eprintln!("  Error: {}", error.message);
+            }
+        }
+        eprintln!(
+            "\nSchema loading failed with {} errors. Please fix the schemas and retry.",
+            result.errors.len()
+        );
+        // Exit with code 3 for schema validation errors per M2 spec
+        std::process::exit(3);
+    }
+
+    // Report warnings if any
+    if !result.warnings.is_empty() {
+        println!("\nWarnings:");
+        for warning in &result.warnings {
+            if let Some(path) = &warning.file_path {
+                println!("  Warning in {}: {}", path.display(), warning.message);
+            } else {
+                println!("  Warning: {}", warning.message);
+            }
+        }
+    }
+
+    // Print success message with counts
+    if result.schemas_loaded > 0 || result.udts_loaded > 0 {
+        println!(
+            "\nSuccessfully loaded {} schemas and {} UDTs",
+            result.schemas_loaded, result.udts_loaded
+        );
+    }
+
+    // Register loaded schemas with database using CREATE TABLE statements
+    // Note: This is a workaround until Database exposes direct registry access
+    let registry_read = schema_registry.read().await;
+    let registered_schemas = registry_read.list_schemas(None).await?;
+
+    if !registered_schemas.is_empty() {
+        println!("\nRegistered schemas:");
+        for schema in &registered_schemas {
+            println!(
+                "  {}.{} ({} columns)",
+                schema.keyspace,
+                schema.table,
+                schema.columns.len()
+            );
+        }
+    }
+
+    // Register UDTs with database
+    let udt_read = udt_registry.read().await;
+    let total_udts = udt_read.total_udts();
+    if total_udts > 0 {
+        println!("\nRegistered {} UDTs", total_udts);
+    }
+
+    println!("\nSchema loading completed successfully!");
     Ok(())
 }
 

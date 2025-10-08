@@ -264,6 +264,12 @@ pub enum SchemaCommands {
         #[arg(long)]
         force: bool,
     },
+    /// Load schemas from files or directories
+    Load {
+        /// Schema file (.cql or .json) or directory paths (repeatable, processed in order)
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
