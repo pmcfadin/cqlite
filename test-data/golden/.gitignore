@@ -1,0 +1,7 @@
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Note: Golden snapshot files (.json, .csv, .table) are intentionally tracked
+# They serve as reference outputs for regression testing

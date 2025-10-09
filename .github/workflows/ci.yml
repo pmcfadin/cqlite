@@ -94,4 +94,30 @@ jobs:
           ls -la "$CQLITE_DATASETS_ROOT/sstables/test_basic/" || echo "test_basic directory not found"
           cargo test --package cqlite-core -- --skip test_legacy_format_allows_blob_fallback_with_feature
 
+      - name: Build CLI for one-shot smoke tests
+        run: |
+          echo "🔨 Building CLI binary for smoke tests..."
+          cargo build --package cqlite-cli --release
+
+      - name: Run one-shot smoke tests with snapshots
+        env:
+          CQLITE_DATA_DIR: ${{ github.workspace }}/test-data/datasets/sstables
+          CQLITE_SCHEMA: ${{ github.workspace }}/test-data/schemas/basic-types.cql
+          CQLITE_CLI: ${{ github.workspace }}/target/release/cqlite
+          GOLDEN_DIR: ${{ github.workspace }}/test-data/golden
+        run: |
+          echo "🔍 Running one-shot CLI smoke tests..."
+          echo "CQLITE_DATA_DIR=$CQLITE_DATA_DIR"
+          echo "CQLITE_SCHEMA=$CQLITE_SCHEMA"
+          chmod +x test-data/scripts/ci-one-shot-smoke.sh
+          test-data/scripts/ci-one-shot-smoke.sh
+
+      - name: Upload smoke test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-results
+          path: test-data/scripts/smoke-test-results/
+          retention-days: 7
+
 

@@ -1,0 +1,38 @@
+{
+  "rows": [],
+  "rows_affected": 0,
+  "execution_time_ms": 1,
+  "row_count": 0,
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "Text",
+      "nullable": true,
+      "position": 0
+    },
+    {
+      "name": "name",
+      "data_type": "Text",
+      "nullable": true,
+      "position": 1
+    },
+    {
+      "name": "age",
+      "data_type": "Text",
+      "nullable": true,
+      "position": 2
+    }
+  ],
+  "performance": {
+    "parse_time_us": 0,
+    "planning_time_us": 0,
+    "execution_time_us": 0,
+    "total_time_us": 0,
+    "memory_usage_bytes": 0,
+    "io_operations": 0,
+    "cache_hits": 0,
+    "cache_misses": 0,
+    "cache_hit_ratio": 0.0
+  },
+  "warnings": []
+}
