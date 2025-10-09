@@ -74,6 +74,10 @@ pub struct ReplEngine {
     command_buffer: String,
     /// Whether we're in multi-line mode
     in_multiline: bool,
+    /// Currently loaded schema paths (for refresh)
+    schema_paths: Vec<std::path::PathBuf>,
+    /// Cassandra version hint
+    version_hint: Option<String>,
 }
 
 impl ReplEngine {
@@ -107,6 +111,8 @@ impl ReplEngine {
             completion,
             command_buffer: String::new(),
             in_multiline: false,
+            schema_paths: Vec::new(),
+            version_hint: None,
         })
     }
 
@@ -260,6 +266,10 @@ impl ReplEngine {
             }
             CommandType::Status => {
                 commands::execute_status(self.session.data_dir()).await?;
+                Ok(ExecutionResult::Continue)
+            }
+            CommandType::Schema { operation } => {
+                self.execute_schema_command(operation).await?;
                 Ok(ExecutionResult::Continue)
             }
             CommandType::Unknown { input } => {
@@ -429,7 +439,8 @@ impl ReplEngine {
             // Set configuration
             let parts: Vec<&str> = operation.splitn(2, '=').collect();
             if parts.len() == 2 {
-                self.set_config_value(parts[0].trim(), parts[1].trim())?;
+                self.set_config_value(parts[0].trim(), parts[1].trim())
+                    .await?;
             } else {
                 println!(
                     "{} Invalid config format. Use: :config key=value",
@@ -841,8 +852,44 @@ impl ReplEngine {
     }
 
     /// Set configuration value
-    fn set_config_value(&mut self, key: &str, value: &str) -> ReplResult<()> {
+    async fn set_config_value(&mut self, key: &str, value: &str) -> ReplResult<()> {
         match key {
+            "data-dir" | "data_dir" => {
+                let data_dir = std::path::PathBuf::from(value);
+
+                // Validate directory exists
+                if !data_dir.exists() {
+                    println!(
+                        "{} Directory does not exist: {}",
+                        "Error:".red().bold(),
+                        value
+                    );
+                    return Ok(());
+                }
+
+                if !data_dir.is_dir() {
+                    println!(
+                        "{} Path is not a directory: {}",
+                        "Error:".red().bold(),
+                        value
+                    );
+                    return Ok(());
+                }
+
+                println!(
+                    "{} Changing data directory to: {}",
+                    "Info:".cyan(),
+                    data_dir.display().to_string().yellow()
+                );
+
+                // Rebuild database with new data directory
+                self.rebuild_database_from_discovery(
+                    data_dir,
+                    self.schema_paths.clone(),
+                    self.version_hint.clone(),
+                )
+                .await?;
+            }
             "output_format" => {
                 self.config.output_format = match value.to_lowercase().as_str() {
                     "table" => OutputFormat::Table,
@@ -913,7 +960,7 @@ impl ReplEngine {
                     "Error:".red().bold(),
                     key
                 );
-                println!("Available keys: output_format, page_size, show_timing, enable_paging");
+                println!("Available keys: data-dir, output_format, page_size, show_timing, enable_paging");
             }
         }
 
@@ -933,5 +980,231 @@ impl ReplEngine {
     /// Get current configuration
     pub fn config(&self) -> &ReplConfig {
         &self.config
+    }
+
+    /// Execute schema command
+    async fn execute_schema_command(
+        &mut self,
+        operation: super::SchemaOperation,
+    ) -> ReplResult<()> {
+        use super::SchemaOperation;
+
+        match operation {
+            SchemaOperation::Load { paths } => {
+                println!(
+                    "{} Loading schemas from {} file(s)...",
+                    "Info:".cyan(),
+                    paths.len()
+                );
+
+                // Convert paths to PathBuf
+                let schema_paths: Vec<std::path::PathBuf> =
+                    paths.iter().map(|p| std::path::PathBuf::from(p)).collect();
+
+                // Validate all paths exist
+                for path in &schema_paths {
+                    if !path.exists() {
+                        println!(
+                            "{} Schema file not found: {}",
+                            "Error:".red().bold(),
+                            path.display()
+                        );
+                        return Ok(());
+                    }
+                }
+
+                // Get current data directory
+                let data_dir = match self.session.data_dir() {
+                    Some(dir) => dir.to_path_buf(),
+                    None => {
+                        println!(
+                            "{} No data directory configured. Use :config data-dir=<path> first",
+                            "Error:".red().bold()
+                        );
+                        return Ok(());
+                    }
+                };
+
+                // Store schema paths for future refresh
+                self.schema_paths = schema_paths.clone();
+
+                // Rebuild database with new schemas
+                self.rebuild_database_from_discovery(
+                    data_dir,
+                    schema_paths,
+                    self.version_hint.clone(),
+                )
+                .await?;
+            }
+            SchemaOperation::Refresh => {
+                println!("{} Refreshing schemas...", "Info:".cyan());
+
+                if self.schema_paths.is_empty() {
+                    println!(
+                        "{} No schemas loaded. Use :schema load <path> first",
+                        "Warning:".yellow()
+                    );
+                    return Ok(());
+                }
+
+                let data_dir = match self.session.data_dir() {
+                    Some(dir) => dir.to_path_buf(),
+                    None => {
+                        println!("{} No data directory configured", "Error:".red().bold());
+                        return Ok(());
+                    }
+                };
+
+                // Rebuild with existing schema paths
+                self.rebuild_database_from_discovery(
+                    data_dir,
+                    self.schema_paths.clone(),
+                    self.version_hint.clone(),
+                )
+                .await?;
+            }
+            SchemaOperation::Unload => {
+                println!("{} Unloading schemas...", "Info:".cyan());
+
+                let data_dir = match self.session.data_dir() {
+                    Some(dir) => dir.to_path_buf(),
+                    None => {
+                        println!("{} No data directory configured", "Error:".red().bold());
+                        return Ok(());
+                    }
+                };
+
+                // Clear schema paths
+                self.schema_paths.clear();
+
+                // Rebuild with no schemas
+                self.rebuild_database_from_discovery(
+                    data_dir,
+                    Vec::new(),
+                    self.version_hint.clone(),
+                )
+                .await?;
+            }
+            SchemaOperation::Show => {
+                println!("{}", "Schema Status".cyan().bold());
+                println!("{}", "═".repeat(25).cyan());
+                println!();
+
+                if self.schema_paths.is_empty() {
+                    println!("No schemas loaded");
+                } else {
+                    println!("Loaded schemas ({}):", self.schema_paths.len());
+                    for (i, path) in self.schema_paths.iter().enumerate() {
+                        println!("  {}. {}", i + 1, path.display().to_string().green());
+                    }
+                }
+
+                if let Some(ref data_dir) = self.session.data_dir() {
+                    println!();
+                    println!(
+                        "Data directory: {}",
+                        data_dir.display().to_string().yellow()
+                    );
+                }
+
+                if let Some(ref version) = self.version_hint {
+                    println!("Version hint: {}", version.yellow());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rebuild Database from discovery when ingestion changes
+    ///
+    /// This method orchestrates schema loading and SSTable discovery to create
+    /// a new Database instance, replacing the existing one in the REPL session.
+    ///
+    /// Use cases:
+    /// - After `:config data-dir <path>` changes the data directory
+    /// - After `:schema load <path>` loads new schema files
+    /// - After `:schema refresh` reloads existing schemas
+    ///
+    /// # Arguments
+    ///
+    /// * `data_dir` - Root data directory containing SSTables
+    /// * `schema_paths` - Schema file paths (.cql or .json) to load
+    /// * `version_hint` - Optional Cassandra version hint (e.g., "5.0")
+    ///
+    /// # Errors
+    ///
+    /// Returns ReplError::Database for ingestion failures, schema loading errors,
+    /// or database initialization errors.
+    pub async fn rebuild_database_from_discovery(
+        &mut self,
+        data_dir: std::path::PathBuf,
+        schema_paths: Vec<std::path::PathBuf>,
+        version_hint: Option<String>,
+    ) -> ReplResult<()> {
+        use cqlite_core::ingestion::{ingest, IngestionConfig};
+
+        println!("{}", "Rebuilding database from discovery...".cyan().bold());
+
+        // Step 1: Create ingestion config
+        // Note: Using default core config as CLI config is different from core config
+        let ingestion_config = IngestionConfig {
+            schema_paths: schema_paths.clone(),
+            data_dir: data_dir.clone(),
+            version_hint: version_hint.clone(),
+            core_config: cqlite_core::Config::default(),
+        };
+
+        // Step 2: Run ingestion flow
+        let start_time = std::time::Instant::now();
+        let ingestion_result = ingest(ingestion_config)
+            .await
+            .map_err(|e| ReplError::Database(e.into()))?;
+        let elapsed = start_time.elapsed();
+
+        // Step 3: Report ingestion results
+        println!(
+            "{} {} schemas loaded, {} UDTs loaded",
+            "Schema:".green(),
+            ingestion_result.schema_load_result.schemas_loaded,
+            ingestion_result.schema_load_result.udts_loaded
+        );
+
+        if !ingestion_result.schema_load_result.warnings.is_empty() {
+            println!(
+                "{} {} warning(s)",
+                "Warnings:".yellow(),
+                ingestion_result.schema_load_result.warnings.len()
+            );
+            for warning in &ingestion_result.schema_load_result.warnings {
+                println!("  - {}", warning.message.yellow());
+            }
+        }
+
+        println!(
+            "{} {} SSTables discovered across {} keyspaces",
+            "Discovery:".green(),
+            ingestion_result.discovery_summary.sstables_found,
+            ingestion_result.discovery_summary.keyspaces.len()
+        );
+
+        if let Some(ref version) = ingestion_result.discovery_summary.resolved_version {
+            println!("{} Cassandra {}", "Version:".green(), version.yellow());
+        }
+
+        // Step 4: Replace Database in session
+        // The old Database will be dropped and properly closed when Arc refcount hits zero
+        self.session.replace_database(ingestion_result.database)?;
+
+        // Step 5: Update session data directory
+        self.session.set_data_dir(Some(data_dir.clone()));
+
+        println!(
+            "{} Database rebuilt in {:.2}ms",
+            "Success:".green().bold(),
+            elapsed.as_millis()
+        );
+
+        Ok(())
     }
 }

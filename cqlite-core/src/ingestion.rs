@@ -56,6 +56,8 @@ pub struct DiscoverySummary {
     pub keyspaces: Vec<String>,
     /// Tables discovered per keyspace
     pub tables: Vec<String>,
+    /// Full directory paths for each discovered table
+    pub table_directories: Vec<PathBuf>,
     /// Resolved Cassandra version (from precedence)
     pub resolved_version: Option<String>,
 }
@@ -169,28 +171,34 @@ pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
         }
     })?;
 
+    // Step 5: Build Database with discovered SSTables
+    // Use open_with_discovered_sstables() to avoid duplicate SSTable scanning
+    // Storage path is data_dir (for runtime storage), discovered directories from DiscoveryService
+    let database = Database::open_with_discovered_sstables(
+        &config.data_dir,
+        service_summary.table_directories.clone(),
+        config.core_config.clone(),
+    )
+    .await
+    .map_err(|e| {
+        // Map database creation errors appropriately
+        match e {
+            Error::Schema(_) => e,
+            Error::Io(_) => e,
+            #[cfg(feature = "state_machine")]
+            Error::QueryExecution(_) => e,
+            _ => Error::QueryExecution(format!("Database initialization failed: {}", e)),
+        }
+    })?;
+
     // Convert from discovery module's DiscoverySummary to ingestion's DiscoverySummary
     let discovery_summary = DiscoverySummary {
         sstables_found: service_summary.sstables_found,
         keyspaces: service_summary.keyspaces,
         tables: service_summary.tables,
+        table_directories: service_summary.table_directories,
         resolved_version: service_summary.resolved_version,
     };
-
-    // Step 5: Build Database using Database::open()
-    // The Database::open() already handles StorageEngine and QueryEngine initialization
-    let database = Database::open(&config.data_dir, config.core_config.clone())
-        .await
-        .map_err(|e| {
-            // Map database creation errors appropriately
-            match e {
-                Error::Schema(_) => e,
-                Error::Io(_) => e,
-                #[cfg(feature = "state_machine")]
-                Error::QueryExecution(_) => e,
-                _ => Error::QueryExecution(format!("Database initialization failed: {}", e)),
-            }
-        })?;
 
     Ok(IngestionResult {
         database,

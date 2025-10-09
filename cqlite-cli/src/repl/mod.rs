@@ -15,7 +15,7 @@ pub mod history;
 pub mod session;
 
 // Re-export main interfaces
-pub use command_parser::{CommandParser, CommandType, ParsedCommand};
+pub use command_parser::{CommandParser, CommandType, ParsedCommand, SchemaOperation};
 pub use completion::CompletionEngine;
 pub use engine::{ReplConfig, ReplEngine};
 pub use history::HistoryManager;

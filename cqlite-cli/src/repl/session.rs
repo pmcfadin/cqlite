@@ -582,4 +582,18 @@ impl ReplSession {
 
         report
     }
+
+    /// Replace the Database instance with a new one
+    ///
+    /// Used when rebuilding the database after ingestion changes.
+    /// The old Database will be dropped when the Arc refcount reaches zero.
+    pub fn replace_database(&mut self, new_database: Database) -> ReplResult<()> {
+        self.database = Arc::new(new_database);
+        Ok(())
+    }
+
+    /// Get reference to the session configuration
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
 }

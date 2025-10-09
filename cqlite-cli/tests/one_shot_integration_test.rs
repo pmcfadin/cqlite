@@ -79,7 +79,7 @@ fn test_one_shot_select_with_ingestion_basic() {
     );
 
     // Should produce output (rows or empty result, but not an error)
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let _stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should not contain critical errors

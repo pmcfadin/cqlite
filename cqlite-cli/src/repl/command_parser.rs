@@ -31,8 +31,23 @@ pub enum CommandType {
     Source { file_path: String },
     /// Show discovery and schema coverage status
     Status,
+    /// Schema management commands
+    Schema { operation: SchemaOperation },
     /// Unknown command
     Unknown { input: String },
+}
+
+/// Schema operation types
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchemaOperation {
+    /// Load schema from file(s)
+    Load { paths: Vec<String> },
+    /// Refresh currently loaded schemas
+    Refresh,
+    /// Unload all schemas
+    Unload,
+    /// Show schema status
+    Show,
 }
 
 /// A parsed command with metadata
@@ -225,6 +240,44 @@ impl CommandParser {
             }
             "status" => Some(CommandType::Status),
 
+            // Schema commands
+            "schema" => {
+                if parts.len() > 1 {
+                    let schema_op = self.parse_schema_operation(&parts[1..])?;
+                    Some(CommandType::Schema {
+                        operation: schema_op,
+                    })
+                } else {
+                    // Default to show if no operation specified
+                    Some(CommandType::Schema {
+                        operation: SchemaOperation::Show,
+                    })
+                }
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Parse schema operation subcommands
+    fn parse_schema_operation(&self, parts: &[&str]) -> Option<SchemaOperation> {
+        if parts.is_empty() {
+            return Some(SchemaOperation::Show);
+        }
+
+        match parts[0].to_lowercase().as_str() {
+            "load" => {
+                if parts.len() > 1 {
+                    // Collect all remaining parts as file paths
+                    let paths: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+                    Some(SchemaOperation::Load { paths })
+                } else {
+                    None // LOAD requires at least one path
+                }
+            }
+            "refresh" => Some(SchemaOperation::Refresh),
+            "unload" => Some(SchemaOperation::Unload),
+            "show" | "status" => Some(SchemaOperation::Show),
             _ => None,
         }
     }
@@ -399,6 +452,31 @@ impl CommandParser {
                 metadata.complexity = 3;
                 metadata.modifies_state = false;
                 metadata.requires_database = false;
+            }
+            CommandType::Schema { operation } => {
+                metadata.category = CommandCategory::Schema;
+                match operation {
+                    SchemaOperation::Load { .. } => {
+                        metadata.complexity = 6;
+                        metadata.modifies_state = true;
+                        metadata.requires_database = true;
+                    }
+                    SchemaOperation::Refresh => {
+                        metadata.complexity = 5;
+                        metadata.modifies_state = true;
+                        metadata.requires_database = true;
+                    }
+                    SchemaOperation::Unload => {
+                        metadata.complexity = 4;
+                        metadata.modifies_state = true;
+                        metadata.requires_database = true;
+                    }
+                    SchemaOperation::Show => {
+                        metadata.complexity = 2;
+                        metadata.modifies_state = false;
+                        metadata.requires_database = false;
+                    }
+                }
             }
             CommandType::Unknown { .. } => {
                 metadata.category = CommandCategory::Unknown;

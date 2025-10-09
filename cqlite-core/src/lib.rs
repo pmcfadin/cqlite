@@ -50,7 +50,7 @@ pub use crate::{
     types::*,
 };
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{memory::MemoryManager, storage::StorageEngine};
@@ -127,6 +127,102 @@ impl Database {
         Ok(Self {
             storage,
             #[cfg(feature = "state_machine")]
+            query,
+            memory,
+            config,
+        })
+    }
+
+    /// Open a database with pre-discovered SSTable table directories
+    ///
+    /// This method is used in the ingestion flow where SSTable discovery has been performed
+    /// externally (e.g., via `DiscoveryService`) and the database should be initialized with
+    /// specific SSTable files rather than scanning the storage directory.
+    ///
+    /// # Use Case
+    ///
+    /// This method is designed for the one-shot ingestion workflow:
+    /// 1. `DiscoveryService::discover()` scans external Cassandra data directories
+    /// 2. `SchemaManager` parses schema from discovered files
+    /// 3. `Database::open_with_discovered_sstables()` creates a queryable database instance
+    ///
+    /// # Arguments
+    ///
+    /// * `storage_path` - The directory path for database runtime files (WAL, manifest, memtable)
+    /// * `discovered_table_dirs` - Vector of table directory paths from DiscoveryService
+    ///   (e.g., `/var/lib/cassandra/data/keyspace1/table1-abc123`)
+    /// * `config` - Database configuration options
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The storage path cannot be created or accessed
+    /// - Any discovered table directory cannot be read
+    /// - Configuration is invalid
+    /// - Storage engine or query engine initialization fails
+    ///
+    /// # Feature Gates
+    ///
+    /// This method is only available when the `state_machine` feature is enabled (default in M2+).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use cqlite_core::{Database, Config};
+    /// use std::path::{Path, PathBuf};
+    ///
+    /// # tokio_test::block_on(async {
+    /// let config = Config::default();
+    /// let storage_path = Path::new("./runtime");
+    /// let discovered_dirs = vec![
+    ///     PathBuf::from("/var/lib/cassandra/data/keyspace1/table1-abc123"),
+    ///     PathBuf::from("/var/lib/cassandra/data/keyspace1/table2-def456"),
+    /// ];
+    ///
+    /// let db = Database::open_with_discovered_sstables(
+    ///     storage_path,
+    ///     discovered_dirs,
+    ///     config
+    /// ).await?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # });
+    /// ```
+    #[cfg(feature = "state_machine")]
+    pub async fn open_with_discovered_sstables(
+        storage_path: &Path,
+        discovered_table_dirs: Vec<PathBuf>,
+        config: Config,
+    ) -> Result<Self> {
+        // Initialize platform abstraction layer
+        let platform = Arc::new(Platform::new(&config).await?);
+
+        // Initialize memory manager
+        let memory = Arc::new(MemoryManager::new(&config)?);
+
+        // Initialize storage engine with pre-discovered SSTables
+        let storage = Arc::new(
+            StorageEngine::open_with_sstables(
+                storage_path,
+                discovered_table_dirs,
+                &config,
+                platform.clone(),
+            )
+            .await?,
+        );
+
+        // Initialize schema manager
+        let schema = Arc::new(SchemaManager::new_with_storage(storage.clone(), &config).await?);
+
+        // Initialize query engine
+        let query = Arc::new(QueryEngine::new(
+            storage.clone(),
+            schema.clone(),
+            memory.clone(),
+            &config,
+        )?);
+
+        Ok(Self {
+            storage,
             query,
             memory,
             config,
@@ -295,6 +391,26 @@ mod tests {
         let config = Config::test_config();
 
         let db = Database::open(temp_dir.path(), config).await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "state_machine")]
+    async fn test_database_open_with_discovered_sstables() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::test_config();
+
+        // Create an empty list of discovered table directories
+        let discovered_dirs = Vec::new();
+
+        let db = Database::open_with_discovered_sstables(temp_dir.path(), discovered_dirs, config)
+            .await
+            .unwrap();
+
+        // Verify database was created successfully
+        let stats = db.stats().await.unwrap();
+        assert_eq!(stats.storage_stats.sstables.sstable_count, 0);
+
         db.close().await.unwrap();
     }
 

@@ -13,7 +13,7 @@ pub mod repl_data_api;
 pub mod schema_discovery;
 pub mod sstable_data_manager;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -52,6 +52,9 @@ pub struct StorageEngine {
 
 impl StorageEngine {
     /// Open a storage engine at the given path
+    ///
+    /// This method discovers SSTables by scanning the storage directory.
+    /// For pre-discovered SSTables, use `open_with_sstables` instead.
     pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
         // Create storage directory if it doesn't exist
         platform.fs().create_dir_all(path).await?;
@@ -62,6 +65,104 @@ impl StorageEngine {
         // Initialize SSTable manager
         let sstables =
             Arc::new(sstable::SSTableManager::new(path, config, platform.clone()).await?);
+
+        // Initialize WAL
+        let wal = Arc::new(wal::WriteAheadLog::open(path, config, platform.clone()).await?);
+
+        // Initialize MemTable
+        let memtable = Arc::new(RwLock::new(memtable::MemTable::new(config)?));
+
+        // Initialize compaction manager
+        let compaction = Arc::new(
+            compaction::CompactionManager::new(sstables.clone(), manifest.clone(), config).await?,
+        );
+
+        // Initialize batch writer for efficient bulk operations
+        let batch_writer = if config.storage.memtable_size_threshold > 1024 * 1024 {
+            // Only for larger configurations
+            Some(
+                BatchWriterBuilder::new(config.clone())
+                    .with_auto_flush_size(1000)
+                    .with_auto_flush_interval(std::time::Duration::from_millis(100))
+                    .build(sstables.clone(), wal.clone()),
+            )
+        } else {
+            None
+        };
+
+        Ok(Self {
+            memtable,
+            sstables,
+            wal,
+            compaction,
+            manifest,
+            _platform: platform,
+            config: config.clone(),
+            batch_writer,
+        })
+    }
+
+    /// Open a storage engine with pre-discovered SSTable table directories
+    ///
+    /// This method is used when SSTables have been discovered externally (e.g., by DiscoveryService)
+    /// and allows the storage engine to be initialized with specific table directories rather than
+    /// scanning the storage directory. Each table directory will be scanned for Data.db files.
+    ///
+    /// # Arguments
+    /// * `path` - Base storage path for WAL, manifest, and memtable operations
+    /// * `discovered_table_dirs` - Vector of table directory paths (each containing SSTable files)
+    /// * `config` - Storage configuration
+    /// * `platform` - Platform abstraction for I/O operations
+    ///
+    /// # Returns
+    /// A StorageEngine instance with all components initialized, including SSTable readers
+    /// for all Data.db files found in the discovered table directories.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::path::{Path, PathBuf};
+    /// # use std::sync::Arc;
+    /// # use cqlite_core::{Config, Platform, storage::StorageEngine};
+    /// # async fn example() -> cqlite_core::Result<()> {
+    /// let config = Config::default();
+    /// let platform = Arc::new(Platform::new(&config).await?);
+    /// let storage_path = Path::new("/var/lib/cqlite/storage");
+    /// let discovered_table_dirs = vec![
+    ///     PathBuf::from("/var/lib/cassandra/keyspace1/table1-abc123"),
+    ///     PathBuf::from("/var/lib/cassandra/keyspace1/table2-def456"),
+    /// ];
+    ///
+    /// let engine = StorageEngine::open_with_sstables(
+    ///     storage_path,
+    ///     discovered_table_dirs,
+    ///     &config,
+    ///     platform,
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn open_with_sstables(
+        path: &Path,
+        discovered_table_dirs: Vec<PathBuf>,
+        config: &Config,
+        platform: Arc<Platform>,
+    ) -> Result<Self> {
+        // Create storage directory if it doesn't exist
+        platform.fs().create_dir_all(path).await?;
+
+        // Initialize manifest first
+        let manifest = Arc::new(manifest::Manifest::open(path, config).await?);
+
+        // Initialize SSTable manager with pre-discovered paths
+        let sstables = Arc::new(
+            sstable::SSTableManager::new_from_discovered_paths(
+                path,
+                discovered_table_dirs,
+                config,
+                platform.clone(),
+            )
+            .await?,
+        );
 
         // Initialize WAL
         let wal = Arc::new(wal::WriteAheadLog::open(path, config, platform.clone()).await?);
@@ -425,6 +526,27 @@ mod tests {
             .unwrap();
         let stats = storage.stats().await.unwrap();
 
+        assert_eq!(stats.sstables.sstable_count, 0);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_storage_engine_with_discovered_sstables() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::test_config();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+
+        // Create an empty list of discovered SSTables for this test
+        let discovered_paths = Vec::new();
+
+        let storage =
+            StorageEngine::open_with_sstables(temp_dir.path(), discovered_paths, &config, platform)
+                .await
+                .unwrap();
+
+        let stats = storage.stats().await.unwrap();
+
+        // Should have 0 SSTables since we provided an empty list
         assert_eq!(stats.sstables.sstable_count, 0);
         storage.shutdown().await.unwrap();
     }

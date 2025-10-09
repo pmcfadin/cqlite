@@ -85,6 +85,18 @@ impl DiscoveryService {
         let scan_result = scanner.scan()?;
         let resolved_version = scanner.resolve_version(&scan_result)?;
 
+        // Extract table directory paths from keyspace_info
+        let table_directories: Vec<PathBuf> = scan_result
+            .keyspace_info
+            .iter()
+            .flat_map(|ks_info| {
+                ks_info
+                    .tables
+                    .iter()
+                    .map(|table_info| table_info.path.clone())
+            })
+            .collect();
+
         let (coverage, badge) = if let Some(registry) = &self.schema_registry {
             let calculator = CoverageCalculator::new(registry.clone());
             let coverage = calculator.calculate(&scan_result.tables).await?;
@@ -100,6 +112,7 @@ impl DiscoveryService {
             data_dir: self.data_dir.clone(),
             keyspaces: scan_result.keyspaces,
             tables: scan_result.tables,
+            table_directories,
             sstables_found: scan_result.sstable_count,
             resolved_version,
             coverage,
@@ -123,6 +136,8 @@ pub struct DiscoverySummary {
     pub keyspaces: Vec<String>,
     /// Fully qualified table names discovered (excluding system tables)
     pub tables: Vec<String>,
+    /// Full directory paths for each discovered table
+    pub table_directories: Vec<PathBuf>,
     /// Total number of SSTables found
     pub sstables_found: usize,
     /// Resolved Cassandra version
@@ -231,6 +246,8 @@ mod tests {
 
         assert_eq!(summary.keyspaces.len(), 1);
         assert_eq!(summary.tables.len(), 1);
+        assert_eq!(summary.table_directories.len(), 1);
+        assert_eq!(summary.table_directories[0], table_dir);
         assert_eq!(summary.sstables_found, 1);
         assert_eq!(summary.resolved_version, Some("5.0".to_string()));
         assert!(summary.coverage.is_none());
@@ -262,6 +279,8 @@ mod tests {
 
         assert_eq!(summary.keyspaces.len(), 1);
         assert_eq!(summary.tables.len(), 1);
+        assert_eq!(summary.table_directories.len(), 1);
+        assert_eq!(summary.table_directories[0], table_dir);
         assert_eq!(summary.sstables_found, 1);
         assert_eq!(summary.resolved_version, Some("5.0".to_string()));
 
@@ -284,10 +303,12 @@ mod tests {
         let keyspace_dir = temp_dir.path().join("test_ks");
         fs::create_dir(&keyspace_dir).unwrap();
 
+        let mut expected_dirs = Vec::new();
         for table_name in &["users", "posts", "comments"] {
             let table_dir = keyspace_dir.join(format!("{}-abc123", table_name));
             fs::create_dir(&table_dir).unwrap();
             fs::write(table_dir.join("na-1-big-Data.db"), b"mock").unwrap();
+            expected_dirs.push(table_dir);
         }
 
         // Create schema registry and register only one schema
@@ -300,6 +321,11 @@ mod tests {
         let summary = service.scan().await.unwrap();
 
         assert_eq!(summary.tables.len(), 3);
+        assert_eq!(summary.table_directories.len(), 3);
+        // Verify all expected directories are present (order may vary)
+        for expected_dir in &expected_dirs {
+            assert!(summary.table_directories.contains(expected_dir));
+        }
         assert_eq!(summary.sstables_found, 3);
 
         // Check coverage
@@ -367,6 +393,7 @@ mod tests {
 
         assert_eq!(summary.keyspaces.len(), 0);
         assert_eq!(summary.tables.len(), 0);
+        assert_eq!(summary.table_directories.len(), 0);
         assert_eq!(summary.sstables_found, 0);
         assert_eq!(summary.resolved_version, Some("unknown".to_string()));
     }
