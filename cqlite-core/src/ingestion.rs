@@ -3,10 +3,11 @@
 //! This module orchestrates schema loading and SSTable discovery to build
 //! a fully-configured Database instance for one-shot query execution.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::discovery::DiscoveryService;
 use crate::error::{Error, Result};
 use crate::schema::{
     aggregator::{AggregatorConfig, LoadResult, SchemaAggregator},
@@ -150,19 +151,31 @@ pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
         )));
     }
 
-    // Step 4: Discover SSTables from data directory
-    let discovery_summary = discover_sstables(&config.data_dir, config.version_hint.as_deref())
-        .await
-        .map_err(|e| {
-            // Map discovery errors to appropriate error types
-            match e {
-                Error::Io(_) => e,
-                _ => Error::Io(std::io::Error::other(format!(
-                    "SSTable discovery failed: {}",
-                    e
-                ))),
-            }
-        })?;
+    // Step 4: Discover SSTables using DiscoveryService
+    let discovery_service = DiscoveryService::with_schema_registry(
+        config.data_dir.clone(),
+        config.version_hint.clone(),
+        schema_registry.clone(),
+    );
+
+    let service_summary = discovery_service.scan().await.map_err(|e| {
+        // Map discovery errors to appropriate error types
+        match e {
+            Error::Io(_) => e,
+            _ => Error::Io(std::io::Error::other(format!(
+                "SSTable discovery failed: {}",
+                e
+            ))),
+        }
+    })?;
+
+    // Convert from discovery module's DiscoverySummary to ingestion's DiscoverySummary
+    let discovery_summary = DiscoverySummary {
+        sstables_found: service_summary.sstables_found,
+        keyspaces: service_summary.keyspaces,
+        tables: service_summary.tables,
+        resolved_version: service_summary.resolved_version,
+    };
 
     // Step 5: Build Database using Database::open()
     // The Database::open() already handles StorageEngine and QueryEngine initialization
@@ -186,196 +199,14 @@ pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
     })
 }
 
-/// Discover SSTables in the data directory
-///
-/// Scans the data directory for SSTable files and resolves the Cassandra version
-/// using the precedence: version_hint > SSTable metadata > metadata.yml > unknown
-async fn discover_sstables(
-    data_dir: &Path,
-    version_hint: Option<&str>,
-) -> Result<DiscoverySummary> {
-    // Step 1: Scan directory structure for keyspaces and tables
-    let mut keyspaces = Vec::new();
-    let mut tables = Vec::new();
-    let mut sstables_found = 0;
-
-    // Cassandra data directory structure is:
-    // data_dir/keyspace_name/table_name-table_id/sstable_files
-    if let Ok(entries) = std::fs::read_dir(data_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                let keyspace_name = entry.file_name().to_string_lossy().to_string();
-
-                // Skip system keyspaces for discovery summary
-                if !keyspace_name.starts_with("system") {
-                    keyspaces.push(keyspace_name.clone());
-                }
-
-                // Scan for tables in this keyspace
-                if let Ok(table_entries) = std::fs::read_dir(entry.path()) {
-                    for table_entry in table_entries.flatten() {
-                        if table_entry.path().is_dir() {
-                            let table_dir_name =
-                                table_entry.file_name().to_string_lossy().to_string();
-
-                            // Extract table name (format: table_name-table_id)
-                            let table_name = table_dir_name
-                                .split('-')
-                                .next()
-                                .unwrap_or(&table_dir_name)
-                                .to_string();
-
-                            let qualified_name = format!("{}.{}", keyspace_name, table_name);
-                            if !qualified_name.starts_with("system") {
-                                tables.push(qualified_name);
-                            }
-
-                            // Count SSTable files (Data.db files)
-                            if let Ok(sstable_files) = std::fs::read_dir(table_entry.path()) {
-                                for sstable_file in sstable_files.flatten() {
-                                    let file_name =
-                                        sstable_file.file_name().to_string_lossy().to_string();
-                                    if file_name.ends_with("-Data.db")
-                                        || file_name.ends_with("Data.db")
-                                    {
-                                        sstables_found += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Step 2: Resolve Cassandra version using precedence
-    let resolved_version = resolve_cassandra_version(data_dir, version_hint).await?;
-
-    Ok(DiscoverySummary {
-        sstables_found,
-        keyspaces,
-        tables,
-        resolved_version,
-    })
-}
-
-/// Resolve Cassandra version using precedence:
-/// 1. version_hint (if provided)
-/// 2. SSTable metadata (from Data.db headers)
-/// 3. metadata.yml (cluster metadata)
-/// 4. "unknown" (fallback)
-async fn resolve_cassandra_version(
-    data_dir: &Path,
-    version_hint: Option<&str>,
-) -> Result<Option<String>> {
-    // Precedence 1: Use version hint if provided
-    if let Some(hint) = version_hint {
-        return Ok(Some(hint.to_string()));
-    }
-
-    // Precedence 2: Try to read version from SSTable metadata
-    // This would require reading the first few bytes of a Data.db file
-    // For now, we'll skip this and move to metadata.yml
-    // TODO: Implement SSTable header version detection
-
-    // Precedence 3: Try to read metadata.yml
-    let metadata_path = data_dir.join("metadata.yml");
-    if metadata_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&metadata_path) {
-            // Parse YAML for version field
-            // Simple string search (not full YAML parsing for now)
-            for line in content.lines() {
-                if line.trim().starts_with("version:") {
-                    let version = line
-                        .trim()
-                        .strip_prefix("version:")
-                        .unwrap_or("")
-                        .trim()
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .to_string();
-                    if !version.is_empty() {
-                        return Ok(Some(version));
-                    }
-                }
-            }
-        }
-    }
-
-    // Precedence 4: Unknown
-    Ok(Some("unknown".to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn test_resolve_cassandra_version_with_hint() {
-        let temp_dir = TempDir::new().unwrap();
-        let version = resolve_cassandra_version(temp_dir.path(), Some("5.0"))
-            .await
-            .unwrap();
-        assert_eq!(version, Some("5.0".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_cassandra_version_from_metadata_yml() {
-        let temp_dir = TempDir::new().unwrap();
-        let metadata_content = "version: 5.0.1\nother: field\n";
-        fs::write(temp_dir.path().join("metadata.yml"), metadata_content).unwrap();
-
-        let version = resolve_cassandra_version(temp_dir.path(), None)
-            .await
-            .unwrap();
-        assert_eq!(version, Some("5.0.1".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_cassandra_version_unknown() {
-        let temp_dir = TempDir::new().unwrap();
-        let version = resolve_cassandra_version(temp_dir.path(), None)
-            .await
-            .unwrap();
-        assert_eq!(version, Some("unknown".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_discover_sstables_empty_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let summary = discover_sstables(temp_dir.path(), None).await.unwrap();
-
-        assert_eq!(summary.sstables_found, 0);
-        assert!(summary.keyspaces.is_empty());
-        assert!(summary.tables.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_discover_sstables_with_structure() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create keyspace/table directory structure
-        let keyspace_dir = temp_dir.path().join("test_ks");
-        fs::create_dir(&keyspace_dir).unwrap();
-
-        let table_dir = keyspace_dir.join("users-abc123");
-        fs::create_dir(&table_dir).unwrap();
-
-        // Create a mock SSTable file
-        fs::write(table_dir.join("na-1-big-Data.db"), b"mock data").unwrap();
-
-        let summary = discover_sstables(temp_dir.path(), None).await.unwrap();
-
-        assert_eq!(summary.sstables_found, 1);
-        assert!(summary.keyspaces.contains(&"test_ks".to_string()));
-        assert!(summary
-            .tables
-            .iter()
-            .any(|t| t.starts_with("test_ks.users")));
-    }
+    // Note: Tests for discover_sstables() and resolve_cassandra_version()
+    // have been removed as these functions are now in the discovery module
+    // and are tested there.
 
     #[tokio::test]
     async fn test_ingest_invalid_data_dir() {

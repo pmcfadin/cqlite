@@ -25,6 +25,10 @@ pub mod storage;
 #[cfg(feature = "state_machine")]
 pub mod ingestion;
 
+// Discovery module for SSTable scanning and coverage analysis
+#[cfg(feature = "state_machine")]
+pub mod discovery;
+
 // Docker integration for testing
 #[cfg(feature = "docker-integration")]
 pub mod docker;

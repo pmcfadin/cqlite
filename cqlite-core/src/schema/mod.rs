@@ -805,6 +805,28 @@ impl TableSchema {
             _ => false,
         }
     }
+
+    /// Create a minimal test schema (for testing only)
+    #[cfg(test)]
+    pub fn new_for_testing(keyspace: &str, table: &str) -> Self {
+        Self {
+            keyspace: keyspace.to_string(),
+            table: table.to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+            }],
+            comments: HashMap::new(),
+        }
+    }
 }
 
 impl CqlType {

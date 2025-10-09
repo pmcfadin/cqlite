@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod command_parser;
+pub mod commands;
 pub mod completion;
 pub mod engine;
 pub mod history;

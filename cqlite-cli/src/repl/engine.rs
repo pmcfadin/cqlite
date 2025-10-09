@@ -4,8 +4,8 @@
 // This is the central component that integrates with the existing CLI infrastructure.
 
 use super::{
-    CommandParser, CommandType, CompletionEngine, ExecutionResult, HistoryManager, OutputFormat,
-    ParsedCommand, ReplError, ReplMode, ReplResult, ReplSession,
+    commands, CommandParser, CommandType, CompletionEngine, ExecutionResult, HistoryManager,
+    OutputFormat, ParsedCommand, ReplError, ReplMode, ReplResult, ReplSession,
 };
 use crate::config::Config;
 use colored::Colorize;
@@ -256,6 +256,10 @@ impl ReplEngine {
             }
             CommandType::Source { file_path } => {
                 self.execute_source_command(&file_path).await?;
+                Ok(ExecutionResult::Continue)
+            }
+            CommandType::Status => {
+                commands::execute_status(self.session.data_dir()).await?;
                 Ok(ExecutionResult::Continue)
             }
             CommandType::Unknown { input } => {
@@ -722,6 +726,7 @@ impl ReplEngine {
         println!("  :describe <obj>  Describe object");
         println!("  :use <keyspace>  Switch keyspace");
         println!("  :config [op]     Show/set configuration");
+        println!("  :status          Show discovery and schema coverage status");
         println!("  :clear           Clear screen");
         println!("  :history         Show command history");
         println!("  :source <file>   Execute commands from file");
@@ -744,6 +749,7 @@ impl ReplEngine {
         println!("  :tables          List all tables");
         println!("  :describe <obj>  Show object schema");
         println!("  :use <keyspace>  Switch to keyspace");
+        println!("  :status          Show discovery and schema coverage status");
         println!();
         println!("File Commands:");
         println!("  :source <file>   Execute SQL file");

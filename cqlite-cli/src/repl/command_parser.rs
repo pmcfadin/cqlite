@@ -29,6 +29,8 @@ pub enum CommandType {
     History,
     /// Execute commands from a file
     Source { file_path: String },
+    /// Show discovery and schema coverage status
+    Status,
     /// Unknown command
     Unknown { input: String },
 }
@@ -221,6 +223,7 @@ impl CommandParser {
                     None // SOURCE requires a file path
                 }
             }
+            "status" => Some(CommandType::Status),
 
             _ => None,
         }
@@ -390,6 +393,12 @@ impl CommandParser {
                 metadata.complexity = 5;
                 metadata.modifies_state = true;
                 metadata.requires_database = true;
+            }
+            CommandType::Status => {
+                metadata.category = CommandCategory::System;
+                metadata.complexity = 3;
+                metadata.modifies_state = false;
+                metadata.requires_database = false;
             }
             CommandType::Unknown { .. } => {
                 metadata.category = CommandCategory::Unknown;

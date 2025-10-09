@@ -253,6 +253,10 @@ fn test_parse_system_commands() -> Result<()> {
         _ => panic!("Expected Source command"),
     }
 
+    // Test status command
+    let result = parser.parse(":status")?;
+    assert_eq!(result.command_type, CommandType::Status);
+
     Ok(())
 }
 
