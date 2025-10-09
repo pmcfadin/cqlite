@@ -1,10 +1,7 @@
 [workspace]
 members = [
     "cqlite-core",
-    "cqlite-ffi",
-    "cqlite-wasm",
     "cqlite-cli",
-    "cqlite-validation",
     "tests",
     "examples",
     "tools/*",
