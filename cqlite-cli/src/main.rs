@@ -154,10 +154,22 @@ async fn run_main() -> Result<()> {
             let mut engine = repl::ReplEngine::new(repl_config, &db_path, config, database)
                 .map_err(|e| anyhow::anyhow!("Failed to initialize REPL: {}", e))?;
 
-            engine
-                .run()
-                .await
-                .map_err(|e| anyhow::anyhow!("REPL error: {}", e))
+            // Run REPL and convert ReplError to proper exit codes
+            engine.run().await.map_err(|e| {
+                // Convert ReplError to anyhow::Error while preserving exit code information
+                match &e {
+                    repl::ReplError::SchemaError(msg) => {
+                        anyhow::anyhow!("Schema error: {}", msg)
+                    }
+                    repl::ReplError::DataDirectoryError(msg) => {
+                        anyhow::anyhow!("Data directory error: {}", msg)
+                    }
+                    repl::ReplError::UnsupportedFeature(msg) => {
+                        anyhow::anyhow!("Unsupported feature: {}", msg)
+                    }
+                    _ => anyhow::anyhow!("REPL error: {}", e),
+                }
+            })
         }
         Some(Commands::Query {
             query,

@@ -5,6 +5,8 @@
 use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[cfg(feature = "state_machine")]
 use cqlite_core::discovery::{CoverageBadge, DiscoveryService};
@@ -17,34 +19,34 @@ use cqlite_core::discovery::{CoverageBadge, DiscoveryService};
 /// - Schema coverage counts and deltas
 /// - Version hints
 /// - Coverage badge (Green/Yellow/Red/Unknown)
-pub async fn execute_status(data_dir: Option<&Path>) -> Result<()> {
+pub async fn execute_status(
+    data_dir: Option<&Path>,
+    schema_registry: Option<Arc<RwLock<cqlite_core::schema::registry::SchemaRegistry>>>,
+) -> Result<()> {
     #[cfg(not(feature = "state_machine"))]
     {
         let _ = data_dir; // Suppress unused warning
-        println!(
-            "{}",
-            "⚠️  Status command requires state_machine feature"
-                .yellow()
-                .bold()
-        );
-        println!("{}", "Hint: Rebuild with --features state_machine".dimmed());
-        return Ok(());
+        let _ = schema_registry; // Suppress unused warning
+        return Err(anyhow::anyhow!(
+            "Status command requires state_machine feature. Rebuild with --features state_machine"
+        ));
     }
 
     #[cfg(feature = "state_machine")]
     {
         // Check if data_dir is set
         let Some(data_dir) = data_dir else {
-            println!("{}", "⚠️  Data directory not configured".yellow().bold());
-            println!(
-                "{}",
-                "Hint: Set data directory with :config data-dir <PATH>".dimmed()
-            );
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "Data directory not configured. Use :config data-dir <PATH>"
+            ));
         };
 
-        // Create discovery service (without schema registry for now)
-        let discovery_service = DiscoveryService::new(data_dir.to_path_buf(), None);
+        // Create discovery service
+        let discovery_service = if let Some(registry) = schema_registry {
+            DiscoveryService::with_schema_registry(data_dir.to_path_buf(), None, registry)
+        } else {
+            DiscoveryService::new(data_dir.to_path_buf(), None)
+        };
 
         // Scan and display results
         println!("{}", "Scanning data directory...".dimmed());
