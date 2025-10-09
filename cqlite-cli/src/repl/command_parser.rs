@@ -31,6 +31,8 @@ pub enum CommandType {
     Source { file_path: String },
     /// Show discovery and schema coverage status
     Status,
+    /// List keyspaces
+    Keyspaces,
     /// Schema management commands
     Schema { operation: SchemaOperation },
     /// Unknown command
@@ -48,6 +50,8 @@ pub enum SchemaOperation {
     Unload,
     /// Show schema status
     Show,
+    /// List loaded schemas with coverage info
+    List,
 }
 
 /// A parsed command with metadata
@@ -239,6 +243,7 @@ impl CommandParser {
                 }
             }
             "status" => Some(CommandType::Status),
+            "keyspaces" => Some(CommandType::Keyspaces),
 
             // Schema commands
             "schema" => {
@@ -278,6 +283,7 @@ impl CommandParser {
             "refresh" => Some(SchemaOperation::Refresh),
             "unload" => Some(SchemaOperation::Unload),
             "show" | "status" => Some(SchemaOperation::Show),
+            "list" => Some(SchemaOperation::List),
             _ => None,
         }
     }
@@ -453,6 +459,12 @@ impl CommandParser {
                 metadata.modifies_state = false;
                 metadata.requires_database = false;
             }
+            CommandType::Keyspaces => {
+                metadata.category = CommandCategory::Navigation;
+                metadata.complexity = 2;
+                metadata.modifies_state = false;
+                metadata.requires_database = false;
+            }
             CommandType::Schema { operation } => {
                 metadata.category = CommandCategory::Schema;
                 match operation {
@@ -472,6 +484,11 @@ impl CommandParser {
                         metadata.requires_database = true;
                     }
                     SchemaOperation::Show => {
+                        metadata.complexity = 2;
+                        metadata.modifies_state = false;
+                        metadata.requires_database = false;
+                    }
+                    SchemaOperation::List => {
                         metadata.complexity = 2;
                         metadata.modifies_state = false;
                         metadata.requires_database = false;

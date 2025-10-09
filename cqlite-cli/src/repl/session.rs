@@ -46,6 +46,9 @@ pub struct ReplSession {
     connection_info: ConnectionInfo,
     /// Performance metrics
     metrics: SessionMetrics,
+    /// Schema registry for coverage reporting
+    schema_registry:
+        Option<Arc<tokio::sync::RwLock<cqlite_core::schema::registry::SchemaRegistry>>>,
 }
 
 /// Connection information
@@ -100,6 +103,7 @@ impl ReplSession {
             variables: HashMap::new(),
             connection_info,
             metrics: SessionMetrics::default(),
+            schema_registry: None,
         })
     }
 
@@ -595,5 +599,20 @@ impl ReplSession {
     /// Get reference to the session configuration
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Get reference to SchemaRegistry for coverage reporting
+    pub fn schema_registry(
+        &self,
+    ) -> Option<Arc<tokio::sync::RwLock<cqlite_core::schema::registry::SchemaRegistry>>> {
+        self.schema_registry.clone()
+    }
+
+    /// Set the schema registry
+    pub fn set_schema_registry(
+        &mut self,
+        registry: Option<Arc<tokio::sync::RwLock<cqlite_core::schema::registry::SchemaRegistry>>>,
+    ) {
+        self.schema_registry = registry;
     }
 }

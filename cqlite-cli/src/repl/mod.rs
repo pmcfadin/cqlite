@@ -47,6 +47,30 @@ pub enum ReplError {
 
     #[error("Completion error: {0}")]
     Completion(String),
+
+    // Exit code 3: Schema errors
+    #[error("Schema error: {0}")]
+    SchemaError(String),
+
+    // Exit code 4: Data directory/discovery errors
+    #[error("Data directory error: {0}")]
+    DataDirectoryError(String),
+
+    // Exit code 5: Unsupported feature
+    #[error("Unsupported feature: {0}")]
+    UnsupportedFeature(String),
+}
+
+impl ReplError {
+    /// Get the exit code for this error
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            ReplError::SchemaError(_) => 3,
+            ReplError::DataDirectoryError(_) => 4,
+            ReplError::UnsupportedFeature(_) => 5,
+            _ => 1, // Generic error
+        }
+    }
 }
 
 /// Execute result indicating whether REPL should continue

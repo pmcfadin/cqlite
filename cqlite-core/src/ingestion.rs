@@ -45,6 +45,9 @@ pub struct IngestionResult {
 
     /// SSTable discovery summary
     pub discovery_summary: DiscoverySummary,
+
+    /// Schema registry for coverage reporting
+    pub schema_registry: Arc<RwLock<SchemaRegistry>>,
 }
 
 /// SSTable discovery summary
@@ -204,6 +207,7 @@ pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
         database,
         schema_load_result,
         discovery_summary,
+        schema_registry: schema_registry.clone(),
     })
 }
 

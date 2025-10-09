@@ -146,10 +146,36 @@ impl ReplEngine {
                         continue;
                     }
 
-                    match self.process_input(trimmed).await? {
-                        ExecutionResult::Continue => continue,
-                        ExecutionResult::Exit => break,
-                        ExecutionResult::ExitWithCode(_) => break,
+                    match self.process_input(trimmed).await {
+                        Ok(ExecutionResult::Continue) => continue,
+                        Ok(ExecutionResult::Exit) => break,
+                        Ok(ExecutionResult::ExitWithCode(code)) => {
+                            // Convert exit code to appropriate ReplError
+                            return Err(match code {
+                                3 => ReplError::SchemaError("Schema error occurred".to_string()),
+                                4 => ReplError::DataDirectoryError(
+                                    "Data directory error occurred".to_string(),
+                                ),
+                                5 => {
+                                    ReplError::UnsupportedFeature("Unsupported feature".to_string())
+                                }
+                                _ => ReplError::Session(format!("Exit with code {}", code)),
+                            });
+                        }
+                        Err(e) => {
+                            // Print error but continue REPL (non-fatal errors)
+                            eprintln!("{} {}", "Error:".red().bold(), e);
+                            // For certain errors, we should exit instead of continuing
+                            if matches!(
+                                e,
+                                ReplError::SchemaError(_)
+                                    | ReplError::DataDirectoryError(_)
+                                    | ReplError::UnsupportedFeature(_)
+                            ) {
+                                return Err(e);
+                            }
+                            continue;
+                        }
                     }
                 }
                 Err(e) => {
@@ -265,7 +291,35 @@ impl ReplEngine {
                 Ok(ExecutionResult::Continue)
             }
             CommandType::Status => {
-                commands::execute_status(self.session.data_dir()).await?;
+                // Get schema registry from session
+                let schema_registry = self.session.schema_registry();
+                commands::execute_status(self.session.data_dir(), schema_registry)
+                    .await
+                    .map_err(|e| {
+                        let err_msg = e.to_string().to_lowercase();
+                        if err_msg.contains("requires state_machine feature") {
+                            ReplError::UnsupportedFeature(e.to_string())
+                        } else if err_msg.contains("data directory") {
+                            ReplError::DataDirectoryError(e.to_string())
+                        } else {
+                            ReplError::Database(e)
+                        }
+                    })?;
+                Ok(ExecutionResult::Continue)
+            }
+            CommandType::Keyspaces => {
+                commands::execute_keyspaces(self.session.data_dir())
+                    .await
+                    .map_err(|e| {
+                        let err_msg = e.to_string().to_lowercase();
+                        if err_msg.contains("requires state_machine feature") {
+                            ReplError::UnsupportedFeature(e.to_string())
+                        } else if err_msg.contains("data directory") {
+                            ReplError::DataDirectoryError(e.to_string())
+                        } else {
+                            ReplError::Database(e)
+                        }
+                    })?;
                 Ok(ExecutionResult::Continue)
             }
             CommandType::Schema { operation } => {
@@ -1004,12 +1058,10 @@ impl ReplEngine {
                 // Validate all paths exist
                 for path in &schema_paths {
                     if !path.exists() {
-                        println!(
-                            "{} Schema file not found: {}",
-                            "Error:".red().bold(),
+                        return Err(ReplError::SchemaError(format!(
+                            "Schema file not found: {}",
                             path.display()
-                        );
-                        return Ok(());
+                        )));
                     }
                 }
 
@@ -1017,11 +1069,10 @@ impl ReplEngine {
                 let data_dir = match self.session.data_dir() {
                     Some(dir) => dir.to_path_buf(),
                     None => {
-                        println!(
-                            "{} No data directory configured. Use :config data-dir=<path> first",
-                            "Error:".red().bold()
-                        );
-                        return Ok(());
+                        return Err(ReplError::DataDirectoryError(
+                            "No data directory configured. Use :config data-dir=<path> first"
+                                .to_string(),
+                        ));
                     }
                 };
 
@@ -1050,8 +1101,9 @@ impl ReplEngine {
                 let data_dir = match self.session.data_dir() {
                     Some(dir) => dir.to_path_buf(),
                     None => {
-                        println!("{} No data directory configured", "Error:".red().bold());
-                        return Ok(());
+                        return Err(ReplError::DataDirectoryError(
+                            "No data directory configured".to_string(),
+                        ));
                     }
                 };
 
@@ -1069,8 +1121,9 @@ impl ReplEngine {
                 let data_dir = match self.session.data_dir() {
                     Some(dir) => dir.to_path_buf(),
                     None => {
-                        println!("{} No data directory configured", "Error:".red().bold());
-                        return Ok(());
+                        return Err(ReplError::DataDirectoryError(
+                            "No data directory configured".to_string(),
+                        ));
                     }
                 };
 
@@ -1110,6 +1163,9 @@ impl ReplEngine {
                 if let Some(ref version) = self.version_hint {
                     println!("Version hint: {}", version.yellow());
                 }
+            }
+            SchemaOperation::List => {
+                commands::execute_schema_list(&self.schema_paths).await?;
             }
         }
 
@@ -1198,6 +1254,10 @@ impl ReplEngine {
 
         // Step 5: Update session data directory
         self.session.set_data_dir(Some(data_dir.clone()));
+
+        // Step 6: Store schema registry for coverage reporting
+        self.session
+            .set_schema_registry(Some(ingestion_result.schema_registry));
 
         println!(
             "{} Database rebuilt in {:.2}ms",

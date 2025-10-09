@@ -445,6 +445,7 @@ pub struct DiscoveryMetrics {
 }
 
 /// Main schema discovery engine
+#[derive(Debug)]
 pub struct SchemaDiscoveryEngine {
     /// Configuration
     config: SchemaDiscoveryConfig,
@@ -691,6 +692,7 @@ impl DiscoveryContext {
 }
 
 /// Type inference engine for complex type analysis
+#[derive(Debug)]
 pub struct TypeInferenceEngine {
     // Implementation details for type inference
 }
@@ -1060,6 +1062,7 @@ impl TypeInferenceEngine {
 }
 
 /// Schema validator for consistency checking
+#[derive(Debug)]
 pub struct SchemaValidator {
     // Implementation details for validation
 }
@@ -1071,6 +1074,7 @@ impl SchemaValidator {
 }
 
 /// Schema exporter for generating output formats
+#[derive(Debug)]
 pub struct SchemaExporter {
     // Implementation details for export
 }

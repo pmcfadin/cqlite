@@ -59,6 +59,7 @@ impl Default for SchemaRegistryConfig {
 }
 
 /// Centralized schema registry
+#[derive(Debug)]
 pub struct SchemaRegistry {
     /// Configuration
     config: SchemaRegistryConfig,
@@ -1393,6 +1394,7 @@ impl ParsingContext {
 }
 
 /// Schema validator for comprehensive validation
+#[derive(Debug)]
 pub struct SchemaValidator;
 
 impl Default for SchemaValidator {
