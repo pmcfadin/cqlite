@@ -1,7 +1,0 @@
-# This directory will contain validation tool binaries
-#
-# Binaries to be migrated:
-# - memory_safety_validator.rs
-# - sstabledump_parity_validator.rs
-# - issue_17_validation_demo.rs
-# - validate_test_sstables.rs

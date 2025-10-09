@@ -136,3 +136,8 @@ cassandra5-small-*.tar.gz.sha256
 
 # Performance metrics
 performance.json
+
+# AI Agent artifacts
+.claude-flow/
+.swarm/
+memory.db
