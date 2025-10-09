@@ -1,0 +1,2 @@
+Parsed exact header size 4096 for BIG v5 format using nom parser
+
