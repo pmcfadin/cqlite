@@ -36,47 +36,30 @@ impl SSTableReader {
 
         let mut entries = Vec::new();
 
-        // For NB format (Cassandra 5.0), blocks are read as complete units and don't need
-        // additional decompression here. The read_next_block already handled decompression
-        // at the chunk level if CompressionInfo exists.
-        // Only decompress for legacy formats that use block-level compression.
-        let needs_block_decompression = !matches!(
-            self.header.cassandra_version,
-            crate::parser::header::CassandraVersion::V5_0NewBig
-                | crate::parser::header::CassandraVersion::V5_0DataFormat
-                | crate::parser::header::CassandraVersion::V5_0Bti
-        );
-
-        let data = if needs_block_decompression {
-            if let Some(compression_reader) = &self.compression_reader {
-                eprintln!("[DEBUG SSTableReader::parse_block_entries] Legacy format: attempting block decompression with algorithm: {:?}",
-                          compression_reader.algorithm());
-                let compression = Compression::new(*compression_reader.algorithm())?;
-                match compression.decompress(block_data) {
-                    Ok(decompressed) => {
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompressed {} bytes to {} bytes",
-                                  block_data.len(), decompressed.len());
-                        decompressed
-                    }
-                    Err(e) => {
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompression failed ({}), parsing raw data instead", e);
-                        eprintln!(
-                            "[DEBUG SSTableReader::parse_block_entries] First 32 bytes: {:02x?}",
-                            &block_data[..std::cmp::min(32, block_data.len())]
-                        );
-                        // Fall back to raw data
-                        block_data.to_vec()
-                    }
+        // Decompress block data if compression is enabled
+        let data = if let Some(compression_reader) = &self.compression_reader {
+            eprintln!("[DEBUG SSTableReader::parse_block_entries] Attempting block decompression with algorithm: {:?}",
+                      compression_reader.algorithm());
+            let compression = Compression::new(*compression_reader.algorithm())?;
+            match compression.decompress(block_data) {
+                Ok(decompressed) => {
+                    eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompressed {} bytes to {} bytes",
+                              block_data.len(), decompressed.len());
+                    decompressed
                 }
-            } else {
-                eprintln!(
-                    "[DEBUG SSTableReader::parse_block_entries] No compression, using raw block data"
-                );
-                block_data.to_vec()
+                Err(e) => {
+                    eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompression failed ({}), parsing raw data instead", e);
+                    eprintln!(
+                        "[DEBUG SSTableReader::parse_block_entries] First 32 bytes: {:02x?}",
+                        &block_data[..std::cmp::min(32, block_data.len())]
+                    );
+                    // Fall back to raw data
+                    block_data.to_vec()
+                }
             }
         } else {
             eprintln!(
-                "[DEBUG SSTableReader::parse_block_entries] NB format: using block data directly (already decompressed if needed)"
+                "[DEBUG SSTableReader::parse_block_entries] No compression, using raw block data"
             );
             block_data.to_vec()
         };
