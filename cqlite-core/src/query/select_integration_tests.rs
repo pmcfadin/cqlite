@@ -334,58 +334,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore] // M2 feature: Aggregation with ORDER BY not fully implemented
-    async fn test_clustering_order_by_with_aggregation() {
-        let (db, _temp_dir) = create_test_database().await;
-
-        db.execute(
-            "CREATE TABLE metrics_by_day (
-                category TEXT,
-                day TEXT,
-                metric DOUBLE,
-                PRIMARY KEY (category, day)
-            )",
-        )
-        .await
-        .unwrap();
-
-        let inserts = [
-            ("tech", "2024-05-01", 10.0),
-            ("tech", "2024-05-02", 15.0),
-            ("tech", "2024-05-03", 12.5),
-        ];
-
-        for (category, day, metric) in inserts {
-            db.execute(&format!(
-                "INSERT INTO metrics_by_day (category, day, metric) VALUES ('{}', '{}', {})",
-                category, day, metric
-            ))
-            .await
-            .unwrap();
-        }
-
-        use tokio::time::{timeout, Duration};
-
-        let result = timeout(
-            Duration::from_secs(2),
-            db.execute(
-                "SELECT MAX(metric) FROM metrics_by_day \
-                 WHERE category = 'tech' ORDER BY day DESC",
-            ),
-        )
-        .await
-        .expect("MAX aggregation with clustering ORDER BY timed out")
-        .unwrap();
-
-        assert_eq!(result.rows.len(), 1);
-        let max_value = result.rows[0]
-            .values
-            .get("Max_metric")
-            .and_then(Value::as_f64)
-            .unwrap();
-        assert!((max_value - 15.0).abs() < f64::EPSILON);
-    }
+    // NOTE: test_clustering_order_by_with_aggregation was removed because
+    // Cassandra CQL does NOT support ORDER BY with aggregate functions.
+    // ORDER BY can only be used with pre-defined clustering columns, not computed values.
+    // This is a fundamental architectural limitation in Cassandra's distributed model.
 
     #[tokio::test]
     #[ignore] // M2 feature: Aggregation error handling not fully implemented

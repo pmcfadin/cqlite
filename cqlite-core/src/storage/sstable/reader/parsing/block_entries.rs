@@ -20,27 +20,37 @@ impl SSTableReader {
         &self,
         block_data: &[u8],
     ) -> Result<Vec<(TableId, RowKey, Value)>> {
+        eprintln!("[DEBUG SSTableReader::parse_block_entries] Starting parse");
+        eprintln!(
+            "[DEBUG SSTableReader::parse_block_entries] Block data size: {} bytes",
+            block_data.len()
+        );
+        eprintln!(
+            "[DEBUG SSTableReader::parse_block_entries] Cassandra version: {:?}",
+            self.header.cassandra_version
+        );
+        eprintln!(
+            "[DEBUG SSTableReader::parse_block_entries] Has compression: {}",
+            self.compression_reader.is_some()
+        );
+
         let mut entries = Vec::new();
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {
+            eprintln!("[DEBUG SSTableReader::parse_block_entries] Attempting decompression with algorithm: {:?}",
+                      compression_reader.algorithm());
             let compression = Compression::new(*compression_reader.algorithm())?;
             match compression.decompress(block_data) {
                 Ok(decompressed) => {
-                    println!(
-                        "✅ Block decompressed {} bytes to {} bytes",
-                        block_data.len(),
-                        decompressed.len()
-                    );
+                    eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompressed {} bytes to {} bytes",
+                              block_data.len(), decompressed.len());
                     decompressed
                 }
                 Err(e) => {
-                    println!(
-                        "⚠️  Block decompression failed ({}), parsing raw data instead",
-                        e
-                    );
-                    println!(
-                        "First 32 bytes of block data: {:02x?}",
+                    eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompression failed ({}), parsing raw data instead", e);
+                    eprintln!(
+                        "[DEBUG SSTableReader::parse_block_entries] First 32 bytes: {:02x?}",
                         &block_data[..std::cmp::min(32, block_data.len())]
                     );
                     // Fall back to raw data
@@ -48,12 +58,30 @@ impl SSTableReader {
                 }
             }
         } else {
+            eprintln!(
+                "[DEBUG SSTableReader::parse_block_entries] No compression, using raw block data"
+            );
             block_data.to_vec()
         };
 
         // Use the new state machine for Cassandra 5+ 'oa' format parsing
         if self.header.cassandra_version != crate::parser::header::CassandraVersion::Legacy {
-            return self.parse_block_entries_with_state_machine(&data);
+            eprintln!("[DEBUG SSTableReader::parse_block_entries] Using state machine for Cassandra 5+ format");
+            let result = self.parse_block_entries_with_state_machine(&data);
+            match &result {
+                Ok(entries) => {
+                    eprintln!("[DEBUG SSTableReader::parse_block_entries] State machine returned {} entries", entries.len());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[DEBUG SSTableReader::parse_block_entries] State machine failed: {}",
+                        e
+                    );
+                }
+            }
+            return result;
+        } else {
+            eprintln!("[DEBUG SSTableReader::parse_block_entries] Using legacy parsing for older Cassandra versions");
         }
 
         // Enhanced partition data parsing for legacy formats
@@ -161,19 +189,35 @@ impl SSTableReader {
         &self,
         data: &[u8],
     ) -> Result<Vec<(TableId, RowKey, Value)>> {
+        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Starting");
+        eprintln!(
+            "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Data size: {} bytes",
+            data.len()
+        );
+
         let mut entries = Vec::new();
         let mut offset = 0;
 
-        println!("🔄 Using state machine for Cassandra 5+ 'oa' format parsing");
-
         // Process multiple rows in the block
         while offset < data.len() {
+            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Processing at offset {}/{}", offset, data.len());
+
             // Create state machine with schema information if available
+            let has_schema = self.get_table_schema().is_some();
+            eprintln!(
+                "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Has schema: {}",
+                has_schema
+            );
+
             let state_machine_result = if let Some(_schema) = self.get_table_schema() {
+                eprintln!(
+                    "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Schema found"
+                );
                 // Modern formats should use SchemaAwareReader with proper comparators
                 match self.header.cassandra_version {
                     crate::parser::header::CassandraVersion::V5_0NewBig
                     | crate::parser::header::CassandraVersion::V5_0Bti => {
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern format detected, requires SchemaAwareReader");
                         Err(Error::Schema(format!(
                             "Modern format {:?} requires SchemaAwareReader with proper comparators - \
                              basic reader with blob fallback is not allowed.",
@@ -184,10 +228,12 @@ impl SSTableReader {
                         // Legacy formats can use basic state machine as last resort
                         #[cfg(feature = "legacy-heuristics")]
                         {
+                            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format, using basic state machine");
                             Ok(RowCellStateMachine::new())
                         }
                         #[cfg(not(feature = "legacy-heuristics"))]
                         {
+                            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format but legacy-heuristics not enabled");
                             Err(Error::Schema(
                                 "Basic state machine parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
                             ))
@@ -195,10 +241,12 @@ impl SSTableReader {
                     }
                 }
             } else {
+                eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema available");
                 // No schema available - check format restrictions
                 match self.header.cassandra_version {
                     crate::parser::header::CassandraVersion::V5_0NewBig
                     | crate::parser::header::CassandraVersion::V5_0Bti => {
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern format requires schema");
                         Err(Error::Schema(format!(
                             "Schema is required for modern format {:?} - cannot use basic reader.",
                             self.header.cassandra_version
@@ -207,10 +255,12 @@ impl SSTableReader {
                     _ => {
                         #[cfg(feature = "legacy-heuristics")]
                         {
+                            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format without schema, using basic state machine");
                             Ok(RowCellStateMachine::new())
                         }
                         #[cfg(not(feature = "legacy-heuristics"))]
                         {
+                            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema and legacy-heuristics not enabled");
                             Err(Error::Schema(
                                 "Schema-less parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
                             ))
@@ -218,6 +268,9 @@ impl SSTableReader {
                     }
                 }
             };
+
+            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] State machine creation result: {}",
+                      if state_machine_result.is_ok() { "OK" } else { "ERROR" });
 
             let mut _state_machine: RowCellStateMachine = state_machine_result?;
 

@@ -83,7 +83,6 @@ async fn detect_compression_heuristic(
         | crate::parser::header::CassandraVersion::V5_0Beta
         | crate::parser::header::CassandraVersion::V5_0Release
         | crate::parser::header::CassandraVersion::V5_0DataFormat
-        | crate::parser::header::CassandraVersion::V5_0SummaryFormat
         | crate::parser::header::CassandraVersion::V5_0FormatC
         | crate::parser::header::CassandraVersion::V5_0FormatD
         | crate::parser::header::CassandraVersion::V5_0FormatE

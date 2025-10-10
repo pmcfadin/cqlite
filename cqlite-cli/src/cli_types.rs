@@ -68,8 +68,19 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", env = "CQLITE_SCHEMA")]
     pub schema: Option<PathBuf>,
 
+    /// Dataset name for test data (e.g., test_basic, test_collections)
+    /// Mutually exclusive with --data-dir. Looks for datasets in CQLITE_DATASETS_ROOT/sstables/{dataset}/
+    #[arg(long, value_name = "DATASET", conflicts_with = "data_dir")]
+    pub dataset: Option<String>,
+
     /// Cassandra data directory root (e.g., /var/lib/cassandra/data)
-    #[arg(long, value_name = "DIR", env = "CQLITE_DATA_DIR")]
+    /// Mutually exclusive with --dataset. For production Cassandra directory layouts.
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "CQLITE_DATA_DIR",
+        conflicts_with = "dataset"
+    )]
     pub data_dir: Option<PathBuf>,
 
     /// Execute a single CQL statement in one-shot mode

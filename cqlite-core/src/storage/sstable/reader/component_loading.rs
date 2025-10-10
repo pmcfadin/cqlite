@@ -58,7 +58,12 @@ impl SSTableReader {
                         );
 
                         // Convert IndexReader to SSTableIndex by extracting partition entries
-                        match Self::convert_index_reader_to_sstable_index(index_reader).await {
+                        match Self::convert_index_reader_to_sstable_index(
+                            index_reader,
+                            data_file_path,
+                        )
+                        .await
+                        {
                             Ok(sstable_index) => {
                                 log::debug!(
                                     "Successfully converted Index.db component to SSTableIndex"
@@ -236,8 +241,22 @@ impl SSTableReader {
     /// Convert IndexReader to SSTableIndex for backward compatibility
     pub(super) async fn convert_index_reader_to_sstable_index(
         index_reader: IndexReader,
+        data_file_path: &Path,
     ) -> Result<SSTableIndex> {
         use crate::storage::sstable::index::{Index, IndexEntry};
+
+        // Extract table name from SSTable directory path
+        // e.g., "simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
+        //       → "simple_table"
+        let table_name =
+            crate::storage::sstable::extract_table_name(data_file_path).ok_or_else(|| {
+                Error::invalid_path(format!(
+                    "Cannot extract table name from SSTable path: {}",
+                    data_file_path.display()
+                ))
+            })?;
+
+        let table_id = crate::types::TableId::new(table_name);
 
         let mut index = Index::new();
 
@@ -247,20 +266,21 @@ impl SSTableReader {
         for partition_entry in partition_entries {
             // Convert partition entry to our internal IndexEntry format
             let index_entry = IndexEntry {
-                table_id: crate::types::TableId::new("default"),
+                table_id: table_id.clone(),
                 key: RowKey::new(partition_entry.key_digest.to_vec()),
                 offset: partition_entry.data_offset,
                 size: partition_entry.data_size,
                 compressed: false,
             };
 
-            // Add to index using default table ID
+            // Add to index using extracted table ID
             index.add_entry(index_entry);
         }
 
         log::debug!(
-            "Converted {} partition entries from IndexReader to SSTableIndex",
-            partition_entries.len()
+            "Converted {} partition entries from IndexReader to SSTableIndex for table '{}'",
+            partition_entries.len(),
+            table_id.name()
         );
 
         Ok(index)

@@ -32,6 +32,10 @@ pub struct IngestionConfig {
 
     /// Core database configuration
     pub core_config: Config,
+
+    /// Optional filter for table directories (e.g., contains "/test_basic/")
+    /// Only table directories matching this pattern will be loaded
+    pub table_directory_filter: Option<String>,
 }
 
 /// Result of ingestion operation
@@ -174,13 +178,26 @@ pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
         }
     })?;
 
-    // Step 5: Build Database with discovered SSTables
-    // Use open_with_discovered_sstables() to avoid duplicate SSTable scanning
+    // Step 5: Filter table directories if a filter is specified
+    let filtered_table_dirs = if let Some(ref filter_pattern) = config.table_directory_filter {
+        service_summary
+            .table_directories
+            .iter()
+            .filter(|path| path.to_string_lossy().contains(filter_pattern))
+            .cloned()
+            .collect()
+    } else {
+        service_summary.table_directories.clone()
+    };
+
+    // Step 6: Build Database with discovered (and optionally filtered) SSTables
+    // Pass the loaded schema_registry to the Database so schemas are available to the query engine
     // Storage path is data_dir (for runtime storage), discovered directories from DiscoveryService
-    let database = Database::open_with_discovered_sstables(
+    let database = Database::open_with_discovered_sstables_and_registry(
         &config.data_dir,
-        service_summary.table_directories.clone(),
+        filtered_table_dirs.clone(),
         config.core_config.clone(),
+        Some(schema_registry.clone()),
     )
     .await
     .map_err(|e| {
@@ -195,11 +212,12 @@ pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
     })?;
 
     // Convert from discovery module's DiscoverySummary to ingestion's DiscoverySummary
+    // Use the filtered table directories in the summary
     let discovery_summary = DiscoverySummary {
         sstables_found: service_summary.sstables_found,
         keyspaces: service_summary.keyspaces,
         tables: service_summary.tables,
-        table_directories: service_summary.table_directories,
+        table_directories: filtered_table_dirs,
         resolved_version: service_summary.resolved_version,
     };
 
@@ -227,6 +245,7 @@ mod tests {
             data_dir: PathBuf::from("/nonexistent/path"),
             version_hint: None,
             core_config: Config::default(),
+            table_directory_filter: None,
         };
 
         let result = ingest(config).await;
@@ -248,6 +267,7 @@ mod tests {
             data_dir: temp_dir.path().to_path_buf(),
             version_hint: Some("5.0".to_string()),
             core_config: Config::default(),
+            table_directory_filter: None,
         };
 
         let result = ingest(config).await;

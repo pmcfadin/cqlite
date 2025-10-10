@@ -249,6 +249,10 @@ impl QueryExecutor {
             .as_ref()
             .ok_or_else(|| Error::query_execution("Missing table in plan".to_string()))?;
 
+        // Debug: log what table we're scanning for
+        #[cfg(debug_assertions)]
+        eprintln!("DEBUG executor: Scanning for table: {:?}", table.name());
+
         // Check if we can parallelize the scan
         let can_parallelize = plan
             .steps

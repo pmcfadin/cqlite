@@ -68,29 +68,119 @@ async fn run_main() -> Result<()> {
 
     // Initialize the database engine - check for ingestion path first
     #[cfg(feature = "state_machine")]
-    let database = if cli.schema.is_some() && cli.data_dir.is_some() {
+    let database = if cli.schema.is_some() && (cli.data_dir.is_some() || cli.dataset.is_some()) {
         // One-shot ingestion path: load schema and discover SSTables
         info!("Using one-shot ingestion mode");
 
-        let ingestion_config = IngestionConfig {
-            schema_paths: vec![cli.schema.clone().unwrap()],
-            data_dir: cli.data_dir.clone().unwrap(),
-            version_hint: cli.cassandra_version.clone(),
-            core_config: create_core_config(&config)?,
-        };
-
-        match ingest(ingestion_config).await {
-            Ok(result) => {
-                info!(
-                    "Ingestion complete: {} schemas loaded, {} SSTables found",
-                    result.schema_load_result.schemas_loaded,
-                    result.discovery_summary.sstables_found
-                );
-                result.database
+        if let Some(dataset_name) = &cli.dataset {
+            // SECURITY: Validate dataset name to prevent directory traversal attacks
+            if dataset_name.contains("..")
+                || dataset_name.contains('/')
+                || dataset_name.contains('\\')
+                || dataset_name.starts_with('.')
+            {
+                return Err(anyhow::anyhow!(
+                    "Invalid dataset name '{}': must not contain '..', '/', '\\', or start with '.'",
+                    dataset_name
+                ));
             }
-            Err(e) => {
-                // Error will be classified by error.rs for proper exit codes
-                return Err(anyhow::anyhow!("Ingestion failed: {}", e));
+
+            // Dataset mode: use sstables directory path directly
+            // The dataset structure is: datasets_root/sstables/{dataset_name}/
+            // which is flat (not production keyspace/table-uuid layout)
+            info!("Dataset mode: using dataset '{}'", dataset_name);
+
+            // Get datasets root from environment variable or use default
+            let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
+                .ok()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("test-data/datasets"));
+
+            info!("Using datasets root: {}", datasets_root.display());
+
+            // For dataset mode, use the sstables/{dataset_name} directory as the data_dir
+            // The DiscoveryService will scan this flat structure
+            let dataset_data_dir = datasets_root.join("sstables").join(dataset_name);
+
+            // SECURITY: Canonicalize and verify the path stays within datasets_root
+            let canonical_dir = dataset_data_dir.canonicalize().map_err(|e| {
+                anyhow::anyhow!(
+                    "Dataset '{}' not found or inaccessible: {}. Check CQLITE_DATASETS_ROOT={}",
+                    dataset_name,
+                    e,
+                    datasets_root.display()
+                )
+            })?;
+
+            let canonical_root = datasets_root.canonicalize().map_err(|e| {
+                anyhow::anyhow!(
+                    "Datasets root directory not found: {}. Check CQLITE_DATASETS_ROOT={}",
+                    e,
+                    datasets_root.display()
+                )
+            })?;
+
+            if !canonical_dir.starts_with(&canonical_root) {
+                return Err(anyhow::anyhow!(
+                    "Security violation: dataset path '{}' escaped datasets root directory",
+                    dataset_name
+                ));
+            }
+
+            info!("Dataset data directory: {}", dataset_data_dir.display());
+
+            // DATASET MODE FIX: The dataset directory IS the keyspace directory with table subdirectories
+            // Use DiscoveryService, but pass the parent (sstables/) so scanner finds dataset as keyspace
+            let dataset_parent = datasets_root.join("sstables");
+
+            // Use standard ingestion with the PARENT directory and filter by dataset name
+            let dataset_segment = format!("/{}/", dataset_name);
+            let ingestion_config = IngestionConfig {
+                schema_paths: vec![cli.schema.clone().unwrap()],
+                data_dir: dataset_parent, // Scanner will find all datasets as keyspaces
+                version_hint: cli.cassandra_version.clone(),
+                core_config: create_core_config(&config)?,
+                table_directory_filter: Some(dataset_segment), // Filter to this dataset only
+            };
+
+            // Ingest - filtering happens inside ingestion module
+            match ingest(ingestion_config).await {
+                Ok(result) => {
+                    info!(
+                        "Dataset ingestion complete: {} schemas loaded, {} table directories from '{}'",
+                        result.schema_load_result.schemas_loaded,
+                        result.discovery_summary.table_directories.len(),
+                        dataset_name
+                    );
+                    result.database
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Dataset ingestion failed: {}", e));
+                }
+            }
+        } else {
+            // Production mode: use standard ingestion with DiscoveryService (no filter)
+            let ingestion_config = IngestionConfig {
+                schema_paths: vec![cli.schema.clone().unwrap()],
+                data_dir: cli.data_dir.clone().unwrap(),
+                version_hint: cli.cassandra_version.clone(),
+                core_config: create_core_config(&config)?,
+                table_directory_filter: None,
+            };
+
+            match ingest(ingestion_config).await {
+                Ok(result) => {
+                    info!(
+                        "Ingestion complete: {} schemas loaded, {} SSTables found",
+                        result.schema_load_result.schemas_loaded,
+                        result.discovery_summary.sstables_found
+                    );
+                    result.database
+                }
+                Err(e) => {
+                    // Error will be classified by error.rs for proper exit codes
+                    return Err(anyhow::anyhow!("Ingestion failed: {}", e));
+                }
             }
         }
     } else {

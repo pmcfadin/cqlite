@@ -721,8 +721,21 @@ impl SelectParser {
     /// Parse FROM clause
     fn parse_from_clause(&mut self) -> Result<FromClause> {
         // Cassandra CQL only supports single table queries - NO JOINS
-        if let Some(Token::Identifier(table_name)) = self.current_token.clone() {
+        if let Some(Token::Identifier(first_identifier)) = self.current_token.clone() {
             self.advance()?;
+
+            // Check if this is a qualified table name (keyspace.table)
+            let table_name = if let Some(Token::Dot) = self.current_token {
+                self.advance()?; // Skip the dot
+                if let Some(Token::Identifier(actual_table)) = self.current_token.clone() {
+                    self.advance()?;
+                    actual_table // Use the table name after the dot
+                } else {
+                    return Err(Error::cql_parse("Expected table name after keyspace"));
+                }
+            } else {
+                first_identifier // No dot, so use the first identifier as the table name
+            };
 
             // Check for optional table alias (Cassandra CQL does support aliases)
             if let Some(Token::Identifier(alias)) = self.current_token.clone() {

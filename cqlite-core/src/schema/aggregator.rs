@@ -1082,7 +1082,7 @@ mod tests {
         // Test with a non-existent file to trigger IO error
         let non_existent_path = PathBuf::from("/nonexistent/path/schema.json");
         let result = aggregator
-            .load_from_paths(&[non_existent_path.clone()])
+            .load_from_paths(std::slice::from_ref(&non_existent_path))
             .await
             .unwrap();
 
@@ -1144,7 +1144,7 @@ mod tests {
         // Test that original error messages are preserved
         let invalid_json = r#"{"keyspace": "ks""#; // Missing closing brace
         let path = write_file(temp_dir.path(), "broken.json", invalid_json);
-        let result = aggregator.load_from_paths(&[path.clone()]).await.unwrap();
+        let result = aggregator.load_from_paths(std::slice::from_ref(&path)).await.unwrap();
 
         assert_eq!(result.errors.len(), 1);
         // Error message should contain both "Failed to parse file" and the original error
@@ -1222,7 +1222,7 @@ mod tests {
         perms.set_mode(0o000);
         fs::set_permissions(&path, perms).unwrap();
 
-        let result = aggregator.load_from_paths(&[path.clone()]).await.unwrap();
+        let result = aggregator.load_from_paths(std::slice::from_ref(&path)).await.unwrap();
 
         // Restore permissions for cleanup
         let mut perms = fs::metadata(&path).unwrap().permissions();

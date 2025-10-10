@@ -711,6 +711,14 @@ impl SchemaRegistry {
         Ok(registry.get_udt(keyspace, name).cloned())
     }
 
+    /// Get the internal UDT registry (crate-only access for schema manager)
+    ///
+    /// This method is used by SchemaManager when initialized with a pre-loaded registry
+    /// to preserve the UDT definitions loaded during ingestion.
+    pub(crate) fn get_udt_registry(&self) -> Arc<RwLock<UdtRegistry>> {
+        self.udt_registry.clone()
+    }
+
     /// Get ComparatorType for a specific column in a table
     pub async fn get_column_comparator(
         &self,

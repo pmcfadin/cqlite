@@ -10,7 +10,11 @@ use crate::{
 };
 
 use super::header_spec::get_global_registry;
-use nom::{bytes::complete::take, number::complete::be_u16, IResult};
+use nom::{
+    bytes::complete::take,
+    number::complete::{be_u16, u8 as nom_u8},
+    IResult,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,9 +23,6 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
 use super::summary_reader::SummaryReader;
-
-/// Size of each index entry in Cassandra 5.x BIG format (2-byte marker + 16-byte token digest)
-const INDEX_ENTRY_SIZE: usize = 18;
 
 /// Index.db file header
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,38 +346,50 @@ fn parse_all_partition_keys_with_summary<'a>(
     Ok((remaining, entries))
 }
 
-/// Parse a single partition key from the Index.db format with proper offset calculation
+/// Parse a single partition key from the Index.db format with variable-length offset
 fn parse_simple_partition_key_with_offset<'a>(
     input: &'a [u8],
-    entry_index: usize,
-    summary_reader: Option<&SummaryReader>,
+    #[allow(unused_variables)] entry_index: usize,
+    _summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], PartitionIndexEntry> {
-    // Parse simple format only: 00 10 followed by 16-byte key digest
-    // The "enhanced format" check was triggering false positives and has been removed
-    // per Issue #92 - we rely on Summary.db for offsets, not inline data
-    let (input, _marker) = be_u16(input)?; // Should be 0x0010
-    let (input, key_digest) = take(16_u8)(input)?; // Fixed 16-byte key digest
+    // Read marker (2 bytes) - should be 0x0010
+    let (input, marker) = be_u16(input)?;
 
-    // Calculate data offset using Summary.db correlation if available
-    let (data_offset, data_size) = if let Some(summary) = summary_reader {
-        calculate_data_offset_from_summary(summary, entry_index)
-    } else {
-        // Without Summary.db, we cannot determine offsets accurately (Issue #92)
-        // Return 0 to indicate unknown offset - callers must handle this case
-        log::warn!(
-            "Index.db parsed without Summary.db - offsets unavailable (entry_index={})",
-            entry_index
-        );
-        (0, 0)
-    };
+    if marker != 0x0010 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+
+    // Read partition key digest (16 bytes)
+    let (input, key_digest) = take(16_u8)(input)?;
+
+    // Read variable-length offset field
+    // Format: length byte (1 byte) + big-endian offset bytes (1-9 bytes)
+    let (input, offset_len) = nom_u8(input)?;
+    let (input, offset_bytes) = take(offset_len)(input)?;
+
+    // Decode big-endian offset and add Data.db header size (30 bytes)
+    let data_offset = decode_be_offset(offset_bytes) + 30;
+
+    // Debug logging to verify parsing
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[DEBUG IndexReader] Entry {}: marker={:#06x}, offset_len={}, data_offset={}",
+        entry_index, marker, offset_len, data_offset
+    );
+
+    // Size not stored in Index.db - will be determined during data read
+    let data_size = 0;
 
     Ok((
         input,
         PartitionIndexEntry {
-            key_digest: Arc::from(key_digest), // Convert to Arc to avoid copying
+            key_digest: Arc::from(key_digest),
             data_offset,
             data_size,
-            promoted_index: None, // Not available in simple format
+            promoted_index: None,
         },
     ))
 }
@@ -385,91 +398,22 @@ fn parse_simple_partition_key_with_offset<'a>(
 // The "enhanced format" with inline offsets was causing false positives
 // Issue #92 mandates using Summary.db for offset correlation, not inline heuristics
 
-/// Calculate actual Data.db offset using Summary.db correlation
-///
-/// ## Spec-Accurate Implementation (Issue #92)
-///
-/// Summary.db entries contain the actual Data.db offsets in the `position` field.
-/// Index.db contains a flat list of partition tokens in order.
-///
-/// Algorithm:
-/// 1. Summary.db samples contain: (token, index_offset, **position**)
-/// 2. `index_offset` = byte position in Index.db where this token appears
-/// 3. `position` = actual Data.db file offset for this partition
-/// 4. For Index.db entries between Summary samples, interpolate based on file positions
-fn calculate_data_offset_from_summary(
-    summary_reader: &SummaryReader,
-    entry_index: usize,
-) -> (u64, u32) {
-    let entries = summary_reader.get_entries();
-
-    if entries.is_empty() {
-        return (0, 0);
+/// Decode variable-length big-endian offset
+fn decode_be_offset(bytes: &[u8]) -> u64 {
+    let mut offset: u64 = 0;
+    for &byte in bytes {
+        offset = (offset << 8) | (byte as u64);
     }
-
-    // Calculate Index.db byte position for this entry
-    let index_byte_position = (entry_index * INDEX_ENTRY_SIZE) as u64;
-
-    // Strategy 1: Find exact match by index_offset
-    if let Some(exact_match) = entries
-        .iter()
-        .find(|e| e.index_offset == index_byte_position)
-    {
-        // Exact match - use the position field directly from Summary.db
-        return (exact_match.position as u64, 0);
-    }
-
-    // Strategy 2: Find surrounding Summary entries and interpolate
-    let mut prev_entry = None;
-    let mut next_entry = None;
-
-    for entry in entries {
-        if entry.index_offset <= index_byte_position {
-            prev_entry = Some(entry);
-        }
-        if entry.index_offset > index_byte_position && next_entry.is_none() {
-            next_entry = Some(entry);
-            break;
-        }
-    }
-
-    match (prev_entry, next_entry) {
-        (Some(prev), Some(next)) => {
-            // Interpolate between two Summary samples
-            let index_range = next.index_offset - prev.index_offset;
-            let data_range = next.position.saturating_sub(prev.position) as u64;
-            let index_delta = index_byte_position - prev.index_offset;
-
-            let ratio = if index_range > 0 {
-                index_delta as f64 / index_range as f64
-            } else {
-                0.0
-            };
-
-            let interpolated_offset = prev.position as u64 + (data_range as f64 * ratio) as u64;
-            (interpolated_offset, 0)
-        }
-        (Some(prev), None) => {
-            // Past last sample - use last known position (conservative)
-            (prev.position as u64, 0)
-        }
-        (None, Some(next)) => {
-            // Before first sample - use first position
-            (next.position as u64, 0)
-        }
-        (None, None) => {
-            // No Summary entries - should not happen with valid Summary.db
-            (0, 0)
-        }
-    }
+    offset
 }
 
 // REMOVED: Old heuristic functions that violated Issue #28 no-heuristics mandate
+// - calculate_data_offset_from_summary: Summary.db correlation (now obsolete with inline offsets)
 // - interpolate_data_offset_from_summary_position: Used arbitrary estimates
 // - estimate_data_offset_from_index_position: Used hardcoded partition size guesses
 //
-// These are replaced by spec-accurate calculate_data_offset_from_summary() which uses
-// actual Summary.db position fields and Index.db byte offsets for interpolation.
+// Modern Cassandra 5+ Index.db format includes variable-length offsets inline,
+// eliminating the need for Summary.db correlation. See decode_be_offset() above.
 
 /// Parse Index.db file data - Legacy API for backward compatibility
 #[allow(dead_code)]
@@ -498,10 +442,13 @@ mod tests {
 
     #[test]
     fn test_simple_partition_key_parsing() {
+        // Variable-length format: marker(2) + key_digest(16) + offset_len(1) + offset(variable)
         let data = vec![
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+            0x02,       // offset_len = 2 bytes
+            0x01, 0x00, // offset = 256 (big-endian)
         ];
 
         let (_, entry) = parse_simple_partition_key(&data).unwrap();
@@ -510,21 +457,24 @@ mod tests {
             entry.key_digest.as_ref(),
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
-        // Without Summary.db, offset is 0 (Issue #92 - no heuristics)
-        assert_eq!(entry.data_offset, 0);
-        assert_eq!(entry.data_size, 0); // Size still not available in simple format
+        // Offset = 256 + 30 (header size) = 286
+        assert_eq!(entry.data_offset, 286);
+        assert_eq!(entry.data_size, 0); // Size not stored in Index.db (Issue #149)
         assert!(entry.promoted_index.is_none());
     }
 
     #[test]
     fn test_partition_key_parsing_without_summary() {
+        // Variable-length format with 3-byte offset
         let data = vec![
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+            0x03,             // offset_len = 3 bytes
+            0x00, 0x10, 0x00, // offset = 4096 (big-endian)
         ];
 
-        // Test with different entry indices - without Summary.db, offsets should be 0
+        // Test with different entry indices - should all parse the same data
         let (_, entry0) = parse_simple_partition_key_with_offset(&data, 0, None).unwrap();
         let (_, entry1) = parse_simple_partition_key_with_offset(&data, 1, None).unwrap();
         let (_, entry5) = parse_simple_partition_key_with_offset(&data, 5, None).unwrap();
@@ -534,10 +484,10 @@ mod tests {
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
 
-        // Without Summary.db, offsets are 0 (Issue #92 - no heuristics)
-        assert_eq!(entry0.data_offset, 0);
-        assert_eq!(entry1.data_offset, 0);
-        assert_eq!(entry5.data_offset, 0);
+        // Offset = 4096 + 30 (header size) = 4126
+        assert_eq!(entry0.data_offset, 4126);
+        assert_eq!(entry1.data_offset, 4126);
+        assert_eq!(entry5.data_offset, 4126);
 
         // All should have the same key digest in this test
         assert_eq!(entry0.key_digest.as_ref(), entry1.key_digest.as_ref());
@@ -549,12 +499,20 @@ mod tests {
 
     #[test]
     fn test_multiple_partition_keys_parsing() {
+        // Two partition entries with variable-length offsets
         let data = vec![
+            // Entry 1
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1 (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x00, 0x10, // marker = 0x0010
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+            0x01,       // offset_len = 1 byte
+            0x64,       // offset = 100
+            // Entry 2
+            0x00, 0x10, // marker = 0x0010
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2 (16 bytes)
             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
+            0x02,       // offset_len = 2 bytes
+            0x01, 0xF4, // offset = 500 (big-endian)
         ];
 
         let (_, entries) = parse_all_partition_keys(&data).unwrap();
@@ -577,9 +535,9 @@ mod tests {
                 ]
             );
 
-            // Without Summary.db, both offsets are 0 (Issue #92 - no heuristics)
-            assert_eq!(entries[0].data_offset, 0);
-            assert_eq!(entries[1].data_offset, 0);
+            // Variable-length offsets: 100 + 30 header = 130, 500 + 30 header = 530
+            assert_eq!(entries[0].data_offset, 130);
+            assert_eq!(entries[1].data_offset, 530);
         }
     }
 
@@ -592,13 +550,20 @@ mod tests {
         // Test Issue #107 fix: Verify that lookup_partition uses Borrow trait
         // to avoid heap allocation on every lookup
 
-        // Create index data with two partition entries
+        // Create index data with two partition entries (variable-length format)
         let data = vec![
+            // Entry 1
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x00, 0x10, // marker = 0x0010
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+            0x01,       // offset_len = 1 byte
+            0x64,       // offset = 100
+            // Entry 2
+            0x00, 0x10, // marker = 0x0010
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2
             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
+            0x02,       // offset_len = 2 bytes
+            0x01, 0xF4, // offset = 500 (big-endian)
         ];
 
         let (_, index_data) = parse_index_data(&data).unwrap();

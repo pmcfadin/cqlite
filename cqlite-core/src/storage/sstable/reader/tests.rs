@@ -1,6 +1,7 @@
 //! Tests for SSTable reader functionality
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::compression::extract_sstable_base_name;
     use super::super::types::*;

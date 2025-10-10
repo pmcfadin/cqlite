@@ -57,20 +57,10 @@ log_warn() {
 validate_environment() {
     log_info "Validating environment variables..."
 
-    if [[ -z "${CQLITE_DATA_DIR:-}" ]]; then
-        log_error "CQLITE_DATA_DIR environment variable not set"
-        echo "Usage: export CQLITE_DATA_DIR=/path/to/test-data/datasets/sstables"
-        exit 1
-    fi
-
+    # CQLITE_SCHEMA is always required
     if [[ -z "${CQLITE_SCHEMA:-}" ]]; then
         log_error "CQLITE_SCHEMA environment variable not set"
         echo "Usage: export CQLITE_SCHEMA=/path/to/test-data/schemas/basic-types.cql"
-        exit 1
-    fi
-
-    if [[ ! -d "${CQLITE_DATA_DIR}" ]]; then
-        log_error "Data directory not found: ${CQLITE_DATA_DIR}"
         exit 1
     fi
 
@@ -79,15 +69,53 @@ validate_environment() {
         exit 1
     fi
 
-    # P2-4: Validate SSTable files exist in data directory
-    local sstable_count
-    sstable_count=$(find "${CQLITE_DATA_DIR}" -name "*-Data.db" -type f 2>/dev/null | wc -l | tr -d ' ')
-    if [[ ${sstable_count} -eq 0 ]]; then
-        log_error "No SSTable files (*-Data.db) found in: ${CQLITE_DATA_DIR}"
-        log_error "Expected to find at least one SSTable file for testing"
-        exit 1
+    # Check if using dataset mode or data-dir mode
+    if [[ -n "${CQLITE_DATASET:-}" ]]; then
+        # Dataset mode: validate CQLITE_DATASETS_ROOT
+        log_info "Using dataset mode with dataset: ${CQLITE_DATASET}"
+
+        DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-${WORKSPACE_ROOT}/test-data/datasets}"
+        DATASET_DIR="${DATASETS_ROOT}/sstables/${CQLITE_DATASET}"
+
+        if [[ ! -d "${DATASET_DIR}" ]]; then
+            log_error "Dataset directory not found: ${DATASET_DIR}"
+            log_error "Expected to find dataset at: ${DATASETS_ROOT}/sstables/${CQLITE_DATASET}"
+            exit 1
+        fi
+
+        # Validate SSTable files exist in dataset
+        local sstable_count
+        sstable_count=$(find "${DATASET_DIR}" -name "*-Data.db" -type f 2>/dev/null | wc -l | tr -d ' ')
+        if [[ ${sstable_count} -eq 0 ]]; then
+            log_error "No SSTable files (*-Data.db) found in dataset: ${DATASET_DIR}"
+            log_error "Expected to find at least one SSTable file for testing"
+            exit 1
+        fi
+        log_info "Found ${sstable_count} SSTable file(s) in dataset"
+    else
+        # Legacy data-dir mode: validate CQLITE_DATA_DIR
+        if [[ -z "${CQLITE_DATA_DIR:-}" ]]; then
+            log_error "Either CQLITE_DATASET or CQLITE_DATA_DIR environment variable must be set"
+            echo "Dataset mode: export CQLITE_DATASET=test_basic"
+            echo "Data dir mode: export CQLITE_DATA_DIR=/path/to/test-data/datasets/sstables"
+            exit 1
+        fi
+
+        if [[ ! -d "${CQLITE_DATA_DIR}" ]]; then
+            log_error "Data directory not found: ${CQLITE_DATA_DIR}"
+            exit 1
+        fi
+
+        # P2-4: Validate SSTable files exist in data directory
+        local sstable_count
+        sstable_count=$(find "${CQLITE_DATA_DIR}" -name "*-Data.db" -type f 2>/dev/null | wc -l | tr -d ' ')
+        if [[ ${sstable_count} -eq 0 ]]; then
+            log_error "No SSTable files (*-Data.db) found in: ${CQLITE_DATA_DIR}"
+            log_error "Expected to find at least one SSTable file for testing"
+            exit 1
+        fi
+        log_info "Found ${sstable_count} SSTable file(s) in data directory"
     fi
-    log_info "Found ${sstable_count} SSTable file(s)"
 
     log_success "Environment validation passed"
 }
@@ -174,14 +202,25 @@ run_test() {
     local output_file="${OUTPUT_DIR}/${test_name}.actual"
     local exit_code=0
 
-    # Run the CLI command
+    # Run the CLI command with appropriate flags
     set +e
-    "${CQLITE_CLI}" \
-        --schema "${CQLITE_SCHEMA}" \
-        --data-dir "${CQLITE_DATA_DIR}" \
-        --execute "${query}" \
-        --format "${format}" \
-        > "${output_file}" 2>&1
+    if [[ -n "${CQLITE_DATASET:-}" ]]; then
+        # Dataset mode
+        "${CQLITE_CLI}" \
+            --schema "${CQLITE_SCHEMA}" \
+            --dataset "${CQLITE_DATASET}" \
+            --execute "${query}" \
+            --format "${format}" \
+            > "${output_file}" 2>&1
+    else
+        # Data-dir mode
+        "${CQLITE_CLI}" \
+            --schema "${CQLITE_SCHEMA}" \
+            --data-dir "${CQLITE_DATA_DIR}" \
+            --execute "${query}" \
+            --format "${format}" \
+            > "${output_file}" 2>&1
+    fi
     exit_code=$?
     set -e
 
@@ -335,43 +374,82 @@ run_test_suite() {
     fi
 
     # Test 6: Error case - invalid query syntax
-    run_error_test \
-        "test_error_invalid_query" \
-        "" \
-        --schema "${CQLITE_SCHEMA}" \
-        --data-dir "${CQLITE_DATA_DIR}" \
-        --execute "SELECT FROM WHERE invalid syntax" \
-        --format "json"
+    if [[ -n "${CQLITE_DATASET:-}" ]]; then
+        run_error_test \
+            "test_error_invalid_query" \
+            "" \
+            --schema "${CQLITE_SCHEMA}" \
+            --dataset "${CQLITE_DATASET}" \
+            --execute "SELECT FROM WHERE invalid syntax" \
+            --format "json"
+    else
+        run_error_test \
+            "test_error_invalid_query" \
+            "" \
+            --schema "${CQLITE_SCHEMA}" \
+            --data-dir "${CQLITE_DATA_DIR}" \
+            --execute "SELECT FROM WHERE invalid syntax" \
+            --format "json"
+    fi
 
     # Test 7: Error case - missing schema file
-    run_error_test \
-        "test_error_missing_schema" \
-        "schema" \
-        --schema "/nonexistent/schema.cql" \
-        --data-dir "${CQLITE_DATA_DIR}" \
-        --execute "SELECT * FROM test_basic.simple_table" \
-        --format "json"
+    if [[ -n "${CQLITE_DATASET:-}" ]]; then
+        run_error_test \
+            "test_error_missing_schema" \
+            "schema" \
+            --schema "/nonexistent/schema.cql" \
+            --dataset "${CQLITE_DATASET}" \
+            --execute "SELECT * FROM test_basic.simple_table" \
+            --format "json"
+    else
+        run_error_test \
+            "test_error_missing_schema" \
+            "schema" \
+            --schema "/nonexistent/schema.cql" \
+            --data-dir "${CQLITE_DATA_DIR}" \
+            --execute "SELECT * FROM test_basic.simple_table" \
+            --format "json"
+    fi
 
-    # Test 8: Error case - missing data directory
-    run_error_test \
-        "test_error_missing_data_dir" \
-        "data" \
-        --schema "${CQLITE_SCHEMA}" \
-        --data-dir "/nonexistent/data/dir" \
-        --execute "SELECT * FROM test_basic.simple_table" \
-        --format "json"
+    # Test 8: Error case - missing data directory/dataset
+    if [[ -n "${CQLITE_DATASET:-}" ]]; then
+        run_error_test \
+            "test_error_missing_dataset" \
+            "data" \
+            --schema "${CQLITE_SCHEMA}" \
+            --dataset "nonexistent_dataset_xyz" \
+            --execute "SELECT * FROM test_basic.simple_table" \
+            --format "json"
+    else
+        run_error_test \
+            "test_error_missing_data_dir" \
+            "data" \
+            --schema "${CQLITE_SCHEMA}" \
+            --data-dir "/nonexistent/data/dir" \
+            --execute "SELECT * FROM test_basic.simple_table" \
+            --format "json"
+    fi
 
     # Test 9: Query non-existent table (currently returns exit 0, may return error in future)
     # This test just validates that the query executes without crashing
     log_info "Running test: test_query_nonexistent_table"
     local output_file="${OUTPUT_DIR}/test_query_nonexistent_table.actual"
     set +e
-    "${CQLITE_CLI}" \
-        --schema "${CQLITE_SCHEMA}" \
-        --data-dir "${CQLITE_DATA_DIR}" \
-        --execute "SELECT * FROM test_basic.nonexistent_table" \
-        --format "json" \
-        > "${output_file}" 2>&1
+    if [[ -n "${CQLITE_DATASET:-}" ]]; then
+        "${CQLITE_CLI}" \
+            --schema "${CQLITE_SCHEMA}" \
+            --dataset "${CQLITE_DATASET}" \
+            --execute "SELECT * FROM test_basic.nonexistent_table" \
+            --format "json" \
+            > "${output_file}" 2>&1
+    else
+        "${CQLITE_CLI}" \
+            --schema "${CQLITE_SCHEMA}" \
+            --data-dir "${CQLITE_DATA_DIR}" \
+            --execute "SELECT * FROM test_basic.nonexistent_table" \
+            --format "json" \
+            > "${output_file}" 2>&1
+    fi
     local exit_code=$?
     set -e
 
@@ -437,7 +515,12 @@ main() {
     echo ""
     log_info "Configuration:"
     log_info "  CLI Binary:   ${CQLITE_CLI}"
-    log_info "  Data Dir:     ${CQLITE_DATA_DIR}"
+    if [[ -n "${CQLITE_DATASET:-}" ]]; then
+        log_info "  Dataset:      ${CQLITE_DATASET}"
+        log_info "  Dataset Root: ${CQLITE_DATASETS_ROOT:-${WORKSPACE_ROOT}/test-data/datasets}"
+    else
+        log_info "  Data Dir:     ${CQLITE_DATA_DIR}"
+    fi
     log_info "  Schema:       ${CQLITE_SCHEMA}"
     log_info "  Output Dir:   ${OUTPUT_DIR}"
     echo ""

@@ -85,6 +85,43 @@ impl SSTableId {
     }
 }
 
+/// Extract table name from SSTable directory path.
+///
+/// SSTable files are stored in directories named `<table_name>-<uuid>`.
+/// For example: `simple_table-6aa08200a25111f0a3fef1a551383fb9/na-1-big-Data.db`
+///
+/// This function extracts the table name portion by:
+/// 1. Getting the parent directory name
+/// 2. Splitting on '-' and removing the UUID suffix
+///
+/// Removes the UUID suffix from directory names like:
+/// - `simple_table-6aa08200a25111f0a3fef1a551383fb9` → `simple_table`
+/// - `my-test-table-UUID` → `my-test-table`
+///
+/// Returns `None` if the path doesn't contain a valid directory component.
+///
+/// Note: Table names can contain hyphens, so we need to be careful to only remove the UUID.
+/// UUIDs in Cassandra directory names are 32 hex chars without hyphens (e.g., 6aa08200a25111f0a3fef1a551383fb9).
+pub(crate) fn extract_table_name(sstable_path: &Path) -> Option<String> {
+    // Get the parent directory name
+    let dir_name = sstable_path.parent()?.file_name()?.to_str()?;
+
+    // Find the last occurrence of '-' followed by 32 hex characters (UUID without hyphens)
+    // Cassandra UUIDs in directory names are formatted as: tablename-<32-hex-chars>
+    if let Some(uuid_start) = dir_name.rfind('-') {
+        let potential_uuid = &dir_name[uuid_start + 1..];
+
+        // Check if this looks like a UUID (32 hex characters)
+        if potential_uuid.len() == 32 && potential_uuid.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Extract everything before the UUID
+            return Some(dir_name[..uuid_start].to_string());
+        }
+    }
+
+    // If we couldn't find a UUID pattern, return the whole directory name
+    Some(dir_name.to_string())
+}
+
 /// SSTable manager that handles multiple SSTable files
 #[derive(Debug)]
 pub struct SSTableManager {
@@ -93,6 +130,10 @@ pub struct SSTableManager {
 
     /// Active SSTable readers indexed by ID
     readers: Arc<RwLock<HashMap<SSTableId, Arc<reader::SSTableReader>>>>,
+
+    /// Table name to SSTable readers mapping
+    /// Maps table names (e.g., "simple_table") to their corresponding SSTable readers
+    table_readers: Arc<RwLock<HashMap<String, Vec<Arc<reader::SSTableReader>>>>>,
 
     /// Platform abstraction
     platform: Arc<Platform>,
@@ -106,10 +147,12 @@ impl SSTableManager {
     pub async fn new(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
         let base_path = path.to_path_buf();
         let readers = Arc::new(RwLock::new(HashMap::new()));
+        let table_readers = Arc::new(RwLock::new(HashMap::new()));
 
         let manager = Self {
             base_path,
             readers,
+            table_readers,
             platform,
             config: config.clone(),
         };
@@ -183,10 +226,12 @@ impl SSTableManager {
     ) -> Result<Self> {
         let base_path = storage_path.to_path_buf();
         let readers = Arc::new(RwLock::new(HashMap::new()));
+        let table_readers = Arc::new(RwLock::new(HashMap::new()));
 
         let manager = Self {
             base_path,
             readers,
+            table_readers,
             platform: platform.clone(),
             config: config.clone(),
         };
@@ -203,6 +248,12 @@ impl SSTableManager {
     /// It handles empty directories gracefully and logs warnings for individual file errors.
     async fn load_from_table_directories(&self, table_dirs: Vec<PathBuf>) -> Result<()> {
         let mut readers = self.readers.write().await;
+        let mut table_readers = self.table_readers.write().await;
+
+        eprintln!(
+            "[DEBUG SSTableManager] load_from_table_directories: processing {} directories",
+            table_dirs.len()
+        );
 
         for table_dir in table_dirs {
             // Check if directory exists
@@ -210,6 +261,8 @@ impl SSTableManager {
                 eprintln!("Warning: Table directory does not exist: {:?}", table_dir);
                 continue;
             }
+
+            eprintln!("[DEBUG SSTableManager] Scanning directory: {:?}", table_dir);
 
             // Read directory contents
             let mut dir_entries = match self.platform.fs().read_dir(&table_dir).await {
@@ -224,11 +277,15 @@ impl SSTableManager {
             };
 
             // Scan for Data.db files
+            let mut files_found = 0;
             while let Some(entry) = dir_entries.next_entry().await? {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                     // Check for Cassandra SSTable data files using the *-Data.db pattern
                     if filename.ends_with("-Data.db") {
+                        files_found += 1;
+                        eprintln!("[DEBUG SSTableManager] Found SSTable file: {:?}", path);
+
                         let sstable_id = SSTableId::from_filename(filename);
                         // Try to open the SSTable reader
                         match reader::SSTableReader::open(
@@ -239,7 +296,33 @@ impl SSTableManager {
                         .await
                         {
                             Ok(reader) => {
-                                readers.insert(sstable_id, Arc::new(reader));
+                                eprintln!(
+                                    "[DEBUG SSTableManager] Successfully loaded SSTable: {}",
+                                    sstable_id.0
+                                );
+                                let reader_arc = Arc::new(reader);
+
+                                // Store by SSTableId (existing)
+                                readers.insert(sstable_id, reader_arc.clone());
+
+                                // NEW: Extract table name and store by table name
+                                if let Some(table_name) = extract_table_name(&path) {
+                                    eprintln!(
+                                        "[DEBUG SSTableManager] Mapping table '{}' to SSTable '{}'",
+                                        table_name,
+                                        path.display()
+                                    );
+
+                                    table_readers
+                                        .entry(table_name)
+                                        .or_insert_with(Vec::new)
+                                        .push(reader_arc);
+                                } else {
+                                    eprintln!(
+                                        "[WARN SSTableManager] Could not extract table name from path: {}",
+                                        path.display()
+                                    );
+                                }
                             }
                             Err(e) => {
                                 // Log warning but continue loading other SSTables
@@ -249,7 +332,21 @@ impl SSTableManager {
                     }
                 }
             }
+
+            eprintln!(
+                "[DEBUG SSTableManager] Directory scan complete: found {} Data.db files in {:?}",
+                files_found, table_dir
+            );
         }
+
+        eprintln!(
+            "[DEBUG SSTableManager] Total SSTables loaded: {}",
+            readers.len()
+        );
+        eprintln!(
+            "[DEBUG SSTableManager] Tables discovered: {:?}",
+            table_readers.keys().collect::<Vec<_>>()
+        );
 
         Ok(())
     }
@@ -266,6 +363,7 @@ impl SSTableManager {
             Err(_) => return Ok(()), // Can't read directory, skip loading
         };
         let mut readers = self.readers.write().await;
+        let mut table_readers = self.table_readers.write().await;
 
         while let Some(entry) = dir_entries.next_entry().await? {
             let path = entry.path();
@@ -278,7 +376,18 @@ impl SSTableManager {
                         .await
                     {
                         Ok(reader) => {
-                            readers.insert(sstable_id, Arc::new(reader));
+                            let reader_arc = Arc::new(reader);
+
+                            // Store by SSTableId
+                            readers.insert(sstable_id, reader_arc.clone());
+
+                            // Extract table name and store by table name
+                            if let Some(table_name) = extract_table_name(&path) {
+                                table_readers
+                                    .entry(table_name)
+                                    .or_insert_with(Vec::new)
+                                    .push(reader_arc);
+                            }
                         }
                         Err(_) => {
                             // Skip problematic SSTable files during initialization
@@ -451,24 +560,71 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
     ) -> Result<Vec<(RowKey, Value)>> {
-        let readers = self.readers.read().await;
-        let mut all_results = Vec::new();
+        let table_readers = self.table_readers.read().await;
 
-        // Collect results from all SSTables
-        for reader in readers.values() {
-            let results = reader.scan(table_id, start_key, end_key, None).await?;
-            all_results.extend(results);
+        eprintln!(
+            "[DEBUG SSTableManager::scan] Scanning table_id='{}'",
+            table_id
+        );
+
+        // Look up readers by table name
+        let readers = table_readers.get(table_id.name());
+
+        if let Some(reader_list) = readers {
+            eprintln!(
+                "[DEBUG SSTableManager::scan] Found {} readers for table '{}'",
+                reader_list.len(),
+                table_id
+            );
+
+            let mut all_results = Vec::new();
+
+            for reader in reader_list {
+                eprintln!(
+                    "[DEBUG SSTableManager::scan] Calling scan on reader for file: {:?}",
+                    reader.file_path
+                );
+
+                let results = reader.scan(table_id, start_key, end_key, None).await?;
+
+                eprintln!(
+                    "[DEBUG SSTableManager::scan] Reader returned {} results",
+                    results.len()
+                );
+
+                all_results.extend(results);
+            }
+
+            eprintln!(
+                "[DEBUG SSTableManager::scan] Total results from all readers: {}",
+                all_results.len()
+            );
+
+            // Sort results by key
+            all_results.sort_by(|a, b| a.0.cmp(&b.0));
+
+            // Apply limit
+            if let Some(limit) = limit {
+                all_results.truncate(limit);
+            }
+
+            eprintln!(
+                "[DEBUG SSTableManager::scan] Returning {} final results",
+                all_results.len()
+            );
+
+            Ok(all_results)
+        } else {
+            eprintln!(
+                "[DEBUG SSTableManager::scan] No readers found for table '{}'",
+                table_id
+            );
+            eprintln!(
+                "[DEBUG SSTableManager::scan] Available tables: {:?}",
+                table_readers.keys().collect::<Vec<_>>()
+            );
+            Ok(Vec::new())
         }
-
-        // Sort results by key
-        all_results.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Apply limit
-        if let Some(limit) = limit {
-            all_results.truncate(limit);
-        }
-
-        Ok(all_results)
     }
 
     /// Get list of all SSTable IDs
@@ -720,5 +876,48 @@ mod tests {
         assert_ne!(id1.filename(), id2.filename());
         assert!(id1.filename().starts_with("sstable_"));
         assert!(id1.filename().ends_with(".sst"));
+    }
+
+    #[test]
+    fn test_extract_table_name() {
+        use std::path::PathBuf;
+
+        // Test standard Cassandra table directory format
+        let path =
+            PathBuf::from("test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db");
+        assert_eq!(extract_table_name(&path), Some("simple_table".to_string()));
+
+        // Test table name with hyphens
+        let path = PathBuf::from(
+            "test-data/datasets/sstables/test_basic/my-test-table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db",
+        );
+        assert_eq!(extract_table_name(&path), Some("my-test-table".to_string()));
+
+        // Test multi_partition_table
+        let path = PathBuf::from(
+            "test-data/datasets/sstables/test_basic/multi_partition_table-6ac52100a25111f0a3fef1a551383fb9/nb-1-big-Data.db",
+        );
+        assert_eq!(
+            extract_table_name(&path),
+            Some("multi_partition_table".to_string())
+        );
+
+        // Test compression_test_table
+        let path = PathBuf::from(
+            "test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db",
+        );
+        assert_eq!(
+            extract_table_name(&path),
+            Some("compression_test_table".to_string())
+        );
+
+        // Test edge case: directory without UUID
+        let path =
+            PathBuf::from("test-data/datasets/sstables/test_basic/simple_table/nb-1-big-Data.db");
+        assert_eq!(extract_table_name(&path), Some("simple_table".to_string()));
+
+        // Test edge case: no parent directory
+        let path = PathBuf::from("nb-1-big-Data.db");
+        assert_eq!(extract_table_name(&path), None);
     }
 }

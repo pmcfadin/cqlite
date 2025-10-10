@@ -202,6 +202,7 @@ impl SelectOptimizer {
                 .as_ref()
                 .ok_or_else(|| Error::internal("Missing FROM clause"))?,
         )?;
+        eprintln!("[OPTIMIZER] Extracted table_id: \"{}\"", table_id);
         let table_stats = self.get_table_statistics(&table_id).await?;
 
         // Step 2: Analyze WHERE clause for predicate pushdown

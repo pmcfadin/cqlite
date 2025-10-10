@@ -187,8 +187,15 @@ impl SelectExecutor {
     ) -> Result<Vec<QueryRow>> {
         let mut results = Vec::new();
 
+        eprintln!(
+            "[EXECUTOR] Executing SSTableScan: table=\"{}\", predicates={:?}",
+            table, predicates
+        );
+
         // Use StorageEngine's scan method to get all rows for the table
         let scan_results = self.storage.scan(table, None, None, None).await?;
+
+        eprintln!("[EXECUTOR] Scan returned {} rows", scan_results.len());
 
         for (key, value) in scan_results {
             context.rows_processed += 1;

@@ -61,20 +61,39 @@ async fn read_next_block_impl(
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
 ) -> Result<Option<Vec<u8>>> {
+    eprintln!("[DEBUG block_io::read_next_block_impl] Starting block read");
+    eprintln!(
+        "[DEBUG block_io::read_next_block_impl] Cassandra version: {:?}",
+        cassandra_version
+    );
+
     // Read block header with format-specific handling
     let block_header = match cassandra_version {
         crate::parser::header::CassandraVersion::V5_0NewBig => {
+            eprintln!("[DEBUG block_io::read_next_block_impl] Using NB format block header reader");
             read_nb_format_block_header(file).await?
         }
         crate::parser::header::CassandraVersion::V5_0Bti => {
+            eprintln!(
+                "[DEBUG block_io::read_next_block_impl] Using BTI format block header reader"
+            );
             read_bti_format_block_header(file).await?
         }
-        _ => read_legacy_format_block_header(file).await?,
+        _ => {
+            eprintln!(
+                "[DEBUG block_io::read_next_block_impl] Using legacy format block header reader"
+            );
+            read_legacy_format_block_header(file).await?
+        }
     };
 
     let Some((compressed_size, checksum, current_pos)) = block_header else {
+        eprintln!("[DEBUG block_io::read_next_block_impl] Block header returned None (EOF)");
         return Ok(None); // EOF
     };
+
+    eprintln!("[DEBUG block_io::read_next_block_impl] Block header: compressed_size={}, checksum={}, pos={}",
+              compressed_size, checksum, current_pos);
 
     // Validate block size to prevent memory issues and detect corruption
     if compressed_size > 64 * 1024 * 1024 {
@@ -139,6 +158,11 @@ async fn read_nb_format_block_header(
         file_guard.stream_position().await.unwrap_or(0)
     };
 
+    eprintln!(
+        "[DEBUG read_nb_format_block_header] Current file position: {}",
+        current_pos
+    );
+
     // For Cassandra 5.0 nb format, the data after the header is typically
     // one large compressed block rather than many small blocks.
     // Check if we're at EOF
@@ -152,21 +176,36 @@ async fn read_nb_format_block_header(
         size
     };
 
+    eprintln!(
+        "[DEBUG read_nb_format_block_header] Total file size: {}",
+        file_size
+    );
+
     if current_pos >= file_size {
+        eprintln!(
+            "[DEBUG read_nb_format_block_header] At EOF (current_pos={} >= file_size={})",
+            current_pos, file_size
+        );
         return Ok(None); // EOF
     }
 
     // Calculate remaining data size
     let remaining_size = (file_size - current_pos) as u32;
 
+    eprintln!(
+        "[DEBUG read_nb_format_block_header] Remaining data: {} bytes",
+        remaining_size
+    );
+
     if remaining_size == 0 {
+        eprintln!("[DEBUG read_nb_format_block_header] No remaining data");
         return Ok(None);
     }
 
     // For nb format, treat the entire remaining data as one block
     // The checksum will be validated by the compression layer if enabled
-    println!(
-        "NB format: Reading remaining {} bytes from position {}",
+    eprintln!(
+        "[DEBUG read_nb_format_block_header] NB format: Reading remaining {} bytes from position {}",
         remaining_size, current_pos
     );
 

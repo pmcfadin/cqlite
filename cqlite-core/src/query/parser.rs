@@ -82,11 +82,17 @@ impl QueryParser {
             }
         }
 
-        // Extract table name
+        // Extract table name (handle qualified names like keyspace.table)
         if let Some(from_part) = self.extract_after(sql, "FROM") {
-            let table_name = from_part.split_whitespace().next().ok_or_else(|| {
+            let qualified_name = from_part.split_whitespace().next().ok_or_else(|| {
                 Error::query_execution("Missing table name after FROM".to_string())
             })?;
+
+            // Split on '.' to handle qualified table names (keyspace.table)
+            // For "test_basic.simple_table", we want just "simple_table"
+            // For "simple_table", we want "simple_table"
+            let table_name = qualified_name.split('.').next_back().unwrap_or(qualified_name);
+
             table = Some(TableId::new(table_name));
         }
 
@@ -569,5 +575,31 @@ mod tests {
         );
         assert_eq!(parser.parse_value("true").unwrap(), Value::Boolean(true));
         assert_eq!(parser.parse_value("NULL").unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn test_parse_select_with_qualified_table_name() {
+        let parser = QueryParser::new(&Config::default());
+        let result = parser
+            .parse("SELECT * FROM test_basic.simple_table LIMIT 5")
+            .unwrap();
+
+        assert_eq!(result.query_type, QueryType::Select);
+        // Should extract only the table name, not the keyspace
+        assert_eq!(result.table, Some(TableId::new("simple_table")));
+        assert_eq!(result.columns, vec!["*"]);
+        assert_eq!(result.limit, Some(5));
+    }
+
+    #[test]
+    fn test_parse_select_with_unqualified_table_name() {
+        let parser = QueryParser::new(&Config::default());
+        let result = parser.parse("SELECT * FROM simple_table LIMIT 5").unwrap();
+
+        assert_eq!(result.query_type, QueryType::Select);
+        // Should work with unqualified names too
+        assert_eq!(result.table, Some(TableId::new("simple_table")));
+        assert_eq!(result.columns, vec!["*"]);
+        assert_eq!(result.limit, Some(5));
     }
 }

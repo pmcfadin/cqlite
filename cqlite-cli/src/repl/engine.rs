@@ -1209,6 +1209,7 @@ impl ReplEngine {
             data_dir: data_dir.clone(),
             version_hint: version_hint.clone(),
             core_config: cqlite_core::Config::default(),
+            table_directory_filter: None, // REPL doesn't use filtering
         };
 
         // Step 2: Run ingestion flow

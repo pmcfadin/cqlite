@@ -1029,6 +1029,45 @@ impl SchemaManager {
         Ok(manager)
     }
 
+    /// Create a new schema manager with a pre-loaded SchemaRegistry
+    ///
+    /// This constructor is used when schemas are loaded from external .cql files
+    /// during ingestion, allowing the pre-loaded schemas to be used by the query engine.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - The storage engine instance
+    /// * `registry` - Pre-loaded schema registry from ingestion
+    /// * `_config` - Database configuration (currently unused)
+    pub async fn new_with_registry(
+        storage: Arc<StorageEngine>,
+        registry: Arc<tokio::sync::RwLock<registry::SchemaRegistry>>,
+        _config: &Config,
+    ) -> Result<Self> {
+        // Acquire both schemas and UDT registry in a single lock scope to prevent deadlocks
+        let (loaded_schemas, udt_registry) = {
+            let registry_guard = registry.read().await;
+            let schemas = registry_guard.list_schemas(None).await?;
+            let udt_reg = registry_guard.get_udt_registry();
+            (schemas, udt_reg)
+        }; // Lock is dropped here before further processing
+
+        // Populate internal schemas map
+        let mut schemas_map = HashMap::new();
+        for schema in loaded_schemas {
+            let table_id = format!("{}.{}", schema.keyspace, schema.table);
+            schemas_map.insert(table_id, schema);
+        }
+
+        let manager = Self {
+            storage,
+            schemas: Arc::new(RwLock::new(schemas_map)),
+            udt_registry,
+        };
+
+        Ok(manager)
+    }
+
     /// Load default UDT definitions that are commonly used in Cassandra
     async fn load_default_udts(&self) {
         // Common address UDT used in many Cassandra schemas

@@ -41,32 +41,76 @@ impl SSTableReader {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
     ) -> Result<Vec<(RowKey, Value)>> {
+        eprintln!("[DEBUG SSTableReader::scan] Starting scan");
+        eprintln!(
+            "[DEBUG SSTableReader::scan] File path: {:?}",
+            self.file_path
+        );
+        eprintln!("[DEBUG SSTableReader::scan] Table ID: {}", table_id);
+        eprintln!("[DEBUG SSTableReader::scan] Start key: {:?}", start_key);
+        eprintln!("[DEBUG SSTableReader::scan] End key: {:?}", end_key);
+        eprintln!("[DEBUG SSTableReader::scan] Limit: {:?}", limit);
+        eprintln!(
+            "[DEBUG SSTableReader::scan] Has index: {}",
+            self.index.is_some()
+        );
+        eprintln!(
+            "[DEBUG SSTableReader::scan] Has bloom filter: {}",
+            self.bloom_filter.is_some()
+        );
+
         let mut results = Vec::new();
         let mut count = 0;
 
         // Use index for efficient range scan if available
         if let Some(index) = &self.index {
+            eprintln!("[DEBUG SSTableReader::scan] Using index-based scan");
             let entries = index.get_range(table_id, start_key, end_key)?;
+            eprintln!(
+                "[DEBUG SSTableReader::scan] Index returned {} entries",
+                entries.len()
+            );
 
-            for entry in entries {
+            for (i, entry) in entries.iter().enumerate() {
+                eprintln!(
+                    "[DEBUG SSTableReader::scan] Processing index entry {}: offset={}, size={}",
+                    i, entry.offset, entry.size
+                );
+
                 if let Some(limit) = limit {
                     if count >= limit {
+                        eprintln!("[DEBUG SSTableReader::scan] Reached limit {}", limit);
                         break;
                     }
                 }
 
                 if let Some(value) = self.read_value_at_offset(entry.offset, entry.size).await? {
+                    eprintln!(
+                        "[DEBUG SSTableReader::scan] Successfully read value at offset {}",
+                        entry.offset
+                    );
                     results.push((entry.key.clone(), value));
                     count += 1;
+                } else {
+                    eprintln!("[DEBUG SSTableReader::scan] Value at offset {} was filtered out (tombstone or expired)", entry.offset);
                 }
             }
         } else {
             // Fallback to sequential scan
+            eprintln!("[DEBUG SSTableReader::scan] No index, falling back to sequential scan");
             results = self
                 .sequential_scan(table_id, start_key, end_key, limit)
                 .await?;
+            eprintln!(
+                "[DEBUG SSTableReader::scan] Sequential scan returned {} results",
+                results.len()
+            );
         }
 
+        eprintln!(
+            "[DEBUG SSTableReader::scan] Returning {} final results",
+            results.len()
+        );
         Ok(results)
     }
 
@@ -239,55 +283,104 @@ impl SSTableReader {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
     ) -> Result<Vec<(RowKey, Value)>> {
+        eprintln!("[DEBUG SSTableReader::sequential_scan] Starting sequential scan");
+        eprintln!(
+            "[DEBUG SSTableReader::sequential_scan] Table ID: {}",
+            table_id
+        );
+
         let mut results = Vec::new();
         let mut count = 0;
 
         let header_size = self.calculate_header_size();
+        eprintln!(
+            "[DEBUG SSTableReader::sequential_scan] Header size: {} bytes",
+            header_size
+        );
+
         {
             let mut file_guard = self.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+            eprintln!("[DEBUG SSTableReader::sequential_scan] Seeked to start of data section at offset {}", header_size);
         }
 
         // Sequential scan through blocks
+        let mut block_count = 0;
         while let Some(block) = self.read_next_block().await? {
-            let entries = self.parse_block_entries(&block)?;
+            block_count += 1;
+            eprintln!(
+                "[DEBUG SSTableReader::sequential_scan] Read block {}, size {} bytes",
+                block_count,
+                block.len()
+            );
 
-            for (entry_table_id, entry_key, entry_value) in entries {
-                if entry_table_id != *table_id {
+            let entries = self.parse_block_entries(&block)?;
+            eprintln!(
+                "[DEBUG SSTableReader::sequential_scan] Block {} contains {} entries",
+                block_count,
+                entries.len()
+            );
+
+            for (i, (entry_table_id, entry_key, entry_value)) in entries.iter().enumerate() {
+                eprintln!("[DEBUG SSTableReader::sequential_scan] Block {} entry {}: table_id='{}', key={:?}",
+                          block_count, i, entry_table_id, entry_key);
+
+                if entry_table_id != table_id {
+                    eprintln!("[DEBUG SSTableReader::sequential_scan] Skipping entry: table_id mismatch ('{}' != '{}')",
+                              entry_table_id, table_id);
                     continue;
                 }
 
                 // Check key range
                 if let Some(start) = start_key {
-                    if entry_key < *start {
+                    if entry_key < start {
+                        eprintln!("[DEBUG SSTableReader::sequential_scan] Skipping entry: key < start_key");
                         continue;
                     }
                 }
 
                 if let Some(end) = end_key {
-                    if entry_key > *end {
+                    if entry_key > end {
+                        eprintln!(
+                            "[DEBUG SSTableReader::sequential_scan] Skipping entry: key > end_key"
+                        );
                         continue;
                     }
                 }
 
                 // Extract write time from entry metadata
-                let _write_time = self.extract_write_time_from_entry(&entry_key, &entry_value);
+                let _write_time = self.extract_write_time_from_entry(entry_key, entry_value);
 
                 // Filter out tombstones and expired data
-                if !self.filter_tombstone(&entry_value) {
+                if !self.filter_tombstone(entry_value) {
+                    eprintln!("[DEBUG SSTableReader::sequential_scan] Skipping entry: filtered out (tombstone or expired)");
                     continue;
                 }
 
-                results.push((entry_key, entry_value));
+                eprintln!(
+                    "[DEBUG SSTableReader::sequential_scan] Including entry in results (count={})",
+                    count + 1
+                );
+                results.push((entry_key.clone(), entry_value.clone()));
                 count += 1;
 
                 if let Some(limit) = limit {
                     if count >= limit {
+                        eprintln!("[DEBUG SSTableReader::sequential_scan] Reached limit {}, stopping scan", limit);
                         return Ok(results);
                     }
                 }
             }
         }
+
+        eprintln!(
+            "[DEBUG SSTableReader::sequential_scan] Finished scanning {} blocks",
+            block_count
+        );
+        eprintln!(
+            "[DEBUG SSTableReader::sequential_scan] Returning {} total results",
+            results.len()
+        );
 
         Ok(results)
     }
