@@ -253,8 +253,16 @@ impl Compression {
                         let uncompressed_size =
                             u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
 
-                        // Only validate and use prefix if size is reasonable
-                        if uncompressed_size <= MAX_DECOMPRESSED_SIZE && uncompressed_size > 0 {
+                        // Reject if size exceeds limit (decompression bomb protection)
+                        if uncompressed_size > MAX_DECOMPRESSED_SIZE {
+                            return Err(Error::storage(format!(
+                                "Decompression bomb protection: claimed size {} exceeds limit {} (128MB)",
+                                uncompressed_size, MAX_DECOMPRESSED_SIZE
+                            )));
+                        }
+
+                        // Try with prefix if size is reasonable
+                        if uncompressed_size > 0 {
                             let compressed_data = &data[4..];
                             if let Ok(decompressed) = decoder.decompress_vec(compressed_data) {
                                 if decompressed.len() == uncompressed_size {
