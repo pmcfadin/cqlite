@@ -363,7 +363,7 @@ async fn load_compression_info(path: &Path) -> Result<CompressionInfo> {
 }
 
 /// Extract SSTable base name from path (e.g., "nb-1-big-Data.db" -> "nb-1-big")
-pub(crate) fn extract_sstable_base_name(path: &Path) -> Option<String> {
+pub fn extract_sstable_base_name(path: &Path) -> Option<String> {
     let filename = path.file_name()?.to_str()?;
 
     // Remove .db extension first

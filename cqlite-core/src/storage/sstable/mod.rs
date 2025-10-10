@@ -4,6 +4,7 @@ pub mod bloom;
 pub mod bti;
 pub mod bulletproof_reader;
 pub mod chunk_decompressor;
+pub mod chunk_reader;
 pub mod chunked_data_reader;
 pub mod compression;
 pub mod compression_info;

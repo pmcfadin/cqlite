@@ -230,7 +230,7 @@ pub struct SSTableReader {
     /// Schema registry for schema-driven operations (modern formats)
     pub(crate) schema_registry: Option<Arc<crate::schema::SchemaRegistry>>,
     /// CompressionInfo metadata for chunked decompression (if compressed)
-    pub(super) compression_info: Option<Arc<CompressionInfo>>,
+    pub compression_info: Option<Arc<CompressionInfo>>,
     /// Current chunk index for sequential chunk reading
     pub(super) current_chunk_index: AtomicUsize,
 }

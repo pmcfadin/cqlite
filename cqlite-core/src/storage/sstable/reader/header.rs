@@ -98,6 +98,70 @@ pub(crate) async fn parse_header_with_version_detection(
         )));
     }
 
+    // Detect NB format (Cassandra 4.x+) from filename FIRST - these files don't have magic numbers
+    // Pattern: nb-{generation}-big-{component}.db (e.g., "nb-1-big-Data.db")
+    let is_nb_format = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.contains("nb-") && s.contains("-big-"))
+        .unwrap_or(false);
+
+    if is_nb_format {
+        log::debug!(
+            "Detected NB format (Cassandra 4.x+) from filename '{}' - loading CompressionInfo.db",
+            path.display()
+        );
+
+        // NB format files don't have headers in Data.db - metadata is in separate component files
+        // The Data.db file contains raw compressed chunks without a header
+
+        // Try to load CompressionInfo.db to determine compression algorithm
+        let compression_algorithm = match load_nb_compression_info(path).await {
+            Ok(info) => {
+                log::info!(
+                    "Loaded CompressionInfo.db for NB format: algorithm={}, chunk_length={}, chunks={}",
+                    info.algorithm,
+                    info.chunk_length,
+                    info.chunk_offsets.len()
+                );
+                info.algorithm
+            }
+            Err(e) => {
+                log::warn!(
+                    "Could not load CompressionInfo.db for NB format file '{}': {}. Assuming no compression.",
+                    path.display(),
+                    e
+                );
+                "NONE".to_string()
+            }
+        };
+
+        // Create a minimal header for NB format with compression info
+        return Ok(SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0NewBig, // NB format maps to NewBig
+            version: 0,        // NB format doesn't have version in Data.db
+            table_id: [0; 16], // Table ID is in other components
+            keyspace: extract_keyspace_from_path(path),
+            table_name: extract_table_name_from_path(path),
+            generation: extract_generation_from_path(path),
+            compression: CompressionInfo {
+                algorithm: compression_algorithm,
+                chunk_size: 16384, // Default chunk size
+                parameters: std::collections::HashMap::new(),
+            },
+            stats: SSTableStats {
+                row_count: 0,
+                min_timestamp: 0,
+                max_timestamp: 0,
+                max_deletion_time: 0,
+                compression_ratio: 1.0,
+                row_size_histogram: vec![],
+            },
+            columns: vec![],
+            properties: std::collections::HashMap::new(),
+        });
+    }
+
     // Read first 4 bytes as potential magic number or CRC32 checksum
     let first_4_bytes = u32::from_be_bytes([
         header_buffer[0],
@@ -154,67 +218,6 @@ pub(crate) async fn parse_header_with_version_detection(
         // First 4 bytes are a valid magic number - no checksum prefix
         header_buffer
     };
-
-    // Detect NB format (Cassandra 4.x) from filename - these files don't have magic numbers
-    let is_nb_format = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.starts_with("nb-"))
-        .unwrap_or(false);
-
-    if is_nb_format {
-        log::debug!(
-            "Detected NB format (Cassandra 4.x) from filename '{}' - parsing without magic number",
-            path.display()
-        );
-
-        // NB format structure (after optional CRC32):
-        // - 2 bytes: version (little-endian)
-        // - 2 bytes: flags or format indicator
-        // - 16 bytes: table UUID
-        // - Variable: keyspace and table name strings
-
-        if actual_header.len() < 20 {
-            return Err(Error::corruption(format!(
-                "NB format header too small: {} bytes (minimum 20 bytes required). File: {}",
-                actual_header.len(),
-                path.display()
-            )));
-        }
-
-        // Parse version as little-endian u16
-        let version = u16::from_le_bytes([actual_header[0], actual_header[1]]);
-        log::debug!("NB format version: {}", version);
-
-        // Parse table UUID (bytes 4-20)
-        let mut table_id = [0u8; 16];
-        table_id.copy_from_slice(&actual_header[4..20]);
-
-        // Create a minimal header for NB format
-        return Ok(SSTableHeader {
-            cassandra_version: CassandraVersion::V5_0Release, // NB format is Cassandra 4.x, but we'll map to V5
-            version,
-            table_id,
-            keyspace: extract_keyspace_from_path(path),
-            table_name: extract_table_name_from_path(path),
-            generation: extract_generation_from_path(path),
-            compression: CompressionInfo {
-                algorithm: "NONE".to_string(),
-                chunk_size: 0,
-                parameters: std::collections::HashMap::new(),
-            },
-            stats: SSTableStats {
-                row_count: 0,
-                min_timestamp: 0,
-                max_timestamp: 0,
-                max_deletion_time: 0,
-                compression_ratio: 1.0,
-                row_size_histogram: vec![],
-            },
-            columns: vec![],
-            properties: std::collections::HashMap::new(),
-        });
-    }
 
     // First try spec-driven parsing for Data.db component
     let registry = get_global_registry();
@@ -399,6 +402,42 @@ pub(crate) fn convert_parsed_header_to_sstable_header(
         columns,
         properties,
     })
+}
+
+/// Load CompressionInfo.db for NB format files
+async fn load_nb_compression_info(
+    data_db_path: &Path,
+) -> Result<crate::storage::sstable::compression_info::CompressionInfo> {
+    use super::compression::extract_sstable_base_name;
+    use tokio::fs::File;
+    use tokio::io::AsyncReadExt;
+
+    // Extract base name (e.g., "nb-1-big-Data.db" -> "nb-1-big")
+    let base_name = extract_sstable_base_name(data_db_path).ok_or_else(|| {
+        Error::InvalidFormat(format!("Cannot extract base name from {:?}", data_db_path))
+    })?;
+
+    // Build CompressionInfo.db path
+    let parent_dir = data_db_path.parent().unwrap_or(Path::new("."));
+    let compression_info_path = parent_dir.join(format!("{}-CompressionInfo.db", base_name));
+
+    // Read and parse CompressionInfo.db
+    let mut file = File::open(&compression_info_path).await.map_err(|e| {
+        Error::InvalidFormat(format!(
+            "Failed to open CompressionInfo.db at {:?}: {}. NB format requires CompressionInfo.db",
+            compression_info_path, e
+        ))
+    })?;
+
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).await.map_err(|e| {
+        Error::InvalidFormat(format!(
+            "Failed to read CompressionInfo.db at {:?}: {}",
+            compression_info_path, e
+        ))
+    })?;
+
+    crate::storage::sstable::compression_info::CompressionInfo::parse(&data)
 }
 
 /// Parse minimal legacy header with strict validation (feature-gated)
