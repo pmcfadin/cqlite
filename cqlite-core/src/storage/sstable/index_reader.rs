@@ -352,8 +352,17 @@ fn parse_simple_partition_key_with_offset<'a>(
     #[allow(unused_variables)] entry_index: usize,
     _summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], PartitionIndexEntry> {
-    // Read marker (2 bytes) - should be 0x0010
-    let (input, marker) = be_u16(input)?;
+    // Some Index.db formats have a 2-byte length prefix before each entry
+    // Try to detect and skip it if present
+    let (input, first_word) = be_u16(input)?;
+
+    let (input, marker) = if first_word == 0x0010 {
+        // No length prefix, first_word is the marker
+        (input, first_word)
+    } else {
+        // first_word is likely a length prefix, read the actual marker
+        be_u16(input)?
+    };
 
     if marker != 0x0010 {
         return Err(nom::Err::Error(nom::error::Error::new(
