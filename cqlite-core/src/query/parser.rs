@@ -91,7 +91,10 @@ impl QueryParser {
             // Split on '.' to handle qualified table names (keyspace.table)
             // For "test_basic.simple_table", we want just "simple_table"
             // For "simple_table", we want "simple_table"
-            let table_name = qualified_name.split('.').next_back().unwrap_or(qualified_name);
+            let table_name = qualified_name
+                .split('.')
+                .next_back()
+                .unwrap_or(qualified_name);
 
             table = Some(TableId::new(table_name));
         }

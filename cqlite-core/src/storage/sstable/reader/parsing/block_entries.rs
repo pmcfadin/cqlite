@@ -36,36 +36,60 @@ impl SSTableReader {
 
         let mut entries = Vec::new();
 
-        // Decompress if needed
-        let data = if let Some(compression_reader) = &self.compression_reader {
-            eprintln!("[DEBUG SSTableReader::parse_block_entries] Attempting decompression with algorithm: {:?}",
-                      compression_reader.algorithm());
-            let compression = Compression::new(*compression_reader.algorithm())?;
-            match compression.decompress(block_data) {
-                Ok(decompressed) => {
-                    eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompressed {} bytes to {} bytes",
-                              block_data.len(), decompressed.len());
-                    decompressed
+        // For NB format (Cassandra 5.0), blocks are read as complete units and don't need
+        // additional decompression here. The read_next_block already handled decompression
+        // at the chunk level if CompressionInfo exists.
+        // Only decompress for legacy formats that use block-level compression.
+        let needs_block_decompression = !matches!(
+            self.header.cassandra_version,
+            crate::parser::header::CassandraVersion::V5_0NewBig
+                | crate::parser::header::CassandraVersion::V5_0DataFormat
+                | crate::parser::header::CassandraVersion::V5_0Bti
+        );
+
+        let data = if needs_block_decompression {
+            if let Some(compression_reader) = &self.compression_reader {
+                eprintln!("[DEBUG SSTableReader::parse_block_entries] Legacy format: attempting block decompression with algorithm: {:?}",
+                          compression_reader.algorithm());
+                let compression = Compression::new(*compression_reader.algorithm())?;
+                match compression.decompress(block_data) {
+                    Ok(decompressed) => {
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompressed {} bytes to {} bytes",
+                                  block_data.len(), decompressed.len());
+                        decompressed
+                    }
+                    Err(e) => {
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompression failed ({}), parsing raw data instead", e);
+                        eprintln!(
+                            "[DEBUG SSTableReader::parse_block_entries] First 32 bytes: {:02x?}",
+                            &block_data[..std::cmp::min(32, block_data.len())]
+                        );
+                        // Fall back to raw data
+                        block_data.to_vec()
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[DEBUG SSTableReader::parse_block_entries] Block decompression failed ({}), parsing raw data instead", e);
-                    eprintln!(
-                        "[DEBUG SSTableReader::parse_block_entries] First 32 bytes: {:02x?}",
-                        &block_data[..std::cmp::min(32, block_data.len())]
-                    );
-                    // Fall back to raw data
-                    block_data.to_vec()
-                }
+            } else {
+                eprintln!(
+                    "[DEBUG SSTableReader::parse_block_entries] No compression, using raw block data"
+                );
+                block_data.to_vec()
             }
         } else {
             eprintln!(
-                "[DEBUG SSTableReader::parse_block_entries] No compression, using raw block data"
+                "[DEBUG SSTableReader::parse_block_entries] NB format: using block data directly (already decompressed if needed)"
             );
             block_data.to_vec()
         };
 
         // Use the new state machine for Cassandra 5+ 'oa' format parsing
-        if self.header.cassandra_version != crate::parser::header::CassandraVersion::Legacy {
+        // Note: V5_0DataFormat temporarily uses legacy parsing until schema loading is implemented
+        let use_state_machine = matches!(
+            self.header.cassandra_version,
+            crate::parser::header::CassandraVersion::V5_0NewBig
+                | crate::parser::header::CassandraVersion::V5_0Bti
+        );
+
+        if use_state_machine {
             eprintln!("[DEBUG SSTableReader::parse_block_entries] Using state machine for Cassandra 5+ format");
             let result = self.parse_block_entries_with_state_machine(&data);
             match &result {
@@ -81,7 +105,7 @@ impl SSTableReader {
             }
             return result;
         } else {
-            eprintln!("[DEBUG SSTableReader::parse_block_entries] Using legacy parsing for older Cassandra versions");
+            eprintln!("[DEBUG SSTableReader::parse_block_entries] Using legacy parsing");
         }
 
         // Enhanced partition data parsing for legacy formats

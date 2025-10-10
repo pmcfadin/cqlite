@@ -69,7 +69,8 @@ async fn read_next_block_impl(
 
     // Read block header with format-specific handling
     let block_header = match cassandra_version {
-        crate::parser::header::CassandraVersion::V5_0NewBig => {
+        crate::parser::header::CassandraVersion::V5_0NewBig
+        | crate::parser::header::CassandraVersion::V5_0DataFormat => {
             eprintln!("[DEBUG block_io::read_next_block_impl] Using NB format block header reader");
             read_nb_format_block_header(file).await?
         }

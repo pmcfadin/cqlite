@@ -242,31 +242,38 @@ impl Compression {
                 {
                     use snap::raw::Decoder;
 
-                    // Cassandra Snappy format includes 4-byte uncompressed size prefix
-                    if data.len() < 4 {
-                        return Err(Error::storage("Invalid Snappy data: too short".to_string()));
+                    // Try two formats:
+                    // 1. With 4-byte size prefix (legacy Cassandra format)
+                    // 2. Raw Snappy without prefix (Cassandra 5.0 nb format)
+
+                    let mut decoder = Decoder::new();
+
+                    // First, try with 4-byte prefix if data is long enough
+                    if data.len() >= 4 {
+                        let uncompressed_size =
+                            u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+                        // Only validate and use prefix if size is reasonable
+                        if uncompressed_size <= MAX_DECOMPRESSED_SIZE && uncompressed_size > 0 {
+                            let compressed_data = &data[4..];
+                            if let Ok(decompressed) = decoder.decompress_vec(compressed_data) {
+                                if decompressed.len() == uncompressed_size {
+                                    return Ok(decompressed);
+                                }
+                            }
+                        }
                     }
 
-                    // Extract uncompressed size (4 bytes, big-endian)
-                    let uncompressed_size =
-                        u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-
-                    // Validate size to prevent decompression bombs
-                    validate_decompression_size(uncompressed_size)?;
-
-                    // Decompress the actual data (skip first 4 bytes)
-                    let compressed_data = &data[4..];
-                    let mut decoder = Decoder::new();
-                    let decompressed = decoder.decompress_vec(compressed_data).map_err(|e| {
-                        Error::storage(format!("Snappy decompression failed: {}", e))
+                    // Fall back to raw Snappy (no prefix) - Cassandra 5.0 nb format
+                    let decompressed = decoder.decompress_vec(data).map_err(|e| {
+                        Error::storage(format!("Snappy decompression failed (both formats): {}", e))
                     })?;
 
-                    // Verify decompressed size matches expected
-                    if decompressed.len() != uncompressed_size {
+                    // Validate decompressed size
+                    if decompressed.len() > MAX_DECOMPRESSED_SIZE {
                         return Err(Error::storage(format!(
-                            "Snappy size mismatch: expected {}, got {}",
-                            uncompressed_size,
-                            decompressed.len()
+                            "Decompression bomb protection: decompressed size {} exceeds limit {} (128MB)",
+                            decompressed.len(), MAX_DECOMPRESSED_SIZE
                         )));
                     }
 

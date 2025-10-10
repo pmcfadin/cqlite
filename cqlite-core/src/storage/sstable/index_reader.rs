@@ -370,8 +370,9 @@ fn parse_simple_partition_key_with_offset<'a>(
     let (input, offset_len) = nom_u8(input)?;
     let (input, offset_bytes) = take(offset_len)(input)?;
 
-    // Decode big-endian offset and add Data.db header size (30 bytes)
-    let data_offset = decode_be_offset(offset_bytes) + 30;
+    // Decode big-endian offset (relative to data section start, not file start)
+    // SSTableReader will add actual_header_size when seeking
+    let data_offset = decode_be_offset(offset_bytes);
 
     // Debug logging to verify parsing
     #[cfg(debug_assertions)]
@@ -446,8 +447,7 @@ mod tests {
         let data = vec![
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            0x02,       // offset_len = 2 bytes
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x02, // offset_len = 2 bytes
             0x01, 0x00, // offset = 256 (big-endian)
         ];
 
@@ -457,8 +457,9 @@ mod tests {
             entry.key_digest.as_ref(),
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
-        // Offset = 256 + 30 (header size) = 286
-        assert_eq!(entry.data_offset, 286);
+        // Raw offset from Index.db (relative to data section start)
+        // SSTableReader will add actual_header_size to get absolute file offset
+        assert_eq!(entry.data_offset, 256);
         assert_eq!(entry.data_size, 0); // Size not stored in Index.db (Issue #149)
         assert!(entry.promoted_index.is_none());
     }
@@ -469,8 +470,7 @@ mod tests {
         let data = vec![
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            0x03,             // offset_len = 3 bytes
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x03, // offset_len = 3 bytes
             0x00, 0x10, 0x00, // offset = 4096 (big-endian)
         ];
 
@@ -484,10 +484,10 @@ mod tests {
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
 
-        // Offset = 4096 + 30 (header size) = 4126
-        assert_eq!(entry0.data_offset, 4126);
-        assert_eq!(entry1.data_offset, 4126);
-        assert_eq!(entry5.data_offset, 4126);
+        // Raw offset from Index.db (relative to data section start)
+        assert_eq!(entry0.data_offset, 4096);
+        assert_eq!(entry1.data_offset, 4096);
+        assert_eq!(entry5.data_offset, 4096);
 
         // All should have the same key digest in this test
         assert_eq!(entry0.key_digest.as_ref(), entry1.key_digest.as_ref());
@@ -504,14 +504,12 @@ mod tests {
             // Entry 1
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1 (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            0x01,       // offset_len = 1 byte
-            0x64,       // offset = 100
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x01, // offset_len = 1 byte
+            0x64, // offset = 100
             // Entry 2
             0x00, 0x10, // marker = 0x0010
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2 (16 bytes)
-            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
-            0x02,       // offset_len = 2 bytes
+            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x02, // offset_len = 2 bytes
             0x01, 0xF4, // offset = 500 (big-endian)
         ];
 
@@ -535,9 +533,9 @@ mod tests {
                 ]
             );
 
-            // Variable-length offsets: 100 + 30 header = 130, 500 + 30 header = 530
-            assert_eq!(entries[0].data_offset, 130);
-            assert_eq!(entries[1].data_offset, 530);
+            // Raw offsets from Index.db (relative to data section start)
+            assert_eq!(entries[0].data_offset, 100);
+            assert_eq!(entries[1].data_offset, 500);
         }
     }
 
@@ -555,14 +553,12 @@ mod tests {
             // Entry 1
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            0x01,       // offset_len = 1 byte
-            0x64,       // offset = 100
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x01, // offset_len = 1 byte
+            0x64, // offset = 100
             // Entry 2
             0x00, 0x10, // marker = 0x0010
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2
-            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
-            0x02,       // offset_len = 2 bytes
+            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x02, // offset_len = 2 bytes
             0x01, 0xF4, // offset = 500 (big-endian)
         ];
 

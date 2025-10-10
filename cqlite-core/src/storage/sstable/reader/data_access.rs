@@ -23,7 +23,18 @@ impl SSTableReader {
         // Use index for efficient lookup if available
         if let Some(index) = &self.index {
             if let Some(entry) = index.find_entry(table_id, key).await? {
-                return self.read_value_at_offset(entry.offset, entry.size).await;
+                // When Index.db reports size=0 (Cassandra 5.0), fall back to sequential scan
+                if entry.size == 0 {
+                    log::debug!(
+                        "Index reports size=0 for key {:?}, using sequential scan fallback",
+                        key
+                    );
+                    return self.scan_for_key(table_id, key).await;
+                }
+
+                // Index offsets are relative to data section start - adjust for header
+                let file_offset = entry.offset + self.actual_header_size as u64;
+                return self.read_value_at_offset(file_offset, entry.size).await;
             }
         } else {
             // Fallback to sequential scan
@@ -71,10 +82,21 @@ impl SSTableReader {
                 entries.len()
             );
 
+            // Check if any entry has size=0 (Cassandra 5.0 format)
+            let has_zero_size = entries.iter().any(|e| e.size == 0);
+            if has_zero_size {
+                eprintln!("[DEBUG SSTableReader::scan] Index reports size=0 for some entries, using sequential scan fallback");
+                return self
+                    .sequential_scan(table_id, start_key, end_key, limit)
+                    .await;
+            }
+
             for (i, entry) in entries.iter().enumerate() {
+                // Index offsets are relative to data section start - adjust for header
+                let file_offset = entry.offset + self.actual_header_size as u64;
                 eprintln!(
-                    "[DEBUG SSTableReader::scan] Processing index entry {}: offset={}, size={}",
-                    i, entry.offset, entry.size
+                    "[DEBUG SSTableReader::scan] Processing index entry {}: index_offset={}, file_offset={}, size={}",
+                    i, entry.offset, file_offset, entry.size
                 );
 
                 if let Some(limit) = limit {
@@ -84,7 +106,7 @@ impl SSTableReader {
                     }
                 }
 
-                if let Some(value) = self.read_value_at_offset(entry.offset, entry.size).await? {
+                if let Some(value) = self.read_value_at_offset(file_offset, entry.size).await? {
                     eprintln!(
                         "[DEBUG SSTableReader::scan] Successfully read value at offset {}",
                         entry.offset
@@ -138,6 +160,14 @@ impl SSTableReader {
     pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<Value>> {
         use crate::parser::header::CassandraVersion;
         use crate::storage::sstable::compression::Compression;
+
+        // Size must be non-zero for offset-based reading
+        if size == 0 {
+            return Err(Error::corruption(format!(
+                "Cannot read value at offset {} with size=0. This should have been caught earlier and handled via sequential scan.",
+                offset
+            )));
+        }
 
         // Use cached reading with metrics tracking
         let buffer = self.get_cached_data(offset, size).await?;
