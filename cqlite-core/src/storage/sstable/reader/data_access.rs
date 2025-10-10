@@ -146,6 +146,9 @@ impl SSTableReader {
             let mut file_guard = self.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
+        // Reset chunk index when seeking to start
+        self.current_chunk_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Read all blocks sequentially
         while let Some(block) = self.read_next_block().await? {
@@ -283,6 +286,9 @@ impl SSTableReader {
             let mut file_guard = self.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
+        // Reset chunk index when seeking to start
+        self.current_chunk_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Sequential scan through blocks
         while let Some(block) = self.read_next_block().await? {
@@ -333,6 +339,9 @@ impl SSTableReader {
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
             eprintln!("[DEBUG SSTableReader::sequential_scan] Seeked to start of data section at offset {}", header_size);
         }
+        // Reset chunk index when seeking to start
+        self.current_chunk_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Sequential scan through blocks
         let mut block_count = 0;
@@ -418,6 +427,13 @@ impl SSTableReader {
     /// Read next block with enhanced error handling and streaming support
     pub(super) async fn read_next_block(&self) -> Result<Option<Vec<u8>>> {
         use super::block_io;
-        block_io::read_next_block(&self.file, &self.header.cassandra_version, &self.config).await
+        block_io::read_next_block(
+            &self.file,
+            &self.header.cassandra_version,
+            &self.config,
+            &self.compression_info,
+            &self.current_chunk_index,
+        )
+        .await
     }
 }

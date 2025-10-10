@@ -19,8 +19,18 @@ pub(crate) async fn read_next_block(
     file: &Arc<Mutex<BufReader<File>>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
+    compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
+    current_chunk_index: &std::sync::atomic::AtomicUsize,
 ) -> Result<Option<Vec<u8>>> {
-    read_next_block_with_retry(file, cassandra_version, config, 3).await
+    read_next_block_with_retry(
+        file,
+        cassandra_version,
+        config,
+        compression_info,
+        current_chunk_index,
+        3,
+    )
+    .await
 }
 
 /// Read block with retry logic for handling transient I/O errors
@@ -28,12 +38,22 @@ async fn read_next_block_with_retry(
     file: &Arc<Mutex<BufReader<File>>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
+    compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
+    current_chunk_index: &std::sync::atomic::AtomicUsize,
     max_retries: usize,
 ) -> Result<Option<Vec<u8>>> {
     let mut retry_count = 0;
 
     loop {
-        match read_next_block_impl(file, cassandra_version, config).await {
+        match read_next_block_impl(
+            file,
+            cassandra_version,
+            config,
+            compression_info,
+            current_chunk_index,
+        )
+        .await
+        {
             Ok(result) => return Ok(result),
             Err(e) => {
                 retry_count += 1;
@@ -60,6 +80,8 @@ async fn read_next_block_impl(
     file: &Arc<Mutex<BufReader<File>>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
+    compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
+    current_chunk_index: &std::sync::atomic::AtomicUsize,
 ) -> Result<Option<Vec<u8>>> {
     eprintln!("[DEBUG block_io::read_next_block_impl] Starting block read");
     eprintln!(
@@ -72,7 +94,7 @@ async fn read_next_block_impl(
         crate::parser::header::CassandraVersion::V5_0NewBig
         | crate::parser::header::CassandraVersion::V5_0DataFormat => {
             eprintln!("[DEBUG block_io::read_next_block_impl] Using NB format block header reader");
-            read_nb_format_block_header(file).await?
+            read_nb_format_block_header(file, compression_info, current_chunk_index).await?
         }
         crate::parser::header::CassandraVersion::V5_0Bti => {
             eprintln!(
@@ -147,12 +169,13 @@ async fn read_next_block_impl(
 
 /// Read block header for NB format (Cassandra 5.0 new big format)
 ///
-/// Cassandra 5.0 "nb" format uses a different block structure.
-/// The blocks are variable-length compressed chunks with metadata.
-/// Instead of trying to parse individual block headers, we need to
-/// read the entire data section and decompress it as needed.
+/// Cassandra 5.0 "nb" format uses chunked compression with metadata in CompressionInfo.db.
+/// This function reads one chunk at a time using the chunk boundaries from CompressionInfo.
+/// For uncompressed files, it reads in fixed-size blocks to avoid the 64MB limit.
 async fn read_nb_format_block_header(
     file: &Arc<Mutex<BufReader<File>>>,
+    compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
+    current_chunk_index: &std::sync::atomic::AtomicUsize,
 ) -> Result<Option<(u32, u32, u64)>> {
     let current_pos = {
         let mut file_guard = file.lock().await;
@@ -164,9 +187,7 @@ async fn read_nb_format_block_header(
         current_pos
     );
 
-    // For Cassandra 5.0 nb format, the data after the header is typically
-    // one large compressed block rather than many small blocks.
-    // Check if we're at EOF
+    // Check file size for EOF detection
     let file_size = {
         let mut file_guard = file.lock().await;
         file_guard.seek(std::io::SeekFrom::End(0)).await?;
@@ -177,40 +198,67 @@ async fn read_nb_format_block_header(
         size
     };
 
-    eprintln!(
-        "[DEBUG read_nb_format_block_header] Total file size: {}",
-        file_size
-    );
-
     if current_pos >= file_size {
-        eprintln!(
-            "[DEBUG read_nb_format_block_header] At EOF (current_pos={} >= file_size={})",
-            current_pos, file_size
-        );
-        return Ok(None); // EOF
-    }
-
-    // Calculate remaining data size
-    let remaining_size = (file_size - current_pos) as u32;
-
-    eprintln!(
-        "[DEBUG read_nb_format_block_header] Remaining data: {} bytes",
-        remaining_size
-    );
-
-    if remaining_size == 0 {
-        eprintln!("[DEBUG read_nb_format_block_header] No remaining data");
+        eprintln!("[DEBUG read_nb_format_block_header] At EOF");
         return Ok(None);
     }
 
-    // For nb format, treat the entire remaining data as one block
-    // The checksum will be validated by the compression layer if enabled
-    eprintln!(
-        "[DEBUG read_nb_format_block_header] NB format: Reading remaining {} bytes from position {}",
-        remaining_size, current_pos
-    );
+    // Use CompressionInfo for chunked reading if available
+    if let Some(comp_info) = compression_info {
+        let chunk_idx = current_chunk_index.load(std::sync::atomic::Ordering::Relaxed);
 
-    Ok(Some((remaining_size, 0, current_pos))) // checksum=0 means skip validation
+        eprintln!(
+            "[DEBUG read_nb_format_block_header] Using chunked reading: chunk_index={}",
+            chunk_idx
+        );
+
+        // Check if we've read all chunks
+        if chunk_idx >= comp_info.chunk_offsets.len() {
+            eprintln!(
+                "[DEBUG read_nb_format_block_header] All chunks read ({}/{})",
+                chunk_idx,
+                comp_info.chunk_offsets.len()
+            );
+            return Ok(None);
+        }
+
+        // Get chunk size from CompressionInfo
+        let chunk_size = comp_info
+            .compressed_chunk_size(chunk_idx, file_size)
+            .ok_or_else(|| {
+                Error::corruption(format!(
+                    "Failed to get compressed chunk size for chunk {} (total chunks: {})",
+                    chunk_idx,
+                    comp_info.chunk_offsets.len()
+                ))
+            })?;
+
+        eprintln!(
+            "[DEBUG read_nb_format_block_header] Chunk {}: size={} bytes",
+            chunk_idx, chunk_size
+        );
+
+        // Increment chunk index for next call
+        current_chunk_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Return chunk size (checksum=0 for chunk-level reading)
+        Ok(Some((chunk_size as u32, 0, current_pos)))
+    } else {
+        // Uncompressed: read in fixed-size blocks (64KB max to stay under limit)
+        let remaining_size = (file_size - current_pos) as u32;
+        let block_size = std::cmp::min(remaining_size, 65536); // 64KB blocks
+
+        if block_size == 0 {
+            return Ok(None);
+        }
+
+        eprintln!(
+            "[DEBUG read_nb_format_block_header] Uncompressed: reading {} byte block",
+            block_size
+        );
+
+        Ok(Some((block_size, 0, current_pos)))
+    }
 }
 
 /// Read block header for BTI format

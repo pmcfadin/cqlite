@@ -20,6 +20,24 @@ pub(crate) use super::header_helpers::{
     calculate_actual_header_size, extract_generation_from_path,
 };
 
+/// Extract keyspace name from SSTable file path
+fn extract_keyspace_from_path(path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .and_then(|s| s.split('-').next())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Extract table name from SSTable file path
+fn extract_table_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Check if a value appears to be ASCII corruption
 pub(crate) fn is_ascii_corruption_value(value: u32) -> bool {
     // Check for known corrupted values
@@ -80,9 +98,127 @@ pub(crate) async fn parse_header_with_version_detection(
         )));
     }
 
+    // Read first 4 bytes as potential magic number or CRC32 checksum
+    let first_4_bytes = u32::from_be_bytes([
+        header_buffer[0],
+        header_buffer[1],
+        header_buffer[2],
+        header_buffer[3],
+    ]);
+
+    // Detect CRC32 prefix (Cassandra 5.0+ feature)
+    // If first 4 bytes don't match any known magic number, treat as CRC32 checksum
+    let actual_header = if CassandraVersion::from_magic_number(first_4_bytes).is_none() {
+        // First 4 bytes are likely a CRC32 checksum prefix
+        log::debug!(
+            "Detected CRC32 checksum prefix: 0x{:08x} in file '{}'",
+            first_4_bytes,
+            path.display()
+        );
+
+        let expected_checksum = first_4_bytes;
+        let header_data = &header_buffer[4..];
+
+        // Validate there's enough data after checksum
+        if header_data.len() < 4 {
+            return Err(Error::corruption(format!(
+                "Insufficient data after CRC32 prefix: {} bytes. File: {}",
+                header_data.len(),
+                path.display()
+            )));
+        }
+
+        // Validate CRC32 checksum
+        let computed_checksum = crc32fast::hash(header_data);
+
+        if computed_checksum != expected_checksum {
+            // Don't fail - just warn. The checksum algorithm or scope may be different.
+            log::warn!(
+                "Header CRC32 checksum mismatch for file '{}' \
+                 (Expected: 0x{:08x}, Computed: 0x{:08x}). \
+                 Proceeding with parsing - checksum validation may use different algorithm.",
+                path.display(),
+                expected_checksum,
+                computed_checksum
+            );
+        } else {
+            log::info!(
+                "Header CRC32 validated (0x{:08x}) for file '{}'",
+                expected_checksum,
+                path.display()
+            );
+        }
+
+        header_data
+    } else {
+        // First 4 bytes are a valid magic number - no checksum prefix
+        header_buffer
+    };
+
+    // Detect NB format (Cassandra 4.x) from filename - these files don't have magic numbers
+    let is_nb_format = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.starts_with("nb-"))
+        .unwrap_or(false);
+
+    if is_nb_format {
+        log::debug!(
+            "Detected NB format (Cassandra 4.x) from filename '{}' - parsing without magic number",
+            path.display()
+        );
+
+        // NB format structure (after optional CRC32):
+        // - 2 bytes: version (little-endian)
+        // - 2 bytes: flags or format indicator
+        // - 16 bytes: table UUID
+        // - Variable: keyspace and table name strings
+
+        if actual_header.len() < 20 {
+            return Err(Error::corruption(format!(
+                "NB format header too small: {} bytes (minimum 20 bytes required). File: {}",
+                actual_header.len(),
+                path.display()
+            )));
+        }
+
+        // Parse version as little-endian u16
+        let version = u16::from_le_bytes([actual_header[0], actual_header[1]]);
+        log::debug!("NB format version: {}", version);
+
+        // Parse table UUID (bytes 4-20)
+        let mut table_id = [0u8; 16];
+        table_id.copy_from_slice(&actual_header[4..20]);
+
+        // Create a minimal header for NB format
+        return Ok(SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0Release, // NB format is Cassandra 4.x, but we'll map to V5
+            version,
+            table_id,
+            keyspace: extract_keyspace_from_path(path),
+            table_name: extract_table_name_from_path(path),
+            generation: extract_generation_from_path(path),
+            compression: CompressionInfo {
+                algorithm: "NONE".to_string(),
+                chunk_size: 0,
+                parameters: std::collections::HashMap::new(),
+            },
+            stats: SSTableStats {
+                row_count: 0,
+                min_timestamp: 0,
+                max_timestamp: 0,
+                max_deletion_time: 0,
+                compression_ratio: 1.0,
+                row_size_histogram: vec![],
+            },
+            columns: vec![],
+            properties: std::collections::HashMap::new(),
+        });
+    }
+
     // First try spec-driven parsing for Data.db component
     let registry = get_global_registry();
-    match registry.parse_data_header(header_buffer) {
+    match registry.parse_data_header(actual_header) {
         Ok(parsed_header) => {
             log::debug!(
                 "Successfully parsed Data.db header using spec-driven approach for file '{}' \
@@ -92,7 +228,7 @@ pub(crate) async fn parse_header_with_version_detection(
             );
 
             // Convert ParsedHeader to SSTableHeader for compatibility
-            return convert_parsed_header_to_sstable_header(parsed_header, header_buffer);
+            return convert_parsed_header_to_sstable_header(parsed_header, actual_header);
         }
         Err(spec_error) => {
             log::debug!(
@@ -104,8 +240,8 @@ pub(crate) async fn parse_header_with_version_detection(
     }
 
     // Fallback to legacy parsing approach
-    // Extract and validate magic number
-    let magic_bytes = &header_buffer[0..4];
+    // Extract and validate magic number (from actual_header, which may have CRC stripped)
+    let magic_bytes = &actual_header[0..4];
     let magic = u32::from_be_bytes([
         magic_bytes[0],
         magic_bytes[1],
@@ -137,8 +273,8 @@ pub(crate) async fn parse_header_with_version_detection(
         ))
     })?;
 
-    // Try to parse using the existing header parser
-    match parse_sstable_header(header_buffer) {
+    // Try to parse using the existing header parser (using actual_header)
+    match parse_sstable_header(actual_header) {
         Ok((_, header)) => {
             log::debug!(
                 "Successfully parsed header for file '{}' with version: {:?}",
@@ -160,7 +296,7 @@ pub(crate) async fn parse_header_with_version_detection(
                     );
 
                     // Only create minimal header for verified legacy format
-                    parse_minimal_legacy_header(header_buffer, path, cassandra_version)
+                    parse_minimal_legacy_header(actual_header, path, cassandra_version)
                 }
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {

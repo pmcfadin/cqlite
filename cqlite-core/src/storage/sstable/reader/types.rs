@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::BufReader;
@@ -13,8 +13,9 @@ use crate::{
 };
 
 use super::super::{
-    bloom::BloomFilter, compression::CompressionReader, index::SSTableIndex,
-    index_reader::IndexReader, statistics_reader::StatisticsReader, summary_reader::SummaryReader,
+    bloom::BloomFilter, compression::CompressionReader, compression_info::CompressionInfo,
+    index::SSTableIndex, index_reader::IndexReader, statistics_reader::StatisticsReader,
+    summary_reader::SummaryReader,
 };
 
 #[cfg(feature = "tombstones")]
@@ -228,4 +229,8 @@ pub struct SSTableReader {
     pub(crate) statistics_reader: Option<StatisticsReader>,
     /// Schema registry for schema-driven operations (modern formats)
     pub(crate) schema_registry: Option<Arc<crate::schema::SchemaRegistry>>,
+    /// CompressionInfo metadata for chunked decompression (if compressed)
+    pub(super) compression_info: Option<Arc<CompressionInfo>>,
+    /// Current chunk index for sequential chunk reading
+    pub(super) current_chunk_index: AtomicUsize,
 }

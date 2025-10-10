@@ -38,7 +38,7 @@ use header::{
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
@@ -47,6 +47,7 @@ use tokio::sync::Mutex;
 use crate::{
     parser::{header::CassandraVersion, SSTableHeader, SSTableParser},
     platform::Platform,
+    storage::sstable::compression_info::CompressionInfo,
     Config, Error, Result, RowKey, Value,
 };
 
@@ -100,6 +101,9 @@ impl SSTableReader {
 
         // Initialize compression reader with improved format detection
         let compression_reader = detect_and_initialize_compression(&header, path).await?;
+
+        // Load CompressionInfo.db for chunked decompression (if it exists)
+        let compression_info = Self::load_compression_info_metadata(path, &platform).await?;
 
         // Pre-validate component architecture for better error handling
         let components = Self::detect_component_files(path).await?;
@@ -163,7 +167,56 @@ impl SSTableReader {
             summary_reader,
             statistics_reader,
             schema_registry: None, // Will be set by set_schema_registry() after construction
+            compression_info: compression_info.map(Arc::new),
+            current_chunk_index: AtomicUsize::new(0),
         })
+    }
+
+    /// Load CompressionInfo.db metadata for chunked reading
+    async fn load_compression_info_metadata(
+        path: &Path,
+        _platform: &Arc<Platform>,
+    ) -> Result<Option<CompressionInfo>> {
+        use tokio::fs::File;
+        use tokio::io::AsyncReadExt;
+
+        // Try to find CompressionInfo.db in same directory
+        let parent_dir = path.parent().unwrap_or(Path::new("."));
+        let base_name = path.file_stem().and_then(|s| s.to_str()).and_then(|s| {
+            // Extract base name: "nb-1-big-Data.db" -> "nb-1-big"
+            let parts: Vec<&str> = s.split('-').collect();
+            if parts.len() >= 4 {
+                Some(parts[0..3].join("-"))
+            } else {
+                None
+            }
+        });
+
+        if let Some(base) = base_name {
+            let compression_info_path = parent_dir.join(format!("{}-CompressionInfo.db", base));
+            if compression_info_path.exists() {
+                let mut file = File::open(&compression_info_path).await?;
+                let mut buffer = Vec::new();
+                file.read_to_end(&mut buffer).await?;
+
+                match CompressionInfo::parse(&buffer) {
+                    Ok(info) => {
+                        log::debug!(
+                            "Loaded CompressionInfo: algorithm={}, chunk_length={}, chunks={}",
+                            info.algorithm,
+                            info.chunk_length,
+                            info.chunk_offsets.len()
+                        );
+                        return Ok(Some(info));
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to parse CompressionInfo.db: {}", e);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Set the schema registry for schema-driven operations
