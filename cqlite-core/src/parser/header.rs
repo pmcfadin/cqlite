@@ -405,12 +405,13 @@ pub fn parse_column_info(input: &[u8]) -> IResult<&[u8], ColumnInfo> {
 pub fn parse_sstable_header(input: &[u8]) -> IResult<&[u8], SSTableHeader> {
     let (input, (cassandra_version, version)) = parse_magic_and_version(input)?;
 
-    // For Cassandra 5.0 FormatC, FormatD, and DataFormat, use a simplified header structure
+    // For Cassandra 5.0 FormatC, FormatD, DataFormat, and NewBig, use a simplified header structure
     // These formats have different header layouts that don't include keyspace/table_name
     match cassandra_version {
         CassandraVersion::V5_0FormatC
         | CassandraVersion::V5_0FormatD
-        | CassandraVersion::V5_0DataFormat => {
+        | CassandraVersion::V5_0DataFormat
+        | CassandraVersion::V5_0NewBig => {
             return parse_cassandra5_simplified_header(input, cassandra_version, version);
         }
         _ => {
@@ -882,7 +883,8 @@ mod tests {
         compression_params.insert("level".to_string(), "6".to_string());
 
         let header = SSTableHeader {
-            cassandra_version: CassandraVersion::V5_0NewBig,
+            // Use V5_0Release for roundtrip testing since V5_0NewBig uses simplified header parsing
+            cassandra_version: CassandraVersion::V5_0Release,
             version: SUPPORTED_VERSION,
             table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             keyspace: "test_keyspace".to_string(),

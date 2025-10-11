@@ -108,58 +108,49 @@ pub(crate) async fn parse_header_with_version_detection(
 
     if is_nb_format {
         log::debug!(
-            "Detected NB format (Cassandra 4.x+) from filename '{}' - loading CompressionInfo.db",
+            "Detected NB format (Cassandra 4.x+) from filename '{}' - checking for header presence",
             path.display()
         );
 
-        // NB format files don't have headers in Data.db - metadata is in separate component files
-        // The Data.db file contains raw compressed chunks without a header
+        // NB format files can be either:
+        // 1. Headerless (most common) - metadata in separate component files
+        // 2. Header-based (e.g., collections_with_udts) - has magic number + header
+        //
+        // Check first 4 bytes to determine which type we have (Issue #154)
+        if header_buffer.len() >= 4 {
+            let first_4_bytes = u32::from_be_bytes([
+                header_buffer[0],
+                header_buffer[1],
+                header_buffer[2],
+                header_buffer[3],
+            ]);
 
-        // Try to load CompressionInfo.db to determine compression algorithm
-        let compression_algorithm = match load_nb_compression_info(path).await {
-            Ok(info) => {
-                log::info!(
-                    "Loaded CompressionInfo.db for NB format: algorithm={}, chunk_length={}, chunks={}",
-                    info.algorithm,
-                    info.chunk_length,
-                    info.chunk_offsets.len()
-                );
-                info.algorithm
-            }
-            Err(e) => {
-                log::warn!(
-                    "Could not load CompressionInfo.db for NB format file '{}': {}. Assuming no compression.",
+            // If first 4 bytes are a valid magic number, this NB file has a header
+            if CassandraVersion::from_magic_number(first_4_bytes).is_some() {
+                log::debug!(
+                    "NB format file '{}' has embedded header (magic: 0x{:08x}) - using standard header parsing",
                     path.display(),
-                    e
+                    first_4_bytes
                 );
-                "NONE".to_string()
+                // Fall through to standard header parsing below
+            } else {
+                // True headerless NB format - first 4 bytes are compressed data
+                log::debug!(
+                    "NB format file '{}' is headerless (first bytes: 0x{:08x}) - loading CompressionInfo.db",
+                    path.display(),
+                    first_4_bytes
+                );
+                return create_minimal_nb_header(path).await;
             }
-        };
-
-        // Create a minimal header for NB format with compression info
-        return Ok(SSTableHeader {
-            cassandra_version: CassandraVersion::V5_0NewBig, // NB format maps to NewBig
-            version: 0,        // NB format doesn't have version in Data.db
-            table_id: [0; 16], // Table ID is in other components
-            keyspace: extract_keyspace_from_path(path),
-            table_name: extract_table_name_from_path(path),
-            generation: extract_generation_from_path(path),
-            compression: CompressionInfo {
-                algorithm: compression_algorithm,
-                chunk_size: 16384, // Default chunk size
-                parameters: std::collections::HashMap::new(),
-            },
-            stats: SSTableStats {
-                row_count: 0,
-                min_timestamp: 0,
-                max_timestamp: 0,
-                max_deletion_time: 0,
-                compression_ratio: 1.0,
-                row_size_histogram: vec![],
-            },
-            columns: vec![],
-            properties: std::collections::HashMap::new(),
-        });
+        } else {
+            // Buffer too small for magic number check, assume headerless
+            log::warn!(
+                "NB format file '{}' has insufficient header buffer ({} bytes) - assuming headerless format",
+                path.display(),
+                header_buffer.len()
+            );
+            return create_minimal_nb_header(path).await;
+        }
     }
 
     // Read first 4 bytes as potential magic number or CRC32 checksum
@@ -401,6 +392,55 @@ pub(crate) fn convert_parsed_header_to_sstable_header(
         stats,
         columns,
         properties,
+    })
+}
+
+/// Create minimal header for headerless NB format files
+async fn create_minimal_nb_header(path: &Path) -> Result<SSTableHeader> {
+    // Try to load CompressionInfo.db to determine compression algorithm
+    let compression_algorithm = match load_nb_compression_info(path).await {
+        Ok(info) => {
+            log::info!(
+                "Loaded CompressionInfo.db for NB format: algorithm={}, chunk_length={}, chunks={}",
+                info.algorithm,
+                info.chunk_length,
+                info.chunk_offsets.len()
+            );
+            info.algorithm
+        }
+        Err(e) => {
+            log::warn!(
+                "Could not load CompressionInfo.db for NB format file '{}': {}. Assuming no compression.",
+                path.display(),
+                e
+            );
+            "NONE".to_string()
+        }
+    };
+
+    // Create a minimal header for NB format with compression info
+    Ok(SSTableHeader {
+        cassandra_version: CassandraVersion::V5_0NewBig, // NB format maps to NewBig
+        version: 0,        // NB format doesn't have version in Data.db
+        table_id: [0; 16], // Table ID is in other components
+        keyspace: extract_keyspace_from_path(path),
+        table_name: extract_table_name_from_path(path),
+        generation: extract_generation_from_path(path),
+        compression: CompressionInfo {
+            algorithm: compression_algorithm,
+            chunk_size: 16384, // Default chunk size
+            parameters: std::collections::HashMap::new(),
+        },
+        stats: SSTableStats {
+            row_count: 0,
+            min_timestamp: 0,
+            max_timestamp: 0,
+            max_deletion_time: 0,
+            compression_ratio: 1.0,
+            row_size_histogram: vec![],
+        },
+        columns: vec![],
+        properties: std::collections::HashMap::new(),
     })
 }
 
