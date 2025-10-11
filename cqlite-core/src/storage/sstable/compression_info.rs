@@ -77,7 +77,7 @@ impl CompressionInfo {
             if data.len() >= 2 + len_2byte + 8 {
                 let chunk_len_pos = 2 + len_2byte;
                 // Modern format uses 8-byte alignment for chunk_length field
-                let aligned_pos = ((chunk_len_pos + 7) / 8) * 8;
+                let aligned_pos = chunk_len_pos.div_ceil(8) * 8;
 
                 if data.len() >= aligned_pos + 4 {
                     let chunk_len_bytes = &data[aligned_pos..aligned_pos + 4];
