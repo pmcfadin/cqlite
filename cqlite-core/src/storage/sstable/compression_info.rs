@@ -72,14 +72,15 @@ impl CompressionInfo {
         cursor.set_position(0);
 
         // Decision logic for format detection
-        if len_2byte > 0 && len_2byte <= 64 && len_2byte + 4 < data.len() {
-            // Check if the data at position 2 + len_2byte looks like valid chunk length
-            if data.len() >= 2 + len_2byte + 4 {
+        if len_2byte > 0 && len_2byte <= 64 && len_2byte + 8 < data.len() {
+            // Check if the data at position after algorithm name (with 8-byte alignment) looks like valid chunk length
+            if data.len() >= 2 + len_2byte + 8 {
                 let chunk_len_pos = 2 + len_2byte;
-                // Account for padding to 4-byte boundary
-                let padded_pos = chunk_len_pos.div_ceil(4) * 4;
-                if data.len() >= padded_pos + 4 {
-                    let chunk_len_bytes = &data[padded_pos..padded_pos + 4];
+                // Modern format uses 8-byte alignment for chunk_length field
+                let aligned_pos = ((chunk_len_pos + 7) / 8) * 8;
+
+                if data.len() >= aligned_pos + 4 {
+                    let chunk_len_bytes = &data[aligned_pos..aligned_pos + 4];
                     let chunk_len = u32::from_be_bytes([
                         chunk_len_bytes[0],
                         chunk_len_bytes[1],
@@ -289,18 +290,16 @@ impl CompressionInfo {
 
     /// Parse CompressionInfo.db file from binary data with CRC validation
     ///
-    /// Binary format (supporting both 2-byte and 4-byte length formats):
-    /// Format 1 (legacy): 2 bytes length + name + padding + metadata
-    /// Format 2 (modern): 4 bytes length + name + metadata + chunk details
-    /// - Length field: algorithm name length (big-endian, 2 or 4 bytes)
-    /// - N bytes: algorithm name string (UTF-8)
-    /// - 4 bytes: chunk length (default 16384 = 0x4000)
-    /// - 8 bytes: total data length
+    /// Binary format (Cassandra 5.0 NB format):
+    /// - 2 bytes: algorithm name length (big-endian, for legacy formats)
+    /// - N bytes: algorithm name string (UTF-8, e.g., "SnappyCompressor")
+    /// - 4 bytes: padding (fixed, always 0x00000000)
+    /// - 4 bytes: chunk length (uncompressed chunk size, typically 16384 = 0x4000)
+    /// - 4 bytes: options/flags field (typically 0x7fffffff)
+    /// - 8 bytes: compressed data length (big-endian)
     /// - 4 bytes: number of chunks
-    /// - N * 8 bytes: chunk offsets (8 bytes each)
-    /// - Optional: N * 4 bytes: compressed sizes
-    /// - Optional: N * 4 bytes: uncompressed sizes
-    /// - 4 bytes: CRC32 checksum (optional, at end of file)
+    /// - N * 8 bytes: chunk offsets in Data.db file (8 bytes each, big-endian)
+    /// - Optional: 4 bytes CRC32 checksum (at end of file)
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.is_empty() {
             return Err(Error::InvalidFormat(
@@ -339,16 +338,11 @@ impl CompressionInfo {
         // Parse algorithm name with robust validation
         let algorithm = Self::parse_algorithm_name(&mut cursor, algorithm_len, format_type)?;
 
-        // Handle padding based on format type
-        if format_type == FormatType::Legacy {
-            let current_pos = cursor.position();
-            let padding_needed = (4 - (current_pos % 4)) % 4;
-            if padding_needed > 0 {
-                cursor
-                    .seek(SeekFrom::Current(padding_needed as i64))
-                    .map_err(|e| Error::InvalidFormat(format!("Failed to skip padding: {}", e)))?;
-            }
-        }
+        // Cassandra 5.0 NB format uses a FIXED 4-byte padding after the algorithm name
+        // This is a constant padding, not alignment-based
+        cursor
+            .seek(SeekFrom::Current(4))
+            .map_err(|e| Error::InvalidFormat(format!("Failed to skip 4-byte padding: {}", e)))?;
 
         // Parse chunk length (4 bytes, big-endian)
         let mut chunk_len_bytes = [0u8; 4];
@@ -357,7 +351,14 @@ impl CompressionInfo {
             .map_err(|e| Error::InvalidFormat(format!("Failed to read chunk length: {}", e)))?;
         let chunk_length = u32::from_be_bytes(chunk_len_bytes);
 
-        // Parse data length (8 bytes, big-endian)
+        // Skip options/flags field (4 bytes) - modern NB format
+        // This field appears to be 0x7fffffff (INT_MAX) in NB format files
+        cursor
+            .seek(SeekFrom::Current(4))
+            .map_err(|e| Error::InvalidFormat(format!("Failed to skip options field: {}", e)))?;
+
+        // Parse compressed data length (8 bytes, big-endian)
+        // Note: This is the compressed size, NOT uncompressed. We use it as data_length for now.
         let mut data_len_bytes = [0u8; 8];
         cursor
             .read_exact(&mut data_len_bytes)
@@ -537,9 +538,9 @@ impl CompressionInfo {
             return Err(Error::InvalidFormat("Zero chunk length".to_string()));
         }
 
-        if self.chunk_length > 1024 * 1024 {
+        if self.chunk_length > 1024 * 1024 * 1024 {
             return Err(Error::InvalidFormat(format!(
-                "Chunk length too large: {}",
+                "Chunk length too large: {} bytes (max 1GB)",
                 self.chunk_length
             )));
         }
