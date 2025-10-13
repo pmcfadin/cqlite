@@ -1,12 +1,12 @@
 {
   "keyspace": "test_wide_rows",
   "table": "wide_partition_table",
-  "index_file_path": "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-70d0a3f0934a11f08d448925b7a9e804/nb-1-big-Index.db",
-  "partition_count": 120,
+  "index_file_path": "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Index.db",
+  "partition_count": 1,
   "promoted_index_count": 0,
   "key_digest_matches": [],
   "offset_matches": [],
   "perfect_parity": true,
-  "timestamp": "2025-10-03T22:45:14.404272Z",
+  "timestamp": "2025-10-13T16:58:28.359319Z",
   "errors": []
 }

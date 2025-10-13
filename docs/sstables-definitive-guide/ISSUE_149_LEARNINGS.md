@@ -358,3 +358,126 @@ let block = read_bytes(remaining)?;
 
 *Document created: 2025-10-10*
 *Based on implementation work for Issue #149*
+
+## Issue #153 Learnings - NB Format Structure (Authoritative)
+
+### Discovery
+
+Investigation of "unknown magic numbers" (`0x71160000`, `0xf1185c00`) revealed these were **not** magic numbers or CRC checksums, but the first 4 bytes of compressed chunk data in NB format files.
+
+**Initial Misunderstanding:** These bytes were incorrectly documented as "Header CRC32 prefixes" that protected SSTable metadata.
+
+**Authoritative Clarification (from senior devs):** NB format Data.db files have no magic number or global header whatsoever. The file starts directly with compressed chunk data.
+
+### NB Format Key Facts (Authoritative)
+
+1. **No magic number in Data.db** - format is identified by filename only (`nb-1-big-Data.db`)
+2. **No global header** - file starts directly with chunk data
+3. **CRCs are trailing** - come after each chunk, not before
+4. **Requires CompressionInfo.db** - chunk boundaries not self-describing
+5. **CRC algorithm** - Java `java.util.zip.CRC32`, big-endian
+
+### Data.db Structure
+
+```
+Offset 0: [chunk_0_compressed_bytes: variable length]
+          [crc32_chunk_0: 4 bytes, big-endian]
+          [chunk_1_compressed_bytes: variable length]
+          [crc32_chunk_1: 4 bytes, big-endian]
+          ...
+```
+
+**Key Points:**
+- First byte of file is first byte of compressed data (NOT a magic number)
+- Chunk boundaries determined by CompressionInfo.db (offset/length pairs)
+- CRC32 validation happens AFTER reading each chunk
+- No way to parse Data.db standalone - must read CompressionInfo.db first
+
+### CompressionInfo.db Format
+
+```
+[chunk_count: varint]
+[chunk_0_offset: varint]
+[chunk_0_length: varint]
+[chunk_1_offset: varint]
+[chunk_1_length: varint]
+...
+```
+
+### Incorrect Assumptions (Now Corrected)
+
+- First 4 bytes are CRC32 of remaining header → **Wrong** (no header exists)
+- First 4 bytes are magic number → **Wrong** (it's chunk data)
+- First 4 bytes are leading CRC prefix → **Wrong** (CRCs are trailing)
+- Can parse Data.db standalone → **Wrong** (need CompressionInfo.db first)
+- NB format has any file header → **Wrong** (completely header-less)
+
+### Why This Matters
+
+**Reading NB Format Files:**
+1. Parse CompressionInfo.db to get chunk map
+2. For chunk N:
+   - Seek to Data.db offset from CompressionInfo.db
+   - Read `length` bytes (compressed data)
+   - Read next 4 bytes as CRC32 (big-endian)
+   - Validate CRC32 over compressed bytes
+   - Decompress chunk
+   - Parse row data
+
+**Anti-Patterns:**
+- Don't try to read magic number from Data.db
+- Don't expect any header bytes
+- Don't treat first 4 bytes as special
+- Don't assume CRCs come before chunks
+
+### Implementation Impact
+
+- Must parse CompressionInfo.db before Data.db
+- Chunk reading requires offset/length from compression metadata
+- CRC validation happens after reading each chunk (trailing 4 bytes)
+- No header parsing needed for NB format Data.db
+- Format detection relies on filename pattern, not file content
+
+### Documentation Updates
+
+The following sections were updated based on authoritative NB format specification:
+
+1. **Chapter 09: CompressionInfo and Chunking**
+   - Added "NB Format: Chunking Without Headers" section
+   - Documented Data.db structure (header-less)
+   - Documented CompressionInfo.db format (varint offset/length pairs)
+   - Added CRC32 algorithm details (trailing, big-endian)
+   - Added common pitfalls section
+
+2. **Chapter 20: Checksums and Integrity**
+   - Updated "Header CRC32 Prefixes" section with note: **legacy formats only, NOT NB**
+   - Added "NB Format: Trailing Chunk CRCs" section
+   - Documented CRC placement (after chunks, not before)
+   - Documented validation process (read chunk, read CRC, validate)
+   - Updated Key Takeaways to clarify NB vs legacy differences
+
+3. **ISSUE_149_LEARNINGS.md** (this file)
+   - Added Issue #153 learnings section
+   - Documented authoritative NB format structure
+   - Clarified incorrect assumptions
+   - Provided implementation guidance
+
+### References
+
+- **Issue #153:** Investigation and root cause analysis
+- **Issue #155:** Proper NB format implementation plan (if exists)
+- **Senior dev explanation:** Authoritative format specification
+- **Cassandra source:** `org.apache.cassandra.io.compress.CompressionMetadata`
+
+### Key Learnings
+
+1. **Trust authoritative sources** - When senior devs provide format specs, update documentation immediately
+2. **Format detection matters** - NB format identified by filename, not file content
+3. **No assumptions without validation** - Don't assume header structures without confirming
+4. **Trailing vs leading** - CRC placement varies by format (NB: trailing, legacy: varies)
+5. **CompressionInfo.db is critical** - NB format Data.db is unreadable without it
+
+---
+
+*Issue #153 section added: 2025-10-10*
+*Based on authoritative NB format clarification from senior developers*

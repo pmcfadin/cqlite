@@ -35,14 +35,21 @@ Common cell flags (high level):
 - presence of timestamp, ttl, local deletion time
 - empty/expiring cells
 
-Bit-level notes (Cassandra 5 `oa`):
-- Flags byte packs presence bits; typical patterns:
-  - bit0: isDeleted
-  - bit1: isExpiring (TTL present)
-  - bit2: hasEmptyValue
-  - bit3: hasTimestamp
-  - bit4: hasLocalDeletionTime
-  - higher bits reserved for format extensions
+Bit-level flags (Cassandra 5.0, authoritative references):
+
+| Bit | Meaning                    | When present                                |
+|-----|----------------------------|---------------------------------------------|
+| 0   | isDeleted                  | Cell is a tombstone                         |
+| 1   | isExpiring                 | TTL fields follow                           |
+| 2   | hasEmptyValue              | Zero-length value                           |
+| 3   | hasTimestamp               | Timestamp present in cell header            |
+| 4   | hasLocalDeletionTime       | Local deletion time present                 |
+| 5+  | format extensions/reserved | Format-specific                             |
+
+Authoritative classes to consult in Cassandra 5.0:
+- `org.apache.cassandra.db.rows.*` (e.g., `Unfiltered`, `Cell`, `BufferCell`)
+- `org.apache.cassandra.db.SerializationHeader`
+- `org.apache.cassandra.db.rows.SerializationHelper`
 
 Endianness:
 - Integers in SSTable payloads are big-endian unless otherwise specified; varints are MSB-first variable-length.

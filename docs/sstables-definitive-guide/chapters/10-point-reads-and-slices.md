@@ -31,6 +31,10 @@ For an implementation walkthrough of the read flow, see Appendix C.
 ### BTI Read Path Notes
 - BTI preserves the decision flow but the index entry payload may differ. Gate parsing using the `Descriptor` format; the iterator and seek abstractions remain the same.
 
+Promoted index (BIG):
+- Emitted for wide partitions when clustering counts exceed internal thresholds.
+- Readers detect presence and use it for O(log m) within-partition seeks; otherwise, fall back to sequential scan within the partition.
+
 ### Complexity Notes
 - Point read: Bloom O(1), Summary binary search O(log s), Index probe O(log n) or O(1) if direct-offset; fallback scan O(n).
 - Slice read: Initialization O(log s) + sequential advancement; with promoted index, within-partition seek O(log m) over clustering entries.

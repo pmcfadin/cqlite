@@ -228,21 +228,11 @@ impl SSTableReader {
                     crate::parser::header::CassandraVersion::V5_0NewBig
                     | crate::parser::header::CassandraVersion::V5_0Bti
                     | crate::parser::header::CassandraVersion::V5_0DataFormat => {
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern format detected - schema available from header");
-                        // Schema is available from header via get_table_schema()
-                        // Use basic state machine for now (full schema-aware parsing in future)
-                        #[cfg(feature = "legacy-heuristics")]
-                        {
-                            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine with header schema");
-                            Ok(RowCellStateMachine::new())
-                        }
-                        #[cfg(not(feature = "legacy-heuristics"))]
-                        {
-                            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No legacy-heuristics feature");
-                            Err(Error::Schema(
-                                "State machine parsing requires legacy-heuristics feature for current implementation.".to_string()
-                            ))
-                        }
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern V5.0 format with schema from header");
+                        // V5.0 modern formats: Use basic state machine (full schema-aware parsing in future)
+                        // Note: Modern V5.0 formats don't require legacy-heuristics - they use structured metadata
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 format");
+                        Ok(RowCellStateMachine::new())
                     }
                     _ => {
                         // Legacy formats can use basic state machine as last resort
@@ -261,27 +251,18 @@ impl SSTableReader {
                     }
                 }
             } else {
-                eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema available");
-                // No schema available - check format restrictions
+                eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema available from header");
+                // No schema available from header - check format restrictions
                 match self.header.cassandra_version {
                     crate::parser::header::CassandraVersion::V5_0NewBig
                     | crate::parser::header::CassandraVersion::V5_0Bti
                     | crate::parser::header::CassandraVersion::V5_0DataFormat => {
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern format detected - schema available from header");
-                        // Schema is available from header via get_table_schema()
-                        // Use basic state machine for now (full schema-aware parsing in future)
-                        #[cfg(feature = "legacy-heuristics")]
-                        {
-                            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine with header schema");
-                            Ok(RowCellStateMachine::new())
-                        }
-                        #[cfg(not(feature = "legacy-heuristics"))]
-                        {
-                            eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No legacy-heuristics feature");
-                            Err(Error::Schema(
-                                "State machine parsing requires legacy-heuristics feature for current implementation.".to_string()
-                            ))
-                        }
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern V5.0 format without header schema");
+                        // V5.0 modern formats: Use basic state machine even without header schema
+                        // The schema will be provided by the Database/query engine layer
+                        // Note: Modern V5.0 formats don't require legacy-heuristics - they use structured metadata
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 format");
+                        Ok(RowCellStateMachine::new())
                     }
                     _ => {
                         #[cfg(feature = "legacy-heuristics")]

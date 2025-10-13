@@ -56,7 +56,9 @@ Before any disk seek, Cassandra checks a Bloom filter built from partition keys.
 For a brief Bloom API example, see Appendix C.
 
 False positive rate (FPR) refresher:
-- Optimal bit count: m ≈ -(n · ln p) / (ln 2)^2; optimal hashes: k ≈ (m/n) · ln 2
+- Optimal bits per key: m = −(n · ln p) / (ln 2)²
+- Optimal hash functions: k = (m / n) · ln 2
+- ASCII: m = - (n * ln(p)) / (ln(2))^2; k = (m / n) * ln(2)
 - Example: targeting p = 1% with n = 1,000 partitions → m ≈ 9,585 bits (~1.2 KiB), k ≈ 7
 - Operationally: a 1% FPR means ~1 in 100 misses still hit Index/Data, so choose p based on acceptable extra IO
 

@@ -2,7 +2,23 @@
 
 **Date**: October 10, 2025
 **Related Issue**: #153 - Unsupported magic numbers in collection tables
-**Status**: Documentation Complete ✅
+**Status**: SUPERSEDED - Documentation Corrected ⚠️
+
+---
+
+## IMPORTANT CORRECTION (2025-10-10)
+
+**This documentation was based on incorrect assumptions and has been superseded by authoritative NB format information.**
+
+**Original Incorrect Claim:** Bytes like `0x71160000` and `0xf1185c00` were "Header CRC32 prefixes" that protected SSTable metadata.
+
+**Authoritative Correction:** These bytes are the **first 4 bytes of compressed chunk data** in NB format files. NB format Data.db has **NO magic number or global header** - the file starts directly with compressed data.
+
+**See:** ISSUE_149_LEARNINGS.md - Issue #153 section for authoritative NB format documentation.
+
+---
+
+## Original Documentation (Now Obsolete)
 
 ---
 

@@ -38,6 +38,24 @@ Illustrative bullets:
 
 For implementation walkthroughs of BTI headers and trie navigation, see Appendix C.
 
+### Prefix/range navigation (byte-wise example)
+
+Consider a composite clustering key `(user_id uuid, path text)` with UTF-8 collation. BTI’s `Rows.db` encodes a trie over the byte sequence of the clustering prefix, enabling prefix seeks:
+
+Pseudo (simplified):
+```text
+advance(trie, prefix_bytes):
+  node = root
+  for b in prefix_bytes:
+    if node.has_child(b):
+      node = node.child(b)
+    else:
+      return node.first_ge_branch(b)
+  return node
+```
+
+Effectively, prefix seek walks byte-by-byte until divergence, then takes the first branch ≥ the requested byte; this contrasts with BIG’s binary search over sampled entries in `Summary.db` followed by scans in `Index.db`.
+
 ## Performance Considerations and Benchmark Methodology
 
 Note: Provide methodology and harness only; do not claim specific results here.

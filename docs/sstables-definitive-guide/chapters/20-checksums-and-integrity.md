@@ -9,9 +9,13 @@ SSTables carry integrity metadata at three levels: header CRC32 prefixes (Cassan
 - How readers/writers interact with integrity metadata
 - How to demonstrate a minimal verification example
 
-## Header CRC32 Prefixes (Cassandra 5.0+)
+## Header CRC32 Prefixes (Legacy Formats Only)
 
-Starting with Cassandra 5.0, some SSTable components (particularly `Data.db` files in certain formats) may include a **4-byte CRC32 checksum prefix** prepended to the file header. This provides early detection of header corruption before attempting to parse metadata.
+> **Note:** This section describes CRC32 prefixes in **legacy formats only**.
+> NB format (Cassandra 4.x/5.x) does NOT use header CRC32 prefixes.
+> See "NB Format: Trailing Chunk CRCs" section below for NB format CRC32 handling (trailing chunk CRCs).
+
+Starting with certain Cassandra versions, some SSTable components in **legacy formats** (not NB) may include a **4-byte CRC32 checksum prefix** prepended to the file header. This provides early detection of header corruption before attempting to parse metadata.
 
 ### Format Structure
 
@@ -136,7 +140,57 @@ Each level serves a distinct purpose:
 - Fail immediately on mismatch (never attempt recovery)
 - Handle both checksummed and non-checksummed headers in readers
 
-## Per-Chunk Checksums
+## NB Format: Trailing Chunk CRCs
+
+NB format uses a different CRC strategy than legacy formats - CRCs are placed **after** (trailing) each chunk, not before.
+
+### CRC Placement
+
+```
+[chunk_bytes: variable length] <- Compressed data
+[crc32: 4 bytes, big-endian]   <- CRC32(chunk_bytes)
+[next_chunk_bytes: variable]
+[crc32: 4 bytes, big-endian]
+...
+```
+
+### Validation Process
+
+1. Read chunk bytes from Data.db (length from CompressionInfo.db)
+2. Read next 4 bytes as big-endian u32 (expected CRC)
+3. Compute CRC32 over chunk bytes using Java algorithm
+4. Compare computed vs expected
+5. On match: decompress and continue
+6. On mismatch: corruption detected (fail or warn based on `crc_check_chance` config)
+
+Explicit note: CRC32 is computed over the compressed chunk only and excludes the trailing 4-byte CRC itself.
+
+Minimal illustration (excerpt from a real `Data.db`, first 32 bytes):
+```
+00000000: fe1e 0000 f209 0010 6b88 bf20 a251 11f0
+00000010: a3fe f1a5 5138 3fb9 7fff ffff 8000 0100
+```
+When aligned to a chunk boundary, the 4 bytes immediately following the compressed chunk are the big-endian CRC32 for that chunk.
+
+### CRC Algorithm Details
+
+- **Standard:** Java `java.util.zip.CRC32`
+- **Polynomial:** 0x04C11DB7 (IEEE standard)
+- **Initial value:** 0
+- **Reflected:** Yes (reversed polynomial: 0xEDB88320)
+- **Output:** Big-endian u32
+
+### Cassandra Configuration
+
+- `crc_check_chance`: Probability of validating CRC (0.0 to 1.0)
+- Default: 1.0 (always validate)
+- Purpose: Trade integrity checking for performance
+
+### Implementation Note
+
+The `crc32fast` Rust crate implements the same algorithm. Ensure big-endian byte order when comparing.
+
+## Per-Chunk Checksums (Legacy Formats)
 When compression is enabled, `CompressionInfo.db` may include a CRC for each compressed chunk. Readers should compute CRC over the compressed bytes and compare with metadata prior to decompression. This catches corruption early and avoids propagating errors downstream.
 
 Readers should validate chunk CRCs where present before decompression; modern formats expect strict CRC adherence. For validation walkthroughs, see Appendix C.
@@ -167,12 +221,13 @@ Scope note: focus on SSTable-level recovery patterns; node-level operations are 
   - Monitor error counters; re-scan directories after compaction
 
 ### Key Takeaways
-- **Header CRC32 prefixes** (Cassandra 5.0+) protect SSTable metadata; detected when first 4 bytes don't match known magic numbers.
-- **Per-chunk CRCs** protect compressed `Data.db` blocks before decompression.
+- **Header CRC32 prefixes** (legacy formats only) protect SSTable metadata; **NB format does NOT use header CRC32 prefixes**.
+- **NB format uses trailing chunk CRCs** - placed after each compressed chunk, not before.
+- **Per-chunk CRCs** protect compressed `Data.db` blocks before decompression (legacy) or after reading (NB format).
 - **`Digest.crc32`** validates whole-file content at the component level.
 - Readers should validate all checksums on-the-fly; tools may verify digests offline.
 - Fail-fast on any CRC mismatch—corruption detected; do not attempt heuristic recovery in modern formats.
-- The three-level hierarchy provides defense in depth: header validation → chunk validation → component validation.
+- The three-level hierarchy provides defense in depth: header validation (legacy) or chunk validation (NB) → component validation.
 
 ### References
 - Cassandra 5.0.0:
@@ -184,5 +239,31 @@ Scope note: focus on SSTable-level recovery patterns; node-level operations are 
   - CRC32 computation: `crc32fast` crate (Rust standard library compatible)
 
 For implementation details and walkthroughs, see Appendix C.
+
+## Format/Component Checksum Matrix (Cassandra 5.0)
+
+| Component (format)     | Header CRC32 prefix | Trailing chunk CRCs | Byte order (stored) | CRC scope | `Digest.crc32` present |
+|------------------------|---------------------|---------------------|---------------------|-----------|------------------------|
+| Data.db (BIG)          | format-dependent    | no                  | n/a                 | n/a       | yes                    |
+| Index.db (BIG)         | format-dependent    | n/a                 | n/a                 | n/a       | yes                    |
+| Summary.db (BIG)       | format-dependent    | n/a                 | n/a                 | n/a       | yes                    |
+| Filter.db (BIG)        | format-dependent    | n/a                 | n/a                 | n/a       | yes                    |
+| Statistics.db (BIG)    | format-dependent    | n/a                 | n/a                 | n/a       | yes                    |
+| CompressionInfo.db     | no                  | n/a                 | n/a                 | n/a       | yes                    |
+| Data.db (NB)           | no                  | yes (per chunk)     | big-endian u32      | compressed chunk bytes only | yes |
+
+Notes:
+- “format-dependent” indicates presence varies by sub-version/feature flags in BIG/mc/mm families. NB does not use header CRCs.
+- Trailing CRCs apply only to NB `Data.db` and are big-endian u32 immediately following each compressed chunk.
+- `Digest.crc32` is emitted per generation and covers the component set listed in `TOC.txt` (see below).
+
+## `Digest.crc32` Coverage
+
+`Digest.crc32` is a per-generation file that stores CRC32 values for listed components. Coverage includes each component file named in `TOC.txt` for that generation (e.g., `Data.db`, `Index.db`, `Summary.db`, `Filter.db`, `Statistics.db`, `CompressionInfo.db` when present). Each entry records the CRC32 over the full file contents (entire byte range) of the corresponding component, computed independently per file.
+
+Minimal verification example:
+1. Read `TOC.txt` to enumerate components.
+2. For each listed component, compute CRC32 over the entire file contents.
+3. Compare against entries in `Digest.crc32`; on mismatch, quarantine and rehydrate via repair/streaming.
 
 

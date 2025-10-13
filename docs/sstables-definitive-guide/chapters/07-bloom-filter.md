@@ -12,8 +12,12 @@ Bloom filters stored in `Filter.db` provide fast negative lookups before any dis
 
 Expected FPR depends on bits-per-key and number of hash functions:
 
-- Optimal bit count: m ≈ -(n · ln p) / (ln 2)^2
-- Optimal hash count: k ≈ (m/n) · ln 2
+- Optimal bits per key: m = −(n · ln p) / (ln 2)²
+- Optimal hash functions: k = (m / n) · ln 2
+
+Text-only (ASCII) versions for copy/paste into code:
+- m = - (n * ln(p)) / (ln(2))^2
+- k = (m / n) * ln(2)
 
 Small numeric example (intuition): for n=1,000 and p=1%, the optimal bits-per-key is ~9.6 and k≈7.
 
@@ -30,6 +34,7 @@ During a point lookup, Bloom is checked before any index/summary seeks. A negati
 ### Key Takeaways
 - Bloom provides fast negative lookups; positives still consult index/summary.
 - FPR is configurable; higher bits-per-key lowers FPR but increases memory.
+- The target FPR stored in `Statistics.db` (build-time) may differ from the observed runtime FPR depending on key distribution and filter saturation; adjust `bloom_filter_fp_chance` and rebuild to realign if needed.
 - Missing or unreadable Bloom falls back to index/summary without correctness loss.
 
 ### References

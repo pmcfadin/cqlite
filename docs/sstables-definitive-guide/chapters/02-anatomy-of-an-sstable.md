@@ -69,6 +69,21 @@ Index.db
 Summary.db
 ```
 
+### BTI directory example (5.0)
+
+When BTI is enabled, a generation includes BTI-specific components alongside common ones. During upgrades, directories may contain both BIG and BTI generations. Real filenames (trimmed):
+
+```text
+na-3-bti-Data.db
+na-3-bti-Partitions.db
+na-3-bti-Rows.db
+na-3-bti-Statistics.db
+na-3-bti-TOC.txt
+na-3-bti-Digest.crc32
+```
+
+See the BTI package for details: `org.apache.cassandra.io.sstable.format.bti`.
+
 ## TOC Invariants and Integrity Checks
 
 `TOC.txt` is authoritative: tools validate that every listed component exists and that unexpected files do not appear. Integrity checks commonly include:

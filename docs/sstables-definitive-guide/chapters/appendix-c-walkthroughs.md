@@ -32,9 +32,9 @@ Row and cell serialization are defined by `rows.*` and the marshaller types (`db
 
 Index and Summary provide navigation primitives: `IndexSummary` samples `RowIndexEntry` positions for efficient seeks into `Index.db` and then `Data.db`.
 
-## Walkthrough: Header CRC32 Validation (Cassandra 5.0+)
+## Walkthrough: Header CRC32 Validation (Legacy formats only)
 
-Some Cassandra 5.0 SSTables prepend a 4-byte CRC32 checksum to protect header integrity. This walkthrough demonstrates detection and validation using real test data.
+Some legacy (non-NB) SSTable components may prepend a 4-byte CRC32 checksum to protect header integrity. NB format does not use header CRCs. This walkthrough demonstrates detection and validation using real test data for legacy/BIG family artifacts where present.
 
 ### Real Example: collection_clustering_table
 
@@ -201,4 +201,21 @@ pub async fn parse_header_with_validation(
 - Cassandra 5.0: `SSTableReader`, `IndexSummary`, `RowIndexEntry`, `SerializationHeader` (see Source Map)
 - CQLite: Header CRC32 validation in `cqlite-core/src/storage/sstable/reader/header.rs`
 - CRC32 library: `crc32fast` crate (https://docs.rs/crc32fast/)
+
+## CLI examples
+
+Minimal commands against a sample generation:
+
+```bash
+# Inspect statistics and Bloom FPR target
+sstablemetadata nb-1-big-Statistics.db
+
+# Dump index/summary entries (trimmed)
+sstabledump nb-1-big-Index.db | head -n 50
+
+# Verify digest over components (use Cassandra’s verifier or equivalent)
+sstableverify /var/lib/cassandra/data/ks/table-uuid/
+```
+
+Align outputs with the toy `test_basic/simple_table` used in examples elsewhere in this guide.
 

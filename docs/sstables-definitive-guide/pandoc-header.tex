@@ -1,24 +1,12 @@
-% Font configuration with fallbacks for symbols and box drawing
-\usepackage{fontspec}
-% Use HarfBuzz renderer for better glyph fallback
-\defaultfontfeatures{Renderer=HarfBuzz}
-\setmainfont{Noto Sans}[
-  Scale=MatchLowercase,
-  Ligatures=TeX,
-]
-\setsansfont{Noto Sans}[
-  Scale=MatchLowercase,
-]
-\setmonofont{Noto Sans Mono}[
-  Scale=MatchLowercase,
-]
-% Fallbacks for symbols (arrows, math) and box drawing
-\newfontfamily\symbolsfont{Noto Sans Symbols 2}
-\newfontfamily\fallbackmono{Noto Sans Mono}
-% Map common Unicode to LaTeX-friendly forms when needed
-\usepackage{newunicodechar}
-% Prefer pulling glyphs directly from the symbols font to avoid missing glyph warnings
-\newunicodechar{→}{{\symbolsfont\symbol{"2192}}}
-\newunicodechar{≤}{{\symbolsfont\symbol{"2264}}}
-\newunicodechar{≈}{{\symbolsfont\symbol{"2248}}}
-\DeclareTextFontCommand{\textsymbols}{\symbolsfont}
+% Pandoc LaTeX header for SSTables: The Definitive Guide
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+\usepackage{bookmark}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+% Allow long URLs to break
+\PassOptionsToPackage{hyphens}{url}
+\usepackage{url}
