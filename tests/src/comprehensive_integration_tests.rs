@@ -462,9 +462,8 @@ impl ComprehensiveIntegrationTestSuite {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let storage = Arc::new(
-            StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?,
-        );
+        let storage =
+            Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
         let schema_manager = Arc::new(SchemaManager::new(temp_dir.path()).await?);
 
         // Create a test schema - simplified for testing
@@ -507,9 +506,8 @@ impl ComprehensiveIntegrationTestSuite {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let storage = Arc::new(
-            StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?,
-        );
+        let storage =
+            Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
 
         let table_id = TableId::new("test_storage");
 

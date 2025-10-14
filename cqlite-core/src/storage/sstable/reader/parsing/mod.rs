@@ -16,6 +16,7 @@ mod value_parsing;
 // No explicit re-exports needed since they're all impl blocks on SSTableReader
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::{
     schema::{ClusteringColumn, Column, KeyColumn, TableSchema},
@@ -23,6 +24,65 @@ use crate::{
 };
 
 use super::{super::row_cell_state_machine::ParsedRow, types::SSTableReader};
+
+/// Extract keyspace and table name from SSTable directory path
+///
+/// SSTable paths follow Cassandra convention:
+/// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`
+///
+/// # Arguments
+/// * `path` - Path to the SSTable Data.db file
+///
+/// # Returns
+/// * `Ok((keyspace, table_name))` - Extracted names
+/// * `Err(Error::Schema)` - If path doesn't match expected format
+///
+/// # Examples
+/// ```ignore
+/// let path = Path::new("/data/test_basic/simple_table-abc/nb-1-big-Data.db");
+/// let (keyspace, table) = extract_keyspace_table_from_path(path)?;
+/// assert_eq!(keyspace, "test_basic");
+/// assert_eq!(table, "simple_table");
+/// ```
+fn extract_keyspace_table_from_path(path: &Path) -> Result<(String, String)> {
+    // Get parent directory containing table_name-uuid
+    let table_dir = path
+        .parent()
+        .ok_or_else(|| Error::schema("SSTable path has no parent directory"))?;
+
+    // Extract table directory name
+    let table_dir_name = table_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Error::schema("Invalid table directory name"))?;
+
+    // Split on last hyphen to handle table names containing hyphens
+    // Format: "table_name-uuid" or "user-profiles-abc123"
+    let table_name = table_dir_name
+        .rsplit_once('-')
+        .ok_or_else(|| {
+            Error::schema(format!(
+                "Table directory '{}' does not match 'tablename-uuid' format",
+                table_dir_name
+            ))
+        })?
+        .0
+        .to_string();
+
+    // Get keyspace directory (parent of table directory)
+    let keyspace_dir = table_dir
+        .parent()
+        .ok_or_else(|| Error::schema("Table directory has no parent (keyspace) directory"))?;
+
+    // Extract keyspace name
+    let keyspace = keyspace_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Error::schema("Invalid keyspace directory name"))?
+        .to_string();
+
+    Ok((keyspace, table_name))
+}
 
 impl SSTableReader {
     /// Get table schema using three-tier lookup strategy
@@ -53,10 +113,24 @@ impl SSTableReader {
                     use futures::executor::block_on;
 
                     let registry = block_on(registry_rwlock.read());
-                    let table_name = &self.header.table_name;
-                    let keyspace = &self.header.keyspace;
 
-                    match block_on(registry.get_schema(keyspace, table_name)) {
+                    // Extract keyspace/table from SSTable path (authoritative source)
+                    // Directory structure: {keyspace}/{table_name}-{uuid}/Data.db
+                    let (keyspace, table_name) = match extract_keyspace_table_from_path(
+                        &self.file_path,
+                    ) {
+                        Ok(names) => names,
+                        Err(e) => {
+                            eprintln!(
+                                "[DEBUG get_table_schema] Failed to extract names from path {}: {}. Falling back to header names.",
+                                self.file_path.display(), e
+                            );
+                            // Fallback to header names if path parsing fails
+                            (self.header.keyspace.clone(), self.header.table_name.clone())
+                        }
+                    };
+
+                    match block_on(registry.get_schema(&keyspace, &table_name)) {
                         Ok(schema) => {
                             eprintln!(
                                 "[DEBUG get_table_schema] Using schema from registry for {}.{}",
@@ -81,13 +155,25 @@ impl SSTableReader {
         #[cfg(not(feature = "state_machine"))]
         {
             if let Some(registry) = self.schema_registry.as_ref() {
-                let table_name = &self.header.table_name;
-                let keyspace = &self.header.keyspace;
+                // Extract keyspace/table from SSTable path (authoritative source)
+                // Directory structure: {keyspace}/{table_name}-{uuid}/Data.db
+                let (keyspace, table_name) = match extract_keyspace_table_from_path(&self.file_path)
+                {
+                    Ok(names) => names,
+                    Err(e) => {
+                        eprintln!(
+                            "[DEBUG get_table_schema] Failed to extract names from path {}: {}. Falling back to header names.",
+                            self.file_path.display(), e
+                        );
+                        // Fallback to header names if path parsing fails
+                        (self.header.keyspace.clone(), self.header.table_name.clone())
+                    }
+                };
 
                 // Non-state_machine SchemaRegistry doesn't have async get_schema method
                 // This path is currently not implemented for non-async registries
                 eprintln!("[DEBUG get_table_schema] Schema registry lookup not available in non-state_machine builds");
-                let _ = (registry, keyspace, table_name); // Avoid unused variable warnings
+                let _ = (registry, &keyspace, &table_name); // Avoid unused variable warnings
             }
         }
 
@@ -296,5 +382,72 @@ impl SSTableReader {
 
         // Parse the partition data
         self.parse_partition_data(&data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_extract_keyspace_table_standard_format() {
+        // Standard Cassandra format
+        let path = Path::new("/data/sstables/test_basic/simple_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db");
+        let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
+        assert_eq!(keyspace, "test_basic");
+        assert_eq!(table, "simple_table");
+    }
+
+    #[test]
+    fn test_extract_keyspace_table_with_hyphens() {
+        // Table name contains hyphens
+        let path = Path::new("/data/sstables/my_keyspace/user-profiles-xyz789/nb-1-big-Data.db");
+        let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
+        assert_eq!(keyspace, "my_keyspace");
+        assert_eq!(table, "user-profiles");
+    }
+
+    #[test]
+    fn test_extract_keyspace_table_real_test_data() {
+        // Real path from test-data
+        let path = Path::new("/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804/nb-1-big-Data.db");
+        let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
+        assert_eq!(keyspace, "test_basic");
+        assert_eq!(table, "simple_table");
+    }
+
+    #[test]
+    fn test_extract_keyspace_table_collections() {
+        // Collections table from test-data
+        let path = Path::new("test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db");
+        let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
+        assert_eq!(keyspace, "test_collections");
+        assert_eq!(table, "collection_table");
+    }
+
+    #[test]
+    fn test_extract_keyspace_table_invalid_no_parent() {
+        // Invalid path - no parent directory
+        let path = Path::new("/Data.db");
+        let result = extract_keyspace_table_from_path(path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_keyspace_table_invalid_format() {
+        // Invalid format - no hyphen in table directory
+        let path = Path::new("/data/keyspace/tablename/Data.db");
+        let result = extract_keyspace_table_from_path(path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_keyspace_table_relative_path() {
+        // Relative path (should work)
+        let path = Path::new("test_basic/simple_table-abc123/nb-1-big-Data.db");
+        let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
+        assert_eq!(keyspace, "test_basic");
+        assert_eq!(table, "simple_table");
     }
 }

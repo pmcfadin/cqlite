@@ -49,7 +49,8 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
     let platform = Arc::new(Platform::new(&config).await?);
 
     // Initialize storage engine
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
 
     // Initialize schema manager
     let schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
@@ -194,7 +195,8 @@ async fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
 
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
     let _schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
     let schema_config = cqlite_core::schema::SchemaDiscoveryConfig::default();
     let _schema_engine = Arc::new(
@@ -236,7 +238,8 @@ async fn test_performance_scalability() -> Result<(), Box<dyn std::error::Error>
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
 
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
 
     let table_id = TableId::new("performance_test");
 
@@ -303,7 +306,8 @@ async fn test_concurrent_operations() -> Result<(), Box<dyn std::error::Error>> 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
 
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
 
     let table_id = TableId::new("concurrent_test");
 
@@ -459,7 +463,8 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
 
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
 
     let table_id = TableId::new("large_dataset_test");
 
@@ -609,7 +614,8 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
 
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
 
     let table_id = TableId::new("concurrent_round_trip_test");
 
@@ -769,7 +775,8 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
 
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
 
     let table_id = TableId::new("edge_cases_test");
 
@@ -1136,7 +1143,8 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     let temp_dir = TempDir::new()?;
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
     let _schema_manager = Arc::new(cqlite_core::schema::SchemaManager::new(temp_dir.path()).await?);
     let schema_config = cqlite_core::schema::SchemaDiscoveryConfig::default();
     let _schema_engine = Arc::new(
@@ -1369,7 +1377,8 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
     let temp_dir = TempDir::new()?;
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
-    let storage = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+    let storage =
+        Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
 
     let table_id = TableId::new("sstable_test");
 
