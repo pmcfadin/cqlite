@@ -76,23 +76,19 @@ impl SSTableReader {
         if use_state_machine {
             eprintln!("[DEBUG SSTableReader::parse_block_entries] Using state machine for Cassandra 5+ format");
 
-            // V5.0 formats require schema for correct parsing
-            if self.schema.is_none() {
-                return Err(Error::schema(
-                    format!(
-                        "Cassandra 5.0 format ({:?}) requires schema for parsing, but schema extraction \
-                         from SSTable header failed or schema not available. This typically indicates \
-                         a malformed header or unsupported format variant.",
-                        self.header.cassandra_version
-                    )
-                ));
+            // Log schema availability - NB format files may not have embedded schema
+            if self.schema.is_some() {
+                eprintln!(
+                    "[DEBUG SSTableReader::parse_block_entries] Schema available: {}.{}",
+                    self.schema.as_ref().unwrap().keyspace,
+                    self.schema.as_ref().unwrap().table
+                );
+            } else {
+                eprintln!(
+                    "[DEBUG SSTableReader::parse_block_entries] No schema in header for {:?}, will use basic state machine",
+                    self.header.cassandra_version
+                );
             }
-
-            eprintln!(
-                "[DEBUG SSTableReader::parse_block_entries] Schema available: {}.{}",
-                self.schema.as_ref().unwrap().keyspace,
-                self.schema.as_ref().unwrap().table
-            );
 
             let result = self.parse_block_entries_with_state_machine(&data);
             match &result {
