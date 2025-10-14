@@ -238,7 +238,7 @@ async fn test_scan_with_mixed_sizes() {
     // Call scan() which should detect size=0 entries and use sequential fallback
     // This triggers the fallback path in data_access.rs lines 86-92
     let table_id = TableId::from("test");
-    let result = reader.scan(&table_id, None, None, Some(10)).await;
+    let result = reader.scan(&table_id, None, None, Some(10), None).await;
 
     assert!(
         result.is_ok(),
@@ -304,7 +304,7 @@ async fn test_sequential_scan_performance() {
     // Time the scan operation
     let table_id = TableId::from("test");
     let start = std::time::Instant::now();
-    let result = reader.scan(&table_id, None, None, Some(100)).await;
+    let result = reader.scan(&table_id, None, None, Some(100), None).await;
     let elapsed = start.elapsed();
 
     assert!(

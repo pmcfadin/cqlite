@@ -560,7 +560,7 @@ impl OptimizedQueryExecutor {
             .ok_or_else(|| Error::query_execution("No index selected".to_string()))?;
 
         // For now, fall back to optimized scan
-        let scan_results = self.storage.scan(table, None, None, None).await?;
+        let scan_results = self.storage.scan(table, None, None, None, None).await?;
 
         let mut rows = Vec::new();
         for (row_key, row_data) in scan_results {
@@ -586,7 +586,7 @@ impl OptimizedQueryExecutor {
         
         let (start_key, end_key) = self.optimize_range_bounds(&range_conditions)?;
 
-        let scan_results = self.storage.scan(table, start_key.as_ref(), end_key.as_ref(), None).await?;
+        let scan_results = self.storage.scan(table, start_key.as_ref(), end_key.as_ref(), None, None).await?;
 
         let mut rows = Vec::new();
         for (row_key, row_data) in scan_results {
@@ -606,7 +606,7 @@ impl OptimizedQueryExecutor {
             .as_ref()
             .ok_or_else(|| Error::query_execution("Missing table in plan".to_string()))?;
 
-        let scan_results = self.storage.scan(table, None, None, None).await?;
+        let scan_results = self.storage.scan(table, None, None, None, None).await?;
 
         let mut rows = Vec::new();
         for (row_key, row_data) in scan_results {

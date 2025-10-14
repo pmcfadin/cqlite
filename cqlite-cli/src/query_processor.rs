@@ -342,7 +342,7 @@ impl CQLQueryProcessor {
         
         // Perform scan
         let scan_results = self.storage_engine
-            .scan(table_id, start_key.as_ref(), end_key.as_ref(), Some(limit * 2))
+            .scan(table_id, start_key.as_ref(), end_key.as_ref(), Some(limit * 2), None)
             .await?;
 
         metrics.sstables_scanned += 1;
@@ -373,7 +373,7 @@ impl CQLQueryProcessor {
         metrics: &mut QueryPerformanceMetrics,
     ) -> Result<Vec<(cqlite_core::RowKey, Value)>> {
         let results = self.storage_engine
-            .scan(table_id, None, None, Some(limit))
+            .scan(table_id, None, None, Some(limit), None)
             .await?;
 
         metrics.sstables_scanned += 1;

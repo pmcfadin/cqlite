@@ -15,10 +15,36 @@ use super::super::{
 };
 
 impl SSTableReader {
+    /// Parse block entries with optional schema parameter
+    ///
+    /// This method provides schema-aware parsing when a schema is provided via the parameter.
+    /// It delegates to the four-tier schema lookup strategy in `get_table_schema()`.
+    ///
+    /// # Arguments
+    /// * `block_data` - Raw block data to parse
+    /// * `schema` - Optional schema from query executor (highest priority in lookup chain)
+    ///
+    /// # Schema Resolution Strategy
+    /// The schema parameter is passed to `get_table_schema()` which implements:
+    /// 0. Provided schema (from this parameter) - highest priority
+    /// 1. SSTable header schema (V5.0+ formats)
+    /// 2. Schema registry lookup (external schema files)
+    /// 3. Header-constructed fallback schema
+    pub(in crate::storage::sstable::reader) fn parse_block_entries_with_schema(
+        &self,
+        block_data: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(TableId, RowKey, Value)>> {
+        // Pass the provided schema through to the parsing logic
+        // This schema parameter flows through the call chain to get_table_schema()
+        self.parse_block_entries(block_data, schema)
+    }
+
     /// Parse block entries from decompressed block data
     pub(in crate::storage::sstable::reader) fn parse_block_entries(
         &self,
         block_data: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(TableId, RowKey, Value)>> {
         eprintln!("[DEBUG SSTableReader::parse_block_entries] Starting parse");
         eprintln!(
@@ -90,7 +116,7 @@ impl SSTableReader {
                 );
             }
 
-            let result = self.parse_block_entries_with_state_machine(&data);
+            let result = self.parse_block_entries_with_state_machine(&data, schema);
             match &result {
                 Ok(entries) => {
                     eprintln!("[DEBUG SSTableReader::parse_block_entries] State machine returned {} entries", entries.len());
@@ -163,7 +189,7 @@ impl SSTableReader {
             // Parse compound/composite keys properly
             let key_data = &data[offset..offset + key_len];
             let key = if key_len > 0 {
-                self.parse_composite_key(key_data)?
+                self.parse_composite_key(key_data, schema)?
             } else {
                 RowKey::new(Vec::new()) // Empty key
             };
@@ -197,7 +223,7 @@ impl SSTableReader {
                 )));
             } else {
                 let value_data = &data[offset..offset + value_len];
-                self.parse_column_value_enhanced(value_data, &table_id, &key)?
+                self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?
             };
             offset += value_len;
 
@@ -211,6 +237,7 @@ impl SSTableReader {
     pub(in crate::storage::sstable::reader) fn parse_block_entries_with_state_machine(
         &self,
         data: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(TableId, RowKey, Value)>> {
         eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Starting");
         eprintln!(
@@ -226,14 +253,14 @@ impl SSTableReader {
             eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Processing at offset {}/{}", offset, data.len());
 
             // Create state machine with schema information if available
-            let has_schema = self.get_table_schema().is_some();
+            let has_schema = self.get_table_schema(schema).is_some();
             eprintln!(
                 "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Has schema: {}",
                 has_schema
             );
 
             let state_machine_result: Result<RowCellStateMachine> = if let Some(_schema) =
-                self.get_table_schema()
+                self.get_table_schema(schema)
             {
                 eprintln!(
                     "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Schema found"
@@ -368,7 +395,7 @@ impl SSTableReader {
                 "🔄 Falling back to legacy parsing for remaining {} bytes",
                 data.len() - offset
             );
-            let legacy_entries = self.parse_block_entries_legacy(&data[offset..])?;
+            let legacy_entries = self.parse_block_entries_legacy(&data[offset..], schema)?;
             entries.extend(legacy_entries);
         }
 
@@ -424,6 +451,7 @@ impl SSTableReader {
     pub(in crate::storage::sstable::reader) fn parse_block_entries_legacy(
         &self,
         data: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(TableId, RowKey, Value)>> {
         let mut entries = Vec::new();
         let mut offset = 0;
@@ -483,7 +511,7 @@ impl SSTableReader {
             // Parse compound/composite keys properly
             let key_data = &data[offset..offset + key_len];
             let key = if key_len > 0 {
-                self.parse_composite_key(key_data)?
+                self.parse_composite_key(key_data, schema)?
             } else {
                 RowKey::new(Vec::new()) // Empty key
             };
@@ -517,7 +545,7 @@ impl SSTableReader {
                 )));
             } else {
                 let value_data = &data[offset..offset + value_len];
-                self.parse_column_value_enhanced(value_data, &table_id, &key)?
+                self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?
             };
             offset += value_len;
 

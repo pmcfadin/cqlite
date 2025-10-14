@@ -538,6 +538,15 @@ impl SSTableManager {
     }
 
     /// Scan a range of keys from all SSTables with proper tombstone merging
+    ///
+    /// # Arguments
+    /// * `table_id` - The table to scan
+    /// * `start_key` - Optional start key for range scan
+    /// * `end_key` - Optional end key for range scan
+    /// * `limit` - Optional limit on number of results
+    /// * `schema` - Optional table schema for schema-aware parsing. When provided,
+    ///   enables accurate type detection and avoids heuristic-based parsing.
+    ///   Strongly recommended for Cassandra 5.0+ formats.
     #[cfg(feature = "tombstones")]
     pub async fn scan(
         &self,
@@ -545,13 +554,16 @@ impl SSTableManager {
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
         limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
         let readers = self.readers.read().await;
         let mut key_values = std::collections::HashMap::new();
 
         // Collect results from all SSTables, grouping by key
         for reader in readers.values() {
-            let results = reader.scan(table_id, start_key, end_key, None).await?;
+            let results = reader
+                .scan(table_id, start_key, end_key, None, schema)
+                .await?;
 
             for (row_key, value) in results {
                 let generation = reader.generation;
@@ -595,6 +607,15 @@ impl SSTableManager {
     }
 
     /// Scan a range of keys from all SSTables (simple version without tombstone merging)
+    ///
+    /// # Arguments
+    /// * `table_id` - The table to scan
+    /// * `start_key` - Optional start key for range scan
+    /// * `end_key` - Optional end key for range scan
+    /// * `limit` - Optional limit on number of results
+    /// * `schema` - Optional table schema for schema-aware parsing. When provided,
+    ///   enables accurate type detection and avoids heuristic-based parsing.
+    ///   Strongly recommended for Cassandra 5.0+ formats.
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan(
         &self,
@@ -602,6 +623,7 @@ impl SSTableManager {
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
         limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
         let table_readers = self.table_readers.read().await;
 
@@ -628,7 +650,9 @@ impl SSTableManager {
                     reader.file_path
                 );
 
-                let results = reader.scan(table_id, start_key, end_key, None).await?;
+                let results = reader
+                    .scan(table_id, start_key, end_key, None, schema)
+                    .await?;
 
                 eprintln!(
                     "[DEBUG SSTableManager::scan] Reader returned {} results",

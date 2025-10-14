@@ -128,7 +128,7 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
 
     // Test 1: Full table scan
     let start_time = Instant::now();
-    let full_results = reader.scan(&table_id, None, None, None).await?;
+    let full_results = reader.scan(&table_id, None, None, None, None).await?;
     let full_scan_duration = start_time.elapsed();
 
     println!(
@@ -152,7 +152,9 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
     let scan_limits = vec![1, 3, 10];
     for limit in scan_limits {
         let start_time = Instant::now();
-        let limited_results = reader.scan(&table_id, None, None, Some(limit)).await?;
+        let limited_results = reader
+            .scan(&table_id, None, None, Some(limit), None)
+            .await?;
         let limited_duration = start_time.elapsed();
 
         assert!(
@@ -183,7 +185,7 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
 
     let start_time = Instant::now();
     let range_results = reader
-        .scan(&table_id, Some(&start_key), Some(&end_key), None)
+        .scan(&table_id, Some(&start_key), Some(&end_key), None, None)
         .await?;
     let range_duration = start_time.elapsed();
 
@@ -207,7 +209,7 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
 
     let start_time = Instant::now();
     let empty_results = reader
-        .scan(&table_id, Some(&empty_start), Some(&empty_end), None)
+        .scan(&table_id, Some(&empty_start), Some(&empty_end), None, None)
         .await?;
     let empty_duration = start_time.elapsed();
 
@@ -282,7 +284,7 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
 
     // Test 1: Read through decompression pipeline
     let start_time = Instant::now();
-    let results = reader.scan(&table_id, None, None, Some(20)).await?;
+    let results = reader.scan(&table_id, None, None, Some(20), None).await?;
     let decompression_duration = start_time.elapsed();
 
     println!(
@@ -359,7 +361,7 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
 
     for i in 0..stress_operations {
         let start_time = Instant::now();
-        let _results = reader.scan(&table_id, None, None, Some(5)).await?;
+        let _results = reader.scan(&table_id, None, None, Some(5), None).await?;
         let duration = start_time.elapsed();
         stress_times.push(duration);
 
@@ -432,7 +434,7 @@ async fn test_cross_operation_validation() -> Result<()> {
     let table_id = TableId::new("test_keyspace.test_table");
 
     // Get some data through scan
-    let scan_results = reader.scan(&table_id, None, None, Some(10)).await?;
+    let scan_results = reader.scan(&table_id, None, None, Some(10), None).await?;
 
     if scan_results.is_empty() {
         println!("  ℹ️  No data available for cross-validation");
@@ -474,7 +476,7 @@ async fn test_cross_operation_validation() -> Result<()> {
         let last_key = &scan_results[scan_results.len() - 1].0;
 
         let range_results = reader
-            .scan(&table_id, Some(first_key), Some(last_key), None)
+            .scan(&table_id, Some(first_key), Some(last_key), None, None)
             .await?;
 
         // All scan results should be contained in range results

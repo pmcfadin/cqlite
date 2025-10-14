@@ -123,7 +123,7 @@ impl SSTableReader {
         }
 
         // Fallback to existing scan method
-        self.sequential_scan(&TableId::from("default"), None, None, None)
+        self.sequential_scan(&TableId::from("default"), None, None, None, None)
             .await
     }
 

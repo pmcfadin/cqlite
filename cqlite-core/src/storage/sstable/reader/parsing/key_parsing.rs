@@ -15,13 +15,14 @@ impl SSTableReader {
     pub(in crate::storage::sstable::reader) fn parse_composite_key(
         &self,
         key_data: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<RowKey> {
         if key_data.is_empty() {
             return Ok(RowKey::new(Vec::new()));
         }
 
         // SCHEMA-DRIVEN KEY PARSING: Use exact comparator types when available
-        if let Some(schema) = self.get_table_schema() {
+        if let Some(schema) = self.get_table_schema(schema) {
             return self.parse_key_with_schema(key_data, &schema);
         }
 

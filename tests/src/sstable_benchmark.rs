@@ -215,7 +215,7 @@ impl SSTableBenchmark {
         // Sequential read test
         let seq_start = SystemTime::now();
         let _results = reader
-            .scan(&table_id, None, None, Some(bench_config.entry_count))
+            .scan(&table_id, None, None, Some(bench_config.entry_count), None)
             .await?;
         let sequential_duration = seq_start.elapsed().unwrap();
 

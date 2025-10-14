@@ -192,8 +192,36 @@ impl SelectExecutor {
             table, predicates
         );
 
+        // Parse table ID to extract keyspace and table name
+        let (keyspace, table_name) = self.parse_table_id(table);
+
+        // Look up schema from SchemaManager
+        let schema_opt = self
+            ._schema
+            .find_schema_by_table(&keyspace, &table_name)
+            .await;
+
+        if let Some(ref schema) = schema_opt {
+            eprintln!(
+                "[EXECUTOR] Found schema for {}.{} with {} columns",
+                schema.keyspace,
+                schema.table,
+                schema.columns.len()
+            );
+        } else {
+            eprintln!(
+                "[EXECUTOR] No schema found for {}.{}, proceeding without schema-aware parsing",
+                keyspace.as_deref().unwrap_or("unknown"),
+                table_name
+            );
+        }
+
         // Use StorageEngine's scan method to get all rows for the table
-        let scan_results = self.storage.scan(table, None, None, None).await?;
+        // Pass schema if available, None otherwise
+        let scan_results = self
+            .storage
+            .scan(table, None, None, None, schema_opt.as_ref())
+            .await?;
 
         eprintln!("[EXECUTOR] Scan returned {} rows", scan_results.len());
 
@@ -994,6 +1022,19 @@ impl SelectExecutor {
             FromClause::Table(table_id) | FromClause::TableAlias(table_id, _) => {
                 Ok(table_id.clone())
             } // JOIN operations are not supported in Cassandra CQL
+        }
+    }
+
+    /// Parse table ID to extract keyspace and table name
+    /// TableId is typically formatted as "keyspace.table" or just "table"
+    fn parse_table_id(&self, table_id: &TableId) -> (Option<String>, String) {
+        let table_str = table_id.name();
+        if let Some(dot_pos) = table_str.rfind('.') {
+            let keyspace = table_str[..dot_pos].to_string();
+            let table_name = table_str[dot_pos + 1..].to_string();
+            (Some(keyspace), table_name)
+        } else {
+            (None, table_str.to_string())
         }
     }
 

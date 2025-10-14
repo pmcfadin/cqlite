@@ -410,7 +410,7 @@ async fn test_golden_path_summary_index_range_efficiency() -> Result<()> {
 
         let start_time = Instant::now();
         let results = reader
-            .scan(&table_id, Some(&start_key), Some(&end_key), limit)
+            .scan(&table_id, Some(&start_key), Some(&end_key), limit, None)
             .await?;
         let scan_duration = start_time.elapsed();
 
@@ -633,7 +633,7 @@ async fn test_golden_path_summary_index_consistency_validation() -> Result<()> {
     // Test: Cross-validate summary, index, and actual data consistency
 
     // Perform full scan to get actual data
-    let full_scan_results = reader.scan(&table_id, None, None, Some(50)).await?;
+    let full_scan_results = reader.scan(&table_id, None, None, Some(50), None).await?;
 
     if !full_scan_results.is_empty() {
         println!(
@@ -669,7 +669,7 @@ async fn test_golden_path_summary_index_consistency_validation() -> Result<()> {
             let range_end = &full_scan_results[mid_point].0;
 
             let range_results = reader
-                .scan(&table_id, Some(range_start), Some(range_end), None)
+                .scan(&table_id, Some(range_start), Some(range_end), None, None)
                 .await?;
 
             // All range results should be within the specified bounds

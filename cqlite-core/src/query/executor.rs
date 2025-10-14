@@ -226,7 +226,7 @@ impl QueryExecutor {
         let mut rows = Vec::new();
 
         // Use storage engine's scan capability (simplified range scan)
-        let range_results = self.storage.scan(table, None, None, None).await?;
+        let range_results = self.storage.scan(table, None, None, None, None).await?;
 
         // Process results
         for (row_key, row_data) in range_results {
@@ -315,7 +315,7 @@ impl QueryExecutor {
             .ok_or_else(|| Error::query_execution("No condition found for index".to_string()))?;
 
         // Simplified secondary index scan using basic scan
-        let scan_results = self.storage.scan(table, None, None, None).await?;
+        let scan_results = self.storage.scan(table, None, None, None, None).await?;
 
         // Process results and filter by condition
         for (row_key, row_data) in scan_results {
@@ -413,7 +413,7 @@ impl QueryExecutor {
         }
 
         // Simplified composite index scan using basic scan
-        let scan_results = self.storage.scan(table, None, None, None).await?;
+        let scan_results = self.storage.scan(table, None, None, None, None).await?;
 
         // Process results
         for (row_key, row_data) in scan_results {
@@ -458,7 +458,7 @@ impl QueryExecutor {
 
             let handle = tokio::spawn(async move {
                 // Worker scans a portion of the table (simplified)
-                let partition_result = storage.scan(&table, None, None, None).await;
+                let partition_result = storage.scan(&table, None, None, None, None).await;
 
                 match partition_result {
                     Ok(results) => {
@@ -501,7 +501,7 @@ impl QueryExecutor {
         let mut rows = Vec::new();
 
         // Use storage engine's sequential scan
-        let scan_results = self.storage.scan(table, None, None, None).await?;
+        let scan_results = self.storage.scan(table, None, None, None, None).await?;
 
         // Process results
         for (row_key, row_data) in scan_results {

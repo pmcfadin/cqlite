@@ -237,6 +237,7 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
             Some(&start_partition),
             Some(&end_partition),
             Some(100),
+            None,
         )
         .await?;
     let scan_duration = start_time.elapsed();
@@ -322,6 +323,7 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
             Some(&partition_start),
             Some(&partition_end),
             Some(50),
+            None,
         )
         .await?;
     let range_duration = start_time.elapsed();
@@ -457,7 +459,13 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
 
     let start_time = Instant::now();
     let range_results = reader
-        .scan(&table_id, Some(&range_start), Some(&range_end), Some(25))
+        .scan(
+            &table_id,
+            Some(&range_start),
+            Some(&range_end),
+            Some(25),
+            None,
+        )
         .await?;
     let range_duration = start_time.elapsed();
 
@@ -649,7 +657,13 @@ async fn test_golden_path_partition_integration_validation() -> Result<()> {
 
     let scan_start_time = Instant::now();
     let scan_results = reader
-        .scan(&table_id, Some(&scan_start), Some(&scan_end), Some(20))
+        .scan(
+            &table_id,
+            Some(&scan_start),
+            Some(&scan_end),
+            Some(20),
+            None,
+        )
         .await?;
     let scan_duration = scan_start_time.elapsed();
 

@@ -153,7 +153,7 @@ impl PerformanceBenchmarks {
         let memory_start = get_memory_usage();
 
         // Test sequential scan
-        match reader.scan(&table_id, None, None, Some(100)).await {
+        match reader.scan(&table_id, None, None, Some(100), None).await {
             Ok(results) => {
                 ops_count += results.len();
                 println!("    ✅ Sequential scan: {} results", results.len());

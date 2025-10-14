@@ -120,7 +120,7 @@ async fn test_golden_path_full_table_scan() -> Result<()> {
 
     // Test: Full table scan without limits
     let start_time = Instant::now();
-    let results = reader.scan(&table_id, None, None, None).await?;
+    let results = reader.scan(&table_id, None, None, None, None).await?;
     let scan_duration = start_time.elapsed();
 
     // Assertions: Basic functionality
@@ -159,7 +159,7 @@ async fn test_golden_path_range_scan_with_boundaries() -> Result<()> {
     // Test: Range scan with start and end boundaries
     let start_time = Instant::now();
     let results = reader
-        .scan(&table_id, Some(&start_key), Some(&end_key), None)
+        .scan(&table_id, Some(&start_key), Some(&end_key), None, None)
         .await?;
     let scan_duration = start_time.elapsed();
 
@@ -183,7 +183,7 @@ async fn test_golden_path_range_scan_with_boundaries() -> Result<()> {
 
     // Test edge case: scan with start > end (should return empty)
     let invalid_results = reader
-        .scan(&table_id, Some(&end_key), Some(&start_key), None)
+        .scan(&table_id, Some(&end_key), Some(&start_key), None, None)
         .await?;
     assert!(
         invalid_results.is_empty(),
@@ -205,7 +205,9 @@ async fn test_golden_path_limited_scan_operations() -> Result<()> {
 
     for limit in test_limits {
         let start_time = Instant::now();
-        let results = reader.scan(&table_id, None, None, Some(limit)).await?;
+        let results = reader
+            .scan(&table_id, None, None, Some(limit), None)
+            .await?;
         let scan_duration = start_time.elapsed();
 
         // Assertions
@@ -255,7 +257,7 @@ async fn test_golden_path_prefix_scan_operations() -> Result<()> {
 
     let start_time = Instant::now();
     let results = reader
-        .scan(&table_id, Some(&start_key), Some(&end_key), None)
+        .scan(&table_id, Some(&start_key), Some(&end_key), None, None)
         .await?;
     let scan_duration = start_time.elapsed();
 
@@ -300,7 +302,7 @@ async fn test_golden_path_scan_performance_benchmarks() -> Result<()> {
 
     for (name, start, end, limit) in scan_operations {
         let start_time = Instant::now();
-        let results = reader.scan(&table_id, start, end, limit).await?;
+        let results = reader.scan(&table_id, start, end, limit, None).await?;
         let duration = start_time.elapsed();
 
         benchmark_results.insert(name, (duration, results.len()));
@@ -342,7 +344,7 @@ async fn test_golden_path_scan_ordering_validation() -> Result<()> {
     let table_id = TableId::new("test_keyspace.test_table");
 
     // Test: Verify scan results are properly ordered
-    let results = reader.scan(&table_id, None, None, Some(50)).await?;
+    let results = reader.scan(&table_id, None, None, Some(50), None).await?;
 
     if results.len() > 1 {
         // Verify ascending order
@@ -389,7 +391,7 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
     let table_id = TableId::new("test_keyspace.test_table");
 
     // Edge case 1: Scan with limit 0
-    let results = reader.scan(&table_id, None, None, Some(0)).await?;
+    let results = reader.scan(&table_id, None, None, Some(0), None).await?;
     assert!(
         results.is_empty(),
         "Scan with limit 0 should return empty results"
@@ -397,12 +399,16 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
 
     // Edge case 2: Scan non-existent table
     let non_existent_table = TableId::new("non_existent.table");
-    let results = reader.scan(&non_existent_table, None, None, None).await?;
+    let results = reader
+        .scan(&non_existent_table, None, None, None, None)
+        .await?;
     // Should not crash, results may be empty
 
     // Edge case 3: Scan with very large limit
     let start_time = Instant::now();
-    let results = reader.scan(&table_id, None, None, Some(1_000_000)).await?;
+    let results = reader
+        .scan(&table_id, None, None, Some(1_000_000), None)
+        .await?;
     let duration = start_time.elapsed();
 
     assert!(
@@ -415,7 +421,7 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
     let empty_start = RowKey::from(b"");
     let empty_end = RowKey::from(b"");
     let results = reader
-        .scan(&table_id, Some(&empty_start), Some(&empty_end), None)
+        .scan(&table_id, Some(&empty_start), Some(&empty_end), None, None)
         .await?;
     // Should handle gracefully
 
@@ -476,7 +482,7 @@ async fn test_golden_path_streaming_scan_operations() -> Result<()> {
         Err(_) => {
             println!("ℹ️  Streaming functionality not available (expected for some readers)");
             // Fallback to regular scan for testing
-            let results = reader.scan(&table_id, None, None, Some(50)).await?;
+            let results = reader.scan(&table_id, None, None, Some(50), None).await?;
             println!("✅ Fallback scan processed {} entries", results.len());
         }
     }
@@ -499,7 +505,7 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
             tokio::spawn(async move {
                 let limit = Some(10 * i);
                 let start_time = Instant::now();
-                let results = reader.scan(&table_id, None, None, limit).await;
+                let results = reader.scan(&table_id, None, None, limit, None).await;
                 let duration = start_time.elapsed();
                 (i, results, duration)
             })
@@ -566,7 +572,7 @@ async fn test_golden_path_scan_integration_validation() -> Result<()> {
 
     // 2. Perform scan and measure comprehensive metrics
     let start_time = Instant::now();
-    let results = reader.scan(&table_id, None, None, Some(25)).await?;
+    let results = reader.scan(&table_id, None, None, Some(25), None).await?;
     let scan_duration = start_time.elapsed();
 
     // 3. Verify reader statistics after scan

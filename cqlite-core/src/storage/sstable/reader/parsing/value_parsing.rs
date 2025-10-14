@@ -20,13 +20,14 @@ impl SSTableReader {
         value_data: &[u8],
         table_id: &TableId,
         key: &RowKey,
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Value> {
         if value_data.is_empty() {
             return Ok(Value::Null);
         }
 
         // Use schema information to determine exact type - NO GUESSING
-        if let Some(schema) = self.get_table_schema() {
+        if let Some(schema) = self.get_table_schema(schema) {
             // Extract column name from key context if possible
             if let Some(column_name) = self.extract_column_name_from_context(table_id, key) {
                 // Find column in schema

@@ -113,7 +113,7 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 4: Test range scan
     println!("Testing range scan...");
-    let scan_results = storage.scan(&table_id, None, None, Some(10)).await?;
+    let scan_results = storage.scan(&table_id, None, None, Some(10), None).await?;
     assert!(!scan_results.is_empty());
     println!("Found {} records in scan", scan_results.len());
 
@@ -173,7 +173,7 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Final verification
-    let final_scan = storage.scan(&table_id, None, None, None).await?;
+    let final_scan = storage.scan(&table_id, None, None, None, None).await?;
     println!("Final scan found {} records", final_scan.len());
     assert!(final_scan.len() >= 4); // At least our original test data
 
@@ -258,7 +258,7 @@ async fn test_performance_scalability() -> Result<(), Box<dyn std::error::Error>
 
     // Test scan performance
     let scan_start = std::time::Instant::now();
-    let scan_results = storage.scan(&table_id, None, None, None).await?;
+    let scan_results = storage.scan(&table_id, None, None, None, None).await?;
     let scan_time = scan_start.elapsed();
 
     println!("Scanned {} records in {:?}", scan_results.len(), scan_time);
@@ -342,7 +342,7 @@ async fn test_concurrent_operations() -> Result<(), Box<dyn std::error::Error>> 
     }
 
     // Verify all records were written
-    let scan_results = storage.scan(&table_id, None, None, None).await?;
+    let scan_results = storage.scan(&table_id, None, None, None, None).await?;
     let expected_count = task_count * records_per_task;
 
     println!(
@@ -547,7 +547,9 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
 
     // Test large-scale query performance
     let query_start = Instant::now();
-    let scan_results = storage.scan(&table_id, None, None, Some(1000)).await?;
+    let scan_results = storage
+        .scan(&table_id, None, None, Some(1000), None)
+        .await?;
     let query_time = query_start.elapsed();
 
     println!("   ✅ Queried 1000 records in {query_time:?}");
@@ -744,7 +746,7 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
     }
 
     // Verify final state consistency
-    let final_scan = storage.scan(&table_id, None, None, None).await?;
+    let final_scan = storage.scan(&table_id, None, None, None, None).await?;
     println!("   ✅ Final scan found {} records", final_scan.len());
 
     // Success criteria: At least 95% operations should succeed
@@ -1354,7 +1356,7 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     println!("   📊 Complex type performance: 100 operations in {perf_time:?}");
 
     // Verify all test data exists
-    let final_scan = storage.scan(&table_id, None, None, None).await?;
+    let final_scan = storage.scan(&table_id, None, None, None, None).await?;
     println!("   ✅ Total records stored: {}", final_scan.len());
     assert!(final_scan.len() >= 106); // Our test records plus performance records
 
@@ -1498,7 +1500,7 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
 
     // Test range scanning
     println!("   Testing range scan operations...");
-    let scan_results = storage.scan(&table_id, None, None, None).await?;
+    let scan_results = storage.scan(&table_id, None, None, None, None).await?;
     assert_eq!(
         scan_results.len(),
         test_data.len(),
@@ -1506,7 +1508,7 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
     );
 
     // Test partial scans
-    let partial_scan = storage.scan(&table_id, None, None, Some(2)).await?;
+    let partial_scan = storage.scan(&table_id, None, None, Some(2), None).await?;
     assert!(partial_scan.len() <= 2, "Partial scan should respect limit");
 
     // Test point lookups with various key types

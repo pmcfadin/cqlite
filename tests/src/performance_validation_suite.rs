@@ -594,7 +594,13 @@ impl PerformanceValidationSuite {
 
             let scan_results = self
                 .storage_engine
-                .scan(table_id, Some(&start_key), Some(&end_key), Some(range_size))
+                .scan(
+                    table_id,
+                    Some(&start_key),
+                    Some(&end_key),
+                    Some(range_size),
+                    None,
+                )
                 .await?;
 
             let elapsed = start.elapsed();

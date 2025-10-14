@@ -283,7 +283,7 @@ async fn test_range_scan_component_integration() -> Result<()> {
 
     // Test 1: Full table scan
     let start_time = Instant::now();
-    let full_results = reader.scan(&table_id, None, None, None).await?;
+    let full_results = reader.scan(&table_id, None, None, None, None).await?;
     let full_scan_duration = start_time.elapsed();
 
     println!(
@@ -301,7 +301,7 @@ async fn test_range_scan_component_integration() -> Result<()> {
 
     // Test 2: Limited range scan
     let start_time = Instant::now();
-    let limited_results = reader.scan(&table_id, None, None, Some(10)).await?;
+    let limited_results = reader.scan(&table_id, None, None, Some(10), None).await?;
     let limited_scan_duration = start_time.elapsed();
 
     println!(
@@ -330,7 +330,7 @@ async fn test_range_scan_component_integration() -> Result<()> {
 
     let start_time = Instant::now();
     let range_results = reader
-        .scan(&table_id, Some(&start_key), Some(&end_key), None)
+        .scan(&table_id, Some(&start_key), Some(&end_key), None, None)
         .await?;
     let range_scan_duration = start_time.elapsed();
 
@@ -389,7 +389,7 @@ async fn test_decompression_component_integration() -> Result<()> {
 
     // Test 2: Read data through decompression pipeline
     let start_time = Instant::now();
-    let results = reader.scan(&table_id, None, None, Some(50)).await?;
+    let results = reader.scan(&table_id, None, None, Some(50), None).await?;
     let decompression_duration = start_time.elapsed();
 
     println!(
@@ -488,7 +488,7 @@ async fn test_end_to_end_component_integration() -> Result<()> {
                 let _result = reader.get(&table_id, &key).await?;
             }
             ("scan", "limited") => {
-                let _results = reader.scan(&table_id, None, None, Some(5)).await?;
+                let _results = reader.scan(&table_id, None, None, Some(5), None).await?;
             }
             ("lookup", "batch") => {
                 for i in 1..=5 {
@@ -500,7 +500,7 @@ async fn test_end_to_end_component_integration() -> Result<()> {
                 let start_key = RowKey::from(&0i32.to_be_bytes()[..]);
                 let end_key = RowKey::from(&10i32.to_be_bytes()[..]);
                 let _results = reader
-                    .scan(&table_id, Some(&start_key), Some(&end_key), None)
+                    .scan(&table_id, Some(&start_key), Some(&end_key), None, None)
                     .await?;
             }
             _ => {}
@@ -540,7 +540,7 @@ async fn test_end_to_end_component_integration() -> Result<()> {
     // );
 
     // Test 5: Cross-validation between get and scan
-    let scan_results = reader.scan(&table_id, None, None, Some(3)).await?;
+    let scan_results = reader.scan(&table_id, None, None, Some(3), None).await?;
     if !scan_results.is_empty() {
         let first_key = &scan_results[0].0;
         let get_result = reader.get(&table_id, first_key).await?;
@@ -613,7 +613,7 @@ async fn test_component_integration_error_handling() -> Result<()> {
     ];
 
     for (case_name, start, end, limit) in invalid_scans {
-        let result = reader.scan(&table_id, start, end, limit).await;
+        let result = reader.scan(&table_id, start, end, limit, None).await;
         match result {
             Ok(results) => {
                 println!(

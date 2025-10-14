@@ -284,12 +284,22 @@ impl StorageEngine {
     }
 
     /// Scan a range of keys
+    ///
+    /// # Arguments
+    /// * `table_id` - The table to scan
+    /// * `start_key` - Optional start key for range scan
+    /// * `end_key` - Optional end key for range scan
+    /// * `limit` - Optional limit on number of results
+    /// * `schema` - Optional table schema for schema-aware parsing. When provided,
+    ///   enables accurate type detection and avoids heuristic-based parsing.
+    ///   Strongly recommended for Cassandra 5.0+ formats.
     pub async fn scan(
         &self,
         table_id: &TableId,
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
         limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
         let mut results = Vec::new();
 
@@ -303,7 +313,7 @@ impl StorageEngine {
         // Scan SSTables and merge with MemTable results
         let sstable_results = self
             .sstables
-            .scan(table_id, start_key, end_key, limit)
+            .scan(table_id, start_key, end_key, limit, schema)
             .await?;
 
         // Merge results, with MemTable taking precedence

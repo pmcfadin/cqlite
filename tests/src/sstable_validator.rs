@@ -642,7 +642,7 @@ impl SSTableValidator {
         let end_key = RowKey::from("key_080");
 
         let results = reader
-            .scan(&table_id, Some(&start_key), Some(&end_key), None)
+            .scan(&table_id, Some(&start_key), Some(&end_key), None, None)
             .await?;
 
         // Should find keys in range: key_030, key_050, key_070
@@ -812,7 +812,7 @@ impl SSTableValidator {
         let reader = SSTableReader::open(&test_path, &self.config, self.platform.clone()).await?;
 
         // Verify we can read all entries
-        let results = reader.scan(&table_id, None, None, None).await?;
+        let results = reader.scan(&table_id, None, None, None, None).await?;
 
         if results.len() != 1000 {
             return Ok(TestResult::failure(

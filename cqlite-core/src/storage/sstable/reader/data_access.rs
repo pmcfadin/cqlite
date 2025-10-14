@@ -45,12 +45,22 @@ impl SSTableReader {
     }
 
     /// Scan a range of keys
+    ///
+    /// # Arguments
+    /// * `table_id` - The table to scan
+    /// * `start_key` - Optional start key for range scan
+    /// * `end_key` - Optional end key for range scan
+    /// * `limit` - Optional limit on number of results
+    /// * `schema` - Optional table schema for schema-aware parsing. When provided,
+    ///   enables accurate type detection and avoids heuristic-based parsing.
+    ///   Strongly recommended for Cassandra 5.0+ formats.
     pub async fn scan(
         &self,
         table_id: &TableId,
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
         limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
         eprintln!("[DEBUG SSTableReader::scan] Starting scan");
         eprintln!(
@@ -61,6 +71,10 @@ impl SSTableReader {
         eprintln!("[DEBUG SSTableReader::scan] Start key: {:?}", start_key);
         eprintln!("[DEBUG SSTableReader::scan] End key: {:?}", end_key);
         eprintln!("[DEBUG SSTableReader::scan] Limit: {:?}", limit);
+        eprintln!(
+            "[DEBUG SSTableReader::scan] Has schema: {}",
+            schema.is_some()
+        );
         eprintln!(
             "[DEBUG SSTableReader::scan] Has index: {}",
             self.index.is_some()
@@ -87,7 +101,7 @@ impl SSTableReader {
             if has_zero_size {
                 eprintln!("[DEBUG SSTableReader::scan] Index reports size=0 for some entries, using sequential scan fallback");
                 return self
-                    .sequential_scan(table_id, start_key, end_key, limit)
+                    .sequential_scan(table_id, start_key, end_key, limit, schema)
                     .await;
             }
 
@@ -121,7 +135,7 @@ impl SSTableReader {
             // Fallback to sequential scan
             eprintln!("[DEBUG SSTableReader::scan] No index, falling back to sequential scan");
             results = self
-                .sequential_scan(table_id, start_key, end_key, limit)
+                .sequential_scan(table_id, start_key, end_key, limit, schema)
                 .await?;
             eprintln!(
                 "[DEBUG SSTableReader::scan] Sequential scan returned {} results",
@@ -152,7 +166,7 @@ impl SSTableReader {
 
         // Read all blocks sequentially
         while let Some(block) = self.read_next_block().await? {
-            let entries = self.parse_block_entries(&block)?;
+            let entries = self.parse_block_entries(&block, None)?;
             results.extend(entries);
         }
 
@@ -292,7 +306,7 @@ impl SSTableReader {
 
         // Sequential scan through blocks
         while let Some(block) = self.read_next_block().await? {
-            let entries = self.parse_block_entries(&block)?;
+            let entries = self.parse_block_entries(&block, None)?;
 
             for (entry_table_id, entry_key, entry_value) in entries {
                 if entry_table_id == *table_id && entry_key == *key {
@@ -318,11 +332,16 @@ impl SSTableReader {
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
         limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
         eprintln!("[DEBUG SSTableReader::sequential_scan] Starting sequential scan");
         eprintln!(
             "[DEBUG SSTableReader::sequential_scan] Table ID: {}",
             table_id
+        );
+        eprintln!(
+            "[DEBUG SSTableReader::sequential_scan] Has schema: {}",
+            schema.is_some()
         );
 
         let mut results = Vec::new();
@@ -353,7 +372,7 @@ impl SSTableReader {
                 block.len()
             );
 
-            let entries = self.parse_block_entries(&block)?;
+            let entries = self.parse_block_entries_with_schema(&block, schema)?;
             eprintln!(
                 "[DEBUG SSTableReader::sequential_scan] Block {} contains {} entries",
                 block_count,

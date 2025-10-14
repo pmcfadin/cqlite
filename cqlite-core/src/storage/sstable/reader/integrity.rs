@@ -79,7 +79,7 @@ impl SSTableReader {
             result.total_blocks_checked += 1;
 
             // Try to parse block entries
-            match self.parse_block_entries(&block_data) {
+            match self.parse_block_entries(&block_data, None) {
                 Ok(entries) => {
                     result.total_entries += entries.len();
                 }

@@ -265,7 +265,7 @@ impl SelectQueryEngine {
         // Execute scan with optimized parameters
         let limit = context.limit.unwrap_or(1000);
         let scan_results = self.storage_engine
-            .scan(&table_id, None, None, Some(limit))
+            .scan(&table_id, None, None, Some(limit), None)
             .await?;
 
         metrics.sstables_accessed = 1;

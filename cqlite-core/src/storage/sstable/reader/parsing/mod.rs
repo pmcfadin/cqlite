@@ -85,13 +85,26 @@ fn extract_keyspace_table_from_path(path: &Path) -> Result<(String, String)> {
 }
 
 impl SSTableReader {
-    /// Get table schema using three-tier lookup strategy
+    /// Get table schema using four-tier lookup strategy
     ///
     /// This method implements a fallback chain for resolving table schemas:
+    /// 0. **Provided Schema**: Use schema passed from query executor (highest priority)
     /// 1. **SSTable Header**: Check `self.schema` (extracted during SSTable opening from V5.0+ headers)
     /// 2. **Schema Registry**: Look up schema from external registry (loaded via --schema flag)
     /// 3. **Header Construction**: Build basic schema from header column metadata (fallback)
-    pub(in crate::storage::sstable::reader) fn get_table_schema(&self) -> Option<TableSchema> {
+    pub(in crate::storage::sstable::reader) fn get_table_schema(
+        &self,
+        provided_schema: Option<&TableSchema>,
+    ) -> Option<TableSchema> {
+        // Strategy 0: Use provided schema from query executor (highest priority)
+        if let Some(schema) = provided_schema {
+            eprintln!(
+                "[DEBUG get_table_schema] Using provided schema for {}.{}",
+                schema.keyspace, schema.table
+            );
+            return Some(schema.clone());
+        }
+
         // Strategy 1: Use schema extracted from SSTable header (if available)
         if let Some(schema) = self.schema.as_deref() {
             eprintln!(

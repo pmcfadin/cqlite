@@ -452,7 +452,13 @@ impl PerformanceRegressionFramework {
             let op_start = Instant::now();
             let _results = self
                 .storage_engine
-                .scan(&table_id, Some(&start_key), Some(&end_key), Some(1000))
+                .scan(
+                    &table_id,
+                    Some(&start_key),
+                    Some(&end_key),
+                    Some(1000),
+                    None,
+                )
                 .await?;
             let op_latency = op_start.elapsed().as_micros() as f64;
             latencies.push(op_latency);

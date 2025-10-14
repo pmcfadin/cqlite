@@ -343,11 +343,17 @@ impl SchemaAwareReader {
             None
         };
 
-        // Scan using underlying reader
+        // Scan using underlying reader, passing schema for accurate parsing
         let table_id = self.get_table_id();
         let raw_results = self
             .reader
-            .scan(&table_id, start_key.as_ref(), end_key.as_ref(), limit)
+            .scan(
+                &table_id,
+                start_key.as_ref(),
+                end_key.as_ref(),
+                limit,
+                Some(&self.context.schema),
+            )
             .await?;
 
         // Parse results using schema
