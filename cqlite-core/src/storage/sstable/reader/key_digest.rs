@@ -25,7 +25,13 @@ impl SSTableReader {
             | crate::parser::header::CassandraVersion::V5_0Bti => {
                 // Modern formats require schema registry and must never use simple digest
                 if let Some(schema_registry) = &self.schema_registry {
-                    match schema_registry
+                    // Acquire read lock to access SchemaRegistry methods
+                    #[cfg(feature = "state_machine")]
+                    let schema_guard = schema_registry.read().await;
+                    #[cfg(not(feature = "state_machine"))]
+                    let schema_guard = schema_registry.as_ref();
+
+                    match schema_guard
                         .get_parsing_context(&self.header.keyspace, &self.header.table_name)
                         .await
                     {
@@ -56,7 +62,13 @@ impl SSTableReader {
             _ => {
                 // Legacy formats: try schema-driven first, fallback to simple digest if needed
                 if let Some(schema_registry) = &self.schema_registry {
-                    match schema_registry
+                    // Acquire read lock to access SchemaRegistry methods
+                    #[cfg(feature = "state_machine")]
+                    let schema_guard = schema_registry.read().await;
+                    #[cfg(not(feature = "state_machine"))]
+                    let schema_guard = schema_registry.as_ref();
+
+                    match schema_guard
                         .get_parsing_context(&self.header.keyspace, &self.header.table_name)
                         .await
                     {

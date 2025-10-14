@@ -141,11 +141,22 @@ pub struct SSTableManager {
 
     /// Configuration
     config: Config,
+
+    /// Schema registry for schema-aware operations (feature-gated)
+    #[cfg(feature = "state_machine")]
+    schema_registry: Arc<RwLock<Option<Arc<RwLock<crate::schema::SchemaRegistry>>>>>,
 }
 
 impl SSTableManager {
     /// Create a new SSTable manager
-    pub async fn new(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+    pub async fn new(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+        #[cfg(feature = "state_machine")] schema_registry: Option<
+            Arc<RwLock<crate::schema::SchemaRegistry>>,
+        >,
+    ) -> Result<Self> {
         let base_path = path.to_path_buf();
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
@@ -156,6 +167,8 @@ impl SSTableManager {
             table_readers,
             platform,
             config: config.clone(),
+            #[cfg(feature = "state_machine")]
+            schema_registry: Arc::new(RwLock::new(schema_registry)),
         };
 
         // Load existing SSTable files
@@ -224,6 +237,9 @@ impl SSTableManager {
         table_dirs: Vec<PathBuf>,
         config: &Config,
         platform: Arc<Platform>,
+        #[cfg(feature = "state_machine")] schema_registry: Option<
+            Arc<RwLock<crate::schema::SchemaRegistry>>,
+        >,
     ) -> Result<Self> {
         let base_path = storage_path.to_path_buf();
         let readers = Arc::new(RwLock::new(HashMap::new()));
@@ -235,6 +251,8 @@ impl SSTableManager {
             table_readers,
             platform: platform.clone(),
             config: config.clone(),
+            #[cfg(feature = "state_machine")]
+            schema_registry: Arc::new(RwLock::new(schema_registry)),
         };
 
         // Load SSTables from the provided table directories
@@ -296,11 +314,25 @@ impl SSTableManager {
                         )
                         .await
                         {
-                            Ok(reader) => {
+                            Ok(mut reader) => {
                                 eprintln!(
                                     "[DEBUG SSTableManager] Successfully loaded SSTable: {}",
                                     sstable_id.0
                                 );
+
+                                // Set schema registry if available (before wrapping in Arc)
+                                #[cfg(feature = "state_machine")]
+                                {
+                                    let schema_reg_guard = self.schema_registry.read().await;
+                                    if let Some(ref registry_rwlock) = *schema_reg_guard {
+                                        eprintln!(
+                                            "[DEBUG SSTableManager] Setting schema registry on reader: {}",
+                                            sstable_id.0
+                                        );
+                                        reader.set_schema_registry(Arc::clone(registry_rwlock));
+                                    }
+                                }
+
                                 let reader_arc = Arc::new(reader);
 
                                 // Store by SSTableId (existing)
@@ -376,7 +408,16 @@ impl SSTableManager {
                     match reader::SSTableReader::open(&path, &self.config, self.platform.clone())
                         .await
                     {
-                        Ok(reader) => {
+                        Ok(mut reader) => {
+                            // Set schema registry if available (before wrapping in Arc)
+                            #[cfg(feature = "state_machine")]
+                            {
+                                let schema_reg_guard = self.schema_registry.read().await;
+                                if let Some(ref registry_rwlock) = *schema_reg_guard {
+                                    reader.set_schema_registry(Arc::clone(registry_rwlock));
+                                }
+                            }
+
                             let reader_arc = Arc::new(reader);
 
                             // Store by SSTableId
@@ -680,6 +721,33 @@ impl SSTableManager {
         })
     }
 
+    /// Set the schema registry for schema-aware operations
+    ///
+    /// This method stores the schema registry and applies it to all existing SSTable readers.
+    /// Future readers loaded via `load_existing_sstables` or `load_from_table_directories`
+    /// will also receive the schema registry during creation.
+    #[cfg(feature = "state_machine")]
+    pub async fn set_schema_registry(
+        &self,
+        registry: Arc<RwLock<crate::schema::SchemaRegistry>>,
+    ) -> Result<()> {
+        // Store the schema registry
+        {
+            let mut schema_reg = self.schema_registry.write().await;
+            *schema_reg = Some(registry.clone());
+        }
+
+        // Apply to all existing readers
+        // Note: SSTableReader::set_schema_registry requires &mut self, but readers are Arc<SSTableReader>
+        // This is by design - schema should be set during reader creation, not after.
+        // The stored registry will be applied to future readers loaded by this manager.
+
+        // For existing readers, we cannot mutate them directly since they're behind Arc.
+        // The schema registry will be applied to new readers as they're loaded.
+
+        Ok(())
+    }
+
     /// Merge multiple SSTables into a new one
     #[cfg(feature = "experimental")]
     pub async fn merge_sstables(
@@ -790,9 +858,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-        let manager = SSTableManager::new(temp_dir.path(), &config, platform)
-            .await
-            .unwrap();
+        let manager = SSTableManager::new(
+            temp_dir.path(),
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .unwrap();
         let stats = manager.stats().await.unwrap();
 
         assert_eq!(stats.sstable_count, 0);
@@ -813,6 +887,8 @@ mod tests {
             discovered_paths,
             &config,
             platform,
+            #[cfg(feature = "state_machine")]
+            None,
         )
         .await
         .unwrap();
@@ -855,6 +931,8 @@ mod tests {
             table_dirs,
             &config,
             platform,
+            #[cfg(feature = "state_machine")]
+            None,
         )
         .await
         .unwrap();

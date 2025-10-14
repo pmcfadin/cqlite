@@ -4,6 +4,14 @@
 \usepackage{bookmark}
 \usepackage{geometry}
 \geometry{margin=1in}
+% Math and symbol support
+\usepackage{amsmath,amssymb}
+\usepackage{newunicodechar}
+% Map common Unicode symbols to TeX math equivalents to ensure glyph coverage
+\newunicodechar{→}{$\rightarrow$}
+\newunicodechar{≤}{$\le$}
+\newunicodechar{≥}{$\ge$}
+\newunicodechar{≈}{$\approx$}
 \usepackage{titlesec}
 \titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
 \titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}

@@ -373,7 +373,7 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
     let mock_header = create_mock_cassandra5_header();
     let serialized_header = serialize_sstable_header(&mock_header)?;
     let (_remaining, parsed_header) = parse_sstable_header(&serialized_header)
-        .map_err(|e| cqlite_core::error::Error::parser(format!("Failed to parse header: {e:?}")))?;
+        .map_err(|e| cqlite_core::error::Error::parse(format!("Failed to parse header: {e:?}")))?;
 
     // Validate round-trip consistency
     assert_eq!(mock_header.version, parsed_header.version);

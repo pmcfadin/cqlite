@@ -23,6 +23,14 @@ render_mermaid() {
     for f in "$DIAGRAMS_DIR"/*.mmd; do
       base="${f%.mmd}"
       mmdc -i "$f" -o "${base}.svg" --backgroundColor white --scale 1.2
+      # Also produce PDF for LaTeX inclusion fallback
+      mmdc -i "$f" -o "${base}.pdf" --backgroundColor white --scale 1.2
+      # Crop PDF whitespace if pdfcrop is available to avoid huge margins
+      if command -v pdfcrop >/dev/null 2>&1; then
+        cropped="${base}.cropped.pdf"
+        pdfcrop --margins '5' "${base}.pdf" "$cropped" >/dev/null 2>&1 || true
+        if [ -f "$cropped" ]; then mv "$cropped" "${base}.pdf"; fi
+      fi
     done
   else
     echo "No Mermaid diagrams found. Skipping render."
@@ -38,7 +46,8 @@ build_html() {
     -o "$DIST_DIR/sstables-definitive-guide.html" \
     --from gfm \
     --toc --toc-depth=2 \
-    --resource-path=".:$GUIDE_DIR"
+    --resource-path=".:$GUIDE_DIR:$DIAGRAMS_DIR" \
+    --default-image-extension=svg
   echo "HTML written to $DIST_DIR/sstables-definitive-guide.html"
 }
 
@@ -46,15 +55,25 @@ build_pdf() {
   require_cmd pandoc
   mkdir -p "$DIST_DIR"
   echo "Building PDF..."
+  # Prepare temp chapters with PDF image links
+  TMP_CHAPTERS_DIR=$(mktemp -d)
+  cp "$CHAPTERS_DIR"/*.md "$TMP_CHAPTERS_DIR"/
+  # Rewrite diagram image links to prefer .pdf for LaTeX build
+  # macOS sed requires an empty string after -i for in-place edits
+  sed -E -i '' 's#\]\(\.{2}/diagrams/([^)]+)\.svg\)#](../diagrams/\1.pdf)#g' "$TMP_CHAPTERS_DIR"/*.md
+  sed -E -i '' 's#\]\(\.{2}/diagrams/([^)\.]+)\)#](../diagrams/\1.pdf)#g' "$TMP_CHAPTERS_DIR"/*.md
+  sed -E -i '' 's#\]\(diagrams/([^)]+)\.svg\)#](diagrams/\1.pdf)#g' "$TMP_CHAPTERS_DIR"/*.md
+  sed -E -i '' 's#\]\(diagrams/([^)\.]+)\)#](diagrams/\1.pdf)#g' "$TMP_CHAPTERS_DIR"/*.md
+
   pandoc \
-    "$CHAPTERS_DIR"/*.md \
+    "$TMP_CHAPTERS_DIR"/*.md \
     -o "$DIST_DIR/sstables-definitive-guide.pdf" \
     --from gfm \
     --pdf-engine=xelatex \
     --toc --toc-depth=2 \
-    --resource-path=".:$GUIDE_DIR" \
+    --resource-path=".:$GUIDE_DIR:$DIAGRAMS_DIR" \
     -V geometry:margin=1in \
-    -V mainfont="Noto Sans" -V monofont="Noto Sans Mono" \
+    -V mainfont="Helvetica Neue" -V monofont="Menlo" \
     --include-in-header="$HEADER_TEX" \
     -V colorlinks=true 
   echo "PDF written to $DIST_DIR/sstables-definitive-guide.pdf"

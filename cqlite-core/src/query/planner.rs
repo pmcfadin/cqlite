@@ -800,9 +800,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let _storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -820,9 +826,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let _storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -858,9 +870,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let _storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema_manager = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())

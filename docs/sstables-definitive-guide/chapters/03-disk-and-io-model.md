@@ -42,10 +42,11 @@ Two common strategies exist for SSTable IO:
 
 In practice, chunked compression dominates the read cost model: aligning reads to chunk boundaries reduces amplification for random lookups; sequential scans amortize decompression overhead. Cassandra’s `CompressionMetadata` and related classes define the chunk map used by the readers.
 
-Practical guidance on chunk sizes:
-- 16 KiB (16384) default is a solid compromise for mixed workloads
+## Practical guidance on chunk sizes
+
+- Server default for `chunk_length` in 5.0: see `CompressionParams` (defaults vary by compressor and release; many deployments use 64 KiB with LZ4 by default)
 - 32–64 KiB can reduce metadata overhead and improve scan throughput at the cost of higher random-read amplification
-- ≤8 KiB may help highly random access patterns when storage latency is high, but increases metadata and CPU overhead
+- ≤16 KiB may help highly random access patterns when storage latency is high, but increases metadata and CPU overhead
 
 Align application reads to chunk boundaries whenever possible to avoid double-decompression.
 
@@ -71,6 +72,7 @@ False positive rate (FPR) refresher:
 ### References
 - Cassandra 5.0.0 (pinned):
   - `CompressionMetadata` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java`
+  - `CompressionParams` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/compress/CompressionParams.java`
   - `BloomFilter` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/utils/bloom/BloomFilter.java`
   
 For implementation walkthroughs, see Appendix C.

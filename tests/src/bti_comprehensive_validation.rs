@@ -1081,7 +1081,7 @@ impl BtiComprehensiveValidator {
         } else {
             println!("\n⚠️  SOME ISSUE #36 REQUIREMENTS NOT MET");
             println!("❌ Additional work required before CI integration");
-            return Err(Error::validation(
+            return Err(Error::invalid_operation(
                 "Issue #36 requirements validation failed",
             ));
         }

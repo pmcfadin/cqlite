@@ -16,8 +16,7 @@ SAI builds per-column indexes that are persisted alongside the base table’s SS
 - Segments are immutable: new segments are added on flush; compactions merge segments and drop obsolete postings.
 - Base-table authority: SAI returns candidate primary keys; rows are materialized via the normal read path against `Data.db`.
 
-Diagram (committed in `diagrams/`):
-- File layout with vector coverage: `../diagrams/sai-file-layout.mmd`
+![SAI file layout](diagrams/sai-file-layout)
   - Alt-text: SAI per-column segments (numeric/text/vector) and their on-disk components.
   - Caption: SAI segments are written per indexed column; vector segments sit alongside numeric/text segments.
 
@@ -31,8 +30,7 @@ At query time, SAI chooses a path based on predicate type:
 
 Candidates are then deduplicated/merged, and fetched from the base table using the standard read path (Bloom → Index → Summary → Data). Non-indexed predicates are applied as filters on the fetched rows.
 
-Diagram (committed in `diagrams/`):
-- Query flow with vector coverage: `../diagrams/sai-query-flow.mmd`
+![SAI query flow](diagrams/sai-query-flow)
   - Alt-text: Dispatcher routes numeric/text/vector queries; candidates merged and passed to base read path.
   - Caption: SAI generates candidate primary keys which are validated via the SSTable read path.
 

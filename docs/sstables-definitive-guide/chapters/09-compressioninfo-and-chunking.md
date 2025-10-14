@@ -71,6 +71,21 @@ Interpretation (trimmed):
 
 Note: Older materials often describe the chunk map as "varint pairs"; Cassandra 5.0 uses fixed-width fields for several header values and format-dependent encodings for the map. Always consult the pinned source for exact widths.
 
+Exact widths (NB, Cassandra 5.0):
+
+| Field | Type/width | Endianness | Notes |
+|---|---|---|---|
+| compressor_name_length | u16 | big | length of compressor class name |
+| compressor_name | UTF-8 bytes | — | e.g., `LZ4Compressor`, `SnappyCompressor` |
+| chunk_length | u32 | big | uncompressed bytes per chunk target |
+| total_uncompressed_length | u64 | big | table payload size before compression |
+| chunk_count | u32 | big | number of chunks |
+| chunk_offsets[chunk_count] | u32 each | big | offset of each compressed chunk in `Data.db` |
+
+Map encoding by format:
+- NB (5.0): offsets only; per-chunk compressed length = next_offset − offset − 4 (CRC word)
+- Legacy variants: may differ; this guide focuses on NB; consult sources when targeting older formats
+
 Chunk map (first two entries, decoded — units: bytes, endianness: big):
 
 From `test_timeseries/event_store`:

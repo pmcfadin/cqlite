@@ -21,6 +21,25 @@ Annotated example (BIG, one entry):
 - `6b88…3fb9` → 16-byte digest
 - `00` → start of length/offset field (variable-length; see reader)
 
+Annotated example (length-prefixed variant — BIG, one entry):
+```
+00000000: 001a 0010 37ac 9f53 bd8e 4da5 a41a 240f  |....7..S..M...$.
+00000010: 8f5a 6cfd 0000 0480 004f 88               |.Zl......O.     |
+```
+- `001a` → entry length (26 bytes)
+- `0010` → marker (partition key digest follows)
+- `37ac…6cfd` → 16-byte digest
+- `0000 0480 004f 88` → variable-length fields: data offset (and optional size/payload per format)
+
+Tiny side-by-side comparison (first 12–16 bytes):
+```
+// No length prefix (legacy/BIG):
+0010 6b88 bf20 a251 11f0 a3fe f1a5 | 0010 + 16B digest ...
+
+// With 2-byte length prefix (some 5.0 BIG tables):
+001a 0010 37ac 9f53 bd8e 4da5 a41a | 001a + 0010 + 16B digest ...
+```
+
 Variant gating (BIG):
 
 Pseudo-structs per variant (field order, big-endian for fixed-width):
@@ -41,6 +60,24 @@ varint data_offset
 ```
 
 Gate detection is handled by the BIG reader; consult `org.apache.cassandra.io.sstable.format.big.BigTableReader` and `RowIndexEntry` for exact parsing. Implementations must handle both variants by detecting an initial length field that precedes the `0x0010` marker.
+
+Mini-parser (variant-tolerant) — conceptual:
+```text
+pos = 0
+prefix = read_u16_be()
+if prefix == 0x0010:
+  // non-length-prefixed variant
+  marker = prefix
+else:
+  entry_len = prefix
+  marker = read_u16_be()
+  assert(marker == 0x0010)
+
+digest = read_16_bytes()
+data_offset = read_vint_u64()
+payload_len = (entry_len - bytes_consumed_so_far) if entry_len else 0
+promoted_index = read_bytes(payload_len) if payload_len > 0
+```
 
 Promoted index (BIG): emitted for wide partitions to accelerate within-partition seeks. Readers detect presence via entry payload structure and fall back to scan when absent. See `org.apache.cassandra.io.sstable.format.big` reader/writer for details.
 

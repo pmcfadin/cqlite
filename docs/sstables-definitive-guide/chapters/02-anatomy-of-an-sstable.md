@@ -20,9 +20,11 @@ This chapter explains each SSTable component and how they fit together. Cassandr
 - `Digest.crc32`: Digest file for end-to-end integrity.
 - `TOC.txt`: Text file listing the components present; tools use it to validate completeness.
 
+> **Publication barrier = `TOC.txt`**. See “TOC Invariants and Integrity Checks” below and Chapter 16 (“SSTable Lifecycle and Maintenance”) for a practical checklist and tooling pointers.
+
 Diagram: sstable components and relationships
 - Alt text: Component diagram showing Data, Index, Summary, Bloom, Stats, CompressionInfo, TOC
-- Source: `../diagrams/sstable-components.mmd` (open this Mermaid file for the figure)
+![SSTable components and relationships](diagrams/sstable-components)
 - Caption: How SSTable components reference each other during reads
 
 ## Versioning and Feature Flags

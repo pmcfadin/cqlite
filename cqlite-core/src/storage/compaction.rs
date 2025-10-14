@@ -404,9 +404,15 @@ mod tests {
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
         let sstables = Arc::new(
-            SSTableManager::new(temp_dir.path(), &config, platform.clone())
-                .await
-                .unwrap(),
+            SSTableManager::new(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let manifest = Arc::new(Manifest::new(temp_dir.path(), &config).await.unwrap());
 

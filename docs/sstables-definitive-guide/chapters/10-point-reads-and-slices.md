@@ -11,7 +11,7 @@ This chapter details the read flow for point and slice queries: Bloom → Index 
 ## Read Flow (Decision Tree)
 
 Diagram: read-path decision tree
-- Diagram (Mermaid source): `../diagrams/read-path-decision-tree.mmd`
+![Read path decision tree](diagrams/read-path-decision-tree)
 - Alt text: Decision tree from Bloom to Summary/Index to Data
 - Caption: Point and slice reads traverse Bloom → Summary/Index → Data
 

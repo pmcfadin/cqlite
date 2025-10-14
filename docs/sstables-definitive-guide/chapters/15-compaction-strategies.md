@@ -35,7 +35,7 @@ Small comparison of strategy behaviors (indicative, not absolute):
 | LCS | Non-overlapping leveled ranges | Low (except L0 during backlog) | Higher | Low | Read-heavy, low-latency point/slice reads |
 | TWCS | Time windows | Moderate (overlap across windows) | Low–Moderate | Low | Time-series, TTL-heavy, time-bucketed access |
 
-Diagram (Mermaid source): `../diagrams/compaction-strategy-comparison.mmd`
+![Compaction strategy comparison](diagrams/compaction-strategy-comparison)
 - Alt text: Visual summary of STCS/LCS/TWCS organizing principles and typical trade-offs.
 - Caption: STCS groups by size, LCS levels to remove overlap, TWCS isolates data in time windows.
 

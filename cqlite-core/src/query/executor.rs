@@ -955,9 +955,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -978,9 +984,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -1007,9 +1019,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -1052,9 +1070,15 @@ mod tests {
         config.storage.memtable_size_threshold = u64::MAX;
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform.clone())
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())

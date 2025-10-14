@@ -275,7 +275,7 @@ impl ComplexTypePerformanceBenchmark {
         let test_data = self
             .test_data_cache
             .get(&format!("list_{}", size_factor))
-            .ok_or_else(|| Error::validation("List test data not found".to_string()))?
+            .ok_or_else(|| Error::invalid_operation("List test data not found".to_string()))?
             .clone();
 
         // Benchmark list parsing
@@ -320,7 +320,7 @@ impl ComplexTypePerformanceBenchmark {
         let test_data = self
             .test_data_cache
             .get(&format!("set_{}", size_factor))
-            .ok_or_else(|| Error::validation("Set test data not found".to_string()))?
+            .ok_or_else(|| Error::invalid_operation("Set test data not found".to_string()))?
             .clone();
 
         let parse_result = self
@@ -364,7 +364,7 @@ impl ComplexTypePerformanceBenchmark {
         let test_data = self
             .test_data_cache
             .get(&format!("map_{}", size_factor))
-            .ok_or_else(|| Error::validation("Map test data not found".to_string()))?
+            .ok_or_else(|| Error::invalid_operation("Map test data not found".to_string()))?
             .clone();
 
         let parse_result = self
@@ -407,7 +407,7 @@ impl ComplexTypePerformanceBenchmark {
             let test_data = self
                 .test_data_cache
                 .get(&format!("udt_{}", size_factor))
-                .ok_or_else(|| Error::validation("UDT test data not found".to_string()))?
+                .ok_or_else(|| Error::invalid_operation("UDT test data not found".to_string()))?
                 .clone();
 
             let result = self
@@ -434,7 +434,7 @@ impl ComplexTypePerformanceBenchmark {
             let test_data = self
                 .test_data_cache
                 .get(&format!("tuple_{}", size_factor))
-                .ok_or_else(|| Error::validation("Tuple test data not found".to_string()))?
+                .ok_or_else(|| Error::invalid_operation("Tuple test data not found".to_string()))?
                 .clone();
 
             let result = self
@@ -462,7 +462,7 @@ impl ComplexTypePerformanceBenchmark {
             let list_data = self
                 .test_data_cache
                 .get(&format!("list_{}", size_factor))
-                .ok_or_else(|| Error::validation("List test data not found".to_string()))?;
+                .ok_or_else(|| Error::invalid_operation("List test data not found".to_string()))?;
 
             let frozen_data: Vec<Value> = list_data
                 .iter()

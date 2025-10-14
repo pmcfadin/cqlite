@@ -92,7 +92,7 @@ impl GoldenPathSummaryIndexTestFixture {
             )));
         }
 
-        SummaryReader::open(&summary_path, &self.config, self.platform.clone()).await
+        SummaryReader::open(&summary_path, self.platform.clone()).await
     }
 
     /// Setup standalone index reader for component testing
@@ -108,7 +108,7 @@ impl GoldenPathSummaryIndexTestFixture {
             )));
         }
 
-        IndexReader::open(&index_path, &self.config, self.platform.clone()).await
+        IndexReader::open(&index_path, self.platform.clone()).await
     }
 
     /// Verify all SSTable component files exist
@@ -151,12 +151,12 @@ async fn test_golden_path_summary_index_component_availability() -> Result<()> {
 
     for component in &required_components {
         assert!(
-            component_paths.contains_key(component),
+            component_paths.contains_key(*component),
             "Required component {} not found",
             component
         );
 
-        let path = &component_paths[component];
+        let path = &component_paths[*component];
         let metadata = fs::metadata(path).await?;
 
         assert!(

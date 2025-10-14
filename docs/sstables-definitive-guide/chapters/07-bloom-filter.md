@@ -23,7 +23,7 @@ Small numeric example (intuition): for n=1,000 and p=1%, the optimal bits-per-ke
 
 Hashing and bit array notes:
 - Double-hashing scheme derives k positions from two base hashes to avoid k separate hashes.
-- Bit array is addressed modulo bit_count; ensure consistent endianness when serializing bitsets.
+- Bit array is addressed modulo bit_count; serialized as big-endian u64 words with bits packed LSB-first within each byte.
 
 ## Read Flow Interaction
 
@@ -43,5 +43,34 @@ During a point lookup, Bloom is checked before any index/summary seeks. A negati
   - `BloomCalculations`: [org.apache.cassandra.utils.bloom.BloomCalculations](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/utils/bloom/BloomCalculations.java)
   
 For implementation details, see Appendix C.
+
+## Filter.db (Bloom) — on-disk layout (overview)
+
+Minimal on-disk fields (Cassandra 5.0):
+- bitset_length_bytes (u32, big-endian): number of bytes in the serialized bitset payload
+- hash_count_k (u32, big-endian)
+- bitset payload (byte array)
+
+Endianness and bit packing:
+- Fixed-width fields are big-endian.
+- Bits in the payload are packed least-significant-bit first within each byte (bit 0 = LSB).
+
+Tiny hex excerpt (real file, start):
+```
+00000000: 0000 0005 0000 0002 a4c0 e2a8 02a2 a1b3 ...
+```
+Interpretation (schematic):
+- `0000 0005` → bitset_length_bytes = 5
+- `0000 0002` → k (hash count)
+- next bytes → bitset payload (5 bytes; bits packed LSB-first per byte)
+
+Concrete sizing example (n = 1,000, p = 1%):
+```
+m = ceil(-(n * ln p) / (ln 2)^2) = ceil(-(1000 * ln 0.01) / (ln 2)^2)
+  = ceil(9585.7) = 9,586 bits ≈ 1,198 bytes
+k = round((m / n) * ln 2) = round((9586 / 1000) * 0.6931) ≈ 7
+```
+
+See `org.apache.cassandra.utils.bloom.BloomFilter` and `BloomCalculations` for writer/reader details.
 
 

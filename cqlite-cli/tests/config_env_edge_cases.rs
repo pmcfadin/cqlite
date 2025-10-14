@@ -31,6 +31,7 @@ fn create_cli_with_flags(
         auto_detect: false,
         cassandra_version: None,
         schema,
+        dataset: None,
         data_dir,
         execute,
         file,

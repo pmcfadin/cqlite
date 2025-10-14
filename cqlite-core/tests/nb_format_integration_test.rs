@@ -19,10 +19,11 @@ async fn test_nb_format_detection_and_opening() {
     );
 
     // Use real NB format test data
-    let test_path = Path::new(concat!(
-        env!("CQLITE_DATASETS_ROOT"),
-        "/sstables/test_collections/collection_clustering_table-6bf78680a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-    ));
+    let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
+        .expect("CQLITE_DATASETS_ROOT environment variable must be set");
+    let test_path = Path::new(&datasets_root).join(
+        "sstables/test_collections/collection_clustering_table-6bf78680a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
+    );
 
     if !test_path.exists() {
         println!(
@@ -33,7 +34,7 @@ async fn test_nb_format_detection_and_opening() {
     }
 
     // This should NOT fail with "unknown magic number" or "unsupported format" errors
-    let result = SSTableReader::open(test_path, &config, platform).await;
+    let result = SSTableReader::open(&test_path, &config, platform).await;
 
     match result {
         Ok(reader) => {
@@ -78,17 +79,18 @@ async fn test_nb_format_data_reading() {
             .expect("Failed to create platform"),
     );
 
-    let test_path = Path::new(concat!(
-        env!("CQLITE_DATASETS_ROOT"),
-        "/sstables/test_collections/collection_clustering_table-6bf78680a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-    ));
+    let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
+        .expect("CQLITE_DATASETS_ROOT environment variable must be set");
+    let test_path = Path::new(&datasets_root).join(
+        "sstables/test_collections/collection_clustering_table-6bf78680a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
+    );
 
     if !test_path.exists() {
         println!("⚠️  NB format test data not found, skipping test");
         return;
     }
 
-    let reader = SSTableReader::open(test_path, &config, platform)
+    let reader = SSTableReader::open(&test_path, &config, platform)
         .await
         .expect("Failed to open NB format file");
 
@@ -183,17 +185,17 @@ async fn test_non_nb_format_files() {
     );
 
     // Test a regular (non-NB) format file
-    let test_path = Path::new(concat!(
-        env!("CQLITE_DATASETS_ROOT"),
-        "/sstables/test_basic/simple_table-d2e60a60a24e11f085a271be57d0abe2/na-1-big-Data.db"
-    ));
+    let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
+        .expect("CQLITE_DATASETS_ROOT environment variable must be set");
+    let test_path = Path::new(&datasets_root)
+        .join("sstables/test_basic/simple_table-d2e60a60a24e11f085a271be57d0abe2/na-1-big-Data.db");
 
     if !test_path.exists() {
         println!("⚠️  Non-NB test data not found, skipping test");
         return;
     }
 
-    let result = SSTableReader::open(test_path, &config, platform).await;
+    let result = SSTableReader::open(&test_path, &config, platform).await;
 
     match result {
         Ok(reader) => {

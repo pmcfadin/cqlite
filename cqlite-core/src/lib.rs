@@ -108,8 +108,17 @@ impl Database {
         // Initialize memory manager
         let memory = Arc::new(MemoryManager::new(&config)?);
 
-        // Initialize storage engine
-        let storage = Arc::new(StorageEngine::open(path, &config, platform.clone()).await?);
+        // Initialize storage engine (no schema registry for simple open)
+        let storage = Arc::new(
+            StorageEngine::open(
+                path,
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await?,
+        );
 
         // Initialize schema manager
         #[cfg(feature = "state_machine")]
@@ -227,20 +236,23 @@ impl Database {
         // Initialize memory manager
         let memory = Arc::new(MemoryManager::new(&config)?);
 
-        // Initialize storage engine with pre-discovered SSTables
+        // Initialize storage engine with pre-discovered SSTables and schema registry
         let storage = Arc::new(
             StorageEngine::open_with_sstables(
                 storage_path,
                 discovered_table_dirs,
                 &config,
                 platform.clone(),
+                schema_registry.clone(),
             )
             .await?,
         );
 
         // Initialize schema manager - use registry if provided, otherwise create empty
-        let schema = if let Some(registry) = schema_registry {
-            Arc::new(SchemaManager::new_with_registry(storage.clone(), registry, &config).await?)
+        let schema = if let Some(registry_rwlock) = schema_registry {
+            Arc::new(
+                SchemaManager::new_with_registry(storage.clone(), registry_rwlock, &config).await?,
+            )
         } else {
             Arc::new(SchemaManager::new_with_storage(storage.clone(), &config).await?)
         };

@@ -20,7 +20,7 @@ cells: account_balance=21088.5, active=false, age=75, name=(utf8) ...
 
 Underlying file shows a partition stream with a serialization header followed by unfiltered rows and optional tombstone markers.
 
-Diagram: `../diagrams/data-db-row-layout.mmd`
+![Data.db row layout](diagrams/data-db-row-layout)
 - Alt text: Annotated Data.db partition/row/cell structure
 - Caption: Serialization header → unfiltered rows/markers → cells with flags and vints
 

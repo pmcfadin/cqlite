@@ -26,7 +26,7 @@ At a high level, Cassandra batches updates in a memtable and appends them to a W
   - Use `Summary.db` to narrow a region of `Index.db`; seek to exact index entry
   - Translate to `Data.db` position; read aligned to compression chunk boundaries and decompress just the needed bytes
 
-See cross-links: Chapter 4 (flush pipeline) and Chapter 10 (read path decision tree). For a quick visual of component relationships, see the diagram referenced in Chapter 2 (`../diagrams/sstable-components.mmd`).
+See cross-links: Chapter 4 (flush pipeline) and Chapter 10 (read path decision tree). For a quick visual of component relationships, see the diagram referenced in Chapter 2 (`../diagrams/sstable-components.svg`, Mermaid source committed alongside).
 
 ## Evolution of Formats
 

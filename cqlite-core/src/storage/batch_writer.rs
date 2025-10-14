@@ -447,9 +447,15 @@ mod tests {
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
         let sstable_manager = Arc::new(
-            SSTableManager::new(temp_dir.path(), &config, platform.clone())
-                .await
-                .unwrap(),
+            SSTableManager::new(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let wal = Arc::new(
             WriteAheadLog::open(temp_dir.path(), &config, platform)
@@ -500,9 +506,15 @@ mod tests {
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
         let sstable_manager = Arc::new(
-            SSTableManager::new(temp_dir.path(), &config, platform.clone())
-                .await
-                .unwrap(),
+            SSTableManager::new(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let wal = Arc::new(
             WriteAheadLog::open(temp_dir.path(), &config, platform)
@@ -552,9 +564,15 @@ mod tests {
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
         let sstable_manager = Arc::new(
-            SSTableManager::new(temp_dir.path(), &config, platform.clone())
-                .await
-                .unwrap(),
+            SSTableManager::new(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let wal = Arc::new(
             WriteAheadLog::open(temp_dir.path(), &config, platform)

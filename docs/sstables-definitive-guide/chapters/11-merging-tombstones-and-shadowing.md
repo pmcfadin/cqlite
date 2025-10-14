@@ -25,7 +25,7 @@ Range tombstones delete clustering intervals; readers must compare timestamps ag
 
 ## Tombstone Timeline Diagram
 
-- Diagram (Mermaid source): `../diagrams/tombstone-timeline.mmd`
+![Tombstone timeline](diagrams/tombstone-timeline)
 - Alt text: Timeline showing writes, tombstones, and TTL expiry with shadowing
 - Caption: Newer values can shadow older tombstones; TTLs create time-bound deletions
 

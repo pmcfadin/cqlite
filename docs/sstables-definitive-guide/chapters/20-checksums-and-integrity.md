@@ -1,9 +1,9 @@
 ## Checksums and Integrity
 
-SSTables carry integrity metadata at three levels: header CRC32 prefixes (Cassandra 5.0+), per-chunk checksums for compressed `Data.db` blocks, and the `Digest.crc32` file for component-level verification. Readers validate checksums at each level to ensure data integrity throughout the read path.
+SSTables carry integrity metadata at three levels: optional header CRC32 prefixes in legacy/BIG formats, per-chunk checksums for compressed `Data.db` blocks, and the `Digest.crc32` file for component-level verification. Readers validate checksums at each level to ensure data integrity throughout the read path.
 
 ### In this chapter you will learn
-- How header CRC32 prefixes protect SSTable metadata (Cassandra 5.0+)
+- How header CRC32 prefixes (Legacy/BIG only) protect SSTable metadata
 - How per-chunk checksums are stored and validated
 - What `Digest.crc32` covers and how it differs from other checksums
 - How readers/writers interact with integrity metadata

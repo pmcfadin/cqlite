@@ -8,7 +8,8 @@ use cqlite_core::error::Result;
 use cqlite_core::parser::{
     M3PerformanceBenchmarks, OptimizedComplexTypeParser, PerformanceRegressionFramework,
 };
-use cqlite_core::validation::hardened_validator_parser::PerformanceTargets;
+// Note: validation module not available - using placeholder
+// use cqlite_core::validation::hardened_validator_parser::PerformanceTargets;
 use std::time::Instant;
 
 /// M3 Performance Validation Suite
@@ -143,7 +144,7 @@ impl M3PerformanceValidator {
 
         // Create output directory
         std::fs::create_dir_all(&self.config.output_dir).map_err(|e| {
-            cqlite_core::Error::Serialization(format!("Failed to create output directory: {e}"))
+            cqlite_core::Error::serialization(format!("Failed to create output directory: {e}"))
         })?;
 
         // Run performance benchmarks
@@ -361,7 +362,7 @@ impl M3PerformanceValidator {
         let main_report = self.format_validation_report(results);
         let main_report_path = format!("{}/m3_validation_report.md", self.config.output_dir);
         std::fs::write(&main_report_path, main_report).map_err(|e| {
-            cqlite_core::Error::Serialization(format!("Failed to write main report: {e}"))
+            cqlite_core::Error::serialization(format!("Failed to write main report: {e}"))
         })?;
 
         // Generate JSON summary for automation

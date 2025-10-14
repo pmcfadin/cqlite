@@ -229,6 +229,10 @@ pub struct SSTableReader {
     /// Statistics.db reader for min/max timestamps and metadata
     pub(crate) statistics_reader: Option<StatisticsReader>,
     /// Schema registry for schema-driven operations (modern formats)
+    #[cfg(feature = "state_machine")]
+    pub(crate) schema_registry: Option<Arc<tokio::sync::RwLock<crate::schema::SchemaRegistry>>>,
+    /// Schema registry for schema-driven operations (modern formats) - non-state_machine builds
+    #[cfg(not(feature = "state_machine"))]
     pub(crate) schema_registry: Option<Arc<crate::schema::SchemaRegistry>>,
     /// Table schema extracted from SSTable header
     pub(super) schema: Option<Arc<TableSchema>>,

@@ -1016,7 +1016,13 @@ mod tests {
 
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
                 .await
                 .unwrap(),
         );

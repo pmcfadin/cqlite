@@ -48,6 +48,10 @@ pub struct StorageEngine {
 
     /// Batch writer for efficient bulk operations
     batch_writer: Option<BatchWriter>,
+
+    /// Schema registry for schema-aware operations (feature-gated)
+    #[cfg(feature = "state_machine")]
+    schema_registry: Arc<RwLock<Option<Arc<RwLock<crate::schema::SchemaRegistry>>>>>,
 }
 
 impl StorageEngine {
@@ -55,16 +59,31 @@ impl StorageEngine {
     ///
     /// This method discovers SSTables by scanning the storage directory.
     /// For pre-discovered SSTables, use `open_with_sstables` instead.
-    pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+    pub async fn open(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+        #[cfg(feature = "state_machine")] schema_registry: Option<
+            Arc<RwLock<crate::schema::SchemaRegistry>>,
+        >,
+    ) -> Result<Self> {
         // Create storage directory if it doesn't exist
         platform.fs().create_dir_all(path).await?;
 
         // Initialize manifest first
         let manifest = Arc::new(manifest::Manifest::open(path, config).await?);
 
-        // Initialize SSTable manager
-        let sstables =
-            Arc::new(sstable::SSTableManager::new(path, config, platform.clone()).await?);
+        // Initialize SSTable manager with schema registry
+        let sstables = Arc::new(
+            sstable::SSTableManager::new(
+                path,
+                config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                schema_registry.clone(),
+            )
+            .await?,
+        );
 
         // Initialize WAL
         let wal = Arc::new(wal::WriteAheadLog::open(path, config, platform.clone()).await?);
@@ -99,6 +118,8 @@ impl StorageEngine {
             _platform: platform,
             config: config.clone(),
             batch_writer,
+            #[cfg(feature = "state_machine")]
+            schema_registry: Arc::new(RwLock::new(schema_registry)),
         })
     }
 
@@ -146,6 +167,9 @@ impl StorageEngine {
         discovered_table_dirs: Vec<PathBuf>,
         config: &Config,
         platform: Arc<Platform>,
+        #[cfg(feature = "state_machine")] schema_registry: Option<
+            Arc<RwLock<crate::schema::SchemaRegistry>>,
+        >,
     ) -> Result<Self> {
         // Create storage directory if it doesn't exist
         platform.fs().create_dir_all(path).await?;
@@ -153,13 +177,15 @@ impl StorageEngine {
         // Initialize manifest first
         let manifest = Arc::new(manifest::Manifest::open(path, config).await?);
 
-        // Initialize SSTable manager with pre-discovered paths
+        // Initialize SSTable manager with pre-discovered paths and schema registry
         let sstables = Arc::new(
             sstable::SSTableManager::new_from_discovered_paths(
                 path,
                 discovered_table_dirs,
                 config,
                 platform.clone(),
+                #[cfg(feature = "state_machine")]
+                schema_registry.clone(),
             )
             .await?,
         );
@@ -197,6 +223,8 @@ impl StorageEngine {
             _platform: platform,
             config: config.clone(),
             batch_writer,
+            #[cfg(feature = "state_machine")]
+            schema_registry: Arc::new(RwLock::new(schema_registry)),
         })
     }
 
@@ -442,6 +470,25 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Set the schema registry for schema-aware operations
+    ///
+    /// This method propagates the schema registry to the SSTable manager,
+    /// which will apply it to all SSTable readers for schema-aware parsing.
+    #[cfg(feature = "state_machine")]
+    pub async fn set_schema_registry(
+        &self,
+        registry: Arc<RwLock<crate::schema::SchemaRegistry>>,
+    ) -> Result<()> {
+        // Store in our field
+        {
+            let mut schema_reg = self.schema_registry.write().await;
+            *schema_reg = Some(registry.clone());
+        }
+
+        // Propagate to SSTable manager
+        self.sstables.set_schema_registry(registry).await
+    }
+
     /// Merge scan results from MemTable and SSTables
     fn merge_scan_results(
         &self,
@@ -521,9 +568,15 @@ mod tests {
         let config = Config::test_config();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-        let storage = StorageEngine::open(temp_dir.path(), &config, platform)
-            .await
-            .unwrap();
+        let storage = StorageEngine::open(
+            temp_dir.path(),
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .unwrap();
         let stats = storage.stats().await.unwrap();
 
         assert_eq!(stats.sstables.sstable_count, 0);
@@ -539,10 +592,16 @@ mod tests {
         // Create an empty list of discovered SSTables for this test
         let discovered_paths = Vec::new();
 
-        let storage =
-            StorageEngine::open_with_sstables(temp_dir.path(), discovered_paths, &config, platform)
-                .await
-                .unwrap();
+        let storage = StorageEngine::open_with_sstables(
+            temp_dir.path(),
+            discovered_paths,
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .unwrap();
 
         let stats = storage.stats().await.unwrap();
 
@@ -558,9 +617,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-        let mut storage = StorageEngine::open(temp_dir.path(), &config, platform)
-            .await
-            .unwrap();
+        let mut storage = StorageEngine::open(
+            temp_dir.path(),
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .unwrap();
 
         // Test batch write operations
         let batch_ops = vec![
@@ -595,9 +660,15 @@ mod tests {
             config.storage.memtable_size_threshold = 1024; // 1KB - smaller than 1MB threshold
             let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-            let mut storage = StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap();
+            let mut storage = StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap();
 
             // Test batch write operations (should use fallback path)
             let batch_ops = vec![

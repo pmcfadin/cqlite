@@ -1108,7 +1108,16 @@ impl SchemaManager {
         // Create temporary storage engine (not actually used in this context)
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await?);
-        let storage = Arc::new(StorageEngine::open(path.as_ref(), &config, platform).await?);
+        let storage = Arc::new(
+            StorageEngine::open(
+                path.as_ref(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await?,
+        );
 
         Ok(Self {
             storage,
@@ -1444,9 +1453,15 @@ mod tests {
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
-            StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
 
         let manager = Arc::new(

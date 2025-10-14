@@ -25,8 +25,78 @@ use crate::{
 use super::{super::row_cell_state_machine::ParsedRow, types::SSTableReader};
 
 impl SSTableReader {
-    /// Get table schema from header information
+    /// Get table schema using three-tier lookup strategy
+    ///
+    /// This method implements a fallback chain for resolving table schemas:
+    /// 1. **SSTable Header**: Check `self.schema` (extracted during SSTable opening from V5.0+ headers)
+    /// 2. **Schema Registry**: Look up schema from external registry (loaded via --schema flag)
+    /// 3. **Header Construction**: Build basic schema from header column metadata (fallback)
     pub(in crate::storage::sstable::reader) fn get_table_schema(&self) -> Option<TableSchema> {
+        // Strategy 1: Use schema extracted from SSTable header (if available)
+        if let Some(schema) = self.schema.as_deref() {
+            eprintln!(
+                "[DEBUG get_table_schema] Using schema from SSTable header for {}.{}",
+                self.header.keyspace, self.header.table_name
+            );
+            return Some(schema.clone());
+        }
+
+        // Strategy 2: Look up schema from schema registry (if available)
+        #[cfg(feature = "state_machine")]
+        {
+            if let Some(registry_rwlock) = self.schema_registry.as_ref() {
+                // We need to call async methods from a sync context.
+                // Use futures::executor::block_on() which is safe here since this is
+                // called from parsing contexts that are already in async contexts.
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    // We're in a tokio context, use block_on
+                    use futures::executor::block_on;
+
+                    let registry = block_on(registry_rwlock.read());
+                    let table_name = &self.header.table_name;
+                    let keyspace = &self.header.keyspace;
+
+                    match block_on(registry.get_schema(keyspace, table_name)) {
+                        Ok(schema) => {
+                            eprintln!(
+                                "[DEBUG get_table_schema] Using schema from registry for {}.{}",
+                                keyspace, table_name
+                            );
+                            return Some(schema);
+                        }
+                        Err(e) => {
+                            eprintln!("[DEBUG get_table_schema] Schema not found in registry for {}.{}: {}",
+                                keyspace, table_name, e);
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "[DEBUG get_table_schema] Not in tokio context, skipping registry lookup"
+                    );
+                }
+            }
+        }
+
+        // For non-state_machine builds, schema_registry is Arc<SchemaRegistry> (not async)
+        #[cfg(not(feature = "state_machine"))]
+        {
+            if let Some(registry) = self.schema_registry.as_ref() {
+                let table_name = &self.header.table_name;
+                let keyspace = &self.header.keyspace;
+
+                // Non-state_machine SchemaRegistry doesn't have async get_schema method
+                // This path is currently not implemented for non-async registries
+                eprintln!("[DEBUG get_table_schema] Schema registry lookup not available in non-state_machine builds");
+                let _ = (registry, keyspace, table_name); // Avoid unused variable warnings
+            }
+        }
+
+        // Strategy 3: Construct basic schema from header columns (existing logic)
+        eprintln!(
+            "[DEBUG get_table_schema] Falling back to header column construction for {}.{}",
+            self.header.keyspace, self.header.table_name
+        );
+
         // Try to construct a basic schema from header information
         if self.header.columns.is_empty() {
             return None;

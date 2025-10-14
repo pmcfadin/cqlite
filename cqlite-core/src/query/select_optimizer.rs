@@ -691,9 +691,15 @@ mod tests {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.unwrap());
         let storage = Arc::new(
-            StorageEngine::open(temp_dir.path(), &config, platform.clone())
-                .await
-                .unwrap(),
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 

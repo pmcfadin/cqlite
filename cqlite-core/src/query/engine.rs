@@ -529,9 +529,15 @@ mod tests {
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
 
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -556,9 +562,15 @@ mod tests {
 
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -590,9 +602,15 @@ mod tests {
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
 
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -628,9 +646,15 @@ mod tests {
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
 
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -660,9 +684,15 @@ mod tests {
 
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
-            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform)
-                .await
-                .unwrap(),
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
@@ -703,9 +733,15 @@ mod plan_cache_tests {
         let temp_dir = TempDir::new().unwrap();
         let platform = Arc::new(Platform::new(config).await.unwrap());
         let storage = Arc::new(
-            StorageEngine::open(temp_dir.path(), config, platform)
-                .await
-                .unwrap(),
+            StorageEngine::open(
+                temp_dir.path(),
+                config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
         );
         let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
         let memory = Arc::new(MemoryManager::new(config).unwrap());

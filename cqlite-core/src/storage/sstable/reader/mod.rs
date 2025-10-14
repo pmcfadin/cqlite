@@ -255,6 +255,21 @@ impl SSTableReader {
     }
 
     /// Set the schema registry for schema-driven operations
+    #[cfg(feature = "state_machine")]
+    pub fn set_schema_registry(
+        &mut self,
+        schema_registry: Arc<tokio::sync::RwLock<crate::schema::SchemaRegistry>>,
+    ) {
+        self.schema_registry = Some(schema_registry);
+        log::debug!(
+            "Schema registry set for {}.{} - enabling schema-driven digest computation",
+            self.header.keyspace,
+            self.header.table_name
+        );
+    }
+
+    /// Set the schema registry for schema-driven operations (non-state_machine builds)
+    #[cfg(not(feature = "state_machine"))]
     pub fn set_schema_registry(&mut self, schema_registry: Arc<crate::schema::SchemaRegistry>) {
         self.schema_registry = Some(schema_registry);
         log::debug!(
