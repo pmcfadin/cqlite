@@ -9,6 +9,24 @@ SSTables carry integrity metadata at three levels: optional header CRC32 prefixe
 - How readers/writers interact with integrity metadata
 - How to demonstrate a minimal verification example
 
+### Checksum coverage at a glance (authoritative)
+
+| Component / Format | Header CRC32 prefix | Trailing per-chunk CRCs | Byte order (stored) | CRC scope | Verified by |
+|---|---|---|---|---|---|
+| Data.db (BIG) | no | no | n/a | n/a | `Digest.crc32` |
+| Data.db (NB) | no | yes | big-endian u32 | compressed chunk bytes only | reader per chunk + `Digest.crc32` |
+| Index.db (BIG/NB) | no | n/a | n/a | n/a | `Digest.crc32` |
+| Summary.db (BIG/NB) | no | n/a | n/a | n/a | `Digest.crc32` |
+| Filter.db (BIG/NB) | no | n/a | n/a | n/a | `Digest.crc32` |
+| Statistics.db (BIG/NB) | no | n/a | n/a | n/a | `Digest.crc32` |
+| CompressionInfo.db (NB) | no | n/a | n/a | n/a | `Digest.crc32` |
+| Legacy headers (select BIG sub-variants) | yes (where present) | n/a | big-endian u32 | header bytes only (after prefix) | reader on open |
+
+Notes:
+- “Legacy headers” are format-specific BIG-family artifacts, not used by NB `Data.db`.
+- `Digest.crc32` validates whole components over full-file contents per `TOC.txt`.
+- Full matrix with details appears later in this chapter.
+
 ## Header CRC32 Prefixes (Legacy Formats Only)
 
 > **Note:** This section describes CRC32 prefixes in **legacy formats only**.

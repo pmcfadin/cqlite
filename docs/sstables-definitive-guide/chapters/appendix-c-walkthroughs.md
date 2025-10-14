@@ -71,6 +71,46 @@ if CassandraVersion::from_magic_number(first4).is_none() {
 
 Scope note: NB `Data.db` begins with compressed chunk bytes and uses trailing per‑chunk CRCs; see the NB chunk CRC walkthrough above for the canonical NB integrity path.
 
+## Walkthrough: BIG Index.db entry parse (both variants)
+
+Tiny hex → parsed struct → assertion.
+
+Input A (non-length-prefixed):
+```
+0010 6b88 bf20 a251 11f0 a3fe f1a5 5138 3fb9 00
+```
+Parse:
+- marker = 0x0010
+- digest = 16 bytes (0x6b88…0x3fb9)
+- data_offset = vint (next bytes)
+
+Assertion: marker == 0x0010; digest.len == 16; offset >= 0.
+
+Input B (length-prefixed):
+```
+001a 0010 37ac 9f53 bd8e 4da5 a41a 240f 8f5a 6cfd 00 00 04 80 00 4f 88
+```
+Parse:
+- entry_len = 0x001a
+- marker = 0x0010
+- digest = 16 bytes (0x37ac…0x6cfd)
+- data_offset = vint (subsequent bytes)
+
+Assertion: entry_len == bytes_consumed; marker == 0x0010; digest.len == 16.
+
+## Walkthrough: Bloom on-disk decode (Filter.db)
+
+Given bytes:
+```
+0000 0005 0000 0002 a4c0 e2a8 02a2 a1b3 77
+```
+Decode:
+- bitset_length_bytes = 5
+- k = 2
+- payload = 5 bytes
+
+Bit packing: bits are LSB-first within each byte; consult `BloomFilter` writer/reader for word ordering (big-endian u64 words when serialized as words).
+
 ## Key Takeaways
 - Schema-aware decoding eliminates guesswork; comparators come from the schema.
 - Index and Summary readers narrow reads before hitting `Data.db` bytes.

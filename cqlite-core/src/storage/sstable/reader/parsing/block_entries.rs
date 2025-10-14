@@ -90,17 +90,29 @@ impl SSTableReader {
             block_data.to_vec()
         };
 
-        // Use the new state machine for Cassandra 5+ 'oa' format parsing
-        // Use state machine for all V5.0 formats - schema is available from header
+        // Determine parsing strategy based on data format classification
+        // V5_0DataFormat and related formats use compressed 'nb' with legacy serialization (u16 lengths)
+        // V5_0NewBig/Bti use true 'oa' format with VInt encoding
+        let data_format = self.header.cassandra_version.data_format();
+
+        eprintln!(
+            "[DEBUG SSTableReader::parse_block_entries] Format: {:?}, DataFormat: {:?}",
+            self.header.cassandra_version, data_format
+        );
+
+        // Use state machine ONLY for true V5 uncompressed OA format (VInt encoding)
         let use_state_machine = matches!(
-            self.header.cassandra_version,
-            crate::parser::header::CassandraVersion::V5_0NewBig
-                | crate::parser::header::CassandraVersion::V5_0Bti
-                | crate::parser::header::CassandraVersion::V5_0DataFormat
+            data_format,
+            crate::parser::header::DataFormat::V5UncompressedOA
+        );
+
+        eprintln!(
+            "[DEBUG SSTableReader::parse_block_entries] use_state_machine: {}",
+            use_state_machine
         );
 
         if use_state_machine {
-            eprintln!("[DEBUG SSTableReader::parse_block_entries] Using state machine for Cassandra 5+ format");
+            eprintln!("[DEBUG SSTableReader::parse_block_entries] Using state machine for true V5.0 'oa' format (VInt encoding)");
 
             // Log schema availability - NB format files may not have embedded schema
             if self.schema.is_some() {
@@ -129,8 +141,23 @@ impl SSTableReader {
                 }
             }
             return result;
+        }
+
+        // V5CompressedLegacy formats need special handling (u16 lengths, not VInt)
+        if matches!(
+            data_format,
+            crate::parser::header::DataFormat::V5CompressedLegacy
+        ) {
+            eprintln!(
+                "[DEBUG SSTableReader::parse_block_entries] Using V5 compressed legacy parsing (u16 lengths, not VInt)"
+            );
+            // TODO: Implement parse_block_entries_legacy() for proper u16 length parsing
+            // For now, fall through to legacy parsing which should work for most cases
+            eprintln!(
+                "[DEBUG SSTableReader::parse_block_entries] WARNING: parse_block_entries_legacy() not yet implemented, using standard legacy parser"
+            );
         } else {
-            eprintln!("[DEBUG SSTableReader::parse_block_entries] Using legacy parsing");
+            eprintln!("[DEBUG SSTableReader::parse_block_entries] Using standard legacy parsing");
         }
 
         // Enhanced partition data parsing for legacy formats
@@ -266,13 +293,14 @@ impl SSTableReader {
                     "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Schema found"
                 );
                 // Modern formats should use SchemaAwareReader with proper comparators
+                // NOTE: Only V5_0NewBig and V5_0Bti use true 'oa' format with VInt encoding
+                // V5_0DataFormat uses compressed legacy format and should NOT reach this code path
                 match self.header.cassandra_version {
                     crate::parser::header::CassandraVersion::V5_0NewBig
-                    | crate::parser::header::CassandraVersion::V5_0Bti
-                    | crate::parser::header::CassandraVersion::V5_0DataFormat => {
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern V5.0 format with schema from header");
-                        // V5.0 modern formats: Use schema-aware state machine with partition key comparators
-                        // Note: Modern V5.0 formats don't require legacy-heuristics - they use structured metadata
+                    | crate::parser::header::CassandraVersion::V5_0Bti => {
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] True V5.0 'oa' format with VInt encoding");
+                        // V5.0 true 'oa' formats: Use schema-aware state machine with partition key comparators
+                        // These use VInt-encoded partition key component counts and lengths
 
                         // Use schema-aware state machine for V5.0 formats
                         match _schema.get_partition_key_comparators() {
@@ -313,15 +341,15 @@ impl SSTableReader {
             } else {
                 eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema available from header");
                 // No schema available from header - check format restrictions
+                // NOTE: Only V5_0NewBig and V5_0Bti use true 'oa' format with VInt encoding
                 match self.header.cassandra_version {
                     crate::parser::header::CassandraVersion::V5_0NewBig
-                    | crate::parser::header::CassandraVersion::V5_0Bti
-                    | crate::parser::header::CassandraVersion::V5_0DataFormat => {
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern V5.0 format without header schema");
-                        // V5.0 format without header schema - use basic state machine
+                    | crate::parser::header::CassandraVersion::V5_0Bti => {
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] True V5.0 'oa' format without header schema");
+                        // V5.0 true 'oa' format without header schema - use basic state machine
                         // Schema may be provided later by Database layer
-                        // Note: Modern V5.0 formats don't require legacy-heuristics - they use structured metadata
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 format (no schema available)");
+                        // Note: These formats use VInt encoding and don't require legacy-heuristics
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 'oa' format (no schema available)");
                         Ok(RowCellStateMachine::new())
                     }
                     _ => {

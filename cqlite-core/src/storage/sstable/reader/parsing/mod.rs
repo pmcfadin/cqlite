@@ -18,6 +18,8 @@ mod value_parsing;
 use std::collections::HashMap;
 use std::path::Path;
 
+use log::{debug, error, warn};
+
 use crate::{
     schema::{ClusteringColumn, Column, KeyColumn, TableSchema},
     Error, Result, RowKey, Value,
@@ -98,8 +100,8 @@ impl SSTableReader {
     ) -> Option<TableSchema> {
         // Strategy 0: Use provided schema from query executor (highest priority)
         if let Some(schema) = provided_schema {
-            eprintln!(
-                "[DEBUG get_table_schema] Using provided schema for {}.{}",
+            debug!(
+                "get_table_schema: Using provided schema for {}.{}",
                 schema.keyspace, schema.table
             );
             return Some(schema.clone());
@@ -107,8 +109,8 @@ impl SSTableReader {
 
         // Strategy 1: Use schema extracted from SSTable header (if available)
         if let Some(schema) = self.schema.as_deref() {
-            eprintln!(
-                "[DEBUG get_table_schema] Using schema from SSTable header for {}.{}",
+            debug!(
+                "get_table_schema: Using schema from SSTable header for {}.{}",
                 self.header.keyspace, self.header.table_name
             );
             return Some(schema.clone());
@@ -134,8 +136,8 @@ impl SSTableReader {
                     ) {
                         Ok(names) => names,
                         Err(e) => {
-                            eprintln!(
-                                "[DEBUG get_table_schema] Failed to extract names from path {}: {}. Falling back to header names.",
+                            debug!(
+                                "get_table_schema: Failed to extract names from path {}: {}. Falling back to header names.",
                                 self.file_path.display(), e
                             );
                             // Fallback to header names if path parsing fails
@@ -145,21 +147,21 @@ impl SSTableReader {
 
                     match block_on(registry.get_schema(&keyspace, &table_name)) {
                         Ok(schema) => {
-                            eprintln!(
-                                "[DEBUG get_table_schema] Using schema from registry for {}.{}",
+                            debug!(
+                                "get_table_schema: Using schema from registry for {}.{}",
                                 keyspace, table_name
                             );
                             return Some(schema);
                         }
                         Err(e) => {
-                            eprintln!("[DEBUG get_table_schema] Schema not found in registry for {}.{}: {}",
-                                keyspace, table_name, e);
+                            debug!(
+                                "get_table_schema: Schema not found in registry for {}.{}: {}",
+                                keyspace, table_name, e
+                            );
                         }
                     }
                 } else {
-                    eprintln!(
-                        "[DEBUG get_table_schema] Not in tokio context, skipping registry lookup"
-                    );
+                    debug!("get_table_schema: Not in tokio context, skipping registry lookup");
                 }
             }
         }
@@ -174,8 +176,8 @@ impl SSTableReader {
                 {
                     Ok(names) => names,
                     Err(e) => {
-                        eprintln!(
-                            "[DEBUG get_table_schema] Failed to extract names from path {}: {}. Falling back to header names.",
+                        debug!(
+                            "get_table_schema: Failed to extract names from path {}: {}. Falling back to header names.",
                             self.file_path.display(), e
                         );
                         // Fallback to header names if path parsing fails
@@ -185,14 +187,14 @@ impl SSTableReader {
 
                 // Non-state_machine SchemaRegistry doesn't have async get_schema method
                 // This path is currently not implemented for non-async registries
-                eprintln!("[DEBUG get_table_schema] Schema registry lookup not available in non-state_machine builds");
+                debug!("get_table_schema: Schema registry lookup not available in non-state_machine builds");
                 let _ = (registry, &keyspace, &table_name); // Avoid unused variable warnings
             }
         }
 
         // Strategy 3: Construct basic schema from header columns (existing logic)
-        eprintln!(
-            "[DEBUG get_table_schema] Falling back to header column construction for {}.{}",
+        debug!(
+            "get_table_schema: Falling back to header column construction for {}.{}",
             self.header.keyspace, self.header.table_name
         );
 
@@ -255,13 +257,43 @@ impl SSTableReader {
     pub(in crate::storage::sstable::reader) fn parse_partition_data(
         &self,
         data: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Option<Vec<(RowKey, Value)>>> {
         if data.is_empty() {
             return Ok(Some(Vec::new()));
         }
 
-        // Use the row cell state machine for proper parsing
-        let mut state_machine = super::super::row_cell_state_machine::RowCellStateMachine::new();
+        // Create schema-aware state machine if schema is available
+        let mut state_machine = if let Some(schema) = schema {
+            // Get partition key comparators from schema
+            match schema.get_partition_key_comparators() {
+                Ok(comparators) if !comparators.is_empty() => {
+                    debug!("parse_partition_data: Creating schema-aware state machine with {} partition key comparators", comparators.len());
+                    super::super::row_cell_state_machine::RowCellStateMachine::with_schema_and_version(
+                        schema.clone(),
+                        comparators[0].clone(),
+                        self.header.cassandra_version
+                    )
+                }
+                Ok(_empty) => {
+                    warn!(
+                        "parse_partition_data: Schema for {}.{} has {} partition keys but comparator parsing returned empty - falling back to schemaless parsing",
+                        schema.keyspace, schema.table, schema.partition_keys.len()
+                    );
+                    super::super::row_cell_state_machine::RowCellStateMachine::new()
+                }
+                Err(e) => {
+                    warn!(
+                        "parse_partition_data: Failed to get partition key comparators for {}.{}: {} - falling back to schemaless parsing",
+                        schema.keyspace, schema.table, e
+                    );
+                    super::super::row_cell_state_machine::RowCellStateMachine::new()
+                }
+            }
+        } else {
+            debug!("parse_partition_data: No schema provided, using basic state machine");
+            super::super::row_cell_state_machine::RowCellStateMachine::new()
+        };
         let mut results = Vec::new();
 
         // Parse the partition data using the row cell state machine
@@ -270,20 +302,39 @@ impl SSTableReader {
                 for parsed_row in parsed_rows {
                     // Extract row key and value from parsed row
                     let row_key = self.extract_row_key_from_parsed_row(&parsed_row)?;
-                    let value = self.extract_value_from_parsed_row(&parsed_row)?;
+
+                    // Use schema-aware extraction if schema is available
+                    let value = if let Some(s) = schema {
+                        // Use schema-aware extraction for proper typing
+                        self.extract_value_from_parsed_row_with_schema(&parsed_row, s)?
+                    } else {
+                        // Fallback to basic extraction when no schema
+                        self.extract_value_from_parsed_row_fallback(&parsed_row)?
+                    };
+
                     results.push((row_key, value));
                 }
                 Ok(Some(results))
             }
             Err(e) => {
-                log::error!("Failed to parse partition data at offset: {}", e);
+                let context = if let Some(s) = schema {
+                    format!("table {}.{} with schema", s.keyspace, s.table)
+                } else {
+                    "unknown table without schema".to_string()
+                };
+
+                error!(
+                    "parse_partition_data: Failed to parse partition data for {} (format {:?}): {}",
+                    context, self.header.cassandra_version, e
+                );
 
                 // For Issue #35 compliance, we must not return synthetic data
                 // If parsing fails, we return None to indicate parsing failure
                 // This ensures zero-tolerance validation and forces proper implementation
                 Err(Error::corruption(format!(
-                    "Partition data parsing failed - real parsing required for Issue #35 compliance: {}",
-                    e
+                    "Partition data parsing failed for {} (format {:?}): {}. \
+                     Ensure schema is provided for Cassandra 5.0+ formats (Issue #35 compliance).",
+                    context, self.header.cassandra_version, e
                 )))
             }
         }
@@ -312,8 +363,11 @@ impl SSTableReader {
         }
     }
 
-    /// Extract value from parsed row data
-    pub(in crate::storage::sstable::reader) fn extract_value_from_parsed_row(
+    /// Extract value from parsed row data (fallback for schemaless parsing)
+    ///
+    /// This method is used when no schema is available. It returns the first
+    /// non-null cell value, which may be a blob.
+    pub(in crate::storage::sstable::reader) fn extract_value_from_parsed_row_fallback(
         &self,
         parsed_row: &ParsedRow,
     ) -> Result<Value> {
@@ -359,6 +413,237 @@ impl SSTableReader {
         )))
     }
 
+    /// Extract typed value from parsed row using schema information
+    ///
+    /// This method builds a complete row map with all columns properly typed
+    /// according to the schema, instead of returning just the first cell as a blob.
+    pub(in crate::storage::sstable::reader) fn extract_value_from_parsed_row_with_schema(
+        &self,
+        parsed_row: &ParsedRow,
+        schema: &crate::schema::TableSchema,
+    ) -> Result<Value> {
+        use std::collections::HashMap;
+
+        let mut columns: HashMap<String, Value> = HashMap::new();
+
+        debug!(
+            "extract_value_with_schema: Processing row with {} cells",
+            parsed_row.cells.len()
+        );
+        debug!(
+            "extract_value_with_schema: Schema has {} partition keys, {} clustering keys, {} columns",
+            schema.partition_keys.len(),
+            schema.clustering_keys.len(),
+            schema.columns.len()
+        );
+
+        // Process partition key components
+        for (idx, component) in parsed_row.partition_key.components.iter().enumerate() {
+            if let Some(pk_col) = schema.partition_keys.get(idx) {
+                debug!(
+                    "extract_value_with_schema: Processing partition key column: {}",
+                    pk_col.name
+                );
+
+                // Parse the component bytes with schema type
+                let typed_value =
+                    self.parse_value_with_schema_type(component, &pk_col.data_type)
+                        .unwrap_or_else(|e| {
+                            warn!(
+                                "extract_value_with_schema: Failed to parse partition key {}: {}, using blob fallback",
+                                pk_col.name, e
+                            );
+                            Value::Blob(component.clone())
+                        });
+
+                columns.insert(pk_col.name.clone(), typed_value);
+            }
+        }
+
+        // Process clustering key if present
+        if let Some(ref clustering_key) = parsed_row.clustering_key {
+            // The clustering_key is a String representation, we need to use the raw bytes
+            // from partition_key components if they represent clustering
+            // For now, we'll check if clustering_rows have data
+            if !parsed_row.clustering_rows.is_empty() {
+                // Extract clustering key from first clustering row
+                let first_clustering_row = &parsed_row.clustering_rows[0];
+                // clustering_key is Vec<u8>, parse it as composite if needed
+                let ck_bytes = &first_clustering_row.clustering_key;
+
+                // For single clustering key
+                if schema.clustering_keys.len() == 1 {
+                    let ck_col = &schema.clustering_keys[0];
+                    debug!(
+                        "extract_value_with_schema: Processing clustering key column: {}",
+                        ck_col.name
+                    );
+
+                    let typed_value =
+                        self.parse_value_with_schema_type(ck_bytes, &ck_col.data_type)
+                            .unwrap_or_else(|e| {
+                                warn!(
+                                    "extract_value_with_schema: Failed to parse clustering key {}: {}, using blob fallback",
+                                    ck_col.name, e
+                                );
+                                Value::Blob(ck_bytes.clone())
+                            });
+
+                    columns.insert(ck_col.name.clone(), typed_value);
+                } else if schema.clustering_keys.len() > 1 {
+                    // For composite clustering keys, we need to parse the composite structure
+                    // This is a TODO for now - use blob fallback
+                    warn!(
+                        "extract_value_with_schema: Composite clustering keys not yet implemented for {}.{} ({} keys) - using string representation fallback",
+                        schema.keyspace, schema.table, schema.clustering_keys.len()
+                    );
+                    for ck_col in &schema.clustering_keys {
+                        columns.insert(ck_col.name.clone(), Value::Text(clustering_key.clone()));
+                    }
+                }
+            } else {
+                // No clustering rows, just use the string representation
+                for ck_col in &schema.clustering_keys {
+                    columns.insert(ck_col.name.clone(), Value::Text(clustering_key.clone()));
+                }
+            }
+        }
+
+        // Process regular columns from cells
+        for cell in &parsed_row.cells {
+            if let Some(col) = schema.columns.iter().find(|c| c.name == cell.column_name) {
+                debug!(
+                    "extract_value_with_schema: Processing regular column: {}",
+                    cell.column_name
+                );
+
+                // Get value from cell - it's already parsed, but might be a blob
+                if let Some(ref cell_value) = cell.value {
+                    match cell_value {
+                        Value::Blob(bytes) if !bytes.is_empty() => {
+                            // Try to parse blob with schema type for better typing
+                            let typed_value =
+                                self.parse_value_with_schema_type(bytes, &col.data_type)
+                                    .unwrap_or_else(|e| {
+                                        debug!(
+                                            "extract_value_with_schema: Failed to parse column {}: {}, keeping blob",
+                                            cell.column_name, e
+                                        );
+                                        Value::Blob(bytes.clone())
+                                    });
+                            columns.insert(cell.column_name.clone(), typed_value);
+                        }
+                        _ => {
+                            // Use the already-typed value from cell
+                            columns.insert(cell.column_name.clone(), cell_value.clone());
+                        }
+                    }
+                } else {
+                    // Null value
+                    columns.insert(cell.column_name.clone(), Value::Null);
+                }
+            }
+        }
+
+        // Also process clustering row columns if present
+        for clustering_row in &parsed_row.clustering_rows {
+            for (col_name, col_value) in &clustering_row.columns {
+                if let Some(col) = schema.columns.iter().find(|c| c.name == *col_name) {
+                    debug!(
+                        "extract_value_with_schema: Processing clustering row column: {}",
+                        col_name
+                    );
+
+                    match col_value {
+                        Value::Blob(bytes) if !bytes.is_empty() => {
+                            // Try to parse blob with schema type
+                            let typed_value =
+                                self.parse_value_with_schema_type(bytes, &col.data_type)
+                                    .unwrap_or_else(|e| {
+                                        debug!(
+                                            "extract_value_with_schema: Failed to parse clustering row column {}: {}, keeping blob",
+                                            col_name, e
+                                        );
+                                        Value::Blob(bytes.clone())
+                                    });
+                            columns.insert(col_name.clone(), typed_value);
+                        }
+                        _ => {
+                            // Use the already-typed value
+                            columns.insert(col_name.clone(), col_value.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Process static row columns if present
+        if let Some(ref static_row) = parsed_row.static_row {
+            for (col_name, col_value) in &static_row.columns {
+                if let Some(col) = schema.columns.iter().find(|c| c.name == *col_name) {
+                    debug!(
+                        "extract_value_with_schema: Processing static row column: {}",
+                        col_name
+                    );
+
+                    match col_value {
+                        Value::Blob(bytes) if !bytes.is_empty() => {
+                            // Try to parse blob with schema type
+                            let typed_value =
+                                self.parse_value_with_schema_type(bytes, &col.data_type)
+                                    .unwrap_or_else(|e| {
+                                        debug!(
+                                            "extract_value_with_schema: Failed to parse static row column {}: {}, keeping blob",
+                                            col_name, e
+                                        );
+                                        Value::Blob(bytes.clone())
+                                    });
+                            columns.insert(col_name.clone(), typed_value);
+                        }
+                        _ => {
+                            // Use the already-typed value
+                            columns.insert(col_name.clone(), col_value.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate we got at least some columns
+        if columns.is_empty() {
+            return Err(Error::Schema(format!(
+                "No columns matched schema - parsed {} cells but none matched {} schema columns",
+                parsed_row.cells.len(),
+                schema.columns.len()
+            )));
+        }
+
+        debug!(
+            "extract_value_with_schema: Extracted {} columns into row map",
+            columns.len()
+        );
+
+        // Convert columns HashMap to UDT fields
+        let fields = columns
+            .into_iter()
+            .map(|(name, value)| crate::types::UdtField {
+                name,
+                value: Some(value),
+            })
+            .collect();
+
+        // Return as UDT value representing the row
+        // NOTE: We use Value::Udt to represent table rows because Value::Row doesn't
+        // exist in the current type system. The query executor treats UDT values with
+        // type_name matching the table name as row representations. This is semantically
+        // imperfect but structurally sound. Consider adding Value::Row in M3 type system refactor.
+        Ok(Value::Udt(crate::types::UdtValue {
+            keyspace: schema.keyspace.clone(),
+            type_name: schema.table.clone(), // Table name as UDT type name
+            fields,
+        }))
+    }
+
     /// Parse partition data at a specific offset in the Data.db file
     ///
     /// This method reads and parses partition data from a specific offset,
@@ -393,8 +678,9 @@ impl SSTableReader {
             buffer
         };
 
-        // Parse the partition data
-        self.parse_partition_data(&data)
+        // Parse the partition data with schema using four-tier lookup
+        let table_schema = self.get_table_schema(None);
+        self.parse_partition_data(&data, table_schema.as_ref())
     }
 }
 

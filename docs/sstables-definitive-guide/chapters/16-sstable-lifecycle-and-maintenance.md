@@ -35,6 +35,8 @@ Tip: Prefer verifying a few SSTables per table (newest, oldest, largest) to esta
 
 `TOC.txt` enumerates the components present for a given generation and is authoritative for lifecycle checks. Tools validate it against the directory listing and component headers.
 
+> Don’t mix component families in a single generation: BIG components must not be combined with BTI components under the same `{generation}`. During upgrades you may have both families in the directory, but each generation is internally consistent.
+
 Core invariants (Cassandra 5.0 multi-file BIG/BTI formats):
 
 - Presence: All components listed in `TOC.txt` exist on disk; no unexpected files beyond the set and `TOC.txt` itself.

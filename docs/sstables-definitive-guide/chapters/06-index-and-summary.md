@@ -61,6 +61,12 @@ varint data_offset
 
 Gate detection is handled by the BIG reader; consult `org.apache.cassandra.io.sstable.format.big.BigTableReader` and `RowIndexEntry` for exact parsing. Implementations must handle both variants by detecting an initial length field that precedes the `0x0010` marker.
 
+Digest and collisions:
+- Partition key digest is 16 bytes; derived from the partition key via Cassandra’s partitioner (e.g., Murmur3Partitioner). Treat digest as an index key; on match, validate by reading the `Data.db` key to guard against extremely rare collisions.
+
+Promoted index payload (BIG):
+- Emitted for wide partitions. The payload follows the offset field when present; readers identify it by entry payload length (length-prefixed variant) or by probing entry structure (non-prefixed). See `RowIndexEntry` for exact fields.
+
 Mini-parser (variant-tolerant) — conceptual:
 ```text
 pos = 0

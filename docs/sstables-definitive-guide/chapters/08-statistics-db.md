@@ -30,7 +30,7 @@ totalRows: 1000
   - **min_timestamp / max_timestamp**: microsecond epoch range of writes
   - **min/max local deletion time**: lower/upper bounds for tombstone local deletion time
 - Bloom and Compression:
-  - **bloom filter fp chance**: target false-positive rate used when building `Filter.db`
+  - **bloom filter fp chance**: build-time target false-positive rate used when constructing `Filter.db`. Runtime observed FPR may diverge as the filter saturates or key distribution shifts; validate empirically and rebuild if drift is unacceptable.
   - **compressor / compression ratio**: algorithm and computed ratio for `Data.db`
 - Cardinality and Sizes:
   - **estimated cardinality**: approximate partition count
