@@ -9,7 +9,8 @@ use tokio::io::BufReader;
 use tokio::sync::Mutex;
 
 use crate::{
-    parser::SSTableHeader, parser::SSTableParser, platform::Platform, types::TableId, RowKey, Value,
+    parser::SSTableHeader, parser::SSTableParser, platform::Platform, schema::TableSchema,
+    types::TableId, RowKey, Value,
 };
 
 use super::super::{
@@ -229,6 +230,8 @@ pub struct SSTableReader {
     pub(crate) statistics_reader: Option<StatisticsReader>,
     /// Schema registry for schema-driven operations (modern formats)
     pub(crate) schema_registry: Option<Arc<crate::schema::SchemaRegistry>>,
+    /// Table schema extracted from SSTable header
+    pub(super) schema: Option<Arc<TableSchema>>,
     /// CompressionInfo metadata for chunked decompression (if compressed)
     pub compression_info: Option<Arc<CompressionInfo>>,
     /// Current chunk index for sequential chunk reading

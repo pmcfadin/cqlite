@@ -50,6 +50,7 @@ pub use json_exporter::{
 pub type ColumnSpec = Column;
 
 use crate::error::{Error, Result};
+use crate::parser::header::SSTableHeader;
 use crate::parser::types::CqlTypeId;
 use crate::storage::StorageEngine;
 use crate::types::{ComparatorType, UdtTypeDef};
@@ -541,6 +542,107 @@ impl UdtRegistry {
 }
 
 impl TableSchema {
+    /// Extract schema from SSTable header column metadata
+    ///
+    /// This method constructs a TableSchema from the column information
+    /// embedded in the SSTable header's SerializationHeader.
+    pub fn from_sstable_header(header: &SSTableHeader) -> Result<Self> {
+        // Separate columns by role
+        let mut partition_keys = Vec::new();
+        let mut clustering_keys = Vec::new();
+        let mut regular_columns = Vec::new();
+
+        for col_info in &header.columns {
+            if col_info.is_primary_key {
+                if col_info.is_clustering {
+                    clustering_keys.push(col_info);
+                } else {
+                    partition_keys.push(col_info);
+                }
+            } else {
+                regular_columns.push(col_info);
+            }
+        }
+
+        // Validate all partition keys have positions
+        for col_info in &partition_keys {
+            if col_info.key_position.is_none() {
+                return Err(Error::schema(format!(
+                    "Partition key column '{}' missing key_position in SSTable header",
+                    col_info.name
+                )));
+            }
+        }
+
+        // Validate all clustering keys have positions
+        for col_info in &clustering_keys {
+            if col_info.key_position.is_none() {
+                return Err(Error::schema(format!(
+                    "Clustering key column '{}' missing key_position in SSTable header",
+                    col_info.name
+                )));
+            }
+        }
+
+        // Sort by header's key_position to establish canonical ordering
+        partition_keys.sort_by_key(|c| c.key_position.unwrap());
+        clustering_keys.sort_by_key(|c| c.key_position.unwrap());
+
+        // Build KeyColumn with contiguous 0-based positions for CQLite's internal representation
+        // (SSTable key_position values may have gaps; we normalize to [0,1,2,...])
+        let partition_keys: Vec<KeyColumn> = partition_keys
+            .iter()
+            .enumerate()
+            .map(|(pos, col)| KeyColumn {
+                name: col.name.clone(),
+                data_type: col.column_type.clone(),
+                position: pos, // Contiguous internal position, not header key_position
+            })
+            .collect();
+
+        // Build ClusteringColumn with contiguous positions
+        let clustering_keys: Vec<ClusteringColumn> = clustering_keys
+            .iter()
+            .enumerate()
+            .map(|(pos, col)| ClusteringColumn {
+                name: col.name.clone(),
+                data_type: col.column_type.clone(),
+                position: pos, // Contiguous internal position, not header key_position
+                order: ClusteringOrder::Asc, // TODO(Future): Extract clustering order from header properties when format documented
+            })
+            .collect();
+
+        // All columns including keys
+        let columns: Vec<Column> = header
+            .columns
+            .iter()
+            .map(|col| Column {
+                name: col.name.clone(),
+                data_type: col.column_type.clone(),
+                nullable: !col.is_primary_key, // Primary keys are non-nullable
+                default: None,
+            })
+            .collect();
+
+        if partition_keys.is_empty() {
+            return Err(Error::schema(
+                "No partition keys found in SSTable header".to_string(),
+            ));
+        }
+
+        let schema = TableSchema {
+            keyspace: header.keyspace.clone(),
+            table: header.table_name.clone(),
+            partition_keys,
+            clustering_keys,
+            columns,
+            comments: HashMap::new(),
+        };
+
+        schema.validate()?;
+        Ok(schema)
+    }
+
     /// Load schema from JSON file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(path)
@@ -1375,5 +1477,57 @@ mod tests {
         assert!(schemas.contains_key("table_0"));
         assert!(schemas.contains_key("table_1"));
         assert!(schemas.contains_key("table_2"));
+    }
+
+    #[test]
+    fn test_schema_from_sstable_header() {
+        use crate::parser::header::{
+            CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader, SSTableStats,
+        };
+        use std::collections::HashMap;
+
+        let columns = vec![
+            ColumnInfo {
+                name: "id".to_string(),
+                column_type: "int".to_string(),
+                is_primary_key: true,
+                key_position: Some(0),
+                is_static: false,
+                is_clustering: false,
+            },
+            ColumnInfo {
+                name: "name".to_string(),
+                column_type: "text".to_string(),
+                is_primary_key: false,
+                key_position: None,
+                is_static: false,
+                is_clustering: false,
+            },
+        ];
+
+        let header = SSTableHeader {
+            cassandra_version: CassandraVersion::V5_0Bti,
+            version: 1,
+            table_id: [0; 16],
+            keyspace: "test_ks".to_string(),
+            table_name: "test_table".to_string(),
+            generation: 1,
+            compression: CompressionInfo {
+                algorithm: "NONE".to_string(),
+                chunk_size: 0,
+                parameters: HashMap::new(),
+            },
+            stats: SSTableStats::default(),
+            columns,
+            properties: HashMap::new(),
+        };
+
+        let schema = TableSchema::from_sstable_header(&header).unwrap();
+
+        assert_eq!(schema.keyspace, "test_ks");
+        assert_eq!(schema.table, "test_table");
+        assert_eq!(schema.partition_keys.len(), 1);
+        assert_eq!(schema.partition_keys[0].name, "id");
+        assert_eq!(schema.columns.len(), 2);
     }
 }

@@ -75,6 +75,25 @@ impl SSTableReader {
 
         if use_state_machine {
             eprintln!("[DEBUG SSTableReader::parse_block_entries] Using state machine for Cassandra 5+ format");
+
+            // V5.0 formats require schema for correct parsing
+            if self.schema.is_none() {
+                return Err(Error::schema(
+                    format!(
+                        "Cassandra 5.0 format ({:?}) requires schema for parsing, but schema extraction \
+                         from SSTable header failed or schema not available. This typically indicates \
+                         a malformed header or unsupported format variant.",
+                        self.header.cassandra_version
+                    )
+                ));
+            }
+
+            eprintln!(
+                "[DEBUG SSTableReader::parse_block_entries] Schema available: {}.{}",
+                self.schema.as_ref().unwrap().keyspace,
+                self.schema.as_ref().unwrap().table
+            );
+
             let result = self.parse_block_entries_with_state_machine(&data);
             match &result {
                 Ok(entries) => {
@@ -229,10 +248,28 @@ impl SSTableReader {
                     | crate::parser::header::CassandraVersion::V5_0Bti
                     | crate::parser::header::CassandraVersion::V5_0DataFormat => {
                         eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern V5.0 format with schema from header");
-                        // V5.0 modern formats: Use basic state machine (full schema-aware parsing in future)
+                        // V5.0 modern formats: Use schema-aware state machine with partition key comparators
                         // Note: Modern V5.0 formats don't require legacy-heuristics - they use structured metadata
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 format");
-                        Ok(RowCellStateMachine::new())
+
+                        // Use schema-aware state machine for V5.0 formats
+                        match _schema.get_partition_key_comparators() {
+                            Ok(comparators) if !comparators.is_empty() => {
+                                eprintln!("[DEBUG] Creating schema-aware state machine with {} partition key comparators", comparators.len());
+                                // Use first comparator for now (composite keys handled internally)
+                                Ok(RowCellStateMachine::with_schema(
+                                    _schema.clone(),
+                                    comparators[0].clone(),
+                                ))
+                            }
+                            Ok(_) => {
+                                eprintln!("[DEBUG] Schema has no partition key comparators, using basic state machine");
+                                Ok(RowCellStateMachine::new())
+                            }
+                            Err(e) => {
+                                eprintln!("[DEBUG] Failed to get partition key comparators: {}, using basic state machine", e);
+                                Ok(RowCellStateMachine::new())
+                            }
+                        }
                     }
                     _ => {
                         // Legacy formats can use basic state machine as last resort
@@ -258,10 +295,10 @@ impl SSTableReader {
                     | crate::parser::header::CassandraVersion::V5_0Bti
                     | crate::parser::header::CassandraVersion::V5_0DataFormat => {
                         eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Modern V5.0 format without header schema");
-                        // V5.0 modern formats: Use basic state machine even without header schema
-                        // The schema will be provided by the Database/query engine layer
+                        // V5.0 format without header schema - use basic state machine
+                        // Schema may be provided later by Database layer
                         // Note: Modern V5.0 formats don't require legacy-heuristics - they use structured metadata
-                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 format");
+                        eprintln!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 format (no schema available)");
                         Ok(RowCellStateMachine::new())
                     }
                     _ => {

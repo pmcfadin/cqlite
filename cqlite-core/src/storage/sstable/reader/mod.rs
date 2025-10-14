@@ -47,6 +47,7 @@ use tokio::sync::Mutex;
 use crate::{
     parser::{header::CassandraVersion, SSTableHeader, SSTableParser},
     platform::Platform,
+    schema::TableSchema,
     storage::sstable::compression_info::CompressionInfo,
     Config, Error, Result, RowKey, Value,
 };
@@ -90,6 +91,39 @@ impl SSTableReader {
                 ))
             })?;
         let header_size = calculate_actual_header_size(&header, &header_buffer)?;
+
+        // Extract schema from header for V5.0+ formats
+        let schema = if matches!(
+            header.cassandra_version,
+            CassandraVersion::V5_0NewBig
+                | CassandraVersion::V5_0Bti
+                | CassandraVersion::V5_0DataFormat
+        ) {
+            match TableSchema::from_sstable_header(&header) {
+                Ok(s) => {
+                    log::debug!(
+                        "Extracted schema from SSTable header: {}.{} ({} columns, {} partition keys, {} clustering keys)",
+                        s.keyspace,
+                        s.table,
+                        s.columns.len(),
+                        s.partition_keys.len(),
+                        s.clustering_keys.len()
+                    );
+                    Some(Arc::new(s))
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to extract schema from SSTable header for {}: {}. Schema-aware parsing will not be available.",
+                        path.display(),
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            // Legacy formats don't have schema in header
+            None
+        };
 
         // Seek to start of data section
         {
@@ -167,6 +201,7 @@ impl SSTableReader {
             summary_reader,
             statistics_reader,
             schema_registry: None, // Will be set by set_schema_registry() after construction
+            schema,
             compression_info: compression_info.map(Arc::new),
             current_chunk_index: AtomicUsize::new(0),
         })
@@ -288,6 +323,13 @@ impl SSTableReader {
     /// Get a reference to the SSTable header
     pub fn header(&self) -> &SSTableHeader {
         &self.header
+    }
+
+    /// Get the table schema extracted from the SSTable header
+    ///
+    /// Returns `None` for legacy formats or if schema extraction failed.
+    pub fn schema(&self) -> Option<&TableSchema> {
+        self.schema.as_deref()
     }
 
     /// Extract write time from entry metadata
