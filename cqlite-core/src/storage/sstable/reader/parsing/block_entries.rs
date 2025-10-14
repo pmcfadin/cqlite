@@ -5,6 +5,7 @@
 //! and legacy format support.
 
 use crate::{parser::vint::parse_vint_length, types::TableId, Error, Result, RowKey, Value};
+use log::{debug, error};
 
 use super::super::{
     super::{
@@ -143,19 +144,47 @@ impl SSTableReader {
             return result;
         }
 
-        // V5CompressedLegacy formats need special handling (u16 lengths, not VInt)
         if matches!(
             data_format,
             crate::parser::header::DataFormat::V5CompressedLegacy
         ) {
-            eprintln!(
-                "[DEBUG SSTableReader::parse_block_entries] Using V5 compressed legacy parsing (u16 lengths, not VInt)"
-            );
-            // TODO: Implement parse_block_entries_legacy() for proper u16 length parsing
-            // For now, fall through to legacy parsing which should work for most cases
-            eprintln!(
-                "[DEBUG SSTableReader::parse_block_entries] WARNING: parse_block_entries_legacy() not yet implemented, using standard legacy parser"
-            );
+            debug!("Routing V5CompressedLegacy to partition parser");
+
+            // Validate header metadata before constructing TableId
+            if self.header.keyspace.is_empty() || self.header.table_name.is_empty() {
+                return Err(Error::Schema(format!(
+                    "V5CompressedLegacy format requires valid keyspace and table in header, found: '{}'.'{}'",
+                    self.header.keyspace, self.header.table_name
+                )));
+            }
+
+            // V5CompressedLegacy uses partition/row structure, not simple entries
+            // Use parse_partition_data() which handles this correctly
+            let table_id = TableId::new(format!(
+                "{}.{}",
+                self.header.keyspace, self.header.table_name
+            ));
+
+            match self.parse_partition_data(&data, schema) {
+                Ok(Some(partition_results)) => {
+                    // Convert partition results to block entry format
+                    let entries: Vec<(TableId, RowKey, Value)> = partition_results
+                        .into_iter()
+                        .map(|(row_key, value)| (table_id.clone(), row_key, value))
+                        .collect();
+
+                    debug!("Partition parser returned {} entries", entries.len());
+                    return Ok(entries);
+                }
+                Ok(None) => {
+                    debug!("Partition parser returned no data");
+                    return Ok(Vec::new());
+                }
+                Err(e) => {
+                    error!("parse_partition_data failed for V5CompressedLegacy: {}", e);
+                    return Err(e);
+                }
+            }
         } else {
             eprintln!("[DEBUG SSTableReader::parse_block_entries] Using standard legacy parsing");
         }
