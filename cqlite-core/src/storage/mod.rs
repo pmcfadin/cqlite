@@ -158,6 +158,7 @@ impl StorageEngine {
     ///     discovered_table_dirs,
     ///     &config,
     ///     platform,
+    ///     None,
     /// ).await?;
     /// # Ok(())
     /// # }

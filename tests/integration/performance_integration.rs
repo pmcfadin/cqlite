@@ -20,7 +20,7 @@ async fn test_end_to_end_performance() {
     let temp_dir = TempDir::new().unwrap();
     let config = Config::performance_optimized();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap();
+    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let table_id = TableId::new("perf_test_table");
     
     // Write performance test
@@ -76,7 +76,7 @@ async fn test_concurrent_performance() {
     let temp_dir = TempDir::new().unwrap();
     let config = Config::performance_optimized();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap());
+    let engine = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap());
     let table_id = TableId::new("concurrent_test_table");
     
     let start_time = Instant::now();
@@ -127,7 +127,7 @@ async fn test_memory_optimization() {
     let temp_dir = TempDir::new().unwrap();
     let config = Config::memory_optimized();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap();
+    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let table_id = TableId::new("memory_test_table");
     
     // Insert data and monitor memory usage
@@ -164,7 +164,7 @@ async fn test_compression_performance() {
     config.storage.compression_algorithm = cqlite_core::config::CompressionAlgorithm::Lz4;
     
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap();
+    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let table_id = TableId::new("compression_test_table");
     
     // Create highly compressible data
@@ -216,7 +216,7 @@ async fn test_sstable_performance() {
     let temp_dir = TempDir::new().unwrap();
     let config = Config::performance_optimized();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap();
+    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let table_id = TableId::new("sstable_test_table");
     
     // Fill memtable to trigger SSTable creation
@@ -267,7 +267,7 @@ async fn test_query_performance() {
     let temp_dir = TempDir::new().unwrap();
     let config = Config::performance_optimized();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap();
+    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let table_id = TableId::new("query_test_table");
     
     // Insert ordered data for range queries
@@ -312,7 +312,7 @@ async fn test_mixed_workload_performance() {
     let temp_dir = TempDir::new().unwrap();
     let config = Config::performance_optimized();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap());
+    let engine = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap());
     let table_id = TableId::new("mixed_workload_table");
     
     // Pre-populate with some data
@@ -361,7 +361,7 @@ async fn test_sustained_performance() {
     let temp_dir = TempDir::new().unwrap();
     let config = Config::performance_optimized();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap());
+    let engine = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap());
     let table_id = TableId::new("sustained_test_table");
     
     let test_duration = Duration::from_secs(30);
@@ -412,7 +412,7 @@ async fn test_recovery_performance() {
     
     // Phase 1: Create and populate database
     {
-        let engine = StorageEngine::open(temp_dir.path(), &config, platform.clone()).await.unwrap();
+        let engine = StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await.unwrap();
         let table_id = TableId::new("recovery_test_table");
         
         // Insert data
@@ -428,7 +428,7 @@ async fn test_recovery_performance() {
     
     // Phase 2: Measure recovery time
     let recovery_start = Instant::now();
-    let engine = StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap();
+    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let recovery_time = recovery_start.elapsed();
     
     println!("Recovery time: {:.2} ms", recovery_time.as_millis());
@@ -461,7 +461,7 @@ async fn test_bloom_filter_performance() {
     config.storage.bloom_filter_fp_rate = 0.01;
     
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap();
+    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let table_id = TableId::new("bloom_test_table");
     
     // Insert data to create bloom filter
@@ -518,7 +518,7 @@ async fn test_data_type_performance() {
     let temp_dir = TempDir::new().unwrap();
     let config = Config::performance_optimized();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let engine = StorageEngine::open(temp_dir.path(), &config, platform).await.unwrap();
+    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let table_id = TableId::new("datatype_test_table");
     
     // Test different data types

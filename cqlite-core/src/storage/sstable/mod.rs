@@ -227,7 +227,8 @@ impl SSTableManager {
     ///     &PathBuf::from("/data"),
     ///     table_dirs,
     ///     &config,
-    ///     platform
+    ///     platform,
+    ///     None,
     /// ).await?;
     /// # Ok(())
     /// # }

@@ -350,7 +350,7 @@ impl PerformanceBenchmarks {
         })?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let engine = StorageEngine::open(temp_dir.path(), &config, platform).await?;
+        let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await?;
         let table_id = TableId::new("benchmark_table");
 
         let dataset_size = self.config.medium_dataset_size;
@@ -426,7 +426,7 @@ impl PerformanceBenchmarks {
         })?;
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let engine = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform).await?);
+        let engine = Arc::new(StorageEngine::open(temp_dir.path(), &config, platform, None).await?);
         let table_id = TableId::new("concurrent_table");
 
         let concurrent_ops = 100;
@@ -499,7 +499,7 @@ impl PerformanceBenchmarks {
         })?;
         let config = Config::performance_optimized();
         let platform = Arc::new(Platform::new(&config).await?);
-        let engine = StorageEngine::open(temp_dir.path(), &config, platform).await?;
+        let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await?;
         let table_id = TableId::new("large_dataset_table");
 
         let dataset_size = self.config.large_dataset_size;

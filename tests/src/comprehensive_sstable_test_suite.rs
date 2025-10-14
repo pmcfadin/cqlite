@@ -703,8 +703,13 @@ impl ComprehensiveSSTableTestSuite {
 
     async fn test_sstable_manager_integration(&self) -> Result<String> {
         // Test integration with SSTableManager
-        let manager =
-            SSTableManager::new(self.temp_dir.path(), &self.config, self.platform.clone()).await?;
+        let manager = SSTableManager::new(
+            self.temp_dir.path(),
+            &self.config,
+            self.platform.clone(),
+            None,
+        )
+        .await?;
 
         let _stats = manager.stats().await?;
         Ok("SSTableManager integration successful".to_string())

@@ -65,7 +65,9 @@ impl EnhancedReplSession {
         
         // Initialize platform and storage components
         let platform = Arc::new(Platform::new(&core_config).await?);
-        let storage_engine = Arc::new(StorageEngine::open(db_path, &core_config, platform).await?);
+        let storage_engine = Arc::new(
+            StorageEngine::open(db_path, &core_config, platform, None).await?,
+        );
         let schema_manager = Arc::new(SchemaManager::new(storage_engine.clone(), &core_config).await?);
         
         // Initialize query engine components

@@ -53,7 +53,8 @@ impl CqlIntegrationTestSuite {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
         let storage = Arc::new(
-            StorageEngine::open(std::path::Path::new("./test_data"), &config, platform).await?,
+            StorageEngine::open(std::path::Path::new("./test_data"), &config, platform, None)
+                .await?,
         );
 
         self.schema_manager = Some(SchemaManager::new_with_storage(storage, &config).await?);

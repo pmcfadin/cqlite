@@ -227,7 +227,7 @@ fn benchmark_basic_load_test(c: &mut Criterion) {
                         let config = Config::performance_optimized();
                         let platform = Arc::new(Platform::new(&config).await.unwrap());
                         let engine = Arc::new(
-                            StorageEngine::open(temp_dir.path(), &config, platform)
+                            StorageEngine::open(temp_dir.path(), &config, platform, None)
                                 .await
                                 .unwrap(),
                         );
@@ -290,7 +290,7 @@ fn benchmark_sustained_load_test(c: &mut Criterion) {
                 let config = Config::performance_optimized();
                 let platform = Arc::new(Platform::new(&config).await.unwrap());
                 let engine = Arc::new(
-                    StorageEngine::open(temp_dir.path(), &config, platform)
+                    StorageEngine::open(temp_dir.path(), &config, platform, None)
                         .await
                         .unwrap(),
                 );
@@ -365,7 +365,7 @@ fn benchmark_memory_pressure_test(c: &mut Criterion) {
 
                 let platform = Arc::new(Platform::new(&config).await.unwrap());
                 let engine = Arc::new(
-                    StorageEngine::open(temp_dir.path(), &config, platform)
+                    StorageEngine::open(temp_dir.path(), &config, platform, None)
                         .await
                         .unwrap(),
                 );
@@ -444,7 +444,7 @@ fn benchmark_connection_stress_test(c: &mut Criterion) {
                 let config = Config::performance_optimized();
                 let platform = Arc::new(Platform::new(&config).await.unwrap());
                 let engine = Arc::new(
-                    StorageEngine::open(temp_dir.path(), &config, platform)
+                    StorageEngine::open(temp_dir.path(), &config, platform, None)
                         .await
                         .unwrap(),
                 );
@@ -505,7 +505,7 @@ fn benchmark_latency_distribution_test(c: &mut Criterion) {
                 let config = Config::performance_optimized();
                 let platform = Arc::new(Platform::new(&config).await.unwrap());
                 let engine = Arc::new(
-                    StorageEngine::open(temp_dir.path(), &config, platform)
+                    StorageEngine::open(temp_dir.path(), &config, platform, None)
                         .await
                         .unwrap(),
                 );
@@ -553,7 +553,7 @@ fn benchmark_failure_recovery_test(c: &mut Criterion) {
 
                 // Create initial engine and populate data
                 {
-                    let engine = StorageEngine::open(temp_dir.path(), &config, platform.clone())
+                    let engine = StorageEngine::open(temp_dir.path(), &config, platform.clone(), None)
                         .await
                         .unwrap();
                     let table_id = TableId::new("recovery_test_table");
@@ -571,7 +571,7 @@ fn benchmark_failure_recovery_test(c: &mut Criterion) {
 
                 // Measure recovery time
                 let start = Instant::now();
-                let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+                let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                     .await
                     .unwrap();
                 let recovery_time = start.elapsed();

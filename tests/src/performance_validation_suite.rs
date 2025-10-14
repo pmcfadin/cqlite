@@ -201,7 +201,7 @@ impl PerformanceValidationSuite {
 
         let platform = Arc::new(Platform::new(&cqlite_config).await?);
         let storage_engine =
-            Arc::new(StorageEngine::open(temp_dir.path(), &cqlite_config, platform.clone()).await?);
+            Arc::new(StorageEngine::open(temp_dir.path(), &cqlite_config, platform.clone(), None).await?);
         let memory_manager = Arc::new(MemoryManager::new(&cqlite_config)?);
 
         Ok(Self {

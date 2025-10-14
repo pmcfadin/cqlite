@@ -87,7 +87,7 @@ fn benchmark_write_performance(c: &mut Criterion) {
                     let temp_dir = TempDir::new().unwrap();
                     let config = Config::performance_optimized();
                     let platform = Arc::new(Platform::new(&config).await.unwrap());
-                    let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+                    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                         .await
                         .unwrap();
                     let table_id = TableId::new("benchmark_table");
@@ -124,7 +124,7 @@ fn benchmark_write_performance(c: &mut Criterion) {
                     let temp_dir = TempDir::new().unwrap();
                     let config = Config::performance_optimized();
                     let platform = Arc::new(Platform::new(&config).await.unwrap());
-                    let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+                    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                         .await
                         .unwrap();
                     let table_id = TableId::new("benchmark_table");
@@ -162,7 +162,7 @@ fn benchmark_read_performance(c: &mut Criterion) {
                         let temp_dir = TempDir::new().unwrap();
                         let config = Config::performance_optimized();
                         let platform = Arc::new(Platform::new(&config).await.unwrap());
-                        let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+                        let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                             .await
                             .unwrap();
                         let table_id = TableId::new("benchmark_table");
@@ -213,7 +213,7 @@ fn benchmark_concurrent_operations(c: &mut Criterion) {
                     let config = Config::performance_optimized();
                     let platform = Arc::new(Platform::new(&config).await.unwrap());
                     let engine = Arc::new(
-                        StorageEngine::open(temp_dir.path(), &config, platform)
+                        StorageEngine::open(temp_dir.path(), &config, platform, None)
                             .await
                             .unwrap(),
                     );
@@ -272,7 +272,7 @@ fn benchmark_memory_usage(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = Config::memory_optimized();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("memory_table");
@@ -388,7 +388,7 @@ fn benchmark_compression_performance(c: &mut Criterion) {
                         cqlite_core::config::CompressionAlgorithm::Lz4;
 
                     let platform = Arc::new(Platform::new(&config).await.unwrap());
-                    let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+                    let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                         .await
                         .unwrap();
                     let table_id = TableId::new("compression_table");
@@ -429,7 +429,7 @@ fn benchmark_query_performance(c: &mut Criterion) {
                 let temp_dir = TempDir::new().unwrap();
                 let config = Config::performance_optimized();
                 let platform = Arc::new(Platform::new(&config).await.unwrap());
-                let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+                let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                     .await
                     .unwrap();
                 let table_id = TableId::new("query_table");
@@ -474,7 +474,7 @@ fn benchmark_mixed_workload(c: &mut Criterion) {
             let config = Config::performance_optimized();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
             let engine = Arc::new(
-                StorageEngine::open(temp_dir.path(), &config, platform)
+                StorageEngine::open(temp_dir.path(), &config, platform, None)
                     .await
                     .unwrap(),
             );
@@ -522,7 +522,7 @@ fn benchmark_data_type_performance(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = Config::performance_optimized();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("types_table");
@@ -553,7 +553,7 @@ fn benchmark_performance_targets(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = Config::performance_optimized();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("target_table");
@@ -584,7 +584,7 @@ fn benchmark_performance_targets(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = Config::memory_optimized();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("memory_table");

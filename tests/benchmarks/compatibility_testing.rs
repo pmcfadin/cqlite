@@ -328,7 +328,7 @@ fn benchmark_data_type_compatibility(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = Config::default();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("compatibility_table");
@@ -416,7 +416,7 @@ fn benchmark_sstable_format_compatibility(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = Config::default();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("compatibility_table");
@@ -462,7 +462,7 @@ fn benchmark_compression_compatibility(c: &mut Criterion) {
             config.storage.compression_algorithm = cqlite_core::config::CompressionAlgorithm::Lz4;
 
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("compression_table");
@@ -503,7 +503,7 @@ fn benchmark_index_compatibility(c: &mut Criterion) {
             config.storage.bloom_filter_fp_rate = 0.01;
 
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("bloom_table");
@@ -550,7 +550,7 @@ fn benchmark_multi_version_compatibility(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = Config::default();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("version_table");
@@ -588,7 +588,7 @@ fn benchmark_large_scale_compatibility(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = Config::performance_optimized();
             let platform = Arc::new(Platform::new(&config).await.unwrap());
-            let engine = StorageEngine::open(temp_dir.path(), &config, platform)
+            let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)
                 .await
                 .unwrap();
             let table_id = TableId::new("large_table");
