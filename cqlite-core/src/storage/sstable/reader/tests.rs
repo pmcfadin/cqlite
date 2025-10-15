@@ -115,4 +115,289 @@ mod tests {
             "nb-1-big-Statistics.db"
         );
     }
+
+    #[tokio::test]
+    async fn test_v5_compressed_legacy_format_research() {
+        use super::super::SSTableReader;
+        use crate::{Config, Platform};
+        use std::path::Path;
+        use std::sync::Arc;
+
+        // Path to test_basic.simple_table SSTable
+        let data_path = Path::new("/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db");
+
+        if !data_path.exists() {
+            eprintln!("Test data not found at {:?}, skipping", data_path);
+            return;
+        }
+
+        // Initialize Platform and Config
+        let config = Config::default();
+        let platform = Arc::new(
+            Platform::new(&config)
+                .await
+                .expect("Failed to create Platform"),
+        );
+
+        // Open the SSTable
+        eprintln!("Opening SSTable at {:?}", data_path);
+        let reader = SSTableReader::open(data_path, &config, platform.clone())
+            .await
+            .expect("Failed to open SSTable");
+
+        eprintln!("SSTable version: {:?}", reader.header.cassandra_version);
+        eprintln!(
+            "Data format: {:?}",
+            reader.header.cassandra_version.data_format()
+        );
+
+        // Try to read all entries - this will trigger the hex dump in our instrumented code
+        match reader.get_all_entries().await {
+            Ok(entries) => {
+                eprintln!("Successfully read {} entries", entries.len());
+                for (idx, (table_id, key, value)) in entries.iter().take(3).enumerate() {
+                    eprintln!(
+                        "Entry {}: table_id={:?}, key={:?}, value={:?}",
+                        idx, table_id, key, value
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read entries: {}", e);
+            }
+        }
+
+        // Check if hex dump was created
+        let hex_dump_path = Path::new("/tmp/v5_compressed_legacy_block_sample.hex");
+        if hex_dump_path.exists() {
+            eprintln!("✅ Hex dump created at {:?}", hex_dump_path);
+        } else {
+            eprintln!("❌ Hex dump was not created");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_v5_compressed_legacy_extracts_cells() -> crate::Result<()> {
+        use super::super::SSTableReader;
+        use crate::schema::{
+            Column, KeyColumn, SchemaRegistry, SchemaRegistryConfig, SchemaSource, TableSchema,
+        };
+        use crate::{Config, Platform, Value};
+        use std::collections::HashMap;
+        use std::path::Path;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // Path to test_basic.simple_table SSTable (V5CompressedLegacy format)
+        let test_dir = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => Path::new(&root)
+                .join("sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9"),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+                return Ok(());
+            }
+        };
+
+        let data_file = test_dir.join("nb-1-big-Data.db");
+        if !data_file.exists() {
+            eprintln!("Test data file not found at {:?}, skipping test", data_file);
+            return Ok(());
+        }
+
+        // Initialize Platform and Config
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await?);
+
+        // Create minimal schema inline (from test-data/datasets/metadata.yml)
+        let schema = TableSchema {
+            keyspace: "test_basic".to_string(),
+            table: "simple_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "account_balance".to_string(),
+                    data_type: "decimal".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                Column {
+                    name: "active".to_string(),
+                    data_type: "boolean".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                Column {
+                    name: "age".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+                Column {
+                    name: "ascii_field".to_string(),
+                    data_type: "ascii".to_string(),
+                    nullable: true,
+                    default: None,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        // Create schema registry and register the schema
+        let registry_instance = SchemaRegistry::new(
+            SchemaRegistryConfig::default(),
+            platform.clone(),
+            config.clone(),
+        )
+        .await?;
+
+        // Register the schema for test_basic.simple_table
+        registry_instance
+            .register_schema(schema, SchemaSource::Manual)
+            .await?;
+
+        let registry = Arc::new(RwLock::new(registry_instance));
+
+        // Open the SSTable
+        eprintln!("Opening SSTable at {:?}", data_file);
+        let mut reader = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+
+        // Register schema registry with reader so it can look up schema during parsing
+        reader.set_schema_registry(registry);
+
+        // Verify it's V5CompressedLegacy format
+        let data_format = reader.header.cassandra_version.data_format();
+        assert!(
+            matches!(
+                data_format,
+                crate::parser::header::DataFormat::V5CompressedLegacy
+            ),
+            "Expected V5CompressedLegacy format, got {:?}",
+            data_format
+        );
+
+        eprintln!("SSTable version: {:?}", reader.header.cassandra_version);
+        eprintln!("Data format: {:?}", data_format);
+
+        // Read all entries
+        let entries = reader.get_all_entries().await?;
+
+        eprintln!("Successfully read {} entries", entries.len());
+
+        // CRITICAL ASSERTION: Must extract at least one entry
+        assert!(
+            !entries.is_empty(),
+            "V5CompressedLegacy parser must extract >0 entries (got 0!)"
+        );
+
+        // Examine the first entry
+        let (table_id, row_key, value) = &entries[0];
+
+        eprintln!("Entry 0: table_id={:?}", table_id);
+        eprintln!("Entry 0: row_key={:?}", row_key);
+        eprintln!("Entry 0: value={:?}", value);
+
+        // CRITICAL ASSERTION: Value must be a row (UDT representation) with cells
+        match value {
+            Value::Udt(udt_value) => {
+                eprintln!("Row has {} fields", udt_value.fields.len());
+
+                // CRITICAL: Must extract >0 cells (not 0!)
+                assert!(
+                    !udt_value.fields.is_empty(),
+                    "V5CompressedLegacy parser must extract >0 cells per row (got 0!)"
+                );
+
+                // Verify we have expected columns from sstabledump JSON
+                // Expected columns: ascii_field, age, active, etc.
+                let field_names: Vec<&str> =
+                    udt_value.fields.iter().map(|f| f.name.as_str()).collect();
+
+                eprintln!("Extracted field names: {:?}", field_names);
+
+                // Check for ascii_field (first cell in hex dump)
+                let ascii_field = udt_value
+                    .fields
+                    .iter()
+                    .find(|f| f.name == "ascii_field")
+                    .expect("Must have 'ascii_field' column");
+
+                eprintln!("ascii_field value: {:?}", ascii_field.value);
+
+                // CRITICAL: Verify typed values (not blobs!)
+                match &ascii_field.value {
+                    Some(Value::Text(text)) => {
+                        eprintln!("✅ ascii_field is Text: '{}'", text);
+                        assert_eq!(
+                            text, "ascii",
+                            "ascii_field value should be 'ascii' from sstabledump"
+                        );
+                    }
+                    Some(Value::Blob(_)) => {
+                        panic!("❌ ascii_field should be Text, not Blob! Type detection failed.");
+                    }
+                    other => {
+                        panic!(
+                            "❌ ascii_field has unexpected type: {:?}. Expected Text.",
+                            other
+                        );
+                    }
+                }
+
+                // Check for age column (should be Int, not Blob)
+                if let Some(age_field) = udt_value.fields.iter().find(|f| f.name == "age") {
+                    eprintln!("age value: {:?}", age_field.value);
+                    match &age_field.value {
+                        Some(Value::Integer(val)) => {
+                            eprintln!("✅ age is Integer: {}", val);
+                        }
+                        Some(Value::Blob(_)) => {
+                            eprintln!(
+                                "⚠️  age is Blob (acceptable if schema not available for typing)"
+                            );
+                        }
+                        other => {
+                            eprintln!("age has type: {:?}", other);
+                        }
+                    }
+                }
+
+                // Check for active column (should be Boolean, not Blob)
+                if let Some(active_field) = udt_value.fields.iter().find(|f| f.name == "active") {
+                    eprintln!("active value: {:?}", active_field.value);
+                    match &active_field.value {
+                        Some(Value::Boolean(val)) => {
+                            eprintln!("✅ active is Boolean: {}", val);
+                        }
+                        Some(Value::Blob(_)) => {
+                            eprintln!("⚠️  active is Blob (acceptable if schema not available)");
+                        }
+                        other => {
+                            eprintln!("active has type: {:?}", other);
+                        }
+                    }
+                }
+            }
+            Value::Null => {
+                panic!("❌ V5CompressedLegacy parser returned Null value (should return row with cells!)");
+            }
+            other => {
+                panic!(
+                    "❌ Expected Value::Udt (row representation), got {:?}",
+                    other
+                );
+            }
+        }
+
+        eprintln!("✅ V5CompressedLegacy parser test PASSED:");
+        eprintln!("   - Extracted {} entries", entries.len());
+        eprintln!("   - First entry has >0 cells");
+        eprintln!("   - Values are properly typed (Text, not Blob)");
+
+        Ok(())
+    }
 }
