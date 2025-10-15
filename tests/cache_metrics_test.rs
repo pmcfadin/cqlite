@@ -2,6 +2,7 @@ use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::reader::SSTableReaderConfig;
 use cqlite_core::Config;
 use std::sync::Arc;
+use tokio;
 
 #[tokio::test]
 async fn test_cache_hit_rate_tracking() {
