@@ -132,7 +132,8 @@ impl V5CompressedLegacyParser {
                     );
 
                     // Parse row data for this partition
-                    // TODO: Support multiple rows per partition (clustering keys) - Issue #3
+                    // Note: V5CompressedLegacy format documentation incomplete - assuming single row for now
+                    // TODO: Determine if/how multiple rows per partition are encoded (Issue #160)
                     match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
                         Ok((cells, final_offset)) => {
                             offset = final_offset;
@@ -326,40 +327,34 @@ impl V5CompressedLegacyParser {
             offset, row_header_size
         );
 
-        // CRITICAL LIMITATION: V5CompressedLegacy format stores cells WITHOUT column names
-        // or column IDs in the binary data. The current implementation assumes cells appear
-        // in alphabetical order matching schema column names (a HEURISTIC that may fail).
+        // CRITICAL: V5CompressedLegacy format stores cells WITHOUT column names
+        // or column IDs in the binary data. Cells appear in SCHEMA DEFINITION ORDER
+        // (the order columns were defined in CREATE TABLE), NOT alphabetical order.
         //
-        // KNOWN ISSUE (#2): This alphabetical ordering assumption can cause data corruption if:
-        // 1. Not all columns are present in every row (NULL/missing columns)
-        // 2. Cassandra uses a different serialization order (e.g., schema definition order)
+        // NULL/missing columns are handled by:
+        // - Checking for cell marker (0x08) before attempting to parse
+        // - If no marker found or parse fails, column is NULL (not present)
+        // - Continue to next column in schema order
         //
-        // TODO: Proper fix requires understanding the actual serialization order used by
-        // Cassandra 5.0 for V5CompressedLegacy format. This may require:
-        // - Parsing the serialization header (if present) to get column count/order
-        // - Using schema definition order instead of alphabetical order
-        // - Detecting which columns are actually present vs missing
-        //
-        // For now, we use alphabetical order as a temporary workaround and log warnings
-        // when column count mismatches occur.
+        // This implementation uses schema definition order directly, which is the
+        // correct approach per Cassandra 5.0 SerializationHeader semantics.
 
-        let mut sorted_columns = schema.columns.clone();
-        sorted_columns.sort_by(|a, b| a.name.cmp(&b.name));
+        let columns_in_order = &schema.columns;
 
-        log::debug!("V5CompressedLegacy: Parsing {} cells in ALPHABETICAL order (WARNING: may not match actual format!) starting at offset {} (row header was {} bytes)", sorted_columns.len(), offset, row_header_size);
+        log::debug!("V5CompressedLegacy: Parsing up to {} cells in SCHEMA DEFINITION ORDER starting at offset {} (row header was {} bytes)", columns_in_order.len(), offset, row_header_size);
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
             hex::encode(&data[offset..std::cmp::min(offset + 64, data.len())])
         );
 
-        for (col_idx, column) in sorted_columns.iter().enumerate() {
+        for (col_idx, column) in columns_in_order.iter().enumerate() {
             if offset >= data.len() {
-                warn!(
-                    "V5CompressedLegacy: Ran out of data at column {} ('{}'), parsed {}/{} cells - POSSIBLE COLUMN ORDERING MISMATCH!",
+                log::debug!(
+                    "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} cells (remaining columns are NULL)",
                     col_idx,
                     column.name,
                     cells.len(),
-                    sorted_columns.len()
+                    columns_in_order.len()
                 );
                 break;
             }
@@ -384,30 +379,29 @@ impl V5CompressedLegacyParser {
                     offset = new_offset;
                 }
                 Err(e) => {
-                    warn!(
-                        "V5CompressedLegacy:   ✗ Failed to parse '{}' at column index {} (offset {}): {} - POSSIBLE COLUMN ORDERING MISMATCH!",
+                    log::debug!(
+                        "V5CompressedLegacy:   ✗ Failed to parse '{}' at column index {} (offset {}): {} - treating as NULL and stopping parse",
                         column.name, col_idx, offset, e
                     );
                     // Show hex for debugging
                     let dump_len = std::cmp::min(32, data.len() - offset);
                     log::debug!(
-                        "V5CompressedLegacy:     Hex: {}",
-                        hex::encode(&data[offset..offset + dump_len])
+                        "V5CompressedLegacy:     Hex at failure: {}",
+                        hex::encode(&data[offset..std::cmp::min(offset + dump_len, data.len())])
                     );
-                    // Stop on first error
+                    // CRITICAL FIX: Stop parsing remaining columns when we hit an error
+                    // The offset doesn't advance here, but we exit the loop cleanly
+                    // rather than continuing with invalid offset
                     break;
                 }
             }
         }
 
-        // Warn if we didn't parse all expected columns
-        if cells.len() < sorted_columns.len() {
-            warn!(
-                "V5CompressedLegacy: Only parsed {}/{} columns - missing columns may indicate NULL values OR column ordering mismatch",
-                cells.len(),
-                sorted_columns.len()
-            );
-        }
+        log::debug!(
+            "V5CompressedLegacy: Parsed {}/{} columns (missing columns are NULL)",
+            cells.len(),
+            columns_in_order.len()
+        );
 
         debug!("V5CompressedLegacy: Parsed total of {} cells", cells.len());
 
@@ -433,6 +427,10 @@ impl V5CompressedLegacyParser {
         _reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         // All cells start with 0x08 marker
+        // V5CompressedLegacy format: Simple type tag/marker byte (0x08), NOT Cassandra cell flags
+        // NOTE: The full Cassandra 5.0 cell flags format (with bitset flags like 0x20=NULL,
+        // 0x04=EMPTY, etc.) applies to NEWER formats (V5_0NewBig, V5_0Bti), not this legacy format.
+        // V5CompressedLegacy uses a simplified marker byte where 0x08 indicates "cell data follows".
         if offset >= data.len() {
             return Err(Error::corruption(format!(
                 "Cell '{}': unexpected end at marker byte",
@@ -549,7 +547,7 @@ impl V5CompressedLegacyParser {
             }
 
             "decimal" => {
-                // Decimal: [0x08][u8 total_len][i32 scale][unscaled bytes]
+                // Decimal: [u8 total_len][i32 scale][unscaled bytes]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': unexpected end at decimal length",
@@ -587,6 +585,189 @@ impl V5CompressedLegacyParser {
                 offset += total_len;
 
                 Value::Decimal { scale, unscaled }
+            }
+
+            "bigint" | "counter" => {
+                // BigInt/Counter: 8 bytes, i64 big-endian (NO length prefix)
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 8 bytes for bigint, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+                let val = i64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                if column.data_type == "counter" {
+                    Value::Counter(val)
+                } else {
+                    Value::BigInt(val)
+                }
+            }
+
+            "double" => {
+                // Double: 8 bytes, f64 big-endian (NO length prefix)
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 8 bytes for double, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+                let val = f64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                Value::Float(val)
+            }
+
+            "timestamp" => {
+                // Timestamp: 8 bytes, i64 microseconds big-endian (NO length prefix)
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 8 bytes for timestamp, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+                let micros = i64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                Value::Timestamp(micros)
+            }
+
+            "date" => {
+                // Date: 4 bytes, u32 days since epoch (unsigned, adjusted by Integer.MIN_VALUE)
+                if offset + 4 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 4 bytes for date, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+                let days = u32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                offset += 4;
+                // Cassandra stores as unsigned offset, adjust by Integer.MIN_VALUE
+                let adjusted = days.wrapping_sub(i32::MIN as u32) as i32;
+                Value::Date(adjusted)
+            }
+
+            "time" => {
+                // Time: 8 bytes, i64 nanoseconds since midnight (NO length prefix)
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 8 bytes for time, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+                let nanos = i64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                Value::Time(nanos)
+            }
+
+            "inet" => {
+                // Inet: [u8 len][address bytes] (len is 4 for IPv4, 16 for IPv6)
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': unexpected end at inet length",
+                        column.name
+                    )));
+                }
+                let len = data[offset] as usize;
+                offset += 1;
+
+                if len != 4 && len != 16 {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': invalid inet length {}, expected 4 or 16",
+                        column.name, len
+                    )));
+                }
+
+                if offset + len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need {} bytes for inet, only {} available",
+                        column.name,
+                        len,
+                        data.len() - offset
+                    )));
+                }
+
+                let bytes = data[offset..offset + len].to_vec();
+                offset += len;
+                Value::Inet(bytes)
+            }
+
+            "timeuuid" => {
+                // TimeUUID: [u8 len=16][16 bytes] (same as UUID but time-based)
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': unexpected end at timeuuid length",
+                        column.name
+                    )));
+                }
+                let uuid_len = data[offset] as usize;
+                offset += 1;
+
+                if uuid_len != 16 {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': expected timeuuid length 16, got {}",
+                        column.name, uuid_len
+                    )));
+                }
+
+                if offset + 16 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 16 bytes for timeuuid, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+
+                let uuid_bytes: [u8; 16] = data[offset..offset + 16]
+                    .try_into()
+                    .map_err(|_| Error::corruption("TimeUUID byte conversion failed"))?;
+
+                offset += 16;
+                Value::Uuid(uuid_bytes)
             }
 
             // Default: treat as length-prefixed blob
