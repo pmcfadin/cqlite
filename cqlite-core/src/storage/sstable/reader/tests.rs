@@ -301,43 +301,47 @@ mod tests {
         eprintln!("Entry 0: row_key={:?}", row_key);
         eprintln!("Entry 0: value={:?}", value);
 
-        // CRITICAL ASSERTION: Value must be a row (UDT representation) with cells
+        // CRITICAL ASSERTION: Value must be a row (Map representation) with cells
+        // Value::Map format: Vec<(Value::Text(column_name), column_value)>
         match value {
-            Value::Udt(udt_value) => {
-                eprintln!("Row has {} fields", udt_value.fields.len());
+            Value::Map(map_entries) => {
+                eprintln!("Row has {} fields", map_entries.len());
 
                 // CRITICAL: Must extract >0 cells (not 0!)
                 assert!(
-                    !udt_value.fields.is_empty(),
+                    !map_entries.is_empty(),
                     "V5CompressedLegacy parser must extract >0 cells per row (got 0!)"
                 );
 
-                // Verify we have expected columns from sstabledump JSON
-                // Expected columns: ascii_field, age, active, etc.
-                let field_names: Vec<&str> =
-                    udt_value.fields.iter().map(|f| f.name.as_str()).collect();
+                // Extract field names from map entries (first element of each tuple)
+                let field_names: Vec<String> = map_entries
+                    .iter()
+                    .filter_map(|(key, _)| match key {
+                        Value::Text(name) => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect();
 
                 eprintln!("Extracted field names: {:?}", field_names);
 
                 // Check for ascii_field (first cell in hex dump)
-                let ascii_field = udt_value
-                    .fields
+                let ascii_field = map_entries
                     .iter()
-                    .find(|f| f.name == "ascii_field")
+                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "ascii_field"))
                     .expect("Must have 'ascii_field' column");
 
-                eprintln!("ascii_field value: {:?}", ascii_field.value);
+                eprintln!("ascii_field value: {:?}", ascii_field.1);
 
                 // CRITICAL: Verify typed values (not blobs!)
-                match &ascii_field.value {
-                    Some(Value::Text(text)) => {
+                match &ascii_field.1 {
+                    Value::Text(text) => {
                         eprintln!("✅ ascii_field is Text: '{}'", text);
                         assert_eq!(
                             text, "ascii",
                             "ascii_field value should be 'ascii' from sstabledump"
                         );
                     }
-                    Some(Value::Blob(_)) => {
+                    Value::Blob(_) => {
                         panic!("❌ ascii_field should be Text, not Blob! Type detection failed.");
                     }
                     other => {
@@ -349,13 +353,16 @@ mod tests {
                 }
 
                 // Check for age column (should be Int, not Blob)
-                if let Some(age_field) = udt_value.fields.iter().find(|f| f.name == "age") {
-                    eprintln!("age value: {:?}", age_field.value);
-                    match &age_field.value {
-                        Some(Value::Integer(val)) => {
+                if let Some((_, age_value)) = map_entries
+                    .iter()
+                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "age"))
+                {
+                    eprintln!("age value: {:?}", age_value);
+                    match age_value {
+                        Value::Integer(val) => {
                             eprintln!("✅ age is Integer: {}", val);
                         }
-                        Some(Value::Blob(_)) => {
+                        Value::Blob(_) => {
                             eprintln!(
                                 "⚠️  age is Blob (acceptable if schema not available for typing)"
                             );
@@ -367,13 +374,16 @@ mod tests {
                 }
 
                 // Check for active column (should be Boolean, not Blob)
-                if let Some(active_field) = udt_value.fields.iter().find(|f| f.name == "active") {
-                    eprintln!("active value: {:?}", active_field.value);
-                    match &active_field.value {
-                        Some(Value::Boolean(val)) => {
+                if let Some((_, active_value)) = map_entries
+                    .iter()
+                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "active"))
+                {
+                    eprintln!("active value: {:?}", active_value);
+                    match active_value {
+                        Value::Boolean(val) => {
                             eprintln!("✅ active is Boolean: {}", val);
                         }
-                        Some(Value::Blob(_)) => {
+                        Value::Blob(_) => {
                             eprintln!("⚠️  active is Blob (acceptable if schema not available)");
                         }
                         other => {
@@ -387,7 +397,7 @@ mod tests {
             }
             other => {
                 panic!(
-                    "❌ Expected Value::Udt (row representation), got {:?}",
+                    "❌ Expected Value::Map (row representation), got {:?}",
                     other
                 );
             }

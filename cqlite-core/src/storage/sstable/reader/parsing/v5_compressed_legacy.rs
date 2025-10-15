@@ -92,7 +92,6 @@ impl V5CompressedLegacyParser {
             "V5CompressedLegacy: First 64 bytes of data: {}",
             hex::encode(&data[..std::cmp::min(64, data.len())])
         );
-
         debug!(
             "V5CompressedLegacy: Parsing block for {}.{} ({} bytes)",
             self.keyspace,
@@ -100,76 +99,101 @@ impl V5CompressedLegacyParser {
             data.len()
         );
 
+        let mut results = Vec::new();
         let mut offset = 0;
-
-        // Parse partition header
-        let (partition_key, new_offset) = self.parse_partition_header(data, offset)?;
-        offset = new_offset;
-
-        log::debug!(
-            "V5CompressedLegacy: Parsed partition key: {} bytes, now at offset {}",
-            partition_key.0.len(),
-            offset
-        );
-        log::debug!(
-            "V5CompressedLegacy: Row data starts at offset {}, remaining: {} bytes",
-            offset,
-            data.len() - offset
-        );
-        log::debug!(
-            "V5CompressedLegacy: Row data hex (first 128 bytes): {}",
-            hex::encode(&data[offset..std::cmp::min(offset + 128, data.len())])
-        );
-
-        debug!(
-            "V5CompressedLegacy: Parsed partition key: {} bytes, now at offset {}",
-            partition_key.0.len(),
-            offset
-        );
-
-        // Parse row data
-        let cells = self.parse_row_data(data, offset, Some(schema), reader)?;
-
-        log::debug!(
-            "V5CompressedLegacy: Parsed {} cells from row data",
-            cells.len()
-        );
-
-        debug!(
-            "V5CompressedLegacy: Parsed {} cells from row data",
-            cells.len()
-        );
-
-        // Build result entries
         let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
 
-        // Convert cells HashMap to Value::Row
-        let row_value = if cells.is_empty() {
-            warn!(
-                "V5CompressedLegacy: No cells extracted for {}.{} (partition key: {} bytes)",
-                self.keyspace,
-                self.table_name,
-                partition_key.0.len()
-            );
-            Value::Null
-        } else {
-            // Use UDT representation for rows (consistent with existing code)
-            let fields = cells
-                .into_iter()
-                .map(|(name, value)| crate::types::UdtField {
-                    name,
-                    value: Some(value),
-                })
-                .collect();
+        // Parse ALL partitions in block (Issue #2 fix: previously only parsed one partition)
+        while offset < data.len() {
+            // Try to parse partition header
+            match self.parse_partition_header(data, offset) {
+                Ok((partition_key, new_offset)) => {
+                    offset = new_offset;
 
-            Value::Udt(crate::types::UdtValue {
-                keyspace: self.keyspace.clone(),
-                type_name: self.table_name.clone(),
-                fields,
-            })
-        };
+                    log::debug!(
+                        "V5CompressedLegacy: Parsed partition key: {} bytes, now at offset {}",
+                        partition_key.0.len(),
+                        offset
+                    );
+                    log::debug!(
+                        "V5CompressedLegacy: Row data starts at offset {}, remaining: {} bytes",
+                        offset,
+                        data.len() - offset
+                    );
+                    log::debug!(
+                        "V5CompressedLegacy: Row data hex (first 128 bytes): {}",
+                        hex::encode(&data[offset..std::cmp::min(offset + 128, data.len())])
+                    );
 
-        Ok(vec![(table_id, partition_key, row_value)])
+                    debug!(
+                        "V5CompressedLegacy: Parsed partition key: {} bytes, now at offset {}",
+                        partition_key.0.len(),
+                        offset
+                    );
+
+                    // Parse row data for this partition
+                    // TODO: Support multiple rows per partition (clustering keys) - Issue #3
+                    match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
+                        Ok((cells, final_offset)) => {
+                            offset = final_offset;
+
+                            log::debug!(
+                                "V5CompressedLegacy: Parsed {} cells from row data",
+                                cells.len()
+                            );
+
+                            debug!(
+                                "V5CompressedLegacy: Parsed {} cells from row data",
+                                cells.len()
+                            );
+
+                            // Convert cells HashMap to Value::Map (required by SelectExecutor)
+                            // SelectExecutor expects Value::Map(Vec<(Value, Value)>) where each entry is
+                            // (Value::Text(column_name), column_value)
+                            let row_value = if cells.is_empty() {
+                                warn!(
+                                    "V5CompressedLegacy: No cells extracted for {}.{} (partition key: {} bytes)",
+                                    self.keyspace,
+                                    self.table_name,
+                                    partition_key.0.len()
+                                );
+                                Value::Null
+                            } else {
+                                // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map
+                                let map_entries: Vec<(Value, Value)> = cells
+                                    .into_iter()
+                                    .map(|(name, value)| (Value::Text(name), value))
+                                    .collect();
+                                Value::Map(map_entries)
+                            };
+
+                            results.push((table_id.clone(), partition_key, row_value));
+                        }
+                        Err(e) => {
+                            debug!(
+                                "V5CompressedLegacy: Failed to parse row data at offset {}: {} (end of valid data)",
+                                offset, e
+                            );
+                            break; // End of valid data in block
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        "V5CompressedLegacy: Failed to parse partition header at offset {}: {} (end of partitions)",
+                        offset, e
+                    );
+                    break; // No more partitions in block
+                }
+            }
+        }
+
+        debug!(
+            "V5CompressedLegacy: Parsed {} total entries from block",
+            results.len()
+        );
+
+        Ok(results)
     }
 
     /// Parse partition header (flags, key, deletion time)
@@ -245,17 +269,19 @@ impl V5CompressedLegacyParser {
         Ok((row_key, offset))
     }
 
-    /// Parse row data (header + cells)
+    /// Parse row data (header + cells) and return cells with new offset
     ///
     /// V5CompressedLegacy format stores cells WITHOUT column names in schema column order.
     /// Schema is REQUIRED to determine which column each value belongs to.
-    fn parse_row_data(
+    ///
+    /// Returns: (cells, new_offset)
+    fn parse_row_data_with_offset(
         &self,
         data: &[u8],
         mut offset: usize,
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
-    ) -> Result<HashMap<String, Value>> {
+    ) -> Result<(HashMap<String, Value>, usize)> {
         let mut cells = HashMap::new();
 
         let schema = schema.ok_or_else(|| {
@@ -300,12 +326,27 @@ impl V5CompressedLegacyParser {
             offset, row_header_size
         );
 
-        // Parse cells in schema column order (NO column names in data)
-        // Cells are stored in alphabetical order by column name to match Cassandra schema ordering
+        // CRITICAL LIMITATION: V5CompressedLegacy format stores cells WITHOUT column names
+        // or column IDs in the binary data. The current implementation assumes cells appear
+        // in alphabetical order matching schema column names (a HEURISTIC that may fail).
+        //
+        // KNOWN ISSUE (#2): This alphabetical ordering assumption can cause data corruption if:
+        // 1. Not all columns are present in every row (NULL/missing columns)
+        // 2. Cassandra uses a different serialization order (e.g., schema definition order)
+        //
+        // TODO: Proper fix requires understanding the actual serialization order used by
+        // Cassandra 5.0 for V5CompressedLegacy format. This may require:
+        // - Parsing the serialization header (if present) to get column count/order
+        // - Using schema definition order instead of alphabetical order
+        // - Detecting which columns are actually present vs missing
+        //
+        // For now, we use alphabetical order as a temporary workaround and log warnings
+        // when column count mismatches occur.
+
         let mut sorted_columns = schema.columns.clone();
         sorted_columns.sort_by(|a, b| a.name.cmp(&b.name));
 
-        log::debug!("V5CompressedLegacy: Parsing {} cells in schema order starting at offset {} (row header was {} bytes)", sorted_columns.len(), offset, row_header_size);
+        log::debug!("V5CompressedLegacy: Parsing {} cells in ALPHABETICAL order (WARNING: may not match actual format!) starting at offset {} (row header was {} bytes)", sorted_columns.len(), offset, row_header_size);
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
             hex::encode(&data[offset..std::cmp::min(offset + 64, data.len())])
@@ -314,17 +355,21 @@ impl V5CompressedLegacyParser {
         for (col_idx, column) in sorted_columns.iter().enumerate() {
             if offset >= data.len() {
                 warn!(
-                    "V5CompressedLegacy: Ran out of data at column {} ('{}'), parsed {} cells",
+                    "V5CompressedLegacy: Ran out of data at column {} ('{}'), parsed {}/{} cells - POSSIBLE COLUMN ORDERING MISMATCH!",
                     col_idx,
                     column.name,
-                    cells.len()
+                    cells.len(),
+                    sorted_columns.len()
                 );
                 break;
             }
 
             log::debug!(
                 "V5CompressedLegacy: Parsing column {} '{}' ({}) at offset {}",
-                col_idx, column.name, column.data_type, offset
+                col_idx,
+                column.name,
+                column.data_type,
+                offset
             );
 
             match self.parse_cell_value_schema_order(data, offset, column, reader) {
@@ -339,9 +384,9 @@ impl V5CompressedLegacyParser {
                     offset = new_offset;
                 }
                 Err(e) => {
-                    log::debug!(
-                        "V5CompressedLegacy:   ✗ Failed to parse '{}' at offset {}: {}",
-                        column.name, offset, e
+                    warn!(
+                        "V5CompressedLegacy:   ✗ Failed to parse '{}' at column index {} (offset {}): {} - POSSIBLE COLUMN ORDERING MISMATCH!",
+                        column.name, col_idx, offset, e
                     );
                     // Show hex for debugging
                     let dump_len = std::cmp::min(32, data.len() - offset);
@@ -355,9 +400,18 @@ impl V5CompressedLegacyParser {
             }
         }
 
+        // Warn if we didn't parse all expected columns
+        if cells.len() < sorted_columns.len() {
+            warn!(
+                "V5CompressedLegacy: Only parsed {}/{} columns - missing columns may indicate NULL values OR column ordering mismatch",
+                cells.len(),
+                sorted_columns.len()
+            );
+        }
+
         debug!("V5CompressedLegacy: Parsed total of {} cells", cells.len());
 
-        Ok(cells)
+        Ok((cells, offset))
     }
 
     /// Parse a single cell value WITHOUT column name (schema-order format)
