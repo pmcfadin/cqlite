@@ -108,7 +108,10 @@ async fn test_nb_format_returns_error_not_fabrication() {
             );
             println!("PASS: Enhanced parser correctly extracts EncodingStats from nb-format");
             println!("  min_timestamp: {}", stats.timestamp_stats.min_timestamp);
-            println!("  min_deletion_time: {}", stats.timestamp_stats.min_deletion_time);
+            println!(
+                "  min_deletion_time: {}",
+                stats.timestamp_stats.min_deletion_time
+            );
         }
         Err(e) => {
             panic!("Parser should successfully extract EncodingStats: {:?}", e);
@@ -143,7 +146,10 @@ async fn test_nb_format_data_extraction_returns_error() {
     let result = parse_nb_format_statistics_data(remaining, &header);
 
     // Issue #162: Minimal parsing succeeds (extracts EncodingStats only)
-    assert!(result.is_ok(), "Statistics data extraction should succeed for minimal EncodingStats");
+    assert!(
+        result.is_ok(),
+        "Statistics data extraction should succeed for minimal EncodingStats"
+    );
 
     match result {
         Ok((_row_stats, timestamp_stats, _table_stats, _column_stats, _)) => {
@@ -152,8 +158,10 @@ async fn test_nb_format_data_extraction_returns_error() {
                 timestamp_stats.min_timestamp != 0 || timestamp_stats.min_deletion_time != 0,
                 "Should extract non-zero EncodingStats from real binary data"
             );
-            println!("PASS: Extracted EncodingStats: min_timestamp={}, min_deletion_time={}",
-                     timestamp_stats.min_timestamp, timestamp_stats.min_deletion_time);
+            println!(
+                "PASS: Extracted EncodingStats: min_timestamp={}, min_deletion_time={}",
+                timestamp_stats.min_timestamp, timestamp_stats.min_deletion_time
+            );
         }
         Err(e) => {
             panic!("Minimal parser should succeed: {:?}", e);
@@ -567,8 +575,10 @@ async fn test_multiple_real_statistics_files() {
 
         if let Ok((_remaining, stats)) = full_result {
             println!("  ✓ Header parsed with real data");
-            println!("  ✓ Full parsing extracted real EncodingStats (min_timestamp={})",
-                     stats.timestamp_stats.min_timestamp);
+            println!(
+                "  ✓ Full parsing extracted real EncodingStats (min_timestamp={})",
+                stats.timestamp_stats.min_timestamp
+            );
         }
     }
 

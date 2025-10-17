@@ -162,6 +162,34 @@ export CQLITE_SCHEMA=/path/to/schemas
 cqlite -e "SELECT * FROM ks.users LIMIT 5"
 ```
 
+#### Configuration Precedence Example
+
+1. Config file (`~/.config/cqlite.toml`) sets:
+   ```toml
+   data_directory = "/srv/cassandra/data"
+   repl.page_size = 100
+   ```
+2. Environment overrides at shell prompt:
+   ```bash
+   export CQLITE_DATA_DIR=/opt/test-data
+   export CQLITE_PAGE_SIZE=50
+   ```
+3. CLI invocation supplies explicit schema:
+   ```bash
+   cqlite --schema ./schemas -e "SELECT * FROM ks.users"
+   ```
+
+Effective configuration resolved by precedence (flags > env > file > defaults):
+
+| Setting | Value Used | Source |
+|---------|------------|--------|
+| `data_directory` | `/opt/test-data` | Environment (`CQLITE_DATA_DIR`) |
+| `schema_paths` | `./schemas` | CLI flag (`--schema`) |
+| `repl.page_size` | `50` | Environment (`CQLITE_PAGE_SIZE`) |
+| `query_limit` | default (none provided) | Built-in defaults |
+
+REPL sessions launched afterward inherit the resolved `data_directory` and `page_size` unless mutated via `:config`.
+
 ---
 
 ### Compatibility Notes (cqlsh)
@@ -259,6 +287,21 @@ Tips:
 cqlite> :quit
 ```
 
+---
+
+### Command Semantics Matrix
+
+| Surface / Command | Primary Inputs | Successful Outcome | Error / Validation Notes |
+|-------------------|----------------|--------------------|---------------------------|
+| Global flags (`--schema`, `--data-dir`, `--out`, `--limit`, `--page-size`, `--no-color`, `--execute`, `--file`) | Paths, enum values, inline CQL | Query executes or batch submitted; defaults persist into REPL session | Missing file/dir → show hint with example; conflicting `--execute`/`--file` → fail with guidance |
+| `cqlite query` | Same as global flags, optional subcommand alias | Mirrors top-level invocation; prints rows using requested formatter | Enforce schema + data dir presence; propagate engine error codes (see Exit Codes) |
+| `cqlite read-sstable` | Path(s) to SSTables, optional `--schema`, `--format` | Streams parsed rows for inspection | Reject mixed NB/V5 without `--auto-detect`; schema mismatch surfaces parse errors |
+| REPL `:config` | `data-dir`, `page-size`, `timing`, `save [FILE]` | Mutates in-memory session and optional persisted file; echoes new value | Invalid key/value → list valid keys; unwritable save path → descriptive IO error |
+| REPL `:schema list|load|show|refresh|unload` | File/dir paths, table identifiers | Updates schema catalog; `list`/`show` render current state | Load failures show parse error count + first error path; unload missing name is no-op with warning |
+| REPL `:status` | Optional `--refresh` flag | Displays discovery summary + coverage badge | Unset data-dir → instruct `:config data-dir`; discovery failure → red status with IO details |
+| REPL `:health` | none | Runs config/environment checks; prints actionable hints | Missing components (schema load errors, unreadable data dir) called out individually |
+| Navigation / introspection (`:use`, `:keyspaces`, `:tables`, `DESCRIBE`, `DESC`) | Keyspace/table identifiers | Updates session keyspace or prints metadata/views | Unknown keyspace/table → descriptive message with `:schema load` suggestion |
+| CQL `SELECT ... LIMIT` | Read-only subset of CQL | Executes against discovered SSTables; honours limit, page size, formatter | Missing schema/data dir surfaces same error as one-shot; unsupported clauses clearly reported |
 
 ---
 
@@ -319,6 +362,21 @@ cqlite> :quit
 - Documentation & Tests
   - CLI usage docs include one‑shot and REPL examples using repository `test-data` paths; CLI help text is accurate.
   - Integration tests cover one‑shot JSON/CSV/table output, REPL essentials (`:config`, `:schema`, `:status`, `:tables`, `DESCRIBE`, `SELECT`), and golden snapshots for table formatting.
+
+#### Test Coverage Checklist
+
+| Requirement | Expected Test / Fixture |
+|-------------|------------------------|
+| `--schema` + `--data-dir` one-shot query (`--out table`) | `cli/tests/query_table.rs` using `test-data/datasets` |
+| JSON / CSV writers (`--out json|csv`) | `cli/tests/query_json.rs`, `cli/tests/query_csv.rs` with golden outputs |
+| One-shot script execution (`--file`) | Integration test executing sample `.cql` script (`cli/tests/query_script.rs`) |
+| REPL `:config` mutations and persistence | `cli/tests/repl_config.rs` covering show/set/save paths |
+| Schema lifecycle (`:schema list|load|show|refresh|unload`) | `cli/tests/repl_schema.rs` with synthetic schema files |
+| `:status` discovery + coverage badge | `cli/tests/repl_status.rs` verifying counts/badge per mock dataset |
+| `:health` diagnostics | `cli/tests/repl_health.rs` covering success + missing schema/data scenarios |
+| Navigation/introspection (`:use`, `:keyspaces`, `:tables`, `DESCRIBE`, `DESC`) | `cli/tests/repl_introspection.rs` |
+| SELECT execution inside REPL (LIMIT, page size) | `cli/tests/repl_select.rs` asserting pagination + formatting |
+| Error paths (missing schema, unreadable data-dir, invalid command) | Consolidated negative tests in `cli/tests/cli_errors.rs` |
 
 - Platforms & Performance
   - Works on macOS/Linux developer environments against local datasets; no explicit performance targets in M2 beyond functional responsiveness.
