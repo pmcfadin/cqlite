@@ -91,23 +91,27 @@ async fn test_nb_format_returns_error_not_fabrication() {
     // Attempt to parse the nb-format Statistics.db with enhanced parser
     let result = parse_enhanced_statistics_file(&file_bytes);
 
-    // MUST return error (not fabricated data)
+    // Issue #162: Minimal nb-format parsing now succeeds (EncodingStats extraction)
+    // This is CORRECT behavior - we read real binary data, not fabricated values
     assert!(
-        result.is_err(),
-        "Enhanced statistics parser should return error for nb-format (deferred to M2)"
+        result.is_ok(),
+        "Enhanced statistics parser should succeed for nb-format (Issue #162 minimal parser)"
     );
 
-    // Verify the error is a parse error (nom::Err::Error), not a panic or fabricated data
+    // Verify we got real data from the file
     match result {
-        Err(nom::Err::Error(_)) => {
-            // Expected behavior - parser explicitly returns error
-            println!("PASS: Enhanced parser correctly returns error for nb-format");
+        Ok((_remaining, stats)) => {
+            // Verify we extracted EncodingStats (non-zero timestamp indicates real data)
+            assert!(
+                stats.timestamp_stats.min_timestamp != 0,
+                "Should extract real min_timestamp from binary data"
+            );
+            println!("PASS: Enhanced parser correctly extracts EncodingStats from nb-format");
+            println!("  min_timestamp: {}", stats.timestamp_stats.min_timestamp);
+            println!("  min_deletion_time: {}", stats.timestamp_stats.min_deletion_time);
         }
-        Err(other) => {
-            panic!("Unexpected error type: {:?}", other);
-        }
-        Ok(_) => {
-            panic!("Parser should not return fabricated statistics for nb-format");
+        Err(e) => {
+            panic!("Parser should successfully extract EncodingStats: {:?}", e);
         }
     }
 }
@@ -135,39 +139,24 @@ async fn test_nb_format_data_extraction_returns_error() {
         "Real Statistics.db should have version 4 (nb-format)"
     );
 
-    // Attempt to extract statistics data (this should fail with explicit error)
+    // Attempt to extract statistics data (Issue #162: now succeeds for minimal EncodingStats)
     let result = parse_nb_format_statistics_data(remaining, &header);
 
-    // MUST return UnsupportedFormat error
-    assert!(result.is_err(), "Statistics data extraction must fail");
+    // Issue #162: Minimal parsing succeeds (extracts EncodingStats only)
+    assert!(result.is_ok(), "Statistics data extraction should succeed for minimal EncodingStats");
 
     match result {
-        Err(Error::UnsupportedFormat(msg)) => {
-            // Verify error message references M2 deferral and Issue #28
+        Ok((_row_stats, timestamp_stats, _table_stats, _column_stats, _)) => {
+            // Verify we extracted real values
             assert!(
-                msg.contains("deferred to M2"),
-                "Error message must reference M2 milestone: {}",
-                msg
+                timestamp_stats.min_timestamp != 0 || timestamp_stats.min_deletion_time != 0,
+                "Should extract non-zero EncodingStats from real binary data"
             );
-            assert!(
-                msg.contains("Issue #28"),
-                "Error message must reference Issue #28: {}",
-                msg
-            );
-            assert!(
-                !msg.contains("fabricat") || msg.contains("without fabrication"),
-                "Error message should acknowledge no fabrication: {}",
-                msg
-            );
-
-            println!("PASS: Statistics data extraction returns proper error");
-            println!("Error message: {}", msg);
+            println!("PASS: Extracted EncodingStats: min_timestamp={}, min_deletion_time={}",
+                     timestamp_stats.min_timestamp, timestamp_stats.min_deletion_time);
         }
-        Err(other) => {
-            panic!("Expected UnsupportedFormat error, got: {:?}", other);
-        }
-        Ok(_) => {
-            panic!("Should not return fabricated statistics data");
+        Err(e) => {
+            panic!("Minimal parser should succeed: {:?}", e);
         }
     }
 }
@@ -568,16 +557,19 @@ async fn test_multiple_real_statistics_files() {
         let (_remaining, header) = header_result.unwrap();
         assert_eq!(header.version, 4, "All test files should be nb-format");
 
-        // Test 2: Full file parsing returns error (not fabricated data)
+        // Test 2: Full file parsing succeeds with minimal EncodingStats (Issue #162)
         let full_result = parse_statistics_with_fallback(&file_bytes);
         assert!(
-            full_result.is_err(),
-            "Full parsing should return error for {}",
+            full_result.is_ok(),
+            "Full parsing should succeed with minimal EncodingStats for {} (Issue #162)",
             file_path_str
         );
 
-        println!("  ✓ Header parsed with real data");
-        println!("  ✓ Full parsing correctly returns error (no fabrication)");
+        if let Ok((_remaining, stats)) = full_result {
+            println!("  ✓ Header parsed with real data");
+            println!("  ✓ Full parsing extracted real EncodingStats (min_timestamp={})",
+                     stats.timestamp_stats.min_timestamp);
+        }
     }
 
     if tested_count == 0 {
@@ -606,44 +598,25 @@ fn test_error_messages_reference_issues() {
         table_id: None,
     };
 
-    let dummy_data = vec![0u8; 100];
-    let result = parse_nb_format_statistics_data(&dummy_data, &dummy_header);
+    let insufficient_data = vec![0u8; 5]; // Too little data for VInt parsing
+    let result = parse_nb_format_statistics_data(&insufficient_data, &dummy_header);
 
-    assert!(result.is_err(), "Should return error");
+    // Issue #162: Parser now attempts minimal parsing and fails on insufficient data
+    assert!(result.is_err(), "Should return error for insufficient data");
 
+    // Error should be a parse error (corruption or nom error)
     match result {
-        Err(Error::UnsupportedFormat(msg)) => {
-            // Check for Issue #28 reference
-            assert!(
-                msg.contains("Issue #28") || msg.contains("issue #28") || msg.contains("Issue#28"),
-                "Error message should reference Issue #28: {}",
-                msg
-            );
-
-            // Check for M2 milestone reference
-            assert!(
-                msg.contains("M2") || msg.contains("deferred"),
-                "Error message should reference M2 deferral: {}",
-                msg
-            );
-
-            // Check that it explains WHY (no heuristics/fabrication)
-            assert!(
-                msg.contains("heuristic") || msg.contains("fabricat") || msg.contains("estimation"),
-                "Error message should explain no-heuristics mandate: {}",
-                msg
-            );
-
-            println!("PASS: Error message properly documents deferral and references issues");
-            println!("Full error message:\n{}", msg);
-        }
-        Err(other) => {
-            panic!("Expected UnsupportedFormat error, got: {:?}", other);
+        Err(_) => {
+            // Parser correctly rejects insufficient/invalid data
+            println!("PASS: Parser correctly rejects insufficient data");
         }
         Ok(_) => {
-            panic!("Should not return statistics data");
+            panic!("Parser should not succeed with insufficient data");
         }
     }
+
+    // Note: Issue #28 mandate is still enforced - we return errors for bad data,
+    // we just succeed when data is valid. This is the correct behavior.
 }
 
 #[test]
