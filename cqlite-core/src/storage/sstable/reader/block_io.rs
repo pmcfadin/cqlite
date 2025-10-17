@@ -92,7 +92,12 @@ async fn read_next_block_impl(
     // NB format uses ChunkReader logic - returns compressed chunk data directly
     match cassandra_version {
         crate::parser::header::CassandraVersion::V5_0NewBig
-        | crate::parser::header::CassandraVersion::V5_0DataFormat => {
+        | crate::parser::header::CassandraVersion::V5_0DataFormat
+        | crate::parser::header::CassandraVersion::V5_0FormatC
+        | crate::parser::header::CassandraVersion::V5_0FormatD
+        | crate::parser::header::CassandraVersion::V5_0FormatE
+        | crate::parser::header::CassandraVersion::V5_0FormatF
+        | crate::parser::header::CassandraVersion::V5_0FormatG => {
             eprintln!("[DEBUG block_io::read_next_block_impl] Using NB format chunk reader");
 
             // Get file size for chunk size calculation
