@@ -82,4 +82,76 @@ Endianness:
   
 For implementation details, see Appendix C.
 
+## V5CompressedLegacy Row Header Format (Cassandra 5.0)
+
+The V5CompressedLegacy format (BigFormat with compression, "nb" file prefix) uses a structured row header with delta-encoded metadata fields. This format is used by Cassandra 5.0 SSTables with the legacy "big" format and compression enabled.
+
+### Row Header Structure
+
+```
+[row_flags: u8]
+[extended_flags: u8 if 0x80 set]
+[row_size: VInt]
+[prev_size: VInt]
+[timestamp: VInt if 0x04 set] ← Delta from min_timestamp
+[ttl: VInt if 0x08 set] ← Delta from min_ttl
+[deletion: 2 VInts if 0x10 set] ← First is delta from min_local_deletion_time
+[column_bitmap: VInt + bytes if NOT 0x20]
+```
+
+All delta-encoded fields are stored as offsets from minimum values found in Statistics.db. This compression technique reduces on-disk size for tables with similar timestamp/TTL values.
+
+### Row Flags
+
+| Flag | Hex  | Meaning            | Details |
+|------|------|--------------------|---------|
+| 0x04 | HAS_TIMESTAMP      | Timestamp delta present | Delta-encoded from Statistics.db min_timestamp |
+| 0x08 | HAS_TTL           | TTL delta present | Delta-encoded from Statistics.db min_ttl |
+| 0x10 | HAS_DELETION      | Deletion time present | Two VInts: local_deletion_time delta and deletion timestamp |
+| 0x20 | HAS_ALL_COLUMNS   | All columns present (no bitmap) | When set, all schema columns have values (no NULLs) |
+| 0x80 | HAS_EXTENDED_FLAGS | Extended flags byte follows | Reserved for future format extensions |
+
+### Delta Decoding
+
+All metadata fields use delta encoding against minimum values from Statistics.db:
+
+```
+absolute_timestamp = min_timestamp + timestamp_delta
+absolute_ttl = min_ttl + ttl_delta
+absolute_deletion_time = min_local_deletion_time + deletion_time_delta
+```
+
+**Example**: If Statistics.db shows `min_timestamp = 1759713125983682` and row header contains `timestamp_delta = 1000`, the absolute timestamp is `1759713125984682` (microseconds since epoch).
+
+### Column Bitmap
+
+When `HAS_ALL_COLUMNS` (0x20) is **NOT** set, a column bitmap follows the metadata fields:
+
+```
+[column_count: VInt]
+[bitmap_bytes: (column_count + 7) / 8 bytes]
+```
+
+Each bit indicates column presence:
+- Bit = 1: Column has a value in this row
+- Bit = 0: Column is NULL (not present)
+
+**Example**: For a table with 10 columns, if only columns 0, 2, and 9 have values:
+- `column_count = 10` (VInt: 0x0a)
+- `bitmap_bytes = 2` bytes: `0b00000101` (columns 0,2) and `0b00000010` (column 9)
+
+### Validation
+
+This format specification is confirmed through:
+- Implementation: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs` (lines 254-445)
+- Integration tests: `cqlite-core/tests/v5_compressed_legacy_integration_test.rs`
+- Test data: Real Cassandra 5.0 SSTables with non-zero minima (ttl_test_table, composite_key_table)
+- Validation: All parsed values match sstabledump output
+
+### References
+
+- Cassandra 5.0.0 Source: `org.apache.cassandra.db.rows.UnfilteredRowIteratorSerializer`
+- SerializationHeader: Delta encoding semantics for Statistics.db integration
+- Implementation research: See `docs/sstables-definitive-guide/ISSUE_162_LEARNINGS.md` for detailed findings
+
 

@@ -347,20 +347,18 @@ mod tests {
         assert_eq!(header.data_length, 44);
         assert_eq!(header.metadata2, 101);
 
-        // Test statistics extraction now returns error per Issue #28
-        let dummy_binary_data = vec![0u8; 1000];
-        let result = parse_nb_format_statistics_data(&dummy_binary_data, &header);
+        // Test statistics extraction with insufficient data returns error
+        // (Issue #162: Minimal parser implemented for EncodingStats only)
+        let insufficient_data = vec![0u8; 10]; // Not enough for full parse
+        let result = parse_nb_format_statistics_data(&insufficient_data, &header);
         assert!(
             result.is_err(),
-            "Statistics data extraction should return error (deferred to M2)"
+            "Statistics data extraction should fail with insufficient data"
         );
 
-        // Verify error message contains expected content
-        if let Err(e) = result {
-            let error_msg = format!("{}", e);
-            assert!(error_msg.contains("deferred to M2"));
-            assert!(error_msg.contains("Issue #28"));
-        }
+        // Note: With valid real data containing proper VInt-encoded EncodingStats,
+        // parsing now succeeds (Issue #162). This test verifies error handling
+        // for invalid/incomplete data.
     }
 
     /// Test fallback parser behavior

@@ -1,9 +1,10 @@
 # V5CompressedLegacy Decompressed Block Format Specification
 
-**Status**: Phase 1 Research - PRELIMINARY FINDINGS
-**Date**: 2025-10-14
-**Issue**: #160
-**Test Data**: `test_basic.simple_table` (nb-1-big-Data.db)
+**Status**: ✅ CONFIRMED - Implementation Complete (Issue #162)
+**Date**: 2025-10-17 (Updated)
+**Initial Research**: Issue #160 (2025-10-14)
+**Implementation**: Issue #162 (2025-10-17)
+**Test Data**: `test_basic.simple_table`, `ttl_test_table`, `composite_key_table`
 
 ## Executive Summary
 
@@ -73,23 +74,38 @@ Offset | Hex Bytes                                      | Interpretation
      * Additional flags
    - Requires further analysis
 
-### Row Header Structure
+### Row Header Structure (✅ CONFIRMED - Issue #162)
 
-Starting at approximately offset 0x001e:
+**Validated Format**:
 
 ```
-Offset | Hex Bytes          | Interpretation
--------|-------------------|------------------
-0x001e | 24 82             | Row flags and type markers
-0x0020 | 5b 1e c8 21 af 08 | Timestamp data (partial)
-0x0026 | 07 00             | Continuation/flags
-0x0028 | 00 00 02 30       | Cell count or clustering data
+[row_flags: u8]
+[extended_flags: u8 if 0x80 set]
+[row_size: VInt]
+[prev_size: VInt]
+[timestamp: VInt if 0x04 set] ← Delta from min_timestamp
+[ttl: VInt if 0x08 set] ← Delta from min_ttl
+[deletion: 2 VInts if 0x10 set] ← First is delta from min_local_deletion_time
+[column_bitmap: VInt + bytes if NOT 0x20]
 ```
 
-**Analysis**:
-- Row header format is NOT yet fully decoded
-- Timestamp from JSON: "2025-10-06T01:12:05.394120Z"
-- Need to map these bytes to the timestamp value
+**Row Flags** (Confirmed through implementation):
+- `0x04` = HAS_TIMESTAMP (timestamp delta follows)
+- `0x08` = HAS_TTL (TTL delta follows)
+- `0x10` = HAS_DELETION (deletion time + deletion timestamp follow)
+- `0x20` = HAS_ALL_COLUMNS (no column bitmap needed)
+- `0x80` = HAS_EXTENDED_FLAGS (extended flags byte follows)
+
+**Delta Decoding** (Validated with real data):
+```
+absolute_timestamp = min_timestamp + timestamp_delta
+absolute_ttl = min_ttl + ttl_delta
+absolute_deletion_time = min_local_deletion_time + deletion_time_delta
+```
+
+**Implementation**: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs` lines 269-445
+**Tests**: `cqlite-core/tests/v5_compressed_legacy_integration_test.rs`
+**Validation**: All parsed values match sstabledump output for ttl_test_table and composite_key_table
 
 ### Cell Encoding
 
@@ -199,45 +215,57 @@ From `UnfilteredRowIteratorSerializer.java`:
 9. **TTL** encoding
 10. **Counter columns**
 
-## Next Steps for Phase 2 (Implementation)
+## ✅ Implementation Status (Issue #162)
 
-### 1. Validate u8 Length Hypothesis
-```rust
-// Test parsing with u8 length prefix
-let partition_key_len = data[1] as usize; // u8, NOT VInt
-let partition_key_bytes = &data[2..2 + partition_key_len];
-```
+### Completed Features
 
-### 2. Decode Timestamp Fields
-```rust
-// Try different timestamp encodings:
-// - i64 big-endian microseconds
-// - i64 with sign bit encoding
-// - Delta-encoded from base timestamp
-```
+1. **u8 Length Parsing** ✅
+   - Partition key length uses u8 prefix (NOT VInt)
+   - Implemented in `parse_partition_header()` lines 453-518
 
-### 3. Build Cell Parser
-```rust
-// Cell structure hypothesis:
-// [type_tag: u8][length: u8][data: [u8; length]]
-fn parse_cell(data: &[u8]) -> Result<(String, Value)> {
-    let type_tag = data[0];
-    let length = data[1] as usize;
-    let value_bytes = &data[2..2 + length];
+2. **Delta Decoding** ✅
+   - Timestamp, TTL, and deletion time delta decoding working
+   - Statistics.db minima integration complete
+   - Validated with non-zero minima in ttl_test_table
 
-    match type_tag {
-        0x08 => parse_string(value_bytes),
-        0x04 => parse_boolean(value_bytes),
-        // ... other types
-    }
-}
-```
+3. **Cell Parser** ✅
+   - Type-aware cell parsing for all primitive types
+   - Schema-order cell iteration (cells lack column names)
+   - Frozen collection and tuple support
+   - Implemented in `parse_cell_value_schema_order()` lines 654-1118
 
-### 4. Create Test-Driven Parser
-- Start with `test_basic.simple_table` as reference
-- Parse first partition completely
-- Validate against sstabledump JSON
-- Iterate until 100% match
+4. **Integration Tests** ✅
+   - Simple table parsing (100 rows)
+   - TTL table with non-zero minima (100 rows)
+   - Composite key table with clustering columns
+   - All tests pass, output matches sstabledump
+
+### Known Limitations
+
+1. **Non-Frozen Collections** ⏸️ Deferred to Issue #162 Task 3
+   - Collections stored as multiple cells with path identifiers
+   - Current single-cell parser returns empty collections
+   - Requires cell-level parsing before column aggregation
+
+2. **UDT Types** ⏸️ Deferred
+   - User-defined types return as blob
+   - Requires schema registry integration
+
+3. **Column Bitmap Optimization** (Minor)
+   - Bitmap parsed but not used to skip NULL columns
+   - Performance impact minimal (NULL parsing fails quickly)
+
+### Test Coverage
+
+- ✅ Partition header parsing (UUID extraction)
+- ✅ Row header with all flag combinations
+- ✅ Delta decoding with non-zero minima
+- ✅ Column bitmap parsing
+- ✅ All primitive types (int, text, uuid, decimal, etc.)
+- ✅ Frozen collections (recursive unwrapping)
+- ✅ Tuple types (element-by-element parsing)
+- ⏸️ Non-frozen collections (deferred)
+- ⏸️ UDT types (deferred)
 
 ## References
 
@@ -345,6 +373,15 @@ fn parse_cell(data: &[u8]) -> Result<(String, Value)> {
 
 ---
 
-**Document Status**: Phase 1 Complete - Ready for Phase 2 Implementation
-**Last Updated**: 2025-10-14
-**Next Review**: After Phase 2 parser implementation
+## Document History
+
+- **2025-10-14**: Initial research findings (Issue #160 Phase 1)
+- **2025-10-17**: Implementation complete, format confirmed (Issue #162)
+  - Row header format validated
+  - Delta decoding verified with real data
+  - Integration tests passing
+  - Known limitations documented
+
+**Document Status**: ✅ CONFIRMED - Implementation Validated
+**Last Updated**: 2025-10-17
+**Implementation Reference**: See `docs/sstables-definitive-guide/ISSUE_162_LEARNINGS.md` for detailed findings

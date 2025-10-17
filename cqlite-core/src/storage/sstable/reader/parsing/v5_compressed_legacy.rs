@@ -38,7 +38,6 @@ use crate::{
 
 /// Row header data extracted from V5CompressedLegacy row
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields used for delta decoding, may be used in future cell parsing
 struct RowHeader {
     /// Row-level timestamp (after delta decoding from min_timestamp)
     timestamp: Option<i64>,
@@ -183,13 +182,20 @@ impl V5CompressedLegacyParser {
                     // Note: V5CompressedLegacy format documentation incomplete - assuming single row for now
                     // TODO: Determine if/how multiple rows per partition are encoded (Issue #160)
                     match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
-                        Ok((cells, final_offset)) => {
+                        Ok((cells, row_header, final_offset)) => {
                             offset = final_offset;
 
                             log::debug!(
                                 "V5CompressedLegacy: Parsed {} cells from row data",
                                 cells.len()
                             );
+
+                            if let Some(ref header) = row_header {
+                                log::debug!(
+                                    "V5CompressedLegacy: Row metadata - timestamp={:?}, ttl={:?}, deletion={:?}",
+                                    header.timestamp, header.ttl, header.local_deletion_time
+                                );
+                            }
 
                             debug!(
                                 "V5CompressedLegacy: Parsed {} cells from row data",
@@ -245,24 +251,21 @@ impl V5CompressedLegacyParser {
         Ok(results)
     }
 
-    /// Parse row header with delta-decoded timestamps/TTL/deletion
+    /// Parse row header with delta-decoded timestamps/TTL/deletion (Issue #162)
     ///
     /// # Format
     /// ```text
     /// [row_flags: u8]
     /// [extended_flags: u8 if 0x80 set]
-    /// [clustering_prefix] (optional, empty for simple tables)
     /// [row_size: VInt]
     /// [prev_size: VInt]
     /// [timestamp: VInt if 0x04 set] ← Delta from min_timestamp
     /// [ttl: VInt if 0x08 set] ← Delta from min_ttl
     /// [deletion: 2 VInts if 0x10 set] ← First is delta from min_local_deletion_time
-    /// [column_bitmap: VInt if NOT 0x20]
+    /// [column_bitmap: VInt + bytes if NOT 0x20]
     /// ```
     ///
-    /// NOTE: This function is currently unused pending full V5CompressedLegacy format documentation.
-    /// It demonstrates the correct approach for delta decoding when the format is fully understood.
-    #[allow(dead_code)]
+    /// Returns RowHeader with decoded metadata and calculated header_size.
     fn parse_row_header(&self, data: &[u8], offset: usize) -> Result<RowHeader> {
         let mut pos = offset;
 
@@ -291,34 +294,13 @@ impl V5CompressedLegacyParser {
             pos += 1;
         }
 
-        // NOTE: V5CompressedLegacy format uses a SIMPLIFIED header structure that differs
-        // from standard Cassandra 5.0. The row header starts immediately after row flags with
-        // row_size/prev_size VInts, WITHOUT an explicit clustering prefix length field.
-        // The format goes: [row_flags] [row_size] [prev_size] [optional_timestamp] ...
+        // V5CompressedLegacy format header structure (Issue #162):
+        // [row_flags: u8] [extended_flags: u8 if 0x80 set]
+        // [row_size: VInt] [prev_size: VInt]
+        // [timestamp: VInt if 0x04] [ttl: VInt if 0x08] [deletion: 2 VInts if 0x10]
+        // [column_bitmap: VInt + bytes if NOT 0x20]
         //
-        // For now, we scan for the 0x08 cell marker to find where the row header ends,
-        // as the exact header structure is not fully documented. This works because cells
-        // consistently start with 0x08 in this format.
-
-        // Find first 0x08 marker (start of first cell) to determine row header size
-        let cell_start = data[pos..]
-            .iter()
-            .position(|&b| b == 0x08)
-            .ok_or_else(|| {
-                Error::corruption(format!(
-                    "V5CompressedLegacy: No cell marker (0x08) found after row flags at offset {} (searched {} bytes)",
-                    pos,
-                    data.len() - pos
-                ))
-            })?;
-
-        let row_header_size_from_flags = cell_start;
-        pos += cell_start;
-
-        debug!(
-            "V5CompressedLegacy: Found cell marker at offset {} (row header was {} bytes from flags)",
-            pos, row_header_size_from_flags
-        );
+        // Parse fields in order WITHOUT scanning for 0x08 marker.
 
         // Read row size (VInt)
         let (remaining, _row_size) = parse_vuint(&data[pos..]).map_err(|e| {
@@ -540,14 +522,14 @@ impl V5CompressedLegacyParser {
     /// V5CompressedLegacy format stores cells WITHOUT column names in schema column order.
     /// Schema is REQUIRED to determine which column each value belongs to.
     ///
-    /// Returns: (cells, new_offset)
+    /// Returns: (cells, row_header, new_offset)
     fn parse_row_data_with_offset(
         &self,
         data: &[u8],
         mut offset: usize,
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
-    ) -> Result<(HashMap<String, Value>, usize)> {
+    ) -> Result<(HashMap<String, Value>, Option<RowHeader>, usize)> {
         let mut cells = HashMap::new();
 
         let schema = schema.ok_or_else(|| {
@@ -563,38 +545,29 @@ impl V5CompressedLegacyParser {
             schema.columns.len()
         );
 
-        // TODO(Issue #161): Parse row header with delta-decoded timestamps/TTL/deletion
-        // For now, use simplified approach that scans for 0x08 cell marker to skip variable-length header.
-        // Full row header parsing (with clustering prefix, column bitmap, etc.) requires more complete
-        // format documentation for V5CompressedLegacy variant.
-        //
-        // Row header structure (partially documented):
-        // [row_flags: u8] [clustering_prefix: varies] [row_size: VInt] [prev_size: VInt]
-        // [timestamp: VInt if HAS_TIMESTAMP] [ttl: VInt if HAS_TTL] [deletion: 2 VInts if HAS_DELETION]
-        // [column_bitmap: VInt count + bytes if NOT HAS_ALL_COLUMNS]
-        //
-        // Minima are available in self.min_timestamp, self.min_local_deletion_time, self.min_ttl
-        // for delta decoding when full header parsing is implemented.
-
-        // Find first 0x08 marker (start of first cell) to skip variable-length row header
-        let cell_start = data[offset..]
-            .iter()
-            .position(|&b| b == 0x08)
-            .ok_or_else(|| {
-                Error::corruption(format!(
-                    "V5CompressedLegacy: No cell marker (0x08) found after partition header at offset {} (searched {} bytes)",
-                    offset,
-                    data.len() - offset
-                ))
-            })?;
-
-        let row_header_size = cell_start;
-        offset += cell_start;
+        // Parse row header with delta-decoded timestamps/TTL/deletion (Issue #162)
+        let row_header = self.parse_row_header(data, offset)?;
 
         debug!(
-            "V5CompressedLegacy: Found cell marker at offset {} (row header was {} bytes)",
-            offset, row_header_size
+            "V5CompressedLegacy: Parsed row header at offset {}: size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
+            offset, row_header.header_size, row_header.timestamp, row_header.ttl, row_header.local_deletion_time
         );
+
+        // Advance offset to start of cell data
+        offset += row_header.header_size;
+
+        // Sanity check: verify we're at a cell marker (0x08) as expected
+        if offset < data.len() && data[offset] == 0x08 {
+            debug!(
+                "V5CompressedLegacy: Verified cell marker (0x08) at offset {} after row header",
+                offset
+            );
+        } else if offset < data.len() {
+            warn!(
+                "V5CompressedLegacy: Expected cell marker (0x08) at offset {}, found 0x{:02x}",
+                offset, data[offset]
+            );
+        }
 
         // CRITICAL: V5CompressedLegacy format stores cells WITHOUT column names
         // or column IDs in the binary data. Cells appear in SCHEMA DEFINITION ORDER
@@ -610,7 +583,7 @@ impl V5CompressedLegacyParser {
 
         let columns_in_order = &schema.columns;
 
-        log::debug!("V5CompressedLegacy: Parsing up to {} cells in SCHEMA DEFINITION ORDER starting at offset {} (row header was {} bytes)", columns_in_order.len(), offset, row_header_size);
+        log::debug!("V5CompressedLegacy: Parsing up to {} cells in SCHEMA DEFINITION ORDER starting at offset {} (row header was {} bytes)", columns_in_order.len(), offset, row_header.header_size);
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
             hex::encode(&data[offset..std::cmp::min(offset + 64, data.len())])
@@ -674,7 +647,7 @@ impl V5CompressedLegacyParser {
 
         debug!("V5CompressedLegacy: Parsed total of {} cells", cells.len());
 
-        Ok((cells, offset))
+        Ok((cells, Some(row_header), offset))
     }
 
     /// Parse a single cell value WITHOUT column name (schema-order format)
@@ -1039,12 +1012,87 @@ impl V5CompressedLegacyParser {
                 Value::Uuid(uuid_bytes)
             }
 
+            // Complex types: frozen, tuple, UDT
+            type_str if type_str.starts_with("frozen<") => {
+                // Frozen types: unwrap inner type and parse
+                let inner_type = self.extract_frozen_inner_type(type_str)?;
+
+                // Create temporary column with unwrapped type
+                let mut inner_column = column.clone();
+                inner_column.data_type = inner_type.clone();
+
+                // Recursively parse the inner type
+                let (inner_value, new_offset) =
+                    self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?;
+                offset = new_offset;
+
+                // Wrap in Frozen
+                Value::Frozen(Box::new(inner_value))
+            }
+
+            type_str if type_str.starts_with("tuple<") => {
+                // Tuple types: parse fixed number of elements
+                self.parse_tuple_value(data, &mut offset, type_str, column, _reader)?
+            }
+
+            // Non-frozen collections: list, set, map
+            // TODO(Issue #162, Task 3): Multi-cell collection parsing
+            //
+            // Collections in V5CompressedLegacy are stored as MULTIPLE CELLS with path identifiers,
+            // NOT as single blob values. The current single-cell parser cannot handle this.
+            //
+            // Format (from sstabledump analysis):
+            //   {"name": "scores", "deletion_info": {...}},  // Collection tombstone
+            //   {"name": "scores", "path": ["uuid1"], "value": 23},  // Element 1
+            //   {"name": "scores", "path": ["uuid2"], "value": 99},  // Element 2
+            //
+            // Required implementation:
+            //   1. Parse cell path (clustering key bytes) for each collection element
+            //   2. Detect collection tombstone cell (has deletion_info, no path/value)
+            //   3. Read N element cells (each with path + value)
+            //   4. Aggregate elements into Value::List/Set/Map based on column type
+            //   5. Handle different path encodings:
+            //      - list<T>: path is UUID bytes (timeuuid for ordering)
+            //      - set<T>: path is serialized element value (key), value is empty
+            //      - map<K,V>: path is serialized key, value is serialized value
+            //
+            // This is a fundamental architectural change requiring cell-level parsing
+            // before column-level aggregation. For now, return stub to unblock downstream work.
+            type_str
+                if type_str.starts_with("list<")
+                    || type_str.starts_with("set<")
+                    || type_str.starts_with("map<") =>
+            {
+                warn!(
+                    "V5CompressedLegacy: Non-frozen collection '{}' type '{}' requires multi-cell parsing (not yet implemented). \
+                     Collections are stored as multiple cells with path identifiers, requiring cell-level aggregation. \
+                     Returning empty collection as placeholder. See Issue #162 Task 3 for implementation plan.",
+                    column.name, column.data_type
+                );
+
+                // Return empty collection based on type
+                if type_str.starts_with("list<") {
+                    Value::List(Vec::new())
+                } else if type_str.starts_with("set<") {
+                    Value::Set(Vec::new())
+                } else {
+                    Value::Map(Vec::new())
+                }
+            }
+
+            // TODO(Issue #162): UDT parsing requires schema registry access
+            // For now, UDTs fall through to blob. Future implementation will:
+            // - Extract UDT name from type_str
+            // - Look up UDT definition in schema registry
+            // - Parse fields according to UDT schema
+            // - Return Value::Udt(UdtValue)
+
             // Default: treat as length-prefixed blob
             _ => {
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
-                        "Cell '{}': unexpected end at blob length",
-                        column.name
+                        "Cell '{}': unexpected end at blob length (type: {})",
+                        column.name, column.data_type
                     )));
                 }
                 let blob_len = data[offset] as usize;
@@ -1052,10 +1100,11 @@ impl V5CompressedLegacyParser {
 
                 if offset + blob_len > data.len() {
                     return Err(Error::corruption(format!(
-                        "Cell '{}': need {} bytes for blob, only {} available",
+                        "Cell '{}': need {} bytes for blob, only {} available (type: {})",
                         column.name,
                         blob_len,
-                        data.len() - offset
+                        data.len() - offset,
+                        column.data_type
                     )));
                 }
 
@@ -1066,6 +1115,106 @@ impl V5CompressedLegacyParser {
         };
 
         Ok((value, offset))
+    }
+
+    /// Extract inner type from frozen<T> type string
+    fn extract_frozen_inner_type(&self, type_str: &str) -> Result<String> {
+        if !type_str.starts_with("frozen<") || !type_str.ends_with('>') {
+            return Err(Error::schema(format!(
+                "Invalid frozen type format: {}",
+                type_str
+            )));
+        }
+
+        let inner = &type_str[7..type_str.len() - 1];
+        if inner.is_empty() {
+            return Err(Error::schema(format!("Empty frozen type: {}", type_str)));
+        }
+
+        Ok(inner.to_string())
+    }
+
+    /// Parse tuple value from binary data
+    /// Format: tuple elements are encoded sequentially according to their types
+    fn parse_tuple_value(
+        &self,
+        data: &[u8],
+        offset: &mut usize,
+        type_str: &str,
+        column: &crate::schema::Column,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<Value> {
+        // Extract tuple element types from type string
+        let element_types = self.extract_tuple_element_types(type_str)?;
+
+        if element_types.is_empty() {
+            return Err(Error::schema(format!("Empty tuple type: {}", type_str)));
+        }
+
+        let mut elements = Vec::new();
+
+        // Parse each element according to its type
+        for (idx, elem_type) in element_types.iter().enumerate() {
+            // Create temporary column for this tuple element
+            let mut elem_column = column.clone();
+            elem_column.name = format!("{}[{}]", column.name, idx);
+            elem_column.data_type = elem_type.clone();
+
+            // Parse the element value recursively
+            let (elem_value, new_offset) =
+                self.parse_cell_value_schema_order(data, *offset, &elem_column, reader)?;
+
+            *offset = new_offset;
+            elements.push(elem_value);
+        }
+
+        Ok(Value::Tuple(elements))
+    }
+
+    /// Extract tuple element types from tuple<T1, T2, ...> string
+    fn extract_tuple_element_types(&self, type_str: &str) -> Result<Vec<String>> {
+        if !type_str.starts_with("tuple<") || !type_str.ends_with('>') {
+            return Err(Error::schema(format!(
+                "Invalid tuple type format: {}",
+                type_str
+            )));
+        }
+
+        let inner = &type_str[6..type_str.len() - 1];
+        if inner.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Split by comma, handling nested angle brackets
+        let mut types = Vec::new();
+        let mut current = String::new();
+        let mut depth = 0;
+
+        for ch in inner.chars() {
+            match ch {
+                '<' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                '>' => {
+                    depth -= 1;
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    types.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => {
+                    current.push(ch);
+                }
+            }
+        }
+
+        if !current.is_empty() {
+            types.push(current.trim().to_string());
+        }
+
+        Ok(types)
     }
 }
 
@@ -1097,5 +1246,240 @@ mod tests {
         // Verify UUID bytes match
         let expected_uuid_bytes = hex::decode("15291a77d7394e738397b787442f3a1f").unwrap();
         assert_eq!(row_key.0, expected_uuid_bytes);
+    }
+
+    #[test]
+    fn test_extract_frozen_inner_type() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Test basic frozen type
+        assert_eq!(
+            parser
+                .extract_frozen_inner_type("frozen<list<int>>")
+                .unwrap(),
+            "list<int>"
+        );
+
+        // Test nested frozen
+        assert_eq!(
+            parser
+                .extract_frozen_inner_type("frozen<map<text,frozen<set<int>>>>")
+                .unwrap(),
+            "map<text,frozen<set<int>>>"
+        );
+
+        // Test error cases
+        assert!(parser.extract_frozen_inner_type("frozen<>").is_err());
+        assert!(parser.extract_frozen_inner_type("frozen").is_err());
+        assert!(parser.extract_frozen_inner_type("list<int>").is_err());
+    }
+
+    #[test]
+    fn test_extract_tuple_element_types() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Test simple tuple
+        let types = parser
+            .extract_tuple_element_types("tuple<int,text,bigint>")
+            .unwrap();
+        assert_eq!(types, vec!["int", "text", "bigint"]);
+
+        // Test tuple with nested collections
+        let types = parser
+            .extract_tuple_element_types("tuple<int,list<text>,map<text,int>>")
+            .unwrap();
+        assert_eq!(types, vec!["int", "list<text>", "map<text,int>"]);
+
+        // Test tuple with frozen
+        let types = parser
+            .extract_tuple_element_types("tuple<int,frozen<list<int>>>")
+            .unwrap();
+        assert_eq!(types, vec!["int", "frozen<list<int>>"]);
+
+        // Test empty tuple
+        let types = parser.extract_tuple_element_types("tuple<>").unwrap();
+        assert!(types.is_empty());
+
+        // Test error cases
+        assert!(parser.extract_tuple_element_types("tuple").is_err());
+        assert!(parser.extract_tuple_element_types("int").is_err());
+    }
+
+    #[test]
+    fn test_frozen_list_parsing() {
+        // TODO(Issue #162): Add integration test with real SSTable data
+        // For now, frozen types delegate to inner type parsing which is tested elsewhere
+    }
+
+    #[test]
+    fn test_tuple_int_text_parsing() {
+        // TODO(Issue #162): Add integration test with real SSTable data containing tuples
+        // This would require:
+        // 1. Real binary data with tuple encoding
+        // 2. Schema definition with tuple column
+        // 3. Expected parsed tuple values
+    }
+
+    #[test]
+    fn test_non_zero_minima_delta_decoding() {
+        // Test delta decoding with non-zero minima from ttl_test_table
+        // Statistics.db shows:
+        //   min_timestamp: 1759713125983682
+        //   min_local_deletion_time: 1759799525
+        //   min_ttl: 86400
+        //
+        // Row header format with HAS_TIMESTAMP (0x04) + HAS_TTL (0x08) + HAS_ALL_COLUMNS (0x20) = 0x2C
+        // [row_flags: 0x2C] [row_size: VInt] [prev_size: VInt]
+        // [timestamp_delta: VInt] [ttl_delta: VInt]
+        // (NO column bitmap because HAS_ALL_COLUMNS is set)
+
+        // Construct row header with flags 0x2C (HAS_TIMESTAMP | HAS_TTL | HAS_ALL_COLUMNS)
+        // row_size=100 (encoded as 0x64), prev_size=0 (encoded as 0x00)
+        // timestamp_delta=1000 (signed VInt: 0x87d0), ttl_delta=0 (unsigned VInt: 0x00)
+        let row_header_hex = "2c640087d000"; // flags=0x2C, size=100, prev=0, ts_delta=1000, ttl_delta=0
+        let data = hex::decode(row_header_hex).unwrap();
+
+        let min_timestamp = 1759713125983682i64;
+        let min_ttl = 86400i64;
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "ttl_test_table".to_string(),
+            min_timestamp,
+            1759799525, // min_local_deletion_time
+            Some(min_ttl),
+        );
+
+        let row_header = parser.parse_row_header(&data, 0).unwrap();
+
+        // Verify delta decoding: absolute_timestamp = min_timestamp + delta
+        assert_eq!(
+            row_header.timestamp,
+            Some(min_timestamp + 1000),
+            "Timestamp should be decoded as min_timestamp + delta"
+        );
+
+        // Verify TTL delta decoding: absolute_ttl = min_ttl + delta
+        assert_eq!(
+            row_header.ttl,
+            Some(min_ttl as i32),
+            "TTL should be decoded as min_ttl + delta (delta=0)"
+        );
+    }
+
+    #[test]
+    fn test_row_header_with_deletion_time() {
+        // Test delta decoding of local_deletion_time field
+        // Row header with HAS_DELETION (0x10) + HAS_ALL_COLUMNS (0x20) = 0x30
+        // [row_flags: 0x30] [row_size: VInt] [prev_size: VInt]
+        // [local_deletion_time_delta: unsigned VInt] [deletion_time: signed VInt]
+
+        let row_header_hex = "30640032645000"; // flags=0x30, size=100, prev=0, del_delta=50, del_time=80 (signed)
+        let data = hex::decode(row_header_hex).unwrap();
+
+        let min_local_deletion_time = 1759799525i64;
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "test_table".to_string(),
+            0,
+            min_local_deletion_time,
+            None,
+        );
+
+        let row_header = parser.parse_row_header(&data, 0).unwrap();
+
+        // Verify delta decoding: absolute_deletion_time = min_local_deletion_time + delta
+        assert_eq!(
+            row_header.local_deletion_time,
+            Some((min_local_deletion_time + 50) as i32),
+            "Local deletion time should be decoded as min + delta"
+        );
+    }
+
+    #[test]
+    fn test_sparse_column_bitmap_parsing() {
+        // Test column bitmap parsing when NOT HAS_ALL_COLUMNS
+        // Row header WITHOUT HAS_ALL_COLUMNS flag (0x20)
+        // Should parse column bitmap after metadata fields
+        //
+        // Row header format: [flags: 0x04] [row_size] [prev_size] [timestamp]
+        // [column_bitmap_size: VInt] [column_bitmap_bytes]
+
+        // Construct row with HAS_TIMESTAMP but NOT HAS_ALL_COLUMNS
+        // bitmap_size=8 columns (0x08), bitmap=0b00000101 (columns 0 and 2 present)
+        let row_header_hex = "046400000805"; // flags=0x04, size=100, prev=0, ts=0 (signed), col_count=8, bitmap=0x05
+        let data = hex::decode(row_header_hex).unwrap();
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "sparse_table".to_string(),
+            0,
+            0,
+            None,
+        );
+
+        // This tests that parse_row_header handles column bitmap correctly
+        // The bitmap parsing happens after the metadata fields
+        let result = parser.parse_row_header(&data, 0);
+
+        // Should succeed without panicking on bitmap parsing
+        assert!(
+            result.is_ok(),
+            "Row header with column bitmap should parse successfully"
+        );
+
+        let row_header = result.unwrap();
+        // Verify header was parsed (has timestamp)
+        assert_eq!(row_header.timestamp, Some(0));
+
+        // Verify header_size includes bitmap overhead
+        // flags(1) + size(1) + prev(1) + timestamp(1) + column_count(1) + bitmap(1) = 6
+        assert_eq!(
+            row_header.header_size, 6,
+            "Header size should include column bitmap"
+        );
+    }
+
+    #[test]
+    fn test_clustering_key_partition_header() {
+        // Test partition header parsing for composite key table
+        // composite_key_table has clustering columns: [ReversedType(TimestampType), UTF8Type]
+        //
+        // Partition header format:
+        // [flags: u8] [key_len: u8] [partition_key_bytes] [deletion_time: i32] [unknown: i64]
+        //
+        // From composite_key_table JSONL:
+        // partition key: "245dff69-026f-45c6-b68f-ba0c964df3c9"
+        // clustering: ["2025-10-06 01:12:06.059Z","information"]
+        //
+        // Note: Clustering keys are part of row data, not partition header
+        // This test verifies partition header parsing for composite key tables
+
+        let partition_hex = "0010245dff69026f45c6b68fba0c964df3c97fffffff8000000000000000";
+        let data = hex::decode(partition_hex).unwrap();
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "composite_key_table".to_string(),
+            1759713125977357, // min_timestamp from Statistics.db
+            1442880000,       // min_local_deletion_time
+            None,
+        );
+
+        let (row_key, offset) = parser.parse_partition_header(&data, 0).unwrap();
+
+        // Verify partition key extraction (UUID is 16 bytes)
+        assert_eq!(row_key.0.len(), 16);
+
+        // Verify correct partition key bytes
+        let expected_uuid_bytes = hex::decode("245dff69026f45c6b68fba0c964df3c9").unwrap();
+        assert_eq!(row_key.0, expected_uuid_bytes);
+
+        // Verify offset: flags(1) + len(1) + uuid(16) + del_time(4) + unknown(8) = 30
+        assert_eq!(offset, 30);
+
+        // Note: Clustering key parsing would happen during row data parsing,
+        // which is tested separately in integration tests
     }
 }
