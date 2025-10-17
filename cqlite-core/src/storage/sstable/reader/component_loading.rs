@@ -232,7 +232,11 @@ impl SSTableReader {
                 Some(reader)
             }
             Err(e) => {
-                log::debug!("Failed to load Statistics.db reader: {}", e);
+                log::warn!(
+                    "Failed to load Statistics.db from {}: {}. Timestamp delta decoding will use zero base values.",
+                    statistics_path.display(),
+                    e
+                );
                 None
             }
         }

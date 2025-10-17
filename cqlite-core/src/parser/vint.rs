@@ -593,17 +593,200 @@ pub fn parse_vint_cassandra(input: &[u8]) -> IResult<&[u8], i64> {
     crate::parser::vint_fixed::parse_vint_fixed(input)
 }
 
-/// Decode a variable-length unsigned integer from bytes
+/// Parse unsigned VInt32 for Cassandra value lengths
 ///
-/// Similar to VInt but treats the value as unsigned
+/// Matches org/apache/cassandra/io/util/DataInputPlus.readUnsignedVInt32()
+/// Used for variable-width type value lengths (text, blob, decimal, etc.)
+///
+/// Encoding format:
+/// - Leading 1-bits indicate number of extra bytes
+/// - Pattern: [n ones][0][data bits]
+/// - Example: 0xxxxxxx = 1 byte, 10xxxxxx xxxxxxxx = 2 bytes
+///
+/// # Arguments
+///
+/// * `input` - Input byte slice
+///
+/// # Returns
+///
+/// Tuple of (remaining_bytes, decoded_u32_value)
+pub fn parse_unsigned_vint32(input: &[u8]) -> IResult<&[u8], u32> {
+    if input.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+
+    let first_byte = input[0];
+    let num_extra_bytes = first_byte.leading_ones() as usize;
+
+    if num_extra_bytes > 4 || num_extra_bytes + 1 > input.len() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+
+    let value = if num_extra_bytes == 0 {
+        // Single byte: 0xxxxxxx
+        (first_byte & 0x7F) as u32
+    } else {
+        // Multi-byte: extract data bits after leading ones pattern
+        let data_bits_first = 8 - num_extra_bytes - 1;
+        let mask = (1u8 << data_bits_first) - 1;
+        let mut value = (first_byte & mask) as u32;
+
+        for &byte in input.iter().skip(1).take(num_extra_bytes) {
+            value = (value << 8) | (byte as u32);
+        }
+        value
+    };
+
+    let bytes_consumed = num_extra_bytes + 1;
+    let (remaining, _) = take(bytes_consumed)(input)?;
+    Ok((remaining, value))
+}
+
+/// Parse unsigned VInt64 for Cassandra timestamps
+///
+/// Matches org/apache/cassandra/io/util/DataInputPlus.readUnsignedVInt()
+/// Used for timestamp deltas and other 64-bit unsigned values.
+///
+/// Encoding format:
+/// - Leading 1-bits indicate number of extra bytes
+/// - Pattern: [n ones][0][data bits]
+/// - Example: 0xxxxxxx = 1 byte, 10xxxxxx xxxxxxxx = 2 bytes
+/// - Maximum 8 extra bytes (9 bytes total) for full 64-bit range
+///
+/// # Arguments
+///
+/// * `input` - Input byte slice
+///
+/// # Returns
+///
+/// Tuple of (remaining_bytes, decoded_u64_value)
 pub fn parse_vuint(input: &[u8]) -> IResult<&[u8], u64> {
-    let (remaining, signed_value) = parse_vint(input)?;
-    Ok((remaining, signed_value as u64))
+    if input.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+
+    let first_byte = input[0];
+    let num_extra_bytes = first_byte.leading_ones() as usize;
+
+    if num_extra_bytes > 8 || num_extra_bytes + 1 > input.len() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+
+    let value = if num_extra_bytes == 0 {
+        // Single byte: 0xxxxxxx
+        (first_byte & 0x7F) as u64
+    } else if num_extra_bytes == 8 {
+        // Special case: 8 leading ones (0xFF) means 8 extra bytes follow, no data bits in first byte
+        let mut value = 0u64;
+        for &byte in input.iter().skip(1).take(num_extra_bytes) {
+            value = (value << 8) | (byte as u64);
+        }
+        value
+    } else {
+        // Multi-byte: extract data bits after leading ones pattern
+        let data_bits_first = 8 - num_extra_bytes - 1;
+        let mask = (1u8 << data_bits_first) - 1;
+        let mut value = (first_byte & mask) as u64;
+
+        for &byte in input.iter().skip(1).take(num_extra_bytes) {
+            value = (value << 8) | (byte as u64);
+        }
+        value
+    };
+
+    let bytes_consumed = num_extra_bytes + 1;
+    let (remaining, _) = take(bytes_consumed)(input)?;
+    Ok((remaining, value))
 }
 
 /// Encode an unsigned integer as a variable-length integer
 pub fn encode_vuint(value: u64) -> Vec<u8> {
-    encode_vint(value as i64)
+    if value <= 0x7F {
+        // Single byte: 0xxxxxxx
+        vec![value as u8]
+    } else if value <= 0x3FFF {
+        // Two bytes: 10xxxxxx xxxxxxxx
+        let byte0 = 0x80 | ((value >> 8) & 0x3F) as u8;
+        let byte1 = (value & 0xFF) as u8;
+        vec![byte0, byte1]
+    } else if value <= 0x1FFFFF {
+        // Three bytes: 110xxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xC0 | ((value >> 16) & 0x1F) as u8;
+        let byte1 = ((value >> 8) & 0xFF) as u8;
+        let byte2 = (value & 0xFF) as u8;
+        vec![byte0, byte1, byte2]
+    } else if value <= 0xFFFFFFF {
+        // Four bytes: 1110xxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xE0 | ((value >> 24) & 0x0F) as u8;
+        let byte1 = ((value >> 16) & 0xFF) as u8;
+        let byte2 = ((value >> 8) & 0xFF) as u8;
+        let byte3 = (value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3]
+    } else if value <= 0x7FFFFFFFF {
+        // Five bytes: 11110xxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xF0 | ((value >> 32) & 0x07) as u8;
+        let byte1 = ((value >> 24) & 0xFF) as u8;
+        let byte2 = ((value >> 16) & 0xFF) as u8;
+        let byte3 = ((value >> 8) & 0xFF) as u8;
+        let byte4 = (value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3, byte4]
+    } else if value <= 0x3FFFFFFFFFF {
+        // Six bytes: 111110xx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        let byte0 = 0xF8 | ((value >> 40) & 0x03) as u8;
+        let byte1 = ((value >> 32) & 0xFF) as u8;
+        let byte2 = ((value >> 24) & 0xFF) as u8;
+        let byte3 = ((value >> 16) & 0xFF) as u8;
+        let byte4 = ((value >> 8) & 0xFF) as u8;
+        let byte5 = (value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3, byte4, byte5]
+    } else if value <= 0x1FFFFFFFFFFFF {
+        // Seven bytes: 1111110x xxxxxxxx ... xxxxxxxx
+        let byte0 = 0xFC | ((value >> 48) & 0x01) as u8;
+        let byte1 = ((value >> 40) & 0xFF) as u8;
+        let byte2 = ((value >> 32) & 0xFF) as u8;
+        let byte3 = ((value >> 24) & 0xFF) as u8;
+        let byte4 = ((value >> 16) & 0xFF) as u8;
+        let byte5 = ((value >> 8) & 0xFF) as u8;
+        let byte6 = (value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3, byte4, byte5, byte6]
+    } else if value <= 0xFFFFFFFFFFFFFF {
+        // Eight bytes: 11111110 xxxxxxxx ... xxxxxxxx
+        let byte0 = 0xFE;
+        let byte1 = ((value >> 48) & 0xFF) as u8;
+        let byte2 = ((value >> 40) & 0xFF) as u8;
+        let byte3 = ((value >> 32) & 0xFF) as u8;
+        let byte4 = ((value >> 24) & 0xFF) as u8;
+        let byte5 = ((value >> 16) & 0xFF) as u8;
+        let byte6 = ((value >> 8) & 0xFF) as u8;
+        let byte7 = (value & 0xFF) as u8;
+        vec![byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7]
+    } else {
+        // Nine bytes: 11111111 xxxxxxxx ... xxxxxxxx (full 8 bytes follow)
+        let byte0 = 0xFF;
+        let byte1 = ((value >> 56) & 0xFF) as u8;
+        let byte2 = ((value >> 48) & 0xFF) as u8;
+        let byte3 = ((value >> 40) & 0xFF) as u8;
+        let byte4 = ((value >> 32) & 0xFF) as u8;
+        let byte5 = ((value >> 24) & 0xFF) as u8;
+        let byte6 = ((value >> 16) & 0xFF) as u8;
+        let byte7 = ((value >> 8) & 0xFF) as u8;
+        let byte8 = (value & 0xFF) as u8;
+        vec![
+            byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7, byte8,
+        ]
+    }
 }
 
 /// Parse a VInt and convert to usize for length fields

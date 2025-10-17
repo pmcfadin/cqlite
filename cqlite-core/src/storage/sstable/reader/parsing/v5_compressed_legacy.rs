@@ -29,20 +29,68 @@ use std::collections::HashMap;
 
 use log::{debug, warn};
 
-use crate::{schema::TableSchema, types::TableId, Error, Result, RowKey, Value};
+use crate::{
+    parser::vint::{parse_vint, parse_vuint},
+    schema::TableSchema,
+    types::TableId,
+    Error, Result, RowKey, Value,
+};
+
+/// Row header data extracted from V5CompressedLegacy row
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used for delta decoding, may be used in future cell parsing
+struct RowHeader {
+    /// Row-level timestamp (after delta decoding from min_timestamp)
+    timestamp: Option<i64>,
+    /// Row-level TTL (after delta decoding from min_ttl)
+    ttl: Option<i32>,
+    /// Row-level local deletion time (after delta decoding from min_local_deletion_time)
+    local_deletion_time: Option<i32>,
+    /// Number of bytes consumed by the header
+    header_size: usize,
+}
+
+// Row header flag constants
+const ROW_HAS_TIMESTAMP: u8 = 0x04;
+const ROW_HAS_TTL: u8 = 0x08;
+const ROW_HAS_DELETION: u8 = 0x10;
+const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
+const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 
 /// Parser for V5CompressedLegacy format decompressed blocks
 pub struct V5CompressedLegacyParser {
     keyspace: String,
     table_name: String,
+    /// Minimum timestamp from Statistics.db for delta decoding
+    min_timestamp: i64,
+    /// Minimum local deletion time from Statistics.db for delta decoding
+    min_local_deletion_time: i64,
+    /// Minimum TTL from Statistics.db for delta decoding
+    min_ttl: Option<i64>,
 }
 
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser
-    pub fn new(keyspace: String, table_name: String) -> Self {
+    ///
+    /// # Arguments
+    /// * `keyspace` - Keyspace name
+    /// * `table_name` - Table name
+    /// * `min_timestamp` - Minimum timestamp for delta decoding (from Statistics.db)
+    /// * `min_local_deletion_time` - Minimum local deletion time for delta decoding (from Statistics.db)
+    /// * `min_ttl` - Minimum TTL for delta decoding (from Statistics.db)
+    pub fn new(
+        keyspace: String,
+        table_name: String,
+        min_timestamp: i64,
+        min_local_deletion_time: i64,
+        min_ttl: Option<i64>,
+    ) -> Self {
         Self {
             keyspace,
             table_name,
+            min_timestamp,
+            min_local_deletion_time,
+            min_ttl,
         }
     }
 
@@ -197,6 +245,223 @@ impl V5CompressedLegacyParser {
         Ok(results)
     }
 
+    /// Parse row header with delta-decoded timestamps/TTL/deletion
+    ///
+    /// # Format
+    /// ```text
+    /// [row_flags: u8]
+    /// [extended_flags: u8 if 0x80 set]
+    /// [clustering_prefix] (optional, empty for simple tables)
+    /// [row_size: VInt]
+    /// [prev_size: VInt]
+    /// [timestamp: VInt if 0x04 set] ← Delta from min_timestamp
+    /// [ttl: VInt if 0x08 set] ← Delta from min_ttl
+    /// [deletion: 2 VInts if 0x10 set] ← First is delta from min_local_deletion_time
+    /// [column_bitmap: VInt if NOT 0x20]
+    /// ```
+    ///
+    /// NOTE: This function is currently unused pending full V5CompressedLegacy format documentation.
+    /// It demonstrates the correct approach for delta decoding when the format is fully understood.
+    #[allow(dead_code)]
+    fn parse_row_header(&self, data: &[u8], offset: usize) -> Result<RowHeader> {
+        let mut pos = offset;
+
+        // Read row flags
+        if pos >= data.len() {
+            return Err(Error::corruption(
+                "V5CompressedLegacy: Unexpected end reading row flags",
+            ));
+        }
+        let row_flags = data[pos];
+        pos += 1;
+
+        debug!(
+            "V5CompressedLegacy: Row flags=0x{:02x} at offset {}",
+            row_flags, offset
+        );
+
+        // Read extended flags if present
+        if (row_flags & ROW_HAS_EXTENDED_FLAGS) != 0 {
+            if pos >= data.len() {
+                return Err(Error::corruption(
+                    "V5CompressedLegacy: Unexpected end reading extended flags",
+                ));
+            }
+            let _extended_flags = data[pos];
+            pos += 1;
+        }
+
+        // NOTE: V5CompressedLegacy format uses a SIMPLIFIED header structure that differs
+        // from standard Cassandra 5.0. The row header starts immediately after row flags with
+        // row_size/prev_size VInts, WITHOUT an explicit clustering prefix length field.
+        // The format goes: [row_flags] [row_size] [prev_size] [optional_timestamp] ...
+        //
+        // For now, we scan for the 0x08 cell marker to find where the row header ends,
+        // as the exact header structure is not fully documented. This works because cells
+        // consistently start with 0x08 in this format.
+
+        // Find first 0x08 marker (start of first cell) to determine row header size
+        let cell_start = data[pos..]
+            .iter()
+            .position(|&b| b == 0x08)
+            .ok_or_else(|| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: No cell marker (0x08) found after row flags at offset {} (searched {} bytes)",
+                    pos,
+                    data.len() - pos
+                ))
+            })?;
+
+        let row_header_size_from_flags = cell_start;
+        pos += cell_start;
+
+        debug!(
+            "V5CompressedLegacy: Found cell marker at offset {} (row header was {} bytes from flags)",
+            pos, row_header_size_from_flags
+        );
+
+        // Read row size (VInt)
+        let (remaining, _row_size) = parse_vuint(&data[pos..]).map_err(|e| {
+            Error::corruption(format!(
+                "V5CompressedLegacy: Failed to parse row size at offset {}: {:?}",
+                pos, e
+            ))
+        })?;
+        pos = data.len() - remaining.len();
+
+        // Read prev size (VInt)
+        let (remaining, _prev_size) = parse_vuint(&data[pos..]).map_err(|e| {
+            Error::corruption(format!(
+                "V5CompressedLegacy: Failed to parse prev size at offset {}: {:?}",
+                pos, e
+            ))
+        })?;
+        pos = data.len() - remaining.len();
+
+        // Read timestamp if HAS_TIMESTAMP flag is set
+        let timestamp = if (row_flags & ROW_HAS_TIMESTAMP) != 0 {
+            let (remaining, delta) = parse_vint(&data[pos..]).map_err(|e| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: Failed to parse timestamp delta at offset {}: {:?}",
+                    pos, e
+                ))
+            })?;
+            pos = data.len() - remaining.len();
+
+            // Apply delta decoding: absolute_timestamp = min_timestamp + delta
+            let absolute_timestamp = self.min_timestamp.wrapping_add(delta);
+            debug!(
+                "V5CompressedLegacy: Row timestamp: delta={}, min={}, absolute={}",
+                delta, self.min_timestamp, absolute_timestamp
+            );
+            Some(absolute_timestamp)
+        } else {
+            None
+        };
+
+        // Read TTL if HAS_TTL flag is set
+        let ttl = if (row_flags & ROW_HAS_TTL) != 0 {
+            let (remaining, delta) = parse_vuint(&data[pos..]).map_err(|e| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: Failed to parse TTL delta at offset {}: {:?}",
+                    pos, e
+                ))
+            })?;
+            pos = data.len() - remaining.len();
+
+            // Apply delta decoding: absolute_ttl = min_ttl + delta
+            let absolute_ttl = if let Some(min_ttl) = self.min_ttl {
+                min_ttl.wrapping_add(delta as i64) as i32
+            } else {
+                delta as i32
+            };
+            debug!(
+                "V5CompressedLegacy: Row TTL: delta={}, min={:?}, absolute={}",
+                delta, self.min_ttl, absolute_ttl
+            );
+            Some(absolute_ttl)
+        } else {
+            None
+        };
+
+        // Read deletion if HAS_DELETION flag is set
+        let local_deletion_time = if (row_flags & ROW_HAS_DELETION) != 0 {
+            // First VInt is local deletion time delta
+            let (remaining, delta) = parse_vuint(&data[pos..]).map_err(|e| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: Failed to parse deletion time delta at offset {}: {:?}",
+                    pos, e
+                ))
+            })?;
+            pos = data.len() - remaining.len();
+
+            // Second VInt is deletion timestamp (we can skip for now)
+            let (remaining, _deletion_timestamp) = parse_vint(&data[pos..]).map_err(|e| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: Failed to parse deletion timestamp at offset {}: {:?}",
+                    pos, e
+                ))
+            })?;
+            pos = data.len() - remaining.len();
+
+            // Apply delta decoding: absolute_deletion_time = min_local_deletion_time + delta
+            let absolute_deletion_time =
+                self.min_local_deletion_time.wrapping_add(delta as i64) as i32;
+            debug!(
+                "V5CompressedLegacy: Row deletion time: delta={}, min={}, absolute={}",
+                delta, self.min_local_deletion_time, absolute_deletion_time
+            );
+            Some(absolute_deletion_time)
+        } else {
+            None
+        };
+
+        // Parse and skip column bitmap if HAS_ALL_COLUMNS is NOT set
+        if (row_flags & ROW_HAS_ALL_COLUMNS) == 0 {
+            // Column bitmap format: VInt column_count + (columns_in_row + 7) / 8 bytes of bitmap
+
+            // Read column count (VInt)
+            let (remaining, column_count) = parse_vuint(&data[pos..]).map_err(|e| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: Failed to parse column count at offset {}: {:?}",
+                    pos, e
+                ))
+            })?;
+            pos = data.len() - remaining.len();
+
+            // Calculate bitmap size in bytes: (column_count + 7) / 8
+            let bitmap_bytes = column_count.div_ceil(8) as usize;
+
+            if pos + bitmap_bytes > data.len() {
+                return Err(Error::corruption(format!(
+                    "V5CompressedLegacy: Not enough bytes for column bitmap at offset {} (need {} bytes, have {})",
+                    pos, bitmap_bytes, data.len() - pos
+                )));
+            }
+
+            // Skip the bitmap bytes
+            pos += bitmap_bytes;
+
+            debug!(
+                "V5CompressedLegacy: Skipped column bitmap: {} columns, {} bitmap bytes",
+                column_count, bitmap_bytes
+            );
+        }
+
+        let header_size = pos - offset;
+        debug!(
+            "V5CompressedLegacy: Row header size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
+            header_size, timestamp, ttl, local_deletion_time
+        );
+
+        Ok(RowHeader {
+            timestamp,
+            ttl,
+            local_deletion_time,
+            header_size,
+        })
+    }
+
     /// Parse partition header (flags, key, deletion time)
     ///
     /// # Format
@@ -298,16 +563,20 @@ impl V5CompressedLegacyParser {
             schema.columns.len()
         );
 
-        // Row header has VARIABLE length (7-23+ bytes) depending on flags, timestamps, etc.
-        // Instead of assuming fixed size, search for first 0x08 byte (cell marker).
+        // TODO(Issue #161): Parse row header with delta-decoded timestamps/TTL/deletion
+        // For now, use simplified approach that scans for 0x08 cell marker to skip variable-length header.
+        // Full row header parsing (with clustering prefix, column bitmap, etc.) requires more complete
+        // format documentation for V5CompressedLegacy variant.
         //
-        // Cell format varies by type (all start with 0x08 marker):
-        // - Boolean: [0x08][u8 value] (2 bytes total)
-        // - Int: [0x08][i32 BE value] (5 bytes total, NO length field)
-        // - Decimal: [0x08][u8 len][i32 scale][unscaled bytes]
-        // - Text/Ascii: [0x08][u8 len][text bytes]
+        // Row header structure (partially documented):
+        // [row_flags: u8] [clustering_prefix: varies] [row_size: VInt] [prev_size: VInt]
+        // [timestamp: VInt if HAS_TIMESTAMP] [ttl: VInt if HAS_TTL] [deletion: 2 VInts if HAS_DELETION]
+        // [column_bitmap: VInt count + bytes if NOT HAS_ALL_COLUMNS]
+        //
+        // Minima are available in self.min_timestamp, self.min_local_deletion_time, self.min_ttl
+        // for delta decoding when full header parsing is implemented.
 
-        // Find first 0x08 marker (start of first cell)
+        // Find first 0x08 marker (start of first cell) to skip variable-length row header
         let cell_start = data[offset..]
             .iter()
             .position(|&b| b == 0x08)
@@ -810,8 +1079,13 @@ mod tests {
         let hex_str = "001015291a77d7394e738397b787442f3a1f7fffffff8000000000000000";
         let data = hex::decode(hex_str).unwrap();
 
-        let parser =
-            V5CompressedLegacyParser::new("test_basic".to_string(), "simple_table".to_string());
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "simple_table".to_string(),
+            0,    // min_timestamp
+            0,    // min_local_deletion_time
+            None, // min_ttl
+        );
         let (row_key, offset) = parser.parse_partition_header(&data, 0).unwrap();
 
         // Verify partition key extraction

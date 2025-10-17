@@ -164,8 +164,37 @@ impl SSTableReader {
                     "V5CompressedLegacy: keyspace/table extraction failed, falling back to legacy parser"
                 );
             } else {
-                // Use dedicated V5CompressedLegacy parser
-                let parser = super::V5CompressedLegacyParser::new(keyspace, table_name);
+                // Use dedicated V5CompressedLegacy parser with EncodingStats from Statistics.db
+                let table_id = TableId::from(format!("{}.{}", keyspace, table_name));
+
+                // Extract EncodingStats from statistics_reader (if available)
+                let (min_timestamp, min_local_deletion_time, min_ttl) = if let Some(stats_reader) =
+                    &self.statistics_reader
+                {
+                    let ts_stats = &stats_reader.statistics().timestamp_stats;
+                    (
+                        ts_stats.min_timestamp,
+                        ts_stats.min_deletion_time,
+                        ts_stats.min_ttl,
+                    )
+                } else {
+                    // No statistics reader - use zeros (may cause incorrect absolute values for delta-coded fields)
+                    log::warn!("V5CompressedLegacy: No statistics_reader available, delta-coded timestamps/TTLs will use zero baseline");
+                    (0, 0, None)
+                };
+
+                // Extract keyspace and table_name from table_id (format: "keyspace.table_name")
+                let table_id_str = table_id.name();
+                let (keyspace, table_name) =
+                    table_id_str.split_once('.').unwrap_or(("", table_id_str));
+
+                let parser = super::V5CompressedLegacyParser::new(
+                    keyspace.to_string(),
+                    table_name.to_string(),
+                    min_timestamp,
+                    min_local_deletion_time,
+                    min_ttl,
+                );
 
                 // Get schema using four-tier lookup (provided -> header -> registry -> fallback)
                 let table_schema = self.get_table_schema(schema);
