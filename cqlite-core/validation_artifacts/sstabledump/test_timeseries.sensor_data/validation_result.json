@@ -1,0 +1,12 @@
+{
+  "keyspace": "test_timeseries",
+  "table": "sensor_data",
+  "index_file_path": "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9/nb-1-big-Index.db",
+  "partition_count": 1,
+  "promoted_index_count": 0,
+  "key_digest_matches": [],
+  "offset_matches": [],
+  "perfect_parity": true,
+  "timestamp": "2025-10-17T17:40:41.878359Z",
+  "errors": []
+}
