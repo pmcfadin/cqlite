@@ -151,24 +151,89 @@ impl V5CompressedLegacyParser {
         let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
 
         // Parse ALL partitions in block (Issue #2 fix: previously only parsed one partition)
+        let mut partition_index = 0;
         while offset < data.len() {
+            log::debug!(
+                "V5CompressedLegacy: === PARTITION {} at offset {} (block size: {}) ===",
+                partition_index,
+                offset,
+                data.len()
+            );
+
+            // CRITICAL FIX (Issue #164): Validate partition header format before attempting parse
+            //
+            // Most compressed blocks contain EXACTLY ONE partition. After parsing the first
+            // partition's row data and trailing VInt, we should NOT assume there's another
+            // partition just because offset < data.len().
+            //
+            // Partition header format validation:
+            // - Byte 0: Flags (typically 0x00, sometimes has partition-level flags)
+            // - Byte 1: Partition key length (u8, typically 16 for UUID)
+            // - Bytes 2+: Partition key data
+            //
+            // If we don't see a valid partition header structure, we've reached the end
+            // of partitions in this block (remaining bytes are likely padding or metadata).
+            if offset >= data.len() {
+                break; // End of block
+            }
+
+            // Check if this looks like a partition header (flags byte + reasonable key length)
+            // Most partition keys are UUIDs (16 bytes), some composite keys are larger but < 100 bytes
+            if offset + 2 > data.len() {
+                log::debug!(
+                    "V5CompressedLegacy: Not enough bytes for partition header at offset {} (need 2, have {}), stopping",
+                    offset,
+                    data.len() - offset
+                );
+                break;
+            }
+
+            let flags = data[offset];
+            let key_len = data[offset + 1] as usize;
+
+            // Validate partition header:
+            // - Flags should be 0x00 or have partition-level flags (typically < 0x20)
+            // - Key length should be reasonable (UUIDs are 16 bytes, composite keys < 256 bytes)
+            // - Must have enough bytes for: flags(1) + len(1) + key(len) + del_time(4) + unknown(8)
+            let header_min_size = 1 + 1 + key_len + 4 + 8;
+            if flags > 0x20
+                || key_len == 0
+                || key_len > 100
+                || offset + header_min_size > data.len()
+            {
+                log::debug!(
+                    "V5CompressedLegacy: Invalid partition header at offset {} (flags=0x{:02x}, key_len={}, need {} bytes, have {}), stopping",
+                    offset,
+                    flags,
+                    key_len,
+                    header_min_size,
+                    data.len() - offset
+                );
+                break; // Not a valid partition header, end of partitions in block
+            }
+
             // Try to parse partition header
             match self.parse_partition_header(data, offset) {
                 Ok((partition_key, new_offset)) => {
+                    let header_size = new_offset - offset;
                     offset = new_offset;
 
                     log::debug!(
-                        "V5CompressedLegacy: Parsed partition key: {} bytes, now at offset {}",
+                        "V5CompressedLegacy: Partition {} - Parsed partition key: {} bytes (header consumed {} bytes, now at offset {})",
+                        partition_index,
                         partition_key.0.len(),
+                        header_size,
                         offset
                     );
                     log::debug!(
-                        "V5CompressedLegacy: Row data starts at offset {}, remaining: {} bytes",
+                        "V5CompressedLegacy: Partition {} - Row data starts at offset {}, remaining: {} bytes",
+                        partition_index,
                         offset,
                         data.len() - offset
                     );
                     log::debug!(
-                        "V5CompressedLegacy: Row data hex (first 128 bytes): {}",
+                        "V5CompressedLegacy: Partition {} - Row data hex (first 128 bytes): {}",
+                        partition_index,
                         hex::encode(&data[offset..std::cmp::min(offset + 128, data.len())])
                     );
 
@@ -182,15 +247,23 @@ impl V5CompressedLegacyParser {
                     // Note: V5CompressedLegacy format documentation incomplete - assuming single row for now
                     // TODO: Determine if/how multiple rows per partition are encoded (Issue #160)
                     match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
-                        Ok((cells, row_header, final_offset)) => {
-                            offset = final_offset;
+                        Ok((cells, row_header_opt, next_partition_offset)) => {
+                            // Update offset to point to the next partition (calculated from row_size)
+                            offset = next_partition_offset;
+
+                            log::debug!(
+                                "V5CompressedLegacy: Partition {} - Parsed {} cells, now at offset {}",
+                                partition_index,
+                                cells.len(),
+                                offset
+                            );
 
                             log::debug!(
                                 "V5CompressedLegacy: Parsed {} cells from row data",
                                 cells.len()
                             );
 
-                            if let Some(ref header) = row_header {
+                            if let Some(ref header) = row_header_opt {
                                 log::debug!(
                                     "V5CompressedLegacy: Row metadata - timestamp={:?}, ttl={:?}, deletion={:?}",
                                     header.timestamp, header.ttl, header.local_deletion_time
@@ -223,11 +296,12 @@ impl V5CompressedLegacyParser {
                             };
 
                             results.push((table_id.clone(), partition_key, row_value));
+                            partition_index += 1;
                         }
                         Err(e) => {
                             debug!(
-                                "V5CompressedLegacy: Failed to parse row data at offset {}: {} (end of valid data)",
-                                offset, e
+                                "V5CompressedLegacy: Partition {} - Failed to parse row data at offset {}: {} (end of valid data)",
+                                partition_index, offset, e
                             );
                             break; // End of valid data in block
                         }
@@ -235,8 +309,8 @@ impl V5CompressedLegacyParser {
                 }
                 Err(e) => {
                     debug!(
-                        "V5CompressedLegacy: Failed to parse partition header at offset {}: {} (end of partitions)",
-                        offset, e
+                        "V5CompressedLegacy: Partition {} - Failed to parse partition header at offset {}: {} (end of partitions)",
+                        partition_index, offset, e
                     );
                     break; // No more partitions in block
                 }
@@ -257,7 +331,7 @@ impl V5CompressedLegacyParser {
     /// ```text
     /// [row_flags: u8]
     /// [extended_flags: u8 if 0x80 set]
-    /// [row_size: VInt]
+    /// [row_size: VInt] ← CRITICAL: Total bytes for this row (header + cells)
     /// [prev_size: VInt]
     /// [timestamp: VInt if 0x04 set] ← Delta from min_timestamp
     /// [ttl: VInt if 0x08 set] ← Delta from min_ttl
@@ -265,8 +339,8 @@ impl V5CompressedLegacyParser {
     /// [column_bitmap: VInt + bytes if NOT 0x20]
     /// ```
     ///
-    /// Returns RowHeader with decoded metadata and calculated header_size.
-    fn parse_row_header(&self, data: &[u8], offset: usize) -> Result<RowHeader> {
+    /// Returns RowHeader with decoded metadata, calculated header_size, and row_size.
+    fn parse_row_header(&self, data: &[u8], offset: usize) -> Result<(RowHeader, u64)> {
         let mut pos = offset;
 
         // Read row flags
@@ -302,8 +376,8 @@ impl V5CompressedLegacyParser {
         //
         // Parse fields in order WITHOUT scanning for 0x08 marker.
 
-        // Read row size (VInt)
-        let (remaining, _row_size) = parse_vuint(&data[pos..]).map_err(|e| {
+        // Read row size (VInt) - CRITICAL for partition boundary detection!
+        let (remaining, row_size) = parse_vuint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
                 "V5CompressedLegacy: Failed to parse row size at offset {}: {:?}",
                 pos, e
@@ -432,16 +506,19 @@ impl V5CompressedLegacyParser {
 
         let header_size = pos - offset;
         debug!(
-            "V5CompressedLegacy: Row header size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
-            header_size, timestamp, ttl, local_deletion_time
+            "V5CompressedLegacy: Row header size={} bytes, row_size={} bytes (total row including cells), timestamp={:?}, ttl={:?}, deletion={:?}",
+            header_size, row_size, timestamp, ttl, local_deletion_time
         );
 
-        Ok(RowHeader {
-            timestamp,
-            ttl,
-            local_deletion_time,
-            header_size,
-        })
+        Ok((
+            RowHeader {
+                timestamp,
+                ttl,
+                local_deletion_time,
+                header_size,
+            },
+            row_size,
+        ))
     }
 
     /// Parse partition header (flags, key, deletion time)
@@ -546,15 +623,52 @@ impl V5CompressedLegacyParser {
         );
 
         // Parse row header with delta-decoded timestamps/TTL/deletion (Issue #162)
-        let row_header = self.parse_row_header(data, offset)?;
+        let row_start_offset = offset;
+        let (row_header, row_size) = self.parse_row_header(data, offset)?;
 
-        debug!(
-            "V5CompressedLegacy: Parsed row header at offset {}: size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
-            offset, row_header.header_size, row_header.timestamp, row_header.ttl, row_header.local_deletion_time
+        // CRITICAL VALIDATION: row_size must be reasonable
+        //
+        // In V5CompressedLegacy format, row_size should never exceed the block size (typically 16KB).
+        // If row_size is unreasonably large, it indicates either:
+        // 1. Partition tombstone or deletion marker (no actual row data)
+        // 2. Format parsing error (landed at wrong offset)
+        // 3. Corrupted data
+        //
+        // In all cases, we should skip this partition rather than panic.
+        const MAX_REASONABLE_ROW_SIZE: u64 = 1_000_000; // 1MB max (very generous)
+        if row_size > MAX_REASONABLE_ROW_SIZE {
+            return Err(Error::corruption(format!(
+                "V5CompressedLegacy: Unreasonably large row_size={} at offset {} (max: {}). Likely partition tombstone or format error.",
+                row_size,
+                row_start_offset,
+                MAX_REASONABLE_ROW_SIZE
+            )));
+        }
+
+        // Also validate that row_size doesn't exceed remaining data
+        if row_start_offset + row_size as usize > data.len() {
+            return Err(Error::corruption(format!(
+                "V5CompressedLegacy: row_size={} at offset {} exceeds block boundary (block_len={}).",
+                row_size,
+                row_start_offset,
+                data.len()
+            )));
+        }
+
+        log::debug!(
+            "V5CompressedLegacy: Parsed row header at offset {}: header_size={} bytes, row_size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
+            offset, row_header.header_size, row_size, row_header.timestamp, row_header.ttl, row_header.local_deletion_time
         );
 
         // Advance offset to start of cell data
         offset += row_header.header_size;
+
+        log::debug!(
+            "V5CompressedLegacy: Cell data starts at offset {} (after {} byte header), first 32 bytes: {}",
+            offset,
+            row_header.header_size,
+            hex::encode(&data[offset..std::cmp::min(offset + 32, data.len())])
+        );
 
         // Sanity check: verify we're at a cell marker (0x08) as expected
         if offset < data.len() && data[offset] == 0x08 {
@@ -581,7 +695,29 @@ impl V5CompressedLegacyParser {
         // This implementation uses schema definition order directly, which is the
         // correct approach per Cassandra 5.0 SerializationHeader semantics.
 
-        let columns_in_order = &schema.columns;
+        // CRITICAL FIX (Issue #164): Filter out partition keys and clustering keys!
+        // The schema.columns list contains ALL columns (including keys), but cells
+        // are only stored for REGULAR columns. Partition/clustering keys are part
+        // of the row key and do NOT have cell data.
+        let partition_key_names: std::collections::HashSet<_> = schema
+            .partition_keys
+            .iter()
+            .map(|k| k.name.as_str())
+            .collect();
+        let clustering_key_names: std::collections::HashSet<_> = schema
+            .clustering_keys
+            .iter()
+            .map(|k| k.name.as_str())
+            .collect();
+
+        let columns_in_order: Vec<_> = schema
+            .columns
+            .iter()
+            .filter(|col| {
+                !partition_key_names.contains(col.name.as_str())
+                    && !clustering_key_names.contains(col.name.as_str())
+            })
+            .collect();
 
         log::debug!("V5CompressedLegacy: Parsing up to {} cells in SCHEMA DEFINITION ORDER starting at offset {} (row header was {} bytes)", columns_in_order.len(), offset, row_header.header_size);
         log::debug!(
@@ -589,10 +725,10 @@ impl V5CompressedLegacyParser {
             hex::encode(&data[offset..std::cmp::min(offset + 64, data.len())])
         );
 
-        for (col_idx, column) in columns_in_order.iter().enumerate() {
+        for (col_idx, &column) in columns_in_order.iter().enumerate() {
             if offset >= data.len() {
                 log::debug!(
-                    "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} cells (remaining columns are NULL)",
+                    "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} cells",
                     col_idx,
                     column.name,
                     cells.len(),
@@ -601,19 +737,13 @@ impl V5CompressedLegacyParser {
                 break;
             }
 
-            log::debug!(
-                "V5CompressedLegacy: Parsing column {} '{}' ({}) at offset {}",
-                col_idx,
-                column.name,
-                column.data_type,
-                offset
-            );
-
             match self.parse_cell_value_schema_order(data, offset, column, reader) {
                 Ok((value, new_offset)) => {
                     log::debug!(
-                        "V5CompressedLegacy:   ✓ Parsed '{}' = {:?}, consumed {} bytes",
+                        "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
+                        col_idx,
                         column.name,
+                        column.data_type,
                         value,
                         new_offset - offset
                     );
@@ -622,14 +752,12 @@ impl V5CompressedLegacyParser {
                 }
                 Err(e) => {
                     log::debug!(
-                        "V5CompressedLegacy:   ✗ Failed to parse '{}' at column index {} (offset {}): {} - treating as NULL and stopping parse",
-                        column.name, col_idx, offset, e
-                    );
-                    // Show hex for debugging
-                    let dump_len = std::cmp::min(32, data.len() - offset);
-                    log::debug!(
-                        "V5CompressedLegacy:     Hex at failure: {}",
-                        hex::encode(&data[offset..std::cmp::min(offset + dump_len, data.len())])
+                        "V5CompressedLegacy:   ✗ Column {} '{}' ({}) at offset {} FAILED: {}",
+                        col_idx,
+                        column.name,
+                        column.data_type,
+                        offset,
+                        e
                     );
                     // CRITICAL FIX: Stop parsing remaining columns when we hit an error
                     // The offset doesn't advance here, but we exit the loop cleanly
@@ -647,7 +775,23 @@ impl V5CompressedLegacyParser {
 
         debug!("V5CompressedLegacy: Parsed total of {} cells", cells.len());
 
-        Ok((cells, Some(row_header), offset))
+        // CRITICAL FIX (Issue #164): Use row_size from header to calculate next partition offset
+        //
+        // The row_size field in the row header is the authoritative source for the total number
+        // of bytes consumed by this row (including header + all cell data). This is MORE reliable
+        // than trying to track offsets through cell parsing or parsing a "trailing VInt".
+        //
+        // Formula: next_partition_offset = row_start_offset + row_size
+        let next_partition_offset = row_start_offset + row_size as usize;
+
+        log::debug!(
+            "V5CompressedLegacy: Using row_size to calculate boundary: row_start={}, row_size={}, next_partition={}",
+            row_start_offset,
+            row_size,
+            next_partition_offset
+        );
+
+        Ok((cells, Some(row_header), next_partition_offset))
     }
 
     /// Parse a single cell value WITHOUT column name (schema-order format)
@@ -723,15 +867,23 @@ impl V5CompressedLegacyParser {
             }
 
             "text" | "varchar" | "ascii" => {
-                // Text: [0x08][u8 len][text bytes]
+                // Text: [0x08][VInt len][text bytes]
+                // V5CompressedLegacy uses VInt length encoding for all variable-length types
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': unexpected end at text length",
                         column.name
                     )));
                 }
-                let text_len = data[offset] as usize;
-                offset += 1;
+
+                let (remaining, text_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse text length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let text_len = text_len as usize;
+                offset = data.len() - remaining.len();
 
                 if offset + text_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -755,15 +907,22 @@ impl V5CompressedLegacyParser {
             }
 
             "uuid" => {
-                // UUID: [0x08][u8 len=16][16 bytes]
+                // UUID: [0x08][VInt len=16][16 bytes]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': unexpected end at UUID length",
                         column.name
                     )));
                 }
-                let uuid_len = data[offset] as usize;
-                offset += 1;
+
+                let (remaining, uuid_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse UUID length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let uuid_len = uuid_len as usize;
+                offset = data.len() - remaining.len();
 
                 if uuid_len != 16 {
                     return Err(Error::corruption(format!(
@@ -789,15 +948,22 @@ impl V5CompressedLegacyParser {
             }
 
             "decimal" => {
-                // Decimal: [u8 total_len][i32 scale][unscaled bytes]
+                // Decimal: [VInt total_len][i32 scale][unscaled bytes]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': unexpected end at decimal length",
                         column.name
                     )));
                 }
-                let total_len = data[offset] as usize;
-                offset += 1;
+
+                let (remaining, total_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse decimal length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let total_len = total_len as usize;
+                offset = data.len() - remaining.len();
 
                 if offset + total_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -903,7 +1069,30 @@ impl V5CompressedLegacyParser {
             }
 
             "date" => {
-                // Date: 4 bytes, u32 days since epoch (unsigned, adjusted by Integer.MIN_VALUE)
+                // Date: [VInt len=4][i32 BE days]
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': unexpected end at date length",
+                        column.name
+                    )));
+                }
+
+                let (remaining, date_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse date length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let date_len = date_len as usize;
+                offset = data.len() - remaining.len();
+
+                if date_len != 4 {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': expected date length 4, got {}",
+                        column.name, date_len
+                    )));
+                }
+
                 if offset + 4 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 4 bytes for date, only {} available",
@@ -911,6 +1100,7 @@ impl V5CompressedLegacyParser {
                         data.len() - offset
                     )));
                 }
+
                 let days = u32::from_be_bytes([
                     data[offset],
                     data[offset + 1],
@@ -921,6 +1111,176 @@ impl V5CompressedLegacyParser {
                 // Cassandra stores as unsigned offset, adjust by Integer.MIN_VALUE
                 let adjusted = days.wrapping_sub(i32::MIN as u32) as i32;
                 Value::Date(adjusted)
+            }
+
+            "duration" => {
+                // Duration: [VInt len][months VInt][days VInt][nanos VInt]
+                // Format: Variable-length encoding with 3 VInt components
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': unexpected end at duration length",
+                        column.name
+                    )));
+                }
+
+                let (remaining, duration_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse duration length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let duration_len = duration_len as usize;
+                offset = data.len() - remaining.len();
+
+                if offset + duration_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need {} bytes for duration, only {} available",
+                        column.name,
+                        duration_len,
+                        data.len() - offset
+                    )));
+                }
+
+                // Parse three VInt components from the duration_len bytes
+                let duration_bytes = &data[offset..offset + duration_len];
+
+                // Parse months (signed VInt)
+                let (remaining, months) = parse_vint(duration_bytes).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse duration months: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let pos = duration_bytes.len() - remaining.len();
+
+                // Parse days (signed VInt)
+                let (remaining, days) = parse_vint(&duration_bytes[pos..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse duration days: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let pos = duration_bytes.len() - remaining.len();
+
+                // Parse nanoseconds (signed VInt)
+                let (remaining, nanos) = parse_vint(&duration_bytes[pos..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse duration nanos: {:?}",
+                        column.name, e
+                    ))
+                })?;
+
+                // Verify we consumed all duration bytes
+                if !remaining.is_empty() {
+                    warn!(
+                        "V5CompressedLegacy: Duration '{}' has {} extra bytes after parsing",
+                        column.name,
+                        remaining.len()
+                    );
+                }
+
+                offset += duration_len;
+                Value::Duration {
+                    months: months as i32,
+                    days: days as i32,
+                    nanos,
+                }
+            }
+
+            "float" => {
+                // Float: 4 bytes, f32 big-endian (NO length prefix, fixed size)
+                if offset + 4 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 4 bytes for float, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+
+                let val = f32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                offset += 4;
+                Value::Float(val as f64) // Convert f32 to f64 for storage
+            }
+
+            "smallint" | "short" => {
+                // SmallInt: [VInt len=2][i16 BE]
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': unexpected end at smallint length",
+                        column.name
+                    )));
+                }
+
+                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse smallint length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let len = len as usize;
+                offset = data.len() - remaining.len();
+
+                if len != 2 {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': expected smallint length 2, got {}",
+                        column.name, len
+                    )));
+                }
+
+                if offset + 2 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 2 bytes for smallint, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+
+                let val = i16::from_be_bytes([data[offset], data[offset + 1]]);
+                offset += 2;
+                Value::SmallInt(val)
+            }
+
+            "tinyint" | "byte" => {
+                // TinyInt: [VInt len=1][i8]
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': unexpected end at tinyint length",
+                        column.name
+                    )));
+                }
+
+                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse tinyint length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let len = len as usize;
+                offset = data.len() - remaining.len();
+
+                if len != 1 {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': expected tinyint length 1, got {}",
+                        column.name, len
+                    )));
+                }
+
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need 1 byte for tinyint, only {} available",
+                        column.name,
+                        data.len() - offset
+                    )));
+                }
+
+                let val = data[offset] as i8;
+                offset += 1;
+                Value::TinyInt(val)
             }
 
             "time" => {
@@ -947,15 +1307,22 @@ impl V5CompressedLegacyParser {
             }
 
             "inet" => {
-                // Inet: [u8 len][address bytes] (len is 4 for IPv4, 16 for IPv6)
+                // Inet: [VInt len][address bytes] (len is 4 for IPv4, 16 for IPv6)
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': unexpected end at inet length",
                         column.name
                     )));
                 }
-                let len = data[offset] as usize;
-                offset += 1;
+
+                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse inet length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let len = len as usize;
+                offset = data.len() - remaining.len();
 
                 if len != 4 && len != 16 {
                     return Err(Error::corruption(format!(
@@ -979,23 +1346,8 @@ impl V5CompressedLegacyParser {
             }
 
             "timeuuid" => {
-                // TimeUUID: [u8 len=16][16 bytes] (same as UUID but time-based)
-                if offset >= data.len() {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': unexpected end at timeuuid length",
-                        column.name
-                    )));
-                }
-                let uuid_len = data[offset] as usize;
-                offset += 1;
-
-                if uuid_len != 16 {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': expected timeuuid length 16, got {}",
-                        column.name, uuid_len
-                    )));
-                }
-
+                // TimeUUID: 16 bytes directly (NO length prefix, same as timestamp/bigint)
+                // Time-based UUID, always exactly 16 bytes, fixed size
                 if offset + 16 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 16 bytes for timeuuid, only {} available",
@@ -1087,7 +1439,9 @@ impl V5CompressedLegacyParser {
             // - Parse fields according to UDT schema
             // - Return Value::Udt(UdtValue)
 
-            // Default: treat as length-prefixed blob
+            // Default: treat as VInt-length-prefixed blob
+            // CRITICAL: V5CompressedLegacy format uses VInt encoding for blob/bytes lengths,
+            // NOT simple u8 length prefix. This allows blobs > 255 bytes.
             _ => {
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
@@ -1095,8 +1449,16 @@ impl V5CompressedLegacyParser {
                         column.name, column.data_type
                     )));
                 }
-                let blob_len = data[offset] as usize;
-                offset += 1;
+
+                // Parse blob length as unsigned VInt (can be > 255 bytes)
+                let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse blob length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let blob_len = blob_len as usize;
+                offset = data.len() - remaining.len();
 
                 if offset + blob_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -1351,7 +1713,7 @@ mod tests {
             Some(min_ttl),
         );
 
-        let row_header = parser.parse_row_header(&data, 0).unwrap();
+        let (row_header, row_size) = parser.parse_row_header(&data, 0).unwrap();
 
         // Verify delta decoding: absolute_timestamp = min_timestamp + delta
         assert_eq!(
@@ -1366,6 +1728,9 @@ mod tests {
             Some(min_ttl as i32),
             "TTL should be decoded as min_ttl + delta (delta=0)"
         );
+
+        // Verify row_size was parsed
+        assert!(row_size > 0, "Row size should be positive");
     }
 
     #[test]
@@ -1387,7 +1752,7 @@ mod tests {
             None,
         );
 
-        let row_header = parser.parse_row_header(&data, 0).unwrap();
+        let (row_header, _row_size) = parser.parse_row_header(&data, 0).unwrap();
 
         // Verify delta decoding: absolute_deletion_time = min_local_deletion_time + delta
         assert_eq!(
@@ -1429,7 +1794,7 @@ mod tests {
             "Row header with column bitmap should parse successfully"
         );
 
-        let row_header = result.unwrap();
+        let (row_header, _row_size) = result.unwrap();
         // Verify header was parsed (has timestamp)
         assert_eq!(row_header.timestamp, Some(0));
 
