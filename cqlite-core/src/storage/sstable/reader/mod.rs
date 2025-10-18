@@ -92,38 +92,8 @@ impl SSTableReader {
             })?;
         let header_size = calculate_actual_header_size(&header, &header_buffer)?;
 
-        // Extract schema from header for V5.0+ formats
-        let schema = if matches!(
-            header.cassandra_version,
-            CassandraVersion::V5_0NewBig
-                | CassandraVersion::V5_0Bti
-                | CassandraVersion::V5_0DataFormat
-        ) {
-            match TableSchema::from_sstable_header(&header) {
-                Ok(s) => {
-                    log::debug!(
-                        "Extracted schema from SSTable header: {}.{} ({} columns, {} partition keys, {} clustering keys)",
-                        s.keyspace,
-                        s.table,
-                        s.columns.len(),
-                        s.partition_keys.len(),
-                        s.clustering_keys.len()
-                    );
-                    Some(Arc::new(s))
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to extract schema from SSTable header for {}: {}. Schema-aware parsing will not be available.",
-                        path.display(),
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            // Legacy formats don't have schema in header
-            None
-        };
+        // Schema extraction deferred until after Statistics.db columns are loaded (Issue #163)
+        // See schema extraction code after statistics_reader loading below
 
         // Seek to start of data section
         {
@@ -163,6 +133,58 @@ impl SSTableReader {
         let index_reader = Self::load_index_reader(path, &platform).await;
         let summary_reader = Self::load_summary_reader(path, &platform).await;
         let statistics_reader = Self::load_statistics_reader(path, &platform).await;
+
+        // Extract SerializationHeader columns from Statistics.db (Issue #163)
+        // This enables schema extraction for V5CompressedLegacy format
+        let mut header = header; // Make mutable to populate columns
+        if let Some(ref stats_reader) = statistics_reader {
+            let serialization_columns = &stats_reader.statistics().serialization_header_columns;
+            if !serialization_columns.is_empty() {
+                log::debug!(
+                    "Populating header.columns from Statistics.db SerializationHeader: {} columns",
+                    serialization_columns.len()
+                );
+                header.columns = serialization_columns.clone();
+            }
+        }
+
+        // Extract schema from header for V5.0+ formats (after columns are populated)
+        let schema = if matches!(
+            header.cassandra_version,
+            CassandraVersion::V5_0NewBig
+                | CassandraVersion::V5_0Bti
+                | CassandraVersion::V5_0DataFormat
+                | CassandraVersion::V5_0FormatC
+                | CassandraVersion::V5_0FormatD
+                | CassandraVersion::V5_0FormatE
+                | CassandraVersion::V5_0FormatF
+                | CassandraVersion::V5_0FormatG
+        ) {
+            match TableSchema::from_sstable_header(&header) {
+                Ok(s) => {
+                    log::debug!(
+                        "Extracted schema from SSTable header: {}.{} ({} columns, {} partition keys, {} clustering keys)",
+                        s.keyspace,
+                        s.table,
+                        s.columns.len(),
+                        s.partition_keys.len(),
+                        s.clustering_keys.len()
+                    );
+                    Some(Arc::new(s))
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to extract schema from SSTable header for {}: {}. Schema-aware parsing will not be available.",
+                        path.display(),
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            // Legacy formats don't have schema in header
+            None
+        };
 
         let stats = SSTableReaderStats {
             file_size,

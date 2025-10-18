@@ -56,6 +56,13 @@ pub struct SSTableStatistics {
     pub compression_stats: CompressionStatistics,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
+    /// SerializationHeader columns (Issue #163)
+    ///
+    /// Column definitions parsed from SerializationHeader embedded in nb-format
+    /// Statistics.db files. Used for schema extraction in V5CompressedLegacy format.
+    /// Empty if SerializationHeader not found in Statistics.db.
+    #[serde(default)]
+    pub serialization_header_columns: Vec<super::header::ColumnInfo>,
 }
 
 /// Row count and distribution statistics
@@ -235,6 +242,7 @@ pub fn parse_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> 
             partition_stats,
             compression_stats,
             metadata,
+            serialization_header_columns: vec![], // Not available in legacy format
         },
     ))
 }
@@ -917,6 +925,7 @@ mod tests {
                 compressed_blocks: 100,
             },
             metadata: HashMap::new(),
+            serialization_header_columns: vec![],
         }
     }
 }

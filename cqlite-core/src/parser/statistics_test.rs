@@ -571,6 +571,7 @@ mod tests {
                 map.insert("version".to_string(), "1.0".to_string());
                 map
             },
+            serialization_header_columns: vec![],
         }
     }
 }

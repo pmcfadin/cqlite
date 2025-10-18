@@ -41,6 +41,9 @@ use super::vint::{parse_vint, parse_vuint};
 use crate::error::{Error, Result};
 use nom::{bytes::complete::take, number::complete::be_u32, IResult};
 
+/// Type alias for EncodingStats parse result to reduce complexity
+type EncodingStatsResult = (i64, i64, Option<i64>, Vec<super::header::ColumnInfo>);
+
 /// Enhanced Statistics.db header parser for real 'nb' format
 ///
 /// This function parses the actual 32-byte binary header structure from
@@ -131,12 +134,13 @@ pub fn parse_nb_format_statistics_data(
     TableStatistics,
     PartitionStatistics,
     CompressionStatistics,
+    Vec<super::header::ColumnInfo>,
 )> {
     // Parse the EncodingStats section from the data following the header
     let result = parse_minimal_encoding_stats(input);
 
     match result {
-        Ok((_, (min_timestamp, min_deletion_time, min_ttl))) => {
+        Ok((_, (min_timestamp, min_deletion_time, min_ttl, columns))) => {
             // Create minimal statistics with only timestamp data populated
             let row_stats = RowStatistics {
                 total_rows: 0,
@@ -193,6 +197,7 @@ pub fn parse_nb_format_statistics_data(
                 table_stats,
                 partition_stats,
                 compression_stats,
+                columns,
             ))
         }
         Err(e) => {
@@ -210,10 +215,171 @@ pub fn parse_nb_format_statistics_data(
     }
 }
 
+/// Parse SerializationHeader columns from Statistics.db (Issue #163)
+///
+/// This function locates and parses column definitions from the SerializationHeader
+/// section embedded in nb-format Statistics.db files. The column data appears after
+/// histogram/statistics data, marked by a specific pattern.
+///
+/// Returns: Vec<ColumnInfo> with column names and types
+fn parse_serialization_header_columns(
+    input: &[u8],
+) -> IResult<&[u8], Vec<super::header::ColumnInfo>> {
+    use super::header::ColumnInfo;
+
+    // Column section marker: 0x00 0x00 followed by column count
+    // We search for this pattern in the remaining data
+    // This avoids needing to parse all intermediate histogram data
+
+    let mut search_offset = 0;
+    let mut columns = Vec::new();
+
+    // Search for column section (max search 8KB to avoid scanning entire file)
+    while search_offset + 3 < input.len() && search_offset < 8192 {
+        // Look for pattern: 0x00 0x00 [count] where count is reasonable (1-100)
+        if input[search_offset] == 0x00
+            && input[search_offset + 1] == 0x00
+            && input[search_offset + 2] > 0
+            && input[search_offset + 2] < 100
+        {
+            let column_count = input[search_offset + 2] as usize;
+            let mut pos = search_offset + 3;
+
+            // Try to parse all columns - if successful, we found the right section
+            let mut parsed_columns = Vec::with_capacity(column_count);
+            let mut parse_success = true;
+
+            for _ in 0..column_count {
+                if pos >= input.len() {
+                    parse_success = false;
+                    break;
+                }
+
+                // Column name length (VInt)
+                let (remaining, name_len) = match parse_vuint(&input[pos..]) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        parse_success = false;
+                        break;
+                    }
+                };
+                pos = input.len() - remaining.len();
+
+                // Sanity check name length
+                if name_len == 0 || name_len > 200 || pos + name_len as usize > input.len() {
+                    parse_success = false;
+                    break;
+                }
+
+                // Column name (UTF-8 string)
+                let name_bytes = &input[pos..pos + name_len as usize];
+                let column_name = match std::str::from_utf8(name_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        parse_success = false;
+                        break;
+                    }
+                };
+                pos += name_len as usize;
+
+                // Column type length (VInt)
+                let (remaining, type_len) = match parse_vuint(&input[pos..]) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        parse_success = false;
+                        break;
+                    }
+                };
+                pos = input.len() - remaining.len();
+
+                // Sanity check type length
+                if type_len == 0 || type_len > 200 || pos + type_len as usize > input.len() {
+                    parse_success = false;
+                    break;
+                }
+
+                // Column type (Cassandra internal type name)
+                let type_bytes = &input[pos..pos + type_len as usize];
+                let internal_type = match std::str::from_utf8(type_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        parse_success = false;
+                        break;
+                    }
+                };
+                pos += type_len as usize;
+
+                // Convert Cassandra marshal type to CQL type
+                let cql_type = convert_marshal_type_to_cql(&internal_type);
+
+                parsed_columns.push(ColumnInfo {
+                    name: column_name,
+                    column_type: cql_type,
+                    is_primary_key: false, // Will be determined from partition/clustering info
+                    key_position: None,
+                    is_static: false,
+                    is_clustering: false,
+                });
+            }
+
+            if parse_success && parsed_columns.len() == column_count {
+                // Successfully parsed all columns - return them
+                columns = parsed_columns;
+                let remaining = &input[pos..];
+                return Ok((remaining, columns));
+            }
+        }
+
+        search_offset += 1;
+    }
+
+    // Column section not found - return empty vec
+    // This is not an error; some Statistics.db files may not contain SerializationHeader
+    Ok((input, columns))
+}
+
+/// Convert Cassandra internal marshal type to CQL type name
+fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
+    // Extract type name from fully-qualified class name
+    // Example: "org.apache.cassandra.db.marshal.Int32Type" -> "int"
+    let type_name = marshal_type
+        .split('.')
+        .next_back()
+        .unwrap_or(marshal_type)
+        .trim_end_matches("Type");
+
+    // Map common types to CQL equivalents
+    match type_name {
+        "UTF8" => "text".to_string(),
+        "Int32" => "int".to_string(),
+        "Long" => "bigint".to_string(),
+        "Short" => "smallint".to_string(),
+        "Byte" => "tinyint".to_string(),
+        "SimpleDate" => "date".to_string(),
+        "Timestamp" => "timestamp".to_string(),
+        "Boolean" => "boolean".to_string(),
+        "Decimal" => "decimal".to_string(),
+        "Float" => "float".to_string(),
+        "Double" => "double".to_string(),
+        "Bytes" => "blob".to_string(),
+        "Ascii" => "ascii".to_string(),
+        "InetAddress" => "inet".to_string(),
+        "UUID" => "uuid".to_string(),
+        "TimeUUID" => "timeuuid".to_string(),
+        "Duration" => "duration".to_string(),
+        "Time" => "time".to_string(),
+        "Counter" => "counter".to_string(),
+        _ => {
+            // Unknown type - use lowercase version of type name
+            type_name.to_lowercase()
+        }
+    }
+}
+
 /// Parse minimal EncodingStats section from nb-format Statistics.db
 ///
-/// Returns: (min_timestamp, min_deletion_time, min_ttl)
-fn parse_minimal_encoding_stats(input: &[u8]) -> IResult<&[u8], (i64, i64, Option<i64>)> {
+/// Returns: (min_timestamp, min_deletion_time, min_ttl, columns)
+fn parse_minimal_encoding_stats(input: &[u8]) -> IResult<&[u8], EncodingStatsResult> {
     // Skip metadata_type (u32 BE) at start of data section
     let (input, _metadata_type) = be_u32(input)?;
 
@@ -254,7 +420,16 @@ fn parse_minimal_encoding_stats(input: &[u8]) -> IResult<&[u8], (i64, i64, Optio
         Some(min_ttl_value)
     };
 
-    Ok((input, (min_timestamp, min_deletion_time, min_ttl)))
+    // Parse SerializationHeader columns (Issue #163)
+    // This searches for and parses column definitions in the remaining data
+    let (input, columns) = parse_serialization_header_columns(input)?;
+
+    log::debug!(
+        "Parsed {} columns from SerializationHeader in Statistics.db",
+        columns.len()
+    );
+
+    Ok((input, (min_timestamp, min_deletion_time, min_ttl, columns)))
 }
 
 /// Main enhanced parser for real Statistics.db files (minimal implementation for Issue #162)
@@ -273,11 +448,23 @@ pub fn parse_enhanced_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableSta
     // Parse the 32-byte header
     let (remaining, header) = parse_nb_format_header(input)?;
 
-    // Parse minimal statistics data (EncodingStats only)
+    // Parse minimal statistics data (EncodingStats + SerializationHeader columns)
     let result = parse_nb_format_statistics_data(remaining, &header);
 
     match result {
-        Ok((row_stats, timestamp_stats, table_stats, partition_stats, compression_stats)) => {
+        Ok((
+            row_stats,
+            timestamp_stats,
+            table_stats,
+            partition_stats,
+            compression_stats,
+            columns,
+        )) => {
+            log::debug!(
+                "Successfully parsed Statistics.db: {} columns from SerializationHeader",
+                columns.len()
+            );
+
             let statistics = SSTableStatistics {
                 header,
                 row_stats,
@@ -287,7 +474,9 @@ pub fn parse_enhanced_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableSta
                 partition_stats,
                 compression_stats,
                 metadata: std::collections::HashMap::new(),
+                serialization_header_columns: columns,
             };
+
             Ok((remaining, statistics))
         }
         Err(e) => {
@@ -317,6 +506,76 @@ pub fn parse_statistics_with_fallback(input: &[u8]) -> IResult<&[u8], SSTableSta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_serialization_header_column_parsing() {
+        // Test data with column section marker and two columns
+        // Pattern: 0x00 0x00 [count=2] [name_len][name][type_len][type]...
+        let mut test_data = vec![
+            0x00, 0x00, 0x02, // Column count = 2
+        ];
+
+        // Column 1: "id" (UUID)
+        test_data.push(0x02); // name length = 2
+        test_data.extend_from_slice(b"id");
+        test_data.push(0x28); // type length = 40
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UUIDType");
+
+        // Column 2: "name" (UTF8/text)
+        test_data.push(0x04); // name length = 4
+        test_data.extend_from_slice(b"name");
+        test_data.push(0x28); // type length = 40
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
+
+        // Add some garbage data before the column section
+        let mut full_data = vec![0xFF; 100];
+        full_data.extend_from_slice(&test_data);
+
+        let result = parse_serialization_header_columns(&full_data);
+        assert!(
+            result.is_ok(),
+            "Failed to parse columns: {:?}",
+            result.err()
+        );
+
+        let (_remaining, columns) = result.unwrap();
+        assert_eq!(columns.len(), 2, "Expected 2 columns");
+
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[0].column_type, "uuid");
+        assert!(!columns[0].is_primary_key); // Will be set later
+
+        assert_eq!(columns[1].name, "name");
+        assert_eq!(columns[1].column_type, "text"); // UTF8 -> text
+    }
+
+    #[test]
+    fn test_marshal_type_conversion() {
+        assert_eq!(
+            convert_marshal_type_to_cql("org.apache.cassandra.db.marshal.Int32Type"),
+            "int"
+        );
+        assert_eq!(
+            convert_marshal_type_to_cql("org.apache.cassandra.db.marshal.UTF8Type"),
+            "text"
+        );
+        assert_eq!(
+            convert_marshal_type_to_cql("org.apache.cassandra.db.marshal.UUIDType"),
+            "uuid"
+        );
+        assert_eq!(
+            convert_marshal_type_to_cql("org.apache.cassandra.db.marshal.TimestampType"),
+            "timestamp"
+        );
+        assert_eq!(
+            convert_marshal_type_to_cql("org.apache.cassandra.db.marshal.DecimalType"),
+            "decimal"
+        );
+        assert_eq!(
+            convert_marshal_type_to_cql("org.apache.cassandra.db.marshal.SimpleDataType"),
+            "simpledata"
+        );
+    }
 
     #[test]
     fn test_nb_format_header_parsing() {
