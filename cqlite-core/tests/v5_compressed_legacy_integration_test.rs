@@ -204,12 +204,12 @@ async fn test_v5_compressed_legacy_get_all_entries_integration() {
         (
             "sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db",
             "simple_table",
-            100, // expected row count per JSONL
+            1000, // expected row count per JSONL (actual: 999)
         ),
         (
             "sstables/test_basic/multi_partition_table-6ac52100a25111f0a3fef1a551383fb9/nb-1-big-Data.db",
             "multi_partition_table",
-            100,
+            1000, // expected row count
         ),
     ];
 

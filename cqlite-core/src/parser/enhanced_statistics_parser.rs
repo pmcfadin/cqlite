@@ -44,6 +44,9 @@ use nom::{bytes::complete::take, number::complete::be_u32, IResult};
 /// Type alias for EncodingStats parse result to reduce complexity
 type EncodingStatsResult = (i64, i64, Option<i64>, Vec<super::header::ColumnInfo>);
 
+/// Type alias for SerializationHeader parse result to reduce complexity
+type SerializationHeaderResult = (Vec<String>, Vec<String>, Vec<super::header::ColumnInfo>);
+
 /// Enhanced Statistics.db header parser for real 'nb' format
 ///
 /// This function parses the actual 32-byte binary header structure from
@@ -215,42 +218,388 @@ pub fn parse_nb_format_statistics_data(
     }
 }
 
-/// Parse SerializationHeader columns from Statistics.db (Issue #163)
+/// Parse SerializationHeader from Statistics.db (Issue #163)
 ///
-/// This function locates and parses column definitions from the SerializationHeader
-/// section embedded in nb-format Statistics.db files. The column data appears after
-/// histogram/statistics data, marked by a specific pattern.
+/// This function locates and parses the complete SerializationHeader section including:
+/// 1. Partition key types
+/// 2. Clustering key types
+/// 3. Regular column definitions
 ///
-/// Returns: Vec<ColumnInfo> with column names and types
-fn parse_serialization_header_columns(
+/// Returns: (partition_key_types, clustering_key_types, regular_columns)
+fn parse_serialization_header(input: &[u8]) -> IResult<&[u8], SerializationHeaderResult> {
+    log::debug!(
+        "Searching for SerializationHeader in {} bytes (max search: 8KB)",
+        input.len()
+    );
+
+    // Log input buffer state at function entry
+    let preview_len = std::cmp::min(64, input.len());
+    let preview_hex: String = input[..preview_len]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
+    log::debug!(
+        "Input buffer size: {} bytes, first 64 bytes: {}",
+        input.len(),
+        preview_hex
+    );
+
+    // Search for SerializationHeader start marker: VInt followed by 0x00 0x00 and '(' character
+    // This marks the beginning of the partition key type descriptor
+    let mut search_offset = 0;
+
+    // Search for partition key type section (max search 8KB to avoid scanning entire file)
+    while search_offset + 10 < input.len() && search_offset < 8192 {
+        // Look for pattern: 0x00 0x00 0x28 "org..."
+        // where 0x28 is '(' indicating partition key type
+        // The VInt length comes before the 0x00 0x00, but we search for the marker pattern
+        if input[search_offset] == 0x00
+            && input[search_offset + 1] == 0x00
+            && input[search_offset + 2] == 0x28
+        // '(' character
+        {
+            log::debug!(
+                "Found potential partition key marker at offset {}",
+                search_offset
+            );
+            // Found potential partition key type marker
+            // Try to parse from the VInt before this offset
+            // The VInt could be 1-9 bytes before the marker
+            for vint_offset in 1..=9 {
+                if search_offset < vint_offset {
+                    break;
+                }
+                let start_offset = search_offset - vint_offset;
+                let result = parse_serialization_header_at_offset(&input[start_offset..]);
+                if result.is_ok() {
+                    log::debug!(
+                        "Successfully parsed SerializationHeader at offset {}",
+                        start_offset
+                    );
+                    return result;
+                }
+            }
+        }
+        search_offset += 1;
+    }
+
+    log::debug!(
+        "Search completed: searched {} bytes, no partition key type found",
+        search_offset
+    );
+
+    // Partition key type not found - try to find regular columns directly
+    // This handles files where SerializationHeader contains only regular columns
+    log::debug!("Attempting to parse regular columns without partition key metadata");
+    let (remaining, (partition_keys, columns)) = parse_regular_columns(input)?;
+
+    if !columns.is_empty() {
+        log::debug!(
+            "Successfully parsed {} regular columns, {} partition keys via backtracking",
+            columns.len(),
+            partition_keys.len()
+        );
+        return Ok((remaining, (partition_keys, Vec::new(), columns)));
+    }
+
+    // Nothing found - return empty results
+    log::warn!(
+        "Failed to locate SerializationHeader or regular columns: searched {} bytes",
+        search_offset
+    );
+    Ok((input, (Vec::new(), Vec::new(), Vec::new())))
+}
+
+/// Parse SerializationHeader structure starting at a known offset
+fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], SerializationHeaderResult> {
+    let _original_input = input;
+
+    // Step 1: Parse partition key type length (VInt)
+    let (input, partition_type_len) = parse_vuint(input)?;
+
+    log::debug!("Partition key type length: {} bytes", partition_type_len);
+
+    // Step 2: Expect 0x00 0x00 marker
+    if input.len() < 2 || input[0] != 0x00 || input[1] != 0x00 {
+        log::debug!(
+            "Expected 0x00 0x00 marker after partition key type length, found: {:02x} {:02x}",
+            input[0],
+            input[1]
+        );
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    let input = &input[2..];
+
+    // Step 3: Parse partition key type string
+    if input.len() < partition_type_len as usize {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+
+    let partition_type_bytes = &input[..partition_type_len as usize];
+    let partition_key_type = std::str::from_utf8(partition_type_bytes)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
+        .to_string();
+
+    log::debug!("Partition key type: {}", partition_key_type);
+
+    let input = &input[partition_type_len as usize..];
+
+    // Step 4: Parse clustering key count (single byte, can be 0)
+    if input.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+
+    let clustering_count = input[0] as usize;
+    let mut input = &input[1..];
+
+    log::debug!("Clustering key count: {}", clustering_count);
+
+    // Step 5: Parse clustering key types
+    let mut clustering_key_types = Vec::with_capacity(clustering_count);
+
+    for idx in 0..clustering_count {
+        // Find the end of the clustering key type descriptor
+        // Clustering types end with ')' when parentheses are balanced
+        // They may start with '[' (composite marker) or '(' (simple type)
+        // The '[' is just a prefix and doesn't have a matching ']'
+
+        let mut type_end = 0;
+        let mut paren_depth = 0;
+        let mut found_end = false;
+
+        for (pos, &byte) in input.iter().enumerate() {
+            match byte {
+                b'(' => paren_depth += 1,
+                b')' => {
+                    if paren_depth > 0 {
+                        paren_depth -= 1;
+                        if paren_depth == 0 {
+                            // Found the end of this clustering key type
+                            type_end = pos + 1;
+                            found_end = true;
+                            break;
+                        }
+                    }
+                }
+                b'[' => {
+                    // Composite type marker - just skip it, doesn't affect balance
+                }
+                _ => {}
+            }
+        }
+
+        if !found_end || type_end == 0 {
+            log::debug!(
+                "Failed to find end of clustering key type {} at position",
+                idx
+            );
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let clustering_type_bytes = &input[..type_end];
+        let clustering_type = std::str::from_utf8(clustering_type_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        log::debug!("Clustering key {} type: {}", idx, clustering_type);
+
+        clustering_key_types.push(clustering_type);
+        input = &input[type_end..];
+    }
+
+    // Step 6: Parse regular columns section
+    // Look for marker followed by column definitions
+    let (input, (_backtrack_partition_keys, columns)) = parse_regular_columns(input)?;
+
+    log::debug!(
+        "Successfully parsed SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
+        1, // Always 1 partition key in current implementation
+        clustering_key_types.len(),
+        columns.len()
+    );
+
+    Ok((
+        input,
+        (vec![partition_key_type], clustering_key_types, columns),
+    ))
+}
+
+/// Extract partition key type by backtracking from the `0x00 0x00` marker
+///
+/// The partition key type descriptor ends immediately before the marker.
+/// We try parsing VInt lengths at different offsets before the marker to find
+/// a valid type string that matches Cassandra marshal type patterns.
+fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Option<String> {
+    if marker_offset < 3 {
+        return None;
+    }
+
+    log::debug!(
+        "Backtracking from marker at offset {} (input len: {})",
+        marker_offset,
+        input.len()
+    );
+
+    // Try parsing VInt lengths at different positions before the marker
+    // Type strings can be up to 200 bytes, and VInts can be 1-9 bytes,
+    // so we need to search back at least 209 bytes (200 + 9)
+    let max_lookback = 210;
+    let search_start = marker_offset.saturating_sub(max_lookback);
+    log::debug!(
+        "Searching for VInt from offset {} to {} ({} positions)",
+        search_start,
+        marker_offset,
+        marker_offset - search_start
+    );
+
+    for vint_start in (search_start..marker_offset).rev() {
+        // Try to parse VInt at this position
+        match parse_vuint(&input[vint_start..marker_offset]) {
+            Ok((remaining, type_len)) => {
+                // Validate type length is reasonable first (before any arithmetic)
+                if !(10..200).contains(&type_len) {
+                    continue;
+                }
+
+                // Calculate how many bytes the VInt consumed
+                let vint_len = marker_offset - vint_start - remaining.len();
+                let type_start = vint_start + vint_len;
+
+                // Bounds check before addition to prevent overflow
+                let type_len_usize = type_len as usize;
+                if type_start > input.len() || type_len_usize > input.len() - type_start {
+                    continue;
+                }
+
+                let type_end = type_start + type_len_usize;
+
+                // Validate:
+                // 1. The type string ends exactly at the marker
+                // 2. The type string is valid UTF-8
+                // 3. It matches Cassandra marshal type patterns
+                if type_end == marker_offset {
+                    if let Ok(type_str) = std::str::from_utf8(&input[type_start..type_end]) {
+                        log::debug!(
+                            "Candidate at vint_start={}: type_len={}, type_start={}, type_end={}, str={}",
+                            vint_start, type_len, type_start, type_end, type_str
+                        );
+                        // Validate it's a Cassandra marshal type
+                        // Note: Partition key types may or may not start with '('
+                        // Both "(org.apache.cassandra..." and "org.apache.cassandra..." are valid
+                        if type_str.contains("org.apache.cassandra") {
+                            log::debug!(
+                                "Found partition key type at offset {}: length={}, type={}",
+                                vint_start,
+                                type_len,
+                                type_str
+                            );
+                            return Some(type_str.to_string());
+                        } else {
+                            log::debug!(
+                                "Rejected candidate (starts_with='(': {}, contains 'org.apache.cassandra': {})",
+                                type_str.starts_with('('),
+                                type_str.contains("org.apache.cassandra")
+                            );
+                        }
+                    } else {
+                        log::debug!(
+                            "Rejected candidate at vint_start={}: not valid UTF-8",
+                            vint_start
+                        );
+                    }
+                }
+            }
+            Err(_) => continue, // Try next offset
+        }
+    }
+
+    None
+}
+
+/// Parse regular columns section from SerializationHeader
+///
+/// Returns: (partition_key_types, regular_columns)
+/// Partition key types are extracted via backtracking when found before the column section marker.
+fn parse_regular_columns(
     input: &[u8],
-) -> IResult<&[u8], Vec<super::header::ColumnInfo>> {
+) -> IResult<&[u8], (Vec<String>, Vec<super::header::ColumnInfo>)> {
     use super::header::ColumnInfo;
 
-    // Column section marker: 0x00 0x00 followed by column count
-    // We search for this pattern in the remaining data
-    // This avoids needing to parse all intermediate histogram data
-
+    // Search for column section marker pattern: 0x00 0x00 [count]
+    // where [count] is the number of regular columns (1-50 typical)
     let mut search_offset = 0;
-    let mut columns = Vec::new();
+    let mut partition_key_types = Vec::new();
 
-    // Search for column section (max search 8KB to avoid scanning entire file)
+    // Search for column section (max search 8KB to handle large gaps)
+    // The SerializationHeader can be up to 5KB into the file after histogram data
     while search_offset + 3 < input.len() && search_offset < 8192 {
-        // Look for pattern: 0x00 0x00 [count] where count is reasonable (1-100)
+        // Look for pattern: 0x00 0x00 [count] where count is 1-50
+        // This is the section marker followed by column count
         if input[search_offset] == 0x00
             && input[search_offset + 1] == 0x00
             && input[search_offset + 2] > 0
-            && input[search_offset + 2] < 100
+            && input[search_offset + 2] <= 50
         {
+            // NEW: Extract partition key by backtracking from the marker
+            log::debug!(
+                "Attempting to extract partition key by backtracking from marker at offset {}",
+                search_offset
+            );
+            if let Some(pk_type) = extract_partition_key_before_marker(input, search_offset) {
+                log::debug!("Found partition key type before marker: {}", pk_type);
+                partition_key_types.push(pk_type);
+            } else {
+                log::debug!(
+                    "No partition key type found via backtracking at offset {}",
+                    search_offset
+                );
+            }
+
             let column_count = input[search_offset + 2] as usize;
             let mut pos = search_offset + 3;
+
+            // Log pattern detection
+            let context_len = std::cmp::min(128, input.len() - search_offset);
+            let context_hex: String = input[search_offset..search_offset + context_len]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            log::debug!(
+                "Pattern found at offset {}: count={}, next 128 bytes: {}",
+                search_offset,
+                column_count,
+                context_hex
+            );
 
             // Try to parse all columns - if successful, we found the right section
             let mut parsed_columns = Vec::with_capacity(column_count);
             let mut parse_success = true;
 
-            for _ in 0..column_count {
+            for col_idx in 0..column_count {
                 if pos >= input.len() {
+                    log::debug!(
+                        "Column {} parsing failed at offset {}: position {} exceeds buffer length {}",
+                        col_idx,
+                        search_offset,
+                        pos,
+                        input.len()
+                    );
                     parse_success = false;
                     break;
                 }
@@ -258,7 +607,14 @@ fn parse_serialization_header_columns(
                 // Column name length (VInt)
                 let (remaining, name_len) = match parse_vuint(&input[pos..]) {
                     Ok(r) => r,
-                    Err(_) => {
+                    Err(e) => {
+                        log::debug!(
+                            "Column {} parsing failed at offset {}: VInt parse error for name_len at pos {}: {:?}",
+                            col_idx,
+                            search_offset,
+                            pos,
+                            e
+                        );
                         parse_success = false;
                         break;
                     }
@@ -267,6 +623,14 @@ fn parse_serialization_header_columns(
 
                 // Sanity check name length
                 if name_len == 0 || name_len > 200 || pos + name_len as usize > input.len() {
+                    log::debug!(
+                        "Column {} parsing failed at offset {}: name_len sanity check failed (name_len={}, pos={}, buffer_len={})",
+                        col_idx,
+                        search_offset,
+                        name_len,
+                        pos,
+                        input.len()
+                    );
                     parse_success = false;
                     break;
                 }
@@ -275,7 +639,21 @@ fn parse_serialization_header_columns(
                 let name_bytes = &input[pos..pos + name_len as usize];
                 let column_name = match std::str::from_utf8(name_bytes) {
                     Ok(s) => s.to_string(),
-                    Err(_) => {
+                    Err(e) => {
+                        let name_hex: String = name_bytes
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        log::debug!(
+                            "Column {} parsing failed at offset {}: UTF-8 decode error for column name at pos {} (len={}): {:?}, bytes: {}",
+                            col_idx,
+                            search_offset,
+                            pos,
+                            name_len,
+                            e,
+                            name_hex
+                        );
                         parse_success = false;
                         break;
                     }
@@ -285,7 +663,15 @@ fn parse_serialization_header_columns(
                 // Column type length (VInt)
                 let (remaining, type_len) = match parse_vuint(&input[pos..]) {
                     Ok(r) => r,
-                    Err(_) => {
+                    Err(e) => {
+                        log::debug!(
+                            "Column {} ('{}') parsing failed at offset {}: VInt parse error for type_len at pos {}: {:?}",
+                            col_idx,
+                            column_name,
+                            search_offset,
+                            pos,
+                            e
+                        );
                         parse_success = false;
                         break;
                     }
@@ -294,6 +680,15 @@ fn parse_serialization_header_columns(
 
                 // Sanity check type length
                 if type_len == 0 || type_len > 200 || pos + type_len as usize > input.len() {
+                    log::debug!(
+                        "Column {} ('{}') parsing failed at offset {}: type_len sanity check failed (type_len={}, pos={}, buffer_len={})",
+                        col_idx,
+                        column_name,
+                        search_offset,
+                        type_len,
+                        pos,
+                        input.len()
+                    );
                     parse_success = false;
                     break;
                 }
@@ -302,7 +697,22 @@ fn parse_serialization_header_columns(
                 let type_bytes = &input[pos..pos + type_len as usize];
                 let internal_type = match std::str::from_utf8(type_bytes) {
                     Ok(s) => s.to_string(),
-                    Err(_) => {
+                    Err(e) => {
+                        let type_hex: String = type_bytes
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        log::debug!(
+                            "Column {} ('{}') parsing failed at offset {}: UTF-8 decode error for column type at pos {} (len={}): {:?}, bytes: {}",
+                            col_idx,
+                            column_name,
+                            search_offset,
+                            pos,
+                            type_len,
+                            e,
+                            type_hex
+                        );
                         parse_success = false;
                         break;
                     }
@@ -323,19 +733,75 @@ fn parse_serialization_header_columns(
             }
 
             if parse_success && parsed_columns.len() == column_count {
-                // Successfully parsed all columns - return them
-                columns = parsed_columns;
+                // Successfully parsed all columns
+                let column_names: Vec<&str> =
+                    parsed_columns.iter().map(|c| c.name.as_str()).collect();
+                log::debug!(
+                    "Successfully parsed {} columns at offset {}: {:?}",
+                    parsed_columns.len(),
+                    search_offset,
+                    column_names
+                );
+                if !partition_key_types.is_empty() {
+                    log::debug!(
+                        "Extracted {} partition key types via backtracking: {:?}",
+                        partition_key_types.len(),
+                        partition_key_types
+                    );
+                }
+
+                // NEW: Create synthetic ColumnInfo entries for partition keys
+                // SerializationHeader provides partition key TYPES but not NAMES
+                // We must create synthetic columns since partition keys are not in regular columns list
+                let mut all_columns = Vec::new();
+
+                for (pk_idx, pk_marshal_type) in partition_key_types.iter().enumerate() {
+                    let pk_cql_type = convert_marshal_type_to_cql(pk_marshal_type);
+
+                    // Generate synthetic partition key column name
+                    // Format: pk_<position> (e.g., "pk_0", "pk_1" for composite keys)
+                    let pk_name = if partition_key_types.len() == 1 {
+                        "id".to_string() // Single partition key - use conventional name
+                    } else {
+                        format!("pk_{}", pk_idx) // Composite partition key
+                    };
+
+                    let pk_column = ColumnInfo {
+                        name: pk_name.clone(),
+                        column_type: pk_cql_type.clone(),
+                        is_primary_key: true,
+                        key_position: Some(pk_idx as u16),
+                        is_static: false,
+                        is_clustering: false,
+                    };
+
+                    log::debug!(
+                        "Created synthetic partition key column '{}' at position {} (type: {})",
+                        pk_name,
+                        pk_idx,
+                        pk_cql_type
+                    );
+
+                    all_columns.push(pk_column);
+                }
+
+                // Add all regular columns AFTER partition keys
+                all_columns.extend(parsed_columns);
+
                 let remaining = &input[pos..];
-                return Ok((remaining, columns));
+                return Ok((remaining, (partition_key_types, all_columns)));
             }
         }
 
         search_offset += 1;
     }
 
-    // Column section not found - return empty vec
-    // This is not an error; some Statistics.db files may not contain SerializationHeader
-    Ok((input, columns))
+    // Column section not found - return empty vecs (not an error, some files may have no regular columns)
+    log::debug!(
+        "Regular column section not found: searched {} bytes",
+        search_offset
+    );
+    Ok((input, (Vec::new(), Vec::new())))
 }
 
 /// Convert Cassandra internal marshal type to CQL type name
@@ -420,14 +886,33 @@ fn parse_minimal_encoding_stats(input: &[u8]) -> IResult<&[u8], EncodingStatsRes
         Some(min_ttl_value)
     };
 
-    // Parse SerializationHeader columns (Issue #163)
-    // This searches for and parses column definitions in the remaining data
-    let (input, columns) = parse_serialization_header_columns(input)?;
+    // Parse SerializationHeader (Issue #163)
+    // This parses partition keys, clustering keys, and regular columns
+    let (input, (partition_types, clustering_types, columns)) = parse_serialization_header(input)?;
 
     log::debug!(
-        "Parsed {} columns from SerializationHeader in Statistics.db",
+        "Parsed SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
+        partition_types.len(),
+        clustering_types.len(),
         columns.len()
     );
+
+    // Mark clustering columns and assign positions (Issue #163)
+    // Clustering keys need to be matched with regular columns and marked appropriately
+    if !clustering_types.is_empty() {
+        // For now, we don't have column names for clustering keys from the type descriptors
+        // The clustering key information is just the types
+        // We need to match these with columns based on schema knowledge or other means
+        // For this initial implementation, we'll store clustering types as metadata
+        // and defer column matching to the schema layer
+
+        // Note: Proper implementation requires extracting column names for clustering keys
+        // from the schema or matching with regular columns. This is a known limitation.
+        log::debug!(
+            "Clustering key types found: {:?}, but column name matching not yet implemented",
+            clustering_types
+        );
+    }
 
     Ok((input, (min_timestamp, min_deletion_time, min_ttl, columns)))
 }
@@ -508,12 +993,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_serialization_header_column_parsing() {
-        // Test data with column section marker and two columns
-        // Pattern: 0x00 0x00 [count=2] [name_len][name][type_len][type]...
-        let mut test_data = vec![
-            0x00, 0x00, 0x02, // Column count = 2
-        ];
+    fn test_serialization_header_with_no_clustering_keys() {
+        // Test SerializationHeader with partition key and regular columns, no clustering keys
+        // Format: [VInt partition_type_len] [0x00 0x00] [partition_type] [clustering_count=0] [0x00 0x00 column_count] [columns...]
+
+        let mut test_data = vec![];
+
+        // Partition key type: 41 bytes "(org.apache.cassandra.db.marshal.UUIDType"
+        test_data.push(0x29); // VInt: 41
+        test_data.extend_from_slice(&[0x00, 0x00]); // Marker
+        test_data.extend_from_slice(b"(org.apache.cassandra.db.marshal.UUIDType");
+
+        // Clustering key count = 0
+        test_data.push(0x00);
+
+        // Regular columns section: marker (0x00 0x00) + count
+        test_data.extend_from_slice(&[0x00, 0x00, 0x02]); // section marker (2 bytes) + count 2
 
         // Column 1: "id" (UUID)
         test_data.push(0x02); // name length = 2
@@ -527,26 +1022,98 @@ mod tests {
         test_data.push(0x28); // type length = 40
         test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
 
-        // Add some garbage data before the column section
+        // Add some garbage data before the SerializationHeader
         let mut full_data = vec![0xFF; 100];
         full_data.extend_from_slice(&test_data);
 
-        let result = parse_serialization_header_columns(&full_data);
+        let result = parse_serialization_header(&full_data);
         assert!(
             result.is_ok(),
-            "Failed to parse columns: {:?}",
+            "Failed to parse SerializationHeader: {:?}",
+            result.as_ref().err()
+        );
+
+        let (_remaining, (partition_types, clustering_types, columns)) = result.unwrap();
+
+        // Verify partition key
+        assert_eq!(partition_types.len(), 1, "Expected 1 partition key");
+        assert!(partition_types[0].contains("UUIDType"));
+
+        // Verify clustering keys (should be none)
+        assert_eq!(clustering_types.len(), 0, "Expected 0 clustering keys");
+
+        // Verify regular columns
+        assert_eq!(columns.len(), 2, "Expected 2 columns");
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[0].column_type, "uuid");
+        assert_eq!(columns[1].name, "name");
+        assert_eq!(columns[1].column_type, "text");
+    }
+
+    #[test]
+    fn test_serialization_header_with_clustering_keys() {
+        // Test SerializationHeader with partition key, 2 clustering keys, and regular columns
+
+        let mut test_data = vec![];
+
+        // Partition key type: 41 bytes
+        test_data.push(0x29); // VInt: 41
+        test_data.extend_from_slice(&[0x00, 0x00]); // Marker
+        test_data.extend_from_slice(b"(org.apache.cassandra.db.marshal.UUIDType");
+
+        // Clustering key count = 2
+        test_data.push(0x02);
+
+        // Clustering key 1: ReversedType(TimestampType)
+        test_data.extend_from_slice(b"[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)");
+
+        // Clustering key 2: UTF8Type
+        test_data.extend_from_slice(b"(org.apache.cassandra.db.marshal.UTF8Type)");
+
+        // Regular columns section
+        test_data.extend_from_slice(&[0x00, 0x00, 0x02]); // section marker (2 bytes) + count 2
+
+        // Column 1: "data" (UTF8)
+        test_data.push(0x04); // name length
+        test_data.extend_from_slice(b"data");
+        test_data.push(0x28); // type length
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
+
+        // Column 2: "value" (Int32)
+        test_data.push(0x05); // name length
+        test_data.extend_from_slice(b"value");
+        test_data.push(0x29); // type length
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.Int32Type");
+
+        // Add garbage data before SerializationHeader
+        let mut full_data = vec![0xFF; 100];
+        full_data.extend_from_slice(&test_data);
+
+        let result = parse_serialization_header(&full_data);
+        assert!(
+            result.is_ok(),
+            "Failed to parse SerializationHeader with clustering keys: {:?}",
             result.err()
         );
 
-        let (_remaining, columns) = result.unwrap();
-        assert_eq!(columns.len(), 2, "Expected 2 columns");
+        let (_remaining, (partition_types, clustering_types, columns)) = result.unwrap();
 
-        assert_eq!(columns[0].name, "id");
-        assert_eq!(columns[0].column_type, "uuid");
-        assert!(!columns[0].is_primary_key); // Will be set later
+        // Verify partition key
+        assert_eq!(partition_types.len(), 1);
+        assert!(partition_types[0].contains("UUIDType"));
 
-        assert_eq!(columns[1].name, "name");
-        assert_eq!(columns[1].column_type, "text"); // UTF8 -> text
+        // Verify clustering keys
+        assert_eq!(clustering_types.len(), 2, "Expected 2 clustering keys");
+        assert!(clustering_types[0].contains("ReversedType"));
+        assert!(clustering_types[0].contains("TimestampType"));
+        assert!(clustering_types[1].contains("UTF8Type"));
+
+        // Verify regular columns
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "data");
+        assert_eq!(columns[0].column_type, "text");
+        assert_eq!(columns[1].name, "value");
+        assert_eq!(columns[1].column_type, "int");
     }
 
     #[test]
@@ -673,5 +1240,179 @@ mod tests {
         let invalid_data = vec![0xFF; 10];
         let result = parse_statistics_with_fallback(&invalid_data);
         assert!(result.is_err(), "Invalid data should fail to parse");
+    }
+
+    #[test]
+    fn test_partition_key_extraction_via_backtracking() {
+        // Test the backtracking logic to extract partition key type before the column marker
+        // This simulates the real ttl_test_table case where we have:
+        // VInt(40) + "org.apache.cassandra.db.marshal.UUIDType" + 0x00 0x00 + [count]
+        // Note: Real files use 2-byte VInt: 0x80 0x28 for length 40
+
+        let mut test_data = vec![];
+
+        // Add some garbage data before the partition key
+        test_data.extend_from_slice(&[0xFF; 50]);
+
+        // Partition key type: 40 bytes "org.apache.cassandra.db.marshal.UUIDType"
+        test_data.extend_from_slice(&[0x80, 0x28]); // VInt: 40 (2-byte encoding)
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UUIDType");
+
+        // Marker: 0x00 0x00 followed by column count
+        // NOTE: In SerializationHeader, partition keys are NOT in the regular columns section
+        // Only regular (non-key) columns are listed here
+        test_data.extend_from_slice(&[0x00, 0x00, 0x02]); // 2 regular columns
+
+        // Regular Column 1: "expiring_value" (Int32)
+        test_data.push(0x0E); // name length = 14
+        test_data.extend_from_slice(b"expiring_value");
+        test_data.push(0x29); // type length = 41
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.Int32Type");
+
+        // Regular Column 2: "session_info" (UTF8)
+        test_data.push(0x0C); // name length = 12
+        test_data.extend_from_slice(b"session_info");
+        test_data.push(0x28); // type length = 40
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
+
+        // Parse the regular columns section which should extract partition key via backtracking
+        let result = parse_regular_columns(&test_data);
+        assert!(
+            result.is_ok(),
+            "Failed to parse columns with backtracking: {:?}",
+            result.err()
+        );
+
+        let (_remaining, (partition_keys, columns)) = result.unwrap();
+
+        // Verify partition key was extracted
+        assert_eq!(
+            partition_keys.len(),
+            1,
+            "Expected 1 partition key via backtracking"
+        );
+        assert_eq!(
+            partition_keys[0],
+            "org.apache.cassandra.db.marshal.UUIDType"
+        );
+
+        // Verify columns: 1 synthetic partition key + 2 regular columns = 3 total
+        assert_eq!(columns.len(), 3, "Expected 1 synthetic PK + 2 regular columns");
+
+        // Column 0: synthetic partition key "id"
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[0].column_type, "uuid");
+        assert_eq!(columns[0].is_primary_key, true);
+        assert_eq!(columns[0].key_position, Some(0));
+
+        // Column 1: regular column "expiring_value"
+        assert_eq!(columns[1].name, "expiring_value");
+        assert_eq!(columns[1].column_type, "int");
+        assert_eq!(columns[1].is_primary_key, false);
+
+        // Column 2: regular column "session_info"
+        assert_eq!(columns[2].name, "session_info");
+        assert_eq!(columns[2].column_type, "text");
+        assert_eq!(columns[2].is_primary_key, false);
+    }
+
+    #[test]
+    fn test_partition_key_extraction_with_longer_type() {
+        // Test with a composite partition key type (longer type string)
+        let mut test_data = vec![0xFF; 100]; // Garbage prefix
+
+        // CompositeType with multiple components: 75 bytes
+        let composite_type =
+            "(org.apache.cassandra.db.marshal.CompositeType(UTF8Type,Int32Type,UUIDType)";
+        let type_len = composite_type.len() as u8;
+
+        // VInt encode the length (75 = 0x4B, fits in single byte)
+        test_data.push(type_len);
+        test_data.extend_from_slice(composite_type.as_bytes());
+
+        // Marker + column count
+        test_data.extend_from_slice(&[0x00, 0x00, 0x01]);
+
+        // Single column: "data" (UTF8)
+        test_data.push(0x04);
+        test_data.extend_from_slice(b"data");
+        test_data.push(0x28);
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
+
+        let result = parse_regular_columns(&test_data);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+        let (_remaining, (partition_keys, columns)) = result.unwrap();
+
+        assert_eq!(partition_keys.len(), 1);
+        assert_eq!(partition_keys[0], composite_type);
+
+        // Expect 2 columns: 1 synthetic partition key + 1 regular column
+        assert_eq!(columns.len(), 2);
+
+        // Column 0: synthetic partition key
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[0].is_primary_key, true);
+
+        // Column 1: regular column "data"
+        assert_eq!(columns[1].name, "data");
+        assert_eq!(columns[1].is_primary_key, false);
+    }
+
+    #[test]
+    fn test_backtracking_with_no_partition_key() {
+        // Test case where there's no partition key before the marker
+        // This should still parse columns successfully but return empty partition key list
+
+        let mut test_data = vec![];
+
+        // Just the marker and columns, no partition key type before
+        test_data.extend_from_slice(&[0x00, 0x00, 0x01]); // Marker + count
+
+        // Column: "name" (UTF8)
+        test_data.push(0x04);
+        test_data.extend_from_slice(b"name");
+        test_data.push(0x28);
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
+
+        let result = parse_regular_columns(&test_data);
+        assert!(result.is_ok());
+
+        let (_remaining, (partition_keys, columns)) = result.unwrap();
+
+        assert_eq!(partition_keys.len(), 0, "Should have no partition keys");
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "name");
+    }
+
+    #[test]
+    fn test_backtracking_rejects_invalid_types() {
+        // Test that backtracking rejects strings that don't match Cassandra type patterns
+        let mut test_data = vec![0xFF; 50];
+
+        // Invalid type: doesn't start with '(' and doesn't contain "org.apache.cassandra"
+        test_data.push(0x15); // VInt: 21 bytes
+        test_data.extend_from_slice(b"InvalidTypeDescriptor");
+
+        // Marker + column count
+        test_data.extend_from_slice(&[0x00, 0x00, 0x01]);
+
+        // Column
+        test_data.push(0x04);
+        test_data.extend_from_slice(b"test");
+        test_data.push(0x28);
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
+
+        let result = parse_regular_columns(&test_data);
+        assert!(result.is_ok());
+
+        let (_remaining, (partition_keys, _columns)) = result.unwrap();
+
+        // Should not extract the invalid type
+        assert_eq!(
+            partition_keys.len(),
+            0,
+            "Should reject invalid type pattern"
+        );
     }
 }
