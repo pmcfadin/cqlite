@@ -152,6 +152,8 @@ impl SSTableReader {
 
     /// Get all entries in the SSTable (for compaction)
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
+        use crate::parser::header::DataFormat;
+
         let mut results = Vec::new();
 
         // Reset to beginning of data section
@@ -164,10 +166,111 @@ impl SSTableReader {
         self.current_chunk_index
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
-        // Read all blocks sequentially
-        while let Some(block) = self.read_next_block().await? {
-            let entries = self.parse_block_entries(&block, None)?;
+        // Check if this is V5CompressedLegacy format which requires chunk stitching
+        let data_format = self.header.cassandra_version.data_format();
+        let requires_stitching = matches!(data_format, DataFormat::V5CompressedLegacy);
+
+        if requires_stitching {
+            // V5CompressedLegacy: Row payloads can span multiple compressed chunks
+            // We must decompress and stitch all chunks together before parsing
+            eprintln!(
+                "[DEBUG] V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing"
+            );
+
+            // Pre-allocate buffer for ~2.5MB (estimated max size for test data)
+            // This matches Cassandra's own ChunkReader which buffers entire files
+            let mut stitched_buffer = Vec::with_capacity(2_500_000);
+
+            // Read, decompress, and concatenate all chunks
+            let mut chunk_count = 0;
+            while let Some(compressed_chunk) = self.read_next_block().await? {
+                // Decompress this chunk before stitching
+                use crate::storage::sstable::compression::Compression;
+                let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader
+                {
+                    let compression = Compression::new(*compression_reader.algorithm())?;
+                    match compression.decompress(&compressed_chunk) {
+                        Ok(decompressed) => {
+                            log::debug!(
+                                "V5CompressedLegacy: Chunk {} decompressed {} bytes to {} bytes",
+                                chunk_count,
+                                compressed_chunk.len(),
+                                decompressed.len()
+                            );
+                            decompressed
+                        }
+                        Err(e) => {
+                            return Err(Error::corruption(format!(
+                                "V5CompressedLegacy: Failed to decompress chunk {}: {}",
+                                chunk_count, e
+                            )));
+                        }
+                    }
+                } else {
+                    // No compression (should not happen for V5CompressedLegacy)
+                    log::warn!("V5CompressedLegacy: No compression reader, using raw chunk data");
+                    compressed_chunk
+                };
+
+                stitched_buffer.extend_from_slice(&decompressed_chunk);
+                chunk_count += 1;
+                log::debug!(
+                    "V5CompressedLegacy: Stitched chunk {}, total buffer size: {} bytes",
+                    chunk_count,
+                    stitched_buffer.len()
+                );
+            }
+
+            eprintln!(
+                "[DEBUG] V5CompressedLegacy: Finished stitching {} chunks, total buffer: {} bytes",
+                chunk_count,
+                stitched_buffer.len()
+            );
+
+            // Parse the stitched buffer using V5CompressedLegacy parser directly
+            // We bypass parse_block_entries to avoid double-decompression attempts
+
+            // Extract keyspace/table from header (most reliable)
+            let keyspace = self.header.keyspace.clone();
+            let table_name = self.header.table_name.clone();
+
+            // Extract EncodingStats from statistics_reader (if available)
+            let (min_timestamp, min_local_deletion_time, min_ttl) =
+                if let Some(stats_reader) = &self.statistics_reader {
+                    let ts_stats = &stats_reader.statistics().timestamp_stats;
+                    (
+                        ts_stats.min_timestamp,
+                        ts_stats.min_deletion_time,
+                        ts_stats.min_ttl,
+                    )
+                } else {
+                    (0, 0, None)
+                };
+
+            let parser = crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::new(
+                keyspace,
+                table_name,
+                min_timestamp,
+                min_local_deletion_time,
+                min_ttl,
+            );
+
+            // Get schema (no schema passed to get_all_entries, so use reader's schema)
+            let table_schema = self.get_table_schema(None);
+
+            // Parse the stitched decompressed buffer
+            let entries = parser.parse_block(&stitched_buffer, table_schema.as_ref(), self)?;
+            eprintln!(
+                "[DEBUG] V5CompressedLegacy: Parsed {} entries from stitched buffer",
+                entries.len()
+            );
             results.extend(entries);
+        } else {
+            // Other formats: Read and parse blocks individually
+            while let Some(block) = self.read_next_block().await? {
+                let entries = self.parse_block_entries(&block, None)?;
+                results.extend(entries);
+            }
         }
 
         Ok(results)

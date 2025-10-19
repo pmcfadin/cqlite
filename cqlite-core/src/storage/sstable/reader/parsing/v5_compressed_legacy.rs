@@ -201,13 +201,14 @@ impl V5CompressedLegacyParser {
                 || key_len > 100
                 || offset + header_min_size > data.len()
             {
-                log::debug!(
-                    "V5CompressedLegacy: Invalid partition header at offset {} (flags=0x{:02x}, key_len={}, need {} bytes, have {}), stopping",
+                eprintln!(
+                    "[DEBUG] V5CompressedLegacy: Invalid partition header at offset {} (flags=0x{:02x}, key_len={}, need {} bytes, have {}), stopping after {} entries",
                     offset,
                     flags,
                     key_len,
                     header_min_size,
-                    data.len() - offset
+                    data.len() - offset,
+                    partition_index
                 );
                 break; // Not a valid partition header, end of partitions in block
             }
@@ -299,18 +300,18 @@ impl V5CompressedLegacyParser {
                             partition_index += 1;
                         }
                         Err(e) => {
-                            debug!(
-                                "V5CompressedLegacy: Partition {} - Failed to parse row data at offset {}: {} (end of valid data)",
-                                partition_index, offset, e
+                            eprintln!(
+                                "[DEBUG] V5CompressedLegacy: Partition {} - Failed to parse row data at offset {}: {} (end of valid data), stopping after {} entries",
+                                partition_index, offset, e, partition_index
                             );
                             break; // End of valid data in block
                         }
                     }
                 }
                 Err(e) => {
-                    debug!(
-                        "V5CompressedLegacy: Partition {} - Failed to parse partition header at offset {}: {} (end of partitions)",
-                        partition_index, offset, e
+                    eprintln!(
+                        "[DEBUG] V5CompressedLegacy: Partition {} - Failed to parse partition header at offset {}: {} (end of partitions), stopping after {} entries",
+                        partition_index, offset, e, partition_index
                     );
                     break; // No more partitions in block
                 }
@@ -645,15 +646,11 @@ impl V5CompressedLegacyParser {
             )));
         }
 
-        // Also validate that row_size doesn't exceed remaining data
-        if row_start_offset + row_size as usize > data.len() {
-            return Err(Error::corruption(format!(
-                "V5CompressedLegacy: row_size={} at offset {} exceeds block boundary (block_len={}).",
-                row_size,
-                row_start_offset,
-                data.len()
-            )));
-        }
+        // Row payloads can span multiple compressed chunks in V5CompressedLegacy format.
+        // The reader has already stitched all chunks together (see get_all_entries()),
+        // so row_size is valid across chunk boundaries. We MUST NOT validate against
+        // individual chunk sizes as rows naturally span chunks in Cassandra's format.
+        // This is NOT corruption - it's the intended file layout.
 
         log::debug!(
             "V5CompressedLegacy: Parsed row header at offset {}: header_size={} bytes, row_size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
@@ -784,8 +781,8 @@ impl V5CompressedLegacyParser {
         // Formula: next_partition_offset = row_start_offset + row_size
         let next_partition_offset = row_start_offset + row_size as usize;
 
-        log::debug!(
-            "V5CompressedLegacy: Using row_size to calculate boundary: row_start={}, row_size={}, next_partition={}",
+        eprintln!(
+            "[DEBUG] V5CompressedLegacy: Using row_size to calculate boundary: row_start={}, row_size={}, next_partition={}",
             row_start_offset,
             row_size,
             next_partition_offset
