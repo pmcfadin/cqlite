@@ -16,13 +16,15 @@
 //! ├─ [+0] Partition deletion time (i32 big-endian)
 //! ├─ [+4] Unknown 8-byte field
 //! ├─ [+8] Row data begins
-//! │  ├─ Row header (flags, timestamp)
-//! │  └─ Cells:
-//! │     ├─ Type tag or flags (u8)
-//! │     ├─ Column name length (u8)
-//! │     ├─ Column name bytes
-//! │     ├─ Value length (varies)
-//! │     └─ Value bytes
+//! │  ├─ Row header (flags, timestamp, row_size)
+//! │  ├─ Cells:
+//! │  │  ├─ Type tag or flags (u8)
+//! │  │  ├─ Column name length (u8)
+//! │  │  ├─ Column name bytes
+//! │  │  ├─ Value length (varies)
+//! │  │  └─ Value bytes
+//! │  └─ Trailing 4-byte field (NOT included in row_size)
+//! └─ [Next partition or end of block]
 //! ```
 
 use std::collections::HashMap;
@@ -55,6 +57,10 @@ const ROW_HAS_TTL: u8 = 0x08;
 const ROW_HAS_DELETION: u8 = 0x10;
 const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
+
+/// Size of the trailing field after each row's cell data in V5CompressedLegacy format.
+/// This field is NOT included in the row_size value from the row header.
+const ROW_TRAILING_FIELD_SIZE: usize = 4;
 
 /// Parser for V5CompressedLegacy format decompressed blocks
 pub struct V5CompressedLegacyParser {
@@ -248,9 +254,9 @@ impl V5CompressedLegacyParser {
                     // Note: V5CompressedLegacy format documentation incomplete - assuming single row for now
                     // TODO: Determine if/how multiple rows per partition are encoded (Issue #160)
                     match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
-                        Ok((cells, row_header_opt, next_partition_offset)) => {
-                            // Update offset to point to the next partition (calculated from row_size)
-                            offset = next_partition_offset;
+                        Ok((cells, row_header_opt, next_offset)) => {
+                            // Update offset to point to the next row or partition (calculated from row_size)
+                            offset = next_offset;
 
                             log::debug!(
                                 "V5CompressedLegacy: Partition {} - Parsed {} cells, now at offset {}",
@@ -529,6 +535,8 @@ impl V5CompressedLegacyParser {
     /// [flags: u8][key_len: u8][key_bytes: [u8; key_len]][del_time: i32][unknown: 8 bytes]
     /// ```
     fn parse_partition_header(&self, data: &[u8], mut offset: usize) -> Result<(RowKey, usize)> {
+        let start_offset = offset;
+
         if offset >= data.len() {
             return Err(Error::corruption(format!(
                 "V5CompressedLegacy: Partition header offset {} out of bounds (data len: {})",
@@ -592,6 +600,12 @@ impl V5CompressedLegacyParser {
         // Create RowKey from partition key bytes
         let row_key = RowKey(key_bytes);
 
+        debug!(
+            "V5CompressedLegacy: Parsed partition header at offset {}, consumed {} bytes",
+            start_offset,
+            offset - start_offset
+        );
+
         Ok((row_key, offset))
     }
 
@@ -608,6 +622,7 @@ impl V5CompressedLegacyParser {
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
     ) -> Result<(HashMap<String, Value>, Option<RowHeader>, usize)> {
+        let input_offset = offset;
         let mut cells = HashMap::new();
 
         let schema = schema.ok_or_else(|| {
@@ -624,7 +639,6 @@ impl V5CompressedLegacyParser {
         );
 
         // Parse row header with delta-decoded timestamps/TTL/deletion (Issue #162)
-        let row_start_offset = offset;
         let (row_header, row_size) = self.parse_row_header(data, offset)?;
 
         // CRITICAL VALIDATION: row_size must be reasonable
@@ -641,7 +655,7 @@ impl V5CompressedLegacyParser {
             return Err(Error::corruption(format!(
                 "V5CompressedLegacy: Unreasonably large row_size={} at offset {} (max: {}). Likely partition tombstone or format error.",
                 row_size,
-                row_start_offset,
+                offset,
                 MAX_REASONABLE_ROW_SIZE
             )));
         }
@@ -772,23 +786,61 @@ impl V5CompressedLegacyParser {
 
         debug!("V5CompressedLegacy: Parsed total of {} cells", cells.len());
 
-        // CRITICAL FIX (Issue #164): Use row_size from header to calculate next partition offset
+        // CRITICAL FINDING (Issue #164): V5CompressedLegacy format partition boundary calculation
         //
-        // The row_size field in the row header is the authoritative source for the total number
-        // of bytes consumed by this row (including header + all cell data). This is MORE reliable
-        // than trying to track offsets through cell parsing or parsing a "trailing VInt".
+        // Analysis from JSONL reference data revealed that partitions are NOT contiguous based
+        // solely on row_size. There is a 4-byte trailing field after each row that is NOT
+        // included in the row_size value.
         //
-        // Formula: next_partition_offset = row_start_offset + row_size
-        let next_partition_offset = row_start_offset + row_size as usize;
+        // Format structure (validated against real Cassandra 5.0 SSTables):
+        //   [Partition Header: 30 bytes]
+        //   [Row Header: variable, reported in header_size]
+        //   [Row Cells: variable, row_size includes header + cells]
+        //   [Trailing 4-byte field: NOT included in row_size]
+        //   [Next Partition starts here]
+        //
+        // Example from simple_table:
+        //   - Partition 1 at offset 30
+        //   - Row size: 603 bytes
+        //   - Trailing field: 4 bytes (offsets 633-637)
+        //   - Partition 2 at offset 637 (not 633!)
+        //
+        // The 4-byte trailing field appears to be a partition/row boundary marker or metadata.
+        // Its exact semantics are unclear from Cassandra source, but it's consistently present
+        // and must be skipped to find the next partition.
 
-        eprintln!(
-            "[DEBUG] V5CompressedLegacy: Using row_size to calculate boundary: row_start={}, row_size={}, next_partition={}",
-            row_start_offset,
-            row_size,
-            next_partition_offset
+        // Calculate offset after cell data (based on row_size from header)
+        let after_cells_offset = input_offset + row_size as usize;
+
+        // Skip the trailing field to reach the next partition
+        if after_cells_offset + ROW_TRAILING_FIELD_SIZE > data.len() {
+            return Err(Error::corruption(format!(
+                "V5CompressedLegacy: Not enough bytes for {}-byte trailing field at offset {} (need {}, have {})",
+                ROW_TRAILING_FIELD_SIZE,
+                after_cells_offset,
+                ROW_TRAILING_FIELD_SIZE,
+                data.len() - after_cells_offset
+            )));
+        }
+
+        // Read the trailing field for debugging/validation purposes
+        let trailing_bytes =
+            &data[after_cells_offset..after_cells_offset + ROW_TRAILING_FIELD_SIZE];
+
+        debug!(
+            "V5CompressedLegacy: Row complete - row_size={} bytes, trailing field at offset {} = {:02x?}",
+            row_size, after_cells_offset, trailing_bytes
         );
 
-        Ok((cells, Some(row_header), next_partition_offset))
+        // Calculate next offset AFTER the trailing field
+        let next_offset = after_cells_offset + ROW_TRAILING_FIELD_SIZE;
+
+        debug!(
+            "V5CompressedLegacy: Calculated next partition offset: {} (row at {}, row_size={}, +4 trailing)",
+            next_offset, input_offset, row_size
+        );
+
+        Ok((cells, Some(row_header), next_offset))
     }
 
     /// Parse a single cell value WITHOUT column name (schema-order format)

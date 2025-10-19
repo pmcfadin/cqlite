@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// Test fixture for schema integration testing
 struct SchemaIntegrationFixture {
     registry: Arc<SchemaRegistry>,
+    #[allow(dead_code)]
     platform: Arc<Platform>,
 }
 

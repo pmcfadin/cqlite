@@ -276,10 +276,10 @@ fn create_valid_compression_info(algorithm: &str, chunk_size: u32) -> Compressio
         ],
         crc32: Some(0x12345678),
         chunk_crcs: vec![
-            CompressionInfo::calculate_crc32(&vec![0u8; 100]), // Valid CRC for fake data
-            CompressionInfo::calculate_crc32(&vec![1u8; 100]),
-            CompressionInfo::calculate_crc32(&vec![2u8; 100]),
-            CompressionInfo::calculate_crc32(&vec![3u8; 100]),
+            CompressionInfo::calculate_crc32(&[0u8; 100]), // Valid CRC for fake data
+            CompressionInfo::calculate_crc32(&[1u8; 100]),
+            CompressionInfo::calculate_crc32(&[2u8; 100]),
+            CompressionInfo::calculate_crc32(&[3u8; 100]),
         ],
     }
 }

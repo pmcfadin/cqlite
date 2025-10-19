@@ -1297,23 +1297,27 @@ mod tests {
         );
 
         // Verify columns: 1 synthetic partition key + 2 regular columns = 3 total
-        assert_eq!(columns.len(), 3, "Expected 1 synthetic PK + 2 regular columns");
+        assert_eq!(
+            columns.len(),
+            3,
+            "Expected 1 synthetic PK + 2 regular columns"
+        );
 
         // Column 0: synthetic partition key "id"
         assert_eq!(columns[0].name, "id");
         assert_eq!(columns[0].column_type, "uuid");
-        assert_eq!(columns[0].is_primary_key, true);
+        assert!(columns[0].is_primary_key);
         assert_eq!(columns[0].key_position, Some(0));
 
         // Column 1: regular column "expiring_value"
         assert_eq!(columns[1].name, "expiring_value");
         assert_eq!(columns[1].column_type, "int");
-        assert_eq!(columns[1].is_primary_key, false);
+        assert!(!columns[1].is_primary_key);
 
         // Column 2: regular column "session_info"
         assert_eq!(columns[2].name, "session_info");
         assert_eq!(columns[2].column_type, "text");
-        assert_eq!(columns[2].is_primary_key, false);
+        assert!(!columns[2].is_primary_key);
     }
 
     #[test]
@@ -1352,11 +1356,11 @@ mod tests {
 
         // Column 0: synthetic partition key
         assert_eq!(columns[0].name, "id");
-        assert_eq!(columns[0].is_primary_key, true);
+        assert!(columns[0].is_primary_key);
 
         // Column 1: regular column "data"
         assert_eq!(columns[1].name, "data");
-        assert_eq!(columns[1].is_primary_key, false);
+        assert!(!columns[1].is_primary_key);
     }
 
     #[test]
