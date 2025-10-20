@@ -1,4 +1,7 @@
 //! Debug test to identify why schema extraction isn't working
+//! Requires state_machine feature for schema functionality
+
+#![cfg(feature = "state_machine")]
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::{Config, Platform};
