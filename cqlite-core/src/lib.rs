@@ -93,7 +93,7 @@ impl Database {
     ///
     /// ```rust,no_run
     /// use cqlite_core::{Database, Config};
-    /// use std::path::Path;
+    /// use std::path::{Path, PathBuf};
     ///
     /// # tokio_test::block_on(async {
     /// let config = Config::default();
@@ -290,7 +290,7 @@ impl Database {
     ///
     /// ```rust,no_run
     /// # use cqlite_core::{Database, Config};
-    /// # use std::path::Path;
+    /// # use std::path::{Path, PathBuf};
     /// # tokio_test::block_on(async {
     /// # let config = Config::default();
     /// # let db = Database::open(Path::new("./data"), config).await?;

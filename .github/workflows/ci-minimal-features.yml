@@ -1,0 +1,95 @@
+name: Minimal Features CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+jobs:
+  minimal-build:
+    name: Minimal Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cqlite-core
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Build with minimal compression (lz4 + snappy only)
+        run: cargo build --no-default-features --features=lz4,snappy
+
+      - name: Build with all compression support
+        run: cargo build --no-default-features --features=all-compression
+
+      - name: Test with all compression support
+        run: cargo test --no-default-features --features=all-compression
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+
+  feature-gate-validation:
+    name: Feature Gate Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Verify 'experimental' feature is NOT in default features
+        run: |
+          if grep -q 'default = \[.*"experimental".*\]' cqlite-core/Cargo.toml; then
+            echo "ERROR: 'experimental' feature found in default features"
+            echo "This violates the minimal features policy for Issue #168"
+            exit 1
+          else
+            echo "✓ 'experimental' feature is correctly NOT in default features"
+          fi
+
+      - name: Verify 'benchmarks' feature is NOT in default features
+        run: |
+          if grep -q 'default = \[.*"benchmarks".*\]' cqlite-core/Cargo.toml; then
+            echo "ERROR: 'benchmarks' feature found in default features"
+            echo "This violates the minimal features policy for Issue #168"
+            exit 1
+          else
+            echo "✓ 'benchmarks' feature is correctly NOT in default features"
+          fi
+
+      - name: Check for feature documentation presence
+        run: |
+          if grep -q "# M2+ production defaults" cqlite-core/Cargo.toml && \
+             grep -q "# Compression features" cqlite-core/Cargo.toml && \
+             grep -q "# Other features" cqlite-core/Cargo.toml; then
+            echo "✓ Feature documentation is present"
+          else
+            echo "WARNING: Feature documentation may be incomplete"
+            echo "Please ensure all feature sections are documented"
+            exit 1
+          fi
+
+      - name: Validate default features list
+        run: |
+          echo "Current default features:"
+          grep '^default = ' cqlite-core/Cargo.toml
+
+          echo ""
+          echo "Validating feature configuration..."
+
+          # Ensure default features are properly documented
+          if grep -A 1 '^# M2+ production defaults' cqlite-core/Cargo.toml | grep -q '^default = '; then
+            echo "✓ Default features are documented"
+          else
+            echo "WARNING: Default features lack documentation comment"
+          fi

@@ -1,0 +1,91 @@
+name: Coverage Baseline
+
+on:
+  pull_request:
+    paths:
+      - 'cqlite-core/src/**'
+
+jobs:
+  coverage:
+    name: Code Coverage Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate coverage report
+        run: cargo tarpaulin --workspace --out Xml --exclude-files 'tests/*'
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./cobertura.xml
+          fail_ci_if_error: false
+          verbose: true
+
+      - name: Check minimum coverage threshold (60%)
+        run: |
+          # Extract coverage percentage from XML report
+          if [ -f cobertura.xml ]; then
+            # Parse line-rate from cobertura.xml (coverage as decimal, e.g., 0.6234)
+            COVERAGE=$(grep -oP 'line-rate="\K[0-9.]+' cobertura.xml | head -n 1)
+
+            if [ -z "$COVERAGE" ]; then
+              echo "ERROR: Could not parse coverage from cobertura.xml"
+              exit 1
+            fi
+
+            # Convert to percentage using bc
+            COVERAGE_PCT=$(echo "$COVERAGE * 100" | bc)
+
+            echo "Current coverage: ${COVERAGE_PCT}%"
+
+            # Check if coverage meets 60% threshold
+            THRESHOLD=60
+            MEETS_THRESHOLD=$(echo "$COVERAGE_PCT >= $THRESHOLD" | bc)
+
+            if [ "$MEETS_THRESHOLD" -eq 1 ]; then
+              echo "✓ Coverage ${COVERAGE_PCT}% meets minimum threshold of ${THRESHOLD}%"
+            else
+              echo "ERROR: Coverage ${COVERAGE_PCT}% is below minimum threshold of ${THRESHOLD}%"
+              echo "Please add tests to improve code coverage"
+              exit 1
+            fi
+          else
+            echo "ERROR: cobertura.xml not found"
+            exit 1
+          fi
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          echo "## Coverage Report Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f cobertura.xml ]; then
+            COVERAGE=$(grep -oP 'line-rate="\K[0-9.]+' cobertura.xml | head -n 1)
+            COVERAGE_PCT=$(echo "$COVERAGE * 100" | bc)
+
+            echo "- **Coverage**: ${COVERAGE_PCT}%" >> $GITHUB_STEP_SUMMARY
+            echo "- **Threshold**: 60%" >> $GITHUB_STEP_SUMMARY
+
+            MEETS_THRESHOLD=$(echo "$COVERAGE_PCT >= 60" | bc)
+            if [ "$MEETS_THRESHOLD" -eq 1 ]; then
+              echo "- **Status**: ✓ PASS" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Status**: ✗ FAIL" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "- **Status**: ERROR - Coverage report not generated" >> $GITHUB_STEP_SUMMARY
+          fi
