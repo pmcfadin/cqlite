@@ -50,7 +50,9 @@ pub use crate::{
     types::*,
 };
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "state_machine")]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{memory::MemoryManager, storage::StorageEngine};
