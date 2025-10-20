@@ -4,6 +4,14 @@
 //! and simplified encoding optimized for compression. This differs from the newer
 //! V5_0NewBig and V5_0Bti formats which use pure VInt encoding.
 //!
+//! ## Partition Key Size Constraints
+//!
+//! **Apache Cassandra Specification**: Partition keys can be up to 64KB (65536 bytes).
+//! **V5CompressedLegacy Format Limitation**: Uses u8 for key length field, limiting keys to 255 bytes max.
+//!
+//! This means V5CompressedLegacy format cannot represent partition keys larger than 255 bytes,
+//! even though Cassandra allows keys up to 64KB. Tables with larger keys would use a different format.
+//!
 //! Based on format research in docs/V5_COMPRESSED_LEGACY_FORMAT_SPEC.md
 //!
 //! ## Format Structure
@@ -178,6 +186,12 @@ impl V5CompressedLegacyParser {
         let mut offset = 0;
         let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
 
+        // Cassandra partition key size limits (used in header validation)
+        // - CASSANDRA_MAX_KEY_SIZE: 64KB limit per Apache Cassandra specification
+        // - FORMAT_MAX_KEY_SIZE: u8 max value - V5CompressedLegacy format limitation
+        const CASSANDRA_MAX_KEY_SIZE: usize = 65536; // 64KB per Cassandra spec
+        const FORMAT_MAX_KEY_SIZE: usize = 255; // u8 max value - format limitation
+
         // Parse ALL partitions in block (Issue #2 fix: previously only parsed one partition)
         let mut partition_index = 0;
         while offset < data.len() {
@@ -206,7 +220,7 @@ impl V5CompressedLegacyParser {
             }
 
             // Check if this looks like a partition header (flags byte + reasonable key length)
-            // Most partition keys are UUIDs (16 bytes), some composite keys are larger but < 100 bytes
+            // Partition keys can be up to 64KB per Cassandra spec (composite keys, text, etc.)
             if offset + 2 > data.len() {
                 log::debug!(
                     "V5CompressedLegacy: Not enough bytes for partition header at offset {} (need 2, have {}), stopping",
@@ -221,12 +235,13 @@ impl V5CompressedLegacyParser {
 
             // Validate partition header:
             // - Flags should be 0x00 or have partition-level flags (typically < 0x20)
-            // - Key length should be reasonable (UUIDs are 16 bytes, composite keys < 256 bytes)
+            // - Key length must be non-zero and within format's limit (u8 max = 255 bytes)
+            //   Note: Cassandra spec allows 64KB keys, but V5CompressedLegacy format uses u8 length
             // - Must have enough bytes for: flags(1) + len(1) + key(len) + del_time(4) + unknown(8)
             let header_min_size = 1 + 1 + key_len + 4 + 8;
             if flags > 0x20
                 || key_len == 0
-                || key_len > 100
+                || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
                 || offset + header_min_size > data.len()
             {
                 eprintln!(

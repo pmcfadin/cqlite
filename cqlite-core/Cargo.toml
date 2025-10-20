@@ -90,6 +90,8 @@ insta = "1.34"
 # cqlite-validation = { path = "../cqlite-validation" }
 fastrand = "2.0"
 libc = { workspace = true }
+num-bigint = "0.4"  # For varint/decimal validation in tests
+num-traits = "0.2"  # Required for BigInt conversion methods
 
 [[bench]]
 name = "partition_lookup"
