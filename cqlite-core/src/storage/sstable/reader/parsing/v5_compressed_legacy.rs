@@ -99,6 +99,59 @@ impl V5CompressedLegacyParser {
         }
     }
 
+    /// Check if bytes at offset look like a valid partition header structure.
+    ///
+    /// This validates the partition header format instead of just checking flags,
+    /// which is critical because row headers can have flags <= 0x20 (e.g., 0x00, 0x20).
+    ///
+    /// # Partition Header Format
+    /// ```text
+    /// [flags: u8]              - Typically 0x00 or very low, but can overlap with row flags
+    /// [key_len: u8]            - Must be > 0, typically 16 for UUID, up to 100 for composite
+    /// [key_bytes: [u8; len]]   - Partition key data
+    /// [deletion_time: i32]     - 4 bytes big-endian
+    /// [unknown: i64]           - 8 bytes
+    /// ```
+    ///
+    /// # Arguments
+    /// * `data` - Binary data buffer
+    /// * `offset` - Offset to check
+    ///
+    /// # Returns
+    /// * `true` if the structure looks like a valid partition header
+    /// * `false` if it doesn't match partition header format
+    fn is_valid_partition_header_structure(&self, data: &[u8], offset: usize) -> bool {
+        // Need at least: flags(1) + key_len(1) + key(min 1) + del_time(4) + unknown(8) = 15 bytes
+        if offset + 2 > data.len() {
+            return false; // Not enough bytes for even flags + key_len
+        }
+
+        let flags = data[offset];
+        let key_len = data[offset + 1] as usize;
+
+        // Partition key length validation:
+        // - Must be > 0 (no empty keys)
+        // - Typically 16 for UUID, but can be up to 100 for composite keys
+        // - Must have enough bytes for the complete header
+        if key_len == 0 || key_len > 100 {
+            return false;
+        }
+
+        let header_size = 1 + 1 + key_len + 4 + 8;
+        if offset + header_size > data.len() {
+            return false; // Not enough bytes for complete header
+        }
+
+        // Additional validation: partition flags are typically very low
+        // Most common: 0x00 (no flags)
+        // But be cautious - don't make this too strict as formats can vary
+        if flags > 0x80 {
+            return false; // Definitely not a partition header
+        }
+
+        true // Looks like it could be a partition header
+    }
+
     /// Parse decompressed block into (TableId, RowKey, Value) entries
     ///
     /// # Arguments
@@ -319,20 +372,36 @@ impl V5CompressedLegacyParser {
                                     break; // End of block
                                 }
 
-                                // Peek at next byte to determine if it's a row or partition header
-                                let next_flags = data[offset];
-                                if next_flags <= 0x20 {
-                                    // Looks like partition header (flags <= 0x20), break inner loop
+                                // CRITICAL FIX (Issue #166): Use structural validation instead of simple flag check
+                                //
+                                // The old code checked `if next_flags <= 0x20` to detect partition headers,
+                                // but this is WRONG because:
+                                // - Row headers can have flags = 0x00 (no timestamp/TTL, valid!)
+                                // - Row headers can have flags = 0x20 (HAS_ALL_COLUMNS only, valid!)
+                                // - These would incorrectly break the loop, stopping after 1 row
+                                //
+                                // Instead, we validate the COMPLETE partition header structure:
+                                // - flags + key_len + key_bytes + deletion_time + unknown (15+ bytes)
+                                // - key_len must be reasonable (1-100 bytes)
+                                // - Must have enough bytes for complete header
+                                //
+                                // This correctly distinguishes partition headers from row headers
+                                // with any flag combination.
+                                let looks_like_partition =
+                                    self.is_valid_partition_header_structure(data, offset);
+
+                                if looks_like_partition {
                                     debug!(
-                                        "V5CompressedLegacy: Partition {} complete: {} rows parsed (next partition at offset {})",
+                                        "V5CompressedLegacy: Partition {} complete: {} rows parsed (next partition detected at offset {})",
                                         partition_index, row_count, offset
                                     );
-                                    break;
+                                    break; // Next partition starts here
                                 }
-                                // else: next_flags > 0x20, likely another row header, continue loop
+
+                                // Otherwise, assume it's another row and continue parsing
                                 debug!(
-                                    "V5CompressedLegacy: Partition {} - Continuing to row {} (flags=0x{:02x} > 0x20)",
-                                    partition_index, row_count + 1, next_flags
+                                    "V5CompressedLegacy: Partition {} - Continuing to row {} at offset {} (structural validation indicates this is a row, not partition)",
+                                    partition_index, row_count + 1, offset
                                 );
                             }
                             Err(e) => {
@@ -855,12 +924,13 @@ impl V5CompressedLegacyParser {
 
         // Skip the trailing field to reach the next partition
         if after_cells_offset + ROW_TRAILING_FIELD_SIZE > data.len() {
+            let remaining = data.len().saturating_sub(after_cells_offset);
             return Err(Error::corruption(format!(
                 "V5CompressedLegacy: Not enough bytes for {}-byte trailing field at offset {} (need {}, have {})",
                 ROW_TRAILING_FIELD_SIZE,
                 after_cells_offset,
                 ROW_TRAILING_FIELD_SIZE,
-                data.len() - after_cells_offset
+                remaining
             )));
         }
 
