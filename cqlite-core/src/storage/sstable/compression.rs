@@ -595,6 +595,7 @@ impl StreamingDecompressor {
     }
 
     /// Streaming Deflate decompression
+    #[allow(clippy::ptr_arg)] // output.extend_from_slice() requires &mut Vec<u8>
     async fn decompress_deflate_streaming<R: Read>(
         &mut self,
         #[cfg_attr(not(feature = "deflate"), allow(unused_variables))] reader: R,
@@ -648,6 +649,7 @@ impl StreamingDecompressor {
     }
 
     /// Streaming Zstd decompression
+    #[allow(clippy::ptr_arg)] // output.extend_from_slice() requires &mut Vec<u8>
     async fn decompress_zstd_streaming<R: Read>(
         &mut self,
         #[cfg_attr(not(feature = "zstd"), allow(unused_variables))] reader: R,
