@@ -250,69 +250,110 @@ impl V5CompressedLegacyParser {
                         offset
                     );
 
-                    // Parse row data for this partition
-                    // Note: V5CompressedLegacy format documentation incomplete - assuming single row for now
-                    // TODO: Determine if/how multiple rows per partition are encoded (Issue #160)
-                    match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
-                        Ok((cells, row_header_opt, next_offset)) => {
-                            // Update offset to point to the next row or partition (calculated from row_size)
-                            offset = next_offset;
+                    // Parse ALL rows in this partition (Issue #166 fix: multi-row partition support)
+                    //
+                    // V5CompressedLegacy partitions can contain multiple rows with different clustering keys.
+                    // Each row starts with a row header (flags > 0x20), while partition headers have flags <= 0x20.
+                    // We parse rows in a loop until we encounter:
+                    // - End of block (offset >= data.len())
+                    // - Next partition header (flags <= 0x20)
+                    // - Parse error (invalid row data)
+                    let mut row_count = 0;
+                    loop {
+                        match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
+                            Ok((cells, row_header_opt, next_offset)) => {
+                                // Update offset to point to the next row or partition
+                                offset = next_offset;
+                                row_count += 1;
 
-                            log::debug!(
-                                "V5CompressedLegacy: Partition {} - Parsed {} cells, now at offset {}",
-                                partition_index,
-                                cells.len(),
-                                offset
-                            );
-
-                            log::debug!(
-                                "V5CompressedLegacy: Parsed {} cells from row data",
-                                cells.len()
-                            );
-
-                            if let Some(ref header) = row_header_opt {
                                 log::debug!(
-                                    "V5CompressedLegacy: Row metadata - timestamp={:?}, ttl={:?}, deletion={:?}",
-                                    header.timestamp, header.ttl, header.local_deletion_time
+                                    "V5CompressedLegacy: Partition {} Row {} - Parsed {} cells, now at offset {}",
+                                    partition_index,
+                                    row_count,
+                                    cells.len(),
+                                    offset
+                                );
+
+                                if let Some(ref header) = row_header_opt {
+                                    log::debug!(
+                                        "V5CompressedLegacy: Row {} metadata - timestamp={:?}, ttl={:?}, deletion={:?}",
+                                        row_count,
+                                        header.timestamp, header.ttl, header.local_deletion_time
+                                    );
+                                }
+
+                                debug!(
+                                    "V5CompressedLegacy: Parsed {} cells from row {}",
+                                    cells.len(),
+                                    row_count
+                                );
+
+                                // Convert cells HashMap to Value::Map (required by SelectExecutor)
+                                let row_value = if cells.is_empty() {
+                                    warn!(
+                                        "V5CompressedLegacy: No cells extracted for {}.{} partition {} row {} (partition key: {} bytes)",
+                                        self.keyspace,
+                                        self.table_name,
+                                        partition_index,
+                                        row_count,
+                                        partition_key.0.len()
+                                    );
+                                    Value::Null
+                                } else {
+                                    // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map
+                                    let map_entries: Vec<(Value, Value)> = cells
+                                        .into_iter()
+                                        .map(|(name, value)| (Value::Text(name), value))
+                                        .collect();
+                                    Value::Map(map_entries)
+                                };
+
+                                results.push((table_id.clone(), partition_key.clone(), row_value));
+
+                                // Check if we're at the end of the partition
+                                if offset >= data.len() {
+                                    debug!(
+                                        "V5CompressedLegacy: Partition {} complete: {} rows parsed (end of block)",
+                                        partition_index, row_count
+                                    );
+                                    break; // End of block
+                                }
+
+                                // Peek at next byte to determine if it's a row or partition header
+                                let next_flags = data[offset];
+                                if next_flags <= 0x20 {
+                                    // Looks like partition header (flags <= 0x20), break inner loop
+                                    debug!(
+                                        "V5CompressedLegacy: Partition {} complete: {} rows parsed (next partition at offset {})",
+                                        partition_index, row_count, offset
+                                    );
+                                    break;
+                                }
+                                // else: next_flags > 0x20, likely another row header, continue loop
+                                debug!(
+                                    "V5CompressedLegacy: Partition {} - Continuing to row {} (flags=0x{:02x} > 0x20)",
+                                    partition_index, row_count + 1, next_flags
                                 );
                             }
-
-                            debug!(
-                                "V5CompressedLegacy: Parsed {} cells from row data",
-                                cells.len()
-                            );
-
-                            // Convert cells HashMap to Value::Map (required by SelectExecutor)
-                            // SelectExecutor expects Value::Map(Vec<(Value, Value)>) where each entry is
-                            // (Value::Text(column_name), column_value)
-                            let row_value = if cells.is_empty() {
-                                warn!(
-                                    "V5CompressedLegacy: No cells extracted for {}.{} (partition key: {} bytes)",
-                                    self.keyspace,
-                                    self.table_name,
-                                    partition_key.0.len()
+                            Err(e) => {
+                                // End of valid data in partition
+                                debug!(
+                                    "V5CompressedLegacy: Partition {} ended after {} rows: {}",
+                                    partition_index, row_count, e
                                 );
-                                Value::Null
-                            } else {
-                                // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map
-                                let map_entries: Vec<(Value, Value)> = cells
-                                    .into_iter()
-                                    .map(|(name, value)| (Value::Text(name), value))
-                                    .collect();
-                                Value::Map(map_entries)
-                            };
-
-                            results.push((table_id.clone(), partition_key, row_value));
-                            partition_index += 1;
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[DEBUG] V5CompressedLegacy: Partition {} - Failed to parse row data at offset {}: {} (end of valid data), stopping after {} entries",
-                                partition_index, offset, e, partition_index
-                            );
-                            break; // End of valid data in block
+                                if row_count == 0 {
+                                    // If we couldn't parse even one row, log as error
+                                    eprintln!(
+                                        "[DEBUG] V5CompressedLegacy: Partition {} - Failed to parse first row at offset {}: {}",
+                                        partition_index, offset, e
+                                    );
+                                }
+                                break; // End of valid data in partition
+                            }
                         }
                     }
+
+                    partition_index += 1;
                 }
                 Err(e) => {
                     eprintln!(

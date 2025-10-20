@@ -378,10 +378,42 @@ mod tests {
             "V5CompressedLegacy parser must extract >0 entries (got 0!)"
         );
 
+        // VERIFICATION #1: Count unique partition keys
+        use std::collections::HashSet;
+        let unique_keys: HashSet<_> = entries.iter().map(|(_, key, _)| key.clone()).collect();
+        eprintln!("Total entries: {}", entries.len());
+        eprintln!("Unique partition keys: {}", unique_keys.len());
+        eprintln!("Expected unique keys (from JSONL): 1000");
+
+        // VERIFICATION #2: Show sample of first 10 partition keys
+        eprintln!("\nFirst 10 partition keys extracted:");
+        for (idx, (_, key, _)) in entries.iter().take(10).enumerate() {
+            eprintln!("  [{}] {:?}", idx, key);
+        }
+
+        // VERIFICATION #3: Check if we're duplicating the same key
+        if entries.len() > 1 {
+            let first_key = &entries[0].1;
+            let second_key = &entries[1].1;
+            if first_key == second_key {
+                eprintln!("WARNING: First two keys are IDENTICAL - possible duplication bug!");
+            } else {
+                eprintln!("GOOD: First two keys are DIFFERENT");
+            }
+        }
+
+        // CRITICAL ASSERTION: Verify we have 1000 unique partition keys (matching JSONL)
+        assert_eq!(
+            unique_keys.len(),
+            1000,
+            "Expected 1000 unique partition keys (one per partition), got {}",
+            unique_keys.len()
+        );
+
         // Examine the first entry
         let (table_id, row_key, value) = &entries[0];
 
-        eprintln!("Entry 0: table_id={:?}", table_id);
+        eprintln!("\nEntry 0: table_id={:?}", table_id);
         eprintln!("Entry 0: row_key={:?}", row_key);
         eprintln!("Entry 0: value={:?}", value);
 
