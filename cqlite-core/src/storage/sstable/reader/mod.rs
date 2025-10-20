@@ -30,6 +30,10 @@ pub use types::{
     SSTableReaderConfig, SSTableReaderHealthMetrics, SSTableReaderStats,
 };
 
+// Re-export V5CompressedLegacyParser for integration testing (Issue #166 regression tests)
+#[doc(hidden)]
+pub use parsing::PublicV5CompressedLegacyParser as V5CompressedLegacyParser;
+
 // Internal imports from submodules
 use compression::detect_and_initialize_compression;
 use header::{

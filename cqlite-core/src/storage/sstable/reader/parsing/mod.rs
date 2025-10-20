@@ -19,6 +19,11 @@ mod value_parsing;
 // Re-export V5CompressedLegacy parser for internal use
 pub(in crate::storage::sstable::reader) use v5_compressed_legacy::V5CompressedLegacyParser;
 
+// Re-export publicly for integration tests (Issue #166 regression tests)
+// Using doc(hidden) to keep it out of public documentation but available for testing
+#[doc(hidden)]
+pub use v5_compressed_legacy::V5CompressedLegacyParser as PublicV5CompressedLegacyParser;
+
 use std::collections::HashMap;
 use std::path::Path;
 

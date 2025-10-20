@@ -112,7 +112,11 @@ impl V5CompressedLegacyParser {
     /// # Returns
     /// * `true` if a valid partition header can be parsed at this offset
     /// * `false` if parsing fails (likely a row header or invalid data)
-    fn peek_is_partition_header(&self, data: &[u8], offset: usize) -> bool {
+    ///
+    /// # Visibility
+    /// Exposed for integration testing to validate partition boundary detection
+    #[doc(hidden)]
+    pub fn peek_is_partition_header(&self, data: &[u8], offset: usize) -> bool {
         // Try to actually parse the partition header
         self.parse_partition_header(data, offset).is_ok()
     }
@@ -603,7 +607,15 @@ impl V5CompressedLegacyParser {
     /// ```text
     /// [flags: u8][key_len: u8][key_bytes: [u8; key_len]][del_time: i32][unknown: 8 bytes]
     /// ```
-    fn parse_partition_header(&self, data: &[u8], mut offset: usize) -> Result<(RowKey, usize)> {
+    ///
+    /// # Visibility
+    /// Exposed for integration testing to validate partition header parsing
+    #[doc(hidden)]
+    pub fn parse_partition_header(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+    ) -> Result<(RowKey, usize)> {
         let start_offset = offset;
 
         if offset >= data.len() {
