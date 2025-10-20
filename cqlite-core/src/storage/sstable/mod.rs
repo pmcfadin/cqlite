@@ -315,6 +315,7 @@ impl SSTableManager {
                         )
                         .await
                         {
+                            #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
                             Ok(mut reader) => {
                                 eprintln!(
                                     "[DEBUG SSTableManager] Successfully loaded SSTable: {}",
@@ -409,6 +410,7 @@ impl SSTableManager {
                     match reader::SSTableReader::open(&path, &self.config, self.platform.clone())
                         .await
                     {
+                        #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
                         Ok(mut reader) => {
                             // Set schema registry if available (before wrapping in Arc)
                             #[cfg(feature = "state_machine")]
