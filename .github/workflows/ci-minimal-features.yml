@@ -47,15 +47,18 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Verify 'experimental' feature is NOT in default features
+      - name: Verify M2+ core features ARE in defaults
         run: |
-          if grep -q 'default = \[.*"experimental".*\]' cqlite-core/Cargo.toml; then
-            echo "ERROR: 'experimental' feature found in default features"
-            echo "This violates the minimal features policy for Issue #168"
-            exit 1
-          else
-            echo "✓ 'experimental' feature is correctly NOT in default features"
-          fi
+          # M2+ default build must include: all-compression, metrics, experimental, state_machine
+          required_features=("all-compression" "metrics" "experimental" "state_machine")
+          for feature in "${required_features[@]}"; do
+            if grep -q "default = \[.*\"$feature\".*\]" cqlite-core/Cargo.toml; then
+              echo "✓ Required M2+ feature '$feature' found in defaults"
+            else
+              echo "ERROR: Required M2+ feature '$feature' missing from defaults"
+              exit 1
+            fi
+          done
 
       - name: Verify 'benchmarks' feature is NOT in default features
         run: |
