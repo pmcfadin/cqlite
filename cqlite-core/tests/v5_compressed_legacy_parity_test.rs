@@ -24,11 +24,28 @@
 //!
 //! Conversion uses `num_bigint` for arbitrary precision arithmetic, matching
 //! the approach used in cqlite-cli's value formatter.
+//!
+//! ## Collection Type Support
+//!
+//! The `values_match()` function now implements recursive comparison for collection types:
+//! - **List**: Recursively compares each element in order, validates length matches
+//! - **Set**: Recursively compares elements (order-independent), validates no duplicates
+//! - **Map**: Recursively compares key-value pairs, validates all keys present
+//!
+//! **Current Test Coverage**: The test_basic/simple_table dataset does NOT contain collection
+//! columns. The collection comparison logic is implemented and tested via compilation, but
+//! not exercised with real data in this test.
+//!
+//! **TODO**: Add test coverage for collection types using test_collections/collection_table
+//! dataset, which includes List, Set, and Map columns with real Cassandra data. See:
+//! - test_collections/collection_table (has tags:set, scores:map, properties:map)
+//! - test_collections/nested_collections_table (nested collections)
+//! - test_collections/frozen_collections_table (frozen collections)
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::{Config, Platform};
 use num_bigint::BigInt;
-use num_traits::ToPrimitive;
+use num_traits::{Signed, ToPrimitive};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
@@ -57,6 +74,8 @@ enum JsonlValue {
     Bool(bool),
     Null,
     Blob(Vec<u8>),
+    Array(Vec<JsonlValue>),
+    Object(HashMap<String, JsonlValue>),
 }
 
 /// Cell mismatch information for reporting
@@ -70,7 +89,7 @@ struct CellMismatch {
 }
 
 impl JsonlValue {
-    /// Parse JSON value into JsonlValue
+    /// Parse JSON value into JsonlValue (recursive for collections)
     fn from_json(value: &Value) -> Self {
         match value {
             Value::String(s) => {
@@ -94,7 +113,19 @@ impl JsonlValue {
             }
             Value::Bool(b) => JsonlValue::Bool(*b),
             Value::Null => JsonlValue::Null,
-            _ => JsonlValue::Null,
+            Value::Array(arr) => {
+                // Recursively parse array elements
+                let elements = arr.iter().map(JsonlValue::from_json).collect();
+                JsonlValue::Array(elements)
+            }
+            Value::Object(obj) => {
+                // Recursively parse object key-value pairs
+                let mut map = HashMap::new();
+                for (key, val) in obj {
+                    map.insert(key.clone(), JsonlValue::from_json(val));
+                }
+                JsonlValue::Object(map)
+            }
         }
     }
 }
@@ -296,12 +327,142 @@ fn values_match(parser_value: &cqlite_core::Value, jsonl_value: &JsonlValue) -> 
             }
         }
 
-        // Collections - would need recursive comparison, for now just check both are present
-        (Value::List(_), JsonlValue::String(_)) => true,
-        (Value::Set(_), JsonlValue::String(_)) => true,
-        (Value::Map(_), JsonlValue::String(_)) => true,
+        // Collections - recursive comparison
+        (Value::List(parser_list), JsonlValue::Array(jsonl_array)) => {
+            // Check length first
+            if parser_list.len() != jsonl_array.len() {
+                eprintln!(
+                    "List length mismatch: parser={}, jsonl={}",
+                    parser_list.len(),
+                    jsonl_array.len()
+                );
+                return false;
+            }
+            // Recursively compare each element
+            for (i, (parser_elem, jsonl_elem)) in
+                parser_list.iter().zip(jsonl_array.iter()).enumerate()
+            {
+                if !values_match(parser_elem, jsonl_elem) {
+                    eprintln!(
+                        "List element {} mismatch: parser={:?}, jsonl={:?}",
+                        i, parser_elem, jsonl_elem
+                    );
+                    return false;
+                }
+            }
+            true
+        }
+
+        (Value::Set(parser_set), JsonlValue::Array(jsonl_array)) => {
+            // Sets are represented as arrays in JSON, but order may differ
+            // Check length first
+            if parser_set.len() != jsonl_array.len() {
+                eprintln!(
+                    "Set length mismatch: parser={}, jsonl={}",
+                    parser_set.len(),
+                    jsonl_array.len()
+                );
+                return false;
+            }
+            // For sets, we need to check that all elements in parser exist in jsonl
+            // Since order may differ, this is O(n²) but acceptable for test data
+            for (i, parser_elem) in parser_set.iter().enumerate() {
+                let found = jsonl_array
+                    .iter()
+                    .any(|jsonl_elem| values_match(parser_elem, jsonl_elem));
+                if !found {
+                    eprintln!(
+                        "Set element {} not found in JSONL: parser={:?}",
+                        i, parser_elem
+                    );
+                    return false;
+                }
+            }
+            // Also verify no extra elements in jsonl
+            for (i, jsonl_elem) in jsonl_array.iter().enumerate() {
+                let found = parser_set
+                    .iter()
+                    .any(|parser_elem| values_match(parser_elem, jsonl_elem));
+                if !found {
+                    eprintln!(
+                        "Set element {} in JSONL not found in parser: jsonl={:?}",
+                        i, jsonl_elem
+                    );
+                    return false;
+                }
+            }
+            true
+        }
+
+        (Value::Map(parser_map), JsonlValue::Object(jsonl_obj)) => {
+            // Check key count first
+            if parser_map.len() != jsonl_obj.len() {
+                eprintln!(
+                    "Map length mismatch: parser={}, jsonl={}",
+                    parser_map.len(),
+                    jsonl_obj.len()
+                );
+                return false;
+            }
+            // Convert parser map to hashmap for easier lookup
+            // Parser map is Vec<(Value, Value)>, we need to extract string keys
+            let mut parser_string_map: HashMap<String, &cqlite_core::Value> = HashMap::new();
+            for (key, val) in parser_map {
+                // Try to extract string key
+                if let cqlite_core::Value::Text(key_str) = key {
+                    parser_string_map.insert(key_str.clone(), val);
+                } else {
+                    eprintln!("Map key is not a string: {:?}", key);
+                    return false;
+                }
+            }
+            // Compare each key-value pair
+            for (jsonl_key, jsonl_val) in jsonl_obj {
+                match parser_string_map.get(jsonl_key) {
+                    Some(parser_val) => {
+                        if !values_match(parser_val, jsonl_val) {
+                            eprintln!(
+                                "Map key '{}' value mismatch: parser={:?}, jsonl={:?}",
+                                jsonl_key, parser_val, jsonl_val
+                            );
+                            return false;
+                        }
+                    }
+                    None => {
+                        eprintln!("Map key '{}' missing in parser output", jsonl_key);
+                        return false;
+                    }
+                }
+            }
+            // Check for extra keys in parser output
+            for key in parser_string_map.keys() {
+                if !jsonl_obj.contains_key(key) {
+                    eprintln!("Map key '{}' in parser but not in JSONL", key);
+                    return false;
+                }
+            }
+            true
+        }
+
+        // Fallback cases: if types don't match expected collection patterns
+        (Value::List(_), _) => {
+            eprintln!("List type mismatch: JSONL is not an array");
+            false
+        }
+        (Value::Set(_), _) => {
+            eprintln!("Set type mismatch: JSONL is not an array");
+            false
+        }
+        (Value::Map(_), _) => {
+            eprintln!("Map type mismatch: JSONL is not an object");
+            false
+        }
 
         // Varint - JSONL represents as number, we need to convert bytes to BigInt
+        //
+        // Precision handling:
+        // - Values that fit in i64 (-2^63 to 2^63-1): Direct numeric comparison with f64
+        // - Larger values: String-based comparison (both converted to decimal string)
         (Value::Varint(p), JsonlValue::Number(j)) => {
             if p.is_empty() {
                 return (*j - 0.0).abs() < f64::EPSILON;
@@ -314,8 +475,8 @@ fn values_match(parser_value: &cqlite_core::Value, jsonl_value: &JsonlValue) -> 
                 let value = as_i64 as f64;
                 (value - j).abs() < f64::EPSILON
             } else {
-                // Very large varint that doesn't fit in i64
-                // Convert both to string for comparison
+                // Very large varint that doesn't fit in i64 (exceeds ±2^63)
+                // Both values must be compared as strings to avoid precision loss
                 let bigint_str = bigint.to_string();
                 let j_str = if j.fract() == 0.0 {
                     format!("{:.0}", j)
@@ -327,6 +488,11 @@ fn values_match(parser_value: &cqlite_core::Value, jsonl_value: &JsonlValue) -> 
         }
 
         // Decimal - JSONL represents as number, we need to apply scale to unscaled value
+        //
+        // Precision handling:
+        // - Unscaled value fits in i64: Convert to f64 and compare with epsilon based on scale
+        // - Unscaled value exceeds i64 (>2^63): String-based decimal comparison
+        //   (divide BigInt string representation by 10^scale)
         (Value::Decimal { scale, unscaled }, JsonlValue::Number(j)) => {
             if unscaled.is_empty() {
                 return (*j - 0.0).abs() < f64::EPSILON;
@@ -335,13 +501,12 @@ fn values_match(parser_value: &cqlite_core::Value, jsonl_value: &JsonlValue) -> 
             // Convert unscaled bytes to BigInt
             let bigint = BigInt::from_signed_bytes_be(unscaled);
 
-            // Convert to decimal by applying scale
-            // Scale is the number of digits after decimal point
-            // unscaled_value / 10^scale = actual_value
-            let scale_divisor = 10_f64.powi(*scale);
-
             // Try to convert unscaled BigInt to i64 for comparison
             if let Some(unscaled_i64) = bigint.to_i64() {
+                // Unscaled value fits in i64 - use floating-point comparison
+                // Scale is the number of digits after decimal point
+                // unscaled_value / 10^scale = actual_value
+                let scale_divisor = 10_f64.powi(*scale);
                 let decimal_value = (unscaled_i64 as f64) / scale_divisor;
 
                 // Use epsilon proportional to the scale for floating-point comparison
@@ -349,10 +514,57 @@ fn values_match(parser_value: &cqlite_core::Value, jsonl_value: &JsonlValue) -> 
                 let epsilon = 10_f64.powi(-(*scale)) * 0.01;
                 (decimal_value - j).abs() < epsilon
             } else {
-                // Very large decimal that doesn't fit in i64
-                // Use string comparison as fallback
-                // This is rare for typical decimal values
-                true
+                // Very large decimal where unscaled value exceeds i64 (>2^63)
+                // Use string-based comparison to avoid precision loss
+                //
+                // Convert BigInt to string and format as decimal: "unscaled / 10^scale"
+                // Example: unscaled=12345, scale=2 -> "123.45"
+
+                let is_negative = bigint.is_negative();
+                let abs_bigint = bigint.abs();
+                let abs_str = abs_bigint.to_string();
+
+                // Build decimal string by inserting decimal point at correct position
+                let decimal_str = if *scale == 0 {
+                    // No decimal point needed
+                    if is_negative {
+                        format!("-{}", abs_str)
+                    } else {
+                        abs_str
+                    }
+                } else if (*scale as usize) >= abs_str.len() {
+                    // Need leading zeros: 0.00...XXX
+                    let leading_zeros = *scale as usize - abs_str.len();
+                    if is_negative {
+                        format!("-0.{:0>width$}{}", "", abs_str, width = leading_zeros)
+                    } else {
+                        format!("0.{:0>width$}{}", "", abs_str, width = leading_zeros)
+                    }
+                } else {
+                    // Insert decimal point: XXX.YYY
+                    let split_pos = abs_str.len() - *scale as usize;
+                    let integer_part = &abs_str[..split_pos];
+                    let fractional_part = &abs_str[split_pos..];
+                    if is_negative {
+                        format!("-{}.{}", integer_part, fractional_part)
+                    } else {
+                        format!("{}.{}", integer_part, fractional_part)
+                    }
+                };
+
+                // Convert JSONL number to string for comparison
+                let j_str = if j.fract() == 0.0 && j.abs() < 1e15 {
+                    // Integer representation for whole numbers (avoid scientific notation)
+                    format!("{:.0}", j)
+                } else {
+                    // Use full precision string
+                    format!("{}", j)
+                };
+
+                // Compare decimal strings
+                // Note: This may still have precision issues if JSONL uses scientific notation
+                // or truncates digits, but it's better than blindly returning true
+                decimal_str == j_str
             }
         }
 
@@ -751,4 +963,181 @@ fn test_jsonl_parsing() {
         partition.cells.get("age"),
         Some(JsonlValue::Number(_))
     ));
+}
+
+/// Test large varint comparison logic (values exceeding i64)
+#[test]
+fn test_large_varint_comparison() {
+    use cqlite_core::Value;
+
+    // Test 1: Small varint that fits in i64 (should use numeric comparison)
+    let small_varint = BigInt::from(12345_i64);
+    let small_bytes = small_varint.to_signed_bytes_be();
+    let parser_value = Value::Varint(small_bytes);
+    let jsonl_value = JsonlValue::Number(12345.0);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "Small varint should match via numeric comparison"
+    );
+
+    // Test 2: Large positive varint exceeding i64::MAX (2^63 - 1 = 9223372036854775807)
+    // Use value that fits exactly in f64 mantissa (2^53 - 1 is safe limit for integers in f64)
+    // For this test, use a value just over i64::MAX that f64 CAN represent exactly
+    // Note: In real Cassandra JSONL, values beyond f64 precision would be strings, not numbers
+    let large_positive = BigInt::from(9223372036854775807_i64) + BigInt::from(1);
+    let large_bytes = large_positive.to_signed_bytes_be();
+    let parser_value = Value::Varint(large_bytes);
+    // f64 can represent 2^63 exactly (it's a power of 2)
+    let jsonl_value = JsonlValue::Number(9223372036854775808.0);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "Large positive varint (2^63) should match via string comparison"
+    );
+
+    // Test 3: Values within i64 range at boundaries
+    let i64_max = BigInt::from(i64::MAX);
+    let max_bytes = i64_max.to_signed_bytes_be();
+    let parser_value = Value::Varint(max_bytes);
+    let jsonl_value = JsonlValue::Number(i64::MAX as f64);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "i64::MAX should match via numeric comparison"
+    );
+
+    // Test 4: Mismatch case - parser and JSONL have different values
+    let varint_123 = BigInt::from(123);
+    let bytes_123 = varint_123.to_signed_bytes_be();
+    let parser_value = Value::Varint(bytes_123);
+    let jsonl_value = JsonlValue::Number(456.0);
+    assert!(
+        !values_match(&parser_value, &jsonl_value),
+        "Mismatched varint values should not match"
+    );
+
+    // Test 5: Zero varint
+    let zero_varint = BigInt::from(0);
+    let zero_bytes = zero_varint.to_signed_bytes_be();
+    let parser_value = Value::Varint(zero_bytes);
+    let jsonl_value = JsonlValue::Number(0.0);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "Zero varint should match"
+    );
+}
+
+/// Test large decimal comparison logic (unscaled value exceeding i64)
+#[test]
+fn test_large_decimal_comparison() {
+    use cqlite_core::Value;
+
+    // Test 1: Small decimal that fits in i64 (should use numeric comparison)
+    // Unscaled=123456, scale=2 -> 1234.56
+    let small_unscaled = BigInt::from(123456);
+    let small_bytes = small_unscaled.to_signed_bytes_be();
+    let parser_value = Value::Decimal {
+        scale: 2,
+        unscaled: small_bytes,
+    };
+    let jsonl_value = JsonlValue::Number(1234.56);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "Small decimal should match via numeric comparison"
+    );
+
+    // Test 2: Large decimal with unscaled value exceeding i64::MAX
+    // Use 2^53 (f64's safe integer limit) + some value that exceeds i64::MAX when combined
+    // This tests the string comparison path without hitting f64 precision issues
+    // Value: 10000000000000000000 (10^19, exceeds i64::MAX = 9.22e18)
+    let large_unscaled_str = "10000000000000000000";
+    let large_unscaled = large_unscaled_str.parse::<BigInt>().unwrap();
+    let large_bytes = large_unscaled.to_signed_bytes_be();
+    let parser_value = Value::Decimal {
+        scale: 0,
+        unscaled: large_bytes.clone(),
+    };
+    // f64 can represent 10^19 exactly (it's 10 * 10^18, within mantissa range)
+    let jsonl_value = JsonlValue::Number(10000000000000000000.0);
+    let matches = values_match(&parser_value, &jsonl_value);
+    if !matches {
+        eprintln!("DEBUG: Large decimal mismatch");
+        eprintln!(
+            "  Unscaled BigInt: {}",
+            BigInt::from_signed_bytes_be(&large_bytes)
+        );
+        eprintln!("  Scale: 0");
+        eprintln!("  JSONL f64: {}", 10000000000000000000.0);
+        eprintln!("  Parser value: {:?}", parser_value);
+    }
+    assert!(
+        matches,
+        "Large decimal (scale=0) should match via string comparison"
+    );
+
+    // Test 3: Decimal with scale > 0 but unscaled fits in i64
+    // Unscaled = 123456, scale=3 -> 123.456
+    let scaled_decimal = BigInt::from(123456);
+    let scaled_bytes = scaled_decimal.to_signed_bytes_be();
+    let parser_value = Value::Decimal {
+        scale: 3,
+        unscaled: scaled_bytes,
+    };
+    let jsonl_value = JsonlValue::Number(123.456);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "Scaled decimal should match via numeric comparison"
+    );
+
+    // Test 4: Decimal with scale requiring leading zeros
+    // Unscaled = 12, scale=5 -> 0.00012
+    let small_with_zeros = BigInt::from(12);
+    let bytes_with_zeros = small_with_zeros.to_signed_bytes_be();
+    let parser_value = Value::Decimal {
+        scale: 5,
+        unscaled: bytes_with_zeros,
+    };
+    let jsonl_value = JsonlValue::Number(0.00012);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "Decimal with leading zeros should match"
+    );
+
+    // Test 5: Negative decimal
+    // Unscaled = -123456, scale=2 -> -1234.56
+    let negative_decimal = BigInt::from(-123456);
+    let neg_bytes = negative_decimal.to_signed_bytes_be();
+    let parser_value = Value::Decimal {
+        scale: 2,
+        unscaled: neg_bytes,
+    };
+    let jsonl_value = JsonlValue::Number(-1234.56);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "Negative decimal should match"
+    );
+
+    // Test 6: Zero decimal
+    let zero_decimal = BigInt::from(0);
+    let zero_bytes = zero_decimal.to_signed_bytes_be();
+    let parser_value = Value::Decimal {
+        scale: 0,
+        unscaled: zero_bytes,
+    };
+    let jsonl_value = JsonlValue::Number(0.0);
+    assert!(
+        values_match(&parser_value, &jsonl_value),
+        "Zero decimal should match"
+    );
+
+    // Test 7: Mismatch case - parser and JSONL have different values
+    let decimal_123 = BigInt::from(123);
+    let bytes_123 = decimal_123.to_signed_bytes_be();
+    let parser_value = Value::Decimal {
+        scale: 0,
+        unscaled: bytes_123,
+    };
+    let jsonl_value = JsonlValue::Number(456.0);
+    assert!(
+        !values_match(&parser_value, &jsonl_value),
+        "Mismatched decimal values should not match"
+    );
 }
