@@ -99,57 +99,22 @@ impl V5CompressedLegacyParser {
         }
     }
 
-    /// Check if bytes at offset look like a valid partition header structure.
+    /// Try to parse partition header at offset WITHOUT consuming it.
     ///
-    /// This validates the partition header format instead of just checking flags,
-    /// which is critical because row headers can have flags <= 0x20 (e.g., 0x00, 0x20).
-    ///
-    /// # Partition Header Format
-    /// ```text
-    /// [flags: u8]              - Typically 0x00 or very low, but can overlap with row flags
-    /// [key_len: u8]            - Must be > 0, typically 16 for UUID, up to 100 for composite
-    /// [key_bytes: [u8; len]]   - Partition key data
-    /// [deletion_time: i32]     - 4 bytes big-endian
-    /// [unknown: i64]           - 8 bytes
-    /// ```
+    /// This performs a full parse attempt to determine if the bytes at offset
+    /// represent a valid partition header. This is the NO-HEURISTICS approach:
+    /// we actually try to parse the structure instead of guessing based on byte patterns.
     ///
     /// # Arguments
     /// * `data` - Binary data buffer
     /// * `offset` - Offset to check
     ///
     /// # Returns
-    /// * `true` if the structure looks like a valid partition header
-    /// * `false` if it doesn't match partition header format
-    fn is_valid_partition_header_structure(&self, data: &[u8], offset: usize) -> bool {
-        // Need at least: flags(1) + key_len(1) + key(min 1) + del_time(4) + unknown(8) = 15 bytes
-        if offset + 2 > data.len() {
-            return false; // Not enough bytes for even flags + key_len
-        }
-
-        let flags = data[offset];
-        let key_len = data[offset + 1] as usize;
-
-        // Partition key length validation:
-        // - Must be > 0 (no empty keys)
-        // - Typically 16 for UUID, but can be up to 100 for composite keys
-        // - Must have enough bytes for the complete header
-        if key_len == 0 || key_len > 100 {
-            return false;
-        }
-
-        let header_size = 1 + 1 + key_len + 4 + 8;
-        if offset + header_size > data.len() {
-            return false; // Not enough bytes for complete header
-        }
-
-        // Additional validation: partition flags are typically very low
-        // Most common: 0x00 (no flags)
-        // But be cautious - don't make this too strict as formats can vary
-        if flags > 0x80 {
-            return false; // Definitely not a partition header
-        }
-
-        true // Looks like it could be a partition header
+    /// * `true` if a valid partition header can be parsed at this offset
+    /// * `false` if parsing fails (likely a row header or invalid data)
+    fn peek_is_partition_header(&self, data: &[u8], offset: usize) -> bool {
+        // Try to actually parse the partition header
+        self.parse_partition_header(data, offset).is_ok()
     }
 
     /// Parse decompressed block into (TableId, RowKey, Value) entries
@@ -372,25 +337,19 @@ impl V5CompressedLegacyParser {
                                     break; // End of block
                                 }
 
-                                // CRITICAL FIX (Issue #166): Use structural validation instead of simple flag check
+                                // CRITICAL FIX (Issue #166): NO HEURISTICS - Try-parse approach
                                 //
-                                // The old code checked `if next_flags <= 0x20` to detect partition headers,
-                                // but this is WRONG because:
-                                // - Row headers can have flags = 0x00 (no timestamp/TTL, valid!)
-                                // - Row headers can have flags = 0x20 (HAS_ALL_COLUMNS only, valid!)
-                                // - These would incorrectly break the loop, stopping after 1 row
+                                // Instead of guessing based on byte patterns (e.g., checking if flags <= 0x20
+                                // or validating key_len ranges), we ACTUALLY TRY TO PARSE the next structure.
                                 //
-                                // Instead, we validate the COMPLETE partition header structure:
-                                // - flags + key_len + key_bytes + deletion_time + unknown (15+ bytes)
-                                // - key_len must be reasonable (1-100 bytes)
-                                // - Must have enough bytes for complete header
+                                // Why heuristics fail:
+                                // - Row with small value (e.g., boolean=0x0A) can look like key_len
+                                // - Row flags=0x00 or 0x20 pass "<= 0x20" checks meant for partitions
+                                // - Any byte-pattern guessing will eventually fail on edge cases
                                 //
-                                // This correctly distinguishes partition headers from row headers
-                                // with any flag combination.
-                                let looks_like_partition =
-                                    self.is_valid_partition_header_structure(data, offset);
-
-                                if looks_like_partition {
+                                // The only reliable approach: try to parse as partition header.
+                                // If that succeeds, it's a partition. If it fails, continue with rows.
+                                if self.peek_is_partition_header(data, offset) {
                                     debug!(
                                         "V5CompressedLegacy: Partition {} complete: {} rows parsed (next partition detected at offset {})",
                                         partition_index, row_count, offset
@@ -398,9 +357,9 @@ impl V5CompressedLegacyParser {
                                     break; // Next partition starts here
                                 }
 
-                                // Otherwise, assume it's another row and continue parsing
+                                // Peek failed - not a partition header, so continue parsing rows
                                 debug!(
-                                    "V5CompressedLegacy: Partition {} - Continuing to row {} at offset {} (structural validation indicates this is a row, not partition)",
+                                    "V5CompressedLegacy: Partition {} - Continuing to row {} at offset {} (peek confirmed this is NOT a partition header)",
                                     partition_index, row_count + 1, offset
                                 );
                             }
