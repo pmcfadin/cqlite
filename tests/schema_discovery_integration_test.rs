@@ -173,17 +173,23 @@ mod schema_discovery_tests {
             columns: vec![
                 MockColumnDefinition {
                     name: "id".to_string(),
-                    data_type: "uuid".to_string(),
+                    column_type: "uuid".to_string(),
+                    kind: "regular".to_string(),
+                    position: 0,
                     confidence: 1.0,
                 },
                 MockColumnDefinition {
                     name: "name".to_string(),
-                    data_type: "text".to_string(),
+                    column_type: "text".to_string(),
+                    kind: "regular".to_string(),
+                    position: 1,
                     confidence: 0.95,
                 },
                 MockColumnDefinition {
                     name: "age".to_string(),
-                    data_type: "int".to_string(),
+                    column_type: "int".to_string(),
+                    kind: "regular".to_string(),
+                    position: 2,
                     confidence: 0.98,
                 },
             ],
@@ -382,6 +388,7 @@ mod schema_discovery_tests {
         println!("🔄 Testing full schema discovery workflow...");
 
         // Step 1: Type inference
+        #[allow(clippy::useless_vec)]  // Vec needed for slicing below
         let samples = vec![
             MockValue {
                 variant: "uuid".to_string(),
@@ -410,17 +417,23 @@ mod schema_discovery_tests {
             columns: vec![
                 MockColumnDefinition {
                     name: "id".to_string(),
-                    data_type: inferred_types[0].type_id.clone(),
+                    column_type: inferred_types[0].type_id.clone(),
+                    kind: "regular".to_string(),
+                    position: 0,
                     confidence: 1.0,
                 },
                 MockColumnDefinition {
                     name: "username".to_string(),
-                    data_type: inferred_types[1].type_id.clone(),
+                    column_type: inferred_types[1].type_id.clone(),
+                    kind: "regular".to_string(),
+                    position: 1,
                     confidence: 0.95,
                 },
                 MockColumnDefinition {
                     name: "age".to_string(),
-                    data_type: inferred_types[2].type_id.clone(),
+                    column_type: inferred_types[2].type_id.clone(),
+                    kind: "regular".to_string(),
+                    position: 2,
                     confidence: 0.98,
                 },
             ],

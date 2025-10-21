@@ -299,7 +299,7 @@ fn test_chunked_reader_seeks_and_reads() {
 
             // Test 1: Read from start
             let mut buf1 = vec![0u8; 100];
-            reader.read(&mut buf1).expect("Failed to read buf1");
+            let _bytes_read = reader.read(&mut buf1).expect("Failed to read buf1");
 
             // Test 2: Seek to middle of second chunk (if available)
             if compression_info.chunk_offsets.len() > 1 {
@@ -323,7 +323,7 @@ fn test_chunked_reader_seeks_and_reads() {
             assert_eq!(reader.position(), 0);
 
             let mut buf3 = vec![0u8; 100];
-            reader.read(&mut buf3).expect("Failed to read buf3");
+            let _bytes_read = reader.read(&mut buf3).expect("Failed to read buf3");
 
             // buf1 and buf3 should match (same position)
             assert_eq!(&buf1[..], &buf3[..]);
@@ -437,9 +437,7 @@ fn test_chunked_reader_all_algorithms() {
             if let Ok(ci_data) = fs::read(&ci_path) {
                 if let Ok(info) = CompressionInfo::parse(&ci_data) {
                     let algo_key = info.algorithm.to_uppercase();
-                    if !by_algo.contains_key(&algo_key) {
-                        by_algo.insert(algo_key, ci_path.clone());
-                    }
+                    by_algo.entry(algo_key).or_insert_with(|| ci_path.clone());
                     // Stop when we have LZ4, Snappy, and Deflate
                     if by_algo.len() >= 3 {
                         break;
