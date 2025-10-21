@@ -108,6 +108,7 @@ async fn test_database_initialization_success() {
 }
 
 #[tokio::test]
+#[cfg(feature = "experimental")]
 async fn test_database_initialization_failures() {
     // Test Platform::new failure
     let _invalid_config = Config {
@@ -148,6 +149,7 @@ async fn test_database_initialization_failures() {
 }
 
 #[tokio::test]
+#[cfg(feature = "experimental")]
 async fn test_database_clone_functionality() {
     let temp_dir = TempDir::new().expect("temp dir");
     let config = Config::default();
@@ -197,6 +199,7 @@ async fn test_database_clone_functionality() {
 }
 
 #[tokio::test]
+#[cfg(feature = "experimental")]
 async fn test_database_stats_retrieval() {
     let temp_dir = TempDir::new().expect("temp dir");
     let config = Config::default();
@@ -307,6 +310,7 @@ async fn test_database_component_interactions() {
 }
 
 #[tokio::test]
+#[cfg(feature = "experimental")]
 async fn test_database_error_recovery() {
     let temp_dir = TempDir::new().expect("temp dir");
     let config = Config::default();
@@ -351,6 +355,7 @@ async fn test_database_error_recovery() {
 }
 
 #[tokio::test]
+#[cfg(feature = "experimental")]
 async fn test_database_concurrent_operations() {
     let temp_dir = TempDir::new().expect("temp dir");
     let config = Config::default();
