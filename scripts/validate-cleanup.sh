@@ -57,9 +57,9 @@ echo ""
 
 # 4. Build release binary and report size
 echo "Step 4: Building release binary and reporting size..."
-echo "Command: cargo build --release --bin cqlite"
+echo "Command: cargo build --release --package cqlite-cli --bin cqlite"
 echo ""
-cargo build --release --bin cqlite
+cargo build --release --package cqlite-cli --bin cqlite
 if [ $? -ne 0 ]; then
     echo "ERROR: Release build failed"
     exit 1
