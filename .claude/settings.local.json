@@ -56,6 +56,8 @@
       "Bash(xxd:*)",
       "Bash(bash:*)",
       "Bash(gh issue comment:*)",
+      "Bash(git rm:*)",
+      "Bash(cargo fmt:*)",
       "Bash(./scripts/validate-cleanup.sh:*)"
     ],
     "deny": [],

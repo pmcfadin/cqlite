@@ -28,9 +28,6 @@ pub mod ingestion;
 #[cfg(feature = "state_machine")]
 pub mod discovery;
 
-// Docker integration for testing
-#[cfg(feature = "docker-integration")]
-pub mod docker;
 // Testing utilities - hidden from public docs via #[doc(hidden)] but available for integration tests
 #[doc(hidden)]
 pub mod testing;
