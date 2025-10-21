@@ -35,14 +35,6 @@ async fn show_database_info(database: &Database) -> Result<()> {
         Ok(stats) => {
             println!("Storage Engine Stats:");
             println!(
-                "  - MemTable size: {} bytes",
-                stats.storage_stats.memtable.size_bytes
-            );
-            println!(
-                "  - MemTable entries: {}",
-                stats.storage_stats.memtable.entry_count
-            );
-            println!(
                 "  - SSTable count: {}",
                 stats.storage_stats.sstables.sstable_count
             );
@@ -135,8 +127,7 @@ async fn backup_database(database: &Database, output: &std::path::Path) -> Resul
     };
 
     // Create progress bar
-    let total_entries = stats.storage_stats.sstables.total_entries
-        + (stats.storage_stats.memtable.entry_count as u64);
+    let total_entries = stats.storage_stats.sstables.total_entries;
     let pb = ProgressBar::new(total_entries);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -153,7 +144,6 @@ async fn backup_database(database: &Database, output: &std::path::Path) -> Resul
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "cqlite_version": env!("CARGO_PKG_VERSION"),
         "total_entries": total_entries,
-        "memtable_entries": stats.storage_stats.memtable.entry_count,
         "sstable_entries": stats.storage_stats.sstables.total_entries,
         "sstable_count": stats.storage_stats.sstables.sstable_count
     });

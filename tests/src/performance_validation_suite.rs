@@ -695,7 +695,8 @@ impl PerformanceValidationSuite {
         // In a real implementation, this would use system memory profiling
         // For now, use storage engine statistics as a proxy
         let stats = self.storage_engine.stats().await?;
-        Ok(stats.memtable.size_bytes)
+        // NOTE: MemTable removed in Issue #175, using SSTable size as proxy
+        Ok(stats.sstables.total_size)
     }
 
     fn generate_large_test_dataset(&self, size: usize) -> Vec<(TableId, RowKey, Value)> {

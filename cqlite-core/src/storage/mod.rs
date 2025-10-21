@@ -1,12 +1,8 @@
 //! Storage engine implementation for CQLite
 
-#[cfg(feature = "experimental")]
-pub mod batch_writer;
 pub mod compaction;
 pub mod manifest;
-pub mod memtable;
 pub mod sstable;
-pub mod wal;
 
 // REPL data access components
 #[cfg(feature = "state_machine")]
@@ -20,29 +16,20 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::platform::Platform;
-#[cfg(feature = "experimental")]
-use crate::storage::batch_writer::{BatchWriter, BatchWriterBuilder};
 use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// Main storage engine that coordinates all storage components
 #[derive(Debug)]
 pub struct StorageEngine {
-    /// In-memory write buffer
-    #[cfg(feature = "experimental")]
-    memtable: Arc<RwLock<memtable::MemTable>>,
-
     /// SSTable manager for persistent storage
     sstables: Arc<sstable::SSTableManager>,
-
-    /// Write-ahead log for durability
-    #[cfg(feature = "experimental")]
-    wal: Arc<wal::WriteAheadLog>,
 
     /// Compaction manager for background maintenance
     compaction: Arc<compaction::CompactionManager>,
 
     /// Manifest for metadata management
-    #[cfg_attr(not(feature = "experimental"), allow(dead_code))]
+    /// NOTE: Unused after Issue #175 (WAL/MemTable removed) but kept for future write support
+    #[allow(dead_code)]
     manifest: Arc<manifest::Manifest>,
 
     /// Platform abstraction
@@ -50,12 +37,9 @@ pub struct StorageEngine {
     _platform: Arc<Platform>,
 
     /// Storage configuration
-    #[cfg_attr(not(feature = "experimental"), allow(dead_code))]
+    /// NOTE: Unused after Issue #175 (WAL/MemTable removed) but kept for future write support
+    #[allow(dead_code)]
     config: Config,
-
-    /// Batch writer for efficient bulk operations
-    #[cfg(feature = "experimental")]
-    batch_writer: Option<BatchWriter>,
 
     /// Schema registry for schema-aware operations (feature-gated)
     #[cfg(feature = "state_machine")]
@@ -93,45 +77,17 @@ impl StorageEngine {
             .await?,
         );
 
-        // Initialize WAL (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        let wal = Arc::new(wal::WriteAheadLog::open(path, config, platform.clone()).await?);
-
-        // Initialize MemTable (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        let memtable = Arc::new(RwLock::new(memtable::MemTable::new(config)?));
-
         // Initialize compaction manager
         let compaction = Arc::new(
             compaction::CompactionManager::new(sstables.clone(), manifest.clone(), config).await?,
         );
 
-        // Initialize batch writer for efficient bulk operations (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        let batch_writer = if config.storage.memtable_size_threshold > 1024 * 1024 {
-            // Only for larger configurations
-            Some(
-                BatchWriterBuilder::new(config.clone())
-                    .with_auto_flush_size(1000)
-                    .with_auto_flush_interval(std::time::Duration::from_millis(100))
-                    .build(sstables.clone(), wal.clone()),
-            )
-        } else {
-            None
-        };
-
         Ok(Self {
-            #[cfg(feature = "experimental")]
-            memtable,
             sstables,
-            #[cfg(feature = "experimental")]
-            wal,
             compaction,
             manifest,
             _platform: platform,
             config: config.clone(),
-            #[cfg(feature = "experimental")]
-            batch_writer,
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
         })
@@ -144,7 +100,7 @@ impl StorageEngine {
     /// scanning the storage directory. Each table directory will be scanned for Data.db files.
     ///
     /// # Arguments
-    /// * `path` - Base storage path for WAL, manifest, and memtable operations
+    /// * `path` - Base storage path for manifest and SSTable operations
     /// * `discovered_table_dirs` - Vector of table directory paths (each containing SSTable files)
     /// * `config` - Storage configuration
     /// * `platform` - Platform abstraction for I/O operations
@@ -205,105 +161,48 @@ impl StorageEngine {
             .await?,
         );
 
-        // Initialize WAL (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        let wal = Arc::new(wal::WriteAheadLog::open(path, config, platform.clone()).await?);
-
-        // Initialize MemTable (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        let memtable = Arc::new(RwLock::new(memtable::MemTable::new(config)?));
-
         // Initialize compaction manager
         let compaction = Arc::new(
             compaction::CompactionManager::new(sstables.clone(), manifest.clone(), config).await?,
         );
 
-        // Initialize batch writer for efficient bulk operations (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        let batch_writer = if config.storage.memtable_size_threshold > 1024 * 1024 {
-            // Only for larger configurations
-            Some(
-                BatchWriterBuilder::new(config.clone())
-                    .with_auto_flush_size(1000)
-                    .with_auto_flush_interval(std::time::Duration::from_millis(100))
-                    .build(sstables.clone(), wal.clone()),
-            )
-        } else {
-            None
-        };
-
         Ok(Self {
-            #[cfg(feature = "experimental")]
-            memtable,
             sstables,
-            #[cfg(feature = "experimental")]
-            wal,
             compaction,
             manifest,
             _platform: platform,
             config: config.clone(),
-            #[cfg(feature = "experimental")]
-            batch_writer,
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
         })
     }
 
     /// Insert a key-value pair
+    ///
+    /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
     #[cfg(feature = "experimental")]
-    pub async fn put(&self, table_id: &TableId, key: RowKey, value: Value) -> Result<()> {
-        // Write to WAL first for durability
-        if self.config.storage.wal.enabled {
-            self.wal.append(table_id, &key, &value).await?;
-        }
-
-        // Write to MemTable and check if flush is needed
-        let should_flush = {
-            let mut memtable = self.memtable.write().await;
-            memtable.put(table_id, key, value)?;
-
-            // Check if MemTable needs to be flushed
-            memtable.size() >= self.config.storage.memtable_size_threshold
-        }; // Release the lock before flushing
-
-        if should_flush {
-            // Trigger async flush (lock is released)
-            self.flush_memtable().await?;
-        }
-
-        Ok(())
+    pub async fn put(&self, _table_id: &TableId, _key: RowKey, _value: Value) -> Result<()> {
+        Err(crate::error::Error::UnsupportedFormat(
+            "Write operations (put) removed in Issue #175 - WAL and MemTable infrastructure deleted".to_string()
+        ))
     }
 
     /// Get a value by key
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
-        // Check MemTable first (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        {
-            let memtable = self.memtable.read().await;
-            if let Some(value) = memtable.get(table_id, key)? {
-                return Ok(Some(value));
-            }
-        }
-
         // Check SSTables
         self.sstables.get(table_id, key).await
     }
 
     /// Delete a key
+    ///
+    /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
     #[cfg(feature = "experimental")]
-    pub async fn delete(&self, table_id: &TableId, key: RowKey) -> Result<()> {
-        // Write tombstone to WAL
-        if self.config.storage.wal.enabled {
-            self.wal.append_tombstone(table_id, &key).await?;
-        }
-
-        // Write tombstone to MemTable
-        {
-            let mut memtable = self.memtable.write().await;
-            memtable.delete(table_id, key)?;
-        }
-
-        Ok(())
+    pub async fn delete(&self, _table_id: &TableId, _key: RowKey) -> Result<()> {
+        Err(crate::error::Error::UnsupportedFormat(
+            "Write operations (delete) removed in Issue #175 - WAL and MemTable infrastructure deleted".to_string()
+        ))
     }
 
     /// Scan a range of keys
@@ -324,70 +223,33 @@ impl StorageEngine {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
-        #[cfg(feature = "experimental")]
-        let mut results = Vec::new();
-
-        #[cfg(not(feature = "experimental"))]
-        let results = Vec::new();
-
-        // Scan MemTable (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        {
-            let memtable = self.memtable.read().await;
-            let memtable_results = memtable.scan(table_id, start_key, end_key, limit)?;
-            results.extend(memtable_results);
-        }
-
-        // Scan SSTables and merge with MemTable results
-        let sstable_results = self
-            .sstables
+        // Scan SSTables directly
+        self.sstables
             .scan(table_id, start_key, end_key, limit, schema)
-            .await?;
-
-        // Merge results, with MemTable taking precedence
-        let merged = self.merge_scan_results(results, sstable_results, limit);
-
-        Ok(merged)
+            .await
     }
 
     /// Flush MemTable to SSTable
+    ///
+    /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
+    #[allow(dead_code)]
     #[cfg(feature = "experimental")]
     async fn flush_memtable(&self) -> Result<()> {
-        let memtable_data = {
-            let mut memtable = self.memtable.write().await;
-            let data = memtable.flush()?;
-            *memtable = memtable::MemTable::new(&self.config)?;
-            data
-        };
-
-        if !memtable_data.is_empty() {
-            // Create new SSTable from MemTable data
-            self.sstables.create_from_memtable(memtable_data).await?;
-
-            // Update manifest
-            self.manifest.add_sstable_created().await?;
-
-            // Trigger compaction if needed
-            if self.config.storage.compaction.auto_compaction {
-                self.compaction.maybe_trigger_compaction().await?;
-            }
-        }
-
-        Ok(())
+        Err(crate::error::Error::UnsupportedFormat(
+            "Write operations (flush_memtable) removed in Issue #175 - WAL and MemTable infrastructure deleted".to_string()
+        ))
     }
 
     /// Force flush all pending writes
+    ///
+    /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
     #[cfg(feature = "experimental")]
     pub async fn flush(&self) -> Result<()> {
-        // Flush MemTable
-        self.flush_memtable().await?;
-
-        // Flush WAL
-        if self.config.storage.wal.enabled {
-            self.wal.flush().await?;
-        }
-
-        Ok(())
+        Err(crate::error::Error::UnsupportedFormat(
+            "Write operations (flush) removed in Issue #175 - WAL and MemTable infrastructure deleted".to_string()
+        ))
     }
 
     /// Perform manual compaction
@@ -400,135 +262,53 @@ impl StorageEngine {
 
     /// Get storage statistics
     pub async fn stats(&self) -> Result<StorageStats> {
-        #[cfg(feature = "experimental")]
-        let memtable_stats = {
-            let memtable = self.memtable.read().await;
-            memtable.stats()
-        };
-
-        #[cfg(not(feature = "experimental"))]
-        let memtable_stats = memtable::MemTableStats {
-            entry_count: 0,
-            size_bytes: 0,
-            table_count: 0,
-            tombstone_count: 0,
-            sequence_number: 0,
-        };
-
         let sstable_stats = self.sstables.stats().await?;
-
-        #[cfg(feature = "experimental")]
-        let wal_stats = if self.config.storage.wal.enabled {
-            Some(self.wal.stats().await?)
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "experimental"))]
-        let wal_stats = None;
-
         let compaction_stats = self.compaction.stats().await?;
 
         Ok(StorageStats {
-            memtable: memtable_stats,
             sstables: sstable_stats,
-            wal: wal_stats,
             compaction: compaction_stats,
-            #[cfg(feature = "experimental")]
-            batch_writer: self.batch_writer.as_ref().map(|bw| bw.stats().clone()),
         })
     }
 
     /// Batch write operations for better performance
+    ///
+    /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
     #[cfg(feature = "experimental")]
-    pub async fn batch_write(&mut self, operations: Vec<BatchOperation>) -> Result<()> {
-        if let Some(ref mut batch_writer) = self.batch_writer {
-            for op in operations {
-                match op {
-                    BatchOperation::Put {
-                        table_id,
-                        key,
-                        value,
-                    } => {
-                        batch_writer.put(table_id, key, value)?;
-                    }
-                    BatchOperation::Delete { table_id, key } => {
-                        batch_writer.delete(table_id, key)?;
-                    }
-                    BatchOperation::Merge {
-                        table_id,
-                        key,
-                        value,
-                    } => {
-                        batch_writer.merge(table_id, key, value)?;
-                    }
-                }
-            }
-
-            // Flush if batch is large enough
-            batch_writer.maybe_flush().await?;
-        } else {
-            // Fall back to individual operations
-            for op in operations {
-                match op {
-                    BatchOperation::Put {
-                        table_id,
-                        key,
-                        value,
-                    } => {
-                        self.put(&table_id, key, value).await?;
-                    }
-                    BatchOperation::Delete { table_id, key } => {
-                        self.delete(&table_id, key).await?;
-                    }
-                    BatchOperation::Merge {
-                        table_id,
-                        key,
-                        value,
-                    } => {
-                        // For now, treat merge as put
-                        self.put(&table_id, key, value).await?;
-                    }
-                }
-            }
-        }
-
-        Ok(())
+    pub async fn batch_write(&mut self, _operations: Vec<BatchOperation>) -> Result<()> {
+        Err(crate::error::Error::UnsupportedFormat(
+            "Write operations (batch_write) removed in Issue #175 - WAL and MemTable infrastructure deleted".to_string()
+        ))
     }
 
     /// Explicit batch flush
+    ///
+    /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
     #[cfg(feature = "experimental")]
     pub async fn flush_batch(&mut self) -> Result<()> {
-        if let Some(ref mut batch_writer) = self.batch_writer {
-            batch_writer.flush().await?;
-        }
-        Ok(())
+        Err(crate::error::Error::UnsupportedFormat(
+            "Write operations (flush_batch) removed in Issue #175 - WAL and MemTable infrastructure deleted".to_string()
+        ))
     }
 
     /// Get batch writer statistics
+    ///
+    /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
     #[cfg(feature = "experimental")]
-    pub fn batch_stats(&self) -> Option<&crate::storage::batch_writer::BatchStats> {
-        self.batch_writer.as_ref().map(|bw| bw.stats())
+    pub fn batch_stats(&self) -> Option<()> {
+        None
     }
 
     /// Shutdown the storage engine
     pub async fn shutdown(&self) -> Result<()> {
-        // Note: batch_writer flush would require mutable access
-        // In practice, shutdown should be called when no more writes are expected
-
         // Stop compaction first
         self.compaction.shutdown().await?;
 
-        // Flush any remaining data (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        {
-            self.flush().await?;
-
-            // Close WAL
-            if self.config.storage.wal.enabled {
-                self.wal.close().await?;
-            }
-        }
+        // NOTE: Flush removed in Issue #175 - no write infrastructure to flush
+        // Previously would flush WAL and MemTable, but those are now deleted
 
         Ok(())
     }
@@ -550,35 +330,6 @@ impl StorageEngine {
 
         // Propagate to SSTable manager
         self.sstables.set_schema_registry(registry).await
-    }
-
-    /// Merge scan results from MemTable and SSTables
-    fn merge_scan_results(
-        &self,
-        memtable_results: Vec<(RowKey, Value)>,
-        sstable_results: Vec<(RowKey, Value)>,
-        limit: Option<usize>,
-    ) -> Vec<(RowKey, Value)> {
-        // Simple merge - in a real implementation, this would be more sophisticated
-        // with proper tombstone handling and deduplication
-        let mut merged = memtable_results;
-
-        for (key, value) in sstable_results {
-            // Only add if not already present in memtable results
-            if !merged.iter().any(|(k, _)| k == &key) {
-                merged.push((key, value));
-            }
-        }
-
-        // Sort by key
-        merged.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Apply limit
-        if let Some(limit) = limit {
-            merged.truncate(limit);
-        }
-
-        merged
     }
 }
 
@@ -605,21 +356,11 @@ pub enum BatchOperation {
 /// Storage engine statistics
 #[derive(Debug, Clone)]
 pub struct StorageStats {
-    /// MemTable statistics
-    pub memtable: memtable::MemTableStats,
-
     /// SSTable statistics
     pub sstables: sstable::SSTableStats,
 
-    /// WAL statistics (if enabled)
-    pub wal: Option<wal::WalStats>,
-
     /// Compaction statistics
     pub compaction: compaction::CompactionStats,
-
-    /// Batch writer statistics (if enabled)
-    #[cfg(feature = "experimental")]
-    pub batch_writer: Option<batch_writer::BatchStats>,
 }
 
 #[cfg(test)]

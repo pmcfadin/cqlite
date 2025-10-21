@@ -35,8 +35,9 @@ pub mod testing;
 // Memory safety testing modules
 #[cfg(test)]
 pub mod memory_safety_runner;
-#[cfg(test)]
-pub mod memory_safety_tests;
+// NOTE: memory_safety_tests disabled - MemTable removed in Issue #175
+// #[cfg(test)]
+// pub mod memory_safety_tests;
 
 // Re-export main types for convenience
 pub use crate::{

@@ -1077,9 +1077,7 @@ mod tests {
     #[tokio::test]
     async fn test_condition_to_row_key_mapping() {
         let temp_dir = TempDir::new().unwrap();
-        let mut config = Config::default();
-        config.storage.wal.enabled = false;
-        config.storage.memtable_size_threshold = u64::MAX;
+        let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let storage = Arc::new(
             crate::storage::StorageEngine::open(

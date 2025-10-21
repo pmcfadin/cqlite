@@ -9,9 +9,12 @@ use cqlite_core::{
     error::Result,
     parser::types::serialize_cql_value,
     schema::SchemaManager,
-    types::{RowKey, TableId, Value},
+    types::{TableId, Value},
     Config,
 };
+
+#[cfg(feature = "experimental")]
+use cqlite_core::types::RowKey;
 
 use assert_cmd::prelude::*;
 use serde_json;
@@ -503,57 +506,72 @@ impl ComprehensiveIntegrationTestSuite {
     async fn test_data_storage(&self) -> Result<TestReport> {
         let start = Instant::now();
 
-        let temp_dir = TempDir::new().unwrap();
-        let config = Config::default();
-        let platform = Arc::new(Platform::new(&config).await?);
-        let storage =
-            Arc::new(StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?);
+        #[cfg(feature = "experimental")]
+        {
+            let temp_dir = TempDir::new().unwrap();
+            let config = Config::default();
+            let platform = Arc::new(Platform::new(&config).await?);
+            let storage = Arc::new(
+                StorageEngine::open(temp_dir.path(), &config, platform.clone(), None).await?,
+            );
 
-        let table_id = TableId::new("test_storage");
+            let table_id = TableId::new("test_storage");
 
-        // Test various data types
-        let test_data = vec![
-            (
-                RowKey::new(b"key1".to_vec()),
-                Value::Text("Hello World".to_string()),
-            ),
-            (RowKey::new(b"key2".to_vec()), Value::Integer(42)),
-            (RowKey::new(b"key3".to_vec()), Value::Boolean(true)),
-            (RowKey::new(b"key4".to_vec()), Value::Null),
-        ];
+            // Test various data types
+            let test_data = vec![
+                (
+                    RowKey::new(b"key1".to_vec()),
+                    Value::Text("Hello World".to_string()),
+                ),
+                (RowKey::new(b"key2".to_vec()), Value::Integer(42)),
+                (RowKey::new(b"key3".to_vec()), Value::Boolean(true)),
+                (RowKey::new(b"key4".to_vec()), Value::Null),
+            ];
 
-        // Store data
-        for (key, value) in &test_data {
-            storage.put(&table_id, key.clone(), value.clone()).await?;
-        }
-
-        // Retrieve and verify data
-        for (key, _expected_value) in &test_data {
-            let retrieved = storage.get(&table_id, key).await?;
-            if retrieved.is_none() {
-                return Ok(TestReport {
-                    test_name: "Data Storage".to_string(),
-                    status: TestStatus::Failed,
-                    execution_time_ms: start.elapsed().as_millis() as u64,
-                    details: format!("Data not found for key: {:?}", key),
-                    metrics: None,
-                });
+            // Store data
+            for (key, value) in &test_data {
+                storage.put(&table_id, key.clone(), value.clone()).await?;
             }
+
+            // Retrieve and verify data
+            for (key, _expected_value) in &test_data {
+                let retrieved = storage.get(&table_id, key).await?;
+                if retrieved.is_none() {
+                    return Ok(TestReport {
+                        test_name: "Data Storage".to_string(),
+                        status: TestStatus::Failed,
+                        execution_time_ms: start.elapsed().as_millis() as u64,
+                        details: format!("Data not found for key: {:?}", key),
+                        metrics: None,
+                    });
+                }
+            }
+
+            storage.shutdown().await?;
+
+            Ok(TestReport {
+                test_name: "Data Storage".to_string(),
+                status: TestStatus::Passed,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                details: "All data stored and retrieved successfully".to_string(),
+                metrics: Some({
+                    let mut metrics = HashMap::new();
+                    metrics.insert("records_tested".to_string(), test_data.len() as f64);
+                    metrics
+                }),
+            })
         }
 
-        storage.shutdown().await?;
-
-        Ok(TestReport {
-            test_name: "Data Storage".to_string(),
-            status: TestStatus::Passed,
-            execution_time_ms: start.elapsed().as_millis() as u64,
-            details: "All data stored and retrieved successfully".to_string(),
-            metrics: Some({
-                let mut metrics = HashMap::new();
-                metrics.insert("records_tested".to_string(), test_data.len() as f64);
-                metrics
-            }),
-        })
+        #[cfg(not(feature = "experimental"))]
+        {
+            Ok(TestReport {
+                test_name: "Data Storage".to_string(),
+                status: TestStatus::Skipped,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                details: "Data storage test skipped - experimental feature not enabled (WAL/MemTable removed in Issue #175)".to_string(),
+                metrics: None,
+            })
+        }
     }
 
     async fn test_query_parsing(&self) -> Result<TestReport> {

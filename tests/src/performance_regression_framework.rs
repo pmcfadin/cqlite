@@ -737,7 +737,8 @@ impl PerformanceRegressionFramework {
     /// Get current memory usage
     async fn get_memory_usage(&self) -> Result<u64> {
         let stats = self.storage_engine.stats().await?;
-        Ok(stats.memtable.size_bytes)
+        // NOTE: MemTable removed in Issue #175, using SSTable size as proxy
+        Ok(stats.sstables.total_size)
     }
 
     /// Get environment information

@@ -1428,8 +1428,7 @@ mod tests {
 
     async fn make_registry(mut reg_config: SchemaRegistryConfig) -> SchemaRegistry {
         reg_config.enable_auto_discovery = false;
-        let mut core_config = Config::default();
-        core_config.storage.wal.enabled = false;
+        let core_config = Config::default();
         let platform = Arc::new(Platform::new(&core_config).await.expect("platform"));
         SchemaRegistry::new(reg_config, platform, core_config)
             .await

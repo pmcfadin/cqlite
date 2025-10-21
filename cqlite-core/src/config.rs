@@ -32,9 +32,6 @@ pub struct StorageConfig {
     /// MemTable size threshold for flushing (default: 16MB)
     pub memtable_size_threshold: u64,
 
-    /// Write-ahead log (WAL) configuration
-    pub wal: WalConfig,
-
     /// Compaction configuration
     pub compaction: CompactionConfig,
 
@@ -62,7 +59,6 @@ impl Default for StorageConfig {
         Self {
             max_sstable_size: 64 * 1024 * 1024,        // 64MB
             memtable_size_threshold: 16 * 1024 * 1024, // 16MB
-            wal: WalConfig::default(),
             compaction: CompactionConfig::default(),
             block_size: 64 * 1024, // 64KB
             compression: CompressionConfig::default(),
@@ -70,33 +66,6 @@ impl Default for StorageConfig {
             bloom_filter_fp_rate: 0.01,
             io_threads: num_cpus::get().min(4),
             sync_mode: SyncMode::Normal,
-        }
-    }
-}
-
-/// Write-ahead log configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalConfig {
-    /// Enable WAL for durability
-    pub enabled: bool,
-
-    /// Maximum WAL file size (default: 32MB)
-    pub max_file_size: u64,
-
-    /// Sync WAL writes to disk
-    pub sync_writes: bool,
-
-    /// WAL sync interval for async writes
-    pub sync_interval: Duration,
-}
-
-impl Default for WalConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_file_size: 32 * 1024 * 1024, // 32MB
-            sync_writes: false,
-            sync_interval: Duration::from_millis(100),
         }
     }
 }

@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::memory::MemoryManager;
-use crate::storage::memtable::MemTable;
+// NOTE: MemTable removed in Issue #175 - this test module is now inactive
+// use crate::storage::memtable::MemTable;
 use crate::types::{TableId, Value};
 use crate::{Config, RowKey};
 
