@@ -58,9 +58,7 @@ pub mod vint;
 pub mod vint_fixed;
 
 // M3 Performance Optimization Modules
-pub mod m3_performance_benchmarks;
 pub mod optimized_complex_types;
-pub mod performance_regression_framework;
 pub mod zero_copy_parser;
 
 // Re-export core trait abstractions
@@ -122,11 +120,7 @@ pub use vint::*;
 
 // Re-export M3 performance modules
 #[cfg(feature = "benchmarks")]
-pub use m3_performance_benchmarks::{M3PerformanceBenchmarks, PerformanceTargets};
-#[cfg(feature = "benchmarks")]
 pub use optimized_complex_types::OptimizedComplexTypeParser;
-#[cfg(feature = "benchmarks")]
-pub use performance_regression_framework::{PerformanceRegressionFramework, RegressionThresholds};
 
 use crate::error::Result;
 use std::sync::Arc;
