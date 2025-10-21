@@ -65,7 +65,7 @@ impl GoldenPathGetTestFixture {
         );
 
         // Verify test data exists
-        if !fs::metadata(&sstable_path).await.is_ok() {
+        if fs::metadata(&sstable_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
@@ -85,7 +85,7 @@ impl GoldenPathGetTestFixture {
             "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
         );
 
-        if !fs::metadata(&actual_path).await.is_ok() {
+        if fs::metadata(&actual_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Schema-aware test SSTable not found: {:?}", actual_path),

@@ -17,7 +17,7 @@ use cqlite_core::{
         TableSchema,
     },
     storage::sstable::reader::SSTableReader,
-    types::{ComparatorType, TableId},
+    types::TableId,
     Config, RowKey,
 };
 

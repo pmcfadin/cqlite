@@ -69,6 +69,7 @@ impl MemTable {
     }
 
     /// Insert a key-value pair
+    #[cfg(feature = "experimental")]
     pub fn put(&mut self, table_id: &TableId, key: RowKey, value: Value) -> Result<()> {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let entry = MemTableEntry::new(Some(value), sequence);
@@ -116,6 +117,7 @@ impl MemTable {
     }
 
     /// Delete a key (insert tombstone)
+    #[cfg(feature = "experimental")]
     pub fn delete(&mut self, table_id: &TableId, key: RowKey) -> Result<()> {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let entry = MemTableEntry::new(None, sequence);
@@ -218,6 +220,7 @@ impl MemTable {
     }
 
     /// Flush all data and return it
+    #[cfg(feature = "experimental")]
     pub fn flush(&mut self) -> Result<Vec<(TableId, RowKey, Value)>> {
         let mut result = Vec::new();
 
@@ -259,6 +262,7 @@ impl MemTable {
     }
 
     /// Estimate the size of a value in bytes
+    #[cfg_attr(not(feature = "experimental"), allow(dead_code))]
     #[allow(clippy::only_used_in_recursion)]
     fn estimate_value_size(&self, value: &Option<Value>) -> usize {
         match value {
@@ -331,6 +335,7 @@ pub struct MemTableStats {
 }
 
 #[cfg(test)]
+#[cfg(feature = "experimental")]
 mod tests {
     use super::*;
     use crate::types::TableId;

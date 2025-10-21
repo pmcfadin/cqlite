@@ -79,13 +79,13 @@ async fn show_database_info(database: &Database) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "state_machine")]
+#[cfg(all(feature = "state_machine", feature = "experimental"))]
 async fn compact_database(database: &Database) -> Result<()> {
     println!("Starting database compaction...");
 
     match database.compact().await {
         Ok(_) => {
-            println!("Database compaction completed successfully");
+            println!("Database compaction successfully");
         }
         Err(e) => {
             println!("Database compaction failed: {}", e);
@@ -94,6 +94,14 @@ async fn compact_database(database: &Database) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(all(feature = "state_machine", not(feature = "experimental")))]
+async fn compact_database(_database: &Database) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Database compaction requires the 'experimental' feature.\n\
+         Build with --features experimental to enable write operations."
+    ))
 }
 
 #[cfg(feature = "state_machine")]

@@ -120,7 +120,11 @@ mod tests {
                 chunk_crcs: vec![],
             };
 
-            let decompressor = ChunkDecompressor::new(compression_info).unwrap();
+            let decompressor = ChunkDecompressor::new(
+                compression_info,
+                cqlite_core::parser::CassandraVersion::V5_0NewBig,
+            )
+            .unwrap();
 
             // Create invalid compressed data that will fail decompression
             let invalid_data = vec![0xFF, 0xFF, 0xFF, 0xFF]; // Invalid for all formats

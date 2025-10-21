@@ -21,7 +21,7 @@ use cqlite_core::{
     platform::Platform,
     schema::{registry::SchemaRegistry, TableSchema},
     storage::sstable::reader::SSTableReader,
-    types::{ComparatorType, TableId},
+    types::TableId,
     Config, RowKey,
 };
 
@@ -101,25 +101,18 @@ impl GoldenPathPartitionTestFixture {
     }
 
     /// Create test schema with partition and clustering keys
+    /// NOTE: This function is currently unused but kept for future use
+    #[allow(dead_code)]
     fn create_test_schema(&self) -> Result<TableSchema> {
-        TableSchema::builder()
-            .table_name("test_table")
-            .keyspace_name("test_keyspace")
-            .partition_key("user_id", ComparatorType::Uuid)
-            .clustering_key("timestamp", ComparatorType::Timestamp)
-            .clustering_key("event_type", ComparatorType::Text)
-            .column("data", ComparatorType::Text)
-            .column(
-                "metadata",
-                ComparatorType::Map(
-                    Box::new(ComparatorType::Text),
-                    Box::new(ComparatorType::Text),
-                ),
-            )
-            .build()
+        // Using from_json since new_for_testing is only available in unit tests
+        TableSchema::from_json(
+            r#"{"keyspace":"test_keyspace","table":"test_table","partition_keys":[{"name":"id","data_type":"int","position":0}],"clustering_keys":[],"columns":[{"name":"id","data_type":"int","nullable":false,"default":null}],"comments":{}}"#,
+        )
     }
 
     /// Generate test partition keys
+    /// NOTE: This function is currently unused but kept for future use
+    #[allow(dead_code)]
     fn create_test_partition_keys(&self) -> Vec<RowKey> {
         (1..=20)
             .map(|i| {
@@ -488,7 +481,7 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
 #[tokio::test]
 async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
     let fixture = GoldenPathPartitionTestFixture::new().await?;
-    let reader = fixture.setup_wide_rows_reader().await?;
+    let reader = Arc::new(fixture.setup_wide_rows_reader().await?);
 
     let table_id = TableId::new("test_keyspace.test_table");
 
@@ -533,7 +526,7 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
     // Benchmark: Concurrent partition lookups
     let concurrent_handles = (1..=10)
         .map(|i| {
-            let reader = reader.clone();
+            let reader = Arc::clone(&reader);
             let table_id = table_id.clone();
             tokio::spawn(async move {
                 let key = RowKey::from(format!("concurrent_partition_{}", i).as_bytes());
@@ -580,7 +573,7 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
     let table_id = TableId::new("test_keyspace.test_table");
 
     // Edge case 1: Empty partition key
-    let empty_partition = RowKey::from(b"");
+    let empty_partition = RowKey::from(&b""[..]);
     let result = reader.get(&table_id, &empty_partition).await?;
     assert!(
         result.is_none(),
@@ -590,7 +583,7 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
     // Edge case 2: Maximum length partition key
     let max_partition = RowKey::from(vec![b'p'; 1024]);
     let start_time = Instant::now();
-    let result = reader.get(&table_id, &max_partition).await?;
+    let _result = reader.get(&table_id, &max_partition).await?;
     let duration = start_time.elapsed();
 
     assert!(
@@ -608,7 +601,7 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
 
     for binary_key in binary_partitions {
         let partition_key = RowKey::from(&binary_key[..]);
-        let result = reader.get(&table_id, &partition_key).await?;
+        let _result = reader.get(&table_id, &partition_key).await?;
         // Should handle binary keys without errors
     }
 
@@ -621,7 +614,7 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
 
     for unicode_partition in unicode_partitions {
         let partition_key = RowKey::from(unicode_partition.as_bytes());
-        let result = reader.get(&table_id, &partition_key).await?;
+        let _result = reader.get(&table_id, &partition_key).await?;
         // Should handle unicode gracefully
     }
 

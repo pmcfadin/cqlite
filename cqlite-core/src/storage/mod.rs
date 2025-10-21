@@ -1,5 +1,6 @@
 //! Storage engine implementation for CQLite
 
+#[cfg(feature = "experimental")]
 pub mod batch_writer;
 pub mod compaction;
 pub mod manifest;
@@ -15,9 +16,11 @@ pub mod sstable_data_manager;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "state_machine")]
 use tokio::sync::RwLock;
 
 use crate::platform::Platform;
+#[cfg(feature = "experimental")]
 use crate::storage::batch_writer::{BatchWriter, BatchWriterBuilder};
 use crate::{types::TableId, Config, Result, RowKey, Value};
 
@@ -25,18 +28,21 @@ use crate::{types::TableId, Config, Result, RowKey, Value};
 #[derive(Debug)]
 pub struct StorageEngine {
     /// In-memory write buffer
+    #[cfg(feature = "experimental")]
     memtable: Arc<RwLock<memtable::MemTable>>,
 
     /// SSTable manager for persistent storage
     sstables: Arc<sstable::SSTableManager>,
 
     /// Write-ahead log for durability
+    #[cfg(feature = "experimental")]
     wal: Arc<wal::WriteAheadLog>,
 
     /// Compaction manager for background maintenance
     compaction: Arc<compaction::CompactionManager>,
 
     /// Manifest for metadata management
+    #[cfg_attr(not(feature = "experimental"), allow(dead_code))]
     manifest: Arc<manifest::Manifest>,
 
     /// Platform abstraction
@@ -44,9 +50,11 @@ pub struct StorageEngine {
     _platform: Arc<Platform>,
 
     /// Storage configuration
+    #[cfg_attr(not(feature = "experimental"), allow(dead_code))]
     config: Config,
 
     /// Batch writer for efficient bulk operations
+    #[cfg(feature = "experimental")]
     batch_writer: Option<BatchWriter>,
 
     /// Schema registry for schema-aware operations (feature-gated)
@@ -85,10 +93,12 @@ impl StorageEngine {
             .await?,
         );
 
-        // Initialize WAL
+        // Initialize WAL (only with experimental feature)
+        #[cfg(feature = "experimental")]
         let wal = Arc::new(wal::WriteAheadLog::open(path, config, platform.clone()).await?);
 
-        // Initialize MemTable
+        // Initialize MemTable (only with experimental feature)
+        #[cfg(feature = "experimental")]
         let memtable = Arc::new(RwLock::new(memtable::MemTable::new(config)?));
 
         // Initialize compaction manager
@@ -96,7 +106,8 @@ impl StorageEngine {
             compaction::CompactionManager::new(sstables.clone(), manifest.clone(), config).await?,
         );
 
-        // Initialize batch writer for efficient bulk operations
+        // Initialize batch writer for efficient bulk operations (only with experimental feature)
+        #[cfg(feature = "experimental")]
         let batch_writer = if config.storage.memtable_size_threshold > 1024 * 1024 {
             // Only for larger configurations
             Some(
@@ -110,13 +121,16 @@ impl StorageEngine {
         };
 
         Ok(Self {
+            #[cfg(feature = "experimental")]
             memtable,
             sstables,
+            #[cfg(feature = "experimental")]
             wal,
             compaction,
             manifest,
             _platform: platform,
             config: config.clone(),
+            #[cfg(feature = "experimental")]
             batch_writer,
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
@@ -191,10 +205,12 @@ impl StorageEngine {
             .await?,
         );
 
-        // Initialize WAL
+        // Initialize WAL (only with experimental feature)
+        #[cfg(feature = "experimental")]
         let wal = Arc::new(wal::WriteAheadLog::open(path, config, platform.clone()).await?);
 
-        // Initialize MemTable
+        // Initialize MemTable (only with experimental feature)
+        #[cfg(feature = "experimental")]
         let memtable = Arc::new(RwLock::new(memtable::MemTable::new(config)?));
 
         // Initialize compaction manager
@@ -202,7 +218,8 @@ impl StorageEngine {
             compaction::CompactionManager::new(sstables.clone(), manifest.clone(), config).await?,
         );
 
-        // Initialize batch writer for efficient bulk operations
+        // Initialize batch writer for efficient bulk operations (only with experimental feature)
+        #[cfg(feature = "experimental")]
         let batch_writer = if config.storage.memtable_size_threshold > 1024 * 1024 {
             // Only for larger configurations
             Some(
@@ -216,13 +233,16 @@ impl StorageEngine {
         };
 
         Ok(Self {
+            #[cfg(feature = "experimental")]
             memtable,
             sstables,
+            #[cfg(feature = "experimental")]
             wal,
             compaction,
             manifest,
             _platform: platform,
             config: config.clone(),
+            #[cfg(feature = "experimental")]
             batch_writer,
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
@@ -230,6 +250,7 @@ impl StorageEngine {
     }
 
     /// Insert a key-value pair
+    #[cfg(feature = "experimental")]
     pub async fn put(&self, table_id: &TableId, key: RowKey, value: Value) -> Result<()> {
         // Write to WAL first for durability
         if self.config.storage.wal.enabled {
@@ -255,7 +276,8 @@ impl StorageEngine {
 
     /// Get a value by key
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
-        // Check MemTable first
+        // Check MemTable first (only with experimental feature)
+        #[cfg(feature = "experimental")]
         {
             let memtable = self.memtable.read().await;
             if let Some(value) = memtable.get(table_id, key)? {
@@ -268,6 +290,7 @@ impl StorageEngine {
     }
 
     /// Delete a key
+    #[cfg(feature = "experimental")]
     pub async fn delete(&self, table_id: &TableId, key: RowKey) -> Result<()> {
         // Write tombstone to WAL
         if self.config.storage.wal.enabled {
@@ -301,9 +324,14 @@ impl StorageEngine {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
+        #[cfg(feature = "experimental")]
         let mut results = Vec::new();
 
-        // Scan MemTable
+        #[cfg(not(feature = "experimental"))]
+        let results = Vec::new();
+
+        // Scan MemTable (only with experimental feature)
+        #[cfg(feature = "experimental")]
         {
             let memtable = self.memtable.read().await;
             let memtable_results = memtable.scan(table_id, start_key, end_key, limit)?;
@@ -323,6 +351,7 @@ impl StorageEngine {
     }
 
     /// Flush MemTable to SSTable
+    #[cfg(feature = "experimental")]
     async fn flush_memtable(&self) -> Result<()> {
         let memtable_data = {
             let mut memtable = self.memtable.write().await;
@@ -348,6 +377,7 @@ impl StorageEngine {
     }
 
     /// Force flush all pending writes
+    #[cfg(feature = "experimental")]
     pub async fn flush(&self) -> Result<()> {
         // Flush MemTable
         self.flush_memtable().await?;
@@ -361,6 +391,7 @@ impl StorageEngine {
     }
 
     /// Perform manual compaction
+    #[cfg(feature = "experimental")]
     pub async fn compact(&self) -> Result<()> {
         // TODO: Implement proper compaction logic
         // This would need to identify candidates and call CompactionManager::run_compaction
@@ -369,31 +400,47 @@ impl StorageEngine {
 
     /// Get storage statistics
     pub async fn stats(&self) -> Result<StorageStats> {
+        #[cfg(feature = "experimental")]
         let memtable_stats = {
             let memtable = self.memtable.read().await;
             memtable.stats()
         };
 
+        #[cfg(not(feature = "experimental"))]
+        let memtable_stats = memtable::MemTableStats {
+            entry_count: 0,
+            size_bytes: 0,
+            table_count: 0,
+            tombstone_count: 0,
+            sequence_number: 0,
+        };
+
         let sstable_stats = self.sstables.stats().await?;
+
+        #[cfg(feature = "experimental")]
         let wal_stats = if self.config.storage.wal.enabled {
             Some(self.wal.stats().await?)
         } else {
             None
         };
-        let compaction_stats = self.compaction.stats().await?;
 
-        let batch_writer_stats = self.batch_writer.as_ref().map(|bw| bw.stats().clone());
+        #[cfg(not(feature = "experimental"))]
+        let wal_stats = None;
+
+        let compaction_stats = self.compaction.stats().await?;
 
         Ok(StorageStats {
             memtable: memtable_stats,
             sstables: sstable_stats,
             wal: wal_stats,
             compaction: compaction_stats,
-            batch_writer: batch_writer_stats,
+            #[cfg(feature = "experimental")]
+            batch_writer: self.batch_writer.as_ref().map(|bw| bw.stats().clone()),
         })
     }
 
     /// Batch write operations for better performance
+    #[cfg(feature = "experimental")]
     pub async fn batch_write(&mut self, operations: Vec<BatchOperation>) -> Result<()> {
         if let Some(ref mut batch_writer) = self.batch_writer {
             for op in operations {
@@ -450,6 +497,7 @@ impl StorageEngine {
     }
 
     /// Explicit batch flush
+    #[cfg(feature = "experimental")]
     pub async fn flush_batch(&mut self) -> Result<()> {
         if let Some(ref mut batch_writer) = self.batch_writer {
             batch_writer.flush().await?;
@@ -458,6 +506,7 @@ impl StorageEngine {
     }
 
     /// Get batch writer statistics
+    #[cfg(feature = "experimental")]
     pub fn batch_stats(&self) -> Option<&crate::storage::batch_writer::BatchStats> {
         self.batch_writer.as_ref().map(|bw| bw.stats())
     }
@@ -470,12 +519,15 @@ impl StorageEngine {
         // Stop compaction first
         self.compaction.shutdown().await?;
 
-        // Flush any remaining data
-        self.flush().await?;
+        // Flush any remaining data (only with experimental feature)
+        #[cfg(feature = "experimental")]
+        {
+            self.flush().await?;
 
-        // Close WAL
-        if self.config.storage.wal.enabled {
-            self.wal.close().await?;
+            // Close WAL
+            if self.config.storage.wal.enabled {
+                self.wal.close().await?;
+            }
         }
 
         Ok(())
@@ -531,6 +583,7 @@ impl StorageEngine {
 }
 
 /// Batch operation types
+#[cfg(feature = "experimental")]
 #[derive(Debug, Clone)]
 pub enum BatchOperation {
     /// Put operation
@@ -565,6 +618,7 @@ pub struct StorageStats {
     pub compaction: compaction::CompactionStats,
 
     /// Batch writer statistics (if enabled)
+    #[cfg(feature = "experimental")]
     pub batch_writer: Option<batch_writer::BatchStats>,
 }
 
@@ -622,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "legacy-heuristics")]
+    #[cfg(all(feature = "legacy-heuristics", feature = "experimental"))]
     async fn test_batch_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
@@ -661,7 +715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "legacy-heuristics")]
+    #[cfg(all(feature = "legacy-heuristics", feature = "experimental"))]
     async fn test_batch_operations_fallback() {
         // Add timeout to prevent hanging in parallel test execution
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
