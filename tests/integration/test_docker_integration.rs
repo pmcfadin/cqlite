@@ -1,6 +1,8 @@
 /// Test file for Docker cqlsh integration
-use cqlite_core::docker::{DockerCqlshClient, DockerContainer};
-use cqlite_core::testing::{CassandraTestRunner, TestSuiteResult};
+#[path = "../helpers/mod.rs"]
+mod helpers;
+
+use helpers::{CassandraTestRunner, CqlshOutput, DockerCqlshClient, TestSuiteResult};
 use std::error::Error;
 
 #[tokio::main]

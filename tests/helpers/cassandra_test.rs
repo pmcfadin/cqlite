@@ -1,5 +1,5 @@
 /// Cassandra testing utilities using Docker cqlsh integration
-use crate::docker::{CqlshOutput, DockerCqlshClient};
+use super::docker::{CqlshOutput, DockerCqlshClient};
 use std::io;
 
 /// Cassandra test runner that uses Docker containers
