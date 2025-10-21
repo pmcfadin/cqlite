@@ -105,7 +105,9 @@ impl GoldenPathPartitionTestFixture {
     #[allow(dead_code)]
     fn create_test_schema(&self) -> Result<TableSchema> {
         // Using from_json since new_for_testing is only available in unit tests
-        TableSchema::from_json(r#"{"keyspace":"test_keyspace","table":"test_table","partition_keys":[{"name":"id","data_type":"int","position":0}],"clustering_keys":[],"columns":[{"name":"id","data_type":"int","nullable":false,"default":null}],"comments":{}}"#)
+        TableSchema::from_json(
+            r#"{"keyspace":"test_keyspace","table":"test_table","partition_keys":[{"name":"id","data_type":"int","position":0}],"clustering_keys":[],"columns":[{"name":"id","data_type":"int","nullable":false,"default":null}],"comments":{}}"#,
+        )
     }
 
     /// Generate test partition keys

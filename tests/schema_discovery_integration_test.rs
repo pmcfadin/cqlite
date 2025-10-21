@@ -388,7 +388,7 @@ mod schema_discovery_tests {
         println!("🔄 Testing full schema discovery workflow...");
 
         // Step 1: Type inference
-        #[allow(clippy::useless_vec)]  // Vec needed for slicing below
+        #[allow(clippy::useless_vec)] // Vec needed for slicing below
         let samples = vec![
             MockValue {
                 variant: "uuid".to_string(),
