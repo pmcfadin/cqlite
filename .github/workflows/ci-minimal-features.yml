@@ -32,8 +32,11 @@ jobs:
       - name: Test with all compression support
         run: |
           # Run all tests except those requiring uncommitted Index.db files
+          # Skip entire test files that need Index.db files not in repo
           cargo test --no-default-features --features=all-compression --quiet \
-            -- --skip test_index_lookup_performance --skip test_promoted_index_wide_partitions
+            -- --skip test_index_lookup_performance \
+               --skip test_promoted_index_wide_partitions \
+               --skip sstabledump_parity_index
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
 

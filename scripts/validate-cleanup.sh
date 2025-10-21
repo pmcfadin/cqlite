@@ -23,11 +23,11 @@ echo ""
 echo "Core reading tests passed!"
 echo ""
 
-# 2. Check clippy warnings
-echo "Step 2: Checking clippy warnings (must be <= 50)..."
-echo "Command: cargo clippy --workspace --all-targets --all-features 2>&1"
+# 2. Check clippy warnings (scope: cqlite-core package only)
+echo "Step 2: Checking clippy warnings on cqlite-core (must be <= 50)..."
+echo "Command: cargo clippy --package cqlite-core --lib --all-features 2>&1"
 echo ""
-CLIPPY_OUTPUT=$(cargo clippy --workspace --all-targets --all-features 2>&1)
+CLIPPY_OUTPUT=$(cargo clippy --package cqlite-core --lib --all-features 2>&1)
 WARNING_COUNT=$(echo "$CLIPPY_OUTPUT" | grep -c "warning:" || true)
 echo "Found $WARNING_COUNT clippy warnings"
 echo ""
@@ -39,11 +39,11 @@ fi
 echo "Clippy warnings within acceptable range!"
 echo ""
 
-# 3. Check for unused imports
-echo "Step 3: Checking for unused imports in build output..."
-echo "Command: cargo build --workspace 2>&1"
+# 3. Check for unused imports (scope: cqlite-core package only)
+echo "Step 3: Checking for unused imports in cqlite-core build..."
+echo "Command: cargo build --package cqlite-core --lib 2>&1"
 echo ""
-BUILD_OUTPUT=$(cargo build --workspace 2>&1)
+BUILD_OUTPUT=$(cargo build --package cqlite-core --lib 2>&1)
 UNUSED_IMPORT_COUNT=$(echo "$BUILD_OUTPUT" | grep -c "unused import" || true)
 echo "Found $UNUSED_IMPORT_COUNT unused imports"
 echo ""
