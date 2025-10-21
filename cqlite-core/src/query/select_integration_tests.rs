@@ -4,6 +4,7 @@
 //! the FIRST EVER direct CQL querying of SSTable files without Cassandra.
 
 #[cfg(test)]
+#[cfg(feature = "experimental")]
 mod tests {
     use crate::{
         query::{parse_select, SelectExecutor, SelectOptimizer, SelectStatement},
@@ -724,6 +725,7 @@ mod tests {
 
 /// Performance benchmarks (for manual testing)
 #[cfg(test)]
+#[cfg(feature = "experimental")]
 mod benchmarks {
     use super::tests::create_test_database;
     #[allow(unused_imports)]

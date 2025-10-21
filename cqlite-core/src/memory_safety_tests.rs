@@ -4,6 +4,8 @@
 //! focusing on detecting memory leaks, buffer overflows, use-after-free bugs, and other
 //! memory-related issues.
 
+#![cfg(feature = "experimental")]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

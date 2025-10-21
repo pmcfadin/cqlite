@@ -720,6 +720,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg(feature = "experimental")]
 mod plan_cache_tests {
     use super::*;
     use crate::{

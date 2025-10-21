@@ -80,7 +80,18 @@ impl QueryExecutor {
             super::planner::PlanType::RangeScan => self.execute_range_scan(plan).await,
             super::planner::PlanType::TableScan => {
                 if has_insert_step {
-                    self.execute_insert_operation(plan).await
+                    #[cfg(feature = "experimental")]
+                    {
+                        self.execute_insert_operation(plan).await
+                    }
+                    #[cfg(not(feature = "experimental"))]
+                    {
+                        Err(Error::UnsupportedFormat(
+                            "INSERT operations require the 'experimental' feature. \
+                             Add 'experimental' to your Cargo.toml features."
+                                .to_string(),
+                        ))
+                    }
                 } else if is_create_table {
                     self.execute_create_table_operation(plan).await
                 } else {
@@ -819,6 +830,7 @@ impl QueryExecutor {
     }
 
     /// Execute INSERT operation
+    #[cfg(feature = "experimental")]
     async fn execute_insert_operation(&self, plan: &QueryPlan) -> Result<QueryResult> {
         // Extract table from plan
         let table_id = plan.table.as_ref().ok_or_else(|| {

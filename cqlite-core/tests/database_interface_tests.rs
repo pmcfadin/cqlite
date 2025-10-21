@@ -18,7 +18,7 @@ use cqlite_core::{Config, Database};
 use tempfile::TempDir;
 
 #[tokio::test]
-#[cfg(feature = "legacy-heuristics")]
+#[cfg(all(feature = "legacy-heuristics", feature = "experimental"))]
 async fn test_database_lifecycle_with_cassandra_tables() {
     let temp_dir = TempDir::new().expect("temp dir");
     let config = Config::default();

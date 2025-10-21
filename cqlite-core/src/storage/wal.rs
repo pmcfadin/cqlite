@@ -58,9 +58,11 @@ pub struct WriteAheadLog {
     platform: Arc<Platform>,
 
     /// Configuration
+    #[cfg_attr(not(feature = "experimental"), allow(dead_code))]
     config: Config,
 
     /// Operation timeout
+    #[cfg_attr(not(feature = "experimental"), allow(dead_code))]
     operation_timeout: Duration,
 }
 
@@ -96,6 +98,7 @@ impl WriteAheadLog {
     }
 
     /// Append a put entry to the WAL
+    #[cfg(feature = "experimental")]
     pub async fn append(&self, table_id: &TableId, key: &RowKey, value: &Value) -> Result<()> {
         let timestamp = self.platform.time().now_micros();
 
@@ -110,6 +113,7 @@ impl WriteAheadLog {
     }
 
     /// Append a delete entry (tombstone) to the WAL
+    #[cfg(feature = "experimental")]
     pub async fn append_tombstone(&self, table_id: &TableId, key: &RowKey) -> Result<()> {
         let timestamp = self.platform.time().now_micros();
 
@@ -123,6 +127,7 @@ impl WriteAheadLog {
     }
 
     /// Write a checkpoint marker
+    #[cfg(feature = "experimental")]
     pub async fn checkpoint(&self) -> Result<()> {
         let timestamp = self.platform.time().now_micros();
 
@@ -132,6 +137,7 @@ impl WriteAheadLog {
     }
 
     /// Write an entry to the WAL with timeout protection
+    #[cfg_attr(not(feature = "experimental"), allow(dead_code))]
     async fn write_entry(&self, entry: &WalEntry) -> Result<()> {
         let serialized =
             bincode::serialize(entry).map_err(|e| Error::serialization(e.to_string()))?;
@@ -180,6 +186,7 @@ impl WriteAheadLog {
     }
 
     /// Flush all pending writes to disk
+    #[cfg(feature = "experimental")]
     pub async fn flush(&self) -> Result<()> {
         let result = timeout(self.operation_timeout, async {
             let state = self.state.lock().await;
@@ -275,7 +282,14 @@ impl WriteAheadLog {
 
     /// Close the WAL
     pub async fn close(&self) -> Result<()> {
-        self.flush().await
+        #[cfg(feature = "experimental")]
+        {
+            self.flush().await
+        }
+        #[cfg(not(feature = "experimental"))]
+        {
+            Ok(())
+        }
     }
 
     /// Rotate the WAL file (create a new one)
@@ -308,6 +322,7 @@ pub struct WalStats {
 }
 
 #[cfg(test)]
+#[cfg(feature = "experimental")]
 mod tests {
     use super::*;
     use crate::types::TableId;

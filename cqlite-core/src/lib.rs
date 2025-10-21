@@ -350,11 +350,13 @@ impl Database {
     }
 
     /// Flush all pending writes to disk
+    #[cfg(feature = "experimental")]
     pub async fn flush(&self) -> Result<()> {
         self.storage.flush().await
     }
 
     /// Perform manual compaction of storage files
+    #[cfg(feature = "experimental")]
     pub async fn compact(&self) -> Result<()> {
         self.storage.compact().await
     }
@@ -367,8 +369,11 @@ impl Database {
         // Stop background tasks
         self.storage.shutdown().await?;
 
-        // Flush any remaining data
-        self.storage.flush().await?;
+        // Flush any remaining data (only with experimental feature)
+        #[cfg(feature = "experimental")]
+        {
+            self.storage.flush().await?;
+        }
 
         Ok(())
     }
@@ -475,7 +480,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(all(feature = "legacy-heuristics", feature = "state_machine"))]
+    #[cfg(all(
+        feature = "legacy-heuristics",
+        feature = "state_machine",
+        feature = "experimental"
+    ))]
     async fn test_database_basic_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::test_config();
