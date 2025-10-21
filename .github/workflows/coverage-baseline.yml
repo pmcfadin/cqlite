@@ -27,7 +27,9 @@ jobs:
           # Run coverage on cqlite-core lib only (integration tests timeout)
           # This measures coverage of the core library code which is the cleanup scope
           # --fail-under 0 disables tarpaulin's threshold (we use bash script check instead)
-          cargo tarpaulin --package cqlite-core --lib --out Xml --timeout 120 --fail-under 0
+          # --ignore-config prevents tarpaulin.toml from overriding output location
+          # --output-dir . ensures cobertura.xml is created in workspace root
+          cargo tarpaulin --package cqlite-core --lib --out Xml --timeout 120 --fail-under 0 --ignore-config --output-dir .
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
 
