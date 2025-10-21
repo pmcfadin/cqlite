@@ -55,7 +55,8 @@
       "Bash(do echo \"=== $file ===\")",
       "Bash(xxd:*)",
       "Bash(bash:*)",
-      "Bash(gh issue comment:*)"
+      "Bash(gh issue comment:*)",
+      "Bash(./scripts/validate-cleanup.sh:*)"
     ],
     "deny": [],
     "ask": []
