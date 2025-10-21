@@ -50,7 +50,9 @@ pub use crate::{
     types::*,
 };
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "state_machine")]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{memory::MemoryManager, storage::StorageEngine};
@@ -93,7 +95,7 @@ impl Database {
     ///
     /// ```rust,no_run
     /// use cqlite_core::{Database, Config};
-    /// use std::path::Path;
+    /// use std::path::{Path, PathBuf};
     ///
     /// # tokio_test::block_on(async {
     /// let config = Config::default();
@@ -290,7 +292,7 @@ impl Database {
     ///
     /// ```rust,no_run
     /// # use cqlite_core::{Database, Config};
-    /// # use std::path::Path;
+    /// # use std::path::{Path, PathBuf};
     /// # tokio_test::block_on(async {
     /// # let config = Config::default();
     /// # let db = Database::open(Path::new("./data"), config).await?;

@@ -120,4 +120,21 @@ jobs:
           path: test-data/scripts/smoke-test-results/
           retention-days: 7
 
+  cleanup-validation:
+    name: Cleanup Safety Validation
+    runs-on: ubuntu-latest
+    if: contains(github.head_ref, 'cleanup/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run validation script
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        run: ./scripts/validate-cleanup.sh
+
 

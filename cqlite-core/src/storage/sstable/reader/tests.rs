@@ -186,7 +186,6 @@ mod tests {
         use std::collections::HashMap;
         use std::path::Path;
         use std::sync::Arc;
-        use tokio::sync::RwLock;
 
         // Path to test_basic.simple_table SSTable (V5CompressedLegacy format)
         let test_dir = match std::env::var("CQLITE_DATASETS_ROOT") {
@@ -344,14 +343,22 @@ mod tests {
             .register_schema(schema, SchemaSource::Manual)
             .await?;
 
-        let registry = Arc::new(RwLock::new(registry_instance));
+        // With state_machine feature, set_schema_registry expects Arc<RwLock<SchemaRegistry>>
+        // Without state_machine, it expects Arc<SchemaRegistry>
+        #[cfg(feature = "state_machine")]
+        let registry = {
+            use tokio::sync::RwLock;
+            Arc::new(RwLock::new(registry_instance))
+        };
+        #[cfg(not(feature = "state_machine"))]
+        let registry = Arc::new(registry_instance);
 
         // Open the SSTable
         eprintln!("Opening SSTable at {:?}", data_file);
         let mut reader = SSTableReader::open(&data_file, &config, platform.clone()).await?;
 
         // Register schema registry with reader so it can look up schema during parsing
-        reader.set_schema_registry(registry);
+        reader.set_schema_registry(registry.clone());
 
         // Verify it's V5CompressedLegacy format
         let data_format = reader.header.cassandra_version.data_format();

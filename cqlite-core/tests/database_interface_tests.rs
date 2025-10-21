@@ -6,8 +6,11 @@
 //! - Database lifecycle management
 //! - Error handling and recovery
 //!
-//! Note: These tests require the legacy-heuristics feature to handle
-//! SSTable files generated during testing.
+//! Note: These tests require the state_machine feature for query execution
+//! and legacy-heuristics feature to handle SSTable files generated during testing.
+
+// All tests in this file require state_machine feature for Database.execute()
+#![cfg(feature = "state_machine")]
 
 #[cfg(feature = "legacy-heuristics")]
 use cqlite_core::Value;

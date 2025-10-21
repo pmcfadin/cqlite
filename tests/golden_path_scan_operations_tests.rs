@@ -20,7 +20,7 @@ use std::time::Instant;
 use cqlite_core::{
     error::{Error, Result},
     platform::Platform,
-    schema::registry::SchemaRegistry,
+    schema::registry::{SchemaRegistry, SchemaRegistryConfig},
     storage::sstable::{
         reader::SSTableReader,
         // streaming_reader::StreamingReader, // Not exported
@@ -49,7 +49,14 @@ impl GoldenPathScanTestFixture {
     pub async fn new() -> Result<Self> {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let schema_registry = Arc::new(SchemaRegistry::new());
+        let schema_registry = Arc::new(
+            SchemaRegistry::new(
+                SchemaRegistryConfig::default(),
+                platform.clone(),
+                config.clone(),
+            )
+            .await?,
+        );
 
         let datasets_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/datasets/sstables");
