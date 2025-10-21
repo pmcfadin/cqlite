@@ -14,7 +14,6 @@ pub mod version_hints;
 
 pub mod benchmarks;
 pub mod memory;
-pub mod performance_monitor;
 pub mod platform;
 #[cfg(feature = "state_machine")]
 pub mod query;
