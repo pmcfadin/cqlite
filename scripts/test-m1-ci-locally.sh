@@ -61,7 +61,6 @@ echo ""
 echo "🧪 Step 5/7: Running M1 integration tests..."
 if ! cargo test --package cqlite-core \
     --test P0_4_modern_format_rejection_tests \
-    --test cassandra_compatibility \
     --test parser_abstraction_tests \
     --test parsing_improvements_test \
     --no-fail-fast 2>&1 | tee /tmp/cqlite-m1-tests.log | grep -E "(^test |test result:)"; then

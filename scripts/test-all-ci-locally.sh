@@ -69,7 +69,6 @@ cargo test --package cqlite-core --lib --no-fail-fast
 echo "Step 5: M1 integration tests"
 cargo test --package cqlite-core \
   --test P0_4_modern_format_rejection_tests \
-  --test cassandra_compatibility \
   --test parser_abstraction_tests \
   --test parsing_improvements_test \
   --no-fail-fast

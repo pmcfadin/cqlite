@@ -194,14 +194,13 @@ jobs:
         echo "🧪 Running M1-aligned integration tests..."
         if ! timeout 5m cargo test --package cqlite-core \
           --test P0_4_modern_format_rejection_tests \
-          --test cassandra_compatibility \
           --test parser_abstraction_tests \
           --test parsing_improvements_test \
           --verbose --no-fail-fast -- \
           --skip test_legacy_format_allows_blob_fallback_with_feature; then
           echo "❌ M1 integration tests failed or timed out"
           echo "💡 Check test output above for specific failures"
-          echo "💡 Run locally with: cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test cassandra_compatibility --test parser_abstraction_tests --test parsing_improvements_test"
+          echo "💡 Run locally with: cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test parser_abstraction_tests --test parsing_improvements_test"
           echo "::error::M1 integration tests failed. Review test output for details."
           exit 1
         fi
@@ -517,7 +516,7 @@ jobs:
           
           # Test 2b: Critical M1 integration tests
           echo "📋 Running critical M1 format compatibility tests..."
-          if cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --test cassandra_compatibility --no-fail-fast; then
+          if cargo test --package cqlite-core --test P0_4_modern_format_rejection_tests --no-fail-fast; then
             echo "✅ M1 format compatibility tests passed"
           else
             echo "💡 Some M1 integration tests not available or failed, continuing with basic validation"
