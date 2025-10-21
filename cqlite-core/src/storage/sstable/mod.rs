@@ -27,8 +27,6 @@ pub mod streaming_reader;
 #[cfg(feature = "tombstones")]
 pub mod tombstone_merger;
 pub mod validation;
-#[cfg(feature = "experimental")]
-pub mod writer;
 
 // Test modules
 #[cfg(test)]
@@ -447,42 +445,17 @@ impl SSTableManager {
     }
 
     /// Create a new SSTable from MemTable data
+    ///
+    /// NOTE: SSTable writing removed in Issue #176 (writer.rs deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
     #[cfg(feature = "experimental")]
     pub async fn create_from_memtable(
         &self,
-        data: Vec<(TableId, RowKey, Value)>,
+        _data: Vec<(TableId, RowKey, Value)>,
     ) -> Result<SSTableId> {
-        let sstable_id = SSTableId::new();
-        let file_path = self.base_path.join(sstable_id.filename());
-
-        // Create SSTable writer
-        let mut writer =
-            writer::SSTableWriter::create(&file_path, &self.config, self.platform.clone()).await?;
-
-        // Sort data by table and key
-        let mut sorted_data = data;
-        sorted_data.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-
-        // Write data to SSTable
-        for (table_id, key, value) in sorted_data {
-            writer.add_entry(&table_id, key, value).await?;
-        }
-
-        // Finalize the SSTable
-        writer.finish().await?;
-
-        // Create reader for the new SSTable
-        let reader = Arc::new(
-            reader::SSTableReader::open(&file_path, &self.config, self.platform.clone()).await?,
-        );
-
-        // Add to active readers
-        {
-            let mut readers = self.readers.write().await;
-            readers.insert(sstable_id.clone(), reader);
-        }
-
-        Ok(sstable_id)
+        Err(crate::error::Error::unsupported_format(
+            "SSTable writing removed in Issue #176 - writer.rs deleted",
+        ))
     }
 
     #[cfg(not(feature = "experimental"))]
@@ -776,70 +749,18 @@ impl SSTableManager {
     }
 
     /// Merge multiple SSTables into a new one
+    ///
+    /// NOTE: SSTable writing removed in Issue #176 (writer.rs deleted).
+    /// This method is feature-gated behind 'experimental' but currently unimplemented.
     #[cfg(feature = "experimental")]
     pub async fn merge_sstables(
         &self,
-        source_ids: Vec<SSTableId>,
-        target_id: SSTableId,
+        _source_ids: Vec<SSTableId>,
+        _target_id: SSTableId,
     ) -> Result<()> {
-        let file_path = self.base_path.join(target_id.filename());
-
-        // Create new SSTable writer
-        let mut writer =
-            writer::SSTableWriter::create(&file_path, &self.config, self.platform.clone()).await?;
-
-        // Collect all data from source SSTables
-        let mut all_data = Vec::new();
-        {
-            let readers = self.readers.read().await;
-            for source_id in &source_ids {
-                if let Some(reader) = readers.get(source_id) {
-                    let data = reader.get_all_entries().await?;
-                    all_data.extend(data);
-                }
-            }
-        }
-
-        // Sort merged data
-        all_data.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-
-        // Remove duplicates (keep latest value for each key)
-        all_data.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-
-        // Write merged data
-        for (table_id, key, value) in all_data {
-            writer.add_entry(&table_id, key, value).await?;
-        }
-
-        writer.finish().await?;
-
-        // Create reader for merged SSTable
-        let reader = Arc::new(
-            reader::SSTableReader::open(&file_path, &self.config, self.platform.clone()).await?,
-        );
-
-        // Update readers map
-        {
-            let mut readers = self.readers.write().await;
-
-            // Remove source SSTables
-            for source_id in &source_ids {
-                readers.remove(source_id);
-            }
-
-            // Add merged SSTable
-            readers.insert(target_id, reader);
-        }
-
-        // Delete source files
-        for source_id in &source_ids {
-            let source_path = self.base_path.join(source_id.filename());
-            if self.platform.fs().exists(&source_path).await? {
-                self.platform.fs().remove_file(&source_path).await?;
-            }
-        }
-
-        Ok(())
+        Err(crate::error::Error::unsupported_format(
+            "SSTable merging removed in Issue #176 - writer.rs deleted",
+        ))
     }
 
     #[cfg(not(feature = "experimental"))]

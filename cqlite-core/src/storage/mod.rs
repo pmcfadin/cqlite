@@ -1,7 +1,5 @@
 //! Storage engine implementation for CQLite
 
-pub mod compaction;
-pub mod manifest;
 pub mod sstable;
 
 // REPL data access components
@@ -19,25 +17,19 @@ use crate::platform::Platform;
 use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// Main storage engine that coordinates all storage components
+///
+/// NOTE: Issue #176 removed write infrastructure (compaction, manifest).
+/// This is now a read-only storage layer focused on SSTable access.
 #[derive(Debug)]
 pub struct StorageEngine {
     /// SSTable manager for persistent storage
     sstables: Arc<sstable::SSTableManager>,
-
-    /// Compaction manager for background maintenance
-    compaction: Arc<compaction::CompactionManager>,
-
-    /// Manifest for metadata management
-    /// NOTE: Unused after Issue #175 (WAL/MemTable removed) but kept for future write support
-    #[allow(dead_code)]
-    manifest: Arc<manifest::Manifest>,
 
     /// Platform abstraction
     #[allow(dead_code)]
     _platform: Arc<Platform>,
 
     /// Storage configuration
-    /// NOTE: Unused after Issue #175 (WAL/MemTable removed) but kept for future write support
     #[allow(dead_code)]
     config: Config,
 
@@ -51,6 +43,9 @@ impl StorageEngine {
     ///
     /// This method discovers SSTables by scanning the storage directory.
     /// For pre-discovered SSTables, use `open_with_sstables` instead.
+    ///
+    /// NOTE: Issue #176 removed write infrastructure (compaction, manifest).
+    /// This is now a read-only storage layer focused on SSTable access.
     pub async fn open(
         path: &Path,
         config: &Config,
@@ -61,9 +56,6 @@ impl StorageEngine {
     ) -> Result<Self> {
         // Create storage directory if it doesn't exist
         platform.fs().create_dir_all(path).await?;
-
-        // Initialize manifest first
-        let manifest = Arc::new(manifest::Manifest::open(path, config).await?);
 
         // Initialize SSTable manager with schema registry
         let sstables = Arc::new(
@@ -77,15 +69,8 @@ impl StorageEngine {
             .await?,
         );
 
-        // Initialize compaction manager
-        let compaction = Arc::new(
-            compaction::CompactionManager::new(sstables.clone(), manifest.clone(), config).await?,
-        );
-
         Ok(Self {
             sstables,
-            compaction,
-            manifest,
             _platform: platform,
             config: config.clone(),
             #[cfg(feature = "state_machine")]
@@ -145,9 +130,6 @@ impl StorageEngine {
         // Create storage directory if it doesn't exist
         platform.fs().create_dir_all(path).await?;
 
-        // Initialize manifest first
-        let manifest = Arc::new(manifest::Manifest::open(path, config).await?);
-
         // Initialize SSTable manager with pre-discovered paths and schema registry
         let sstables = Arc::new(
             sstable::SSTableManager::new_from_discovered_paths(
@@ -161,15 +143,8 @@ impl StorageEngine {
             .await?,
         );
 
-        // Initialize compaction manager
-        let compaction = Arc::new(
-            compaction::CompactionManager::new(sstables.clone(), manifest.clone(), config).await?,
-        );
-
         Ok(Self {
             sstables,
-            compaction,
-            manifest,
             _platform: platform,
             config: config.clone(),
             #[cfg(feature = "state_machine")]
@@ -261,13 +236,13 @@ impl StorageEngine {
     }
 
     /// Get storage statistics
+    ///
+    /// NOTE: Issue #176 removed compaction stats (compaction.rs deleted).
     pub async fn stats(&self) -> Result<StorageStats> {
         let sstable_stats = self.sstables.stats().await?;
-        let compaction_stats = self.compaction.stats().await?;
 
         Ok(StorageStats {
             sstables: sstable_stats,
-            compaction: compaction_stats,
         })
     }
 
@@ -303,13 +278,11 @@ impl StorageEngine {
     }
 
     /// Shutdown the storage engine
+    ///
+    /// NOTE: Issue #176 removed compaction shutdown (compaction.rs deleted).
+    /// Issue #175 removed flush operations (WAL/MemTable deleted).
     pub async fn shutdown(&self) -> Result<()> {
-        // Stop compaction first
-        self.compaction.shutdown().await?;
-
-        // NOTE: Flush removed in Issue #175 - no write infrastructure to flush
-        // Previously would flush WAL and MemTable, but those are now deleted
-
+        // Nothing to shutdown - read-only storage layer
         Ok(())
     }
 
@@ -354,13 +327,12 @@ pub enum BatchOperation {
 }
 
 /// Storage engine statistics
+///
+/// NOTE: Issue #176 removed compaction statistics (compaction.rs deleted).
 #[derive(Debug, Clone)]
 pub struct StorageStats {
     /// SSTable statistics
     pub sstables: sstable::SSTableStats,
-
-    /// Compaction statistics
-    pub compaction: compaction::CompactionStats,
 }
 
 #[cfg(test)]
