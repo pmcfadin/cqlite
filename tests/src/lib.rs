@@ -54,14 +54,6 @@ pub mod performance_monitor;
 /// Comprehensive parser validation tests against real Cassandra 5+ data
 pub mod parser_validation;
 
-pub mod bti_comprehensive_validation;
-pub mod bti_encoder_tests;
-pub mod bti_integration_tests;
-pub mod bti_tdd_tests;
-pub mod bti_test_data;
-/// BTI (Big Trie Index) format validation tests for Cassandra 5.0+
-pub mod bti_validation;
-
 /// Comprehensive SSTable test suite for Issue #17
 pub mod comprehensive_sstable_test_suite;
 
@@ -169,16 +161,6 @@ pub use performance_complex_types_benchmark::{
 pub use real_cassandra_data_validator::{
     RealCassandraDataValidator, RealDataValidationConfig, RealDataValidationResults,
 };
-
-// Re-export BTI validation components for Issue #36 (temporarily disabled for Issue #35 compilation)
-// pub use bti_validation::{
-//     BtiValidationSuite, BtiValidationConfig, BtiTestDataset, BtiTestValue,
-//     BtiDatasetValidationResult, ValidationStatus, TrieTraversalResult,
-//     RowsDecodingResult, ByteComparableValidationResult, BtiPerformanceMetrics,
-// };
-// pub use bti_comprehensive_validation::{
-//     BtiComprehensiveValidator, BtiValidationConfig as ComprehensiveBtiValidationConfig,
-// };
 
 // New comprehensive integration test suite
 pub mod comprehensive_integration_test_suite;
