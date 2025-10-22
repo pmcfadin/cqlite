@@ -300,8 +300,18 @@ async fn test_golden_path_summary_index_range_efficiency() -> Result<()> {
 
     // Test: Range scans leveraging summary and index for efficiency
     let range_tests = vec![
-        ("small_range", b"range_a" as &[u8], b"range_b" as &[u8], Some(10)),
-        ("medium_range", b"range_a" as &[u8], b"range_z" as &[u8], Some(50)),
+        (
+            "small_range",
+            b"range_a" as &[u8],
+            b"range_b" as &[u8],
+            Some(10),
+        ),
+        (
+            "medium_range",
+            b"range_a" as &[u8],
+            b"range_z" as &[u8],
+            Some(50),
+        ),
         ("large_range", b"a" as &[u8], b"z" as &[u8], Some(100)),
     ];
 

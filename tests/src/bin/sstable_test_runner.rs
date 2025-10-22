@@ -46,7 +46,9 @@ async fn run_tests() -> Result<()> {
             #[cfg(not(feature = "sstable-writer"))]
             {
                 println!("🔍 Validation tests (Skipped - sstable-writer feature disabled)");
-                println!("ℹ️  Validation tests require SSTableWriter which was removed in Issue #176");
+                println!(
+                    "ℹ️  Validation tests require SSTableWriter which was removed in Issue #176"
+                );
             }
         }
         Some("benchmark") => {
