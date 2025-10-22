@@ -110,7 +110,7 @@ mod tests {
             ("DeflateCompressor", "Deflate decompression failed"),
         ];
 
-        for (algorithm, expected_error) in test_cases {
+        for (algorithm, _expected_error) in test_cases {
             let compression_info = CompressionInfo {
                 algorithm: algorithm.to_string(),
                 chunk_length: 16384,
@@ -120,7 +120,7 @@ mod tests {
                 chunk_crcs: vec![],
             };
 
-            let decompressor = ChunkDecompressor::new(
+            let mut decompressor = ChunkDecompressor::new(
                 compression_info,
                 cqlite_core::parser::CassandraVersion::V5_0NewBig,
             )

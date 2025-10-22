@@ -1,4 +1,5 @@
 //! Test script to demonstrate Cassandra compatibility improvements
+#![cfg(feature = "experimental")]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use tempfile::TempDir;
 
 use cqlite_core::{Config, Result, RowKey, Value};
 use cqlite_core::platform::Platform;
+#[cfg(feature = "experimental")]
 use cqlite_core::storage::sstable::writer::SSTableWriter;
 use cqlite_core::storage::sstable::validation::CassandraValidationFramework;
 use cqlite_core::types::TableId;

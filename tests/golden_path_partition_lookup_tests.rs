@@ -36,6 +36,7 @@ pub struct GoldenPathPartitionTestFixture {
     /// Configuration
     config: Config,
     /// Schema registry
+    #[allow(dead_code)]
     schema_registry: Arc<SchemaRegistry>,
 }
 
@@ -71,7 +72,7 @@ impl GoldenPathPartitionTestFixture {
             "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
         );
 
-        if !fs::metadata(&fallback_path).await.is_ok() {
+        if fs::metadata(&fallback_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
@@ -90,7 +91,7 @@ impl GoldenPathPartitionTestFixture {
             "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
         );
 
-        if !fs::metadata(&fallback_path).await.is_ok() {
+        if fs::metadata(&fallback_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Test SSTable not found: {:?}", fallback_path),

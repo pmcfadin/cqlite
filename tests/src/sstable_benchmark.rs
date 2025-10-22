@@ -1,4 +1,5 @@
 #![cfg(feature = "benchmarks")]
+#![cfg(feature = "experimental")]
 
 //! SSTable performance benchmark suite
 //! Tests write/read performance, compression efficiency, and scalability

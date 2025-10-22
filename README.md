@@ -32,6 +32,36 @@ cargo build --release
 ./target/release/cqlite parse my-table-data.db
 ```
 
+## Feature Flags
+
+CQLite uses Cargo feature flags to control optional functionality:
+
+### Default Features (M1/M2 Scope)
+- `all-compression` - All compression codecs (LZ4, Snappy, Deflate, Zstd)
+- `state_machine` - Query engine (M2 CLI)
+
+### Optional Features
+- `experimental` - Write support (M5, unstable)
+- `benchmarks` - Performance benchmarks
+- `tombstones` - Tombstone merging (M3+)
+- `metrics` - Performance monitoring and telemetry
+
+### Building with Custom Features
+
+```bash
+# Default build (M1/M2 features only)
+cargo build
+
+# Build with experimental write support
+cargo build --features experimental
+
+# Build with metrics enabled
+cargo build --features metrics
+
+# Minimal build (no compression)
+cargo build --no-default-features
+```
+
 ## Features (Planned)
 
 ### ✅ Current (Alpha)

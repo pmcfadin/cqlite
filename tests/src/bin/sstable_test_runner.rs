@@ -10,12 +10,12 @@ use std::process;
 use cqlite_core::Result;
 
 // Import our test modules
-use cqlite_tests::{
-    format_verifier::{verify_sstable_format, SSTableFormatVerifier},
-    sstable_validator::{run_validation, SSTableValidator},
-};
+use cqlite_tests::format_verifier::{verify_sstable_format, SSTableFormatVerifier};
 
-#[cfg(feature = "benchmarks")]
+#[cfg(feature = "sstable-writer")]
+use cqlite_tests::sstable_validator::{run_validation, SSTableValidator};
+
+#[cfg(all(feature = "benchmarks", feature = "sstable-writer"))]
 use cqlite_tests::sstable_benchmark::{
     run_comprehensive_benchmark, BenchmarkConfig, SSTableBenchmark,
 };
@@ -38,8 +38,16 @@ async fn run_tests() -> Result<()> {
 
     match args.get(1).map(|s| s.as_str()) {
         Some("validate") => {
-            println!("🔍 Running validation tests...");
-            run_validation().await?;
+            #[cfg(feature = "sstable-writer")]
+            {
+                println!("🔍 Running validation tests...");
+                run_validation().await?;
+            }
+            #[cfg(not(feature = "sstable-writer"))]
+            {
+                println!("🔍 Validation tests (Skipped - sstable-writer feature disabled)");
+                println!("ℹ️  Validation tests require SSTableWriter which was removed in Issue #176");
+            }
         }
         Some("benchmark") => {
             #[cfg(feature = "benchmarks")]
@@ -87,6 +95,7 @@ async fn run_comprehensive_tests() -> Result<()> {
     // 1. Run validation tests
     println!("📋 Step 1: SSTable Validation Tests");
     println!("===================================");
+    #[cfg(feature = "sstable-writer")]
     match run_validation().await {
         Ok(_) => println!("✅ Validation tests passed!"),
         Err(e) => {
@@ -94,6 +103,8 @@ async fn run_comprehensive_tests() -> Result<()> {
             all_passed = false;
         }
     }
+    #[cfg(not(feature = "sstable-writer"))]
+    println!("⚠️  Validation tests skipped (sstable-writer feature disabled)");
     println!();
 
     // 2. Run format verification on test files

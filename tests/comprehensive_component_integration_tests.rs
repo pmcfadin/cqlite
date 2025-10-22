@@ -34,6 +34,7 @@ pub struct ComponentIntegrationTestFixture {
     /// Configuration
     config: Config,
     /// Schema registry
+    #[allow(dead_code)]
     schema_registry: Arc<SchemaRegistry>,
 }
 
@@ -63,7 +64,7 @@ impl ComponentIntegrationTestFixture {
     async fn setup_minimal_fixture_reader(&self) -> Result<SSTableReader> {
         let data_file = self.fixtures_path.join("Data.db");
 
-        if !fs::metadata(&data_file).await.is_ok() {
+        if fs::metadata(&data_file).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
@@ -82,7 +83,7 @@ impl ComponentIntegrationTestFixture {
             "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
         );
 
-        if !fs::metadata(&fallback_path).await.is_ok() {
+        if fs::metadata(&fallback_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
@@ -96,6 +97,7 @@ impl ComponentIntegrationTestFixture {
     }
 
     /// Verify all fixture components exist
+    #[allow(dead_code)]
     async fn verify_fixture_components(&self) -> Result<Vec<PathBuf>> {
         let components = vec![
             "Data.db",
@@ -125,6 +127,7 @@ impl ComponentIntegrationTestFixture {
     }
 
     /// Create test table schema
+    #[allow(dead_code)]
     fn create_test_schema(&self) -> Result<TableSchema> {
         use cqlite_core::schema::{Column, KeyColumn};
 
@@ -207,7 +210,7 @@ async fn test_partition_lookup_component_integration() -> Result<()> {
     let table_id = TableId::new("test_keyspace.test_table");
 
     // Test 1: Basic partition lookup with component integration
-    let test_keys = vec![
+    let test_keys = [
         RowKey::from(&1i32.to_be_bytes()[..]), // Integer key 1 (from fixture)
         RowKey::from(b"test_partition_key".as_slice()),
         RowKey::from(b"non_existent_key".as_slice()),
@@ -233,7 +236,7 @@ async fn test_partition_lookup_component_integration() -> Result<()> {
                 assert!(!value.is_empty(), "Value should not be empty");
 
                 // For minimal fixture, expect "test" value
-                if value.len() == 4 && value.as_bytes().map_or(false, |b| b == b"test") {
+                if value.len() == 4 && value.as_bytes().is_some_and(|b| b == b"test") {
                     println!(
                         "    📋 Found expected fixture value: {:?}",
                         value
@@ -413,7 +416,7 @@ async fn test_decompression_component_integration() -> Result<()> {
         total_value_size += value.len();
 
         // Additional validation for specific known data
-        if value.len() == 4 && value.as_bytes().map_or(false, |b| b == b"test") {
+        if value.len() == 4 && value.as_bytes().is_some_and(|b| b == b"test") {
             println!("  📋 Found expected test value");
         }
     }
@@ -491,8 +494,8 @@ async fn test_end_to_end_component_integration() -> Result<()> {
                 let _results = reader.scan(&table_id, None, None, Some(5), None).await?;
             }
             ("lookup", "batch") => {
-                for i in 1..=5 {
-                    let key = RowKey::from(&(i as i32).to_be_bytes()[..]);
+                for i in 1i32..=5 {
+                    let key = RowKey::from(&i.to_be_bytes()[..]);
                     let _result = reader.get(&table_id, &key).await?;
                 }
             }

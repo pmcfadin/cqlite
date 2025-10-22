@@ -404,7 +404,7 @@ mod schema_discovery_tests {
             },
         ];
 
-        let inferred_types = vec![
+        let inferred_types = [
             type_engine.infer_column_type(&samples[0..1]).await.unwrap(),
             type_engine.infer_column_type(&samples[1..2]).await.unwrap(),
             type_engine.infer_column_type(&samples[2..3]).await.unwrap(),
