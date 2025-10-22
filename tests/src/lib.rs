@@ -18,15 +18,9 @@ pub mod sstable_format_tests;
 pub mod type_system_tests;
 
 // SSTable validation and testing modules
-// Note: complex_data_test, sstable_benchmark, and sstable_validator depend on SSTableWriter
-// which was removed in Issue #176. Disabled until SSTable writing is re-implemented.
-#[cfg(feature = "sstable-writer")]
-pub mod complex_data_test;
+// Note: complex_data_test, sstable_benchmark, and sstable_validator were removed in Issue #176
+// as they depended on SSTableWriter which is no longer available.
 pub mod format_verifier;
-#[cfg(all(feature = "benchmarks", feature = "sstable-writer"))]
-pub mod sstable_benchmark;
-#[cfg(feature = "sstable-writer")]
-pub mod sstable_validator;
 
 // Advanced Performance Testing Modules
 #[cfg(feature = "benchmarks")]
@@ -203,16 +197,7 @@ pub use integration_test_harness::{
 };
 
 // Re-export SSTable validation components
-#[cfg(feature = "sstable-writer")]
-pub use complex_data_test::{run_complex_data_tests, ComplexDataTestResults, ComplexDataTestSuite};
 pub use format_verifier::{verify_sstable_format, FormatVerificationResult, SSTableFormatVerifier};
-#[cfg(all(feature = "benchmarks", feature = "sstable-writer"))]
-pub use sstable_benchmark::{
-    run_comprehensive_benchmark, BenchmarkConfig as SSTableBenchmarkConfig, BenchmarkResults,
-    SSTableBenchmark,
-};
-#[cfg(feature = "sstable-writer")]
-pub use sstable_validator::{run_validation, SSTableValidator};
 
 // Minimal smoke tests for baseline
 #[cfg(test)]

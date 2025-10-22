@@ -113,6 +113,7 @@ impl StorageEngine {
     ///     discovered_table_dirs,
     ///     &config,
     ///     platform,
+    ///     #[cfg(feature = "state_machine")]
     ///     None,
     /// ).await?;
     /// # Ok(())

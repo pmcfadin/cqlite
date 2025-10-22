@@ -85,10 +85,11 @@ path = "src/bin/compatibility_test_runner.rs"
 name = "complex_type_validation_runner"
 path = "src/bin/complex_type_validation_runner.rs"
 
-[[bin]]
-name = "sstable_test_runner"
-path = "src/bin/sstable_test_runner.rs"
-required-features = ["sstable-writer"]
+# sstable_test_runner removed in Issue #176 - depends on SSTableWriter which was removed
+# [[bin]]
+# name = "sstable_test_runner"
+# path = "src/bin/sstable_test_runner.rs"
+# required-features = ["sstable-writer"]
 
 [[bin]]
 name = "property_based_test_runner"
