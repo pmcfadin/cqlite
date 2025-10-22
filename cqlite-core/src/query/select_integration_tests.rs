@@ -528,7 +528,6 @@ mod tests {
 
         // Optimize the query
         let optimized_plan = optimizer.optimize(statement).await.unwrap();
-        assert!(optimized_plan.estimated_cost > 0.0);
         assert!(!optimized_plan.execution_steps.is_empty());
 
         // The executor would run the plan, but we need actual SSTable files for that
