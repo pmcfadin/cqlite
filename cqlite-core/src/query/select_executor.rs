@@ -115,7 +115,6 @@ impl SelectExecutor {
                 table: context.table_id.clone(),
                 predicates: vec![],
                 projection: context.columns.iter().map(|c| c.name.clone()).collect(),
-                estimated_cost: 1.0,
             }]
         } else {
             plan.execution_steps.clone()
@@ -679,7 +678,7 @@ impl SelectExecutor {
         let mut agg_state = AggregationState {
             groups: Vec::new(),
             memory_usage_bytes: 0,
-            memory_limit_bytes: agg_plan.memory_limit_mb as usize * 1024 * 1024,
+            memory_limit_bytes: 512 * 1024 * 1024, // Default 512MB limit
         };
 
         // Process each row
