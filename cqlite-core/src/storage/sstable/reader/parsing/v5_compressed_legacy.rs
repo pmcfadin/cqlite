@@ -716,6 +716,277 @@ impl V5CompressedLegacyParser {
         Ok((row_key, offset))
     }
 
+    /// Parse clustering prefix section (between row header and cells)
+    ///
+    /// The clustering prefix encodes clustering key values using a compact VInt header
+    /// with 2 bits per clustering column to indicate value state.
+    ///
+    /// # Format
+    /// ```text
+    /// [prefix_header: VInt] ← 2 bits per clustering column
+    ///   - 00 = null
+    ///   - 01 = empty
+    ///   - 10/11 = has value
+    /// [value_1: bytes if present]
+    /// [value_2: bytes if present]
+    /// [... more values ...]
+    /// ```
+    ///
+    /// Returns: (clustering_values, new_offset)
+    fn parse_clustering_prefix(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        schema: &TableSchema,
+    ) -> Result<(Vec<Value>, usize)> {
+        // If no clustering keys, skip this section
+        if schema.clustering_keys.is_empty() {
+            log::debug!("V5CompressedLegacy: No clustering keys in schema, skipping clustering prefix");
+            return Ok((Vec::new(), offset));
+        }
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing clustering prefix at offset {} for {} clustering keys",
+            offset,
+            schema.clustering_keys.len()
+        );
+
+        // Read header VInt (2 bits per clustering column)
+        let (remaining, header_vint) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "V5CompressedLegacy: Failed to parse clustering prefix header VInt at offset {}: {:?}",
+                offset, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Clustering prefix header = 0x{:x}, consumed {} bytes",
+            header_vint,
+            bytes_consumed
+        );
+
+        // Decode each clustering value based on 2-bit state
+        let mut clustering_values = Vec::new();
+        for (i, col) in schema.clustering_keys.iter().enumerate() {
+            let state = (header_vint >> (i * 2)) & 0x03;
+            log::debug!(
+                "V5CompressedLegacy: Clustering key {} '{}' state = {} (from bits {}..{})",
+                i,
+                col.name,
+                state,
+                i * 2,
+                i * 2 + 1
+            );
+
+            match state {
+                0 => {
+                    // NULL
+                    clustering_values.push(Value::Null);
+                    log::debug!("V5CompressedLegacy:   -> NULL");
+                }
+                1 => {
+                    // EMPTY
+                    clustering_values.push(Value::Text(String::new()));
+                    log::debug!("V5CompressedLegacy:   -> EMPTY");
+                }
+                2 | 3 => {
+                    // PRESENT - parse value based on type
+                    let (value, new_off) = self.parse_clustering_value(data, offset, col)?;
+                    log::debug!(
+                        "V5CompressedLegacy:   -> {:?} (consumed {} bytes)",
+                        value,
+                        new_off - offset
+                    );
+                    clustering_values.push(value);
+                    offset = new_off;
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        log::debug!(
+            "V5CompressedLegacy: Parsed {} clustering values, new offset = {}",
+            clustering_values.len(),
+            offset
+        );
+
+        Ok((clustering_values, offset))
+    }
+
+    /// Parse individual clustering value (type-specific)
+    ///
+    /// Clustering values are encoded based on their CQL type. This handles the most
+    /// common clustering key types: timestamp, text, int, uuid.
+    ///
+    /// Returns: (value, new_offset)
+    fn parse_clustering_value(
+        &self,
+        data: &[u8],
+        offset: usize,
+        col: &crate::schema::ClusteringColumn,
+    ) -> Result<(Value, usize)> {
+        let normalized = col.data_type.to_lowercase();
+        log::debug!(
+            "V5CompressedLegacy: Parsing clustering value '{}' type '{}' at offset {}",
+            col.name,
+            normalized,
+            offset
+        );
+
+        match normalized.as_str() {
+            "timestamp" | "reversedtype(timestamptype)" => {
+                // Fixed 8-byte timestamp (big-endian i64)
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': need 8 bytes for timestamp, only {} available",
+                        col.name,
+                        data.len() - offset
+                    )));
+                }
+                let ts = i64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                Ok((Value::Timestamp(ts), offset + 8))
+            }
+
+            "text" | "utf8type" | "varchar" => {
+                // VInt length + UTF-8 bytes
+                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': failed to parse text length: {:?}",
+                        col.name, e
+                    ))
+                })?;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                let len_offset = offset + bytes_consumed;
+
+                if len_offset + len as usize > data.len() {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': need {} bytes for text, only {} available",
+                        col.name,
+                        len,
+                        data.len() - len_offset
+                    )));
+                }
+
+                let text = String::from_utf8(
+                    data[len_offset..len_offset + len as usize].to_vec()
+                ).map_err(|e| {
+                    Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': invalid UTF-8: {:?}",
+                        col.name, e
+                    ))
+                })?;
+                Ok((Value::Text(text), len_offset + len as usize))
+            }
+
+            "int" => {
+                // VInt length + i32 big-endian
+                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': failed to parse int length: {:?}",
+                        col.name, e
+                    ))
+                })?;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                let len_offset = offset + bytes_consumed;
+
+                if len != 4 {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': expected int length 4, got {}",
+                        col.name, len
+                    )));
+                }
+
+                if len_offset + 4 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': need 4 bytes for int, only {} available",
+                        col.name,
+                        data.len() - len_offset
+                    )));
+                }
+
+                let val = i32::from_be_bytes([
+                    data[len_offset],
+                    data[len_offset + 1],
+                    data[len_offset + 2],
+                    data[len_offset + 3],
+                ]);
+                Ok((Value::Integer(val), len_offset + 4))
+            }
+
+            "uuid" | "timeuuid" => {
+                // VInt length + 16 UUID bytes
+                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': failed to parse UUID length: {:?}",
+                        col.name, e
+                    ))
+                })?;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                let len_offset = offset + bytes_consumed;
+
+                if len != 16 {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': expected UUID length 16, got {}",
+                        col.name, len
+                    )));
+                }
+
+                if len_offset + 16 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': need 16 bytes for UUID, only {} available",
+                        col.name,
+                        data.len() - len_offset
+                    )));
+                }
+
+                let uuid_bytes: [u8; 16] = data[len_offset..len_offset + 16]
+                    .try_into()
+                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+
+                Ok((Value::Uuid(uuid_bytes), len_offset + 16))
+            }
+
+            _ => {
+                // For other types, read VInt length + skip that many bytes
+                // Return as blob for now
+                warn!(
+                    "V5CompressedLegacy: Clustering '{}' has unsupported type '{}', treating as blob",
+                    col.name, col.data_type
+                );
+                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': failed to parse blob length: {:?}",
+                        col.name, e
+                    ))
+                })?;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                let len_offset = offset + bytes_consumed;
+
+                if len_offset + len as usize > data.len() {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': need {} bytes, only {} available",
+                        col.name,
+                        len,
+                        data.len() - len_offset
+                    )));
+                }
+
+                Ok((Value::Blob(data[len_offset..len_offset + len as usize].to_vec()), len_offset + len as usize))
+            }
+        }
+    }
+
     /// Parse row data (header + cells) and return cells with new offset
     ///
     /// V5CompressedLegacy format stores cells WITHOUT column names in schema column order.
@@ -819,13 +1090,24 @@ impl V5CompressedLegacyParser {
             return Ok((cells, Some(row_header), next_offset));
         }
 
-        // Advance offset to start of cell data
+        // Advance offset to start of clustering prefix / cell data
         debug!("V5CompressedLegacy: BEFORE advancing offset: offset={}, row_header.header_size={}", offset, row_header.header_size);
         offset += row_header.header_size;
         debug!("V5CompressedLegacy: AFTER advancing offset: offset={}, data[offset]={:02x}, data[offset+1]={:02x}", offset, data[offset], data[offset+1]);
 
+        // CRITICAL FIX: Parse clustering prefix BEFORE cell data
+        // Clustering prefix encodes clustering key values between row header and cells
+        let (clustering_values, new_offset) = self.parse_clustering_prefix(data, offset, schema)?;
+        offset = new_offset;
+
         log::debug!(
-            "V5CompressedLegacy: Cell data starts at offset {} (after {} byte header), first 32 bytes: {}",
+            "V5CompressedLegacy: Parsed {} clustering values, cell data starts at offset {}",
+            clustering_values.len(),
+            offset
+        );
+
+        log::debug!(
+            "V5CompressedLegacy: Cell data starts at offset {} (after {} byte header + clustering prefix), first 32 bytes: {}",
             offset,
             row_header.header_size,
             hex::encode(&data[offset..std::cmp::min(offset + 32, data.len())])
@@ -876,16 +1158,46 @@ impl V5CompressedLegacyParser {
             .map(|k| k.name.as_str())
             .collect();
 
-        let columns_in_order: Vec<_> = schema
-            .columns
-            .iter()
-            .filter(|col| {
-                !partition_key_names.contains(col.name.as_str())
-                    && !clustering_key_names.contains(col.name.as_str())
-            })
-            .collect();
+        // CRITICAL FIX (Issue #191): Use serialization header column order, not schema order
+        // Cassandra 5.0 V5CompressedLegacy stores cells in the order defined by Statistics.db
+        // serialization header (alphabetical by ColumnIdentifier/comparator), NOT CQL schema order.
+        // We must iterate reader.header.columns directly to align binary layout with logical columns.
+        let columns_in_order: Vec<_> = if !reader.header.columns.is_empty() {
+            // Build lookup map from schema for column details
+            let schema_map: HashMap<String, &crate::schema::Column> = schema
+                .columns
+                .iter()
+                .map(|col| (col.name.clone(), col))
+                .collect();
 
-        log::debug!("V5CompressedLegacy: Parsing up to {} cells in SCHEMA DEFINITION ORDER starting at offset {} (row header was {} bytes)", columns_in_order.len(), offset, row_header.header_size);
+            // Iterate serialization header columns in exact order (skipping keys)
+            reader
+                .header
+                .columns
+                .iter()
+                .filter(|col_info| !col_info.is_primary_key && !col_info.is_clustering)
+                .filter_map(|col_info| {
+                    schema_map.get(&col_info.name).copied()
+                })
+                .collect()
+        } else {
+            // Fallback to schema order when header is empty (shouldn't happen for real SSTables)
+            log::warn!("V5CompressedLegacy: reader.header.columns is empty, falling back to schema order (may cause column misalignment)");
+            schema
+                .columns
+                .iter()
+                .filter(|col| {
+                    !partition_key_names.contains(col.name.as_str())
+                        && !clustering_key_names.contains(col.name.as_str())
+                })
+                .collect()
+        };
+
+        log::debug!("V5CompressedLegacy: Parsing {} cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes)", columns_in_order.len(), offset, row_header.header_size);
+        log::debug!(
+            "V5CompressedLegacy: Column order: {:?}",
+            columns_in_order.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
             hex::encode(&data[offset..std::cmp::min(offset + 64, data.len())])
@@ -937,6 +1249,10 @@ impl V5CompressedLegacyParser {
             "V5CompressedLegacy: Parsed {}/{} columns (missing columns are NULL)",
             cells.len(),
             columns_in_order.len()
+        );
+        log::debug!(
+            "V5CompressedLegacy: Cells HashMap keys: {:?}",
+            cells.keys().collect::<Vec<_>>()
         );
 
         debug!("V5CompressedLegacy: Parsed total of {} cells", cells.len());
@@ -1180,24 +1496,7 @@ impl V5CompressedLegacyParser {
             }
 
             "int" => {
-                // Integer (i32): [VInt len][i32 BE value]
-                // V5CompressedLegacy uses VInt length prefix even for fixed-size types
-                let (remaining, int_len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "Cell '{}': failed to parse int length as VInt: {:?}",
-                        column.name, e
-                    ))
-                })?;
-                let int_len = int_len as usize;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
-
-                if int_len != 4 {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': expected int length 4, got {}",
-                        column.name, int_len
-                    )));
-                }
+                // Integer (i32): fixed-width 4 bytes (no length prefix in Cassandra 5.0)
                 if offset + 4 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 4 bytes for int, only {} available",
@@ -1250,31 +1549,7 @@ impl V5CompressedLegacyParser {
             }
 
             "uuid" => {
-                // UUID: [0x08][VInt len=16][16 bytes]
-                if offset >= data.len() {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': unexpected end at UUID length",
-                        column.name
-                    )));
-                }
-
-                let (remaining, uuid_len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "Cell '{}': failed to parse UUID length as VInt: {:?}",
-                        column.name, e
-                    ))
-                })?;
-                let uuid_len = uuid_len as usize;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
-
-                if uuid_len != 16 {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': expected UUID length 16, got {}",
-                        column.name, uuid_len
-                    )));
-                }
-
+                // UUID: fixed-width 16 bytes (no length prefix in Cassandra 5.0 writer)
                 if offset + 16 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 16 bytes for UUID, only {} available",
@@ -1341,24 +1616,7 @@ impl V5CompressedLegacyParser {
             }
 
             "bigint" | "counter" => {
-                // BigInt/Counter: [VInt len][8 bytes i64 big-endian]
-                // V5CompressedLegacy uses VInt length prefix even for fixed-size types
-                let (remaining, bigint_len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "Cell '{}': failed to parse bigint length as VInt: {:?}",
-                        column.name, e
-                    ))
-                })?;
-                let bigint_len = bigint_len as usize;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
-
-                if bigint_len != 8 {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': expected bigint length 8, got {}",
-                        column.name, bigint_len
-                    )));
-                }
+                // BigInt/Counter: fixed-width 8 bytes (no length prefix in Cassandra 5.0)
                 if offset + 8 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 8 bytes for bigint, only {} available",
