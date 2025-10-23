@@ -33,6 +33,10 @@ pub struct Index {
     /// Sorted keys for range queries
     sorted_keys: HashMap<TableId, Vec<RowKey>>,
 
+    /// Reverse index: unqualified table name -> list of qualified TableIds
+    /// Enables O(1) unqualified name resolution instead of O(n) HashMap iteration
+    unqualified_to_qualified: HashMap<String, Vec<TableId>>,
+
     /// Total number of entries
     total_entries: usize,
 }
@@ -43,6 +47,7 @@ impl Index {
         Self {
             entries: HashMap::new(),
             sorted_keys: HashMap::new(),
+            unqualified_to_qualified: HashMap::new(),
             total_entries: 0,
         }
     }
@@ -70,7 +75,7 @@ impl Index {
             .insert(key.clone(), entry);
 
         // Add to sorted keys
-        let sorted_keys = self.sorted_keys.entry(table_id).or_default();
+        let sorted_keys = self.sorted_keys.entry(table_id.clone()).or_default();
 
         // Insert in sorted order
         match sorted_keys.binary_search(&key) {
@@ -83,12 +88,32 @@ impl Index {
             }
         }
 
+        // Update reverse index: unqualified name -> qualified TableId
+        let table_name = table_id.name();
+        let unqualified = if let Some(dot_pos) = table_name.rfind('.') {
+            table_name[dot_pos + 1..].to_string()
+        } else {
+            table_name.to_string()
+        };
+
+        let qualified_list = self
+            .unqualified_to_qualified
+            .entry(unqualified)
+            .or_default();
+
+        // Only add if not already present (avoid duplicates)
+        if !qualified_list.contains(&table_id) {
+            qualified_list.push(table_id);
+        }
+
         self.total_entries += 1;
     }
 
     /// Get an entry by table and key
     pub fn get(&self, table_id: &TableId, key: &RowKey) -> Option<&IndexEntry> {
-        self.entries.get(table_id)?.get(key)
+        // Find matching table_id (handles qualified/unqualified matching)
+        let actual_table_id = self.find_matching_table_id(table_id).ok()?;
+        self.entries.get(actual_table_id)?.get(key)
     }
 
     /// Find an entry by table and key (alias for get)
@@ -100,6 +125,60 @@ impl Index {
         Ok(self.get(table_id, key))
     }
 
+    /// Find the actual table_id stored in the index that matches the query table_id.
+    ///
+    /// This handles flexible matching between qualified (keyspace.table) and unqualified (table) formats:
+    /// - Exact match has priority (O(1))
+    /// - Falls back to matching unqualified table names (O(1) via reverse index)
+    /// - Detects and returns error for ambiguous unqualified names
+    ///
+    /// # Examples
+    /// - Query "test_basic.simple_table" matches stored "test_basic.simple_table" (exact)
+    /// - Query "simple_table" matches stored "test_basic.simple_table" (unqualified → qualified)
+    /// - Query "test_basic.simple_table" matches stored "simple_table" (qualified → unqualified)
+    ///
+    /// # Errors
+    /// - Returns `Error::table_not_found()` if no matching table exists
+    /// - Returns `Error::ambiguous_table()` if unqualified name matches multiple tables
+    ///
+    /// Note: This always returns a reference to a TableId stored in self.entries, never the query_table_id parameter.
+    fn find_matching_table_id(&self, query_table_id: &TableId) -> Result<&TableId> {
+        let query_name = query_table_id.name();
+
+        // Fast path: exact match - return the key from self.entries, not query_table_id
+        if let Some((stored_key, _)) = self.entries.get_key_value(query_table_id) {
+            return Ok(stored_key);
+        }
+
+        // Extract unqualified query name
+        let query_unqualified = if let Some(dot_pos) = query_name.rfind('.') {
+            &query_name[dot_pos + 1..]
+        } else {
+            query_name
+        };
+
+        // O(1) reverse index lookup (not O(n) iteration!)
+        let matches = self
+            .unqualified_to_qualified
+            .get(query_unqualified)
+            .ok_or_else(|| crate::Error::table_not_found(query_name))?;
+
+        match matches.len() {
+            0 => Err(crate::Error::table_not_found(query_name)),
+            1 => Ok(&matches[0]),
+            _ => {
+                // Multiple tables with same unqualified name - ambiguous
+                let table_names: Vec<String> =
+                    matches.iter().map(|t| t.name().to_string()).collect();
+                Err(crate::Error::ambiguous_table(format!(
+                    "Table '{}' is ambiguous. Found in: {}. Use qualified name (keyspace.table).",
+                    query_unqualified,
+                    table_names.join(", ")
+                )))
+            }
+        }
+    }
+
     /// Get entries for a key range
     pub fn get_range(
         &self,
@@ -107,12 +186,20 @@ impl Index {
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
     ) -> Result<Vec<&IndexEntry>> {
-        let table_entries = match self.entries.get(table_id) {
+        // Find the actual table_id stored in the index that matches the query table_id
+        // This handles both qualified (keyspace.table) and unqualified (table) formats
+        // Returns error for not found or ambiguous tables
+        let actual_table_id = match self.find_matching_table_id(table_id) {
+            Ok(tid) => tid,
+            Err(_) => return Ok(Vec::new()), // Table not found, return empty results
+        };
+
+        let table_entries = match self.entries.get(actual_table_id) {
             Some(entries) => entries,
             None => return Ok(Vec::new()),
         };
 
-        let sorted_keys = match self.sorted_keys.get(table_id) {
+        let sorted_keys = match self.sorted_keys.get(actual_table_id) {
             Some(keys) => keys,
             None => return Ok(Vec::new()),
         };
@@ -184,6 +271,7 @@ impl Index {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.sorted_keys.clear();
+        self.unqualified_to_qualified.clear();
         self.total_entries = 0;
     }
 

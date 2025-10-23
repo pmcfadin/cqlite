@@ -266,6 +266,16 @@ impl Error {
         Self::UnsupportedQuery(msg.into())
     }
 
+    /// Create a table not found error
+    pub fn table_not_found(msg: impl Into<String>) -> Self {
+        Self::NotFound(format!("Table not found: {}", msg.into()))
+    }
+
+    /// Create an ambiguous table error
+    pub fn ambiguous_table(msg: impl Into<String>) -> Self {
+        Self::Table(format!("Ambiguous table reference: {}", msg.into()))
+    }
+
     /// Check if this error is recoverable
     pub fn is_recoverable(&self) -> bool {
         match self {

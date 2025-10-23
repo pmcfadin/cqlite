@@ -603,17 +603,28 @@ impl SSTableManager {
     ) -> Result<Vec<(RowKey, Value)>> {
         let table_readers = self.table_readers.read().await;
 
-        eprintln!(
-            "[DEBUG SSTableManager::scan] Scanning table_id='{}'",
-            table_id
+        log::debug!("SSTableManager::scan - Scanning table_id='{}'", table_id);
+
+        // Extract unqualified table name from potentially qualified table_id
+        // Supports both "keyspace.table" and "table" formats
+        let table_name = table_id.name();
+        let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
+            &table_name[dot_pos + 1..]
+        } else {
+            table_name
+        };
+
+        log::debug!(
+            "SSTableManager::scan - Looking up table by unqualified name: '{}'",
+            unqualified_name
         );
 
-        // Look up readers by table name
-        let readers = table_readers.get(table_id.name());
+        // Look up readers by unqualified table name
+        let readers = table_readers.get(unqualified_name);
 
         if let Some(reader_list) = readers {
-            eprintln!(
-                "[DEBUG SSTableManager::scan] Found {} readers for table '{}'",
+            log::debug!(
+                "SSTableManager::scan - Found {} readers for table '{}'",
                 reader_list.len(),
                 table_id
             );
@@ -621,8 +632,8 @@ impl SSTableManager {
             let mut all_results = Vec::new();
 
             for reader in reader_list {
-                eprintln!(
-                    "[DEBUG SSTableManager::scan] Calling scan on reader for file: {:?}",
+                log::debug!(
+                    "SSTableManager::scan - Calling scan on reader for file: {:?}",
                     reader.file_path
                 );
 
@@ -630,16 +641,16 @@ impl SSTableManager {
                     .scan(table_id, start_key, end_key, None, schema)
                     .await?;
 
-                eprintln!(
-                    "[DEBUG SSTableManager::scan] Reader returned {} results",
+                log::debug!(
+                    "SSTableManager::scan - Reader returned {} results",
                     results.len()
                 );
 
                 all_results.extend(results);
             }
 
-            eprintln!(
-                "[DEBUG SSTableManager::scan] Total results from all readers: {}",
+            log::debug!(
+                "SSTableManager::scan - Total results from all readers: {}",
                 all_results.len()
             );
 
@@ -651,19 +662,19 @@ impl SSTableManager {
                 all_results.truncate(limit);
             }
 
-            eprintln!(
-                "[DEBUG SSTableManager::scan] Returning {} final results",
+            log::debug!(
+                "SSTableManager::scan - Returning {} final results",
                 all_results.len()
             );
 
             Ok(all_results)
         } else {
-            eprintln!(
-                "[DEBUG SSTableManager::scan] No readers found for table '{}'",
+            log::debug!(
+                "SSTableManager::scan - No readers found for table '{}'",
                 table_id
             );
-            eprintln!(
-                "[DEBUG SSTableManager::scan] Available tables: {:?}",
+            log::debug!(
+                "SSTableManager::scan - Available tables: {:?}",
                 table_readers.keys().collect::<Vec<_>>()
             );
             Ok(Vec::new())

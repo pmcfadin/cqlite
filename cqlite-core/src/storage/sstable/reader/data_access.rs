@@ -10,6 +10,44 @@ use log::{debug, warn};
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
 
+/// Compare two table IDs, handling both qualified (keyspace.table) and unqualified (table) formats.
+///
+/// This function allows flexible matching:
+/// - "keyspace.table" matches "keyspace.table" (exact match)
+/// - "table" matches "keyspace.table" (unqualified matches qualified)
+/// - "keyspace.table" matches "table" (qualified matches unqualified)
+/// - "table" matches "table" (exact match)
+///
+/// This is necessary because:
+/// - Dataset mode SSTables store qualified table_ids (e.g., "test_basic.simple_table")
+/// - Queries can use either qualified ("test_basic.simple_table") or unqualified ("simple_table") names
+/// - Production SSTables may use unqualified table_ids
+fn table_ids_match(entry_table_id: &TableId, query_table_id: &TableId) -> bool {
+    let entry_name = entry_table_id.name();
+    let query_name = query_table_id.name();
+
+    // Fast path: exact match
+    if entry_name == query_name {
+        return true;
+    }
+
+    // Extract unqualified table names for comparison
+    let entry_unqualified = if let Some(dot_pos) = entry_name.rfind('.') {
+        &entry_name[dot_pos + 1..]
+    } else {
+        entry_name
+    };
+
+    let query_unqualified = if let Some(dot_pos) = query_name.rfind('.') {
+        &query_name[dot_pos + 1..]
+    } else {
+        query_name
+    };
+
+    // Match if unqualified names are the same
+    entry_unqualified == query_unqualified
+}
+
 impl SSTableReader {
     /// Get a value by key from the SSTable
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
@@ -62,25 +100,16 @@ impl SSTableReader {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
-        eprintln!("[DEBUG SSTableReader::scan] Starting scan");
-        eprintln!(
-            "[DEBUG SSTableReader::scan] File path: {:?}",
-            self.file_path
-        );
-        eprintln!("[DEBUG SSTableReader::scan] Table ID: {}", table_id);
-        eprintln!("[DEBUG SSTableReader::scan] Start key: {:?}", start_key);
-        eprintln!("[DEBUG SSTableReader::scan] End key: {:?}", end_key);
-        eprintln!("[DEBUG SSTableReader::scan] Limit: {:?}", limit);
-        eprintln!(
-            "[DEBUG SSTableReader::scan] Has schema: {}",
-            schema.is_some()
-        );
-        eprintln!(
-            "[DEBUG SSTableReader::scan] Has index: {}",
-            self.index.is_some()
-        );
-        eprintln!(
-            "[DEBUG SSTableReader::scan] Has bloom filter: {}",
+        log::debug!("SSTableReader::scan - Starting scan");
+        log::debug!("SSTableReader::scan - File path: {:?}", self.file_path);
+        log::debug!("SSTableReader::scan - Table ID: {}", table_id);
+        log::debug!("SSTableReader::scan - Start key: {:?}", start_key);
+        log::debug!("SSTableReader::scan - End key: {:?}", end_key);
+        log::debug!("SSTableReader::scan - Limit: {:?}", limit);
+        log::debug!("SSTableReader::scan - Has schema: {}", schema.is_some());
+        log::debug!("SSTableReader::scan - Has index: {}", self.index.is_some());
+        log::debug!(
+            "SSTableReader::scan - Has bloom filter: {}",
             self.bloom_filter.is_some()
         );
 
@@ -89,17 +118,17 @@ impl SSTableReader {
 
         // Use index for efficient range scan if available
         if let Some(index) = &self.index {
-            eprintln!("[DEBUG SSTableReader::scan] Using index-based scan");
+            log::debug!("SSTableReader::scan - Using index-based scan");
             let entries = index.get_range(table_id, start_key, end_key)?;
-            eprintln!(
-                "[DEBUG SSTableReader::scan] Index returned {} entries",
+            log::debug!(
+                "SSTableReader::scan - Index returned {} entries",
                 entries.len()
             );
 
             // Check if any entry has size=0 (Cassandra 5.0 format)
             let has_zero_size = entries.iter().any(|e| e.size == 0);
             if has_zero_size {
-                eprintln!("[DEBUG SSTableReader::scan] Index reports size=0 for some entries, using sequential scan fallback");
+                log::debug!("SSTableReader::scan - Index reports size=0 for some entries, using sequential scan fallback");
                 return self
                     .sequential_scan(table_id, start_key, end_key, limit, schema)
                     .await;
@@ -108,43 +137,43 @@ impl SSTableReader {
             for (i, entry) in entries.iter().enumerate() {
                 // Index offsets are relative to data section start - adjust for header
                 let file_offset = entry.offset + self.actual_header_size as u64;
-                eprintln!(
-                    "[DEBUG SSTableReader::scan] Processing index entry {}: index_offset={}, file_offset={}, size={}",
+                log::debug!(
+                    "SSTableReader::scan - Processing index entry {}: index_offset={}, file_offset={}, size={}",
                     i, entry.offset, file_offset, entry.size
                 );
 
                 if let Some(limit) = limit {
                     if count >= limit {
-                        eprintln!("[DEBUG SSTableReader::scan] Reached limit {}", limit);
+                        log::debug!("SSTableReader::scan - Reached limit {}", limit);
                         break;
                     }
                 }
 
                 if let Some(value) = self.read_value_at_offset(file_offset, entry.size).await? {
-                    eprintln!(
-                        "[DEBUG SSTableReader::scan] Successfully read value at offset {}",
+                    log::debug!(
+                        "SSTableReader::scan - Successfully read value at offset {}",
                         entry.offset
                     );
                     results.push((entry.key.clone(), value));
                     count += 1;
                 } else {
-                    eprintln!("[DEBUG SSTableReader::scan] Value at offset {} was filtered out (tombstone or expired)", entry.offset);
+                    log::debug!("SSTableReader::scan - Value at offset {} was filtered out (tombstone or expired)", entry.offset);
                 }
             }
         } else {
             // Fallback to sequential scan
-            eprintln!("[DEBUG SSTableReader::scan] No index, falling back to sequential scan");
+            log::debug!("SSTableReader::scan - No index, falling back to sequential scan");
             results = self
                 .sequential_scan(table_id, start_key, end_key, limit, schema)
                 .await?;
-            eprintln!(
-                "[DEBUG SSTableReader::scan] Sequential scan returned {} results",
+            log::debug!(
+                "SSTableReader::scan - Sequential scan returned {} results",
                 results.len()
             );
         }
 
-        eprintln!(
-            "[DEBUG SSTableReader::scan] Returning {} final results",
+        log::debug!(
+            "SSTableReader::scan - Returning {} final results",
             results.len()
         );
         Ok(results)
@@ -173,8 +202,8 @@ impl SSTableReader {
         if requires_stitching {
             // V5CompressedLegacy: Row payloads can span multiple compressed chunks
             // We must decompress and stitch all chunks together before parsing
-            eprintln!(
-                "[DEBUG] V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing"
+            log::debug!(
+                "V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing"
             );
 
             // Pre-allocate buffer for ~2.5MB (estimated max size for test data)
@@ -221,8 +250,8 @@ impl SSTableReader {
                 );
             }
 
-            eprintln!(
-                "[DEBUG] V5CompressedLegacy: Finished stitching {} chunks, total buffer: {} bytes",
+            log::debug!(
+                "V5CompressedLegacy: Finished stitching {} chunks, total buffer: {} bytes",
                 chunk_count,
                 stitched_buffer.len()
             );
@@ -260,8 +289,8 @@ impl SSTableReader {
 
             // Parse the stitched decompressed buffer
             let entries = parser.parse_block(&stitched_buffer, table_schema.as_ref(), self)?;
-            eprintln!(
-                "[DEBUG] V5CompressedLegacy: Parsed {} entries from stitched buffer",
+            log::debug!(
+                "V5CompressedLegacy: Parsed {} entries from stitched buffer",
                 entries.len()
             );
             results.extend(entries);
@@ -437,13 +466,10 @@ impl SSTableReader {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
-        eprintln!("[DEBUG SSTableReader::sequential_scan] Starting sequential scan");
-        eprintln!(
-            "[DEBUG SSTableReader::sequential_scan] Table ID: {}",
-            table_id
-        );
-        eprintln!(
-            "[DEBUG SSTableReader::sequential_scan] Has schema: {}",
+        log::debug!("SSTableReader::sequential_scan - Starting sequential scan");
+        log::debug!("SSTableReader::sequential_scan - Table ID: {}", table_id);
+        log::debug!(
+            "SSTableReader::sequential_scan - Has schema: {}",
             schema.is_some()
         );
 
@@ -451,15 +477,18 @@ impl SSTableReader {
         let mut count = 0;
 
         let header_size = self.calculate_header_size();
-        eprintln!(
-            "[DEBUG SSTableReader::sequential_scan] Header size: {} bytes",
+        log::debug!(
+            "SSTableReader::sequential_scan - Header size: {} bytes",
             header_size
         );
 
         {
             let mut file_guard = self.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-            eprintln!("[DEBUG SSTableReader::sequential_scan] Seeked to start of data section at offset {}", header_size);
+            log::debug!(
+                "SSTableReader::sequential_scan - Seeked to start of data section at offset {}",
+                header_size
+            );
         }
         // Reset chunk index when seeking to start
         self.current_chunk_index
@@ -469,25 +498,32 @@ impl SSTableReader {
         let mut block_count = 0;
         while let Some(block) = self.read_next_block().await? {
             block_count += 1;
-            eprintln!(
-                "[DEBUG SSTableReader::sequential_scan] Read block {}, size {} bytes",
+            log::debug!(
+                "SSTableReader::sequential_scan - Read block {}, size {} bytes",
                 block_count,
                 block.len()
             );
 
             let entries = self.parse_block_entries_with_schema(&block, schema)?;
-            eprintln!(
-                "[DEBUG SSTableReader::sequential_scan] Block {} contains {} entries",
+            log::debug!(
+                "SSTableReader::sequential_scan - Block {} contains {} entries",
                 block_count,
                 entries.len()
             );
 
             for (i, (entry_table_id, entry_key, entry_value)) in entries.iter().enumerate() {
-                eprintln!("[DEBUG SSTableReader::sequential_scan] Block {} entry {}: table_id='{}', key={:?}",
-                          block_count, i, entry_table_id, entry_key);
+                log::debug!(
+                    "SSTableReader::sequential_scan - Block {} entry {}: table_id='{}', key={:?}",
+                    block_count,
+                    i,
+                    entry_table_id,
+                    entry_key
+                );
 
-                if entry_table_id != table_id {
-                    eprintln!("[DEBUG SSTableReader::sequential_scan] Skipping entry: table_id mismatch ('{}' != '{}')",
+                // Match table IDs - supports both qualified (keyspace.table) and unqualified (table) formats
+                // This allows queries with either format to match SSTables stored with either format
+                if !table_ids_match(entry_table_id, table_id) {
+                    log::debug!("SSTableReader::sequential_scan - Skipping entry: table_id mismatch ('{}' != '{}')",
                               entry_table_id, table_id);
                     continue;
                 }
@@ -495,15 +531,17 @@ impl SSTableReader {
                 // Check key range
                 if let Some(start) = start_key {
                     if entry_key < start {
-                        eprintln!("[DEBUG SSTableReader::sequential_scan] Skipping entry: key < start_key");
+                        log::debug!(
+                            "SSTableReader::sequential_scan - Skipping entry: key < start_key"
+                        );
                         continue;
                     }
                 }
 
                 if let Some(end) = end_key {
                     if entry_key > end {
-                        eprintln!(
-                            "[DEBUG SSTableReader::sequential_scan] Skipping entry: key > end_key"
+                        log::debug!(
+                            "SSTableReader::sequential_scan - Skipping entry: key > end_key"
                         );
                         continue;
                     }
@@ -514,12 +552,12 @@ impl SSTableReader {
 
                 // Filter out tombstones and expired data
                 if !self.filter_tombstone(entry_value) {
-                    eprintln!("[DEBUG SSTableReader::sequential_scan] Skipping entry: filtered out (tombstone or expired)");
+                    log::debug!("SSTableReader::sequential_scan - Skipping entry: filtered out (tombstone or expired)");
                     continue;
                 }
 
-                eprintln!(
-                    "[DEBUG SSTableReader::sequential_scan] Including entry in results (count={})",
+                log::debug!(
+                    "SSTableReader::sequential_scan - Including entry in results (count={})",
                     count + 1
                 );
                 results.push((entry_key.clone(), entry_value.clone()));
@@ -527,19 +565,22 @@ impl SSTableReader {
 
                 if let Some(limit) = limit {
                     if count >= limit {
-                        eprintln!("[DEBUG SSTableReader::sequential_scan] Reached limit {}, stopping scan", limit);
+                        log::debug!(
+                            "SSTableReader::sequential_scan - Reached limit {}, stopping scan",
+                            limit
+                        );
                         return Ok(results);
                     }
                 }
             }
         }
 
-        eprintln!(
-            "[DEBUG SSTableReader::sequential_scan] Finished scanning {} blocks",
+        log::debug!(
+            "SSTableReader::sequential_scan - Finished scanning {} blocks",
             block_count
         );
-        eprintln!(
-            "[DEBUG SSTableReader::sequential_scan] Returning {} total results",
+        log::debug!(
+            "SSTableReader::sequential_scan - Returning {} total results",
             results.len()
         );
 

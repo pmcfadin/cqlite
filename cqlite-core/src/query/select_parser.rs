@@ -729,7 +729,8 @@ impl SelectParser {
                 self.advance()?; // Skip the dot
                 if let Some(Token::Identifier(actual_table)) = self.current_token.clone() {
                     self.advance()?;
-                    actual_table // Use the table name after the dot
+                    // Preserve the qualified name (keyspace.table)
+                    format!("{}.{}", first_identifier, actual_table)
                 } else {
                     return Err(Error::cql_parse("Expected table name after keyspace"));
                 }

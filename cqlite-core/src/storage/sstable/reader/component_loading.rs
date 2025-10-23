@@ -242,6 +242,54 @@ impl SSTableReader {
         }
     }
 
+    /// Extract keyspace and table name from SSTable file path.
+    ///
+    /// Expected Cassandra directory structure:
+    /// `<data_dir>/<keyspace_name>/<table_name>-<uuid>/<sstable_file>`
+    ///
+    /// For example:
+    /// `/var/lib/cassandra/data/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db`
+    /// → keyspace: "test_basic", table: "simple_table"
+    ///
+    /// # Errors
+    /// Returns error if path doesn't match expected structure.
+    fn extract_keyspace_and_table(sstable_path: &Path) -> Result<(String, String)> {
+        // Extract table name (already handles UUID stripping)
+        let table_name =
+            crate::storage::sstable::extract_table_name(sstable_path).ok_or_else(|| {
+                Error::invalid_path(format!(
+                    "Cannot extract table name from SSTable path: {}",
+                    sstable_path.display()
+                ))
+            })?;
+
+        // Extract keyspace from grandparent directory
+        // Path structure: .../keyspace_name/table_name-uuid/sstable_file.db
+        //                       ↑ keyspace    ↑ table dir    ↑ file
+        let keyspace = sstable_path
+            .parent() // Step 1: .../keyspace_name/table_name-uuid
+            .and_then(|p| p.parent()) // Step 2: .../keyspace_name
+            .and_then(|p| p.file_name()) // Step 3: Get directory name
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                Error::invalid_path(format!(
+                    "Cannot extract keyspace from SSTable path: {}. \
+                     Expected Cassandra directory structure: <data_dir>/<keyspace>/<table-uuid>/file",
+                    sstable_path.display()
+                ))
+            })?;
+
+        log::debug!(
+            "Extracted keyspace='{}', table='{}' from path: {}",
+            keyspace,
+            table_name,
+            sstable_path.display()
+        );
+
+        Ok((keyspace, table_name))
+    }
+
     /// Convert IndexReader to SSTableIndex for backward compatibility
     pub(super) async fn convert_index_reader_to_sstable_index(
         index_reader: IndexReader,
@@ -249,18 +297,13 @@ impl SSTableReader {
     ) -> Result<SSTableIndex> {
         use crate::storage::sstable::index::{Index, IndexEntry};
 
-        // Extract table name from SSTable directory path
-        // e.g., "simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-        //       → "simple_table"
-        let table_name =
-            crate::storage::sstable::extract_table_name(data_file_path).ok_or_else(|| {
-                Error::invalid_path(format!(
-                    "Cannot extract table name from SSTable path: {}",
-                    data_file_path.display()
-                ))
-            })?;
+        // Extract keyspace and table name from SSTable directory path
+        // Issue #188: Must use fully-qualified table ID (keyspace.table) to match
+        // query executor expectations, not just table name alone
+        let (keyspace, table_name) = Self::extract_keyspace_and_table(data_file_path)?;
 
-        let table_id = crate::types::TableId::new(table_name);
+        // Create fully-qualified table ID: "keyspace.table"
+        let table_id = crate::types::TableId::new(format!("{}.{}", keyspace, table_name));
 
         let mut index = Index::new();
 
@@ -282,9 +325,11 @@ impl SSTableReader {
         }
 
         log::debug!(
-            "Converted {} partition entries from IndexReader to SSTableIndex for table '{}'",
+            "Converted {} partition entries from IndexReader to SSTableIndex for table '{}' (keyspace: {}, table: {})",
             partition_entries.len(),
-            table_id.name()
+            table_id.name(),
+            keyspace,
+            table_name
         );
 
         Ok(index)
