@@ -1,0 +1,2768 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 706 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 1 test
+✅ Dataset validation passed. Found 33 tables
+🔍 Validating Index.db parity for test_basic.simple_table
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+✅ Perfect parity achieved for test_basic.simple_table (1 partitions, 0 promoted entries)
+🔍 Validating Index.db parity for test_timeseries.sensor_data
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+✅ Perfect parity achieved for test_timeseries.sensor_data (1 partitions, 0 promoted entries)
+🔍 Validating Index.db parity for test_wide_rows.wide_partition_table
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+✅ Perfect parity achieved for test_wide_rows.wide_partition_table (1 partitions, 0 promoted entries)
+🔍 Validating Index.db parity for test_collections.collection_table
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+✅ Perfect parity achieved for test_collections.collection_table (1 partitions, 0 promoted entries)
+📄 Validation report saved: validation_artifacts/sstabledump/index_parity_report.md
+💾 Table result saved: validation_artifacts/sstabledump/test_basic.simple_table/validation_result.json
+💾 Table result saved: validation_artifacts/sstabledump/test_timeseries.sensor_data/validation_result.json
+💾 Table result saved: validation_artifacts/sstabledump/test_wide_rows.wide_partition_table/validation_result.json
+💾 Table result saved: validation_artifacts/sstabledump/test_collections.collection_table/validation_result.json
+✅ Minimal parity achieved for test_basic.simple_table (1 partitions)
+✅ Minimal parity achieved for test_timeseries.sensor_data (1 partitions)
+✅ Minimal parity achieved for test_wide_rows.wide_partition_table (1 partitions)
+✅ Minimal parity achieved for test_collections.collection_table (1 partitions)
+🎉 All Index.db parity validations passed with zero discrepancies!
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 1 test
+📊 Loading JSONL reference data...
+✓ Loaded 1000 partitions from JSONL
+📖 Opening SSTable with V5CompressedLegacy parser...
+Parsed exact header size 4096 for BIG v5 format using nom parser
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 224, 0, 0, 0, 128, 0, 0, 0, 8, 32, 0, 0, 0, 56, 0, 0, 0, 80, 0, 0, 0, 104, 0, 0, 0, 128, 0, 0, 0, 152, 0, 0, 0, 176, 0, 0, 0, 200, 0, 0, 0, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 0, 0, 0, 0, 0, 108, 156, 193, 246, 53, 250, 71, 172, 169, 44, 151, 94, 5, 7, 252, 96, 231, 10, 0, 0, 0, 0, 0, 0, 204, 159, 93, 172, 89, 86, 66, 182, 174, 119, 108, 104, 235, 181, 172, 114, 231, 21, 0, 0, 0, 0, 0, 0, 5, 23, 76, 160, 178, 118, 68, 49, 181, 29, 207, 73, 121, 170, 116, 75, 231, 32, 0, 0, 0, 0, 0, 0, 2, 42, 220, 110, 31, 179, 75, 78, 140, 66, 44, 232, 123, 187, 189, 156, 231, 43, 0, 0, 0, 0, 0, 0, 244, 241, 3, 30, 78, 27, 78, 251, 156, 12, 218, 226, 236, 150, 110, 66, 231, 54, 0, 0, 0, 0, 0, 0, 244, 123, 106, 9, 243, 72, 67, 177, 176, 75, 146, 60, 27, 89, 240, 171, 231, 65, 0, 0, 0, 0, 0, 0, 248, 153, 36, 104, 49, 238, 77, 188, 159, 168, 186, 79, 45, 239, 25, 127, 231, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 16, 7, 149, 153, 169, 206, 251, 72, 148, 158, 202, 226, 226, 178, 31, 149, 130], code: Verify })
+  Keyspace: test_keyspace
+  Table: test_table
+  Compression: none
+🔍 Reading all entries from SSTable...
+[DEBUG] V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 0/41
+[DEBUG read_nb_format_chunk_data] Chunk 0 offset: 0x0
+[DEBUG read_nb_format_chunk_data] Chunk 0 total_size=15871, data_size=15867, offset=0x0
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 0: 0xbc878748
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 0: 15867 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 1/41
+[DEBUG read_nb_format_chunk_data] Chunk 1 offset: 0x3dff
+[DEBUG read_nb_format_chunk_data] Chunk 1 total_size=16240, data_size=16236, offset=0x3dff
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 1: 0x75f56510
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 1: 16236 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 2/41
+[DEBUG read_nb_format_chunk_data] Chunk 2 offset: 0x7d6f
+[DEBUG read_nb_format_chunk_data] Chunk 2 total_size=16394, data_size=16390, offset=0x7d6f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 2: 0x7fb4c2c3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 2: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 3/41
+[DEBUG read_nb_format_chunk_data] Chunk 3 offset: 0xbd79
+[DEBUG read_nb_format_chunk_data] Chunk 3 total_size=16342, data_size=16338, offset=0xbd79
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 3: 0x63013836
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 3: 16338 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 4/41
+[DEBUG read_nb_format_chunk_data] Chunk 4 offset: 0xfd4f
+[DEBUG read_nb_format_chunk_data] Chunk 4 total_size=15796, data_size=15792, offset=0xfd4f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 4: 0x8e1718f0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 4: 15792 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 5/41
+[DEBUG read_nb_format_chunk_data] Chunk 5 offset: 0x13b03
+[DEBUG read_nb_format_chunk_data] Chunk 5 total_size=15731, data_size=15727, offset=0x13b03
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 5: 0x9a7c8ae3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 5: 15727 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 6/41
+[DEBUG read_nb_format_chunk_data] Chunk 6 offset: 0x17876
+[DEBUG read_nb_format_chunk_data] Chunk 6 total_size=16394, data_size=16390, offset=0x17876
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 6: 0xd88233ad
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 6: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 7/41
+[DEBUG read_nb_format_chunk_data] Chunk 7 offset: 0x1b880
+[DEBUG read_nb_format_chunk_data] Chunk 7 total_size=15682, data_size=15678, offset=0x1b880
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 7: 0xaa0ef540
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 7: 15678 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 8/41
+[DEBUG read_nb_format_chunk_data] Chunk 8 offset: 0x1f5c2
+[DEBUG read_nb_format_chunk_data] Chunk 8 total_size=15733, data_size=15729, offset=0x1f5c2
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 8: 0xcb963432
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 8: 15729 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 9/41
+[DEBUG read_nb_format_chunk_data] Chunk 9 offset: 0x23337
+[DEBUG read_nb_format_chunk_data] Chunk 9 total_size=15647, data_size=15643, offset=0x23337
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 9: 0xa98e58da
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 9: 15643 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 10/41
+[DEBUG read_nb_format_chunk_data] Chunk 10 offset: 0x27056
+[DEBUG read_nb_format_chunk_data] Chunk 10 total_size=15672, data_size=15668, offset=0x27056
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 10: 0x0263e3e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 10: 15668 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 11/41
+[DEBUG read_nb_format_chunk_data] Chunk 11 offset: 0x2ad8e
+[DEBUG read_nb_format_chunk_data] Chunk 11 total_size=16014, data_size=16010, offset=0x2ad8e
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 11: 0x6b59ea55
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 11: 16010 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 12/41
+[DEBUG read_nb_format_chunk_data] Chunk 12 offset: 0x2ec1c
+[DEBUG read_nb_format_chunk_data] Chunk 12 total_size=15999, data_size=15995, offset=0x2ec1c
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 12: 0x8c085f85
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 12: 15995 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 13/41
+[DEBUG read_nb_format_chunk_data] Chunk 13 offset: 0x32a9b
+[DEBUG read_nb_format_chunk_data] Chunk 13 total_size=15990, data_size=15986, offset=0x32a9b
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 13: 0x409fe4fb
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 13: 15986 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 14/41
+[DEBUG read_nb_format_chunk_data] Chunk 14 offset: 0x36911
+[DEBUG read_nb_format_chunk_data] Chunk 14 total_size=15861, data_size=15857, offset=0x36911
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 14: 0x1e730d03
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 14: 15857 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 15/41
+[DEBUG read_nb_format_chunk_data] Chunk 15 offset: 0x3a706
+[DEBUG read_nb_format_chunk_data] Chunk 15 total_size=15747, data_size=15743, offset=0x3a706
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 15: 0x71f285d8
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 15: 15743 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 16/41
+[DEBUG read_nb_format_chunk_data] Chunk 16 offset: 0x3e489
+[DEBUG read_nb_format_chunk_data] Chunk 16 total_size=15867, data_size=15863, offset=0x3e489
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 16: 0xe788bcbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 16: 15863 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 17/41
+[DEBUG read_nb_format_chunk_data] Chunk 17 offset: 0x42284
+[DEBUG read_nb_format_chunk_data] Chunk 17 total_size=16394, data_size=16390, offset=0x42284
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 17: 0xd7893392
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 17: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 18/41
+[DEBUG read_nb_format_chunk_data] Chunk 18 offset: 0x4628e
+[DEBUG read_nb_format_chunk_data] Chunk 18 total_size=15588, data_size=15584, offset=0x4628e
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 18: 0x93feab07
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 18: 15584 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 19/41
+[DEBUG read_nb_format_chunk_data] Chunk 19 offset: 0x49f72
+[DEBUG read_nb_format_chunk_data] Chunk 19 total_size=16379, data_size=16375, offset=0x49f72
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 19: 0xb01e4a15
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 19: 16375 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 20/41
+[DEBUG read_nb_format_chunk_data] Chunk 20 offset: 0x4df6d
+[DEBUG read_nb_format_chunk_data] Chunk 20 total_size=16012, data_size=16008, offset=0x4df6d
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 20: 0x58ff623a
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 20: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 21/41
+[DEBUG read_nb_format_chunk_data] Chunk 21 offset: 0x51df9
+[DEBUG read_nb_format_chunk_data] Chunk 21 total_size=16265, data_size=16261, offset=0x51df9
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 21: 0x77d41cb6
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 21: 16261 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 22/41
+[DEBUG read_nb_format_chunk_data] Chunk 22 offset: 0x55d82
+[DEBUG read_nb_format_chunk_data] Chunk 22 total_size=15685, data_size=15681, offset=0x55d82
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 22: 0x2f0da694
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 22: 15681 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 23/41
+[DEBUG read_nb_format_chunk_data] Chunk 23 offset: 0x59ac7
+[DEBUG read_nb_format_chunk_data] Chunk 23 total_size=16394, data_size=16390, offset=0x59ac7
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 23: 0x4fea2620
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 23: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 24/41
+[DEBUG read_nb_format_chunk_data] Chunk 24 offset: 0x5dad1
+[DEBUG read_nb_format_chunk_data] Chunk 24 total_size=16394, data_size=16390, offset=0x5dad1
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 24: 0xf674bb58
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 24: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 25/41
+[DEBUG read_nb_format_chunk_data] Chunk 25 offset: 0x61adb
+[DEBUG read_nb_format_chunk_data] Chunk 25 total_size=15690, data_size=15686, offset=0x61adb
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 25: 0x7c18e5e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 25: 15686 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 26/41
+[DEBUG read_nb_format_chunk_data] Chunk 26 offset: 0x65825
+[DEBUG read_nb_format_chunk_data] Chunk 26 total_size=15722, data_size=15718, offset=0x65825
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 26: 0x9febb2f2
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 26: 15718 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 27/41
+[DEBUG read_nb_format_chunk_data] Chunk 27 offset: 0x6958f
+[DEBUG read_nb_format_chunk_data] Chunk 27 total_size=16050, data_size=16046, offset=0x6958f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 27: 0x5da0a035
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 27: 16046 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 28/41
+[DEBUG read_nb_format_chunk_data] Chunk 28 offset: 0x6d441
+[DEBUG read_nb_format_chunk_data] Chunk 28 total_size=15632, data_size=15628, offset=0x6d441
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 28: 0x4c723dbf
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 28: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 29/41
+[DEBUG read_nb_format_chunk_data] Chunk 29 offset: 0x71151
+[DEBUG read_nb_format_chunk_data] Chunk 29 total_size=16081, data_size=16077, offset=0x71151
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 29: 0xdb0b6dbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 29: 16077 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 30/41
+[DEBUG read_nb_format_chunk_data] Chunk 30 offset: 0x75022
+[DEBUG read_nb_format_chunk_data] Chunk 30 total_size=16012, data_size=16008, offset=0x75022
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 30: 0x681673d3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 30: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 31/41
+[DEBUG read_nb_format_chunk_data] Chunk 31 offset: 0x78eae
+[DEBUG read_nb_format_chunk_data] Chunk 31 total_size=16007, data_size=16003, offset=0x78eae
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 31: 0x9ad5566d
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 31: 16003 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 32/41
+[DEBUG read_nb_format_chunk_data] Chunk 32 offset: 0x7cd35
+[DEBUG read_nb_format_chunk_data] Chunk 32 total_size=15626, data_size=15622, offset=0x7cd35
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 32: 0x54aeb1f4
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 32: 15622 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 33/41
+[DEBUG read_nb_format_chunk_data] Chunk 33 offset: 0x80a3f
+[DEBUG read_nb_format_chunk_data] Chunk 33 total_size=16394, data_size=16390, offset=0x80a3f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 33: 0xd75d58fc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 33: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 34/41
+[DEBUG read_nb_format_chunk_data] Chunk 34 offset: 0x84a49
+[DEBUG read_nb_format_chunk_data] Chunk 34 total_size=16188, data_size=16184, offset=0x84a49
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 34: 0xa5623006
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 34: 16184 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 35/41
+[DEBUG read_nb_format_chunk_data] Chunk 35 offset: 0x88985
+[DEBUG read_nb_format_chunk_data] Chunk 35 total_size=16096, data_size=16092, offset=0x88985
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 35: 0x2a557c46
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 35: 16092 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 36/41
+[DEBUG read_nb_format_chunk_data] Chunk 36 offset: 0x8c865
+[DEBUG read_nb_format_chunk_data] Chunk 36 total_size=15632, data_size=15628, offset=0x8c865
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 36: 0x6a75b2cc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 36: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 37/41
+[DEBUG read_nb_format_chunk_data] Chunk 37 offset: 0x90575
+[DEBUG read_nb_format_chunk_data] Chunk 37 total_size=15765, data_size=15761, offset=0x90575
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 37: 0x5cbd7dbe
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 37: 15761 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 38/41
+[DEBUG read_nb_format_chunk_data] Chunk 38 offset: 0x9430a
+[DEBUG read_nb_format_chunk_data] Chunk 38 total_size=15680, data_size=15676, offset=0x9430a
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 38: 0xaab92f28
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 38: 15676 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 39/41
+[DEBUG read_nb_format_chunk_data] Chunk 39 offset: 0x9804a
+[DEBUG read_nb_format_chunk_data] Chunk 39 total_size=16394, data_size=16390, offset=0x9804a
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 39: 0xa60581c7
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 39: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 40/41
+[DEBUG read_nb_format_chunk_data] Chunk 40 offset: 0x9c054
+[DEBUG read_nb_format_chunk_data] Chunk 40 total_size=8104, data_size=8100, offset=0x9c054
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 40: 0x34f03705
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 40: 8100 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] All chunks read (41/41)
+[DEBUG] V5CompressedLegacy: Finished stitching 41 chunks, total buffer: 663863 bytes
+[DEBUG] V5CompressedLegacy: Parsed 1000 entries from stitched buffer
+✓ Read 1000 entries from SSTable
+
+📋 Validation 1: Partition Count
+  ✓ Parser returned 1000 partitions (expected 999-1000)
+
+📋 Validation 2: Partition Key Matching
+  ✓ Entry 0: UUID=15291a77-d739-4e73-8397-b787442f3a1f, table_id=test_keyspace.test_table
+  ✓ Entry 1: UUID=e94e1bf3-8aea-4d59-adf3-57eb1d1d854d, table_id=test_keyspace.test_table
+  ✓ Entry 2: UUID=bc15f6ea-3c19-4264-8ca4-21c260edea01, table_id=test_keyspace.test_table
+  ✓ Entry 3: UUID=57154486-c4d2-46d5-bc92-fdc0f41dc57a, table_id=test_keyspace.test_table
+  ✓ Entry 4: UUID=37bc8d3a-9052-413d-aff0-97966a2632dc, table_id=test_keyspace.test_table
+
+  ✓ Matched 1000/1000 partition keys with JSONL reference
+
+📋 Validation 3: Cell Data Verification
+  (Validating ALL cells for first 10 partitions against JSONL reference)
+
+  📊 Entry 0: UUID=15291a77-d739-4e73-8397-b787442f3a1f, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 1: UUID=e94e1bf3-8aea-4d59-adf3-57eb1d1d854d, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 2: UUID=bc15f6ea-3c19-4264-8ca4-21c260edea01, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 3: UUID=57154486-c4d2-46d5-bc92-fdc0f41dc57a, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 4: UUID=37bc8d3a-9052-413d-aff0-97966a2632dc, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 5: UUID=4d7a38d9-27a5-4f65-bd3a-83cecff24bf5, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 6: UUID=ebe4c40e-3ed9-4595-a8b6-0b572755a68b, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 7: UUID=53cd23eb-40ee-4100-94d0-0fd8593c51f3, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 8: UUID=29e21323-e8b4-4d6d-987d-dd8867d1af1c, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 9: UUID=05f8e423-6893-4074-aed1-5757870353b5, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  ═══════════════════════════════════════════
+  ✓ Cell Validation Summary: 180/180 cells matched
+  ✓ Partitions with 100% match: 10/10
+  ═══════════════════════════════════════════
+
+════════════════════════════════════════════════════════
+✅ V5CompressedLegacy JSONL Parity Test PASSED
+════════════════════════════════════════════════════════
+  Partition Count:  1000 (100% match)
+  Partition Keys:   1000/1000 matched (100.0%)
+  Cell Data:        180/180 cells matched (100.0%)
+  Full Partitions:  10/10 partitions with 100% cell match
+
+🎯 Issue #166 Validated: Parser output matches sstabledump 1:1
+   - Partition keys match
+   - Cell names match
+   - Cell values match (types and data)
+════════════════════════════════════════════════════════
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.03s
+
+
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 705 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 1 test
+Reference Counter value validated: 422216548022666
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 1 test
+PASS: Parser correctly rejects insufficient data
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 11 tests
+.........Opening SSTable at "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
+Opening SSTable at "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
+Parsed exact header size 4096 for BIG v5 format using nom parser
+Parsed exact header size 4096 for BIG v5 format using nom parser
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 224, 0, 0, 0, 128, 0, 0, 0, 8, 32, 0, 0, 0, 56, 0, 0, 0, 80, 0, 0, 0, 104, 0, 0, 0, 128, 0, 0, 0, 152, 0, 0, 0, 176, 0, 0, 0, 200, 0, 0, 0, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 0, 0, 0, 0, 0, 108, 156, 193, 246, 53, 250, 71, 172, 169, 44, 151, 94, 5, 7, 252, 96, 231, 10, 0, 0, 0, 0, 0, 0, 204, 159, 93, 172, 89, 86, 66, 182, 174, 119, 108, 104, 235, 181, 172, 114, 231, 21, 0, 0, 0, 0, 0, 0, 5, 23, 76, 160, 178, 118, 68, 49, 181, 29, 207, 73, 121, 170, 116, 75, 231, 32, 0, 0, 0, 0, 0, 0, 2, 42, 220, 110, 31, 179, 75, 78, 140, 66, 44, 232, 123, 187, 189, 156, 231, 43, 0, 0, 0, 0, 0, 0, 244, 241, 3, 30, 78, 27, 78, 251, 156, 12, 218, 226, 236, 150, 110, 66, 231, 54, 0, 0, 0, 0, 0, 0, 244, 123, 106, 9, 243, 72, 67, 177, 176, 75, 146, 60, 27, 89, 240, 171, 231, 65, 0, 0, 0, 0, 0, 0, 248, 153, 36, 104, 49, 238, 77, 188, 159, 168, 186, 79, 45, 239, 25, 127, 231, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 16, 7, 149, 153, 169, 206, 251, 72, 148, 158, 202, 226, 226, 178, 31, 149, 130], code: Verify })
+Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 224, 0, 0, 0, 128, 0, 0, 0, 8, 32, 0, 0, 0, 56, 0, 0, 0, 80, 0, 0, 0, 104, 0, 0, 0, 128, 0, 0, 0, 152, 0, 0, 0, 176, 0, 0, 0, 200, 0, 0, 0, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 0, 0, 0, 0, 0, 108, 156, 193, 246, 53, 250, 71, 172, 169, 44, 151, 94, 5, 7, 252, 96, 231, 10, 0, 0, 0, 0, 0, 0, 204, 159, 93, 172, 89, 86, 66, 182, 174, 119, 108, 104, 235, 181, 172, 114, 231, 21, 0, 0, 0, 0, 0, 0, 5, 23, 76, 160, 178, 118, 68, 49, 181, 29, 207, 73, 121, 170, 116, 75, 231, 32, 0, 0, 0, 0, 0, 0, 2, 42, 220, 110, 31, 179, 75, 78, 140, 66, 44, 232, 123, 187, 189, 156, 231, 43, 0, 0, 0, 0, 0, 0, 244, 241, 3, 30, 78, 27, 78, 251, 156, 12, 218, 226, 236, 150, 110, 66, 231, 54, 0, 0, 0, 0, 0, 0, 244, 123, 106, 9, 243, 72, 67, 177, 176, 75, 146, 60, 27, 89, 240, 171, 231, 65, 0, 0, 0, 0, 0, 0, 248, 153, 36, 104, 49, 238, 77, 188, 159, 168, 186, 79, 45, 239, 25, 127, 231, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 16, 7, 149, 153, 169, 206, 251, 72, 148, 158, 202, 226, 226, 178, 31, 149, 130], code: Verify })
+SSTable version: V5_0DataFormat
+Data format: V5CompressedLegacy
+[DEBUG] V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 0/41
+[DEBUG read_nb_format_chunk_data] Chunk 0 offset: 0x0
+[DEBUG read_nb_format_chunk_data] Chunk 0 total_size=15871, data_size=15867, offset=0x0
+SSTable version: V5_0DataFormat
+Data format: V5CompressedLegacy
+[DEBUG] V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 0/41
+[DEBUG read_nb_format_chunk_data] Chunk 0 offset: 0x0
+[DEBUG read_nb_format_chunk_data] Chunk 0 total_size=15871, data_size=15867, offset=0x0
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 0: 0xbc878748
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 0: 15867 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 0: 0xbc878748
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 0: 15867 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 1/41
+[DEBUG read_nb_format_chunk_data] Chunk 1 offset: 0x3dff
+[DEBUG read_nb_format_chunk_data] Chunk 1 total_size=16240, data_size=16236, offset=0x3dff
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 1/41
+[DEBUG read_nb_format_chunk_data] Chunk 1 offset: 0x3dff
+[DEBUG read_nb_format_chunk_data] Chunk 1 total_size=16240, data_size=16236, offset=0x3dff
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 1: 0x75f56510
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 1: 16236 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 1: 0x75f56510
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 1: 16236 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 2/41
+[DEBUG read_nb_format_chunk_data] Chunk 2 offset: 0x7d6f
+[DEBUG read_nb_format_chunk_data] Chunk 2 total_size=16394, data_size=16390, offset=0x7d6f
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 2/41
+[DEBUG read_nb_format_chunk_data] Chunk 2 offset: 0x7d6f
+[DEBUG read_nb_format_chunk_data] Chunk 2 total_size=16394, data_size=16390, offset=0x7d6f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 2: 0x7fb4c2c3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 2: 16390 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 2: 0x7fb4c2c3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 2: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 3/41
+[DEBUG read_nb_format_chunk_data] Chunk 3 offset: 0xbd79
+[DEBUG read_nb_format_chunk_data] Chunk 3 total_size=16342, data_size=16338, offset=0xbd79
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 3/41
+[DEBUG read_nb_format_chunk_data] Chunk 3 offset: 0xbd79
+[DEBUG read_nb_format_chunk_data] Chunk 3 total_size=16342, data_size=16338, offset=0xbd79
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 3: 0x63013836
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 3: 16338 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 3: 0x63013836
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 3: 16338 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 4/41
+[DEBUG read_nb_format_chunk_data] Chunk 4 offset: 0xfd4f
+[DEBUG read_nb_format_chunk_data] Chunk 4 total_size=15796, data_size=15792, offset=0xfd4f
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 4/41
+[DEBUG read_nb_format_chunk_data] Chunk 4 offset: 0xfd4f
+[DEBUG read_nb_format_chunk_data] Chunk 4 total_size=15796, data_size=15792, offset=0xfd4f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 4: 0x8e1718f0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 4: 15792 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 4: 0x8e1718f0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 4: 15792 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 5/41
+[DEBUG read_nb_format_chunk_data] Chunk 5 offset: 0x13b03
+[DEBUG read_nb_format_chunk_data] Chunk 5 total_size=15731, data_size=15727, offset=0x13b03
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 5/41
+[DEBUG read_nb_format_chunk_data] Chunk 5 offset: 0x13b03
+[DEBUG read_nb_format_chunk_data] Chunk 5 total_size=15731, data_size=15727, offset=0x13b03
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 5: 0x9a7c8ae3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 5: 15727 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 5: 0x9a7c8ae3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 5: 15727 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 6/41
+[DEBUG read_nb_format_chunk_data] Chunk 6 offset: 0x17876
+[DEBUG read_nb_format_chunk_data] Chunk 6 total_size=16394, data_size=16390, offset=0x17876
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 6: 0xd88233ad
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 6: 16390 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 6/41
+[DEBUG read_nb_format_chunk_data] Chunk 6 offset: 0x17876
+[DEBUG read_nb_format_chunk_data] Chunk 6 total_size=16394, data_size=16390, offset=0x17876
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 6: 0xd88233ad
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 6: 16390 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 7/41
+[DEBUG read_nb_format_chunk_data] Chunk 7 offset: 0x1b880
+[DEBUG read_nb_format_chunk_data] Chunk 7 total_size=15682, data_size=15678, offset=0x1b880
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 7/41
+[DEBUG read_nb_format_chunk_data] Chunk 7 offset: 0x1b880
+[DEBUG read_nb_format_chunk_data] Chunk 7 total_size=15682, data_size=15678, offset=0x1b880
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 7: 0xaa0ef540
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 7: 15678 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 7: 0xaa0ef540
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 7: 15678 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 8/41
+[DEBUG read_nb_format_chunk_data] Chunk 8 offset: 0x1f5c2
+[DEBUG read_nb_format_chunk_data] Chunk 8 total_size=15733, data_size=15729, offset=0x1f5c2
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 8/41
+[DEBUG read_nb_format_chunk_data] Chunk 8 offset: 0x1f5c2
+[DEBUG read_nb_format_chunk_data] Chunk 8 total_size=15733, data_size=15729, offset=0x1f5c2
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 8: 0xcb963432
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 8: 15729 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 8: 0xcb963432
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 8: 15729 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 9/41
+[DEBUG read_nb_format_chunk_data] Chunk 9 offset: 0x23337
+[DEBUG read_nb_format_chunk_data] Chunk 9 total_size=15647, data_size=15643, offset=0x23337
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 9/41
+[DEBUG read_nb_format_chunk_data] Chunk 9 offset: 0x23337
+[DEBUG read_nb_format_chunk_data] Chunk 9 total_size=15647, data_size=15643, offset=0x23337
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 9: 0xa98e58da
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 9: 15643 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 9: 0xa98e58da
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 9: 15643 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 10/41
+[DEBUG read_nb_format_chunk_data] Chunk 10 offset: 0x27056
+[DEBUG read_nb_format_chunk_data] Chunk 10 total_size=15672, data_size=15668, offset=0x27056
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 10/41
+[DEBUG read_nb_format_chunk_data] Chunk 10 offset: 0x27056
+[DEBUG read_nb_format_chunk_data] Chunk 10 total_size=15672, data_size=15668, offset=0x27056
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 10: 0x0263e3e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 10: 15668 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 10: 0x0263e3e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 10: 15668 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 11/41
+[DEBUG read_nb_format_chunk_data] Chunk 11 offset: 0x2ad8e
+[DEBUG read_nb_format_chunk_data] Chunk 11 total_size=16014, data_size=16010, offset=0x2ad8e
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 11/41
+[DEBUG read_nb_format_chunk_data] Chunk 11 offset: 0x2ad8e
+[DEBUG read_nb_format_chunk_data] Chunk 11 total_size=16014, data_size=16010, offset=0x2ad8e
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 11: 0x6b59ea55
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 11: 16010 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 11: 0x6b59ea55
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 11: 16010 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 12/41
+[DEBUG read_nb_format_chunk_data] Chunk 12 offset: 0x2ec1c
+[DEBUG read_nb_format_chunk_data] Chunk 12 total_size=15999, data_size=15995, offset=0x2ec1c
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 12/41
+[DEBUG read_nb_format_chunk_data] Chunk 12 offset: 0x2ec1c
+[DEBUG read_nb_format_chunk_data] Chunk 12 total_size=15999, data_size=15995, offset=0x2ec1c
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 12: 0x8c085f85
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 12: 15995 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 12: 0x8c085f85
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 12: 15995 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 13/41
+[DEBUG read_nb_format_chunk_data] Chunk 13 offset: 0x32a9b
+[DEBUG read_nb_format_chunk_data] Chunk 13 total_size=15990, data_size=15986, offset=0x32a9b
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 13/41
+[DEBUG read_nb_format_chunk_data] Chunk 13 offset: 0x32a9b
+[DEBUG read_nb_format_chunk_data] Chunk 13 total_size=15990, data_size=15986, offset=0x32a9b
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 13: 0x409fe4fb
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 13: 15986 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 13: 0x409fe4fb
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 13: 15986 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 14/41
+[DEBUG read_nb_format_chunk_data] Chunk 14 offset: 0x36911
+[DEBUG read_nb_format_chunk_data] Chunk 14 total_size=15861, data_size=15857, offset=0x36911
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 14/41
+[DEBUG read_nb_format_chunk_data] Chunk 14 offset: 0x36911
+[DEBUG read_nb_format_chunk_data] Chunk 14 total_size=15861, data_size=15857, offset=0x36911
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 14: 0x1e730d03
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 14: 15857 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 14: 0x1e730d03
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 14: 15857 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 15/41
+[DEBUG read_nb_format_chunk_data] Chunk 15 offset: 0x3a706
+[DEBUG read_nb_format_chunk_data] Chunk 15 total_size=15747, data_size=15743, offset=0x3a706
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 15/41
+[DEBUG read_nb_format_chunk_data] Chunk 15 offset: 0x3a706
+[DEBUG read_nb_format_chunk_data] Chunk 15 total_size=15747, data_size=15743, offset=0x3a706
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 15: 0x71f285d8
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 15: 15743 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 15: 0x71f285d8
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 15: 15743 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 16/41
+[DEBUG read_nb_format_chunk_data] Chunk 16 offset: 0x3e489
+[DEBUG read_nb_format_chunk_data] Chunk 16 total_size=15867, data_size=15863, offset=0x3e489
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 16/41
+[DEBUG read_nb_format_chunk_data] Chunk 16 offset: 0x3e489
+[DEBUG read_nb_format_chunk_data] Chunk 16 total_size=15867, data_size=15863, offset=0x3e489
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 16: 0xe788bcbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 16: 15863 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 16: 0xe788bcbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 16: 15863 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 17/41
+[DEBUG read_nb_format_chunk_data] Chunk 17 offset: 0x42284
+[DEBUG read_nb_format_chunk_data] Chunk 17 total_size=16394, data_size=16390, offset=0x42284
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 17/41
+[DEBUG read_nb_format_chunk_data] Chunk 17 offset: 0x42284
+[DEBUG read_nb_format_chunk_data] Chunk 17 total_size=16394, data_size=16390, offset=0x42284
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 17: 0xd7893392
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 17: 16390 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 17: 0xd7893392
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 17: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 18/41
+[DEBUG read_nb_format_chunk_data] Chunk 18 offset: 0x4628e
+[DEBUG read_nb_format_chunk_data] Chunk 18 total_size=15588, data_size=15584, offset=0x4628e
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 18/41
+[DEBUG read_nb_format_chunk_data] Chunk 18 offset: 0x4628e
+[DEBUG read_nb_format_chunk_data] Chunk 18 total_size=15588, data_size=15584, offset=0x4628e
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 18: 0x93feab07
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 18: 15584 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 18: 0x93feab07
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 18: 15584 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 19/41
+[DEBUG read_nb_format_chunk_data] Chunk 19 offset: 0x49f72
+[DEBUG read_nb_format_chunk_data] Chunk 19 total_size=16379, data_size=16375, offset=0x49f72
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 19/41
+[DEBUG read_nb_format_chunk_data] Chunk 19 offset: 0x49f72
+[DEBUG read_nb_format_chunk_data] Chunk 19 total_size=16379, data_size=16375, offset=0x49f72
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 19: 0xb01e4a15
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 19: 16375 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 19: 0xb01e4a15
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 19: 16375 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 20/41
+[DEBUG read_nb_format_chunk_data] Chunk 20 offset: 0x4df6d
+[DEBUG read_nb_format_chunk_data] Chunk 20 total_size=16012, data_size=16008, offset=0x4df6d
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 20/41
+[DEBUG read_nb_format_chunk_data] Chunk 20 offset: 0x4df6d
+[DEBUG read_nb_format_chunk_data] Chunk 20 total_size=16012, data_size=16008, offset=0x4df6d
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 20: 0x58ff623a
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 20: 16008 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 20: 0x58ff623a
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 20: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 21/41
+[DEBUG read_nb_format_chunk_data] Chunk 21 offset: 0x51df9
+[DEBUG read_nb_format_chunk_data] Chunk 21 total_size=16265, data_size=16261, offset=0x51df9
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 21/41
+[DEBUG read_nb_format_chunk_data] Chunk 21 offset: 0x51df9
+[DEBUG read_nb_format_chunk_data] Chunk 21 total_size=16265, data_size=16261, offset=0x51df9
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 21: 0x77d41cb6
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 21: 16261 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 21: 0x77d41cb6
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 21: 16261 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 22/41
+[DEBUG read_nb_format_chunk_data] Chunk 22 offset: 0x55d82
+[DEBUG read_nb_format_chunk_data] Chunk 22 total_size=15685, data_size=15681, offset=0x55d82
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 22/41
+[DEBUG read_nb_format_chunk_data] Chunk 22 offset: 0x55d82
+[DEBUG read_nb_format_chunk_data] Chunk 22 total_size=15685, data_size=15681, offset=0x55d82
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 22: 0x2f0da694
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 22: 15681 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 22: 0x2f0da694
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 22: 15681 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 23/41
+[DEBUG read_nb_format_chunk_data] Chunk 23 offset: 0x59ac7
+[DEBUG read_nb_format_chunk_data] Chunk 23 total_size=16394, data_size=16390, offset=0x59ac7
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 23/41
+[DEBUG read_nb_format_chunk_data] Chunk 23 offset: 0x59ac7
+[DEBUG read_nb_format_chunk_data] Chunk 23 total_size=16394, data_size=16390, offset=0x59ac7
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 23: 0x4fea2620
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 23: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 23: 0x4fea2620
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 23: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 24/41
+[DEBUG read_nb_format_chunk_data] Chunk 24 offset: 0x5dad1
+[DEBUG read_nb_format_chunk_data] Chunk 24 total_size=16394, data_size=16390, offset=0x5dad1
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 24/41
+[DEBUG read_nb_format_chunk_data] Chunk 24 offset: 0x5dad1
+[DEBUG read_nb_format_chunk_data] Chunk 24 total_size=16394, data_size=16390, offset=0x5dad1
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 24: 0xf674bb58
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 24: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 24: 0xf674bb58
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 24: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 25/41
+[DEBUG read_nb_format_chunk_data] Chunk 25 offset: 0x61adb
+[DEBUG read_nb_format_chunk_data] Chunk 25 total_size=15690, data_size=15686, offset=0x61adb
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 25/41
+[DEBUG read_nb_format_chunk_data] Chunk 25 offset: 0x61adb
+[DEBUG read_nb_format_chunk_data] Chunk 25 total_size=15690, data_size=15686, offset=0x61adb
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 25: 0x7c18e5e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 25: 15686 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 25: 0x7c18e5e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 25: 15686 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 26/41
+[DEBUG read_nb_format_chunk_data] Chunk 26 offset: 0x65825
+[DEBUG read_nb_format_chunk_data] Chunk 26 total_size=15722, data_size=15718, offset=0x65825
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 26/41
+[DEBUG read_nb_format_chunk_data] Chunk 26 offset: 0x65825
+[DEBUG read_nb_format_chunk_data] Chunk 26 total_size=15722, data_size=15718, offset=0x65825
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 26: 0x9febb2f2
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 26: 15718 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 26: 0x9febb2f2
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 26: 15718 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 27/41
+[DEBUG read_nb_format_chunk_data] Chunk 27 offset: 0x6958f
+[DEBUG read_nb_format_chunk_data] Chunk 27 total_size=16050, data_size=16046, offset=0x6958f
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 27/41
+[DEBUG read_nb_format_chunk_data] Chunk 27 offset: 0x6958f
+[DEBUG read_nb_format_chunk_data] Chunk 27 total_size=16050, data_size=16046, offset=0x6958f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 27: 0x5da0a035
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 27: 16046 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 27: 0x5da0a035
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 27: 16046 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 28/41
+[DEBUG read_nb_format_chunk_data] Chunk 28 offset: 0x6d441
+[DEBUG read_nb_format_chunk_data] Chunk 28 total_size=15632, data_size=15628, offset=0x6d441
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 28: 0x4c723dbf
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 28: 15628 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 28/41
+[DEBUG read_nb_format_chunk_data] Chunk 28 offset: 0x6d441
+[DEBUG read_nb_format_chunk_data] Chunk 28 total_size=15632, data_size=15628, offset=0x6d441
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 28: 0x4c723dbf
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 28: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 29/41
+[DEBUG read_nb_format_chunk_data] Chunk 29 offset: 0x71151
+[DEBUG read_nb_format_chunk_data] Chunk 29 total_size=16081, data_size=16077, offset=0x71151
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 29/41
+[DEBUG read_nb_format_chunk_data] Chunk 29 offset: 0x71151
+[DEBUG read_nb_format_chunk_data] Chunk 29 total_size=16081, data_size=16077, offset=0x71151
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 29: 0xdb0b6dbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 29: 16077 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 29: 0xdb0b6dbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 29: 16077 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 30/41
+[DEBUG read_nb_format_chunk_data] Chunk 30 offset: 0x75022
+[DEBUG read_nb_format_chunk_data] Chunk 30 total_size=16012, data_size=16008, offset=0x75022
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 30/41
+[DEBUG read_nb_format_chunk_data] Chunk 30 offset: 0x75022
+[DEBUG read_nb_format_chunk_data] Chunk 30 total_size=16012, data_size=16008, offset=0x75022
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 30: 0x681673d3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 30: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 30: 0x681673d3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 30: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 31/41
+[DEBUG read_nb_format_chunk_data] Chunk 31 offset: 0x78eae
+[DEBUG read_nb_format_chunk_data] Chunk 31 total_size=16007, data_size=16003, offset=0x78eae
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 31/41
+[DEBUG read_nb_format_chunk_data] Chunk 31 offset: 0x78eae
+[DEBUG read_nb_format_chunk_data] Chunk 31 total_size=16007, data_size=16003, offset=0x78eae
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 31: 0x9ad5566d
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 31: 16003 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 31: 0x9ad5566d
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 31: 16003 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 32/41
+[DEBUG read_nb_format_chunk_data] Chunk 32 offset: 0x7cd35
+[DEBUG read_nb_format_chunk_data] Chunk 32 total_size=15626, data_size=15622, offset=0x7cd35
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 32/41
+[DEBUG read_nb_format_chunk_data] Chunk 32 offset: 0x7cd35
+[DEBUG read_nb_format_chunk_data] Chunk 32 total_size=15626, data_size=15622, offset=0x7cd35
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 32: 0x54aeb1f4
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 32: 15622 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 32: 0x54aeb1f4
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 32: 15622 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 33/41
+[DEBUG read_nb_format_chunk_data] Chunk 33 offset: 0x80a3f
+[DEBUG read_nb_format_chunk_data] Chunk 33 total_size=16394, data_size=16390, offset=0x80a3f
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 33/41
+[DEBUG read_nb_format_chunk_data] Chunk 33 offset: 0x80a3f
+[DEBUG read_nb_format_chunk_data] Chunk 33 total_size=16394, data_size=16390, offset=0x80a3f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 33: 0xd75d58fc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 33: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 33: 0xd75d58fc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 33: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 34/41
+[DEBUG read_nb_format_chunk_data] Chunk 34 offset: 0x84a49
+[DEBUG read_nb_format_chunk_data] Chunk 34 total_size=16188, data_size=16184, offset=0x84a49
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 34/41
+[DEBUG read_nb_format_chunk_data] Chunk 34 offset: 0x84a49
+[DEBUG read_nb_format_chunk_data] Chunk 34 total_size=16188, data_size=16184, offset=0x84a49
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 34: 0xa5623006
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 34: 16184 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 34: 0xa5623006
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 34: 16184 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 35/41
+[DEBUG read_nb_format_chunk_data] Chunk 35 offset: 0x88985
+[DEBUG read_nb_format_chunk_data] Chunk 35 total_size=16096, data_size=16092, offset=0x88985
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 35/41
+[DEBUG read_nb_format_chunk_data] Chunk 35 offset: 0x88985
+[DEBUG read_nb_format_chunk_data] Chunk 35 total_size=16096, data_size=16092, offset=0x88985
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 35: 0x2a557c46
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 35: 16092 bytes (compressed)
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 35: 0x2a557c46
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 35: 16092 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 36/41
+[DEBUG read_nb_format_chunk_data] Chunk 36 offset: 0x8c865
+[DEBUG read_nb_format_chunk_data] Chunk 36 total_size=15632, data_size=15628, offset=0x8c865
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 36/41
+[DEBUG read_nb_format_chunk_data] Chunk 36 offset: 0x8c865
+[DEBUG read_nb_format_chunk_data] Chunk 36 total_size=15632, data_size=15628, offset=0x8c865
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 36: 0x6a75b2cc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 36: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 36: 0x6a75b2cc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 36: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 37/41
+[DEBUG read_nb_format_chunk_data] Chunk 37 offset: 0x90575
+[DEBUG read_nb_format_chunk_data] Chunk 37 total_size=15765, data_size=15761, offset=0x90575
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 37/41
+[DEBUG read_nb_format_chunk_data] Chunk 37 offset: 0x90575
+[DEBUG read_nb_format_chunk_data] Chunk 37 total_size=15765, data_size=15761, offset=0x90575
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 37: 0x5cbd7dbe
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 37: 15761 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 37: 0x5cbd7dbe
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 37: 15761 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 38/41
+[DEBUG read_nb_format_chunk_data] Chunk 38 offset: 0x9430a
+[DEBUG read_nb_format_chunk_data] Chunk 38 total_size=15680, data_size=15676, offset=0x9430a
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 38/41
+[DEBUG read_nb_format_chunk_data] Chunk 38 offset: 0x9430a
+[DEBUG read_nb_format_chunk_data] Chunk 38 total_size=15680, data_size=15676, offset=0x9430a
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 38: 0xaab92f28
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 38: 15676 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 38: 0xaab92f28
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 38: 15676 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 39/41
+[DEBUG read_nb_format_chunk_data] Chunk 39 offset: 0x9804a
+[DEBUG read_nb_format_chunk_data] Chunk 39 total_size=16394, data_size=16390, offset=0x9804a
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 39/41
+[DEBUG read_nb_format_chunk_data] Chunk 39 offset: 0x9804a
+[DEBUG read_nb_format_chunk_data] Chunk 39 total_size=16394, data_size=16390, offset=0x9804a
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 39: 0xa60581c7
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 39: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 39: 0xa60581c7
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 39: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 40/41
+[DEBUG read_nb_format_chunk_data] Chunk 40 offset: 0x9c054
+[DEBUG read_nb_format_chunk_data] Chunk 40 total_size=8104, data_size=8100, offset=0x9c054
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 40/41
+[DEBUG read_nb_format_chunk_data] Chunk 40 offset: 0x9c054
+[DEBUG read_nb_format_chunk_data] Chunk 40 total_size=8104, data_size=8100, offset=0x9c054
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 40: 0x34f03705
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 40: 8100 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 40: 0x34f03705
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 40: 8100 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] All chunks read (41/41)
+[DEBUG] V5CompressedLegacy: Finished stitching 41 chunks, total buffer: 663863 bytes
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] All chunks read (41/41)
+[DEBUG] V5CompressedLegacy: Finished stitching 41 chunks, total buffer: 663863 bytes
+[DEBUG] V5CompressedLegacy: Parsed 1000 entries from stitched buffer
+Successfully read 1000 entries
+Total entries: 1000
+Unique partition keys: 1000
+Expected unique keys (from JSONL): 1000
+
+First 10 partition keys extracted:
+  [0] RowKey([21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31])
+  [1] RowKey([233, 78, 27, 243, 138, 234, 77, 89, 173, 243, 87, 235, 29, 29, 133, 77])
+  [2] RowKey([188, 21, 246, 234, 60, 25, 66, 100, 140, 164, 33, 194, 96, 237, 234, 1])
+  [3] RowKey([87, 21, 68, 134, 196, 210, 70, 213, 188, 146, 253, 192, 244, 29, 197, 122])
+  [4] RowKey([55, 188, 141, 58, 144, 82, 65, 61, 175, 240, 151, 150, 106, 38, 50, 220])
+  [5] RowKey([77, 122, 56, 217, 39, 165, 79, 101, 189, 58, 131, 206, 207, 242, 75, 245])
+  [6] RowKey([235, 228, 196, 14, 62, 217, 69, 149, 168, 182, 11, 87, 39, 85, 166, 139])
+  [7] RowKey([83, 205, 35, 235, 64, 238, 65, 0, 148, 208, 15, 216, 89, 60, 81, 243])
+  [8] RowKey([41, 226, 19, 35, 232, 180, 77, 109, 152, 125, 221, 136, 103, 209, 175, 28])
+  [9] RowKey([5, 248, 228, 35, 104, 147, 64, 116, 174, 209, 87, 87, 135, 3, 83, 181])
+GOOD: First two keys are DIFFERENT
+
+Entry 0: table_id=TableId("test_keyspace.test_table")
+Entry 0: row_key=RowKey([21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31])
+Entry 0: value=Map([(Text("birth_date"), Date(20257)), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 46702000000000 }), (Text("medium_number"), SmallInt(11684)), (Text("small_number"), TinyInt(122)), (Text("account_balance"), Decimal { scale: 2, unscaled: [48, 54, 15] }), (Text("description"), Blob([148, 223, 7, 178, 14, 75, 240, 173, 117, 194, 150, 0, 36, 38, 213, 55, 252, 176, 100, 209, 173, 71, 143, 237, 167, 80, 126, 120, 48, 141, 207, 81, 12, 201, 215, 61, 81, 36, 191, 202, 123, 74, 50, 186, 120, 131, 177, 133, 119, 217, 229, 157, 72, 209, 162, 150, 215, 38, 81, 103, 94, 161, 60, 225, 80, 154, 14, 226, 242, 187, 156, 112, 193, 79, 18, 100, 190, 128, 4, 155, 155, 204, 142, 125, 119, 144, 80, 105, 189, 196, 150, 155, 239, 156, 118, 220, 140, 99, 63, 201, 247, 68, 231, 51, 0, 54, 43, 182, 88, 63, 97, 113, 234, 119, 193, 101, 13, 100, 9, 186, 44, 98, 107, 58, 200, 159, 99, 239, 96, 2, 159, 205, 23, 63, 103, 99, 89, 150, 93, 51, 49, 253, 23, 224, 75, 210, 94, 38, 82, 114, 248, 161, 223, 5, 64, 181, 21, 126, 106, 249, 165, 172, 110, 45, 50, 56, 198, 125, 193, 202, 224, 168, 245, 23, 206, 45, 11, 81, 21, 46, 250, 219, 213, 250, 9, 179, 95, 14, 174, 2, 23, 254, 138, 162, 97, 244, 66, 131, 175, 194, 139, 86, 85, 129, 104, 116, 173, 251, 70, 59, 233, 148, 120, 138, 103, 237, 204, 227, 222, 83, 144, 87, 82, 250, 139, 218, 128, 242, 5, 190, 99, 55, 194, 57, 41, 224, 174, 9, 166, 89, 15, 45, 117, 230, 49, 45, 251, 211, 52, 24, 137, 212, 109, 92, 113, 34, 169, 222, 168, 56, 182, 71, 74, 25, 236, 226, 252, 3, 193, 209, 62, 174, 107, 115, 197, 29, 194, 8, 30, 161, 49, 225, 254, 121, 3, 87, 240, 196, 16, 232, 145, 228, 15, 180, 49, 232, 194, 22, 84, 103, 46, 187, 126, 65, 200, 195, 116, 132, 87, 238, 85, 50, 145, 249, 0, 189, 119, 10, 95, 22, 206, 173, 19, 49, 55, 21, 82, 43, 229, 225, 174, 72, 195, 111, 40, 8, 122, 139, 38, 80, 149, 247, 64, 68, 18, 128, 181, 83, 182, 169, 164, 75, 174, 211, 68, 0, 18, 246, 213, 160, 65, 76, 4, 114, 174, 78, 45, 235, 220, 63, 254, 111, 203, 72, 183, 96, 236, 143, 55, 175, 93, 238, 187, 65, 104, 136, 251, 71, 125, 84, 178, 27, 209, 173, 129, 223, 211, 118, 63, 143, 8, 202, 151, 235, 73, 166, 141, 109, 148, 16, 156, 140, 41, 159, 101, 232, 73, 72, 233, 244, 249, 206, 42, 238, 107, 7, 99, 56, 116, 57, 218, 201, 72, 119, 212, 149, 254, 230, 230, 76, 145, 21, 162, 164, 2, 233, 234, 171, 170, 231, 184, 143, 160, 251, 172, 120, 28])), (Text("salary"), BigInt(30081)), (Text("age"), Integer(40)), (Text("created"), Timestamp(1759713125394)), (Text("ip_address"), Inet([154, 47, 65, 214])), (Text("name"), Text("Mr. James Hoffman")), (Text("weight"), Float(60.24)), (Text("work_time"), Time(576460769199493866)), (Text("active"), Boolean(true)), (Text("varchar_field"), Text("reveal")), (Text("ascii_field"), Text("ascii")), (Text("session_id"), Uuid([120, 246, 65, 0, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("height"), Float(1.840000033378601))])
+Row has 18 fields
+[DEBUG] V5CompressedLegacy: Parsed 1000 entries from stitched buffer
+Extracted field names: ["birth_date", "duration_val", "medium_number", "small_number", "account_balance", "description", "salary", "age", "created", "ip_address", "name", "weight", "work_time", "active", "varchar_field", "ascii_field", "session_id", "height"]
+ascii_field value: Text("ascii")
+✅ ascii_field is Text: 'ascii'
+Successfully read 1000 entries
+Entry 0: table_id=TableId("test_keyspace.test_table"), key=RowKey([21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31]), value=Map([(Text("name"), Text("Mr. James Hoffman")), (Text("salary"), BigInt(30081)), (Text("ip_address"), Inet([154, 47, 65, 214])), (Text("ascii_field"), Text("ascii")), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 46702000000000 }), (Text("weight"), Float(60.24)), (Text("age"), Integer(40)), (Text("height"), Float(1.840000033378601)), (Text("created"), Timestamp(1759713125394)), (Text("account_balance"), Decimal { scale: 2, unscaled: [48, 54, 15] }), (Text("description"), Blob([148, 223, 7, 178, 14, 75, 240, 173, 117, 194, 150, 0, 36, 38, 213, 55, 252, 176, 100, 209, 173, 71, 143, 237, 167, 80, 126, 120, 48, 141, 207, 81, 12, 201, 215, 61, 81, 36, 191, 202, 123, 74, 50, 186, 120, 131, 177, 133, 119, 217, 229, 157, 72, 209, 162, 150, 215, 38, 81, 103, 94, 161, 60, 225, 80, 154, 14, 226, 242, 187, 156, 112, 193, 79, 18, 100, 190, 128, 4, 155, 155, 204, 142, 125, 119, 144, 80, 105, 189, 196, 150, 155, 239, 156, 118, 220, 140, 99, 63, 201, 247, 68, 231, 51, 0, 54, 43, 182, 88, 63, 97, 113, 234, 119, 193, 101, 13, 100, 9, 186, 44, 98, 107, 58, 200, 159, 99, 239, 96, 2, 159, 205, 23, 63, 103, 99, 89, 150, 93, 51, 49, 253, 23, 224, 75, 210, 94, 38, 82, 114, 248, 161, 223, 5, 64, 181, 21, 126, 106, 249, 165, 172, 110, 45, 50, 56, 198, 125, 193, 202, 224, 168, 245, 23, 206, 45, 11, 81, 21, 46, 250, 219, 213, 250, 9, 179, 95, 14, 174, 2, 23, 254, 138, 162, 97, 244, 66, 131, 175, 194, 139, 86, 85, 129, 104, 116, 173, 251, 70, 59, 233, 148, 120, 138, 103, 237, 204, 227, 222, 83, 144, 87, 82, 250, 139, 218, 128, 242, 5, 190, 99, 55, 194, 57, 41, 224, 174, 9, 166, 89, 15, 45, 117, 230, 49, 45, 251, 211, 52, 24, 137, 212, 109, 92, 113, 34, 169, 222, 168, 56, 182, 71, 74, 25, 236, 226, 252, 3, 193, 209, 62, 174, 107, 115, 197, 29, 194, 8, 30, 161, 49, 225, 254, 121, 3, 87, 240, 196, 16, 232, 145, 228, 15, 180, 49, 232, 194, 22, 84, 103, 46, 187, 126, 65, 200, 195, 116, 132, 87, 238, 85, 50, 145, 249, 0, 189, 119, 10, 95, 22, 206, 173, 19, 49, 55, 21, 82, 43, 229, 225, 174, 72, 195, 111, 40, 8, 122, 139, 38, 80, 149, 247, 64, 68, 18, 128, 181, 83, 182, 169, 164, 75, 174, 211, 68, 0, 18, 246, 213, 160, 65, 76, 4, 114, 174, 78, 45, 235, 220, 63, 254, 111, 203, 72, 183, 96, 236, 143, 55, 175, 93, 238, 187, 65, 104, 136, 251, 71, 125, 84, 178, 27, 209, 173, 129, 223, 211, 118, 63, 143, 8, 202, 151, 235, 73, 166, 141, 109, 148, 16, 156, 140, 41, 159, 101, 232, 73, 72, 233, 244, 249, 206, 42, 238, 107, 7, 99, 56, 116, 57, 218, 201, 72, 119, 212, 149, 254, 230, 230, 76, 145, 21, 162, 164, 2, 233, 234, 171, 170, 231, 184, 143, 160, 251, 172, 120, 28])), (Text("medium_number"), SmallInt(11684)), (Text("session_id"), Uuid([120, 246, 65, 0, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("work_time"), Time(576460769199493866)), (Text("active"), Boolean(true)), (Text("varchar_field"), Text("reveal")), (Text("birth_date"), Date(20257)), (Text("small_number"), TinyInt(122))])
+Entry 1: table_id=TableId("test_keyspace.test_table"), key=RowKey([233, 78, 27, 243, 138, 234, 77, 89, 173, 243, 87, 235, 29, 29, 133, 77]), value=Map([(Text("session_id"), Uuid([120, 177, 79, 100, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("salary"), BigInt(91791)), (Text("description"), Blob([36, 167, 23, 220, 233, 158, 30, 119, 123, 176, 142, 211, 217, 37, 84, 250, 53, 91, 251, 218, 75, 142, 216, 223, 135, 43, 47, 185, 232, 180, 173, 125, 48, 127, 6, 82, 74, 107, 74, 72, 104, 11, 181, 188, 104, 128, 66, 52, 170, 240, 202, 247, 240, 9, 45, 81, 193, 247, 32, 133, 88, 129, 252, 52, 162, 88, 243, 62, 193, 55, 111, 107, 195, 183, 24, 184, 118, 193, 210, 211, 222, 215, 231, 125, 203, 214, 67, 103, 118, 226, 244, 7, 192, 98, 43, 199, 42, 4, 198, 114, 252, 52, 239, 35, 82, 163, 231, 38, 142, 15, 248, 246, 84, 159, 220, 195, 249, 103, 254, 252, 60, 144, 189, 126, 113, 35, 83, 141, 73, 168, 95, 232, 1, 43, 78, 33, 151, 133, 180, 204, 164, 53, 26, 0, 197, 40, 87, 34, 250, 199, 167, 82, 249, 117, 7, 213, 225, 43, 247, 100, 120, 13, 168, 162, 75, 175, 255, 15, 82, 72, 96, 145, 157, 248, 28, 179, 137, 174, 253, 200, 139, 88, 121, 147, 97, 76, 139, 111, 43, 32, 25, 155, 0, 136, 186, 164, 38, 43, 78, 33, 68, 11, 121, 119, 249, 16, 57, 37, 53, 62, 52, 105, 139, 115, 165, 153, 172, 140, 180, 1, 234, 16, 205, 19, 101, 2, 85, 205, 28, 14, 210, 216, 87, 156, 32, 205, 193, 220, 207, 0, 113, 5, 16, 138, 109, 151, 192, 27, 190, 211, 185, 47, 135, 151, 182, 130, 141, 163, 224, 231, 131, 255, 16, 85, 249, 178, 237, 49, 239, 212, 82, 138, 92, 251, 107, 234, 109, 229, 204, 154, 34, 200, 32, 204, 73, 10, 50, 168, 16, 241, 137, 59, 95, 109, 33, 48, 114, 216, 46, 7, 84, 47, 119, 37, 37, 29, 166, 221, 233, 161, 166, 148, 64, 15, 233, 186, 200, 121, 118, 67, 85, 177, 68, 232, 150, 20, 153, 189, 150, 68, 14, 253, 198, 206, 1, 252, 9, 81, 210, 50, 199, 205, 246, 18, 183, 71, 77, 69, 122, 93, 99, 93, 167, 99, 176, 185, 116, 10, 168, 165, 111, 20, 225, 99, 63, 201, 90, 50, 246, 239, 178, 60, 82, 171, 65, 249, 255, 45, 121, 0, 115, 147, 126, 69, 168, 74, 210, 130, 159, 8, 95, 231, 241, 212, 96, 130, 21, 21, 99, 195, 92, 248, 236, 147, 11, 90, 122, 17, 84, 94, 28, 236, 182, 148, 0, 199, 237, 63, 140, 238, 7, 146, 229, 81, 253, 224, 189, 210, 237, 11, 213, 3, 41, 124, 251, 108, 133, 108, 236, 131, 67, 191, 252, 46, 50, 239, 153, 61, 117, 195, 81, 8, 79, 61, 147, 164, 239, 26, 46, 219, 237, 192, 155, 182, 200, 31, 157, 166, 231, 208, 219, 228, 73, 130, 139, 64, 250, 199, 111, 117, 127, 238, 193, 3, 96, 247, 131, 200, 95, 175, 187, 128, 227, 144, 72, 222, 117, 226, 149, 205, 253, 33, 175, 147, 65, 97, 57, 180, 199, 106, 186, 163, 192, 219, 202, 233, 241, 30, 31, 219, 169, 71, 194, 224, 170, 196, 210, 73, 20, 168, 106, 208, 81, 162, 168, 109, 208, 172, 49, 226, 239, 182, 154, 181, 199, 173, 73, 247, 165, 46, 220, 114, 144, 74, 76, 95, 101, 93, 253, 238, 245, 20, 246, 96, 116, 8, 33, 37, 93, 141, 111, 36, 236, 150, 205, 121, 117, 96, 236, 76, 39, 154, 25, 18, 157, 80, 48, 46, 117, 55, 157, 181, 163, 146, 46, 137, 144, 5, 193, 93, 140, 80, 49, 147, 113, 122, 59, 165, 109, 34, 196, 90, 234, 76, 139, 36, 66, 246, 131, 114, 120, 219, 195, 245, 36, 122, 193, 37, 145, 22, 6, 250, 71, 106, 205, 142, 156, 226, 158, 191, 48, 67, 193, 18, 243, 26, 132, 230, 151, 16, 85, 38, 175, 220, 238, 221, 245, 41, 227, 172, 228, 182, 209, 26, 57, 89, 3, 60, 234, 18, 221, 6, 152, 135, 132, 144, 205, 224, 152, 109, 106, 59, 0, 216, 241, 136, 96, 75, 72, 155, 82, 41, 177, 225, 115, 112, 153, 7, 118, 207, 100, 15, 250, 108, 3, 34, 248, 219, 207, 220, 85, 146, 198, 56, 102, 31, 146, 194, 176, 165, 18, 250, 15, 79, 150, 25, 116, 122, 36, 188, 54, 167, 247, 111, 235, 25, 166, 36, 70, 107, 237, 191, 147, 249, 7, 43, 35, 134, 233, 38, 199, 169, 174, 138, 234, 142, 29, 71, 15, 99, 12, 185, 170, 50, 114, 188, 32, 60, 232, 158, 38, 110, 193, 73, 183, 21, 171, 67, 147, 135, 212, 248, 43, 169, 41, 37, 202, 123, 110, 177, 236, 117, 10, 36, 153, 246, 39, 217, 100, 164, 47, 168, 194, 235, 14, 76, 165, 139, 223, 25, 189, 17, 240, 214, 28, 6, 136, 66, 48, 166, 209, 231, 119, 159, 235, 26, 60, 98, 170, 207, 109, 159, 68, 10, 81, 136, 49, 94, 44, 240, 37, 38, 172, 59, 253, 20, 233, 142, 16, 120, 165, 128, 122, 194, 7, 109, 1, 24, 36, 217, 240, 201, 214, 91, 9, 253, 57, 160, 73, 6, 207, 203, 143, 59, 101, 132, 113, 102, 162, 182, 97, 17, 91, 132, 155, 104, 130, 125, 198, 97, 93, 92, 145, 106, 36, 236, 77, 151, 37])), (Text("birth_date"), Date(20121)), (Text("height"), Float(1.649999976158142)), (Text("age"), Integer(76)), (Text("medium_number"), SmallInt(664)), (Text("name"), Text("Elizabeth Alvarado")), (Text("small_number"), TinyInt(62)), (Text("created"), Timestamp(1759713124942)), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 4844000000000 }), (Text("ip_address"), Inet([205, 19, 7, 56])), (Text("account_balance"), Decimal { scale: 2, unscaled: [79, 216, 32] }), (Text("active"), Boolean(true)), (Text("varchar_field"), Text("everything")), (Text("weight"), Float(92.15)), (Text("work_time"), Time(576460769197728855)), (Text("ascii_field"), Text("ascii"))])
+Entry 2: table_id=TableId("test_keyspace.test_table"), key=RowKey([188, 21, 246, 234, 60, 25, 66, 100, 140, 164, 33, 194, 96, 237, 234, 1]), value=Map([(Text("medium_number"), SmallInt(26988)), (Text("weight"), Float(116.36)), (Text("name"), Text("Carlos Johnson")), (Text("session_id"), Uuid([121, 57, 47, 106, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("description"), Blob([180, 152, 230, 30, 5, 39, 6, 32, 105, 124, 169, 103, 203, 133, 108, 135, 155, 223, 135, 108, 101, 123, 39, 18, 211, 222, 103, 150, 79, 55, 39, 57, 238, 161, 128, 247, 227, 39, 219, 139, 110, 188, 99, 109, 232, 75, 153, 42, 171, 92, 176, 240, 165, 58, 107, 234, 101, 27, 158, 66, 145, 231, 141, 67, 212, 103, 197, 96, 75, 94, 57, 172, 121, 190, 170, 133, 85, 237, 45, 15, 173, 243, 246, 81, 169, 254, 138, 244, 96, 69, 29, 9, 165, 16, 97, 112, 217, 242, 171, 192, 22, 82, 47, 42, 49, 220, 126, 162, 235, 245, 196, 210, 96, 60, 48, 176, 229, 207, 232, 106, 147, 53, 241, 188, 175, 58, 43, 92, 222, 224, 167, 202, 30, 67, 248, 138, 39, 180, 19, 133, 232, 208, 88, 249, 95, 217, 44, 137, 209, 38, 61, 255, 242, 53, 228, 178, 176, 120, 156, 158, 22, 167, 50, 155, 172, 66, 94, 176, 106, 174, 85, 188, 76, 44, 246, 18, 16, 84, 141, 125, 142, 227, 202, 27, 37, 87, 103, 160, 10, 75, 127, 73, 194, 102, 66, 240, 48, 136, 97, 111, 240, 31, 144, 246, 109, 69, 13, 91, 20, 8, 120, 164, 18, 205, 169, 69, 157, 141, 232, 197, 131, 133, 255, 50, 231, 5, 39, 237, 17, 163, 78, 231, 35, 205, 118, 219, 71, 30, 8, 221, 239, 84, 36, 135, 229, 60, 122, 255, 30, 103, 236, 94, 39, 47, 58, 67, 78, 55, 210, 248, 181, 90, 43, 111, 217, 149, 252, 246, 23, 86, 149, 85, 91, 9, 71, 16, 50, 154, 74, 208, 132, 216, 65, 224, 212, 86, 79, 71, 17, 178, 104, 154, 171, 119, 205, 205, 62, 109, 180, 97, 18, 141, 119, 197, 238, 240, 247, 36, 165, 174, 94, 13, 133, 96, 39, 236, 206, 33, 61, 49, 190, 138, 176, 87, 247, 252, 207, 86, 66, 31, 134, 23, 138, 152, 147, 90, 165, 128, 141, 122, 221, 181, 61, 143, 174, 165, 202, 18, 170, 185, 72, 218, 54, 8, 72, 7, 157, 196, 242, 232, 121, 39, 141, 10, 141, 13, 117, 66, 129, 3, 243, 39, 170, 216, 124, 43, 69, 207, 93, 237, 197, 20, 45, 175, 17, 172, 50, 54, 157, 11, 245, 113, 55, 19, 242, 53, 55, 177, 120, 32, 153, 18, 69, 128, 148, 172, 51, 135, 94, 14, 14, 123, 13, 105, 97, 178, 210, 110, 55, 138, 21, 248, 241, 124, 201, 68])), (Text("age"), Integer(42)), (Text("varchar_field"), Text("police")), (Text("work_time"), Time(576460769201207339)), (Text("created"), Timestamp(1759713125832)), (Text("birth_date"), Date(20266)), (Text("height"), Float(1.559999942779541)), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 17011000000000 }), (Text("ip_address"), Inet([197, 17, 68, 110])), (Text("account_balance"), Decimal { scale: 2, unscaled: [12, 220, 72] }), (Text("active"), Boolean(true)), (Text("ascii_field"), Text("ascii")), (Text("salary"), BigInt(66126)), (Text("small_number"), TinyInt(3))])
+age value: Integer(40)
+✅ age is Integer: 40
+active value: Boolean(true)
+✅ active is Boolean: true
+✅ V5CompressedLegacy parser test PASSED:
+   - Extracted 1000 entries
+   - First entry has >0 cells
+   - Values are properly typed (Text, not Blob)
+❌ Hex dump was not created
+..
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 695 filtered out; finished in 0.02s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 2 tests
+Parsed exact header size 4096 for BIG v5 format using nom parser
+Parsed exact header size 4096 for BIG v5 format using nom parser
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 224, 0, 0, 0, 128, 0, 0, 0, 8, 32, 0, 0, 0, 56, 0, 0, 0, 80, 0, 0, 0, 104, 0, 0, 0, 128, 0, 0, 0, 152, 0, 0, 0, 176, 0, 0, 0, 200, 0, 0, 0, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 0, 0, 0, 0, 0, 108, 156, 193, 246, 53, 250, 71, 172, 169, 44, 151, 94, 5, 7, 252, 96, 231, 10, 0, 0, 0, 0, 0, 0, 204, 159, 93, 172, 89, 86, 66, 182, 174, 119, 108, 104, 235, 181, 172, 114, 231, 21, 0, 0, 0, 0, 0, 0, 5, 23, 76, 160, 178, 118, 68, 49, 181, 29, 207, 73, 121, 170, 116, 75, 231, 32, 0, 0, 0, 0, 0, 0, 2, 42, 220, 110, 31, 179, 75, 78, 140, 66, 44, 232, 123, 187, 189, 156, 231, 43, 0, 0, 0, 0, 0, 0, 244, 241, 3, 30, 78, 27, 78, 251, 156, 12, 218, 226, 236, 150, 110, 66, 231, 54, 0, 0, 0, 0, 0, 0, 244, 123, 106, 9, 243, 72, 67, 177, 176, 75, 146, 60, 27, 89, 240, 171, 231, 65, 0, 0, 0, 0, 0, 0, 248, 153, 36, 104, 49, 238, 77, 188, 159, 168, 186, 79, 45, 239, 25, 127, 231, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 16, 7, 149, 153, 169, 206, 251, 72, 148, 158, 202, 226, 226, 178, 31, 149, 130], code: Verify })
+Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 224, 0, 0, 0, 128, 0, 0, 0, 8, 32, 0, 0, 0, 56, 0, 0, 0, 80, 0, 0, 0, 104, 0, 0, 0, 128, 0, 0, 0, 152, 0, 0, 0, 176, 0, 0, 0, 200, 0, 0, 0, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 0, 0, 0, 0, 0, 108, 156, 193, 246, 53, 250, 71, 172, 169, 44, 151, 94, 5, 7, 252, 96, 231, 10, 0, 0, 0, 0, 0, 0, 204, 159, 93, 172, 89, 86, 66, 182, 174, 119, 108, 104, 235, 181, 172, 114, 231, 21, 0, 0, 0, 0, 0, 0, 5, 23, 76, 160, 178, 118, 68, 49, 181, 29, 207, 73, 121, 170, 116, 75, 231, 32, 0, 0, 0, 0, 0, 0, 2, 42, 220, 110, 31, 179, 75, 78, 140, 66, 44, 232, 123, 187, 189, 156, 231, 43, 0, 0, 0, 0, 0, 0, 244, 241, 3, 30, 78, 27, 78, 251, 156, 12, 218, 226, 236, 150, 110, 66, 231, 54, 0, 0, 0, 0, 0, 0, 244, 123, 106, 9, 243, 72, 67, 177, 176, 75, 146, 60, 27, 89, 240, 171, 231, 65, 0, 0, 0, 0, 0, 0, 248, 153, 36, 104, 49, 238, 77, 188, 159, 168, 186, 79, 45, 239, 25, 127, 231, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 16, 7, 149, 153, 169, 206, 251, 72, 148, 158, 202, 226, 226, 178, 31, 149, 130], code: Verify })
+✓ Opened simple_table successfully
+[DEBUG] V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 0/41
+[DEBUG read_nb_format_chunk_data] Chunk 0 offset: 0x0
+[DEBUG read_nb_format_chunk_data] Chunk 0 total_size=15871, data_size=15867, offset=0x0
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 0: 0xbc878748
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 0: 15867 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 1/41
+[DEBUG read_nb_format_chunk_data] Chunk 1 offset: 0x3dff
+[DEBUG read_nb_format_chunk_data] Chunk 1 total_size=16240, data_size=16236, offset=0x3dff
+✅ V5CompressedLegacy format detected and opened successfully
+  Keyspace: test_keyspace
+  Table: test_table
+  Compression: none
+  CompressionInfo:
+    Algorithm: SnappyCompressor
+    Chunk length: 16384
+    Chunk count: 41
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 1: 0x75f56510
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 1: 16236 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+.[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 2/41
+[DEBUG read_nb_format_chunk_data] Chunk 2 offset: 0x7d6f
+[DEBUG read_nb_format_chunk_data] Chunk 2 total_size=16394, data_size=16390, offset=0x7d6f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 2: 0x7fb4c2c3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 2: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 3/41
+[DEBUG read_nb_format_chunk_data] Chunk 3 offset: 0xbd79
+[DEBUG read_nb_format_chunk_data] Chunk 3 total_size=16342, data_size=16338, offset=0xbd79
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 3: 0x63013836
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 3: 16338 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 4/41
+[DEBUG read_nb_format_chunk_data] Chunk 4 offset: 0xfd4f
+[DEBUG read_nb_format_chunk_data] Chunk 4 total_size=15796, data_size=15792, offset=0xfd4f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 4: 0x8e1718f0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 4: 15792 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 5/41
+[DEBUG read_nb_format_chunk_data] Chunk 5 offset: 0x13b03
+[DEBUG read_nb_format_chunk_data] Chunk 5 total_size=15731, data_size=15727, offset=0x13b03
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 5: 0x9a7c8ae3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 5: 15727 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 6/41
+[DEBUG read_nb_format_chunk_data] Chunk 6 offset: 0x17876
+[DEBUG read_nb_format_chunk_data] Chunk 6 total_size=16394, data_size=16390, offset=0x17876
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 6: 0xd88233ad
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 6: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 7/41
+[DEBUG read_nb_format_chunk_data] Chunk 7 offset: 0x1b880
+[DEBUG read_nb_format_chunk_data] Chunk 7 total_size=15682, data_size=15678, offset=0x1b880
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 7: 0xaa0ef540
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 7: 15678 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 8/41
+[DEBUG read_nb_format_chunk_data] Chunk 8 offset: 0x1f5c2
+[DEBUG read_nb_format_chunk_data] Chunk 8 total_size=15733, data_size=15729, offset=0x1f5c2
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 8: 0xcb963432
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 8: 15729 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 9/41
+[DEBUG read_nb_format_chunk_data] Chunk 9 offset: 0x23337
+[DEBUG read_nb_format_chunk_data] Chunk 9 total_size=15647, data_size=15643, offset=0x23337
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 9: 0xa98e58da
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 9: 15643 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 10/41
+[DEBUG read_nb_format_chunk_data] Chunk 10 offset: 0x27056
+[DEBUG read_nb_format_chunk_data] Chunk 10 total_size=15672, data_size=15668, offset=0x27056
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 10: 0x0263e3e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 10: 15668 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 11/41
+[DEBUG read_nb_format_chunk_data] Chunk 11 offset: 0x2ad8e
+[DEBUG read_nb_format_chunk_data] Chunk 11 total_size=16014, data_size=16010, offset=0x2ad8e
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 11: 0x6b59ea55
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 11: 16010 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 12/41
+[DEBUG read_nb_format_chunk_data] Chunk 12 offset: 0x2ec1c
+[DEBUG read_nb_format_chunk_data] Chunk 12 total_size=15999, data_size=15995, offset=0x2ec1c
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 12: 0x8c085f85
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 12: 15995 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 13/41
+[DEBUG read_nb_format_chunk_data] Chunk 13 offset: 0x32a9b
+[DEBUG read_nb_format_chunk_data] Chunk 13 total_size=15990, data_size=15986, offset=0x32a9b
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 13: 0x409fe4fb
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 13: 15986 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 14/41
+[DEBUG read_nb_format_chunk_data] Chunk 14 offset: 0x36911
+[DEBUG read_nb_format_chunk_data] Chunk 14 total_size=15861, data_size=15857, offset=0x36911
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 14: 0x1e730d03
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 14: 15857 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 15/41
+[DEBUG read_nb_format_chunk_data] Chunk 15 offset: 0x3a706
+[DEBUG read_nb_format_chunk_data] Chunk 15 total_size=15747, data_size=15743, offset=0x3a706
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 15: 0x71f285d8
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 15: 15743 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 16/41
+[DEBUG read_nb_format_chunk_data] Chunk 16 offset: 0x3e489
+[DEBUG read_nb_format_chunk_data] Chunk 16 total_size=15867, data_size=15863, offset=0x3e489
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 16: 0xe788bcbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 16: 15863 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 17/41
+[DEBUG read_nb_format_chunk_data] Chunk 17 offset: 0x42284
+[DEBUG read_nb_format_chunk_data] Chunk 17 total_size=16394, data_size=16390, offset=0x42284
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 17: 0xd7893392
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 17: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 18/41
+[DEBUG read_nb_format_chunk_data] Chunk 18 offset: 0x4628e
+[DEBUG read_nb_format_chunk_data] Chunk 18 total_size=15588, data_size=15584, offset=0x4628e
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 18: 0x93feab07
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 18: 15584 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 19/41
+[DEBUG read_nb_format_chunk_data] Chunk 19 offset: 0x49f72
+[DEBUG read_nb_format_chunk_data] Chunk 19 total_size=16379, data_size=16375, offset=0x49f72
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 19: 0xb01e4a15
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 19: 16375 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 20/41
+[DEBUG read_nb_format_chunk_data] Chunk 20 offset: 0x4df6d
+[DEBUG read_nb_format_chunk_data] Chunk 20 total_size=16012, data_size=16008, offset=0x4df6d
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 20: 0x58ff623a
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 20: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 21/41
+[DEBUG read_nb_format_chunk_data] Chunk 21 offset: 0x51df9
+[DEBUG read_nb_format_chunk_data] Chunk 21 total_size=16265, data_size=16261, offset=0x51df9
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 21: 0x77d41cb6
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 21: 16261 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 22/41
+[DEBUG read_nb_format_chunk_data] Chunk 22 offset: 0x55d82
+[DEBUG read_nb_format_chunk_data] Chunk 22 total_size=15685, data_size=15681, offset=0x55d82
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 22: 0x2f0da694
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 22: 15681 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 23/41
+[DEBUG read_nb_format_chunk_data] Chunk 23 offset: 0x59ac7
+[DEBUG read_nb_format_chunk_data] Chunk 23 total_size=16394, data_size=16390, offset=0x59ac7
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 23: 0x4fea2620
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 23: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 24/41
+[DEBUG read_nb_format_chunk_data] Chunk 24 offset: 0x5dad1
+[DEBUG read_nb_format_chunk_data] Chunk 24 total_size=16394, data_size=16390, offset=0x5dad1
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 24: 0xf674bb58
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 24: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 25/41
+[DEBUG read_nb_format_chunk_data] Chunk 25 offset: 0x61adb
+[DEBUG read_nb_format_chunk_data] Chunk 25 total_size=15690, data_size=15686, offset=0x61adb
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 25: 0x7c18e5e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 25: 15686 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 26/41
+[DEBUG read_nb_format_chunk_data] Chunk 26 offset: 0x65825
+[DEBUG read_nb_format_chunk_data] Chunk 26 total_size=15722, data_size=15718, offset=0x65825
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 26: 0x9febb2f2
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 26: 15718 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 27/41
+[DEBUG read_nb_format_chunk_data] Chunk 27 offset: 0x6958f
+[DEBUG read_nb_format_chunk_data] Chunk 27 total_size=16050, data_size=16046, offset=0x6958f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 27: 0x5da0a035
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 27: 16046 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 28/41
+[DEBUG read_nb_format_chunk_data] Chunk 28 offset: 0x6d441
+[DEBUG read_nb_format_chunk_data] Chunk 28 total_size=15632, data_size=15628, offset=0x6d441
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 28: 0x4c723dbf
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 28: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 29/41
+[DEBUG read_nb_format_chunk_data] Chunk 29 offset: 0x71151
+[DEBUG read_nb_format_chunk_data] Chunk 29 total_size=16081, data_size=16077, offset=0x71151
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 29: 0xdb0b6dbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 29: 16077 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 30/41
+[DEBUG read_nb_format_chunk_data] Chunk 30 offset: 0x75022
+[DEBUG read_nb_format_chunk_data] Chunk 30 total_size=16012, data_size=16008, offset=0x75022
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 30: 0x681673d3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 30: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 31/41
+[DEBUG read_nb_format_chunk_data] Chunk 31 offset: 0x78eae
+[DEBUG read_nb_format_chunk_data] Chunk 31 total_size=16007, data_size=16003, offset=0x78eae
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 31: 0x9ad5566d
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 31: 16003 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 32/41
+[DEBUG read_nb_format_chunk_data] Chunk 32 offset: 0x7cd35
+[DEBUG read_nb_format_chunk_data] Chunk 32 total_size=15626, data_size=15622, offset=0x7cd35
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 32: 0x54aeb1f4
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 32: 15622 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 33/41
+[DEBUG read_nb_format_chunk_data] Chunk 33 offset: 0x80a3f
+[DEBUG read_nb_format_chunk_data] Chunk 33 total_size=16394, data_size=16390, offset=0x80a3f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 33: 0xd75d58fc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 33: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 34/41
+[DEBUG read_nb_format_chunk_data] Chunk 34 offset: 0x84a49
+[DEBUG read_nb_format_chunk_data] Chunk 34 total_size=16188, data_size=16184, offset=0x84a49
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 34: 0xa5623006
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 34: 16184 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 35/41
+[DEBUG read_nb_format_chunk_data] Chunk 35 offset: 0x88985
+[DEBUG read_nb_format_chunk_data] Chunk 35 total_size=16096, data_size=16092, offset=0x88985
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 35: 0x2a557c46
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 35: 16092 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 36/41
+[DEBUG read_nb_format_chunk_data] Chunk 36 offset: 0x8c865
+[DEBUG read_nb_format_chunk_data] Chunk 36 total_size=15632, data_size=15628, offset=0x8c865
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 36: 0x6a75b2cc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 36: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 37/41
+[DEBUG read_nb_format_chunk_data] Chunk 37 offset: 0x90575
+[DEBUG read_nb_format_chunk_data] Chunk 37 total_size=15765, data_size=15761, offset=0x90575
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 37: 0x5cbd7dbe
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 37: 15761 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 38/41
+[DEBUG read_nb_format_chunk_data] Chunk 38 offset: 0x9430a
+[DEBUG read_nb_format_chunk_data] Chunk 38 total_size=15680, data_size=15676, offset=0x9430a
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 38: 0xaab92f28
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 38: 15676 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 39/41
+[DEBUG read_nb_format_chunk_data] Chunk 39 offset: 0x9804a
+[DEBUG read_nb_format_chunk_data] Chunk 39 total_size=16394, data_size=16390, offset=0x9804a
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 39: 0xa60581c7
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 39: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 40/41
+[DEBUG read_nb_format_chunk_data] Chunk 40 offset: 0x9c054
+[DEBUG read_nb_format_chunk_data] Chunk 40 total_size=8104, data_size=8100, offset=0x9c054
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 40: 0x34f03705
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 40: 8100 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] All chunks read (41/41)
+[DEBUG] V5CompressedLegacy: Finished stitching 41 chunks, total buffer: 663863 bytes
+[DEBUG] V5CompressedLegacy: Parsed 1000 entries from stitched buffer
+  Read 1000 entries from simple_table
+  Entry 0: key=16 bytes, value=Map([(Text("account_balance"), Decimal { scale: 2, unscaled: [48, 54, 15] }), (Text("description"), Blob([148, 223, 7, 178, 14, 75, 240, 173, 117, 194, 150, 0, 36, 38, 213, 55, 252, 176, 100, 209, 173, 71, 143, 237, 167, 80, 126, 120, 48, 141, 207, 81, 12, 201, 215, 61, 81, 36, 191, 202, 123, 74, 50, 186, 120, 131, 177, 133, 119, 217, 229, 157, 72, 209, 162, 150, 215, 38, 81, 103, 94, 161, 60, 225, 80, 154, 14, 226, 242, 187, 156, 112, 193, 79, 18, 100, 190, 128, 4, 155, 155, 204, 142, 125, 119, 144, 80, 105, 189, 196, 150, 155, 239, 156, 118, 220, 140, 99, 63, 201, 247, 68, 231, 51, 0, 54, 43, 182, 88, 63, 97, 113, 234, 119, 193, 101, 13, 100, 9, 186, 44, 98, 107, 58, 200, 159, 99, 239, 96, 2, 159, 205, 23, 63, 103, 99, 89, 150, 93, 51, 49, 253, 23, 224, 75, 210, 94, 38, 82, 114, 248, 161, 223, 5, 64, 181, 21, 126, 106, 249, 165, 172, 110, 45, 50, 56, 198, 125, 193, 202, 224, 168, 245, 23, 206, 45, 11, 81, 21, 46, 250, 219, 213, 250, 9, 179, 95, 14, 174, 2, 23, 254, 138, 162, 97, 244, 66, 131, 175, 194, 139, 86, 85, 129, 104, 116, 173, 251, 70, 59, 233, 148, 120, 138, 103, 237, 204, 227, 222, 83, 144, 87, 82, 250, 139, 218, 128, 242, 5, 190, 99, 55, 194, 57, 41, 224, 174, 9, 166, 89, 15, 45, 117, 230, 49, 45, 251, 211, 52, 24, 137, 212, 109, 92, 113, 34, 169, 222, 168, 56, 182, 71, 74, 25, 236, 226, 252, 3, 193, 209, 62, 174, 107, 115, 197, 29, 194, 8, 30, 161, 49, 225, 254, 121, 3, 87, 240, 196, 16, 232, 145, 228, 15, 180, 49, 232, 194, 22, 84, 103, 46, 187, 126, 65, 200, 195, 116, 132, 87, 238, 85, 50, 145, 249, 0, 189, 119, 10, 95, 22, 206, 173, 19, 49, 55, 21, 82, 43, 229, 225, 174, 72, 195, 111, 40, 8, 122, 139, 38, 80, 149, 247, 64, 68, 18, 128, 181, 83, 182, 169, 164, 75, 174, 211, 68, 0, 18, 246, 213, 160, 65, 76, 4, 114, 174, 78, 45, 235, 220, 63, 254, 111, 203, 72, 183, 96, 236, 143, 55, 175, 93, 238, 187, 65, 104, 136, 251, 71, 125, 84, 178, 27, 209, 173, 129, 223, 211, 118, 63, 143, 8, 202, 151, 235, 73, 166, 141, 109, 148, 16, 156, 140, 41, 159, 101, 232, 73, 72, 233, 244, 249, 206, 42, 238, 107, 7, 99, 56, 116, 57, 218, 201, 72, 119, 212, 149, 254, 230, 230, 76, 145, 21, 162, 164, 2, 233, 234, 171, 170, 231, 184, 143, 160, 251, 172, 120, 28])), (Text("ip_address"), Inet([154, 47, 65, 214])), (Text("created"), Timestamp(1759713125394)), (Text("name"), Text("Mr. James Hoffman")), (Text("age"), Integer(40)), (Text("height"), Float(1.840000033378601)), (Text("medium_number"), SmallInt(11684)), (Text("ascii_field"), Text("ascii")), (Text("active"), Boolean(true)), (Text("birth_date"), Date(20257)), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 46702000000000 }), (Text("work_time"), Time(576460769199493866)), (Text("salary"), BigInt(30081)), (Text("varchar_field"), Text("reveal")), (Text("session_id"), Uuid([120, 246, 65, 0, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("small_number"), TinyInt(122)), (Text("weight"), Float(60.24))])
+  Entry 1: key=16 bytes, value=Map([(Text("medium_number"), SmallInt(664)), (Text("work_time"), Time(576460769197728855)), (Text("session_id"), Uuid([120, 177, 79, 100, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 4844000000000 }), (Text("salary"), BigInt(91791)), (Text("birth_date"), Date(20121)), (Text("ip_address"), Inet([205, 19, 7, 56])), (Text("weight"), Float(92.15)), (Text("active"), Boolean(true)), (Text("height"), Float(1.649999976158142)), (Text("age"), Integer(76)), (Text("created"), Timestamp(1759713124942)), (Text("account_balance"), Decimal { scale: 2, unscaled: [79, 216, 32] }), (Text("description"), Blob([36, 167, 23, 220, 233, 158, 30, 119, 123, 176, 142, 211, 217, 37, 84, 250, 53, 91, 251, 218, 75, 142, 216, 223, 135, 43, 47, 185, 232, 180, 173, 125, 48, 127, 6, 82, 74, 107, 74, 72, 104, 11, 181, 188, 104, 128, 66, 52, 170, 240, 202, 247, 240, 9, 45, 81, 193, 247, 32, 133, 88, 129, 252, 52, 162, 88, 243, 62, 193, 55, 111, 107, 195, 183, 24, 184, 118, 193, 210, 211, 222, 215, 231, 125, 203, 214, 67, 103, 118, 226, 244, 7, 192, 98, 43, 199, 42, 4, 198, 114, 252, 52, 239, 35, 82, 163, 231, 38, 142, 15, 248, 246, 84, 159, 220, 195, 249, 103, 254, 252, 60, 144, 189, 126, 113, 35, 83, 141, 73, 168, 95, 232, 1, 43, 78, 33, 151, 133, 180, 204, 164, 53, 26, 0, 197, 40, 87, 34, 250, 199, 167, 82, 249, 117, 7, 213, 225, 43, 247, 100, 120, 13, 168, 162, 75, 175, 255, 15, 82, 72, 96, 145, 157, 248, 28, 179, 137, 174, 253, 200, 139, 88, 121, 147, 97, 76, 139, 111, 43, 32, 25, 155, 0, 136, 186, 164, 38, 43, 78, 33, 68, 11, 121, 119, 249, 16, 57, 37, 53, 62, 52, 105, 139, 115, 165, 153, 172, 140, 180, 1, 234, 16, 205, 19, 101, 2, 85, 205, 28, 14, 210, 216, 87, 156, 32, 205, 193, 220, 207, 0, 113, 5, 16, 138, 109, 151, 192, 27, 190, 211, 185, 47, 135, 151, 182, 130, 141, 163, 224, 231, 131, 255, 16, 85, 249, 178, 237, 49, 239, 212, 82, 138, 92, 251, 107, 234, 109, 229, 204, 154, 34, 200, 32, 204, 73, 10, 50, 168, 16, 241, 137, 59, 95, 109, 33, 48, 114, 216, 46, 7, 84, 47, 119, 37, 37, 29, 166, 221, 233, 161, 166, 148, 64, 15, 233, 186, 200, 121, 118, 67, 85, 177, 68, 232, 150, 20, 153, 189, 150, 68, 14, 253, 198, 206, 1, 252, 9, 81, 210, 50, 199, 205, 246, 18, 183, 71, 77, 69, 122, 93, 99, 93, 167, 99, 176, 185, 116, 10, 168, 165, 111, 20, 225, 99, 63, 201, 90, 50, 246, 239, 178, 60, 82, 171, 65, 249, 255, 45, 121, 0, 115, 147, 126, 69, 168, 74, 210, 130, 159, 8, 95, 231, 241, 212, 96, 130, 21, 21, 99, 195, 92, 248, 236, 147, 11, 90, 122, 17, 84, 94, 28, 236, 182, 148, 0, 199, 237, 63, 140, 238, 7, 146, 229, 81, 253, 224, 189, 210, 237, 11, 213, 3, 41, 124, 251, 108, 133, 108, 236, 131, 67, 191, 252, 46, 50, 239, 153, 61, 117, 195, 81, 8, 79, 61, 147, 164, 239, 26, 46, 219, 237, 192, 155, 182, 200, 31, 157, 166, 231, 208, 219, 228, 73, 130, 139, 64, 250, 199, 111, 117, 127, 238, 193, 3, 96, 247, 131, 200, 95, 175, 187, 128, 227, 144, 72, 222, 117, 226, 149, 205, 253, 33, 175, 147, 65, 97, 57, 180, 199, 106, 186, 163, 192, 219, 202, 233, 241, 30, 31, 219, 169, 71, 194, 224, 170, 196, 210, 73, 20, 168, 106, 208, 81, 162, 168, 109, 208, 172, 49, 226, 239, 182, 154, 181, 199, 173, 73, 247, 165, 46, 220, 114, 144, 74, 76, 95, 101, 93, 253, 238, 245, 20, 246, 96, 116, 8, 33, 37, 93, 141, 111, 36, 236, 150, 205, 121, 117, 96, 236, 76, 39, 154, 25, 18, 157, 80, 48, 46, 117, 55, 157, 181, 163, 146, 46, 137, 144, 5, 193, 93, 140, 80, 49, 147, 113, 122, 59, 165, 109, 34, 196, 90, 234, 76, 139, 36, 66, 246, 131, 114, 120, 219, 195, 245, 36, 122, 193, 37, 145, 22, 6, 250, 71, 106, 205, 142, 156, 226, 158, 191, 48, 67, 193, 18, 243, 26, 132, 230, 151, 16, 85, 38, 175, 220, 238, 221, 245, 41, 227, 172, 228, 182, 209, 26, 57, 89, 3, 60, 234, 18, 221, 6, 152, 135, 132, 144, 205, 224, 152, 109, 106, 59, 0, 216, 241, 136, 96, 75, 72, 155, 82, 41, 177, 225, 115, 112, 153, 7, 118, 207, 100, 15, 250, 108, 3, 34, 248, 219, 207, 220, 85, 146, 198, 56, 102, 31, 146, 194, 176, 165, 18, 250, 15, 79, 150, 25, 116, 122, 36, 188, 54, 167, 247, 111, 235, 25, 166, 36, 70, 107, 237, 191, 147, 249, 7, 43, 35, 134, 233, 38, 199, 169, 174, 138, 234, 142, 29, 71, 15, 99, 12, 185, 170, 50, 114, 188, 32, 60, 232, 158, 38, 110, 193, 73, 183, 21, 171, 67, 147, 135, 212, 248, 43, 169, 41, 37, 202, 123, 110, 177, 236, 117, 10, 36, 153, 246, 39, 217, 100, 164, 47, 168, 194, 235, 14, 76, 165, 139, 223, 25, 189, 17, 240, 214, 28, 6, 136, 66, 48, 166, 209, 231, 119, 159, 235, 26, 60, 98, 170, 207, 109, 159, 68, 10, 81, 136, 49, 94, 44, 240, 37, 38, 172, 59, 253, 20, 233, 142, 16, 120, 165, 128, 122, 194, 7, 109, 1, 24, 36, 217, 240, 201, 214, 91, 9, 253, 57, 160, 73, 6, 207, 203, 143, 59, 101, 132, 113, 102, 162, 182, 97, 17, 91, 132, 155, 104, 130, 125, 198, 97, 93, 92, 145, 106, 36, 236, 77, 151, 37])), (Text("ascii_field"), Text("ascii")), (Text("name"), Text("Elizabeth Alvarado")), (Text("small_number"), TinyInt(62)), (Text("varchar_field"), Text("everything"))])
+  Entry 2: key=16 bytes, value=Map([(Text("medium_number"), SmallInt(26988)), (Text("small_number"), TinyInt(3)), (Text("weight"), Float(116.36)), (Text("work_time"), Time(576460769201207339)), (Text("birth_date"), Date(20266)), (Text("ip_address"), Inet([197, 17, 68, 110])), (Text("ascii_field"), Text("ascii")), (Text("created"), Timestamp(1759713125832)), (Text("account_balance"), Decimal { scale: 2, unscaled: [12, 220, 72] }), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 17011000000000 }), (Text("varchar_field"), Text("police")), (Text("age"), Integer(42)), (Text("active"), Boolean(true)), (Text("salary"), BigInt(66126)), (Text("description"), Blob([180, 152, 230, 30, 5, 39, 6, 32, 105, 124, 169, 103, 203, 133, 108, 135, 155, 223, 135, 108, 101, 123, 39, 18, 211, 222, 103, 150, 79, 55, 39, 57, 238, 161, 128, 247, 227, 39, 219, 139, 110, 188, 99, 109, 232, 75, 153, 42, 171, 92, 176, 240, 165, 58, 107, 234, 101, 27, 158, 66, 145, 231, 141, 67, 212, 103, 197, 96, 75, 94, 57, 172, 121, 190, 170, 133, 85, 237, 45, 15, 173, 243, 246, 81, 169, 254, 138, 244, 96, 69, 29, 9, 165, 16, 97, 112, 217, 242, 171, 192, 22, 82, 47, 42, 49, 220, 126, 162, 235, 245, 196, 210, 96, 60, 48, 176, 229, 207, 232, 106, 147, 53, 241, 188, 175, 58, 43, 92, 222, 224, 167, 202, 30, 67, 248, 138, 39, 180, 19, 133, 232, 208, 88, 249, 95, 217, 44, 137, 209, 38, 61, 255, 242, 53, 228, 178, 176, 120, 156, 158, 22, 167, 50, 155, 172, 66, 94, 176, 106, 174, 85, 188, 76, 44, 246, 18, 16, 84, 141, 125, 142, 227, 202, 27, 37, 87, 103, 160, 10, 75, 127, 73, 194, 102, 66, 240, 48, 136, 97, 111, 240, 31, 144, 246, 109, 69, 13, 91, 20, 8, 120, 164, 18, 205, 169, 69, 157, 141, 232, 197, 131, 133, 255, 50, 231, 5, 39, 237, 17, 163, 78, 231, 35, 205, 118, 219, 71, 30, 8, 221, 239, 84, 36, 135, 229, 60, 122, 255, 30, 103, 236, 94, 39, 47, 58, 67, 78, 55, 210, 248, 181, 90, 43, 111, 217, 149, 252, 246, 23, 86, 149, 85, 91, 9, 71, 16, 50, 154, 74, 208, 132, 216, 65, 224, 212, 86, 79, 71, 17, 178, 104, 154, 171, 119, 205, 205, 62, 109, 180, 97, 18, 141, 119, 197, 238, 240, 247, 36, 165, 174, 94, 13, 133, 96, 39, 236, 206, 33, 61, 49, 190, 138, 176, 87, 247, 252, 207, 86, 66, 31, 134, 23, 138, 152, 147, 90, 165, 128, 141, 122, 221, 181, 61, 143, 174, 165, 202, 18, 170, 185, 72, 218, 54, 8, 72, 7, 157, 196, 242, 232, 121, 39, 141, 10, 141, 13, 117, 66, 129, 3, 243, 39, 170, 216, 124, 43, 69, 207, 93, 237, 197, 20, 45, 175, 17, 172, 50, 54, 157, 11, 245, 113, 55, 19, 242, 53, 55, 177, 120, 32, 153, 18, 69, 128, 148, 172, 51, 135, 94, 14, 14, 123, 13, 105, 97, 178, 210, 110, 55, 138, 21, 248, 241, 124, 201, 68])), (Text("name"), Text("Carlos Johnson")), (Text("session_id"), Uuid([121, 57, 47, 106, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("height"), Float(1.559999942779541))])
+  Entry 3: key=16 bytes, value=Map([(Text("ascii_field"), Text("ascii")), (Text("session_id"), Uuid([121, 64, 133, 8, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("small_number"), TinyInt(88)), (Text("age"), Integer(70)), (Text("created"), Timestamp(1759713125880)), (Text("salary"), BigInt(159842)), (Text("weight"), Float(94.94)), (Text("description"), Blob([220, 43, 158, 85, 241, 129, 107, 21, 165, 41, 244, 116, 54, 255, 192, 83, 224, 55, 18, 187, 180, 13, 179, 229, 65, 93, 147, 32, 141, 159, 34, 93, 101, 117, 239, 190, 178, 28, 24, 211, 80, 212, 54, 161, 245, 49, 158, 101, 238, 242, 131, 122, 24, 140, 124, 105, 178, 89, 13, 93, 122, 103, 10, 174, 238, 234, 2, 133, 248, 58, 254, 11, 13, 97, 248, 116, 155, 52, 111, 69, 146, 160, 88, 101, 250, 141, 169, 200, 1, 0, 47, 122, 18, 111, 204, 152, 13, 182, 105, 228, 83, 176, 143, 158, 27, 127, 119, 175, 231, 125, 165, 47, 135, 176, 255, 150, 63, 212, 214, 240, 118, 126, 142, 5, 155, 59, 98, 86, 199, 121, 84, 165, 163, 74, 255, 194, 187, 125, 57, 185, 21, 182, 207, 96, 179, 56, 251, 108, 69, 160, 66, 129, 191, 161, 242, 235, 0, 50, 48, 137, 99, 42, 207, 229, 30, 176, 55, 197, 235, 217, 80, 101, 18, 105, 39, 138, 55, 167, 162, 95, 93, 251, 109, 131, 93, 12, 149, 108, 141, 74, 75, 206, 146, 72, 57, 204, 250, 248, 100, 110, 126, 101, 186, 1, 160, 7, 31, 22, 134, 233, 67, 238, 209, 76, 89, 197, 76, 50, 181, 167, 85, 130, 135, 103, 106, 175, 172, 154, 230, 140, 128, 220, 66, 28, 12, 120, 87, 160, 235, 76, 92, 11, 144, 63, 108, 203, 14, 251, 200, 155, 113, 187, 153, 48, 227, 230, 80, 172, 22, 108, 124, 70, 234, 75, 144, 174, 154, 206, 236, 10, 219, 254, 184, 146, 250, 140, 91, 29, 24, 234, 253, 99, 110, 77, 126, 46, 37, 233, 127, 65, 192, 175, 220, 226, 179, 146, 9, 52, 194, 147, 55, 138, 219, 163, 37, 195, 180, 104, 25, 204, 139, 105, 230, 153, 234, 50, 254, 253, 133, 229, 83, 72, 74, 213, 190, 53, 205, 45, 0, 42, 209, 113, 10, 216, 87, 221, 63, 166, 199, 165, 122, 120, 34, 187, 207, 117, 248, 131, 203, 50, 145, 218, 184, 115, 206, 203, 154, 131, 174, 135, 76, 49, 100, 138, 155, 244, 138, 1, 115, 3, 154, 51, 53, 137, 68, 186, 77, 72, 1, 90, 22, 43, 129, 188, 185, 123, 243, 254, 1, 93, 60, 250, 171, 156, 209, 97, 113, 70, 18, 96, 255, 244, 214, 105, 153, 131, 189, 178, 104, 128, 219, 185, 72, 83, 31, 154, 85, 51, 201, 93, 229, 155, 4, 103, 240, 194, 160, 156, 198, 243, 192, 133, 174, 71, 139, 78, 165, 195, 130, 57, 240, 89, 30, 153, 226, 73, 187, 40, 229, 191, 213, 254, 209, 14, 101, 71, 56, 12, 32, 16, 77, 64, 148, 22, 104, 78, 183, 242, 64, 202, 47, 189, 107, 61, 114, 199, 89, 239, 232, 97, 128, 229, 95, 220, 174, 90, 55, 192, 37, 228, 117, 158, 115, 242, 163, 164, 111, 249, 205, 130, 107, 99, 68, 203, 155, 237, 179, 86, 254, 193, 132, 236, 150, 178, 2, 170, 169, 238, 130, 118, 64, 232, 146, 104, 91, 36, 178, 185, 241, 82, 81, 157, 210, 125, 166, 219, 117, 170, 47, 202, 51, 147, 167, 52, 119, 253, 220, 234, 182, 164, 39, 67, 197, 188, 127, 22, 226, 64, 184, 193, 197, 179, 18, 153, 26, 189, 162, 221, 122, 186, 215, 72, 147, 114, 205, 226, 27, 210, 6, 85, 143, 76, 107, 102, 185, 36, 4, 230, 30, 46, 172, 24, 197, 94, 242, 51, 225, 183, 239, 78, 97, 185, 135, 253, 221, 121, 88, 223, 212, 164, 77, 48, 212, 33, 39, 28, 29, 12, 6, 166, 55, 85, 27, 150, 127, 213, 95, 100, 229, 183, 29, 217, 66, 91, 253, 199, 151, 78, 105, 76, 14, 164, 81, 2, 174, 129, 220, 27, 122, 187, 203, 199, 169, 213, 185, 226, 27, 176, 84, 106, 179, 205, 115, 26, 90, 38, 38, 104, 156, 34, 9, 42, 92, 242, 85, 43, 148, 184, 124, 184, 252, 226, 109, 217, 97, 31, 172, 223, 250, 125, 9, 166, 229, 76, 242, 3, 126, 36, 206, 175, 21, 210, 197, 81, 188, 2, 73, 80, 210, 210, 36, 91, 235, 14, 203, 139, 6, 99, 143, 151, 112, 105, 246, 14, 9, 135, 175, 220, 223, 246, 190, 18, 202, 73, 237, 89, 114, 171, 102, 1, 75, 132, 48, 62, 101, 102, 161, 33, 244, 253, 153, 113, 19, 251, 178, 247, 95, 220, 71, 25, 176, 20, 53, 98, 165, 251, 245, 78, 255, 191, 29, 254, 168, 200, 67, 87, 131, 49, 150, 153, 43, 215, 49, 185, 94, 140, 169, 234, 35, 5, 222, 73, 103, 75, 46, 122, 129, 77, 231, 208, 175, 135, 71, 205, 218, 144, 117, 255, 72, 157, 229, 137, 69, 61, 94, 215, 240, 67, 87, 172, 91, 97, 170, 5, 189, 98])), (Text("height"), Float(1.8700000047683716)), (Text("name"), Text("Shawn Watson")), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 20864000000000 }), (Text("work_time"), Time(576460769201395038)), (Text("account_balance"), Decimal { scale: 2, unscaled: [0, 147, 188, 158] }), (Text("birth_date"), Date(20280)), (Text("active"), Boolean(false)), (Text("ip_address"), Inet([174, 107, 200, 153])), (Text("varchar_field"), Text("direction")), (Text("medium_number"), SmallInt(17874))])
+  Entry 4: key=16 bytes, value=Map([(Text("height"), Float(1.5499999523162842)), (Text("session_id"), Uuid([121, 72, 250, 98, 162, 81, 17, 240, 161, 141, 214, 114, 106, 99, 122, 76])), (Text("created"), Timestamp(1759713125936)), (Text("active"), Boolean(true)), (Text("salary"), BigInt(180274)), (Text("duration_val"), Duration { months: 0, days: 0, nanos: 10159000000000 }), (Text("small_number"), TinyInt(35)), (Text("varchar_field"), Text("bill")), (Text("work_time"), Time(576460769201611636)), (Text("weight"), Float(75.88)), (Text("description"), Blob([62, 144, 169, 2, 248, 142, 142, 170, 145, 130, 241, 221, 126, 149, 105, 28, 156, 120, 200, 75, 131, 184, 249, 56, 177, 90, 4, 228, 224, 134, 114, 251, 161, 240, 30, 225, 197, 175, 160, 15, 93, 233, 4, 48, 180, 116, 80, 98, 23, 227, 249, 248, 182, 18, 131, 144, 5, 255, 143, 252, 126, 94, 80, 163, 252, 165, 8, 85, 70, 52, 89, 88, 162, 218, 253, 7, 104, 150, 1, 142, 32, 247, 57, 102, 245, 125, 130, 44, 78, 123, 13, 7, 41, 43, 60, 201, 155, 68, 6, 135, 176, 104, 228, 187, 79, 46, 137, 204, 56, 50, 68, 71, 198, 230, 90, 228, 203, 255, 244, 55, 133, 215, 110, 78, 101, 4, 39, 41, 224, 61, 67, 242, 36, 17, 5, 152, 62, 221, 155, 64, 86, 195, 244, 115, 22, 114, 60, 133, 199, 114, 158, 229, 201, 168, 125, 70, 130, 201, 64, 165, 177, 157, 71, 206, 134, 105, 200, 147, 129, 239, 132, 151, 120, 216, 115, 36, 124, 188, 182, 177, 126, 57, 79, 174, 120, 106, 7, 149, 204, 209, 42, 213, 31, 111, 200, 229, 122, 146, 100, 3, 50, 24, 144, 249, 120, 196, 218, 197, 193, 122, 244, 84, 54, 86, 75, 107, 22, 115, 237, 229, 144, 99, 78, 232, 81, 129, 205, 37, 112, 86, 163, 149, 199, 141, 159, 245, 198, 157, 210, 199, 239, 220, 206, 165, 53, 134, 10, 115, 162, 236, 241, 210, 222, 48, 217, 165, 229, 123, 129, 35, 244, 100, 93, 18, 130, 245, 71, 158, 195, 77, 250, 51, 52, 82, 204, 156, 22, 69, 42, 230, 98, 204, 126, 249, 50, 149, 163, 142, 10, 141, 30, 163, 136, 236, 165, 46, 86, 136, 7, 212, 150, 131, 246, 24, 104, 10, 193, 38, 246, 33, 190, 243, 96, 86, 57, 7, 185, 62, 191, 248, 160, 242, 224, 160, 137, 70, 3, 208, 215, 63, 167, 102, 56, 169, 154, 43, 7, 104, 185, 205, 241, 251, 68, 91, 102, 133, 204, 140, 127, 125, 99, 187, 214, 52, 124, 154, 109, 95, 174, 255, 165, 228, 63, 122, 37, 117, 233, 62, 202, 97, 145, 30, 95, 29, 33, 172, 126, 15, 10])), (Text("ascii_field"), Text("ascii")), (Text("medium_number"), SmallInt(22653)), (Text("age"), Integer(76)), (Text("account_balance"), Decimal { scale: 2, unscaled: [0, 133, 163, 68] }), (Text("ip_address"), Inet([203, 69, 64, 16])), (Text("name"), Text("Joan Gregory")), (Text("birth_date"), Date(20202))])
+✅ simple_table integration test passed
+Parsed exact header size 4096 for BIG v5 format using nom parser
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 1: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 1: marker=0x0010, offset_len=0, data_offset=0
+Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 50, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 0, 16, 152, 224, 88, 32, 152, 45, 65, 28, 150, 31, 38, 209, 5, 116, 116, 228, 0, 0, 16, 157, 21, 154, 43, 8, 218, 74, 209, 190, 120, 201, 15, 135, 131, 229, 193, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 38, 0, 16, 152, 224, 88, 32, 152, 45, 65, 28, 150, 31, 38, 209, 5, 116, 116, 228, 0, 0, 16, 157, 21, 154, 43, 8, 218, 74, 209, 190, 120, 201, 15, 135, 131, 229, 193, 0, 0, 0, 0, 38, 0, 16, 33, 40, 109, 180, 29, 13, 68, 189, 191, 2, 9, 239, 104, 147, 106, 63, 0, 0, 16, 54, 6, 103, 215, 139, 210, 71, 133, 170, 11, 74, 63, 161, 40, 128, 16, 0], code: Verify })
+✓ Opened multi_partition_table successfully
+⏭️ Skipping multi_partition_table: Schema extraction not yet implemented
+.
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.02s
+
+
+running 1 test
+📊 Loading JSONL reference data...
+✓ Loaded 1000 partitions from JSONL
+📖 Opening SSTable with V5CompressedLegacy parser...
+Parsed exact header size 4096 for BIG v5 format using nom parser
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
+Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 224, 0, 0, 0, 128, 0, 0, 0, 8, 32, 0, 0, 0, 56, 0, 0, 0, 80, 0, 0, 0, 104, 0, 0, 0, 128, 0, 0, 0, 152, 0, 0, 0, 176, 0, 0, 0, 200, 0, 0, 0, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 0, 0, 0, 0, 0, 108, 156, 193, 246, 53, 250, 71, 172, 169, 44, 151, 94, 5, 7, 252, 96, 231, 10, 0, 0, 0, 0, 0, 0, 204, 159, 93, 172, 89, 86, 66, 182, 174, 119, 108, 104, 235, 181, 172, 114, 231, 21, 0, 0, 0, 0, 0, 0, 5, 23, 76, 160, 178, 118, 68, 49, 181, 29, 207, 73, 121, 170, 116, 75, 231, 32, 0, 0, 0, 0, 0, 0, 2, 42, 220, 110, 31, 179, 75, 78, 140, 66, 44, 232, 123, 187, 189, 156, 231, 43, 0, 0, 0, 0, 0, 0, 244, 241, 3, 30, 78, 27, 78, 251, 156, 12, 218, 226, 236, 150, 110, 66, 231, 54, 0, 0, 0, 0, 0, 0, 244, 123, 106, 9, 243, 72, 67, 177, 176, 75, 146, 60, 27, 89, 240, 171, 231, 65, 0, 0, 0, 0, 0, 0, 248, 153, 36, 104, 49, 238, 77, 188, 159, 168, 186, 79, 45, 239, 25, 127, 231, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 16, 7, 149, 153, 169, 206, 251, 72, 148, 158, 202, 226, 226, 178, 31, 149, 130], code: Verify })
+  Keyspace: test_keyspace
+  Table: test_table
+  Compression: none
+🔍 Reading all entries from SSTable...
+[DEBUG] V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 0/41
+[DEBUG read_nb_format_chunk_data] Chunk 0 offset: 0x0
+[DEBUG read_nb_format_chunk_data] Chunk 0 total_size=15871, data_size=15867, offset=0x0
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 0: 0xbc878748
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 0: 15867 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 1/41
+[DEBUG read_nb_format_chunk_data] Chunk 1 offset: 0x3dff
+[DEBUG read_nb_format_chunk_data] Chunk 1 total_size=16240, data_size=16236, offset=0x3dff
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 1: 0x75f56510
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 1: 16236 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 2/41
+[DEBUG read_nb_format_chunk_data] Chunk 2 offset: 0x7d6f
+[DEBUG read_nb_format_chunk_data] Chunk 2 total_size=16394, data_size=16390, offset=0x7d6f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 2: 0x7fb4c2c3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 2: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 3/41
+[DEBUG read_nb_format_chunk_data] Chunk 3 offset: 0xbd79
+[DEBUG read_nb_format_chunk_data] Chunk 3 total_size=16342, data_size=16338, offset=0xbd79
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 3: 0x63013836
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 3: 16338 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 4/41
+[DEBUG read_nb_format_chunk_data] Chunk 4 offset: 0xfd4f
+[DEBUG read_nb_format_chunk_data] Chunk 4 total_size=15796, data_size=15792, offset=0xfd4f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 4: 0x8e1718f0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 4: 15792 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 5/41
+[DEBUG read_nb_format_chunk_data] Chunk 5 offset: 0x13b03
+[DEBUG read_nb_format_chunk_data] Chunk 5 total_size=15731, data_size=15727, offset=0x13b03
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 5: 0x9a7c8ae3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 5: 15727 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 6/41
+[DEBUG read_nb_format_chunk_data] Chunk 6 offset: 0x17876
+[DEBUG read_nb_format_chunk_data] Chunk 6 total_size=16394, data_size=16390, offset=0x17876
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 6: 0xd88233ad
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 6: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 7/41
+[DEBUG read_nb_format_chunk_data] Chunk 7 offset: 0x1b880
+[DEBUG read_nb_format_chunk_data] Chunk 7 total_size=15682, data_size=15678, offset=0x1b880
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 7: 0xaa0ef540
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 7: 15678 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 8/41
+[DEBUG read_nb_format_chunk_data] Chunk 8 offset: 0x1f5c2
+[DEBUG read_nb_format_chunk_data] Chunk 8 total_size=15733, data_size=15729, offset=0x1f5c2
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 8: 0xcb963432
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 8: 15729 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 9/41
+[DEBUG read_nb_format_chunk_data] Chunk 9 offset: 0x23337
+[DEBUG read_nb_format_chunk_data] Chunk 9 total_size=15647, data_size=15643, offset=0x23337
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 9: 0xa98e58da
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 9: 15643 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 10/41
+[DEBUG read_nb_format_chunk_data] Chunk 10 offset: 0x27056
+[DEBUG read_nb_format_chunk_data] Chunk 10 total_size=15672, data_size=15668, offset=0x27056
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 10: 0x0263e3e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 10: 15668 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 11/41
+[DEBUG read_nb_format_chunk_data] Chunk 11 offset: 0x2ad8e
+[DEBUG read_nb_format_chunk_data] Chunk 11 total_size=16014, data_size=16010, offset=0x2ad8e
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 11: 0x6b59ea55
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 11: 16010 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 12/41
+[DEBUG read_nb_format_chunk_data] Chunk 12 offset: 0x2ec1c
+[DEBUG read_nb_format_chunk_data] Chunk 12 total_size=15999, data_size=15995, offset=0x2ec1c
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 12: 0x8c085f85
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 12: 15995 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 13/41
+[DEBUG read_nb_format_chunk_data] Chunk 13 offset: 0x32a9b
+[DEBUG read_nb_format_chunk_data] Chunk 13 total_size=15990, data_size=15986, offset=0x32a9b
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 13: 0x409fe4fb
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 13: 15986 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 14/41
+[DEBUG read_nb_format_chunk_data] Chunk 14 offset: 0x36911
+[DEBUG read_nb_format_chunk_data] Chunk 14 total_size=15861, data_size=15857, offset=0x36911
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 14: 0x1e730d03
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 14: 15857 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 15/41
+[DEBUG read_nb_format_chunk_data] Chunk 15 offset: 0x3a706
+[DEBUG read_nb_format_chunk_data] Chunk 15 total_size=15747, data_size=15743, offset=0x3a706
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 15: 0x71f285d8
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 15: 15743 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 16/41
+[DEBUG read_nb_format_chunk_data] Chunk 16 offset: 0x3e489
+[DEBUG read_nb_format_chunk_data] Chunk 16 total_size=15867, data_size=15863, offset=0x3e489
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 16: 0xe788bcbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 16: 15863 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 17/41
+[DEBUG read_nb_format_chunk_data] Chunk 17 offset: 0x42284
+[DEBUG read_nb_format_chunk_data] Chunk 17 total_size=16394, data_size=16390, offset=0x42284
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 17: 0xd7893392
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 17: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 18/41
+[DEBUG read_nb_format_chunk_data] Chunk 18 offset: 0x4628e
+[DEBUG read_nb_format_chunk_data] Chunk 18 total_size=15588, data_size=15584, offset=0x4628e
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 18: 0x93feab07
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 18: 15584 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 19/41
+[DEBUG read_nb_format_chunk_data] Chunk 19 offset: 0x49f72
+[DEBUG read_nb_format_chunk_data] Chunk 19 total_size=16379, data_size=16375, offset=0x49f72
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 19: 0xb01e4a15
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 19: 16375 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 20/41
+[DEBUG read_nb_format_chunk_data] Chunk 20 offset: 0x4df6d
+[DEBUG read_nb_format_chunk_data] Chunk 20 total_size=16012, data_size=16008, offset=0x4df6d
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 20: 0x58ff623a
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 20: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 21/41
+[DEBUG read_nb_format_chunk_data] Chunk 21 offset: 0x51df9
+[DEBUG read_nb_format_chunk_data] Chunk 21 total_size=16265, data_size=16261, offset=0x51df9
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 21: 0x77d41cb6
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 21: 16261 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 22/41
+[DEBUG read_nb_format_chunk_data] Chunk 22 offset: 0x55d82
+[DEBUG read_nb_format_chunk_data] Chunk 22 total_size=15685, data_size=15681, offset=0x55d82
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 22: 0x2f0da694
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 22: 15681 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 23/41
+[DEBUG read_nb_format_chunk_data] Chunk 23 offset: 0x59ac7
+[DEBUG read_nb_format_chunk_data] Chunk 23 total_size=16394, data_size=16390, offset=0x59ac7
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 23: 0x4fea2620
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 23: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 24/41
+[DEBUG read_nb_format_chunk_data] Chunk 24 offset: 0x5dad1
+[DEBUG read_nb_format_chunk_data] Chunk 24 total_size=16394, data_size=16390, offset=0x5dad1
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 24: 0xf674bb58
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 24: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 25/41
+[DEBUG read_nb_format_chunk_data] Chunk 25 offset: 0x61adb
+[DEBUG read_nb_format_chunk_data] Chunk 25 total_size=15690, data_size=15686, offset=0x61adb
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 25: 0x7c18e5e0
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 25: 15686 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 26/41
+[DEBUG read_nb_format_chunk_data] Chunk 26 offset: 0x65825
+[DEBUG read_nb_format_chunk_data] Chunk 26 total_size=15722, data_size=15718, offset=0x65825
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 26: 0x9febb2f2
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 26: 15718 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 27/41
+[DEBUG read_nb_format_chunk_data] Chunk 27 offset: 0x6958f
+[DEBUG read_nb_format_chunk_data] Chunk 27 total_size=16050, data_size=16046, offset=0x6958f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 27: 0x5da0a035
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 27: 16046 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 28/41
+[DEBUG read_nb_format_chunk_data] Chunk 28 offset: 0x6d441
+[DEBUG read_nb_format_chunk_data] Chunk 28 total_size=15632, data_size=15628, offset=0x6d441
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 28: 0x4c723dbf
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 28: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 29/41
+[DEBUG read_nb_format_chunk_data] Chunk 29 offset: 0x71151
+[DEBUG read_nb_format_chunk_data] Chunk 29 total_size=16081, data_size=16077, offset=0x71151
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 29: 0xdb0b6dbc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 29: 16077 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 30/41
+[DEBUG read_nb_format_chunk_data] Chunk 30 offset: 0x75022
+[DEBUG read_nb_format_chunk_data] Chunk 30 total_size=16012, data_size=16008, offset=0x75022
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 30: 0x681673d3
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 30: 16008 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 31/41
+[DEBUG read_nb_format_chunk_data] Chunk 31 offset: 0x78eae
+[DEBUG read_nb_format_chunk_data] Chunk 31 total_size=16007, data_size=16003, offset=0x78eae
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 31: 0x9ad5566d
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 31: 16003 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 32/41
+[DEBUG read_nb_format_chunk_data] Chunk 32 offset: 0x7cd35
+[DEBUG read_nb_format_chunk_data] Chunk 32 total_size=15626, data_size=15622, offset=0x7cd35
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 32: 0x54aeb1f4
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 32: 15622 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 33/41
+[DEBUG read_nb_format_chunk_data] Chunk 33 offset: 0x80a3f
+[DEBUG read_nb_format_chunk_data] Chunk 33 total_size=16394, data_size=16390, offset=0x80a3f
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 33: 0xd75d58fc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 33: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 34/41
+[DEBUG read_nb_format_chunk_data] Chunk 34 offset: 0x84a49
+[DEBUG read_nb_format_chunk_data] Chunk 34 total_size=16188, data_size=16184, offset=0x84a49
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 34: 0xa5623006
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 34: 16184 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 35/41
+[DEBUG read_nb_format_chunk_data] Chunk 35 offset: 0x88985
+[DEBUG read_nb_format_chunk_data] Chunk 35 total_size=16096, data_size=16092, offset=0x88985
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 35: 0x2a557c46
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 35: 16092 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 36/41
+[DEBUG read_nb_format_chunk_data] Chunk 36 offset: 0x8c865
+[DEBUG read_nb_format_chunk_data] Chunk 36 total_size=15632, data_size=15628, offset=0x8c865
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 36: 0x6a75b2cc
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 36: 15628 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 37/41
+[DEBUG read_nb_format_chunk_data] Chunk 37 offset: 0x90575
+[DEBUG read_nb_format_chunk_data] Chunk 37 total_size=15765, data_size=15761, offset=0x90575
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 37: 0x5cbd7dbe
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 37: 15761 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 38/41
+[DEBUG read_nb_format_chunk_data] Chunk 38 offset: 0x9430a
+[DEBUG read_nb_format_chunk_data] Chunk 38 total_size=15680, data_size=15676, offset=0x9430a
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 38: 0xaab92f28
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 38: 15676 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 39/41
+[DEBUG read_nb_format_chunk_data] Chunk 39 offset: 0x9804a
+[DEBUG read_nb_format_chunk_data] Chunk 39 total_size=16394, data_size=16390, offset=0x9804a
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 39: 0xa60581c7
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 39: 16390 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] Reading chunk 40/41
+[DEBUG read_nb_format_chunk_data] Chunk 40 offset: 0x9c054
+[DEBUG read_nb_format_chunk_data] Chunk 40 total_size=8104, data_size=8100, offset=0x9c054
+[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 40: 0x34f03705
+[DEBUG read_nb_format_chunk_data] Successfully read chunk 40: 8100 bytes (compressed)
+[DEBUG block_io::read_next_block_impl] Starting block read
+[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
+[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
+[DEBUG read_nb_format_chunk_data] Starting chunk read
+[DEBUG read_nb_format_chunk_data] All chunks read (41/41)
+[DEBUG] V5CompressedLegacy: Finished stitching 41 chunks, total buffer: 663863 bytes
+[DEBUG] V5CompressedLegacy: Parsed 1000 entries from stitched buffer
+✓ Read 1000 entries from SSTable
+
+📋 Validation 1: Partition Count
+  ✓ Parser returned 1000 partitions (expected 999-1000)
+
+📋 Validation 2: Partition Key Matching
+  ✓ Entry 0: UUID=15291a77-d739-4e73-8397-b787442f3a1f, table_id=test_keyspace.test_table
+  ✓ Entry 1: UUID=e94e1bf3-8aea-4d59-adf3-57eb1d1d854d, table_id=test_keyspace.test_table
+  ✓ Entry 2: UUID=bc15f6ea-3c19-4264-8ca4-21c260edea01, table_id=test_keyspace.test_table
+  ✓ Entry 3: UUID=57154486-c4d2-46d5-bc92-fdc0f41dc57a, table_id=test_keyspace.test_table
+  ✓ Entry 4: UUID=37bc8d3a-9052-413d-aff0-97966a2632dc, table_id=test_keyspace.test_table
+
+  ✓ Matched 1000/1000 partition keys with JSONL reference
+
+📋 Validation 3: Cell Data Verification
+  (Validating ALL cells for first 10 partitions against JSONL reference)
+
+  📊 Entry 0: UUID=15291a77-d739-4e73-8397-b787442f3a1f, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 1: UUID=e94e1bf3-8aea-4d59-adf3-57eb1d1d854d, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 2: UUID=bc15f6ea-3c19-4264-8ca4-21c260edea01, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 3: UUID=57154486-c4d2-46d5-bc92-fdc0f41dc57a, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 4: UUID=37bc8d3a-9052-413d-aff0-97966a2632dc, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 5: UUID=4d7a38d9-27a5-4f65-bd3a-83cecff24bf5, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 6: UUID=ebe4c40e-3ed9-4595-a8b6-0b572755a68b, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 7: UUID=53cd23eb-40ee-4100-94d0-0fd8593c51f3, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 8: UUID=29e21323-e8b4-4d6d-987d-dd8867d1af1c, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  📊 Entry 9: UUID=05f8e423-6893-4074-aed1-5757870353b5, table_id=test_keyspace.test_table
+    Parser cells: 18, JSONL cells: 18
+    ✓ ALL 18 cells match JSONL reference
+
+  ═══════════════════════════════════════════
+  ✓ Cell Validation Summary: 180/180 cells matched
+  ✓ Partitions with 100% match: 10/10
+  ═══════════════════════════════════════════
+
+════════════════════════════════════════════════════════
+✅ V5CompressedLegacy JSONL Parity Test PASSED
+════════════════════════════════════════════════════════
+  Partition Count:  1000 (100% match)
+  Partition Keys:   1000/1000 matched (100.0%)
+  Cell Data:        180/180 cells matched (100.0%)
+  Full Partitions:  10/10 partitions with 100% cell match
+
+🎯 Issue #166 Validated: Parser output matches sstabledump 1:1
+   - Partition keys match
+   - Cell names match
+   - Cell values match (types and data)
+════════════════════════════════════════════════════════
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.03s
+

@@ -1,8 +1,13 @@
 //! Bulletproof SSTable reader with universal format support
 //!
-//! This module provides a bulletproof SSTable reader that can handle any
-//! Cassandra version (2.x, 3.x, 4.x, 5.x) with automatic format detection
-//! and proper compression handling.
+//! # DEPRECATED - DO NOT USE IN PRODUCTION
+//!
+//! This module is DEPRECATED for production use. Use `SSTableReader` instead.
+//!
+//! **Deprecation Notice (Issue #190):**
+//! - This reader is marked EXPERIMENTAL and should not be used in production code paths
+//! - For production use, prefer `crate::storage::sstable::reader::SSTableReader`
+//! - This module is retained only for testing and legacy compatibility purposes
 //!
 //! ⚠️  **EXPERIMENTAL WARNING for Modern Formats (4.x/5.x)**
 //!
@@ -11,12 +16,13 @@
 //! Cassandra Big format specification (CEP-25). For production use with modern
 //! formats, prefer the spec-accurate readers:
 //!
+//! - `crate::storage::sstable::reader::SSTableReader` - Production-ready spec-accurate reader
 //! - `row_cell_state_machine.rs` - Implements schema-driven parsing without heuristics
 //! - Follows exact Cassandra specification for BIG format row/cell parsing
 //! - Eliminates type guessing in favor of schema-aware decoding
-//!
-//! **TODO**: Either align this implementation with CEP-25 Big format specification
-//! or deprecate the modern format parsing in favor of spec-accurate implementations.
+
+// Allow deprecated warnings within this module since the entire module is deprecated
+#![allow(deprecated)]
 
 use log::{debug, info, warn};
 use std::fs::File;
@@ -32,6 +38,15 @@ use crate::parser::vint::parse_vint;
 use crate::{Error, Result};
 
 /// Bulletproof SSTable reader with automatic format detection
+///
+/// # Deprecated
+///
+/// This reader is DEPRECATED for production use (Issue #190).
+/// Use `crate::storage::sstable::reader::SSTableReader` instead.
+#[deprecated(
+    since = "0.1.0",
+    note = "Use SSTableReader instead. This reader is EXPERIMENTAL and not suitable for production. See Issue #190."
+)]
 pub struct BulletproofReader {
     /// SSTable information (format, generation, etc.)
     info: SSTableInfo,

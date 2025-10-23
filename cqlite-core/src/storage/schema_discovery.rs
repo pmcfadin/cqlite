@@ -16,7 +16,7 @@ use crate::{
     parser::header::{CassandraVersion, ColumnInfo},
     platform::Platform,
     schema::{Column, TableSchema},
-    storage::sstable::bulletproof_reader::BulletproofReader,
+    storage::sstable::reader::SSTableReader,
     types::{DataType, Value},
     Config, Result,
 };
@@ -218,9 +218,8 @@ impl SchemaDiscovery {
                 // Try to get schema from header first
                 if let Ok(header_schema) = self.extract_schema_from_header(&reader).await {
                     if cassandra_version.is_none() {
-                        if let Ok(header) = reader.get_header().await {
-                            cassandra_version = Some(header.cassandra_version);
-                        }
+                        let header = reader.header();
+                        cassandra_version = Some(header.cassandra_version);
                     }
 
                     // Merge with existing column data
@@ -287,16 +286,16 @@ impl SchemaDiscovery {
     }
 
     /// Create a reader for the SSTable file
-    async fn create_reader(&self, file_path: &Path) -> Result<BulletproofReader> {
-        BulletproofReader::open(file_path)
+    async fn create_reader(&self, file_path: &Path) -> Result<SSTableReader> {
+        SSTableReader::open(file_path, &self.core_config, self.platform.clone()).await
     }
 
     /// Extract schema information from SSTable header
     async fn extract_schema_from_header(
         &self,
-        reader: &BulletproofReader,
+        reader: &SSTableReader,
     ) -> Result<HashMap<String, ColumnInfo>> {
-        let header = reader.get_header().await?;
+        let header = reader.header();
         let mut columns = HashMap::new();
 
         for column_def in &header.columns {
@@ -309,37 +308,36 @@ impl SchemaDiscovery {
     /// Sample data from the SSTable for type inference
     async fn sample_table_data(
         &self,
-        reader: &BulletproofReader,
+        reader: &SSTableReader,
     ) -> Result<Vec<HashMap<String, Value>>> {
-        let mut samples = Vec::new();
-        let mut entry_stream = reader.stream_entries().await?;
-        let mut count = 0;
-
-        // Get column names from the header to avoid generic fabrication
-        let header = reader.get_header().await?;
+        // Get column names from the header
+        let header = reader.header();
         let column_names: Vec<String> = header.columns.iter().map(|col| col.name.clone()).collect();
 
-        while let Some(entry) = entry_stream.next().await? {
-            if count >= self.config.max_sample_rows {
-                break;
-            }
+        // Get all entries and sample up to max_rows
+        let all_entries = reader.get_all_entries().await?;
 
-            // Convert entry to column-value map using actual column names
-            let mut row_data = HashMap::new();
-            for (i, value) in entry.values.iter().enumerate() {
-                let column_name = if i < column_names.len() {
-                    // Use actual column name from header
-                    column_names[i].clone()
+        // TODO(Issue #190): SSTableReader returns Vec<(TableId, RowKey, Value)> where Value
+        // is typically a single parsed value per entry. For schema discovery type inference,
+        // we map each entry's Value to the first column. Future enhancement: use scan()
+        // with schema-aware parsing for multi-column row data.
+        let samples: Vec<HashMap<String, Value>> = all_entries
+            .into_iter()
+            .take(self.config.max_sample_rows)
+            .filter_map(|(_table_id, _row_key, value)| {
+                // Convert entry to column-value map using actual column names
+                let mut row_data = HashMap::new();
+
+                if !column_names.is_empty() {
+                    // Map the single Value to the first column for type inference
+                    row_data.insert(column_names[0].clone(), value);
+                    Some(row_data)
                 } else {
-                    // Fallback for extra values (should not happen in well-formed SSTable)
-                    format!("unknown_column_{}", i)
-                };
-                row_data.insert(column_name, value.clone());
-            }
-
-            samples.push(row_data);
-            count += 1;
-        }
+                    // If no column names available, skip this entry
+                    None
+                }
+            })
+            .collect();
 
         Ok(samples)
     }

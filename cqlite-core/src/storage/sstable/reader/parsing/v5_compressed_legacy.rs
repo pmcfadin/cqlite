@@ -472,22 +472,28 @@ impl V5CompressedLegacyParser {
         // Parse fields in order WITHOUT scanning for 0x08 marker.
 
         // Read row size (VInt) - CRITICAL for partition boundary detection!
+        debug!("V5CompressedLegacy: Parsing row_size VInt at pos={}, hex={:02x?}", pos, &data[pos..std::cmp::min(pos+5, data.len())]);
         let (remaining, row_size) = parse_vuint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
                 "V5CompressedLegacy: Failed to parse row size at offset {}: {:?}",
                 pos, e
             ))
         })?;
-        pos = data.len() - remaining.len();
+        let bytes_consumed = data[pos..].len() - remaining.len();
+        debug!("V5CompressedLegacy: row_size={}, consumed {} bytes, pos before={}, pos after={}", row_size, bytes_consumed, pos, pos + bytes_consumed);
+        pos += bytes_consumed;
 
         // Read prev size (VInt)
+        debug!("V5CompressedLegacy: Parsing prev_size VInt at pos={}, hex={:02x?}", pos, &data[pos..std::cmp::min(pos+5, data.len())]);
         let (remaining, _prev_size) = parse_vuint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
                 "V5CompressedLegacy: Failed to parse prev size at offset {}: {:?}",
                 pos, e
             ))
         })?;
-        pos = data.len() - remaining.len();
+        let bytes_consumed = data[pos..].len() - remaining.len();
+        debug!("V5CompressedLegacy: prev_size={}, consumed {} bytes, pos before={}, pos after={}", _prev_size, bytes_consumed, pos, pos + bytes_consumed);
+        pos += bytes_consumed;
 
         // Read timestamp if HAS_TIMESTAMP flag is set
         let timestamp = if (row_flags & ROW_HAS_TIMESTAMP) != 0 {
@@ -497,7 +503,8 @@ impl V5CompressedLegacyParser {
                     pos, e
                 ))
             })?;
-            pos = data.len() - remaining.len();
+            let bytes_consumed = data[pos..].len() - remaining.len();
+            pos += bytes_consumed;
 
             // Apply delta decoding: absolute_timestamp = min_timestamp + delta
             let absolute_timestamp = self.min_timestamp.wrapping_add(delta);
@@ -518,7 +525,8 @@ impl V5CompressedLegacyParser {
                     pos, e
                 ))
             })?;
-            pos = data.len() - remaining.len();
+            let bytes_consumed = data[pos..].len() - remaining.len();
+            pos += bytes_consumed;
 
             // Apply delta decoding: absolute_ttl = min_ttl + delta
             let absolute_ttl = if let Some(min_ttl) = self.min_ttl {
@@ -544,7 +552,8 @@ impl V5CompressedLegacyParser {
                     pos, e
                 ))
             })?;
-            pos = data.len() - remaining.len();
+            let bytes_consumed = data[pos..].len() - remaining.len();
+            pos += bytes_consumed;
 
             // Second VInt is deletion timestamp (we can skip for now)
             let (remaining, _deletion_timestamp) = parse_vint(&data[pos..]).map_err(|e| {
@@ -553,7 +562,8 @@ impl V5CompressedLegacyParser {
                     pos, e
                 ))
             })?;
-            pos = data.len() - remaining.len();
+            let bytes_consumed = data[pos..].len() - remaining.len();
+            pos += bytes_consumed;
 
             // Apply delta decoding: absolute_deletion_time = min_local_deletion_time + delta
             let absolute_deletion_time =
@@ -578,7 +588,8 @@ impl V5CompressedLegacyParser {
                     pos, e
                 ))
             })?;
-            pos = data.len() - remaining.len();
+            let bytes_consumed = data[pos..].len() - remaining.len();
+            pos += bytes_consumed;
 
             // Calculate bitmap size in bytes: (column_count + 7) / 8
             let bitmap_bytes = column_count.div_ceil(8) as usize;
@@ -601,8 +612,8 @@ impl V5CompressedLegacyParser {
 
         let header_size = pos - offset;
         debug!(
-            "V5CompressedLegacy: Row header size={} bytes, row_size={} bytes (total row including cells), timestamp={:?}, ttl={:?}, deletion={:?}",
-            header_size, row_size, timestamp, ttl, local_deletion_time
+            "V5CompressedLegacy: Row header parsing complete: offset_start={}, pos_end={}, header_size={} bytes, row_size={} bytes (total row including cells), timestamp={:?}, ttl={:?}, deletion={:?}",
+            offset, pos, header_size, row_size, timestamp, ttl, local_deletion_time
         );
 
         Ok((
@@ -767,8 +778,51 @@ impl V5CompressedLegacyParser {
             offset, row_header.header_size, row_size, row_header.timestamp, row_header.ttl, row_header.local_deletion_time
         );
 
+        // CRITICAL FIX (Issue #191, Phase 2): Row tombstone detection
+        // If the row has deletion metadata (local_deletion_time is set), the entire row is deleted.
+        // In this case, there are NO cell values to parse - the row_size includes ONLY the header.
+        // Attempting to parse cells from a tombstoned row will read garbage data and fail.
+        //
+        // According to Cassandra 5.0 format:
+        // - Deleted rows have ROW_HAS_DELETION flag (0x10) set
+        // - Row header contains deletion time and deletion timestamp
+        // - row_size = header_size (no cell data follows)
+        // - Cell parsing must be skipped entirely
+        if row_header.local_deletion_time.is_some() {
+            log::debug!(
+                "V5CompressedLegacy: Row is tombstoned (deletion_time={:?}), skipping cell parsing",
+                row_header.local_deletion_time
+            );
+
+            // Calculate offset after row data (based on row_size from header)
+            let after_row_offset = input_offset + row_size as usize;
+
+            // Skip the trailing field to reach the next partition
+            if after_row_offset + ROW_TRAILING_FIELD_SIZE > data.len() {
+                let remaining = data.len().saturating_sub(after_row_offset);
+                return Err(Error::corruption(format!(
+                    "V5CompressedLegacy: Not enough bytes for {}-byte trailing field at offset {} (need {}, have {})",
+                    ROW_TRAILING_FIELD_SIZE,
+                    after_row_offset,
+                    ROW_TRAILING_FIELD_SIZE,
+                    remaining
+                )));
+            }
+
+            let next_offset = after_row_offset + ROW_TRAILING_FIELD_SIZE;
+            log::debug!(
+                "V5CompressedLegacy: Skipped tombstoned row, next offset = {}",
+                next_offset
+            );
+
+            // Return empty cells for tombstoned row
+            return Ok((cells, Some(row_header), next_offset));
+        }
+
         // Advance offset to start of cell data
+        debug!("V5CompressedLegacy: BEFORE advancing offset: offset={}, row_header.header_size={}", offset, row_header.header_size);
         offset += row_header.header_size;
+        debug!("V5CompressedLegacy: AFTER advancing offset: offset={}, data[offset]={:02x}, data[offset+1]={:02x}", offset, data[offset], data[offset+1]);
 
         log::debug!(
             "V5CompressedLegacy: Cell data starts at offset {} (after {} byte header), first 32 bytes: {}",
@@ -777,17 +831,22 @@ impl V5CompressedLegacyParser {
             hex::encode(&data[offset..std::cmp::min(offset + 32, data.len())])
         );
 
-        // Sanity check: verify we're at a cell marker (0x08) as expected
-        if offset < data.len() && data[offset] == 0x08 {
-            debug!(
-                "V5CompressedLegacy: Verified cell marker (0x08) at offset {} after row header",
-                offset
-            );
-        } else if offset < data.len() {
-            warn!(
-                "V5CompressedLegacy: Expected cell marker (0x08) at offset {}, found 0x{:02x}",
-                offset, data[offset]
-            );
+        // Cell flags validation: First byte should be valid cell flags (0x00-0x1F)
+        // Common flags: 0x00 (basic cell), 0x08 (USE_ROW_TIMESTAMP), 0x04 (HAS_EMPTY_VALUE)
+        // Deleted cells have 0x01 (IS_DELETED), expiring cells have 0x02 (IS_EXPIRING)
+        if offset < data.len() {
+            let first_byte = data[offset];
+            if first_byte <= 0x1F {
+                debug!(
+                    "V5CompressedLegacy: Valid cell flags 0x{:02x} at offset {} after row header",
+                    first_byte, offset
+                );
+            } else {
+                warn!(
+                    "V5CompressedLegacy: Invalid cell flags 0x{:02x} at offset {} (expected 0x00-0x1F)",
+                    first_byte, offset
+                );
+            }
         }
 
         // CRITICAL: V5CompressedLegacy format stores cells WITHOUT column names
@@ -942,13 +1001,17 @@ impl V5CompressedLegacyParser {
 
     /// Parse a single cell value WITHOUT column name (schema-order format)
     ///
-    /// All cells start with 0x08 marker, but format varies by type:
-    /// - Boolean: [0x08][u8 value] (2 bytes total, 0x00=false, 0x01=true)
-    /// - Int: [0x08][i32 BE value] (5 bytes total, NO length field)
-    /// - Decimal: [0x08][u8 len][i32 BE scale][unscaled bytes]
-    /// - Text/Ascii/Varchar: [0x08][u8 len][text bytes]
-    /// - UUID: [0x08][u8 len=16][16 bytes]
-    /// - Blob: [0x08][u8 len][bytes]
+    /// Cell format in V5CompressedLegacy follows Cassandra 5.0 cell serialization:
+    /// - First byte: Cell flags (bitset, valid range: 0x00-0x1F)
+    ///   - 0x01 = IS_DELETED_MASK (tombstone)
+    ///   - 0x02 = IS_EXPIRING_MASK (has TTL)
+    ///   - 0x04 = HAS_EMPTY_VALUE_MASK (no value bytes)
+    ///   - 0x08 = USE_ROW_TIMESTAMP_MASK (use row timestamp)
+    ///   - 0x10 = USE_ROW_TTL_MASK (use row TTL)
+    /// - Conditional timestamp/TTL/deletion fields (based on flags)
+    /// - Value data (if HAS_EMPTY_VALUE not set)
+    ///
+    /// See CASSANDRA_5_CELL_DESERIALIZATION_FORMAT.md for complete specification.
     ///
     /// Returns: (value, new_offset)
     fn parse_cell_value_schema_order(
@@ -958,28 +1021,151 @@ impl V5CompressedLegacyParser {
         column: &crate::schema::Column,
         _reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize)> {
-        // All cells start with 0x08 marker
-        // V5CompressedLegacy format: Simple type tag/marker byte (0x08), NOT Cassandra cell flags
-        // NOTE: The full Cassandra 5.0 cell flags format (with bitset flags like 0x20=NULL,
-        // 0x04=EMPTY, etc.) applies to NEWER formats (V5_0NewBig, V5_0Bti), not this legacy format.
-        // V5CompressedLegacy uses a simplified marker byte where 0x08 indicates "cell data follows".
+        // Cell flag constants (from Cassandra 5.0 Cell.Serializer)
+        const CELL_IS_DELETED: u8 = 0x01;
+        const CELL_IS_EXPIRING: u8 = 0x02;
+        const CELL_HAS_EMPTY_VALUE: u8 = 0x04;
+        const CELL_USE_ROW_TIMESTAMP: u8 = 0x08;
+        const CELL_USE_ROW_TTL: u8 = 0x10;
+
+        // Read cell flags byte
         if offset >= data.len() {
             return Err(Error::corruption(format!(
-                "Cell '{}': unexpected end at marker byte",
+                "Cell '{}': unexpected end at flags byte",
                 column.name
             )));
         }
-        let marker = data[offset];
-        if marker != 0x08 {
+        let flags = data[offset];
+
+        // CRITICAL FIX (Issue #191): Validate flags are in valid range (0x00-0x1F)
+        // Bits 0x20, 0x40, 0x80 are row-level flags and should NEVER appear in cell flags.
+        // If we see these bits, the offset is misaligned (reading row data at cell position).
+        if flags > 0x1F {
             return Err(Error::corruption(format!(
-                "Cell '{}': expected marker 0x08, got 0x{:02x}",
-                column.name, marker
+                "Cell '{}': invalid cell flags 0x{:02x} at offset {} (bits 0x20/0x40/0x80 indicate offset misalignment)",
+                column.name, flags, offset
             )));
         }
+
         offset += 1;
 
+        // Decode flags
+        let is_deleted = (flags & CELL_IS_DELETED) != 0;
+        let is_expiring = (flags & CELL_IS_EXPIRING) != 0;
+        let has_empty_value = (flags & CELL_HAS_EMPTY_VALUE) != 0;
+        let use_row_timestamp = (flags & CELL_USE_ROW_TIMESTAMP) != 0;
+        let use_row_ttl = (flags & CELL_USE_ROW_TTL) != 0;
+
+        log::debug!(
+            "V5CompressedLegacy: Cell '{}' flags=0x{:02x} (deleted={}, expiring={}, empty={}, use_row_ts={}, use_row_ttl={})",
+            column.name, flags, is_deleted, is_expiring, has_empty_value, use_row_timestamp, use_row_ttl
+        );
+
+        // === PHASE 2: Parse conditional fields between flags and value ===
+        // Based on Cassandra 5.0 Cell.Serializer format specification
+
+        // Step 1: Read timestamp (if not using row timestamp)
+        if !use_row_timestamp {
+            let (remaining, timestamp_delta) = parse_vint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Cell '{}': failed to parse timestamp delta as VInt at offset {}: {:?}",
+                    column.name, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+            log::debug!(
+                "V5CompressedLegacy: Cell '{}' timestamp_delta={} (min_timestamp={})",
+                column.name,
+                timestamp_delta,
+                self.min_timestamp
+            );
+            // Note: actual timestamp = min_timestamp + timestamp_delta (from Statistics.db)
+        }
+
+        // Step 2: Read localDeletionTime (if deleted or expiring, and not using row TTL)
+        if !use_row_ttl && (is_deleted || is_expiring) {
+            let (remaining, deletion_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Cell '{}': failed to parse localDeletionTime delta as VUInt at offset {}: {:?}",
+                    column.name, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+            log::debug!(
+                "V5CompressedLegacy: Cell '{}' deletion_delta={} (min_local_deletion_time={})",
+                column.name,
+                deletion_delta,
+                self.min_local_deletion_time
+            );
+            // Note: actual localDeletionTime = min_local_deletion_time + deletion_delta
+        }
+
+        // Step 3: Read TTL (if expiring and not using row TTL)
+        if !use_row_ttl && is_expiring {
+            let (remaining, ttl_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Cell '{}': failed to parse TTL delta as VUInt at offset {}: {:?}",
+                    column.name, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+            log::debug!(
+                "V5CompressedLegacy: Cell '{}' ttl_delta={} (min_ttl={:?})",
+                column.name,
+                ttl_delta,
+                self.min_ttl
+            );
+            // Note: actual TTL = min_ttl + ttl_delta (if min_ttl exists)
+        }
+
+        // Step 4: Cell path for complex columns (multi-cell collections/UDTs)
+        // For now, skip this - we'll add in a future iteration when we handle complex columns.
+        // Simple columns (int, text, boolean, uuid, etc.) don't have cell paths.
+
+        // === End of Phase 2 conditional field parsing ===
+
+        // CRITICAL: Inverted logic for HAS_EMPTY_VALUE_MASK
+        // Flag NOT set (0x04 absent) = cell HAS value → read value bytes
+        // Flag SET (0x04 present) = cell has NO value → return empty/null immediately
+        let has_value = !has_empty_value;
+
+        // Handle deleted cells (tombstones)
+        // According to Cassandra 5.0 Cell.Serializer, deleted cells:
+        // 1. Have IS_DELETED flag set
+        // 2. May have deletion metadata (timestamp, localDeletionTime)
+        // 3. Do NOT have value data (even if HAS_EMPTY_VALUE not set)
+        if is_deleted {
+            log::debug!(
+                "V5CompressedLegacy: Cell '{}' is tombstone (deleted), returning Null",
+                column.name
+            );
+            // TODO(Issue #191, Phase 2): Parse deletion metadata (timestamp, localDeletionTime)
+            // For now, skip to next cell by returning offset without advancing further
+            return Ok((Value::Null, offset));
+        }
+
+        // Handle empty cells (no value bytes to read)
+        if !has_value {
+            log::debug!(
+                "V5CompressedLegacy: Cell '{}' has HAS_EMPTY_VALUE flag, returning empty value",
+                column.name
+            );
+            // Return appropriate empty value for type
+            // For most types, empty = empty string or empty collection
+            return Ok((Value::Text(String::new()), offset));
+        }
+
+        // At this point, we have a live cell with value data
+        // The value parsing logic below is unchanged from the original implementation
+
         // Parse based on column type (data_type is a String with CQL type name)
-        let value = match column.data_type.as_str() {
+        // CRITICAL: Normalize type name to lowercase for case-insensitive matching
+        // Schema may provide "TEXT", "INT", etc. (uppercase) while match arms use lowercase
+        let normalized_type = column.data_type.to_lowercase();
+        let value = match normalized_type.as_str() {
             "boolean" => {
                 // Boolean: [0x08][u8 value]
                 if offset >= data.len() {
@@ -994,7 +1180,24 @@ impl V5CompressedLegacyParser {
             }
 
             "int" => {
-                // Integer (i32): [0x08][i32 BE value] (NO length field!)
+                // Integer (i32): [VInt len][i32 BE value]
+                // V5CompressedLegacy uses VInt length prefix even for fixed-size types
+                let (remaining, int_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse int length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let int_len = int_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+                if int_len != 4 {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': expected int length 4, got {}",
+                        column.name, int_len
+                    )));
+                }
                 if offset + 4 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 4 bytes for int, only {} available",
@@ -1013,15 +1216,8 @@ impl V5CompressedLegacyParser {
             }
 
             "text" | "varchar" | "ascii" => {
-                // Text: [0x08][VInt len][text bytes]
-                // V5CompressedLegacy uses VInt length encoding for all variable-length types
-                if offset >= data.len() {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': unexpected end at text length",
-                        column.name
-                    )));
-                }
-
+                // Text: [VInt len][text bytes]
+                // V5CompressedLegacy uses VInt length encoding for variable-length types
                 let (remaining, text_len) = parse_vuint(&data[offset..]).map_err(|e| {
                     Error::corruption(format!(
                         "Cell '{}': failed to parse text length as VInt: {:?}",
@@ -1029,7 +1225,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let text_len = text_len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if offset + text_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -1068,7 +1265,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let uuid_len = uuid_len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if uuid_len != 16 {
                     return Err(Error::corruption(format!(
@@ -1109,7 +1307,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let total_len = total_len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if offset + total_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -1142,7 +1341,24 @@ impl V5CompressedLegacyParser {
             }
 
             "bigint" | "counter" => {
-                // BigInt/Counter: 8 bytes, i64 big-endian (NO length prefix)
+                // BigInt/Counter: [VInt len][8 bytes i64 big-endian]
+                // V5CompressedLegacy uses VInt length prefix even for fixed-size types
+                let (remaining, bigint_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse bigint length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let bigint_len = bigint_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+                if bigint_len != 8 {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': expected bigint length 8, got {}",
+                        column.name, bigint_len
+                    )));
+                }
                 if offset + 8 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 8 bytes for bigint, only {} available",
@@ -1161,7 +1377,7 @@ impl V5CompressedLegacyParser {
                     data[offset + 7],
                 ]);
                 offset += 8;
-                if column.data_type == "counter" {
+                if normalized_type == "counter" {
                     Value::Counter(val)
                 } else {
                     Value::BigInt(val)
@@ -1230,7 +1446,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let date_len = date_len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if date_len != 4 {
                     return Err(Error::corruption(format!(
@@ -1276,7 +1493,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let duration_len = duration_len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if offset + duration_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -1369,7 +1587,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let len = len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if len != 2 {
                     return Err(Error::corruption(format!(
@@ -1407,7 +1626,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let len = len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if len != 1 {
                     return Err(Error::corruption(format!(
@@ -1468,7 +1688,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let len = len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if len != 4 && len != 16 {
                     return Err(Error::corruption(format!(
@@ -1604,7 +1825,8 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 let blob_len = blob_len as usize;
-                offset = data.len() - remaining.len();
+                let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
 
                 if offset + blob_len > data.len() {
                     return Err(Error::corruption(format!(

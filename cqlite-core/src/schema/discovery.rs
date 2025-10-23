@@ -1403,12 +1403,11 @@ impl SchemaDiscoveryEngine {
 
     /// Parse SSTable header from file
     async fn parse_sstable_header(&self, file_path: &std::path::Path) -> Result<SSTableHeader> {
-        // This is a simplified implementation
-        // Real implementation would use bulletproof reader or similar
-        use crate::storage::sstable::bulletproof_reader::BulletproofReader;
+        use crate::storage::sstable::reader::SSTableReader;
 
-        let reader = BulletproofReader::open(file_path)?;
-        reader.get_header().await
+        let reader =
+            SSTableReader::open(file_path, &self.core_config, self.platform.clone()).await?;
+        Ok(reader.header().clone())
     }
 
     async fn sample_data_for_inference(&self, context: &mut DiscoveryContext) -> Result<()> {
@@ -1453,34 +1452,40 @@ impl SchemaDiscoveryEngine {
         file_path: &std::path::Path,
         max_rows: usize,
     ) -> Result<Vec<HashMap<String, Value>>> {
-        use crate::storage::sstable::bulletproof_reader::BulletproofReader;
+        use crate::storage::sstable::reader::SSTableReader;
 
-        let reader = BulletproofReader::open(file_path)?;
-        let header = reader.get_header().await?;
+        let reader =
+            SSTableReader::open(file_path, &self.core_config, self.platform.clone()).await?;
+        let header = reader.header();
         let column_names: Vec<String> = header.columns.iter().map(|col| col.name.clone()).collect();
 
-        let mut samples = Vec::new();
-        let mut entry_stream = reader.stream_entries().await?;
-        let mut count = 0;
+        // Get all entries and sample up to max_rows
+        let all_entries = reader.get_all_entries().await?;
 
-        while let Some(entry) = entry_stream.next().await? {
-            if count >= max_rows {
-                break;
-            }
+        // TODO(Issue #190): SSTableReader returns Vec<(TableId, RowKey, Value)> where Value
+        // is typically a single parsed value per entry. This differs from BulletproofReader's
+        // SSTableEntry which had `values: Vec<Value>` for multiple columns per row.
+        // For schema discovery type inference, we map each entry's Value to the first column
+        // as a conservative approach. Future enhancement: use scan() with schema-aware parsing
+        // or enhance SSTableReader to return row-level multi-column data.
+        let samples: Vec<HashMap<String, Value>> = all_entries
+            .into_iter()
+            .take(max_rows)
+            .filter_map(|(_table_id, _row_key, value)| {
+                let mut row_data = HashMap::new();
 
-            let mut row_data = HashMap::new();
-            for (i, value) in entry.values.iter().enumerate() {
-                let column_name = if i < column_names.len() {
-                    column_names[i].clone()
+                // Map the single Value to the first column for type inference
+                // This works for simple tables and provides data for type analysis
+                if !column_names.is_empty() {
+                    row_data.insert(column_names[0].clone(), value);
                 } else {
-                    format!("unknown_column_{}", i)
-                };
-                row_data.insert(column_name, value.clone());
-            }
+                    // If no column names are available, skip this entry
+                    return None;
+                }
 
-            samples.push(row_data);
-            count += 1;
-        }
+                Some(row_data)
+            })
+            .collect();
 
         Ok(samples)
     }
