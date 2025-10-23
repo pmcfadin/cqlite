@@ -201,6 +201,64 @@ fn default_nullable() -> bool {
     true
 }
 
+/// Extract keyspace name from USE statement
+/// Example: "USE test_basic;" -> Some("test_basic")
+/// Example: "USE \"test-basic\";" -> Some("test-basic")
+fn extract_use_keyspace(statement: &str) -> Option<String> {
+    let normalized = statement.trim().to_lowercase();
+    if !normalized.starts_with("use ") {
+        return None;
+    }
+
+    // Extract keyspace name after "USE "
+    let after_use = statement.trim()[4..].trim();
+    let mut ks_name = after_use.trim_end_matches(';').trim();
+
+    // Strip quotes from keyspace name if present
+    if ks_name.starts_with('"') && ks_name.ends_with('"') && ks_name.len() > 1 {
+        ks_name = &ks_name[1..ks_name.len() - 1];
+    }
+
+    if ks_name.is_empty() {
+        None
+    } else {
+        Some(ks_name.to_string())
+    }
+}
+
+/// Extract keyspace name from CREATE KEYSPACE statement
+/// Example: "CREATE KEYSPACE IF NOT EXISTS test_basic WITH ..." -> Some("test_basic")
+/// Example: "CREATE KEYSPACE \"test-basic\" WITH ..." -> Some("test-basic")
+fn extract_create_keyspace_name(statement: &str) -> Option<String> {
+    let normalized = statement.trim().to_lowercase();
+    if !normalized.starts_with("create keyspace") {
+        return None;
+    }
+
+    // Split by whitespace and find the keyspace name
+    let words: Vec<&str> = statement.split_whitespace().collect();
+
+    // Pattern: CREATE KEYSPACE [IF NOT EXISTS] <name> ...
+    let start_idx = if words.len() > 2 && words[2].eq_ignore_ascii_case("if") {
+        5 // Skip "CREATE KEYSPACE IF NOT EXISTS"
+    } else {
+        2 // Skip "CREATE KEYSPACE"
+    };
+
+    if words.len() > start_idx {
+        let mut ks_name = words[start_idx].trim();
+
+        // Strip quotes from keyspace name if present
+        if ks_name.starts_with('"') && ks_name.ends_with('"') && ks_name.len() > 1 {
+            ks_name = &ks_name[1..ks_name.len() - 1];
+        }
+
+        Some(ks_name.to_string())
+    } else {
+        None
+    }
+}
+
 impl SchemaAggregator {
     /// Create a new schema aggregator
     pub fn new(
@@ -399,12 +457,23 @@ impl SchemaAggregator {
             match classify_statement(statement) {
                 StatementType::CreateType => create_type_stmts.push(statement.as_str()),
                 StatementType::CreateTable => create_table_stmts.push(statement.as_str()),
-                StatementType::Other(kind) => {
-                    errors.push(format!(
-                        "Unsupported statement type '{}' in {}",
-                        kind,
-                        path.display()
-                    ));
+                StatementType::Other(ref kind) if kind == "use" => {
+                    // Extract keyspace name from USE statement
+                    if let Some(ks_name) = extract_use_keyspace(statement) {
+                        keyspace = Some(ks_name);
+                    }
+                }
+                StatementType::Other(ref kind) if kind == "create" => {
+                    // Handle CREATE KEYSPACE statements - extract keyspace name
+                    if let Some(ks_name) = extract_create_keyspace_name(statement) {
+                        // Only set keyspace if not already set by USE statement
+                        if keyspace.is_none() {
+                            keyspace = Some(ks_name);
+                        }
+                    }
+                }
+                StatementType::Other(_kind) => {
+                    // Skip other statement types silently (e.g., ALTER, DROP, comments)
                 }
             }
         }
@@ -448,8 +517,16 @@ impl SchemaAggregator {
         // Parse CREATE TABLE statements
         for stmt in create_table_stmts {
             match parse_cql_schema(stmt) {
-                Ok(table_schema) => {
-                    // Update keyspace if not set
+                Ok(mut table_schema) => {
+                    // Override keyspace with the one from USE statement or CREATE KEYSPACE
+                    // Only override if the table doesn't have an explicit qualified name
+                    if table_schema.keyspace == "default" {
+                        if let Some(ref active_keyspace) = keyspace {
+                            table_schema.keyspace = active_keyspace.clone();
+                        }
+                    }
+
+                    // Update keyspace if not set (from first table's explicit keyspace)
                     if keyspace.is_none() {
                         keyspace = Some(table_schema.keyspace.clone());
                     }
@@ -476,6 +553,36 @@ impl SchemaAggregator {
                 path.display(),
                 errors.join("; ")
             )));
+        }
+
+        // If no tables or UDTs were parsed, and statements exist, treat as error
+        // This catches truly invalid CQL that doesn't match any expected pattern
+        if tables.is_empty() && udts.is_empty() && !statements.is_empty() {
+            // Check if all statements are legitimate "other" types (USE, CREATE KEYSPACE, etc.)
+            // or if there are truly unrecognized/invalid statements
+            let legitimate_keywords = [
+                "use", "create", "alter", "drop", "grant", "revoke", "truncate",
+            ];
+            let has_invalid_statement = statements.iter().any(|stmt| {
+                let normalized = stmt.trim().to_lowercase();
+                let first_word = normalized.split_whitespace().next().unwrap_or("");
+
+                // If it's a CREATE statement that wasn't successfully parsed, it's invalid
+                if normalized.starts_with("create ") {
+                    return true;
+                }
+
+                // If it's not a legitimate keyword, it's invalid
+                !legitimate_keywords.contains(&first_word)
+            });
+
+            // If there are invalid statements, return an error
+            if has_invalid_statement {
+                return Err(Error::CqlParse(format!(
+                    "Failed to parse CQL file {}: No valid CREATE TABLE or CREATE TYPE statements found",
+                    path.display()
+                )));
+            }
         }
 
         // Determine final keyspace (use first discovered or default)
