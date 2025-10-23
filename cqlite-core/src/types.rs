@@ -11,6 +11,19 @@ use crate::schema::CqlType;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+// Size constants for fixed-size types
+const BOOL_SIZE: usize = 1;
+const TINYINT_SIZE: usize = 1;
+const SMALLINT_SIZE: usize = 2;
+const INT_SIZE: usize = 4;
+const BIGINT_SIZE: usize = 8;
+const FLOAT32_SIZE: usize = 4;
+const FLOAT64_SIZE: usize = 8;
+const UUID_SIZE: usize = 16;
+const DURATION_SIZE: usize = 12; // 3 * 4 bytes (months, days, nanos)
+const TOMBSTONE_SIZE: usize = 16;
+const VINT_LENGTH_PREFIX: usize = 4;
+
 /// Database value type that can hold any supported data type
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
@@ -403,48 +416,59 @@ impl Value {
         }
     }
 
-    /// Create a row tombstone with the given timestamp
-    pub fn row_tombstone(deletion_time: i64) -> Self {
+    /// Create a tombstone with the given type and timestamp
+    fn create_tombstone(
+        tombstone_type: TombstoneType,
+        deletion_time: i64,
+        ttl: Option<i64>,
+        range_start: Option<RowKey>,
+        range_end: Option<RowKey>,
+    ) -> Self {
         Value::Tombstone(TombstoneInfo {
             deletion_time,
-            tombstone_type: TombstoneType::RowTombstone,
-            ttl: None,
-            range_start: None,
-            range_end: None,
+            tombstone_type,
+            ttl,
+            range_start,
+            range_end,
         })
+    }
+
+    /// Create a row tombstone with the given timestamp
+    pub fn row_tombstone(deletion_time: i64) -> Self {
+        Self::create_tombstone(TombstoneType::RowTombstone, deletion_time, None, None, None)
     }
 
     /// Create a cell tombstone with the given timestamp
     pub fn cell_tombstone(deletion_time: i64) -> Self {
-        Value::Tombstone(TombstoneInfo {
+        Self::create_tombstone(
+            TombstoneType::CellTombstone,
             deletion_time,
-            tombstone_type: TombstoneType::CellTombstone,
-            ttl: None,
-            range_start: None,
-            range_end: None,
-        })
+            None,
+            None,
+            None,
+        )
     }
 
     /// Create a TTL expiration tombstone
     pub fn ttl_tombstone(deletion_time: i64, ttl: i64) -> Self {
-        Value::Tombstone(TombstoneInfo {
+        Self::create_tombstone(
+            TombstoneType::TtlExpiration,
             deletion_time,
-            tombstone_type: TombstoneType::TtlExpiration,
-            ttl: Some(ttl),
-            range_start: None,
-            range_end: None,
-        })
+            Some(ttl),
+            None,
+            None,
+        )
     }
 
     /// Create a range tombstone for clustering key ranges
     pub fn range_tombstone(deletion_time: i64, start_key: RowKey, end_key: RowKey) -> Self {
-        Value::Tombstone(TombstoneInfo {
+        Self::create_tombstone(
+            TombstoneType::RangeTombstone,
             deletion_time,
-            tombstone_type: TombstoneType::RangeTombstone,
-            ttl: None,
-            range_start: Some(start_key),
-            range_end: Some(end_key),
-        })
+            None,
+            Some(start_key),
+            Some(end_key),
+        )
     }
 
     /// Create a range tombstone with TTL for clustering key ranges
@@ -454,13 +478,13 @@ impl Value {
         end_key: RowKey,
         ttl: i64,
     ) -> Self {
-        Value::Tombstone(TombstoneInfo {
+        Self::create_tombstone(
+            TombstoneType::RangeTombstone,
             deletion_time,
-            tombstone_type: TombstoneType::RangeTombstone,
-            ttl: Some(ttl),
-            range_start: Some(start_key),
-            range_end: Some(end_key),
-        })
+            Some(ttl),
+            Some(start_key),
+            Some(end_key),
+        )
     }
 
     /// Get the tombstone type if this is a tombstone
@@ -621,72 +645,64 @@ impl Value {
     /// Get the size in bytes for this value when serialized
     pub fn size_estimate(&self) -> usize {
         match self {
-            Value::Null => 1,
-            Value::Boolean(_) => 1,
-            Value::TinyInt(_) => 1,
-            Value::SmallInt(_) => 2,
-            Value::Integer(_) => 4,
-            Value::BigInt(_) => 8,
-            Value::Counter(_) => 8,
-            Value::Float32(_) => 4,
-            Value::Float(_) => 8,
-            Value::Text(s) => 4 + s.len(), // VInt length + content
-            Value::Blob(b) => 4 + b.len(), // VInt length + content
-            Value::Timestamp(_) => 8,
-            Value::Time(_) => 8, // i64 = 8 bytes
-            Value::Date(_) => 4, // i32 = 4 bytes
-            Value::Uuid(_) => 16,
-            Value::Inet(addr) => 4 + addr.len(), // VInt length + bytes
-            Value::Json(j) => {
-                let json_str = j.to_string();
-                4 + json_str.len()
+            Value::Null => BOOL_SIZE,
+            Value::Boolean(_) => BOOL_SIZE,
+            Value::TinyInt(_) => TINYINT_SIZE,
+            Value::SmallInt(_) => SMALLINT_SIZE,
+            Value::Integer(_) => INT_SIZE,
+            Value::BigInt(_) | Value::Counter(_) => BIGINT_SIZE,
+            Value::Float32(_) => FLOAT32_SIZE,
+            Value::Float(_) => FLOAT64_SIZE,
+            Value::Timestamp(_) | Value::Time(_) => BIGINT_SIZE,
+            Value::Date(_) => INT_SIZE,
+            Value::Uuid(_) => UUID_SIZE,
+            Value::Duration { .. } => DURATION_SIZE,
+            Value::Tombstone(_) => TOMBSTONE_SIZE,
+
+            // Variable-length types with prefix
+            Value::Text(s) => VINT_LENGTH_PREFIX + s.len(),
+            Value::Blob(b) => VINT_LENGTH_PREFIX + b.len(),
+            Value::Inet(addr) => VINT_LENGTH_PREFIX + addr.len(),
+            Value::Varint(data) => VINT_LENGTH_PREFIX + data.len(),
+            Value::Decimal { unscaled, .. } => INT_SIZE + VINT_LENGTH_PREFIX + unscaled.len(),
+            Value::Json(j) => VINT_LENGTH_PREFIX + j.to_string().len(),
+
+            // Collections
+            Value::List(items) | Value::Set(items) => {
+                Self::collection_size(items.iter(), VINT_LENGTH_PREFIX + BOOL_SIZE)
             }
-            Value::List(list) => {
-                let mut size = 4 + 1; // count + element type
-                for item in list {
-                    size += item.size_estimate();
-                }
-                size
+            Value::Map(pairs) => {
+                let overhead = VINT_LENGTH_PREFIX + 2 * BOOL_SIZE; // count + key_type + value_type
+                pairs.iter().fold(overhead, |acc, (k, v)| {
+                    acc + k.size_estimate() + v.size_estimate()
+                })
             }
-            Value::Set(set) => {
-                let mut size = 4 + 1; // count + element type
-                for item in set {
-                    size += item.size_estimate();
-                }
-                size
-            }
-            Value::Map(map) => {
-                let mut size = 4 + 2; // count + key_type + value_type
-                for (key, value) in map {
-                    size += key.size_estimate() + value.size_estimate();
-                }
-                size
-            }
-            Value::Tuple(tuple) => {
-                let mut size = 4; // count
-                for item in tuple {
-                    size += 1 + item.size_estimate(); // type + value
-                }
-                size
-            }
+            Value::Tuple(items) => Self::collection_size(items.iter(), VINT_LENGTH_PREFIX),
             Value::Udt(udt_value) => {
-                let mut size = 4 + udt_value.type_name.len() + 4 + udt_value.keyspace.len() + 4; // type name + keyspace + field count
+                let mut size = VINT_LENGTH_PREFIX
+                    + udt_value.type_name.len()
+                    + VINT_LENGTH_PREFIX
+                    + udt_value.keyspace.len()
+                    + VINT_LENGTH_PREFIX; // field count
                 for field in &udt_value.fields {
-                    size += 4 + field.name.len(); // field name length + field name
-                    if let Some(ref field_value) = field.value {
-                        size += 1 + field_value.size_estimate(); // type + value
-                    } else {
-                        size += 1; // null marker
-                    }
+                    size += VINT_LENGTH_PREFIX + field.name.len();
+                    size += match &field.value {
+                        Some(val) => BOOL_SIZE + val.size_estimate(),
+                        None => BOOL_SIZE,
+                    };
                 }
                 size
             }
             Value::Frozen(inner) => inner.size_estimate(),
-            Value::Varint(data) => 4 + data.len(),
-            Value::Decimal { scale: _, unscaled } => 4 + 4 + unscaled.len(), // scale + length + data
-            Value::Duration { .. } => 12, // 3 * 4 bytes (months, days, nanos)
-            Value::Tombstone(_) => 16,    // timestamp + type + optional TTL
         }
+    }
+
+    /// Helper to calculate collection size
+    fn collection_size<'a, I>(items: I, overhead: usize) -> usize
+    where
+        I: Iterator<Item = &'a Value>,
+    {
+        items.fold(overhead, |acc, item| acc + item.size_estimate())
     }
 
     /// Check if this value represents an empty collection
@@ -723,88 +739,85 @@ impl Value {
     pub fn validate_collection_types(&self) -> crate::Result<()> {
         match self {
             Value::List(list) => {
-                if list.is_empty() {
-                    return Ok(());
-                }
-                let first_type = list[0].data_type();
-                for item in list.iter().skip(1) {
-                    if item.data_type() != first_type {
-                        return Err(crate::Error::schema(format!(
-                            "List contains mixed types: {:?} and {:?}",
-                            first_type,
-                            item.data_type()
-                        )));
-                    }
-                }
+                Self::validate_homogeneous_collection(list.iter(), "List")?;
                 Ok(())
             }
             Value::Set(set) => {
-                if set.is_empty() {
-                    return Ok(());
-                }
-                let first_type = set[0].data_type();
-                for item in set.iter().skip(1) {
-                    if item.data_type() != first_type {
-                        return Err(crate::Error::schema(format!(
-                            "Set contains mixed types: {:?} and {:?}",
-                            first_type,
-                            item.data_type()
-                        )));
-                    }
-                }
-                // Check for duplicates in set
-                let mut seen = std::collections::HashSet::new();
-                for item in set {
-                    let item_str = format!("{}", item);
-                    if !seen.insert(item_str.clone()) {
-                        return Err(crate::Error::schema(format!(
-                            "Set contains duplicate value: {}",
-                            item_str
-                        )));
-                    }
-                }
+                Self::validate_homogeneous_collection(set.iter(), "Set")?;
+                Self::check_unique_items(set.iter(), "Set")?;
                 Ok(())
             }
             Value::Map(map) => {
-                if map.is_empty() {
-                    return Ok(());
-                }
-                let (first_key, first_value) = &map[0];
-                let key_type = first_key.data_type();
-                let value_type = first_value.data_type();
+                if !map.is_empty() {
+                    let (first_key, first_value) = &map[0];
+                    let key_type = first_key.data_type();
+                    let value_type = first_value.data_type();
 
-                for (key, value) in map.iter().skip(1) {
-                    if key.data_type() != key_type {
-                        return Err(crate::Error::schema(format!(
-                            "Map contains mixed key types: {:?} and {:?}",
-                            key_type,
-                            key.data_type()
-                        )));
+                    for (key, value) in map.iter().skip(1) {
+                        if key.data_type() != key_type {
+                            return Err(crate::Error::schema(format!(
+                                "Map contains mixed key types: {:?} and {:?}",
+                                key_type,
+                                key.data_type()
+                            )));
+                        }
+                        if value.data_type() != value_type {
+                            return Err(crate::Error::schema(format!(
+                                "Map contains mixed value types: {:?} and {:?}",
+                                value_type,
+                                value.data_type()
+                            )));
+                        }
                     }
-                    if value.data_type() != value_type {
-                        return Err(crate::Error::schema(format!(
-                            "Map contains mixed value types: {:?} and {:?}",
-                            value_type,
-                            value.data_type()
-                        )));
-                    }
-                }
 
-                // Check for duplicate keys
-                let mut seen_keys = std::collections::HashSet::new();
-                for (key, _) in map {
-                    let key_str = format!("{}", key);
-                    if !seen_keys.insert(key_str.clone()) {
-                        return Err(crate::Error::schema(format!(
-                            "Map contains duplicate key: {}",
-                            key_str
-                        )));
-                    }
+                    Self::check_unique_items(map.iter().map(|(k, _)| k), "Map keys")?;
                 }
                 Ok(())
             }
             _ => Ok(()), // Non-collections are always valid
         }
+    }
+
+    /// Helper to validate homogeneous collection types
+    fn validate_homogeneous_collection<'a, I>(
+        mut items: I,
+        collection_name: &str,
+    ) -> crate::Result<()>
+    where
+        I: Iterator<Item = &'a Value>,
+    {
+        if let Some(first) = items.next() {
+            let first_type = first.data_type();
+            for item in items {
+                if item.data_type() != first_type {
+                    return Err(crate::Error::schema(format!(
+                        "{} contains mixed types: {:?} and {:?}",
+                        collection_name,
+                        first_type,
+                        item.data_type()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Helper to check for duplicate items
+    fn check_unique_items<'a, I>(items: I, collection_name: &str) -> crate::Result<()>
+    where
+        I: Iterator<Item = &'a Value>,
+    {
+        let mut seen = std::collections::HashSet::new();
+        for item in items {
+            let item_str = format!("{}", item);
+            if !seen.insert(item_str.clone()) {
+                return Err(crate::Error::schema(format!(
+                    "{} contains duplicate: {}",
+                    collection_name, item_str
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -846,88 +859,19 @@ impl fmt::Display for Value {
             Value::Boolean(b) => write!(f, "{}", b),
             Value::Integer(i) => write!(f, "{}", i),
             Value::BigInt(i) => write!(f, "{}", i),
-            Value::Counter(i) => write!(f, "counter:{}", i),
-            Value::Float(fl) => write!(f, "{}", fl),
-            Value::Text(s) => write!(f, "'{}'", s),
-            Value::Blob(b) => write!(f, "BLOB({} bytes)", b.len()),
-            Value::Timestamp(ts) => write!(f, "TIMESTAMP({})", ts),
-            Value::Time(nanos) => {
-                // Convert nanoseconds to HH:MM:SS.nnnnnnnnn format
-                let total_seconds = nanos / 1_000_000_000;
-                let hours = total_seconds / 3600;
-                let minutes = (total_seconds % 3600) / 60;
-                let seconds = total_seconds % 60;
-                let remaining_nanos = nanos % 1_000_000_000;
-                write!(
-                    f,
-                    "TIME({:02}:{:02}:{:02}.{:09})",
-                    hours, minutes, seconds, remaining_nanos
-                )
-            }
-            Value::Date(days) => write!(f, "DATE({})", days),
-            Value::Uuid(uuid) => {
-                write!(f, "UUID({})", hex::encode(uuid))
-            }
-            Value::Json(json) => write!(f, "JSON({})", json),
             Value::TinyInt(i) => write!(f, "{}", i),
             Value::SmallInt(i) => write!(f, "{}", i),
+            Value::Float(fl) => write!(f, "{}", fl),
             Value::Float32(fl) => write!(f, "{}", fl),
-            Value::Set(set) => {
-                write!(f, "{{")?;
-                for (i, item) in set.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, "}}")
-            }
-            Value::List(list) => {
-                write!(f, "[")?;
-                for (i, item) in list.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, "]")
-            }
-            Value::Map(map) => {
-                write!(f, "{{")?;
-                for (i, (key, value)) in map.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}: {}", key, value)?;
-                }
-                write!(f, "}}")
-            }
-            Value::Tuple(tuple) => {
-                write!(f, "(")?;
-                for (i, item) in tuple.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, ")")
-            }
-            Value::Udt(udt) => {
-                write!(f, "{}{{", udt.type_name)?;
-                for (i, field) in udt.fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    match &field.value {
-                        Some(value) => write!(f, "{}: {}", field.name, value)?,
-                        None => write!(f, "{}: NULL", field.name)?,
-                    }
-                }
-                write!(f, "}}")
-            }
-            Value::Frozen(inner) => {
-                write!(f, "FROZEN({})", inner)
-            }
+            Value::Counter(i) => write!(f, "counter:{}", i),
+            Value::Text(s) => write!(f, "'{}'", s),
+            Value::Blob(b) => write!(f, "BLOB({} bytes)", b.len()),
+            Value::Timestamp(ts) => Self::fmt_typed(f, "TIMESTAMP", ts),
+            Value::Date(days) => Self::fmt_typed(f, "DATE", days),
+            Value::Time(nanos) => Self::fmt_time(f, *nanos),
+            Value::Uuid(uuid) => Self::fmt_typed(f, "UUID", hex::encode(uuid)),
+            Value::Json(json) => Self::fmt_typed(f, "JSON", json),
+            Value::Inet(bytes) => Self::fmt_inet(f, bytes),
             Value::Varint(data) => write!(f, "VARINT(0x{})", hex::encode(data)),
             Value::Decimal { scale, unscaled } => {
                 write!(f, "DECIMAL(scale={}, unscaled={:?})", scale, unscaled)
@@ -936,35 +880,119 @@ impl fmt::Display for Value {
                 months,
                 days,
                 nanos,
-            } => write!(f, "DURATION({}M {}D {}ns)", months, days, nanos),
-            Value::Inet(bytes) => {
-                if bytes.len() == 4 {
-                    // IPv4: 192.168.1.1
-                    write!(f, "{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
-                } else if bytes.len() == 16 {
-                    // IPv6: 2001:db8::1 (simplified - just show hex groups)
-                    write!(f, "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
-                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-                        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15])
-                } else {
-                    write!(f, "INET({} bytes)", bytes.len())
-                }
+            } => {
+                write!(f, "DURATION({}M {}D {}ns)", months, days, nanos)
             }
-            Value::Tombstone(info) => match info.tombstone_type {
-                TombstoneType::RowTombstone => write!(f, "TOMBSTONE(ROW@{})", info.deletion_time),
-                TombstoneType::CellTombstone => write!(f, "TOMBSTONE(CELL@{})", info.deletion_time),
-                TombstoneType::RangeTombstone => {
-                    write!(f, "TOMBSTONE(RANGE@{})", info.deletion_time)
-                }
-                TombstoneType::TtlExpiration => {
-                    if let Some(ttl) = info.ttl {
-                        write!(f, "TOMBSTONE(TTL@{}+{})", info.deletion_time, ttl)
-                    } else {
-                        write!(f, "TOMBSTONE(TTL@{})", info.deletion_time)
-                    }
-                }
-            },
+            Value::Set(items) => Self::fmt_collection(f, items.iter(), '{', '}'),
+            Value::List(items) => Self::fmt_collection(f, items.iter(), '[', ']'),
+            Value::Tuple(items) => Self::fmt_collection(f, items.iter(), '(', ')'),
+            Value::Map(pairs) => Self::fmt_map(f, pairs),
+            Value::Udt(udt) => Self::fmt_udt(f, udt),
+            Value::Frozen(inner) => Self::fmt_typed(f, "FROZEN", &**inner),
+            Value::Tombstone(info) => Self::fmt_tombstone(f, info),
         }
+    }
+}
+
+impl Value {
+    /// Format a typed value wrapper like TIMESTAMP(value)
+    fn fmt_typed(
+        f: &mut fmt::Formatter<'_>,
+        type_name: &str,
+        value: impl fmt::Display,
+    ) -> fmt::Result {
+        write!(f, "{}({})", type_name, value)
+    }
+
+    /// Format a time value as HH:MM:SS.nnnnnnnnn
+    fn fmt_time(f: &mut fmt::Formatter<'_>, nanos: i64) -> fmt::Result {
+        let total_seconds = nanos / 1_000_000_000;
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+        let remaining_nanos = nanos % 1_000_000_000;
+        write!(
+            f,
+            "TIME({:02}:{:02}:{:02}.{:09})",
+            hours, minutes, seconds, remaining_nanos
+        )
+    }
+
+    /// Format an IP address (IPv4 or IPv6)
+    fn fmt_inet(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+        match bytes.len() {
+            4 => write!(f, "{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]),
+            16 => write!(
+                f,
+                "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+            ),
+            _ => write!(f, "INET({} bytes)", bytes.len()),
+        }
+    }
+
+    /// Format a tombstone with type and timestamp
+    fn fmt_tombstone(f: &mut fmt::Formatter<'_>, info: &TombstoneInfo) -> fmt::Result {
+        let type_name = match info.tombstone_type {
+            TombstoneType::RowTombstone => "ROW",
+            TombstoneType::CellTombstone => "CELL",
+            TombstoneType::RangeTombstone => "RANGE",
+            TombstoneType::TtlExpiration => {
+                return match info.ttl {
+                    Some(ttl) => write!(f, "TOMBSTONE(TTL@{}+{})", info.deletion_time, ttl),
+                    None => write!(f, "TOMBSTONE(TTL@{})", info.deletion_time),
+                };
+            }
+        };
+        write!(f, "TOMBSTONE({}@{})", type_name, info.deletion_time)
+    }
+
+    /// Format a collection with delimiters
+    fn fmt_collection<'a, I>(
+        f: &mut fmt::Formatter<'_>,
+        items: I,
+        open: char,
+        close: char,
+    ) -> fmt::Result
+    where
+        I: Iterator<Item = &'a Value>,
+    {
+        write!(f, "{}", open)?;
+        for (i, item) in items.enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", item)?;
+        }
+        write!(f, "{}", close)
+    }
+
+    /// Format a map
+    fn fmt_map(f: &mut fmt::Formatter<'_>, pairs: &[(Value, Value)]) -> fmt::Result {
+        write!(f, "{{")?;
+        for (i, (key, value)) in pairs.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}: {}", key, value)?;
+        }
+        write!(f, "}}")
+    }
+
+    /// Format a UDT
+    fn fmt_udt(f: &mut fmt::Formatter<'_>, udt: &UdtValue) -> fmt::Result {
+        write!(f, "{}{{", udt.type_name)?;
+        for (i, field) in udt.fields.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            match &field.value {
+                Some(value) => write!(f, "{}: {}", field.name, value)?,
+                None => write!(f, "{}: NULL", field.name)?,
+            }
+        }
+        write!(f, "}}")
     }
 }
 
