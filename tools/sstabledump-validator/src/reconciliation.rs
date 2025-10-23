@@ -342,11 +342,13 @@ impl ReconciliationEngine {
         for candidate in candidates.iter_mut() {
             // Check if cell is deleted by row tombstone
             if let Some(row_tombstone_time) = row_tombstone_time {
+                // Track that a row tombstone was considered, regardless of outcome
+                affected_by_tombstone = true;
+
                 if candidate.cell.timestamp <= row_tombstone_time {
                     candidate.visibility = CellVisibility::HiddenByRowTombstone {
                         tombstone_time: row_tombstone_time,
                     };
-                    affected_by_tombstone = true;
                     continue;
                 }
             }
