@@ -112,7 +112,7 @@ pub(crate) fn parse_exact_header_size_nb(
         Ok((remaining, _parsed_header)) => {
             // The difference between original buffer and remaining is the exact header size
             let header_size = header_buffer.len() - remaining.len();
-            println!(
+            debug!(
                 "Parsed exact header size {} for BIG v5 format using nom parser",
                 header_size
             );
