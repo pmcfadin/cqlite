@@ -210,8 +210,13 @@ impl QueryResult {
     pub fn to_json(&self) -> serde_json::Value {
         let mut result = serde_json::Map::new();
 
-        // Add rows
-        let rows_json: Vec<serde_json::Value> = self.rows.iter().map(|row| row.to_json()).collect();
+        // Add rows with deterministic field ordering (Issue #129)
+        // Iterate metadata.columns in order, NOT HashMap iteration
+        let rows_json: Vec<serde_json::Value> = self
+            .rows
+            .iter()
+            .map(|row| self.row_to_json_deterministic(row))
+            .collect();
         result.insert("rows".to_string(), serde_json::Value::Array(rows_json));
 
         // Add metadata
@@ -263,6 +268,52 @@ impl QueryResult {
     /// Create result iterator
     pub fn iter(&self) -> std::slice::Iter<'_, QueryRow> {
         self.rows.iter()
+    }
+
+    /// Convert a single row to JSON with deterministic field ordering
+    ///
+    /// Uses metadata.columns order when available to ensure consistent output
+    /// across multiple runs (Issue #129). Falls back to sorted HashMap keys
+    /// when metadata.columns is empty.
+    fn row_to_json_deterministic(&self, row: &QueryRow) -> serde_json::Value {
+        let mut result = serde_json::Map::new();
+
+        // Use metadata.columns for deterministic ordering if available
+        if !self.metadata.columns.is_empty() {
+            // Iterate columns in metadata order, NOT HashMap order
+            for col in &self.metadata.columns {
+                let value_json = match row.values.get(&col.name) {
+                    Some(value) => value.to_json(),
+                    None => serde_json::Value::Null,
+                };
+                result.insert(col.name.clone(), value_json);
+            }
+        } else {
+            // Fallback: Sort HashMap keys alphabetically for determinism
+            let mut sorted_keys: Vec<&String> = row.values.keys().collect();
+            sorted_keys.sort();
+            for key in sorted_keys {
+                if let Some(value) = row.values.get(key) {
+                    result.insert(key.clone(), value.to_json());
+                }
+            }
+        }
+
+        // Add row key
+        result.insert(
+            "_key".to_string(),
+            serde_json::Value::String(format!("{:?}", row.key)),
+        );
+
+        // Add metadata if present
+        if row.metadata.version.is_some()
+            || row.metadata.ttl.is_some()
+            || !row.metadata.tags.is_empty()
+        {
+            result.insert("_metadata".to_string(), row.metadata.to_json());
+        }
+
+        serde_json::Value::Object(result)
     }
 }
 

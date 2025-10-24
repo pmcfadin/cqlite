@@ -120,13 +120,13 @@ run_and_save() {
   echo -e "  ${BLUE}→${NC} Generating ${name}.golden..."
 
   # P0-6: Pass correct data directory path with /sstables suffix
-  # Run CLI command
+  # Run CLI command - capture only stdout (Issue #129: logs go to stderr)
   if "$CLI_BIN" \
     --schema "$schema" \
     --data-dir "$DATASETS_DIR/sstables" \
     -e "$query" \
     --format "$format" \
-    > "$output_file" 2>&1; then
+    > "$output_file" 2>/dev/null; then
 
     local line_count=$(wc -l < "$output_file" | tr -d ' ')
     echo -e "    ${GREEN}✓${NC} Saved (${line_count} lines)"

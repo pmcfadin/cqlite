@@ -1,686 +1,106 @@
-[DEBUG SSTableManager] load_from_table_directories: processing 33 directories
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 2, 132, 167, 24, 190, 123, 73, 230, 182, 185, 142, 130, 245, 255, 22, 96, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 2, 132, 167, 24, 190, 123, 73, 230, 182, 185, 142, 130, 245, 255, 22, 96, 0, 0, 0, 16, 254, 65, 94, 86, 225, 75, 69, 253, 180, 208, 82, 212, 62, 255, 43, 245], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'sensor_data' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/time_bucketed_counters-6ccefac0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/time_bucketed_counters-6ccefac0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0xDE150000
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 114, 101, 113, 117, 101, 115, 116, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 114, 101, 113, 117, 101, 115, 116, 115, 0, 0, 0, 8, 114, 101, 113, 117, 101, 115, 116, 115], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'time_bucketed_counters' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/time_bucketed_counters-6ccefac0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/time_bucketed_counters-6ccefac0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/log_entries-6cad6900a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/log_entries-6cad6900a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 77, 0, 0, 0, 128, 0, 0, 0, 2, 8, 0, 0, 0, 44, 0, 0, 0, 0, 7, 110, 97, 116, 117, 114, 97, 108, 0, 0, 4, 73, 78, 70, 79, 0, 0, 8, 0, 0, 1, 153, 147, 160, 154, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 119, 105, 116, 104, 0, 0, 4, 73, 78, 70, 79, 0, 0, 8, 0, 0, 1, 153, 146, 251, 206, 128, 0, 56, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 0, 7, 110, 97, 116, 117, 114, 97, 108, 0, 0, 4, 73, 78, 70, 79, 0, 0, 8, 0, 0, 1, 153, 147, 160, 154, 0, 0, 0, 0, 0, 26, 0, 5, 97, 104, 101, 97, 100, 0, 0, 4, 73, 78, 70, 79, 0, 0, 8, 0, 0, 1, 153, 146, 251, 206, 128, 0], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'log_entries' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/log_entries-6cad6900a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/log_entries-6cad6900a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0xB57C6400
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 63, 0, 0, 0, 128, 0, 0, 0, 2, 8, 0, 0, 0, 34, 0, 0, 0, 0, 4, 103, 111, 97, 108, 0, 0, 8, 105, 110, 116, 101, 114, 101, 115, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 102, 111, 114, 0, 0, 12, 112, 114, 111, 102, 101, 115, 115, 105, 111, 110, 97, 108, 0, 16, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 18, 0, 4, 103, 111, 97, 108, 0, 0, 8, 105, 110, 116, 101, 114, 101, 115, 116, 0, 0, 0, 0, 18, 0, 7, 104, 117, 115, 98, 97, 110, 100, 0, 0, 5, 99, 97, 114, 114, 121, 0], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'app_metrics' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_sessions-6cda1e50a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_sessions-6cda1e50a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 128, 0, 0, 0, 2, 8, 0, 0, 0, 32, 0, 0, 0, 201, 50, 74, 70, 37, 51, 72, 117, 186, 68, 17, 204, 189, 101, 3, 104, 0, 0, 0, 0, 0, 0, 0, 0, 39, 117, 75, 119, 109, 212, 74, 1, 135, 228, 57, 144, 244, 25, 36, 171, 171, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 201, 50, 74, 70, 37, 51, 72, 117, 186, 68, 17, 204, 189, 101, 3, 104, 0, 0, 0, 16, 250, 231, 233, 49, 122, 30, 69, 2, 168, 127, 175, 56, 121, 27, 36, 63], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'user_sessions' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_sessions-6cda1e50a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_sessions-6cda1e50a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/event_store-6cbbc0e0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/event_store-6cbbc0e0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 128, 0, 0, 0, 2, 8, 0, 0, 0, 32, 0, 0, 0, 76, 202, 95, 84, 189, 52, 79, 232, 162, 192, 145, 111, 93, 188, 201, 1, 0, 0, 0, 0, 0, 0, 0, 0, 242, 10, 2, 169, 188, 40, 73, 169, 133, 49, 24, 20, 216, 136, 12, 76, 126, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 76, 202, 95, 84, 189, 52, 79, 232, 162, 192, 145, 111, 93, 188, 201, 1, 0, 0, 0, 16, 103, 230, 177, 113, 55, 131, 66, 241, 168, 174, 161, 235, 12, 108, 221, 23], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'event_store' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/event_store-6cbbc0e0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/event_store-6cbbc0e0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/tick_data-6ce716a0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/tick_data-6ce716a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0x57320000
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 39, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 0, 4, 65, 65, 80, 76, 0, 0, 6, 78, 65, 83, 68, 65, 81, 0, 0, 8, 0, 0, 1, 153, 146, 251, 206, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 27, 0, 4, 65, 65, 80, 76, 0, 0, 6, 78, 65, 83, 68, 65, 81, 0, 0, 8, 0, 0, 1, 153, 146, 251, 206, 128, 0, 0, 0, 0, 27, 0, 4, 65, 65, 80, 76, 0, 0, 6, 78, 65, 83, 68, 65, 81, 0, 0, 8, 0, 0, 1, 153, 147, 160, 154, 0, 0], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'tick_data' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/tick_data-6ce716a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/tick_data-6ce716a0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/stock_prices-6c9fad60a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/stock_prices-6c9fad60a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0xD4645400
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 26, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 0, 4, 65, 77, 90, 78, 0, 0, 4, 128, 0, 79, 136, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14, 0, 4, 65, 77, 90, 78, 0, 0, 4, 128, 0, 79, 136, 0, 0, 0, 0, 14, 0, 4, 65, 65, 80, 76, 0, 0, 4, 128, 0, 79, 136, 0], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'stock_prices' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/stock_prices-6c9fad60a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/stock_prices-6c9fad60a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_activity-6c935150a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_activity-6c935150a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 76, 0, 0, 0, 128, 0, 0, 0, 2, 8, 0, 0, 0, 42, 0, 0, 0, 0, 16, 55, 172, 159, 83, 189, 142, 77, 165, 164, 26, 36, 15, 143, 90, 108, 253, 0, 0, 4, 128, 0, 79, 136, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 89, 106, 228, 90, 178, 250, 68, 226, 155, 90, 234, 147, 168, 22, 207, 182, 0, 0, 4, 128, 0, 79, 136, 0, 129, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 26, 0, 16, 55, 172, 159, 83, 189, 142, 77, 165, 164, 26, 36, 15, 143, 90, 108, 253, 0, 0, 4, 128, 0, 79, 136, 0, 0, 0, 0, 26, 0, 16, 95, 64, 58, 46, 142, 123, 68, 66, 129, 88, 40, 159, 12, 219, 8, 46, 0, 0, 4, 128, 0, 79, 136, 0], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'user_activity' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_activity-6c935150a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_timeseries/user_activity-6c935150a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 36, 93, 255, 105, 2, 111, 69, 198, 182, 143, 186, 12, 150, 77, 243, 201, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 36, 93, 255, 105, 2, 111, 69, 198, 182, 143, 186, 12, 150, 77, 243, 201, 0, 0, 0, 16, 58, 224, 58, 173, 152, 211, 79, 215, 137, 252, 43, 252, 193, 0, 216, 137], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'composite_key_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 238, 155, 164, 177, 73, 9, 71, 88, 178, 202, 63, 99, 214, 17, 253, 130, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 238, 155, 164, 177, 73, 9, 71, 88, 178, 202, 63, 99, 214, 17, 253, 130, 0, 0, 0, 16, 16, 9, 31, 27, 136, 249, 64, 186, 128, 91, 153, 103, 65, 60, 86, 108], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'ttl_test_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0xC0515C00
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 104, 51, 67, 205, 120, 174, 69, 167, 140, 248, 122, 14, 154, 146, 117, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 104, 51, 67, 205, 120, 174, 69, 167, 140, 248, 122, 14, 154, 146, 117, 115, 0, 0, 0, 16, 177, 160, 254, 166, 174, 10, 75, 226, 158, 44, 95, 112, 66, 148, 6, 72], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'static_columns_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 133, 13, 192, 24, 186, 31, 72, 218, 190, 183, 146, 68, 9, 252, 225, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 133, 13, 192, 24, 186, 31, 72, 218, 190, 183, 146, 68, 9, 252, 225, 44, 0, 0, 0, 16, 245, 192, 23, 24, 14, 244, 72, 74, 148, 110, 135, 235, 255, 197, 122, 33], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'compression_test_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 224, 0, 0, 0, 128, 0, 0, 0, 8, 32, 0, 0, 0, 56, 0, 0, 0, 80, 0, 0, 0, 104, 0, 0, 0, 128, 0, 0, 0, 152, 0, 0, 0, 176, 0, 0, 0, 200, 0, 0, 0, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 0, 0, 0, 0, 0, 108, 156, 193, 246, 53, 250, 71, 172, 169, 44, 151, 94, 5, 7, 252, 96, 231, 10, 0, 0, 0, 0, 0, 0, 204, 159, 93, 172, 89, 86, 66, 182, 174, 119, 108, 104, 235, 181, 172, 114, 231, 21, 0, 0, 0, 0, 0, 0, 5, 23, 76, 160, 178, 118, 68, 49, 181, 29, 207, 73, 121, 170, 116, 75, 231, 32, 0, 0, 0, 0, 0, 0, 2, 42, 220, 110, 31, 179, 75, 78, 140, 66, 44, 232, 123, 187, 189, 156, 231, 43, 0, 0, 0, 0, 0, 0, 244, 241, 3, 30, 78, 27, 78, 251, 156, 12, 218, 226, 236, 150, 110, 66, 231, 54, 0, 0, 0, 0, 0, 0, 244, 123, 106, 9, 243, 72, 67, 177, 176, 75, 146, 60, 27, 89, 240, 171, 231, 65, 0, 0, 0, 0, 0, 0, 248, 153, 36, 104, 49, 238, 77, 188, 159, 168, 186, 79, 45, 239, 25, 127, 231, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 21, 41, 26, 119, 215, 57, 78, 115, 131, 151, 183, 135, 68, 47, 58, 31, 0, 0, 0, 16, 7, 149, 153, 169, 206, 251, 72, 148, 158, 202, 226, 226, 178, 31, 149, 130], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'simple_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/multi_partition_table-6ac52100a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/multi_partition_table-6ac52100a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 1: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 1: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 50, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 0, 16, 152, 224, 88, 32, 152, 45, 65, 28, 150, 31, 38, 209, 5, 116, 116, 228, 0, 0, 16, 157, 21, 154, 43, 8, 218, 74, 209, 190, 120, 201, 15, 135, 131, 229, 193, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 38, 0, 16, 152, 224, 88, 32, 152, 45, 65, 28, 150, 31, 38, 209, 5, 116, 116, 228, 0, 0, 16, 157, 21, 154, 43, 8, 218, 74, 209, 190, 120, 201, 15, 135, 131, 229, 193, 0, 0, 0, 0, 38, 0, 16, 33, 40, 109, 180, 29, 13, 68, 189, 191, 2, 9, 239, 104, 147, 106, 63, 0, 0, 16, 54, 6, 103, 215, 139, 210, 71, 133, 170, 11, 74, 63, 161, 40, 128, 16, 0], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'multi_partition_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/multi_partition_table-6ac52100a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/multi_partition_table-6ac52100a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0x0010045E
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 4, 94, 99, 252, 78, 147, 67, 94, 168, 155, 185, 152, 17, 199, 247, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 4, 94, 99, 252, 78, 147, 67, 94, 168, 155, 185, 152, 17, 199, 247, 30, 0, 0, 0, 16, 80, 179, 78, 201, 30, 134, 72, 176, 153, 209, 94, 26, 119, 157, 156, 115], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'uncompressed_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-Warning: Could not load SSTable file "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9/nb-1-big-Data.db": Data corruption: Failed to parse SSTable header for file '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9/nb-1-big-Data.db': Data corruption: Failed to parse header for modern format V5_0FormatG file '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9/nb-1-big-Data.db': Error(Error { input: [1, 0, 242, 22, 32, 128, 165, 22, 0, 193, 231, 125, 36, 0, 1, 128, 0, 243, 92, 249, 138, 34, 12, 64, 251, 139, 4, 244, 255, 127, 252, 246, 129, 0, 6, 64, 115, 35, 209, 210, 16, 43, 0, 47, 0, 41, 41, 0, 21, 31, 35, 41, 0, 21, 31, 205, 41, 0, 21, 139, 129, 1, 0, 4, 104, 101, 108, 112, 187, 0, 95, 18, 0, 193, 239, 210, 187, 0, 8, 35, 217, 224, 187, 0, 31, 31, 41, 0, 21, 31, 33, 41, 0, 21, 31, 183, 41, 0, 21, 16, 119, 187, 0, 62, 111, 109, 101, 187, 0, 47, 214, 131, 187, 0, 8, 35, 190, 136, 187, 0, 31, 55, 41, 0, 21, 31, 38, 41, 0, 21, 31, 184, 41, 0, 21, 155, 91, 1, 0, 5, 97, 98, 111, 117, 116, 188, 0, 95, 19, 0, 193, 218, 155, 188, 0, 8, 38, 194, 112, 188, 0, 15, 41, 0, 19, 31, 29, 41, 0, 21, 31, 202, 41, 0, 21, 172, 118, 1, 0, 7, 99, 111, 110, 116, 97, 99, 190, 0, 95, 21, 0, 193, 236, 42, 190, 0, 8, 35, 213, 248, 190, 0, 31, 57, 41, 0, 21, 31, 26, 41, 0, 21, 31, 180, 41, 0, 18, 80, 0, 0, 0, 97, 1, 192, 22, 209, 99], code: Verify }). This indicates file corruption or format incompatibility.. This indicates either file corruption or an unsupported SSTable format. File size: 249 bytes, header buffer size: 249 bytes.
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/nested_collections_table-6b99af10a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/nested_collections_table-6b99af10a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 6, 95, 180, 22, 253, 66, 70, 64, 148, 246, 135, 242, 151, 163, 139, 223, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 6, 95, 180, 22, 253, 66, 70, 64, 148, 246, 135, 242, 151, 163, 139, 223, 0, 0, 0, 16, 28, 149, 163, 240, 247, 74, 72, 237, 133, 231, 117, 109, 218, 86, 63, 82], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'nested_collections_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/nested_collections_table-6b99af10a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/nested_collections_table-6b99af10a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/frozen_collections_table-6bd1fd20a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/frozen_collections_table-6bd1fd20a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0x82365C00
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 220, 103, 38, 166, 5, 198, 72, 80, 134, 205, 15, 227, 27, 103, 87, 175, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 220, 103, 38, 166, 5, 198, 72, 80, 134, 205, 15, 227, 27, 103, 87, 175, 0, 0, 0, 16, 237, 128, 131, 172, 95, 55, 65, 183, 159, 206, 167, 147, 177, 25, 165, 117], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'frozen_collections_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/frozen_collections_table-6bd1fd20a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/frozen_collections_table-6bd1fd20a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/empty_collections_table-6be780f0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/empty_collections_table-6be780f0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0xF1185C00
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 179, 213, 26, 209, 236, 243, 75, 147, 185, 172, 158, 18, 52, 61, 64, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 179, 213, 26, 209, 236, 243, 75, 147, 185, 172, 158, 18, 52, 61, 64, 8, 0, 0, 0, 16, 70, 191, 29, 157, 69, 166, 76, 98, 163, 43, 235, 40, 127, 12, 138, 232], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'empty_collections_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/empty_collections_table-6be780f0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/empty_collections_table-6be780f0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 112, 0, 0, 0, 128, 0, 0, 0, 4, 16, 0, 0, 0, 40, 0, 0, 0, 64, 0, 0, 0, 88, 0, 0, 0, 87, 22, 192, 145, 62, 245, 68, 161, 154, 83, 184, 52, 184, 48, 218, 229, 0, 0, 0, 0, 0, 0, 0, 0, 20, 252, 187, 149, 136, 49, 70, 103, 134, 46, 213, 192, 205, 7, 75, 83, 219, 10, 0, 0, 0, 0, 0, 0, 40, 191, 2, 125, 194, 200, 73, 213, 160, 42, 19, 127, 0, 114, 31, 207, 219, 21, 0, 0, 0, 0, 0, 0, 190, 171, 116, 121, 57, 3, 76, 192, 130, 112, 13, 153, 166, 178, 201, 78, 219, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 87, 22, 192, 145, 62, 245, 68, 161, 154, 83, 184, 52, 184, 48, 218, 229, 0, 0, 0, 16, 102, 245, 146, 215, 179, 11, 64, 190, 133, 184, 247, 206, 162, 8, 73, 193], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'collection_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collections_with_udts-6bc2bae0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collections_with_udts-6bc2bae0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 233, 79, 16, 232, 109, 116, 77, 163, 174, 47, 227, 217, 44, 246, 137, 118, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 233, 79, 16, 232, 109, 116, 77, 163, 174, 47, 227, 217, 44, 246, 137, 118, 0, 0, 0, 16, 177, 163, 182, 174, 171, 208, 71, 214, 183, 129, 251, 90, 77, 141, 95, 85], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'collections_with_udts' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collections_with_udts-6bc2bae0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collections_with_udts-6bc2bae0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/large_collections_table-6ba9b4a0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/large_collections_table-6ba9b4a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0x8A6B5C00
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 75, 20, 162, 227, 101, 40, 69, 189, 189, 125, 55, 50, 246, 113, 51, 58, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 75, 20, 162, 227, 101, 40, 69, 189, 189, 125, 55, 50, 246, 113, 51, 58, 0, 0, 0, 16, 126, 46, 100, 161, 155, 79, 68, 135, 154, 108, 124, 120, 91, 191, 234, 51], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'large_collections_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/large_collections_table-6ba9b4a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/large_collections_table-6ba9b4a0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/typed_collections_table-6bdf91b0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/typed_collections_table-6bdf91b0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0x0F3C0000
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 44, 58, 124, 235, 143, 153, 72, 160, 182, 57, 152, 4, 94, 106, 68, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 44, 58, 124, 235, 143, 153, 72, 160, 182, 57, 152, 4, 94, 106, 68, 121, 0, 0, 0, 16, 249, 95, 39, 235, 177, 73, 76, 12, 137, 227, 76, 102, 96, 41, 83, 143], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'typed_collections_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/typed_collections_table-6bdf91b0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/typed_collections_table-6bdf91b0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_clustering_table-6bf78680a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_clustering_table-6bf78680a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0x71160000
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 215, 81, 86, 203, 197, 167, 69, 86, 128, 55, 204, 209, 250, 200, 191, 117, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 215, 81, 86, 203, 197, 167, 69, 86, 128, 55, 204, 209, 250, 200, 191, 117, 0, 0, 0, 16, 254, 82, 98, 221, 140, 81, 69, 25, 135, 255, 165, 50, 112, 37, 140, 121], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'collection_clustering_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_clustering_table-6bf78680a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_collections/collection_clustering_table-6bf78680a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/product_catalog-6db31930a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/product_catalog-6db31930a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0x88355C00
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 44, 22, 127, 158, 19, 80, 69, 250, 164, 46, 32, 87, 138, 151, 108, 137, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 44, 22, 127, 158, 19, 80, 69, 250, 164, 46, 32, 87, 138, 151, 108, 137, 0, 0, 0, 16, 94, 111, 69, 175, 195, 118, 77, 143, 168, 255, 88, 16, 57, 139, 223, 2], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'product_catalog' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/product_catalog-6db31930a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/product_catalog-6db31930a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/chat_messages-6da47330a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/chat_messages-6da47330a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0xF07C5C00
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 48, 181, 104, 29, 229, 31, 64, 185, 142, 100, 201, 108, 33, 56, 252, 143, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 48, 181, 104, 29, 229, 31, 64, 185, 142, 100, 201, 108, 33, 56, 252, 143, 0, 0, 0, 16, 214, 166, 55, 162, 151, 231, 68, 54, 136, 179, 206, 157, 29, 28, 244, 4], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'chat_messages' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/chat_messages-6da47330a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/chat_messages-6da47330a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/multi_metric_timeseries-6dbd7970a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/multi_metric_timeseries-6dbd7970a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0xEA3B0000
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 13, 191, 178, 166, 156, 221, 65, 180, 134, 152, 164, 21, 233, 82, 10, 254, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 13, 191, 178, 166, 156, 221, 65, 180, 134, 152, 164, 21, 233, 82, 10, 254, 0, 0, 0, 16, 59, 200, 72, 121, 140, 133, 66, 251, 177, 127, 41, 124, 204, 102, 184, 3], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'multi_metric_timeseries' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/multi_metric_timeseries-6dbd7970a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/multi_metric_timeseries-6dbd7970a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 62, 74, 159, 136, 247, 206, 68, 153, 151, 41, 104, 212, 178, 228, 218, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 62, 74, 159, 136, 247, 206, 68, 153, 151, 41, 104, 212, 178, 228, 218, 3, 0, 0, 0, 16, 178, 181, 85, 124, 82, 65, 68, 165, 154, 56, 49, 141, 253, 113, 54, 23], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'wide_partition_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/large_blob_table-6d81d000a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/large_blob_table-6d81d000a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 64, 24, 17, 44, 17, 96, 68, 138, 156, 150, 109, 59, 103, 135, 72, 82, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 64, 24, 17, 44, 17, 96, 68, 138, 156, 150, 109, 59, 103, 135, 72, 82, 0, 0, 0, 16, 123, 180, 151, 197, 235, 110, 79, 11, 166, 172, 139, 137, 29, 228, 119, 71], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'large_blob_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/large_blob_table-6d81d000a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/large_blob_table-6d81d000a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/sparse_data_table-6dc3bb00a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/sparse_data_table-6dc3bb00a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:21Z ERROR cqlite_core::parser::header] Unknown magic number: 0xA9465C00
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 182, 14, 90, 172, 142, 72, 77, 48, 178, 187, 115, 128, 167, 86, 145, 29, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 182, 14, 90, 172, 142, 72, 77, 48, 178, 187, 115, 128, 167, 86, 145, 29, 0, 0, 0, 16, 195, 217, 92, 237, 19, 197, 79, 189, 185, 161, 220, 95, 174, 29, 250, 125], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'sparse_data_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/sparse_data_table-6dc3bb00a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/sparse_data_table-6dc3bb00a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/many_columns_table-6d77bde0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/many_columns_table-6d77bde0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[2025-10-24T17:30:22Z ERROR cqlite_core::parser::header] Unknown magic number: 0xAB285C00
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 174, 153, 9, 204, 139, 183, 65, 252, 155, 111, 133, 211, 200, 70, 6, 59, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 174, 153, 9, 204, 139, 183, 65, 252, 155, 111, 133, 211, 200, 70, 6, 59, 0, 0, 0, 16, 210, 143, 175, 68, 90, 150, 73, 4, 129, 152, 110, 75, 34, 60, 136, 126], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'many_columns_table' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/many_columns_table-6d77bde0a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/many_columns_table-6d77bde0a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Scanning directory: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/document_versions-6da9f170a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Found SSTable file: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/document_versions-6da9f170a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-[DEBUG IndexReader] Entry 0: marker=0x0010, offset_len=0, data_offset=0
-Header parsing failed: Error(Error { input: [0, 0, 0, 128, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 128, 0, 0, 0, 1, 4, 0, 0, 0, 40, 4, 180, 127, 176, 98, 77, 81, 129, 96, 180, 11, 248, 69, 163, 220, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 40, 4, 180, 127, 176, 98, 77, 81, 129, 96, 180, 11, 248, 69, 163, 220, 0, 0, 0, 16, 227, 74, 121, 124, 179, 205, 71, 225, 179, 139, 89, 132, 21, 21, 45, 167], code: Verify })
-[DEBUG SSTableManager] Successfully loaded SSTable: nb-1-big-Data.db
-[DEBUG SSTableManager] Setting schema registry on reader: nb-1-big-Data.db
-[DEBUG SSTableManager] Mapping table 'document_versions' to SSTable '/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/document_versions-6da9f170a25111f0a3fef1a551383fb9/nb-1-big-Data.db'
-[DEBUG SSTableManager] Directory scan complete: found 1 Data.db files in "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_wide_rows/document_versions-6da9f170a25111f0a3fef1a551383fb9"
-[DEBUG SSTableManager] Total SSTables loaded: 1
-[DEBUG SSTableManager] Tables discovered: ["multi_partition_table", "app_metrics", "tick_data", "nested_collections_table", "simple_table", "large_collections_table", "collection_clustering_table", "multi_metric_timeseries", "many_columns_table", "user_sessions", "ttl_test_table", "stock_prices", "time_bucketed_counters", "sensor_data", "wide_partition_table", "log_entries", "static_columns_table", "frozen_collections_table", "composite_key_table", "typed_collections_table", "large_blob_table", "compression_test_table", "event_store", "product_catalog", "user_activity", "chat_messages", "uncompressed_table", "collection_table", "collections_with_udts", "sparse_data_table", "document_versions", "empty_collections_table"]
-[EXECUTOR] Executing SSTableScan: table="test_basic.simple_table", predicates=[]
-[EXECUTOR] Found schema for test_basic.simple_table with 19 columns
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 0/41
-[DEBUG read_nb_format_chunk_data] Chunk 0 offset: 0x0
-[DEBUG read_nb_format_chunk_data] Chunk 0 total_size=15871, data_size=15867, offset=0x0
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 0: 0xbc878748
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 0: 15867 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 1/41
-[DEBUG read_nb_format_chunk_data] Chunk 1 offset: 0x3dff
-[DEBUG read_nb_format_chunk_data] Chunk 1 total_size=16240, data_size=16236, offset=0x3dff
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 1: 0x75f56510
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 1: 16236 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 2/41
-[DEBUG read_nb_format_chunk_data] Chunk 2 offset: 0x7d6f
-[DEBUG read_nb_format_chunk_data] Chunk 2 total_size=16394, data_size=16390, offset=0x7d6f
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 2: 0x7fb4c2c3
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 2: 16390 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 3/41
-[DEBUG read_nb_format_chunk_data] Chunk 3 offset: 0xbd79
-[DEBUG read_nb_format_chunk_data] Chunk 3 total_size=16342, data_size=16338, offset=0xbd79
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 3: 0x63013836
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 3: 16338 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 4/41
-[DEBUG read_nb_format_chunk_data] Chunk 4 offset: 0xfd4f
-[DEBUG read_nb_format_chunk_data] Chunk 4 total_size=15796, data_size=15792, offset=0xfd4f
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 4: 0x8e1718f0
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 4: 15792 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 5/41
-[DEBUG read_nb_format_chunk_data] Chunk 5 offset: 0x13b03
-[DEBUG read_nb_format_chunk_data] Chunk 5 total_size=15731, data_size=15727, offset=0x13b03
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 5: 0x9a7c8ae3
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 5: 15727 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 6/41
-[DEBUG read_nb_format_chunk_data] Chunk 6 offset: 0x17876
-[DEBUG read_nb_format_chunk_data] Chunk 6 total_size=16394, data_size=16390, offset=0x17876
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 6: 0xd88233ad
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 6: 16390 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 7/41
-[DEBUG read_nb_format_chunk_data] Chunk 7 offset: 0x1b880
-[DEBUG read_nb_format_chunk_data] Chunk 7 total_size=15682, data_size=15678, offset=0x1b880
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 7: 0xaa0ef540
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 7: 15678 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 8/41
-[DEBUG read_nb_format_chunk_data] Chunk 8 offset: 0x1f5c2
-[DEBUG read_nb_format_chunk_data] Chunk 8 total_size=15733, data_size=15729, offset=0x1f5c2
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 8: 0xcb963432
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 8: 15729 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 9/41
-[DEBUG read_nb_format_chunk_data] Chunk 9 offset: 0x23337
-[DEBUG read_nb_format_chunk_data] Chunk 9 total_size=15647, data_size=15643, offset=0x23337
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 9: 0xa98e58da
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 9: 15643 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 10/41
-[DEBUG read_nb_format_chunk_data] Chunk 10 offset: 0x27056
-[DEBUG read_nb_format_chunk_data] Chunk 10 total_size=15672, data_size=15668, offset=0x27056
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 10: 0x0263e3e0
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 10: 15668 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 11/41
-[DEBUG read_nb_format_chunk_data] Chunk 11 offset: 0x2ad8e
-[DEBUG read_nb_format_chunk_data] Chunk 11 total_size=16014, data_size=16010, offset=0x2ad8e
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 11: 0x6b59ea55
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 11: 16010 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 12/41
-[DEBUG read_nb_format_chunk_data] Chunk 12 offset: 0x2ec1c
-[DEBUG read_nb_format_chunk_data] Chunk 12 total_size=15999, data_size=15995, offset=0x2ec1c
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 12: 0x8c085f85
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 12: 15995 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 13/41
-[DEBUG read_nb_format_chunk_data] Chunk 13 offset: 0x32a9b
-[DEBUG read_nb_format_chunk_data] Chunk 13 total_size=15990, data_size=15986, offset=0x32a9b
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 13: 0x409fe4fb
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 13: 15986 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 14/41
-[DEBUG read_nb_format_chunk_data] Chunk 14 offset: 0x36911
-[DEBUG read_nb_format_chunk_data] Chunk 14 total_size=15861, data_size=15857, offset=0x36911
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 14: 0x1e730d03
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 14: 15857 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 15/41
-[DEBUG read_nb_format_chunk_data] Chunk 15 offset: 0x3a706
-[DEBUG read_nb_format_chunk_data] Chunk 15 total_size=15747, data_size=15743, offset=0x3a706
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 15: 0x71f285d8
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 15: 15743 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 16/41
-[DEBUG read_nb_format_chunk_data] Chunk 16 offset: 0x3e489
-[DEBUG read_nb_format_chunk_data] Chunk 16 total_size=15867, data_size=15863, offset=0x3e489
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 16: 0xe788bcbc
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 16: 15863 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 17/41
-[DEBUG read_nb_format_chunk_data] Chunk 17 offset: 0x42284
-[DEBUG read_nb_format_chunk_data] Chunk 17 total_size=16394, data_size=16390, offset=0x42284
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 17: 0xd7893392
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 17: 16390 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 18/41
-[DEBUG read_nb_format_chunk_data] Chunk 18 offset: 0x4628e
-[DEBUG read_nb_format_chunk_data] Chunk 18 total_size=15588, data_size=15584, offset=0x4628e
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 18: 0x93feab07
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 18: 15584 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 19/41
-[DEBUG read_nb_format_chunk_data] Chunk 19 offset: 0x49f72
-[DEBUG read_nb_format_chunk_data] Chunk 19 total_size=16379, data_size=16375, offset=0x49f72
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 19: 0xb01e4a15
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 19: 16375 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 20/41
-[DEBUG read_nb_format_chunk_data] Chunk 20 offset: 0x4df6d
-[DEBUG read_nb_format_chunk_data] Chunk 20 total_size=16012, data_size=16008, offset=0x4df6d
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 20: 0x58ff623a
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 20: 16008 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 21/41
-[DEBUG read_nb_format_chunk_data] Chunk 21 offset: 0x51df9
-[DEBUG read_nb_format_chunk_data] Chunk 21 total_size=16265, data_size=16261, offset=0x51df9
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 21: 0x77d41cb6
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 21: 16261 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 22/41
-[DEBUG read_nb_format_chunk_data] Chunk 22 offset: 0x55d82
-[DEBUG read_nb_format_chunk_data] Chunk 22 total_size=15685, data_size=15681, offset=0x55d82
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 22: 0x2f0da694
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 22: 15681 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 23/41
-[DEBUG read_nb_format_chunk_data] Chunk 23 offset: 0x59ac7
-[DEBUG read_nb_format_chunk_data] Chunk 23 total_size=16394, data_size=16390, offset=0x59ac7
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 23: 0x4fea2620
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 23: 16390 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 24/41
-[DEBUG read_nb_format_chunk_data] Chunk 24 offset: 0x5dad1
-[DEBUG read_nb_format_chunk_data] Chunk 24 total_size=16394, data_size=16390, offset=0x5dad1
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 24: 0xf674bb58
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 24: 16390 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 25/41
-[DEBUG read_nb_format_chunk_data] Chunk 25 offset: 0x61adb
-[DEBUG read_nb_format_chunk_data] Chunk 25 total_size=15690, data_size=15686, offset=0x61adb
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 25: 0x7c18e5e0
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 25: 15686 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 26/41
-[DEBUG read_nb_format_chunk_data] Chunk 26 offset: 0x65825
-[DEBUG read_nb_format_chunk_data] Chunk 26 total_size=15722, data_size=15718, offset=0x65825
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 26: 0x9febb2f2
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 26: 15718 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 27/41
-[DEBUG read_nb_format_chunk_data] Chunk 27 offset: 0x6958f
-[DEBUG read_nb_format_chunk_data] Chunk 27 total_size=16050, data_size=16046, offset=0x6958f
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 27: 0x5da0a035
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 27: 16046 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 28/41
-[DEBUG read_nb_format_chunk_data] Chunk 28 offset: 0x6d441
-[DEBUG read_nb_format_chunk_data] Chunk 28 total_size=15632, data_size=15628, offset=0x6d441
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 28: 0x4c723dbf
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 28: 15628 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 29/41
-[DEBUG read_nb_format_chunk_data] Chunk 29 offset: 0x71151
-[DEBUG read_nb_format_chunk_data] Chunk 29 total_size=16081, data_size=16077, offset=0x71151
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 29: 0xdb0b6dbc
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 29: 16077 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 30/41
-[DEBUG read_nb_format_chunk_data] Chunk 30 offset: 0x75022
-[DEBUG read_nb_format_chunk_data] Chunk 30 total_size=16012, data_size=16008, offset=0x75022
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 30: 0x681673d3
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 30: 16008 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 31/41
-[DEBUG read_nb_format_chunk_data] Chunk 31 offset: 0x78eae
-[DEBUG read_nb_format_chunk_data] Chunk 31 total_size=16007, data_size=16003, offset=0x78eae
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 31: 0x9ad5566d
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 31: 16003 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 32/41
-[DEBUG read_nb_format_chunk_data] Chunk 32 offset: 0x7cd35
-[DEBUG read_nb_format_chunk_data] Chunk 32 total_size=15626, data_size=15622, offset=0x7cd35
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 32: 0x54aeb1f4
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 32: 15622 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 33/41
-[DEBUG read_nb_format_chunk_data] Chunk 33 offset: 0x80a3f
-[DEBUG read_nb_format_chunk_data] Chunk 33 total_size=16394, data_size=16390, offset=0x80a3f
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 33: 0xd75d58fc
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 33: 16390 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 34/41
-[DEBUG read_nb_format_chunk_data] Chunk 34 offset: 0x84a49
-[DEBUG read_nb_format_chunk_data] Chunk 34 total_size=16188, data_size=16184, offset=0x84a49
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 34: 0xa5623006
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 34: 16184 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 35/41
-[DEBUG read_nb_format_chunk_data] Chunk 35 offset: 0x88985
-[DEBUG read_nb_format_chunk_data] Chunk 35 total_size=16096, data_size=16092, offset=0x88985
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 35: 0x2a557c46
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 35: 16092 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 36/41
-[DEBUG read_nb_format_chunk_data] Chunk 36 offset: 0x8c865
-[DEBUG read_nb_format_chunk_data] Chunk 36 total_size=15632, data_size=15628, offset=0x8c865
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 36: 0x6a75b2cc
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 36: 15628 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 37/41
-[DEBUG read_nb_format_chunk_data] Chunk 37 offset: 0x90575
-[DEBUG read_nb_format_chunk_data] Chunk 37 total_size=15765, data_size=15761, offset=0x90575
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 37: 0x5cbd7dbe
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 37: 15761 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 38/41
-[DEBUG read_nb_format_chunk_data] Chunk 38 offset: 0x9430a
-[DEBUG read_nb_format_chunk_data] Chunk 38 total_size=15680, data_size=15676, offset=0x9430a
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 38: 0xaab92f28
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 38: 15676 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 39/41
-[DEBUG read_nb_format_chunk_data] Chunk 39 offset: 0x9804a
-[DEBUG read_nb_format_chunk_data] Chunk 39 total_size=16394, data_size=16390, offset=0x9804a
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 39: 0xa60581c7
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 39: 16390 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] Reading chunk 40/41
-[DEBUG read_nb_format_chunk_data] Chunk 40 offset: 0x9c054
-[DEBUG read_nb_format_chunk_data] Chunk 40 total_size=8104, data_size=8100, offset=0x9c054
-[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk 40: 0x34f03705
-[DEBUG read_nb_format_chunk_data] Successfully read chunk 40: 8100 bytes (compressed)
-[DEBUG block_io::read_next_block_impl] Starting block read
-[DEBUG block_io::read_next_block_impl] Cassandra version: V5_0DataFormat
-[DEBUG block_io::read_next_block_impl] Using NB format chunk reader
-[DEBUG read_nb_format_chunk_data] Starting chunk read
-[DEBUG read_nb_format_chunk_data] All chunks read (41/41)
-[EXECUTOR] Scan returned 1000 rows
-DEBUG: Database::execute('SELECT * FROM test_basic.simple_table LIMIT 3') returning rows_affected: 3
-[
-  {},
-  {},
-  {}
-]
+{
+  "rows": [
+    {
+      "account_balance": {
+        "scale": 2,
+        "unscaled": "aoGF"
+      },
+      "active": true,
+      "age": 79,
+      "ascii_field": "ascii",
+      "birth_date": 20141,
+      "created": 1759713125926,
+      "description": "1/4ejB3zoXRKT2QEWBqNRGYTAYYPdMxenaJ81YCVYMWIE+0TUvLfCpXoMGJjNruItji0lWkGgj1EwpNId5KsjjaE2yknvtyh185fuhz5Mk7bXKdQ3S4f7EljGyZZEq9kq9/oNLpsa6oDU+FRAFEdXwY5DRscIN/1Fr0aupH5bfQUaJw44U/aotHi/vOMFTuLNNxm8YSqE3co/cAZW85u3t27NdSEO4SqGBwDUS1MDnnNvkvQ1/kw5oNDFYmUVhFIdYX6N7G82Ltydfzf34guHAgA+sYgrnqOrCm/k3CQZIJnXkpQ37DsBGzCc1rjwLdrbmm6fi838kpPIBu1vtri8j/4/KYefr08qhJIHWGdekT3X6iSZ9oNKKCqV0moqanXVVr6Kbxbwu7dCOMqY9roD7WhBshozUOEVkIq5R7zkzZrJtzGCgbOyhwb/W8+GDsRAjjskrLsgw21xrv4PA7BE2J0tGAiR3CktnbgVwKZpEJffT3WaztdO3TJvWtEQ3FloixcZlOQPcBLWLiY7mSsFDiMzDkSa6MaKZmwtW+IJ1p2+iu4P97JH5CYYtEuTlpniBqL/s2Up2I2wWkldWe/QGGBNXUzpwo+0Sdyesb6x88XmVX4s7UIRYQh4zbbl/GzLOnCZnhdPO47ABrtqrrkjYzWrjZDY8WNVBhSUei0h6lQw+MctGI9GT8mNFiuV7gj2AcLfA==",
+      "duration_val": {
+        "months": 0,
+        "days": 0,
+        "nanos": 3033000000000
+      },
+      "height": 1.6699999570846558,
+      "id": "[0, 35, 236, 231, 124, 78, 71, 5, 144, 104, 209, 165, 158, 197, 254, 25]",
+      "ip_address": "g029eQ==",
+      "medium_number": 11366,
+      "name": "Debbie Soto",
+      "salary": 152974,
+      "session_id": "eUePGqJREfChjdZyamN6TA==",
+      "small_number": 105,
+      "varchar_field": "realize",
+      "weight": 74.45,
+      "work_time": 576460769201574980,
+      "_key": "RowKey([0, 35, 236, 231, 124, 78, 71, 5, 144, 104, 209, 165, 158, 197, 254, 25])"
+    },
+    {
+      "account_balance": {
+        "scale": 2,
+        "unscaled": "cTce"
+      },
+      "active": false,
+      "age": 58,
+      "ascii_field": "ascii",
+      "birth_date": 20357,
+      "created": 1759713125872,
+      "description": "Dhwt3x6KhM9xwNbmOZlkGy66YN5b5QaylA+LYWjDwzBRZqlC3tStgi79HmrBM4TZJ4Vgm0MuuPdGQ7Hsd4mFWkAPCcnSh0Jgw0lFIRZMSCtojuyH3C2xVd0rvNUSJG1uLG8WN+VB0rPgAy4hE7aOoSTVDVR65B0daoPMCOKbWmMJPXSYdHW71e5thL0s2MTn5qr6mxkwUXalD04=",
+      "duration_val": {
+        "months": 0,
+        "days": 0,
+        "nanos": 12882000000000
+      },
+      "height": 1.7699999809265137,
+      "id": "[0, 159, 185, 19, 113, 115, 64, 223, 180, 234, 103, 237, 104, 52, 207, 229]",
+      "ip_address": "DS7Kwg==",
+      "medium_number": 8070,
+      "name": "Richard Parker",
+      "salary": 78689,
+      "session_id": "eT83IKJREfChjdZyamN6TA==",
+      "small_number": 26,
+      "varchar_field": "speak",
+      "weight": 114.45,
+      "work_time": 576460769201361734,
+      "_key": "RowKey([0, 159, 185, 19, 113, 115, 64, 223, 180, 234, 103, 237, 104, 52, 207, 229])"
+    },
+    {
+      "account_balance": {
+        "scale": 2,
+        "unscaled": "R+Jn"
+      },
+      "active": false,
+      "age": 47,
+      "ascii_field": "ascii",
+      "birth_date": 20017,
+      "created": 1759713125811,
+      "description": "5WSGv7CKH9mctuTtmNPlpjtGRUbPrDuBqOuUIplnSLysWIAY2EbSdlf07SfsBB+40Th3ClmtlgbYrJ3zadrbP2+eZzK3+lBqI8D7W4wbUaPj/qW5l1ppP+D/KkR6vx5hQc5dn8ELp51TTKg1Pk2rlCWwD0hUevGm2oJkTn8uxYsRsBd1diRIeBI98PaGS9qBCvKhbbO4Eud1kjZkgIcIJnH2KqvnnsfB8OeVrkSfSPP4DOuFXcPOjcdvvcfI6wLznazmEHm7MeXIq3s5a8qnqDq0tguKZFwrCbsbjJ8PXYMqV4RIYHXXiygSXTbI3SAYXXGI5NndoPUNI+KEz0C6OkBFuH4grbwc7blq4poyHZjCMXeHpxCblYRvbRI9IG0/reJgCN1+RSXIYxN8q4wyI5AnbOSefB0Wx6S2pES84q67nkgdkhp4gMbbw493gkPZMBjlbKS9tKUs5qBv3nZxJ0zXwV7YIQHdnRr3GFiZhcN8kh3H3jTvVYEYZpT5SPK+jpyOvLd9UCMumM41W2eIvQcHn4iqOecSlV2+DsxQ6xUxdIZl9Mp25egql2WTRG9jfHn6NW3IlstQHHxyIZnBKVawfdiChz3mQ1wpb+A2daxU5om7TkLfXWd8PDrFVFp1Du84vxramkejY/5Rr7dN9B5Luaqv8cHAk1y/3HBb7Rsa2fhKh6sExMN0V9tiufpltutqGVuOiLCh3JJULHHa5IgI7yuyETb55YcdPg+p+Gzk+UEjtrm6JDCsHc10C2eX02o0fQ7MKceInukNH7VHZHMTUmTwV0VVQdBDxwIJ6fryBYs7/oGm0B89kF9zpq+mbf9X7QAbGAM1E8wHwDEG+vxeLZv9q60+MyhJRQhBYkw4fAU0MVmDZ93dMDkyce2Pb5gCPmBac8EcoqD4rJmxfGy43g6DKvu/jwyCbjXcRGDDqLPuZyU9YStH9tUGYzZQilYN67jmCNECdV3KQeGqEi2OHoHbIWsIoH2EJ+Fpr7tQwSPBpp5Oqvm77z8zxBw5qQeZGL5X4D4+FPtRnsw0AlBCfi2EIcoSLnelk2IDEX2FmqFCyF3nVzdXXUHBMBs1Xl0iBxPNvTxfXnJ9sCUNXUud9LSF69z+kFwtDIBQjNlOkiq6o9kiykcmG8/fN7kskgzSQoPm1VVWSG3gLWXFFnRgCjjSQtSM8pUjGQOXTEjLpKEPvM4gjSgRWwIAhFD/LoQfqLG5D1QpxA6Hcx0/",
+      "duration_val": {
+        "months": 0,
+        "days": 0,
+        "nanos": 5023000000000
+      },
+      "height": 1.8700000047683716,
+      "id": "[0, 167, 66, 38, 155, 222, 66, 89, 155, 160, 215, 67, 89, 232, 1, 62]",
+      "ip_address": "Z37K4A==",
+      "medium_number": 20373,
+      "name": "Andrew Meyers",
+      "salary": 44179,
+      "session_id": "eTXr3qJREfChjdZyamN6TA==",
+      "small_number": 82,
+      "varchar_field": "clearly",
+      "weight": 75.12,
+      "work_time": 576460769201123687,
+      "_key": "RowKey([0, 167, 66, 38, 155, 222, 66, 89, 155, 160, 215, 67, 89, 232, 1, 62])"
+    }
+  ],
+  "rows_affected": 3,
+  "row_count": 3,
+  "columns": [],
+  "performance": {
+    "parse_time_us": 0,
+    "planning_time_us": 0,
+    "execution_time_us": 0,
+    "total_time_us": 0,
+    "memory_usage_bytes": 0,
+    "io_operations": 0,
+    "cache_hits": 0,
+    "cache_misses": 0,
+    "cache_hit_ratio": 0.0
+  },
+  "warnings": []
+}

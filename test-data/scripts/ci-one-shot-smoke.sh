@@ -203,6 +203,7 @@ run_test() {
     local exit_code=0
 
     # Run the CLI command with appropriate flags
+    # Suppress stderr to match golden snapshots (Issue #129: logs go to stderr)
     set +e
     if [[ -n "${CQLITE_DATASET:-}" ]]; then
         # Dataset mode
@@ -211,7 +212,7 @@ run_test() {
             --dataset "${CQLITE_DATASET}" \
             --execute "${query}" \
             --format "${format}" \
-            > "${output_file}" 2>&1
+            > "${output_file}" 2>/dev/null
     else
         # Data-dir mode
         "${CQLITE_CLI}" \
@@ -219,7 +220,7 @@ run_test() {
             --data-dir "${CQLITE_DATA_DIR}" \
             --execute "${query}" \
             --format "${format}" \
-            > "${output_file}" 2>&1
+            > "${output_file}" 2>/dev/null
     fi
     exit_code=$?
     set -e
