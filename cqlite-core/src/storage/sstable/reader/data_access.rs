@@ -543,7 +543,6 @@ impl SSTableReader {
             // from header defaults. Since sequential_scan is called with a specific table_id,
             // all entries from this SSTable should match that table_id.
             for (_entry_table_id, entry_key, entry_value) in all_entries {
-
                 if let Some(start) = start_key {
                     if &entry_key < start {
                         continue;
