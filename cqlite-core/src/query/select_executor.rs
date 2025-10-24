@@ -227,6 +227,15 @@ impl SelectExecutor {
         for (key, value) in scan_results {
             context.rows_processed += 1;
 
+            // CRITICAL FIX (Issue #191): Skip tombstoned/null rows
+            // When the parser returns Value::Null (tombstoned row or unparseable partition),
+            // we should skip it entirely instead of creating a pseudo-row that will fail
+            // column projection. This mirrors SSTableDataManager behavior.
+            if matches!(value, Value::Null) {
+                log::debug!("Skipping tombstoned/null row with key: {:?}", key);
+                continue;
+            }
+
             // Create QueryRow from the scanned data
             let mut row_values = HashMap::new();
 
@@ -239,6 +248,22 @@ impl SelectExecutor {
                         // For specific projection, only include requested columns
                         if projection.is_empty() || projection.contains(&name) {
                             row_values.insert(name, col_value);
+                        }
+                    }
+                }
+
+                // CRITICAL FIX (Issue #191): Synthesize partition key columns from RowKey
+                // Cassandra never serializes key columns in cell data - they're part of the row key.
+                // If the query selects partition key columns (e.g., id), we must decode them from
+                // the RowKey and add them to row_values.
+                if let Some(schema) = &schema_opt {
+                    for pk in &schema.partition_keys {
+                        // Only synthesize if projected
+                        if projection.is_empty() || projection.contains(&pk.name) {
+                            // Decode partition key from RowKey bytes
+                            if let Ok(pk_value) = self.decode_partition_key_value(&key, pk) {
+                                row_values.insert(pk.name.clone(), pk_value);
+                            }
                         }
                     }
                 }
@@ -1034,6 +1059,108 @@ impl SelectExecutor {
             (Some(keyspace), table_name)
         } else {
             (None, table_str.to_string())
+        }
+    }
+
+    /// Decode partition key value from RowKey bytes (Issue #191)
+    ///
+    /// Cassandra doesn't serialize partition keys in cell data - they're part of the row key.
+    /// This method extracts the partition key value from the RowKey bytes based on the CQL type.
+    ///
+    /// For simple_table: partition key is UUID (16 bytes)
+    fn decode_partition_key_value(
+        &self,
+        key: &RowKey,
+        pk_column: &crate::schema::KeyColumn,
+    ) -> Result<Value> {
+        let key_bytes = key.0.as_slice();
+
+        // For simple partition keys (not composite), the entire key is the partition key value
+        // Decode based on CQL type
+        let normalized_type = pk_column.data_type.to_lowercase();
+        match normalized_type.as_str() {
+            "uuid" | "timeuuid" => {
+                // UUID is 16 bytes
+                if key_bytes.len() >= 16 {
+                    let uuid_bytes: [u8; 16] = key_bytes[..16].try_into().map_err(|_| {
+                        Error::query_execution("Invalid UUID key length".to_string())
+                    })?;
+                    Ok(Value::Uuid(uuid_bytes))
+                } else {
+                    Err(Error::query_execution(format!(
+                        "Partition key too short for UUID: {} bytes",
+                        key_bytes.len()
+                    )))
+                }
+            }
+            "text" | "varchar" | "ascii" => {
+                // Text keys are length-prefixed (2 bytes big-endian length + bytes)
+                if key_bytes.len() >= 2 {
+                    let len = u16::from_be_bytes([key_bytes[0], key_bytes[1]]) as usize;
+                    if key_bytes.len() >= 2 + len {
+                        let text =
+                            String::from_utf8(key_bytes[2..2 + len].to_vec()).map_err(|e| {
+                                Error::query_execution(format!(
+                                    "Invalid UTF-8 in partition key: {}",
+                                    e
+                                ))
+                            })?;
+                        Ok(Value::Text(text))
+                    } else {
+                        Err(Error::query_execution(
+                            "Partition key text length mismatch".to_string(),
+                        ))
+                    }
+                } else {
+                    Err(Error::query_execution(
+                        "Partition key too short for text".to_string(),
+                    ))
+                }
+            }
+            "int" => {
+                // INT is 4 bytes big-endian
+                if key_bytes.len() >= 4 {
+                    let int_val = i32::from_be_bytes([
+                        key_bytes[0],
+                        key_bytes[1],
+                        key_bytes[2],
+                        key_bytes[3],
+                    ]);
+                    Ok(Value::Integer(int_val))
+                } else {
+                    Err(Error::query_execution(
+                        "Partition key too short for int".to_string(),
+                    ))
+                }
+            }
+            "bigint" | "counter" => {
+                // BIGINT is 8 bytes big-endian
+                if key_bytes.len() >= 8 {
+                    let long_val = i64::from_be_bytes([
+                        key_bytes[0],
+                        key_bytes[1],
+                        key_bytes[2],
+                        key_bytes[3],
+                        key_bytes[4],
+                        key_bytes[5],
+                        key_bytes[6],
+                        key_bytes[7],
+                    ]);
+                    Ok(Value::BigInt(long_val))
+                } else {
+                    Err(Error::query_execution(
+                        "Partition key too short for bigint".to_string(),
+                    ))
+                }
+            }
+            _ => {
+                // For unsupported types, return the raw bytes as a blob or debug string
+                log::warn!(
+                    "Unsupported partition key type: {}, returning as debug string",
+                    pk_column.data_type
+                );
+                Ok(Value::Text(format!("{:?}", key_bytes)))
+            }
         }
     }
 

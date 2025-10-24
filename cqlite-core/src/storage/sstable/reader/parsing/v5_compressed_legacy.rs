@@ -472,7 +472,11 @@ impl V5CompressedLegacyParser {
         // Parse fields in order WITHOUT scanning for 0x08 marker.
 
         // Read row size (VInt) - CRITICAL for partition boundary detection!
-        debug!("V5CompressedLegacy: Parsing row_size VInt at pos={}, hex={:02x?}", pos, &data[pos..std::cmp::min(pos+5, data.len())]);
+        debug!(
+            "V5CompressedLegacy: Parsing row_size VInt at pos={}, hex={:02x?}",
+            pos,
+            &data[pos..std::cmp::min(pos + 5, data.len())]
+        );
         let (remaining, row_size) = parse_vuint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
                 "V5CompressedLegacy: Failed to parse row size at offset {}: {:?}",
@@ -480,11 +484,21 @@ impl V5CompressedLegacyParser {
             ))
         })?;
         let bytes_consumed = data[pos..].len() - remaining.len();
-        debug!("V5CompressedLegacy: row_size={}, consumed {} bytes, pos before={}, pos after={}", row_size, bytes_consumed, pos, pos + bytes_consumed);
+        debug!(
+            "V5CompressedLegacy: row_size={}, consumed {} bytes, pos before={}, pos after={}",
+            row_size,
+            bytes_consumed,
+            pos,
+            pos + bytes_consumed
+        );
         pos += bytes_consumed;
 
         // Read prev size (VInt)
-        debug!("V5CompressedLegacy: Parsing prev_size VInt at pos={}, hex={:02x?}", pos, &data[pos..std::cmp::min(pos+5, data.len())]);
+        debug!(
+            "V5CompressedLegacy: Parsing prev_size VInt at pos={}, hex={:02x?}",
+            pos,
+            &data[pos..std::cmp::min(pos + 5, data.len())]
+        );
         let (remaining, _prev_size) = parse_vuint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
                 "V5CompressedLegacy: Failed to parse prev size at offset {}: {:?}",
@@ -492,7 +506,13 @@ impl V5CompressedLegacyParser {
             ))
         })?;
         let bytes_consumed = data[pos..].len() - remaining.len();
-        debug!("V5CompressedLegacy: prev_size={}, consumed {} bytes, pos before={}, pos after={}", _prev_size, bytes_consumed, pos, pos + bytes_consumed);
+        debug!(
+            "V5CompressedLegacy: prev_size={}, consumed {} bytes, pos before={}, pos after={}",
+            _prev_size,
+            bytes_consumed,
+            pos,
+            pos + bytes_consumed
+        );
         pos += bytes_consumed;
 
         // Read timestamp if HAS_TIMESTAMP flag is set
@@ -741,7 +761,9 @@ impl V5CompressedLegacyParser {
     ) -> Result<(Vec<Value>, usize)> {
         // If no clustering keys, skip this section
         if schema.clustering_keys.is_empty() {
-            log::debug!("V5CompressedLegacy: No clustering keys in schema, skipping clustering prefix");
+            log::debug!(
+                "V5CompressedLegacy: No clustering keys in schema, skipping clustering prefix"
+            );
             return Ok((Vec::new(), offset));
         }
 
@@ -878,14 +900,13 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                let text = String::from_utf8(
-                    data[len_offset..len_offset + len as usize].to_vec()
-                ).map_err(|e| {
-                    Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': invalid UTF-8: {:?}",
-                        col.name, e
-                    ))
-                })?;
+                let text = String::from_utf8(data[len_offset..len_offset + len as usize].to_vec())
+                    .map_err(|e| {
+                        Error::corruption(format!(
+                            "V5CompressedLegacy: Clustering '{}': invalid UTF-8: {:?}",
+                            col.name, e
+                        ))
+                    })?;
                 Ok((Value::Text(text), len_offset + len as usize))
             }
 
@@ -982,7 +1003,10 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                Ok((Value::Blob(data[len_offset..len_offset + len as usize].to_vec()), len_offset + len as usize))
+                Ok((
+                    Value::Blob(data[len_offset..len_offset + len as usize].to_vec()),
+                    len_offset + len as usize,
+                ))
             }
         }
     }
@@ -1091,7 +1115,10 @@ impl V5CompressedLegacyParser {
         }
 
         // Advance offset to start of clustering prefix / cell data
-        debug!("V5CompressedLegacy: BEFORE advancing offset: offset={}, row_header.header_size={}", offset, row_header.header_size);
+        debug!(
+            "V5CompressedLegacy: BEFORE advancing offset: offset={}, row_header.header_size={}",
+            offset, row_header.header_size
+        );
         offset += row_header.header_size;
         debug!("V5CompressedLegacy: AFTER advancing offset: offset={}, data[offset]={:02x}, data[offset+1]={:02x}", offset, data[offset], data[offset+1]);
 
@@ -1176,9 +1203,7 @@ impl V5CompressedLegacyParser {
                 .columns
                 .iter()
                 .filter(|col_info| !col_info.is_primary_key && !col_info.is_clustering)
-                .filter_map(|col_info| {
-                    schema_map.get(&col_info.name).copied()
-                })
+                .filter_map(|col_info| schema_map.get(&col_info.name).copied())
                 .collect()
         } else {
             // Fallback to schema order when header is empty (shouldn't happen for real SSTables)
@@ -1525,7 +1550,7 @@ impl V5CompressedLegacyParser {
                 })?;
                 let text_len = text_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
+                offset += bytes_consumed;
 
                 if offset + text_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -1583,7 +1608,7 @@ impl V5CompressedLegacyParser {
                 })?;
                 let total_len = total_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
+                offset += bytes_consumed;
 
                 if offset + total_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -1705,7 +1730,7 @@ impl V5CompressedLegacyParser {
                 })?;
                 let date_len = date_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
+                offset += bytes_consumed;
 
                 if date_len != 4 {
                     return Err(Error::corruption(format!(
@@ -1752,7 +1777,7 @@ impl V5CompressedLegacyParser {
                 })?;
                 let duration_len = duration_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
+                offset += bytes_consumed;
 
                 if offset + duration_len > data.len() {
                     return Err(Error::corruption(format!(
@@ -1846,7 +1871,7 @@ impl V5CompressedLegacyParser {
                 })?;
                 let len = len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
+                offset += bytes_consumed;
 
                 if len != 2 {
                     return Err(Error::corruption(format!(
@@ -1885,7 +1910,7 @@ impl V5CompressedLegacyParser {
                 })?;
                 let len = len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
+                offset += bytes_consumed;
 
                 if len != 1 {
                     return Err(Error::corruption(format!(
@@ -1947,7 +1972,7 @@ impl V5CompressedLegacyParser {
                 })?;
                 let len = len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
+                offset += bytes_consumed;
 
                 if len != 4 && len != 16 {
                     return Err(Error::corruption(format!(
@@ -2084,7 +2109,7 @@ impl V5CompressedLegacyParser {
                 })?;
                 let blob_len = blob_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
-            offset += bytes_consumed;
+                offset += bytes_consumed;
 
                 if offset + blob_len > data.len() {
                     return Err(Error::corruption(format!(
