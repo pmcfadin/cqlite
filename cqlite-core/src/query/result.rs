@@ -219,10 +219,9 @@ impl QueryResult {
             "rows_affected".to_string(),
             serde_json::Value::Number(self.rows_affected.into()),
         );
-        result.insert(
-            "execution_time_ms".to_string(),
-            serde_json::Value::Number(self.execution_time_ms.into()),
-        );
+        // Exclude execution_time_ms from JSON output (Issue #129)
+        // Timing metadata causes non-deterministic snapshot diffs
+        // Use --timing flag to display timing separately
         result.insert(
             "row_count".to_string(),
             serde_json::Value::Number(self.rows.len().into()),

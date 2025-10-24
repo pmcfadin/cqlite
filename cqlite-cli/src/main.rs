@@ -53,7 +53,11 @@ async fn run_main() -> Result<()> {
         (false, _) => "trace",
     };
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
+    // Configure logging to stderr only (Issue #129)
+    // This prevents debug/warn logs from contaminating stdout JSON/CSV output
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
+        .target(env_logger::Target::Stderr)
+        .init();
 
     info!("Starting CQLite CLI v{}", env!("CARGO_PKG_VERSION"));
 

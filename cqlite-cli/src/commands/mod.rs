@@ -249,8 +249,12 @@ pub async fn execute_query(
             }
         }
         OutputFormat::Json => {
-            let json_result = result.to_json();
-            println!("{}", serde_json::to_string_pretty(&json_result)?);
+            // Use JSONWriter for deterministic field ordering (Issue #129)
+            // JSONWriter iterates metadata.columns in order, NOT HashMap iteration
+            use crate::output::json::JSONWriter;
+            let json_output = JSONWriter::write(&result)
+                .map_err(|e| anyhow::anyhow!("Failed to format JSON output: {}", e))?;
+            println!("{}", json_output);
         }
         OutputFormat::Csv => {
             print_csv_format(&result)?;
