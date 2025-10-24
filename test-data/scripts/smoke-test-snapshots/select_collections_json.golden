@@ -1,25 +1,7 @@
-{
-  "rows": [
-    {
-      "id": "[124, 112, 144, 2, 253, 41, 68, 252, 163, 220, 189, 254, 65, 238, 22, 173]",
-      "metadata_map": {},
-      "numbers_set": null,
-      "_key": "RowKey([124, 112, 144, 2, 253, 41, 68, 252, 163, 220, 189, 254, 65, 238, 22, 173])"
-    }
-  ],
-  "rows_affected": 1,
-  "row_count": 1,
-  "columns": [],
-  "performance": {
-    "parse_time_us": 0,
-    "planning_time_us": 0,
-    "execution_time_us": 0,
-    "total_time_us": 0,
-    "memory_usage_bytes": 0,
-    "io_operations": 0,
-    "cache_hits": 0,
-    "cache_misses": 0,
-    "cache_hit_ratio": 0.0
-  },
-  "warnings": []
-}
+[
+  {
+    "id": "[124, 112, 144, 2, 253, 41, 68, 252, 163, 220, 189, 254, 65, 238, 22, 173]",
+    "metadata_map": [],
+    "numbers_set": null
+  }
+]

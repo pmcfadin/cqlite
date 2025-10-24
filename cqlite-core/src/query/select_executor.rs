@@ -162,12 +162,35 @@ impl SelectExecutor {
         }
 
         let total_rows = intermediate_results.len() as u64;
+
+        // CRITICAL FIX (Issue #129/#140): Populate metadata.columns for SELECT *
+        // When SELECT * is used, context.columns is empty (see line 1172-1175).
+        // We must infer columns from the first row's HashMap keys.
+        // IMPORTANT: Must be sorted alphabetically for deterministic JSON output (Issue #129)!
+        let mut columns = context.columns;
+        if columns.is_empty() && !intermediate_results.is_empty() {
+            // Infer columns from first row
+            let first_row = &intermediate_results[0];
+            let mut col_names: Vec<_> = first_row.values.keys().collect();
+            col_names.sort(); // Sort alphabetically for deterministic ordering (Issue #129)
+
+            for (idx, col_name) in col_names.iter().enumerate() {
+                columns.push(ColumnInfo {
+                    name: (*col_name).clone(),
+                    data_type: crate::types::DataType::Text, // TODO: Infer proper type
+                    nullable: true,
+                    position: idx,
+                    table_name: None,
+                });
+            }
+        }
+
         Ok(QueryResult {
             rows: intermediate_results,
             rows_affected: total_rows, // Use actual number of rows returned
             execution_time_ms: 0,      // Will be set by the engine
             metadata: crate::query::result::QueryMetadata {
-                columns: context.columns,
+                columns,
                 total_rows: Some(total_rows),
                 plan_info: None,
                 performance: Default::default(),

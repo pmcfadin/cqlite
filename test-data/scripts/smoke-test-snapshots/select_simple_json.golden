@@ -1,106 +1,86 @@
-{
-  "rows": [
-    {
-      "account_balance": {
-        "scale": 2,
-        "unscaled": "aoGF"
-      },
-      "active": true,
-      "age": 79,
-      "ascii_field": "ascii",
-      "birth_date": 20141,
-      "created": 1759713125926,
-      "description": "1/4ejB3zoXRKT2QEWBqNRGYTAYYPdMxenaJ81YCVYMWIE+0TUvLfCpXoMGJjNruItji0lWkGgj1EwpNId5KsjjaE2yknvtyh185fuhz5Mk7bXKdQ3S4f7EljGyZZEq9kq9/oNLpsa6oDU+FRAFEdXwY5DRscIN/1Fr0aupH5bfQUaJw44U/aotHi/vOMFTuLNNxm8YSqE3co/cAZW85u3t27NdSEO4SqGBwDUS1MDnnNvkvQ1/kw5oNDFYmUVhFIdYX6N7G82Ltydfzf34guHAgA+sYgrnqOrCm/k3CQZIJnXkpQ37DsBGzCc1rjwLdrbmm6fi838kpPIBu1vtri8j/4/KYefr08qhJIHWGdekT3X6iSZ9oNKKCqV0moqanXVVr6Kbxbwu7dCOMqY9roD7WhBshozUOEVkIq5R7zkzZrJtzGCgbOyhwb/W8+GDsRAjjskrLsgw21xrv4PA7BE2J0tGAiR3CktnbgVwKZpEJffT3WaztdO3TJvWtEQ3FloixcZlOQPcBLWLiY7mSsFDiMzDkSa6MaKZmwtW+IJ1p2+iu4P97JH5CYYtEuTlpniBqL/s2Up2I2wWkldWe/QGGBNXUzpwo+0Sdyesb6x88XmVX4s7UIRYQh4zbbl/GzLOnCZnhdPO47ABrtqrrkjYzWrjZDY8WNVBhSUei0h6lQw+MctGI9GT8mNFiuV7gj2AcLfA==",
-      "duration_val": {
-        "months": 0,
-        "days": 0,
-        "nanos": 3033000000000
-      },
-      "height": 1.6699999570846558,
-      "id": "[0, 35, 236, 231, 124, 78, 71, 5, 144, 104, 209, 165, 158, 197, 254, 25]",
-      "ip_address": "g029eQ==",
-      "medium_number": 11366,
-      "name": "Debbie Soto",
-      "salary": 152974,
-      "session_id": "eUePGqJREfChjdZyamN6TA==",
-      "small_number": 105,
-      "varchar_field": "realize",
-      "weight": 74.45,
-      "work_time": 576460769201574980,
-      "_key": "RowKey([0, 35, 236, 231, 124, 78, 71, 5, 144, 104, 209, 165, 158, 197, 254, 25])"
+[
+  {
+    "account_balance": {
+      "scale": 2,
+      "unscaled": "aoGF"
     },
-    {
-      "account_balance": {
-        "scale": 2,
-        "unscaled": "cTce"
-      },
-      "active": false,
-      "age": 58,
-      "ascii_field": "ascii",
-      "birth_date": 20357,
-      "created": 1759713125872,
-      "description": "Dhwt3x6KhM9xwNbmOZlkGy66YN5b5QaylA+LYWjDwzBRZqlC3tStgi79HmrBM4TZJ4Vgm0MuuPdGQ7Hsd4mFWkAPCcnSh0Jgw0lFIRZMSCtojuyH3C2xVd0rvNUSJG1uLG8WN+VB0rPgAy4hE7aOoSTVDVR65B0daoPMCOKbWmMJPXSYdHW71e5thL0s2MTn5qr6mxkwUXalD04=",
-      "duration_val": {
-        "months": 0,
-        "days": 0,
-        "nanos": 12882000000000
-      },
-      "height": 1.7699999809265137,
-      "id": "[0, 159, 185, 19, 113, 115, 64, 223, 180, 234, 103, 237, 104, 52, 207, 229]",
-      "ip_address": "DS7Kwg==",
-      "medium_number": 8070,
-      "name": "Richard Parker",
-      "salary": 78689,
-      "session_id": "eT83IKJREfChjdZyamN6TA==",
-      "small_number": 26,
-      "varchar_field": "speak",
-      "weight": 114.45,
-      "work_time": 576460769201361734,
-      "_key": "RowKey([0, 159, 185, 19, 113, 115, 64, 223, 180, 234, 103, 237, 104, 52, 207, 229])"
+    "active": true,
+    "age": 79,
+    "ascii_field": "ascii",
+    "birth_date": 20141,
+    "created": 1759713125926,
+    "description": "1/4ejB3zoXRKT2QEWBqNRGYTAYYPdMxenaJ81YCVYMWIE+0TUvLfCpXoMGJjNruItji0lWkGgj1EwpNId5KsjjaE2yknvtyh185fuhz5Mk7bXKdQ3S4f7EljGyZZEq9kq9/oNLpsa6oDU+FRAFEdXwY5DRscIN/1Fr0aupH5bfQUaJw44U/aotHi/vOMFTuLNNxm8YSqE3co/cAZW85u3t27NdSEO4SqGBwDUS1MDnnNvkvQ1/kw5oNDFYmUVhFIdYX6N7G82Ltydfzf34guHAgA+sYgrnqOrCm/k3CQZIJnXkpQ37DsBGzCc1rjwLdrbmm6fi838kpPIBu1vtri8j/4/KYefr08qhJIHWGdekT3X6iSZ9oNKKCqV0moqanXVVr6Kbxbwu7dCOMqY9roD7WhBshozUOEVkIq5R7zkzZrJtzGCgbOyhwb/W8+GDsRAjjskrLsgw21xrv4PA7BE2J0tGAiR3CktnbgVwKZpEJffT3WaztdO3TJvWtEQ3FloixcZlOQPcBLWLiY7mSsFDiMzDkSa6MaKZmwtW+IJ1p2+iu4P97JH5CYYtEuTlpniBqL/s2Up2I2wWkldWe/QGGBNXUzpwo+0Sdyesb6x88XmVX4s7UIRYQh4zbbl/GzLOnCZnhdPO47ABrtqrrkjYzWrjZDY8WNVBhSUei0h6lQw+MctGI9GT8mNFiuV7gj2AcLfA==",
+    "duration_val": {
+      "months": 0,
+      "days": 0,
+      "nanos": 3033000000000
     },
-    {
-      "account_balance": {
-        "scale": 2,
-        "unscaled": "R+Jn"
-      },
-      "active": false,
-      "age": 47,
-      "ascii_field": "ascii",
-      "birth_date": 20017,
-      "created": 1759713125811,
-      "description": "5WSGv7CKH9mctuTtmNPlpjtGRUbPrDuBqOuUIplnSLysWIAY2EbSdlf07SfsBB+40Th3ClmtlgbYrJ3zadrbP2+eZzK3+lBqI8D7W4wbUaPj/qW5l1ppP+D/KkR6vx5hQc5dn8ELp51TTKg1Pk2rlCWwD0hUevGm2oJkTn8uxYsRsBd1diRIeBI98PaGS9qBCvKhbbO4Eud1kjZkgIcIJnH2KqvnnsfB8OeVrkSfSPP4DOuFXcPOjcdvvcfI6wLznazmEHm7MeXIq3s5a8qnqDq0tguKZFwrCbsbjJ8PXYMqV4RIYHXXiygSXTbI3SAYXXGI5NndoPUNI+KEz0C6OkBFuH4grbwc7blq4poyHZjCMXeHpxCblYRvbRI9IG0/reJgCN1+RSXIYxN8q4wyI5AnbOSefB0Wx6S2pES84q67nkgdkhp4gMbbw493gkPZMBjlbKS9tKUs5qBv3nZxJ0zXwV7YIQHdnRr3GFiZhcN8kh3H3jTvVYEYZpT5SPK+jpyOvLd9UCMumM41W2eIvQcHn4iqOecSlV2+DsxQ6xUxdIZl9Mp25egql2WTRG9jfHn6NW3IlstQHHxyIZnBKVawfdiChz3mQ1wpb+A2daxU5om7TkLfXWd8PDrFVFp1Du84vxramkejY/5Rr7dN9B5Luaqv8cHAk1y/3HBb7Rsa2fhKh6sExMN0V9tiufpltutqGVuOiLCh3JJULHHa5IgI7yuyETb55YcdPg+p+Gzk+UEjtrm6JDCsHc10C2eX02o0fQ7MKceInukNH7VHZHMTUmTwV0VVQdBDxwIJ6fryBYs7/oGm0B89kF9zpq+mbf9X7QAbGAM1E8wHwDEG+vxeLZv9q60+MyhJRQhBYkw4fAU0MVmDZ93dMDkyce2Pb5gCPmBac8EcoqD4rJmxfGy43g6DKvu/jwyCbjXcRGDDqLPuZyU9YStH9tUGYzZQilYN67jmCNECdV3KQeGqEi2OHoHbIWsIoH2EJ+Fpr7tQwSPBpp5Oqvm77z8zxBw5qQeZGL5X4D4+FPtRnsw0AlBCfi2EIcoSLnelk2IDEX2FmqFCyF3nVzdXXUHBMBs1Xl0iBxPNvTxfXnJ9sCUNXUud9LSF69z+kFwtDIBQjNlOkiq6o9kiykcmG8/fN7kskgzSQoPm1VVWSG3gLWXFFnRgCjjSQtSM8pUjGQOXTEjLpKEPvM4gjSgRWwIAhFD/LoQfqLG5D1QpxA6Hcx0/",
-      "duration_val": {
-        "months": 0,
-        "days": 0,
-        "nanos": 5023000000000
-      },
-      "height": 1.8700000047683716,
-      "id": "[0, 167, 66, 38, 155, 222, 66, 89, 155, 160, 215, 67, 89, 232, 1, 62]",
-      "ip_address": "Z37K4A==",
-      "medium_number": 20373,
-      "name": "Andrew Meyers",
-      "salary": 44179,
-      "session_id": "eTXr3qJREfChjdZyamN6TA==",
-      "small_number": 82,
-      "varchar_field": "clearly",
-      "weight": 75.12,
-      "work_time": 576460769201123687,
-      "_key": "RowKey([0, 167, 66, 38, 155, 222, 66, 89, 155, 160, 215, 67, 89, 232, 1, 62])"
-    }
-  ],
-  "rows_affected": 3,
-  "row_count": 3,
-  "columns": [],
-  "performance": {
-    "parse_time_us": 0,
-    "planning_time_us": 0,
-    "execution_time_us": 0,
-    "total_time_us": 0,
-    "memory_usage_bytes": 0,
-    "io_operations": 0,
-    "cache_hits": 0,
-    "cache_misses": 0,
-    "cache_hit_ratio": 0.0
+    "height": 1.6699999570846558,
+    "id": "[0, 35, 236, 231, 124, 78, 71, 5, 144, 104, 209, 165, 158, 197, 254, 25]",
+    "ip_address": "131.77.189.121",
+    "medium_number": 11366,
+    "name": "Debbie Soto",
+    "salary": 152974,
+    "session_id": "79478f1a-a251-11f0-a18d-d6726a637a4c",
+    "small_number": 105,
+    "varchar_field": "realize",
+    "weight": 74.45,
+    "work_time": 576460769201574980
   },
-  "warnings": []
-}
+  {
+    "account_balance": {
+      "scale": 2,
+      "unscaled": "cTce"
+    },
+    "active": false,
+    "age": 58,
+    "ascii_field": "ascii",
+    "birth_date": 20357,
+    "created": 1759713125872,
+    "description": "Dhwt3x6KhM9xwNbmOZlkGy66YN5b5QaylA+LYWjDwzBRZqlC3tStgi79HmrBM4TZJ4Vgm0MuuPdGQ7Hsd4mFWkAPCcnSh0Jgw0lFIRZMSCtojuyH3C2xVd0rvNUSJG1uLG8WN+VB0rPgAy4hE7aOoSTVDVR65B0daoPMCOKbWmMJPXSYdHW71e5thL0s2MTn5qr6mxkwUXalD04=",
+    "duration_val": {
+      "months": 0,
+      "days": 0,
+      "nanos": 12882000000000
+    },
+    "height": 1.7699999809265137,
+    "id": "[0, 159, 185, 19, 113, 115, 64, 223, 180, 234, 103, 237, 104, 52, 207, 229]",
+    "ip_address": "13.46.202.194",
+    "medium_number": 8070,
+    "name": "Richard Parker",
+    "salary": 78689,
+    "session_id": "793f3720-a251-11f0-a18d-d6726a637a4c",
+    "small_number": 26,
+    "varchar_field": "speak",
+    "weight": 114.45,
+    "work_time": 576460769201361734
+  },
+  {
+    "account_balance": {
+      "scale": 2,
+      "unscaled": "R+Jn"
+    },
+    "active": false,
+    "age": 47,
+    "ascii_field": "ascii",
+    "birth_date": 20017,
+    "created": 1759713125811,
+    "description": "5WSGv7CKH9mctuTtmNPlpjtGRUbPrDuBqOuUIplnSLysWIAY2EbSdlf07SfsBB+40Th3ClmtlgbYrJ3zadrbP2+eZzK3+lBqI8D7W4wbUaPj/qW5l1ppP+D/KkR6vx5hQc5dn8ELp51TTKg1Pk2rlCWwD0hUevGm2oJkTn8uxYsRsBd1diRIeBI98PaGS9qBCvKhbbO4Eud1kjZkgIcIJnH2KqvnnsfB8OeVrkSfSPP4DOuFXcPOjcdvvcfI6wLznazmEHm7MeXIq3s5a8qnqDq0tguKZFwrCbsbjJ8PXYMqV4RIYHXXiygSXTbI3SAYXXGI5NndoPUNI+KEz0C6OkBFuH4grbwc7blq4poyHZjCMXeHpxCblYRvbRI9IG0/reJgCN1+RSXIYxN8q4wyI5AnbOSefB0Wx6S2pES84q67nkgdkhp4gMbbw493gkPZMBjlbKS9tKUs5qBv3nZxJ0zXwV7YIQHdnRr3GFiZhcN8kh3H3jTvVYEYZpT5SPK+jpyOvLd9UCMumM41W2eIvQcHn4iqOecSlV2+DsxQ6xUxdIZl9Mp25egql2WTRG9jfHn6NW3IlstQHHxyIZnBKVawfdiChz3mQ1wpb+A2daxU5om7TkLfXWd8PDrFVFp1Du84vxramkejY/5Rr7dN9B5Luaqv8cHAk1y/3HBb7Rsa2fhKh6sExMN0V9tiufpltutqGVuOiLCh3JJULHHa5IgI7yuyETb55YcdPg+p+Gzk+UEjtrm6JDCsHc10C2eX02o0fQ7MKceInukNH7VHZHMTUmTwV0VVQdBDxwIJ6fryBYs7/oGm0B89kF9zpq+mbf9X7QAbGAM1E8wHwDEG+vxeLZv9q60+MyhJRQhBYkw4fAU0MVmDZ93dMDkyce2Pb5gCPmBac8EcoqD4rJmxfGy43g6DKvu/jwyCbjXcRGDDqLPuZyU9YStH9tUGYzZQilYN67jmCNECdV3KQeGqEi2OHoHbIWsIoH2EJ+Fpr7tQwSPBpp5Oqvm77z8zxBw5qQeZGL5X4D4+FPtRnsw0AlBCfi2EIcoSLnelk2IDEX2FmqFCyF3nVzdXXUHBMBs1Xl0iBxPNvTxfXnJ9sCUNXUud9LSF69z+kFwtDIBQjNlOkiq6o9kiykcmG8/fN7kskgzSQoPm1VVWSG3gLWXFFnRgCjjSQtSM8pUjGQOXTEjLpKEPvM4gjSgRWwIAhFD/LoQfqLG5D1QpxA6Hcx0/",
+    "duration_val": {
+      "months": 0,
+      "days": 0,
+      "nanos": 5023000000000
+    },
+    "height": 1.8700000047683716,
+    "id": "[0, 167, 66, 38, 155, 222, 66, 89, 155, 160, 215, 67, 89, 232, 1, 62]",
+    "ip_address": "103.126.202.224",
+    "medium_number": 20373,
+    "name": "Andrew Meyers",
+    "salary": 44179,
+    "session_id": "7935ebde-a251-11f0-a18d-d6726a637a4c",
+    "small_number": 82,
+    "varchar_field": "clearly",
+    "weight": 75.12,
+    "work_time": 576460769201123687
+  }
+]

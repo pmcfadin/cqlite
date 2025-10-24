@@ -360,7 +360,11 @@ run_test_suite() {
     local collections_schema="${schema_dir}/collections.cql"
     if [[ -f "${collections_schema}" ]]; then
         local orig_schema="${CQLITE_SCHEMA}"
+        local orig_dataset="${CQLITE_DATASET:-}"
         export CQLITE_SCHEMA="${collections_schema}"
+        if [[ -n "${CQLITE_DATASET:-}" ]]; then
+            export CQLITE_DATASET="test_collections"
+        fi
 
         run_test \
             "test_select_collections" \
@@ -370,6 +374,9 @@ run_test_suite() {
             "${SNAPSHOTS_DIR}/select_collections_json.golden"
 
         export CQLITE_SCHEMA="${orig_schema}"
+        if [[ -n "${orig_dataset}" ]]; then
+            export CQLITE_DATASET="${orig_dataset}"
+        fi
     else
         log_warn "Skipping collections test: schema not found at ${collections_schema}"
     fi

@@ -186,11 +186,18 @@ impl Default for Config {
 
 impl Config {
     pub fn load(config_path: Option<PathBuf>, cli: &crate::cli_types::Cli) -> Result<Self> {
-        Ok(ConfigBuilder::from_defaults()
-            .with_file(config_path)?
-            .with_env()?
-            .with_flags(cli)
-            .build())
+        let mut builder = ConfigBuilder::from_defaults()
+            .with_user_config()? // 1. User config (lowest precedence)
+            .with_project_config()?; // 2. Project config (overrides user)
+
+        // 3. Explicit --config flag (overrides discovered configs)
+        if let Some(path) = config_path {
+            builder = builder.with_explicit_config(path)?;
+        }
+
+        // 4. Environment variables (override files)
+        // 5. CLI flags (highest precedence)
+        Ok(builder.with_env()?.with_flags(cli).build())
     }
 
     /// Resolve Cassandra version using precedence chain (Issue #130)
@@ -468,6 +475,81 @@ impl Default for OutputConfig {
     }
 }
 
+/// Merge two configs with partial override semantics
+/// Only non-default values from overlay replace base values
+fn merge_partial_config(base: Config, overlay: Config) -> Config {
+    // Determine final no_color value (true if either is true)
+    let final_no_color = overlay.no_color || base.no_color;
+
+    // Determine output colors
+    // Priority: if no_color is true, colors must be false
+    // Otherwise, use overlay value (which has defaults applied during TOML parsing)
+    let final_output_colors = if final_no_color {
+        false
+    } else {
+        overlay.output.colors
+    };
+
+    Config {
+        // Use overlay value if present, otherwise keep base
+        data_directory: overlay.data_directory.or(base.data_directory),
+        default_keyspace: overlay.default_keyspace.or(base.default_keyspace),
+
+        // For schema_paths, use overlay if non-empty
+        schema_paths: if overlay.schema_paths.is_empty() {
+            base.schema_paths
+        } else {
+            overlay.schema_paths
+        },
+
+        // Output mode
+        output_mode: overlay.output_mode.or(base.output_mode),
+
+        // Numeric limits
+        query_limit: overlay.query_limit.or(base.query_limit),
+
+        // Nested structs - merge carefully
+        connection: overlay.connection,
+        output: OutputSettings {
+            max_rows: overlay.output.max_rows.or(base.output.max_rows),
+            pager: overlay.output.pager.or(base.output.pager),
+            colors: final_output_colors,
+            timestamp_format: overlay.output.timestamp_format,
+        },
+        repl: ReplConfig {
+            enable_history: overlay.repl.enable_history,
+            enable_completion: overlay.repl.enable_completion,
+            enable_colors: overlay.repl.enable_colors,
+            show_timing: overlay.repl.show_timing,
+            page_size: overlay.repl.page_size,
+            enable_paging: overlay.repl.enable_paging,
+            max_history_size: overlay.repl.max_history_size,
+            prompt: overlay.repl.prompt,
+            prompt_continuation: overlay.repl.prompt_continuation,
+            history_file: overlay.repl.history_file.or(base.repl.history_file),
+        },
+        performance: overlay.performance,
+        logging: overlay.logging,
+
+        // Legacy fields (backward compat)
+        enable_history: overlay.enable_history.or(base.enable_history),
+        enable_completion: overlay.enable_completion.or(base.enable_completion),
+        show_timing: overlay.show_timing.or(base.show_timing),
+        page_size: overlay.page_size.or(base.page_size),
+        enable_paging: overlay.enable_paging.or(base.enable_paging),
+        no_color: final_no_color,
+
+        // Skip serialization fields
+        execution_query: base.execution_query,
+        execution_file: base.execution_file,
+        cassandra_version: overlay.cassandra_version.or(base.cassandra_version),
+        resolved_version: base.resolved_version,
+
+        // Deprecated - keep base
+        default_database: base.default_database,
+    }
+}
+
 /// Builder for Config with precedence: flags > env > file > defaults
 pub struct ConfigBuilder {
     config: Config,
@@ -482,6 +564,9 @@ impl ConfigBuilder {
     }
 
     /// Layer config file (overrides defaults)
+    ///
+    /// Deprecated: Use `with_explicit_config()` instead for --config flag handling
+    #[allow(dead_code)]
     pub fn with_file(mut self, path: Option<PathBuf>) -> Result<Self> {
         if let Some(p) = path {
             let loaded = Config::load_from_file(&p)?;
@@ -489,6 +574,57 @@ impl ConfigBuilder {
             self.config = loaded;
         }
         Ok(self)
+    }
+
+    /// Layer user config (overrides defaults)
+    pub fn with_user_config(mut self) -> Result<Self> {
+        if let Some(user_path) = Self::user_config_path() {
+            if user_path.exists() {
+                let loaded = Config::load_from_file(&user_path).with_context(|| {
+                    format!("Failed to load user config: {}", user_path.display())
+                })?;
+                self.config = merge_partial_config(self.config, loaded);
+            }
+        }
+        Ok(self)
+    }
+
+    /// Layer project config (overrides user config and defaults)
+    pub fn with_project_config(mut self) -> Result<Self> {
+        let project_path = PathBuf::from("./.cqlite.toml");
+        if project_path.exists() {
+            let loaded = Config::load_from_file(&project_path)
+                .with_context(|| "Failed to load project config")?;
+            self.config = merge_partial_config(self.config, loaded);
+        }
+        Ok(self)
+    }
+
+    /// Layer explicit config from --config flag (overrides discovered configs)
+    pub fn with_explicit_config(mut self, path: PathBuf) -> Result<Self> {
+        let loaded = Config::load_from_file(&path)
+            .with_context(|| format!("Failed to load config file: {}", path.display()))?;
+        self.config = merge_partial_config(self.config, loaded);
+        Ok(self)
+    }
+
+    /// Get platform-specific user config path
+    fn user_config_path() -> Option<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            dirs::home_dir().map(|h| h.join("Library/Application Support/cqlite/config.toml"))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            dirs::config_dir().map(|d| d.join("cqlite").join("config.toml"))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            std::env::var("XDG_CONFIG_HOME")
+                .ok()
+                .map(|p| PathBuf::from(p).join("cqlite/config.toml"))
+                .or_else(|| dirs::home_dir().map(|h| h.join(".config/cqlite/config.toml")))
+        }
     }
 
     /// Layer environment variables (overrides file and defaults)
