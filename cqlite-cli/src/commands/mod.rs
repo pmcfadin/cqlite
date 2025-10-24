@@ -1,4 +1,7 @@
 #![allow(dead_code)]
+// Allow deprecated BulletproofReader usage (Issue #190 - experimental reader)
+// This will be removed once BulletproofReader is fully replaced with SSTableReader
+#![allow(deprecated)]
 
 use crate::cli::OutputFormat;
 #[cfg(feature = "state_machine")]

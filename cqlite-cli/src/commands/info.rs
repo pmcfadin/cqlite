@@ -1,6 +1,10 @@
 // SSTable Info Command Implementation - Issue #26
 // Comprehensive SSTable analysis and metadata display
 
+// Allow deprecated BulletproofReader usage (Issue #190 - experimental reader)
+// This will be removed once BulletproofReader is fully replaced with SSTableReader
+#![allow(deprecated)]
+
 use anyhow::{Context, Result};
 use cqlite_core::{
     schema::{parse_cql_schema, TableSchema},
