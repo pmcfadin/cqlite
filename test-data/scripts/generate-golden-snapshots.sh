@@ -25,7 +25,8 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEST_DATA_ROOT="$PROJECT_ROOT/test-data"
-GOLDEN_DIR="$TEST_DATA_ROOT/golden"
+# Use smoke-test-snapshots directory to match ci-one-shot-smoke.sh expectations
+GOLDEN_DIR="${GOLDEN_DIR:-$SCRIPT_DIR/smoke-test-snapshots}"
 SCHEMAS_DIR="$TEST_DATA_ROOT/schemas"
 DATASETS_DIR="$TEST_DATA_ROOT/datasets"
 
@@ -114,9 +115,9 @@ run_and_save() {
   local schema="$2"
   local query="$3"
   local format="$4"
-  local output_file="$GOLDEN_DIR/${name}.${format}"
+  local output_file="$GOLDEN_DIR/${name}.golden"
 
-  echo -e "  ${BLUE}→${NC} Generating ${name}.${format}..."
+  echo -e "  ${BLUE}→${NC} Generating ${name}.golden..."
 
   # P0-6: Pass correct data directory path with /sstables suffix
   # Run CLI command
@@ -144,98 +145,64 @@ TOTAL=0
 SUCCESS=0
 FAILED=0
 
-# P0-4: Use .cql schema files
-# Basic test - JSON format
+# Generate golden snapshots matching ci-one-shot-smoke.sh test expectations
+# Note: These must match the snapshot file names expected in ci-one-shot-smoke.sh
+
+# Test 1: Basic SELECT with JSON output (simple_table) - LIMIT 3
 ((TOTAL++))
 if run_and_save \
-  "basic_select_json" \
+  "select_simple_json" \
   "$SCHEMAS_DIR/basic-types.cql" \
-  "SELECT * FROM test_basic.simple_table LIMIT 5" \
+  "SELECT * FROM test_basic.simple_table LIMIT 3" \
   "json"; then
   ((SUCCESS++))
 else
   ((FAILED++))
 fi
 
-# Basic test - CSV format
+# Test 2: Basic SELECT with CSV output (simple_table) - LIMIT 3
 ((TOTAL++))
 if run_and_save \
-  "basic_select_csv" \
+  "select_simple_csv" \
   "$SCHEMAS_DIR/basic-types.cql" \
-  "SELECT * FROM test_basic.simple_table LIMIT 5" \
+  "SELECT * FROM test_basic.simple_table LIMIT 3" \
   "csv"; then
   ((SUCCESS++))
 else
   ((FAILED++))
 fi
 
-# Basic test - Table format (for reference)
+# Test 3: Basic SELECT with table output (simple_table) - LIMIT 2
 ((TOTAL++))
 if run_and_save \
-  "basic_select_table" \
+  "select_simple_table" \
   "$SCHEMAS_DIR/basic-types.cql" \
-  "SELECT * FROM test_basic.simple_table LIMIT 5" \
+  "SELECT * FROM test_basic.simple_table LIMIT 2" \
   "table"; then
   ((SUCCESS++))
 else
   ((FAILED++))
 fi
 
-# Collections test - JSON format
+# Test 4: Column projection - LIMIT 3
 ((TOTAL++))
 if run_and_save \
-  "collections_select" \
-  "$SCHEMAS_DIR/collections.cql" \
-  "SELECT * FROM test_collections.collection_table LIMIT 3" \
+  "select_columns_json" \
+  "$SCHEMAS_DIR/basic-types.cql" \
+  "SELECT id, name FROM test_basic.simple_table LIMIT 3" \
   "json"; then
   ((SUCCESS++))
 else
   ((FAILED++))
 fi
 
-# Collections test - CSV format (for reference)
+# Test 5: Collections query with JSON output - LIMIT 2
 ((TOTAL++))
 if run_and_save \
-  "collections_select_csv" \
+  "select_collections_json" \
   "$SCHEMAS_DIR/collections.cql" \
-  "SELECT * FROM test_collections.collection_table LIMIT 3" \
-  "csv"; then
-  ((SUCCESS++))
-else
-  ((FAILED++))
-fi
-
-# Collections test - Table format (for reference)
-((TOTAL++))
-if run_and_save \
-  "collections_select_table" \
-  "$SCHEMAS_DIR/collections.cql" \
-  "SELECT * FROM test_collections.collection_table LIMIT 3" \
-  "table"; then
-  ((SUCCESS++))
-else
-  ((FAILED++))
-fi
-
-# Subset of columns - JSON format
-((TOTAL++))
-if run_and_save \
-  "basic_select_columns_json" \
-  "$SCHEMAS_DIR/basic-types.cql" \
-  "SELECT id, name, age FROM test_basic.simple_table LIMIT 3" \
+  "SELECT * FROM test_collections.collection_table LIMIT 2" \
   "json"; then
-  ((SUCCESS++))
-else
-  ((FAILED++))
-fi
-
-# Subset of columns - CSV format
-((TOTAL++))
-if run_and_save \
-  "basic_select_columns_csv" \
-  "$SCHEMAS_DIR/basic-types.cql" \
-  "SELECT id, name, age FROM test_basic.simple_table LIMIT 3" \
-  "csv"; then
   ((SUCCESS++))
 else
   ((FAILED++))

@@ -1,6 +1,8 @@
 //! Cassandra 5.0 'oa' Format Specification Compliance Tests
 //! Tests exact byte-level compliance with the format specification
 
+#![allow(deprecated)] // Allow BulletproofReader usage until Issue #190
+
 #[cfg(test)]
 mod tests {
     use super::super::bulletproof_reader::*;

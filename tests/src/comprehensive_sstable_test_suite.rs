@@ -4,6 +4,8 @@
 //! reading functionality across all supported Cassandra versions (3.x, 4.x, 5.x)
 //! with >90% code coverage and robust error handling.
 
+#![allow(deprecated)] // Allow BulletproofReader usage until Issue #190
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
