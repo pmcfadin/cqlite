@@ -307,6 +307,20 @@ impl ReplEngine {
                     })?;
                 Ok(ExecutionResult::Continue)
             }
+            CommandType::Health => {
+                // Get configuration parameters for health checks
+                // Note: config_file path is not tracked in session, so we pass None
+                commands::execute_health(
+                    self.session.data_dir(),
+                    None, // Config file path not tracked in session
+                    self.config.page_size,
+                    self.config.show_timing,
+                    self.config.enable_colors,
+                )
+                .await
+                .map_err(|e| ReplError::Database(e))?;
+                Ok(ExecutionResult::Continue)
+            }
             CommandType::Keyspaces => {
                 commands::execute_keyspaces(self.session.data_dir())
                     .await
@@ -792,6 +806,7 @@ impl ReplEngine {
         println!("  :use <keyspace>  Switch keyspace");
         println!("  :config [op]     Show/set configuration");
         println!("  :status          Show discovery and schema coverage status");
+        println!("  :health          Show health diagnostics");
         println!("  :clear           Clear screen");
         println!("  :history         Show command history");
         println!("  :source <file>   Execute commands from file");
@@ -815,6 +830,7 @@ impl ReplEngine {
         println!("  :describe <obj>  Show object schema");
         println!("  :use <keyspace>  Switch to keyspace");
         println!("  :status          Show discovery and schema coverage status");
+        println!("  :health          Show health diagnostics");
         println!();
         println!("File Commands:");
         println!("  :source <file>   Execute SQL file");

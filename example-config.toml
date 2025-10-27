@@ -1,0 +1,69 @@
+# Example CQLite Configuration File
+#
+# This file demonstrates the minimal TOML config file support for CQLite CLI.
+# Config discovery order (lowest to highest precedence):
+#   1. Built-in defaults
+#   2. User config (~/.config/cqlite/config.toml on Linux)
+#   3. Project config (./.cqlite.toml in current directory)
+#   4. Explicit config (--config <FILE>)
+#   5. Environment variables (CQLITE_*)
+#   6. CLI flags
+
+# Data directory containing SSTable files
+# data_directory = "/path/to/cassandra/data"
+
+# Default keyspace to use
+# default_keyspace = "my_keyspace"
+
+# Schema file paths (can specify multiple)
+# schema_paths = [
+#     "/path/to/schema1.cql",
+#     "/path/to/schema2.cql"
+# ]
+
+# Output format for query results (table, json, csv)
+# output_mode = "table"
+
+# Maximum rows to display in query results
+# query_limit = 1000
+
+# Disable colored output
+# no_color = false
+
+# Connection settings
+[connection]
+timeout_ms = 30000
+retry_attempts = 3
+pool_size = 10
+
+# Output settings
+[output]
+max_rows = 1000
+colors = true
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+# pager = "less"
+
+# REPL settings
+[repl]
+enable_history = true
+enable_completion = true
+enable_colors = true
+show_timing = false
+page_size = 50
+enable_paging = true
+max_history_size = 1000
+prompt = "cqlite> "
+prompt_continuation = "    -> "
+# history_file = "/path/to/.cqlite_history"
+
+# Performance settings
+[performance]
+query_timeout_ms = 30000
+cache_size_mb = 64
+# memory_limit_mb = 512
+
+# Logging settings
+[logging]
+level = "info"
+# file = "/path/to/cqlite.log"
+format = "Pretty"  # Options: Plain, Json, Pretty

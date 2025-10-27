@@ -35,6 +35,8 @@ pub enum CommandType {
     Keyspaces,
     /// Schema management commands
     Schema { operation: SchemaOperation },
+    /// Show health diagnostics
+    Health,
     /// Unknown command
     Unknown { input: String },
 }
@@ -244,6 +246,7 @@ impl CommandParser {
             }
             "status" => Some(CommandType::Status),
             "keyspaces" => Some(CommandType::Keyspaces),
+            "health" => Some(CommandType::Health),
 
             // Schema commands
             "schema" => {
@@ -461,6 +464,12 @@ impl CommandParser {
             }
             CommandType::Keyspaces => {
                 metadata.category = CommandCategory::Navigation;
+                metadata.complexity = 2;
+                metadata.modifies_state = false;
+                metadata.requires_database = false;
+            }
+            CommandType::Health => {
+                metadata.category = CommandCategory::System;
                 metadata.complexity = 2;
                 metadata.modifies_state = false;
                 metadata.requires_database = false;
