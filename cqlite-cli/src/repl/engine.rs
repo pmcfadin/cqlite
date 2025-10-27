@@ -729,6 +729,9 @@ impl ReplEngine {
 
     /// Display result in table format
     fn display_table_result(&self, result: &QueryResult) -> ReplResult<()> {
+        use crate::config::OutputConfig;
+        use crate::output::TableWriter;
+
         if result.rows.is_empty() {
             if result.rows_affected > 0 {
                 println!(
@@ -742,29 +745,43 @@ impl ReplEngine {
             return Ok(());
         }
 
-        println!();
-        println!(
-            "{} {} rows returned",
-            "📊 Results:".green().bold(),
-            result.rows.len()
-        );
+        // Build output config from REPL config
+        let output_config = OutputConfig {
+            color_enabled: self.config.enable_colors,
+            limit: None,
+            page_size: None,
+        };
 
-        // For now, delegate to the existing display logic
-        // In a full implementation, this would be integrated with the REPL's table formatter
-        println!("(Table formatting would be implemented here)");
+        // Format using TableWriter
+        let formatted = TableWriter::write(result, &output_config)
+            .map_err(|e| ReplError::Session(format!("Failed to format table output: {}", e)))?;
+
+        println!("{}", formatted);
 
         Ok(())
     }
 
     /// Display result in CSV format
-    fn display_csv_result(&self, _result: &QueryResult) -> ReplResult<()> {
-        println!("CSV output not yet implemented");
+    fn display_csv_result(&self, result: &QueryResult) -> ReplResult<()> {
+        use crate::output::CSVWriter;
+
+        let formatted = CSVWriter::write(result)
+            .map_err(|e| ReplError::Session(format!("Failed to format CSV output: {}", e)))?;
+
+        println!("{}", formatted);
+
         Ok(())
     }
 
     /// Display result in JSON format
-    fn display_json_result(&self, _result: &QueryResult) -> ReplResult<()> {
-        println!("JSON output not yet implemented");
+    fn display_json_result(&self, result: &QueryResult) -> ReplResult<()> {
+        use crate::output::JSONWriter;
+
+        let formatted = JSONWriter::write(result)
+            .map_err(|e| ReplError::Session(format!("Failed to format JSON output: {}", e)))?;
+
+        println!("{}", formatted);
+
         Ok(())
     }
 
