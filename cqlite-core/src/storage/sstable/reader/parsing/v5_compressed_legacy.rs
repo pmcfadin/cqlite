@@ -1573,8 +1573,8 @@ impl V5CompressedLegacyParser {
                 Value::Text(text)
             }
 
-            "uuid" => {
-                // UUID: fixed-width 16 bytes (no length prefix in Cassandra 5.0 writer)
+            "uuid" | "timeuuid" => {
+                // UUID/TimeUUID: fixed-width 16 bytes (no length prefix in Cassandra 5.0 writer)
                 if offset + 16 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 16 bytes for UUID, only {} available",
@@ -1993,25 +1993,6 @@ impl V5CompressedLegacyParser {
                 let bytes = data[offset..offset + len].to_vec();
                 offset += len;
                 Value::Inet(bytes)
-            }
-
-            "timeuuid" => {
-                // TimeUUID: 16 bytes directly (NO length prefix, same as timestamp/bigint)
-                // Time-based UUID, always exactly 16 bytes, fixed size
-                if offset + 16 > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': need 16 bytes for timeuuid, only {} available",
-                        column.name,
-                        data.len() - offset
-                    )));
-                }
-
-                let uuid_bytes: [u8; 16] = data[offset..offset + 16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("TimeUUID byte conversion failed"))?;
-
-                offset += 16;
-                Value::Uuid(uuid_bytes)
             }
 
             // Complex types: frozen, tuple, UDT

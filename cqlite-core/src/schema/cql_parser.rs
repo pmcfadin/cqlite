@@ -125,16 +125,13 @@ fn column_definition(input: &str) -> IResult<&str, (String, String)> {
     let (input, data_type) = cql_type(input)?;
     let (input, _) = ws(input)?;
 
-    // Check for inline PRIMARY KEY
-    let (input, is_primary) = opt(tuple((keyword("primary"), ws1, keyword("key"))))(input)?;
+    // Check for inline PRIMARY KEY (parse it but don't modify data_type)
+    // The PRIMARY KEY constraint is tracked via partition_keys/clustering_keys, not in data_type
+    let (input, _is_primary) = opt(tuple((keyword("primary"), ws1, keyword("key"))))(input)?;
 
-    let final_type = if is_primary.is_some() {
-        format!("{} PRIMARY KEY", data_type)
-    } else {
-        data_type
-    };
-
-    Ok((input, (name, final_type)))
+    // Return the data_type as-is (e.g., "uuid", not "uuid PRIMARY KEY")
+    // Issue #192: data_type must be a pure CQL type name for proper type matching
+    Ok((input, (name, data_type)))
 }
 
 /// Parse PRIMARY KEY specification
