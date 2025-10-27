@@ -503,28 +503,17 @@ impl ReplEngine {
 
     /// Execute config command
     async fn execute_config_command(&mut self, operation: String) -> ReplResult<()> {
-        // Parse config operation (show, set key=value, etc.)
+        // Issue #143: Display merged effective configuration (read-only in M2)
         if operation.is_empty() || operation == "show" {
             self.show_current_config();
-        } else if operation.contains('=') {
-            // Set configuration
-            let parts: Vec<&str> = operation.splitn(2, '=').collect();
-            if parts.len() == 2 {
-                self.set_config_value(parts[0].trim(), parts[1].trim())
-                    .await?;
-            } else {
-                println!(
-                    "{} Invalid config format. Use: :config key=value",
-                    "Error:".red().bold()
-                );
-            }
         } else {
             println!(
-                "{} Unknown config operation: {}",
-                "Error:".red().bold(),
-                operation
+                "{} Configuration is read-only in M2.",
+                "Note:".yellow().bold()
             );
-            println!("Usage: :config [show] or :config key=value");
+            println!("Use CLI flags, environment variables, or config files to modify settings.");
+            println!();
+            self.show_current_config();
         }
         Ok(())
     }
@@ -856,8 +845,7 @@ impl ReplEngine {
         println!("  :source <file>   Execute SQL file");
         println!();
         println!("Configuration:");
-        println!("  :config          Show current settings");
-        println!("  :config key=val  Set configuration");
+        println!("  :config          Show merged effective configuration (read-only)");
     }
 
     /// Show config help
@@ -865,16 +853,19 @@ impl ReplEngine {
         println!("{}", "Configuration Help".cyan().bold());
         println!("{}", "═".repeat(20).cyan());
         println!();
-        println!("Available settings:");
-        println!("  output_format    Output format (table, csv, json, raw)");
-        println!("  page_size        Result page size");
-        println!("  show_timing      Show query timing (true/false)");
-        println!("  enable_paging    Enable result paging (true/false)");
+        println!("View merged effective configuration (read-only):");
+        println!("  :config                    Display all configuration settings");
         println!();
-        println!("Usage:");
-        println!("  :config                    Show all settings");
-        println!("  :config output_format=json Set output format");
-        println!("  :config show_timing=true   Enable timing");
+        println!("The :config command shows:");
+        println!("  • Data & Schema settings (data_directory, schema_paths, default_keyspace)");
+        println!("  • Output settings (output_mode, query_limit, colors)");
+        println!("  • REPL settings (page_size, show_timing, history, completion)");
+        println!(
+            "  • Precedence chain (CLI > ENV > --config > .cqlite.toml > user config > defaults)"
+        );
+        println!();
+        println!("Note: Configuration is read-only in M2. Use CLI flags, environment");
+        println!("      variables, or config files to modify settings.");
     }
 
     /// Show CQL help
@@ -911,20 +902,74 @@ impl ReplEngine {
         println!("  :source /path/to/queries.sql");
     }
 
-    /// Show current configuration
+    /// Show current configuration (Issue #143: Display merged effective config)
     fn show_current_config(&self) {
-        println!("{}", "Current Configuration".cyan().bold());
-        println!("{}", "═".repeat(25).cyan());
+        let cli_config = self.session.config();
+
+        println!("{}", "Effective Configuration".cyan().bold());
+        println!("{}", "═".repeat(60).cyan());
         println!();
-        println!("REPL Settings:");
-        println!("  Mode: {:?}", self.config.mode);
-        println!("  Output Format: {:?}", self.config.output_format);
-        println!("  Page Size: {}", self.config.page_size);
-        println!("  Show Timing: {}", self.config.show_timing);
-        println!("  Enable Paging: {}", self.config.enable_paging);
-        println!("  Enable Colors: {}", self.config.enable_colors);
+
+        // Data and Schema Configuration
+        println!("{}", "Data & Schema:".yellow().bold());
+        if let Some(ref data_dir) = cli_config.data_directory {
+            println!("  data_directory       = {}", data_dir.display());
+        } else {
+            println!("  data_directory       = {}", "<not set>".dimmed());
+        }
+
+        if !cli_config.schema_paths.is_empty() {
+            let paths: Vec<String> = cli_config
+                .schema_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            println!("  schema_paths         = [{}]", paths.join(", "));
+        } else {
+            println!("  schema_paths         = {}", "[]".dimmed());
+        }
+
+        if let Some(ref keyspace) = cli_config.default_keyspace {
+            println!("  default_keyspace     = {}", keyspace);
+        } else {
+            println!("  default_keyspace     = {}", "<not set>".dimmed());
+        }
+        println!();
+
+        // Output Configuration
+        println!("{}", "Output Settings:".yellow().bold());
+        if let Some(ref mode) = cli_config.output_mode {
+            println!("  output_mode          = {}", mode);
+        } else {
+            println!("  output_mode          = {}", "table".dimmed());
+        }
+
+        if let Some(limit) = cli_config.query_limit {
+            println!("  query_limit          = {}", limit);
+        } else {
+            println!("  query_limit          = {}", "<unlimited>".dimmed());
+        }
+
+        println!("  no_color             = {}", cli_config.no_color);
+        println!("  colors               = {}", cli_config.output.colors);
+
+        if let Some(max_rows) = cli_config.output.max_rows {
+            println!("  max_rows             = {}", max_rows);
+        } else {
+            println!("  max_rows             = {}", "<unlimited>".dimmed());
+        }
+        println!();
+
+        // REPL Settings
+        println!("{}", "REPL Settings:".yellow().bold());
+        println!("  mode                 = {:?}", self.config.mode);
+        println!("  output_format        = {:?}", self.config.output_format);
+        println!("  page_size            = {}", self.config.page_size);
+        println!("  show_timing          = {}", self.config.show_timing);
+        println!("  enable_paging        = {}", self.config.enable_paging);
+        println!("  enable_colors        = {}", self.config.enable_colors);
         println!(
-            "  History: {}",
+            "  history              = {}",
             if self.history.is_some() {
                 "enabled"
             } else {
@@ -932,13 +977,18 @@ impl ReplEngine {
             }
         );
         println!(
-            "  Completion: {}",
+            "  completion           = {}",
             if self.completion.is_some() {
                 "enabled"
             } else {
                 "disabled"
             }
         );
+        println!();
+
+        // Precedence Information
+        println!("{}", "Precedence Chain:".yellow().bold());
+        println!("  {}", "CLI flags > Environment variables > Explicit config (--config) > Project config (./.cqlite.toml) > User config > Defaults".dimmed());
     }
 
     /// Set configuration value
