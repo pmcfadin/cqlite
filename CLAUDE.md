@@ -377,6 +377,39 @@ Solution: Use `timeout` wrapper or increase test timeout in CI
 **Compilation Errors with Features**:
 The default build includes the query engine (`state_machine` feature). For minimal builds without query support, use `--no-default-features`.
 
+### Experimental SELECT Fallback (Issue #142, M2 P2)
+
+**TEMPORARY FEATURE - Will be removed in M3 after ingestion stabilizes**
+
+When ingestion is unavailable (no schema/data-dir), `-e SELECT` can fallback to direct read-sstable:
+
+```bash
+# Enable via flag
+cqlite --enable-select-fallback -e "SELECT * FROM /path/to/table"
+
+# Enable via environment variable
+export CQLITE_ENABLE_SELECT_FALLBACK=true
+cqlite -e "SELECT * FROM /path/to/table"
+```
+
+**Behavior:**
+- **Disabled by default** - explicit opt-in required (`--enable-select-fallback` or `CQLITE_ENABLE_SELECT_FALLBACK=true`)
+- Only activates when ingestion unavailable (missing schema OR missing data-dir/dataset)
+- Only applies to SELECT queries (other statements use normal path)
+- Extracts table path from `SELECT * FROM /path/to/table` syntax
+- Routes to `read-sstable` command with same output format
+
+**Limitations:**
+- Only simple SELECT queries supported (no WHERE clause filtering)
+- Path must be a valid SSTable file or directory
+- No schema-aware parsing (raw SSTable data display)
+- Documented as temporary until ingestion stability achieved
+
+**Warning:** When fallback is active, you'll see:
+```
+⚠️  Using experimental read-sstable fallback (temporary feature, disabled by default)
+```
+
 ### Performance Issues
 
 - Use `cargo flamegraph` for profiling

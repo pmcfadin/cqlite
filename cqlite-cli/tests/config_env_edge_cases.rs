@@ -39,6 +39,7 @@ fn create_cli_with_flags(
         limit,
         page_size,
         no_color,
+        enable_select_fallback: false,
         command: None,
     }
 }

@@ -107,6 +107,10 @@ pub struct Cli {
     #[arg(long, env = "CQLITE_NO_COLOR")]
     pub no_color: bool,
 
+    /// EXPERIMENTAL: Fallback to read-sstable for SELECT when ingestion unavailable (temporary, will be removed in M3)
+    #[arg(long, env = "CQLITE_ENABLE_SELECT_FALLBACK")]
+    pub enable_select_fallback: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

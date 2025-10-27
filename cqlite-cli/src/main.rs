@@ -212,6 +212,50 @@ async fn run_main() -> Result<()> {
 
     // Handle --execute flag (single statement execution) - takes precedence over subcommands
     if let Some(query) = cli.execute {
+        // Issue #142: Experimental fallback to read-sstable for SELECT when ingestion unavailable
+        // This is a temporary feature (disabled by default) that will be removed in M3
+        if cli.enable_select_fallback {
+            // Check if ingestion is unavailable (no schema or no data source)
+            let ingestion_unavailable =
+                cli.schema.is_none() || (cli.data_dir.is_none() && cli.dataset.is_none());
+
+            // Check if query is a SELECT statement
+            let is_select_query = query.trim().to_uppercase().starts_with("SELECT");
+
+            if ingestion_unavailable && is_select_query {
+                eprintln!("⚠️  Using experimental read-sstable fallback (temporary feature, disabled by default)");
+
+                // Extract table path from SELECT query using simple regex
+                // Supports patterns like: SELECT * FROM /path/to/table or SELECT * FROM path/to/table
+                let table_path_result = extract_table_path_from_select(&query);
+
+                match table_path_result {
+                    Ok(table_path) => {
+                        eprintln!("📂 Extracted table path: {}", table_path.display());
+
+                        // Call read-sstable command with extracted path
+                        return commands::read_sstable::execute_read_sstable_command(
+                            &table_path,
+                            cli.format,
+                            cli.limit,
+                            0,     // skip
+                            false, // keys_only
+                            false, // raw
+                            cli.verbose > 0,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "SELECT fallback failed: {}. \
+                             Provide schema and data-dir for full query engine support.",
+                            e
+                        ));
+                    }
+                }
+            }
+        }
+
         return commands::execute_query(
             &database,
             &query,
@@ -450,4 +494,57 @@ fn create_core_config(cli_config: &config::Config) -> Result<CoreConfig> {
         .map_err(|e| anyhow::anyhow!("Invalid database configuration: {}", e))?;
 
     Ok(core_config)
+}
+
+/// Extract table path from SELECT query for fallback routing (Issue #142)
+/// Supports simple patterns: SELECT * FROM /path/to/table
+fn extract_table_path_from_select(query: &str) -> Result<PathBuf> {
+    // Remove extra whitespace and normalize
+    let normalized_query = query
+        .trim()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let uppercase_query = normalized_query.to_uppercase();
+
+    // Find FROM clause
+    if let Some(from_pos) = uppercase_query.find("FROM") {
+        // Extract text after FROM
+        let after_from = &normalized_query[from_pos + 4..].trim();
+
+        // Find first token after FROM (this should be the path)
+        let path_token = after_from
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No table path found after FROM clause"))?;
+
+        // Remove trailing semicolon if present
+        let cleaned_path = path_token.trim_end_matches(';');
+
+        // SECURITY: Check for directory traversal attempts before canonicalization
+        // Issue #142: Defense-in-depth for temporary fallback feature
+        if cleaned_path.contains("..") {
+            return Err(anyhow::anyhow!(
+                "Security violation: path contains '..' which could indicate directory traversal attempt: {}",
+                cleaned_path
+            ));
+        }
+
+        let path = PathBuf::from(cleaned_path);
+
+        // SECURITY: Canonicalize to resolve symlinks and validate path exists
+        let canonical_path = path.canonicalize().map_err(|e| {
+            anyhow::anyhow!(
+                "Table path does not exist or is inaccessible: {}. Ensure the path points to a valid SSTable file or directory. Error: {}",
+                path.display(),
+                e
+            )
+        })?;
+
+        Ok(canonical_path)
+    } else {
+        Err(anyhow::anyhow!(
+            "Invalid SELECT query: missing FROM clause. Use format: SELECT * FROM /path/to/table"
+        ))
+    }
 }
