@@ -1,0 +1,100 @@
+# Test Configuration for CQLite - simple_table acceptance testing
+#
+# This config is set up to work with the simple_table dataset for acceptance testing.
+# Usage: cqlite --config test.toml repl
+
+# =============================================================================
+# Core Data Settings
+# =============================================================================
+
+# Cassandra data directory root (copy from running node)
+# Points to sstables directory which contains keyspaces (test_basic, system, etc.)
+data_directory = "./test-data/datasets/sstables"
+
+# Schema file paths
+# Using the basic-types.cql schema which defines simple_table
+schema_paths = ["./test-data/schemas/basic-types.cql"]
+
+# Default keyspace to use
+default_keyspace = "test_basic"
+
+# =============================================================================
+# Query Execution Settings
+# =============================================================================
+
+# Output format for query results (table, json, csv)
+out = "table"
+
+# Maximum number of rows to return from queries
+query_limit = 100
+
+# =============================================================================
+# Display Settings
+# =============================================================================
+
+# Enable colored output
+no_color = false
+
+# =============================================================================
+# REPL Settings
+# =============================================================================
+
+[repl]
+# Enable command history
+enable_history = true
+
+# Enable tab completion
+enable_completion = true
+
+# Enable colored output in REPL
+enable_colors = true
+
+# Show query execution timing
+show_timing = true
+
+# Number of rows per page
+page_size = 25
+
+# Enable pagination for large result sets
+enable_paging = true
+
+# Maximum number of history entries
+max_history_size = 1000
+
+# REPL prompt
+prompt = "test_basic> "
+
+# Continuation prompt for multi-line statements
+prompt_continuation = "       ... "
+
+# =============================================================================
+# Output Formatting
+# =============================================================================
+
+[output]
+# Enable colored output in formatted tables
+colors = true
+
+# Timestamp format
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+
+# =============================================================================
+# Cassandra Version Hints
+# =============================================================================
+
+# Cassandra version hint for format compatibility
+cassandra_version = "5.0"
+
+# Enable auto-detection of format and version
+auto_detect = true
+
+# =============================================================================
+# Logging Settings
+# =============================================================================
+
+[logging]
+# Log level: "error", "warn", "info", "debug", "trace"
+level = "info"
+
+# Log format: "Plain", "Json", "Pretty"
+format = "Pretty"

@@ -118,6 +118,9 @@ impl ReplEngine {
 
     /// Start the REPL loop
     pub async fn run(&mut self) -> ReplResult<()> {
+        // Initialize session (loads data dir, default keyspace, etc.)
+        self.session.initialize().await?;
+
         self.display_startup_banner().await?;
 
         match self.config.mode {

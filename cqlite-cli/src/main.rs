@@ -225,23 +225,74 @@ async fn run_main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Repl { tui }) => {
-            // Create REPL configuration
+            // Check if we need to run ingestion from config file
+            #[cfg(feature = "state_machine")]
+            let database = if !config.schema_paths.is_empty() && config.data_directory.is_some() {
+                info!("REPL: Running ingestion from config file");
+                info!(
+                    "REPL: Loading {} schema file(s) from config",
+                    config.schema_paths.len()
+                );
+                info!(
+                    "REPL: Discovering SSTables in: {}",
+                    config.data_directory.as_ref().unwrap().display()
+                );
+
+                let ingestion_config = IngestionConfig {
+                    schema_paths: config.schema_paths.clone(),
+                    data_dir: config.data_directory.clone().unwrap(),
+                    version_hint: config.cassandra_version.clone(),
+                    core_config: create_core_config(&config)?,
+                    table_directory_filter: None, // REPL doesn't filter tables
+                };
+
+                match ingest(ingestion_config).await {
+                    Ok(result) => {
+                        info!(
+                            "REPL ingestion complete: {} schema(s) loaded, {} SSTable(s) discovered, {} keyspace(s) found",
+                            result.schema_load_result.schemas_loaded,
+                            result.discovery_summary.sstables_found,
+                            result.discovery_summary.keyspaces.len()
+                        );
+                        result.database
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "REPL ingestion failed: {}. Check schema paths and data directory in config file.",
+                            e
+                        ));
+                    }
+                }
+            } else {
+                // No config-based ingestion, use existing database
+                database
+            };
+
+            #[cfg(not(feature = "state_machine"))]
+            let database = database; // Just use existing database if state_machine feature disabled
+
+            // Create REPL configuration from loaded config (not hardcoded!)
             let repl_config = repl::ReplConfig {
                 mode: if tui {
                     repl::ReplMode::Tui
                 } else {
                     repl::ReplMode::Basic
                 },
-                enable_history: true,
-                enable_completion: true,
-                enable_colors: !cli.no_color,
+                // Use config.repl settings with CLI flag overrides
+                enable_history: config.repl.enable_history,
+                enable_completion: config.repl.enable_completion,
+                enable_colors: if cli.no_color {
+                    false
+                } else {
+                    config.repl.enable_colors
+                },
                 output_format: repl::OutputFormat::Table,
-                max_history_size: 1000,
-                page_size: cli.page_size.unwrap_or(50),
-                show_timing: false,
-                enable_paging: true,
-                prompt: "cqlite> ".to_string(),
-                prompt_continuation: "    -> ".to_string(),
+                max_history_size: config.repl.max_history_size,
+                page_size: cli.page_size.unwrap_or(config.repl.page_size),
+                show_timing: config.repl.show_timing,
+                enable_paging: config.repl.enable_paging,
+                prompt: config.repl.prompt.clone(),
+                prompt_continuation: config.repl.prompt_continuation.clone(),
             };
 
             // Initialize and run REPL engine
