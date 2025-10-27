@@ -31,7 +31,7 @@ impl OutputMode {
 #[command(name = "cqlite")]
 #[command(about = "CQLite - Local SSTable query tool with cqlsh-compatible interface")]
 #[command(
-    long_about = "CQLite provides cqlsh-compatible access to Apache Cassandra 5.0 SSTables locally without cluster dependencies. Supports interactive REPL and one-shot query modes."
+    long_about = "CQLite provides cqlsh-compatible access to Apache Cassandra 5.0 SSTables locally without cluster dependencies. Supports interactive REPL and one-shot query modes.\n\nIngestion Model: Provide --schema and --data-dir together to trigger schema loading + dataset discovery for query execution.\n\nNote: Timestamps are displayed in UTC for M2 milestone."
 )]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(author = "CQLite Team")]
@@ -64,7 +64,9 @@ pub struct Cli {
     #[arg(long, value_name = "VER")]
     pub cassandra_version: Option<String>,
 
-    /// File (.cql or .json) or directory containing schemas. Repeatable; order defines precedence
+    /// CQL (.cql) or JSON (.json) schema files; triggers schema loading for ingestion.
+    /// When combined with --data-dir, enables schema-aware query execution.
+    /// Repeatable; order defines precedence
     #[arg(long, value_name = "PATH", env = "CQLITE_SCHEMA")]
     pub schema: Option<PathBuf>,
 
@@ -73,7 +75,8 @@ pub struct Cli {
     #[arg(long, value_name = "DATASET", conflicts_with = "data_dir")]
     pub dataset: Option<String>,
 
-    /// Cassandra data directory root (e.g., /var/lib/cassandra/data)
+    /// Cassandra data directory root (e.g., /var/lib/cassandra/data).
+    /// Combined with --schema, triggers dataset discovery and ingestion.
     /// Mutually exclusive with --dataset. For production Cassandra directory layouts.
     #[arg(
         long,

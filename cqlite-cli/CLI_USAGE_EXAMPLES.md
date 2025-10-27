@@ -22,8 +22,11 @@ CQLite M2 delivers a cqlsh-compatible experience for querying local Cassandra 5 
 - **Multiple output formats**: table (cqlsh-compatible), JSON, and CSV
 - **Schema-aware reading**: Load CQL or JSON schema definitions
 - **Status & health commands**: Monitor schema-data synchronization
+- **Ingestion model**: Provide `--schema` and `--data-dir` together to trigger schema loading + dataset discovery for query execution
 
 All examples in this guide use the validated test data paths from the CQLite repository.
+
+**Note**: Timestamps are displayed in UTC for M2 milestone. Local timezone support is planned for M3.
 
 ---
 
@@ -451,6 +454,20 @@ cqlite> SELECT * FROM users WHERE id = 8b6c8a96-5f5a-4f7e-a6a8-2b5a3a3f1c01;
 ## Output Formats
 
 CQLite supports three output formats in M2 (Parquet planned for M3):
+
+### UTC Timestamp Behavior (M2)
+
+CQLite M2 displays all timestamp values in UTC timezone for consistency:
+
+```text
+cqlite> SELECT id, created_at FROM users LIMIT 2;
+ id                                   | created_at
+--------------------------------------+---------------------------
+ 8b6c8a96-5f5a-4f7e-a6a8-2b5a3a3f1c01 | 2024-01-15 10:30:00 UTC
+ 2a1dc9b7-2f1f-4db2-8d1f-7c0a4d4f9b12 | 2024-01-16 14:22:00 UTC
+```
+
+**Note**: This behavior ensures consistent timestamp display across different system timezones. Local timezone support is planned for M3.
 
 ### Table Format (cqlsh-compatible)
 
