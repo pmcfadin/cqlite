@@ -97,7 +97,8 @@ async fn read_next_block_impl(
         | crate::parser::header::CassandraVersion::V5_0FormatD
         | crate::parser::header::CassandraVersion::V5_0FormatE
         | crate::parser::header::CassandraVersion::V5_0FormatF
-        | crate::parser::header::CassandraVersion::V5_0FormatG => {
+        | crate::parser::header::CassandraVersion::V5_0FormatG
+        | crate::parser::header::CassandraVersion::V5_0StaticColumns => {
             eprintln!("[DEBUG block_io::read_next_block_impl] Using NB format chunk reader");
 
             // Get file size for chunk size calculation
