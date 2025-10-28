@@ -25,7 +25,7 @@
     "small_number": 105,
     "varchar_field": "realize",
     "weight": 74.45,
-    "work_time": 576460769201574980
+    "work_time": 4325926782000
   },
   {
     "account_balance": {
@@ -53,7 +53,7 @@
     "small_number": 26,
     "varchar_field": "speak",
     "weight": 114.45,
-    "work_time": 576460769201361734
+    "work_time": 4325872191000
   },
   {
     "account_balance": {
@@ -81,6 +81,6 @@
     "small_number": 82,
     "varchar_field": "clearly",
     "weight": 75.12,
-    "work_time": 576460769201123687
+    "work_time": 4325811251000
   }
 ]
