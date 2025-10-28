@@ -44,8 +44,8 @@ impl ValueFormatter {
             // Blob: 0x-prefixed lowercase hex
             Value::Blob(bytes) => format!("0x{}", hex::encode(bytes)),
 
-            // Timestamp: microseconds since epoch → YYYY-MM-DD HH:MM:SS.fff+0000
-            Value::Timestamp(micros) => Self::format_timestamp(*micros),
+            // Timestamp: milliseconds since epoch → YYYY-MM-DD HH:MM:SS.fff+0000
+            Value::Timestamp(millis) => Self::format_timestamp(*millis),
 
             // Date: days since epoch → YYYY-MM-DD
             Value::Date(days) => Self::format_date(*days),
@@ -128,17 +128,17 @@ impl ValueFormatter {
         }
     }
 
-    /// Format timestamp (microseconds since epoch) as YYYY-MM-DD HH:MM:SS.fff+0000
-    fn format_timestamp(micros: i64) -> String {
-        // Convert microseconds to seconds and nanoseconds
-        let secs = micros / 1_000_000;
-        let subsec_nanos = ((micros % 1_000_000).abs() as u32) * 1_000;
+    /// Format timestamp (milliseconds since epoch) as YYYY-MM-DD HH:MM:SS.fff+0000
+    fn format_timestamp(millis: i64) -> String {
+        // Convert milliseconds to seconds and nanoseconds
+        let secs = millis / 1_000;
+        let subsec_nanos = ((millis % 1_000).abs() as u32) * 1_000_000;
 
         if let Some(datetime) = DateTime::from_timestamp(secs, subsec_nanos) {
             // Format with milliseconds: YYYY-MM-DD HH:MM:SS.fff+0000
             datetime.format("%Y-%m-%d %H:%M:%S%.3f+0000").to_string()
         } else {
-            format!("<invalid-timestamp:{}>", micros)
+            format!("<invalid-timestamp:{}>", millis)
         }
     }
 
@@ -439,8 +439,8 @@ mod tests {
 
     #[test]
     fn test_timestamp() {
-        // 2023-01-15 10:30:45.123 UTC = 1673778645123000 microseconds
-        let timestamp = Value::Timestamp(1673778645123000);
+        // 2023-01-15 10:30:45.123 UTC = 1673778645123 milliseconds
+        let timestamp = Value::Timestamp(1673778645123);
         let formatted = ValueFormatter::format_value(&timestamp);
         assert!(formatted.starts_with("2023-01-15"));
         assert!(formatted.contains("10:30:45"));

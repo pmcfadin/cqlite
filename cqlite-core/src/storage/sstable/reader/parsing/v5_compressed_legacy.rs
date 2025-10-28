@@ -1691,7 +1691,7 @@ impl V5CompressedLegacyParser {
             }
 
             "timestamp" => {
-                // Timestamp: 8 bytes, i64 microseconds big-endian (NO length prefix)
+                // Timestamp: 8 bytes, i64 milliseconds big-endian (NO length prefix, per Cassandra spec)
                 if offset + 8 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 8 bytes for timestamp, only {} available",
@@ -1699,7 +1699,7 @@ impl V5CompressedLegacyParser {
                         data.len() - offset
                     )));
                 }
-                let micros = i64::from_be_bytes([
+                let millis = i64::from_be_bytes([
                     data[offset],
                     data[offset + 1],
                     data[offset + 2],
@@ -1710,7 +1710,7 @@ impl V5CompressedLegacyParser {
                     data[offset + 7],
                 ]);
                 offset += 8;
-                Value::Timestamp(micros)
+                Value::Timestamp(millis)
             }
 
             "date" => {
@@ -1933,10 +1933,31 @@ impl V5CompressedLegacyParser {
             }
 
             "time" => {
-                // Time: 8 bytes, i64 nanoseconds since midnight (NO length prefix)
+                // Time: [VInt len=8][i64 BE nanoseconds since midnight]
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': unexpected end at time length",
+                        column.name
+                    )));
+                }
+                let (remaining, time_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse time length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let time_len = time_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+                if time_len != 8 {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': expected time length 8, got {}",
+                        column.name, time_len
+                    )));
+                }
                 if offset + 8 > data.len() {
                     return Err(Error::corruption(format!(
-                        "Cell '{}': need 8 bytes for time, only {} available",
+                        "Cell '{}': need 8 bytes for time value, only {} available",
                         column.name,
                         data.len() - offset
                     )));

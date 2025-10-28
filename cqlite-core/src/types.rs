@@ -43,7 +43,7 @@ pub enum Value {
     Text(String),
     /// Binary data
     Blob(Vec<u8>),
-    /// Timestamp (microseconds since Unix epoch)
+    /// Timestamp (milliseconds since Unix epoch)
     Timestamp(i64),
     /// Date (days since Unix epoch: 1970-01-01)
     Date(i32),

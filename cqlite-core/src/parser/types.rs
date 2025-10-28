@@ -283,9 +283,10 @@ pub fn parse_uuid(input: &[u8]) -> IResult<&[u8], Value> {
     Ok((input, Value::Uuid(uuid)))
 }
 
-/// Parse timestamp (64-bit milliseconds since epoch)
+/// Parse timestamp from binary format (reads milliseconds, converts to microseconds for internal storage)
+/// NOTE: This is used for statistics/metadata parsing. Data row parsing uses V5CompressedLegacyParser which stores milliseconds directly.
 pub fn parse_timestamp(input: &[u8]) -> IResult<&[u8], Value> {
-    map(be_i64, |ts| Value::Timestamp(ts * 1000))(input) // Convert ms to microseconds
+    map(be_i64, |ts_ms| Value::Timestamp(ts_ms * 1000))(input) // Convert ms to μs (statistics format)
 }
 
 /// Parse date (32-bit days since epoch)
