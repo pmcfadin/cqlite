@@ -42,13 +42,14 @@ async fn test_uuid_partition_key_parsing() {
     println!("  Table: {}", reader.header().table_name);
 
     // Check if schema was extracted from header
-    if reader.schema().is_none() {
-        println!("⏭️ Skipping test: Schema extraction from SSTable header not yet implemented");
-        println!(
-            "   V5CompressedLegacy format requires schema but header parsing didn't extract it"
-        );
-        return;
-    }
+    // SerializationHeader must be extracted from Statistics.db for V5CompressedLegacy format
+    assert!(
+        reader.schema().is_some(),
+        "Schema extraction failed for table '{}'. \
+         SerializationHeader must be extracted from Statistics.db for V5CompressedLegacy format. \
+         This is a hard requirement - tests must not skip. See Issue #195.",
+        reader.header().table_name
+    );
 
     // Read all entries - this exercises the full V5CompressedLegacy parsing path
     let entries_result = reader.get_all_entries().await;
@@ -194,10 +195,15 @@ async fn test_timeuuid_column_parsing() {
         .await
         .expect("Failed to open simple_table");
 
-    if reader.schema().is_none() {
-        println!("⏭️ Skipping test: Schema extraction from SSTable header not yet implemented");
-        return;
-    }
+    // Check if schema was extracted from header
+    // SerializationHeader must be extracted from Statistics.db for V5CompressedLegacy format
+    assert!(
+        reader.schema().is_some(),
+        "Schema extraction failed for table '{}'. \
+         SerializationHeader must be extracted from Statistics.db for V5CompressedLegacy format. \
+         This is a hard requirement - tests must not skip. See Issue #195.",
+        reader.header().table_name
+    );
 
     let entries_result = reader.get_all_entries().await;
 

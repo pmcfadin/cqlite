@@ -629,13 +629,14 @@ async fn test_v5_compressed_legacy_jsonl_parity() {
     println!("  Compression: {}", reader.header().compression.algorithm);
 
     // Check if schema was extracted from header
-    if reader.schema().is_none() {
-        println!("⏭️ Skipping test: Schema extraction from SSTable header not yet implemented");
-        println!(
-            "   V5CompressedLegacy format requires schema but header parsing didn't extract it"
-        );
-        return;
-    }
+    // SerializationHeader must be extracted from Statistics.db for V5CompressedLegacy format
+    assert!(
+        reader.schema().is_some(),
+        "Schema extraction failed for table '{}'. \
+         SerializationHeader must be extracted from Statistics.db for V5CompressedLegacy format. \
+         This is a hard requirement - tests must not skip. See Issue #195.",
+        reader.header().table_name
+    );
 
     println!("🔍 Reading all entries from SSTable...");
     let entries = reader
