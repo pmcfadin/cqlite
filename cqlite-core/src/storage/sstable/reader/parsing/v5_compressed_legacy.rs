@@ -194,6 +194,7 @@ impl V5CompressedLegacyParser {
 
         // Parse ALL partitions in block (Issue #2 fix: previously only parsed one partition)
         let mut partition_index = 0;
+        let mut skipped_partitions = 0;
         while offset < data.len() {
             log::debug!(
                 "V5CompressedLegacy: === PARTITION {} at offset {} (block size: {}) ===",
@@ -244,8 +245,9 @@ impl V5CompressedLegacyParser {
                 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
                 || offset + header_min_size > data.len()
             {
-                eprintln!(
-                    "[DEBUG] V5CompressedLegacy: Invalid partition header at offset {} (flags=0x{:02x}, key_len={}, need {} bytes, have {}), stopping after {} entries",
+                log::warn!(
+                    "V5CompressedLegacy: Skipping malformed partition header at offset {} \
+                     (flags=0x{:02x}, key_len={}, need {} bytes, have {}, partition={}): header validation failed",
                     offset,
                     flags,
                     key_len,
@@ -253,7 +255,10 @@ impl V5CompressedLegacyParser {
                     data.len() - offset,
                     partition_index
                 );
-                break; // Not a valid partition header, end of partitions in block
+                // Try to skip to next potential partition boundary
+                skipped_partitions += 1;
+                offset += 1; // Minimal forward progress to avoid infinite loop
+                continue; // Skip this partition, try next
             }
 
             // Try to parse partition header
@@ -390,8 +395,8 @@ impl V5CompressedLegacyParser {
                                 );
                                 if row_count == 0 {
                                     // If we couldn't parse even one row, log as error
-                                    eprintln!(
-                                        "[DEBUG] V5CompressedLegacy: Partition {} - Failed to parse first row at offset {}: {}",
+                                    log::error!(
+                                        "V5CompressedLegacy: Partition {} - Failed to parse first row at offset {}: {}",
                                         partition_index, offset, e
                                     );
                                 }
@@ -403,13 +408,27 @@ impl V5CompressedLegacyParser {
                     partition_index += 1;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[DEBUG] V5CompressedLegacy: Partition {} - Failed to parse partition header at offset {}: {} (end of partitions), stopping after {} entries",
-                        partition_index, offset, e, partition_index
+                    log::warn!(
+                        "V5CompressedLegacy: Failed to parse partition header at offset {} \
+                         (partition={}): {}. Attempting to continue to next partition.",
+                        offset,
+                        partition_index,
+                        e
                     );
-                    break; // No more partitions in block
+                    // Try to skip forward to find next partition
+                    skipped_partitions += 1;
+                    offset += 1;
+                    continue; // Skip this partition, try next
                 }
             }
+        }
+
+        if skipped_partitions > 0 {
+            log::warn!(
+                "V5CompressedLegacy: Successfully parsed {} entries, skipped {} malformed partitions",
+                results.len(),
+                skipped_partitions
+            );
         }
 
         debug!(
