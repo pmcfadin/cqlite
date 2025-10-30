@@ -62,15 +62,10 @@ async fn test_data_offset_calculation_from_real_data() {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-    // Find the actual Data.db file - skip if not present (refs-only dataset)
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            println!("   This test requires full SSTable binary files, not just reference data");
-            return;
-        }
-    };
+    // Find the actual Data.db file
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Test requires full SSTable dataset: No SSTable Data.db files found (refs-only dataset in CI). This test requires full SSTable binary files, not just reference data");
 
     let sstable_reader = match SSTableReader::open(&data_file, &config, platform.clone()).await {
         Ok(reader) => reader,
@@ -85,13 +80,9 @@ async fn test_data_offset_calculation_from_real_data() {
     };
 
     // Get partition entries from the index to validate offset calculations
-    let index_file = match find_file_with_pattern(&table_path, "-Index.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No Index.db file found");
-            return;
-        }
-    };
+    let index_file = find_file_with_pattern(&table_path, "-Index.db")
+        .await
+        .expect("Test requires full SSTable dataset: No Index.db file found");
 
     let index_reader = match IndexReader::open(&index_file, platform).await {
         Ok(reader) => reader,
@@ -203,26 +194,18 @@ async fn test_different_partitions_different_offsets() {
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
     // Find the actual Data.db file
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            return;
-        }
-    };
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Test requires full SSTable dataset: No SSTable Data.db files found");
 
     let reader = SSTableReader::open(&data_file, &config, platform.clone())
         .await
         .unwrap();
 
     // Load the index to get actual partition information
-    let index_file = match find_file_with_pattern(&table_path, "-Index.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No Index.db file found");
-            return;
-        }
-    };
+    let index_file = find_file_with_pattern(&table_path, "-Index.db")
+        .await
+        .expect("Test requires full SSTable dataset: No Index.db file found");
 
     let index_reader = IndexReader::open(&index_file, platform).await.unwrap();
 
@@ -318,13 +301,9 @@ async fn test_offset_accuracy_for_data_access() {
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
     // Find the actual Data.db file
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            return;
-        }
-    };
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Test requires full SSTable dataset: No SSTable Data.db files found");
 
     let reader = match SSTableReader::open(&data_file, &config, platform.clone()).await {
         Ok(reader) => reader,
@@ -460,13 +439,9 @@ async fn test_offset_calculation_large_files() {
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
     // Find the actual Data.db file
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            return;
-        }
-    };
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Test requires full SSTable dataset: No SSTable Data.db files found");
 
     // Check file size to ensure we're testing with a reasonably large file
     let data_file_metadata = fs::metadata(&data_file).await.unwrap();
@@ -490,13 +465,9 @@ async fn test_offset_calculation_large_files() {
     };
 
     // Load index to understand the partition structure
-    let index_file = match find_file_with_pattern(&table_path, "-Index.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No Index.db file found");
-            return;
-        }
-    };
+    let index_file = find_file_with_pattern(&table_path, "-Index.db")
+        .await
+        .expect("Test requires full SSTable dataset: No Index.db file found");
 
     let index_reader = match IndexReader::open(&index_file, platform).await {
         Ok(reader) => reader,
@@ -667,8 +638,10 @@ async fn test_offset_calculation_boundary_conditions() {
         let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
             Some(path) => path,
             None => {
-                println!("⏭️  Skipping boundary test case: No SSTable Data.db files found");
-                continue;
+                panic!(
+                    "Test requires full SSTable dataset: No SSTable Data.db files found for {}",
+                    table_name
+                );
             }
         };
 
@@ -861,13 +834,9 @@ async fn test_issue_66_fix_demonstration() {
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
     // Find the actual Data.db file
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            return;
-        }
-    };
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Test requires full SSTable dataset: No SSTable Data.db files found");
 
     let reader = match SSTableReader::open(&data_file, &config, platform.clone()).await {
         Ok(reader) => reader,
@@ -882,13 +851,9 @@ async fn test_issue_66_fix_demonstration() {
     };
 
     // Load index to understand what partitions actually exist
-    let index_file = match find_file_with_pattern(&table_path, "-Index.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No Index.db file found");
-            return;
-        }
-    };
+    let index_file = find_file_with_pattern(&table_path, "-Index.db")
+        .await
+        .expect("Test requires full SSTable dataset: No Index.db file found");
 
     let index_reader = match IndexReader::open(&index_file, platform).await {
         Ok(reader) => reader,

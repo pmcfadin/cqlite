@@ -88,21 +88,9 @@ async fn test_partition_lookup_correct_offsets() {
         }
     }
 
-    // Skip test if SSTable binary files not present (CI uses refs-only dataset)
-    let data_file = match data_file {
-        Some(f) => f,
-        None => {
-            println!("⏭️  Skipping test: Data.db file not present in dataset (refs-only mode)");
-            return;
-        }
-    };
-    let index_file = match index_file {
-        Some(f) => f,
-        None => {
-            println!("⏭️  Skipping test: Index.db file not present in dataset (refs-only mode)");
-            return;
-        }
-    };
+    // Require SSTable binary files to be present
+    let data_file = data_file.expect("Data.db file must be present in dataset for this test");
+    let index_file = index_file.expect("Index.db file must be present in dataset for this test");
 
     // Test with real SSTable reader
     let _reader = SSTableReader::open(&data_file, &config, platform.clone())
@@ -196,21 +184,9 @@ async fn test_index_with_real_sstable_data() {
         }
     }
 
-    // Skip test if SSTable binary files not present (CI uses refs-only dataset)
-    let data_file = match data_file {
-        Some(f) => f,
-        None => {
-            println!("⏭️  Skipping test: Data.db file not present in dataset (refs-only mode)");
-            return;
-        }
-    };
-    let index_file = match index_file {
-        Some(f) => f,
-        None => {
-            println!("⏭️  Skipping test: Index.db file not present in dataset (refs-only mode)");
-            return;
-        }
-    };
+    // Require SSTable binary files to be present
+    let data_file = data_file.expect("Data.db file must be present in dataset for this test");
+    let index_file = index_file.expect("Index.db file must be present in dataset for this test");
 
     // Test that Index.db entries correspond to actual SSTable data
     let index_reader = IndexReader::open(&index_file, platform.clone())

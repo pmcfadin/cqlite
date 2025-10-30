@@ -425,12 +425,11 @@ async fn test_legacy_sst_backward_compatibility() {
     // Store results in memory
     store_backward_compat_results_in_memory(&backward_compat_results).await;
 
-    // Skip test if no SSTable Data.db files were found (refs-only dataset)
-    if successful_tests == 0 {
-        println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset or test infrastructure issue)");
-        println!("💡 This test requires actual Data.db binary files, not just reference data");
-        return;
-    }
+    // Assert that we found at least some SSTable Data.db files
+    assert!(
+        successful_tests > 0,
+        "Test requires full SSTable dataset: No SSTable Data.db files found (refs-only dataset or test infrastructure issue). This test requires actual Data.db binary files, not just reference data"
+    );
 
     // Validate backward compatibility
     assert!(

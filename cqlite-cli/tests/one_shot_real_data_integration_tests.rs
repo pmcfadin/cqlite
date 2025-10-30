@@ -52,15 +52,17 @@ fn test_one_shot_select_table_format() -> Result<()> {
     let data_dir = get_test_basic_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() {
-        eprintln!("Skipping test: data directory not found at {:?}", data_dir);
-        return Ok(());
-    }
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema file not found at {:?}", schema_file);
-        return Ok(());
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists(),
+        "Test requires full SSTable dataset: data directory not found at {:?}",
+        data_dir
+    );
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema file not found at {:?}",
+        schema_file
+    );
 
     let output = Command::new(get_cli_binary())
         .args(&[
@@ -120,15 +122,17 @@ fn test_one_shot_select_json_format() -> Result<()> {
     let data_dir = get_test_basic_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() {
-        eprintln!("Skipping test: data directory not found at {:?}", data_dir);
-        return Ok(());
-    }
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema file not found at {:?}", schema_file);
-        return Ok(());
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists(),
+        "Test requires full SSTable dataset: data directory not found at {:?}",
+        data_dir
+    );
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema file not found at {:?}",
+        schema_file
+    );
 
     let output = Command::new(get_cli_binary())
         .args(&[
@@ -182,15 +186,17 @@ fn test_one_shot_select_csv_format() -> Result<()> {
     let data_dir = get_test_basic_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() {
-        eprintln!("Skipping test: data directory not found at {:?}", data_dir);
-        return Ok(());
-    }
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema file not found at {:?}", schema_file);
-        return Ok(());
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists(),
+        "Test requires full SSTable dataset: data directory not found at {:?}",
+        data_dir
+    );
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema file not found at {:?}",
+        schema_file
+    );
 
     let output = Command::new(get_cli_binary())
         .args(&[
@@ -242,15 +248,17 @@ fn test_script_file_execution() -> Result<()> {
     let data_dir = get_test_basic_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() {
-        eprintln!("Skipping test: data directory not found at {:?}", data_dir);
-        return Ok(());
-    }
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema file not found at {:?}", schema_file);
-        return Ok(());
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists(),
+        "Test requires full SSTable dataset: data directory not found at {:?}",
+        data_dir
+    );
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema file not found at {:?}",
+        schema_file
+    );
 
     // Create a temporary script file
     let temp_dir = TempDir::new()?;
@@ -310,15 +318,17 @@ fn test_script_file_with_json_format() -> Result<()> {
     let data_dir = get_test_basic_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() {
-        eprintln!("Skipping test: data directory not found at {:?}", data_dir);
-        return Ok(());
-    }
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema file not found at {:?}", schema_file);
-        return Ok(());
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists(),
+        "Test requires full SSTable dataset: data directory not found at {:?}",
+        data_dir
+    );
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema file not found at {:?}",
+        schema_file
+    );
 
     // Create a temporary script file
     let temp_dir = TempDir::new()?;
@@ -370,15 +380,17 @@ fn test_one_shot_select_with_where_clause() -> Result<()> {
     let data_dir = get_test_basic_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() {
-        eprintln!("Skipping test: data directory not found at {:?}", data_dir);
-        return Ok(());
-    }
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema file not found at {:?}", schema_file);
-        return Ok(());
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists(),
+        "Test requires full SSTable dataset: data directory not found at {:?}",
+        data_dir
+    );
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema file not found at {:?}",
+        schema_file
+    );
 
     let output = Command::new(get_cli_binary())
         .args(&[
@@ -418,15 +430,17 @@ fn test_one_shot_count_query() -> Result<()> {
     let data_dir = get_test_basic_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() {
-        eprintln!("Skipping test: data directory not found at {:?}", data_dir);
-        return Ok(());
-    }
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema file not found at {:?}", schema_file);
-        return Ok(());
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists(),
+        "Test requires full SSTable dataset: data directory not found at {:?}",
+        data_dir
+    );
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema file not found at {:?}",
+        schema_file
+    );
 
     let output = Command::new(get_cli_binary())
         .args(&[

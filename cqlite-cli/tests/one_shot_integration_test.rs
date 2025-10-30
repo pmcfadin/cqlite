@@ -50,11 +50,12 @@ fn test_one_shot_select_with_ingestion_basic() {
     let data_dir = get_test_data_root().join("sstables");
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() || !schema_file.exists() {
-        eprintln!("Skipping test: test data not found at {:?}", data_dir);
-        return;
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found at {:?}",
+        data_dir
+    );
 
     let output = run_cli_command(&[
         "--schema",
@@ -95,11 +96,12 @@ fn test_one_shot_select_with_invalid_schema_exit_code_3() {
     let data_dir = get_test_data_root().join("sstables");
     let invalid_schema = PathBuf::from("/tmp/nonexistent_schema.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() {
-        eprintln!("Skipping test: test data not found");
-        return;
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists(),
+        "Test requires full SSTable dataset: test data not found at {:?}",
+        data_dir
+    );
 
     let output = run_cli_command(&[
         "--schema",
@@ -137,10 +139,11 @@ fn test_one_shot_select_with_invalid_data_dir_exit_code_4() {
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
     // Skip if schema not available
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema not found");
-        return;
-    }
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema not found at {:?}",
+        schema_file
+    );
 
     let output = run_cli_command(&[
         "--schema",
@@ -178,11 +181,13 @@ fn test_one_shot_select_with_version_hint() {
     let data_dir = get_test_data_root().join("sstables");
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() || !schema_file.exists() {
-        eprintln!("Skipping test: test data not found");
-        return;
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
 
     let output = run_cli_command(&[
         "--schema",
@@ -213,11 +218,13 @@ fn test_one_shot_select_table_format() {
     let data_dir = get_test_data_root().join("sstables");
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() || !schema_file.exists() {
-        eprintln!("Skipping test: test data not found");
-        return;
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
 
     let output = run_cli_command(&[
         "--schema",
@@ -250,11 +257,13 @@ fn test_one_shot_select_csv_format() {
     let data_dir = get_test_data_root().join("sstables");
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if test data not available
-    if !data_dir.exists() || !schema_file.exists() {
-        eprintln!("Skipping test: test data not found");
-        return;
-    }
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
 
     let output = run_cli_command(&[
         "--schema",

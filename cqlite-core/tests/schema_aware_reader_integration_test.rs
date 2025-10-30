@@ -114,7 +114,6 @@ fn create_nested_collections_schema() -> TableSchema {
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test --test schema_aware_reader_integration_test -- --ignored
 async fn test_format_detection_from_real_sstable() {
     let datasets_root = get_test_datasets_root();
     let test_table_dir = datasets_root
@@ -122,16 +121,8 @@ async fn test_format_detection_from_real_sstable() {
         .join("test_basic")
         .join("simple_table-6f06afc0934a11f08d448925b7a9e804");
 
-    let data_file = match find_data_file(&test_table_dir) {
-        Some(f) => f,
-        None => {
-            eprintln!(
-                "Skipping test: No Data.db file found in {:?}",
-                test_table_dir
-            );
-            return;
-        }
-    };
+    let data_file =
+        find_data_file(&test_table_dir).expect("Data.db file must exist in dataset for this test");
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
@@ -160,7 +151,6 @@ async fn test_format_detection_from_real_sstable() {
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test --test schema_aware_reader_integration_test -- --ignored
 async fn test_schema_aware_reader_deterministic_decode() {
     let datasets_root = get_test_datasets_root();
     let test_table_dir = datasets_root
@@ -168,16 +158,8 @@ async fn test_schema_aware_reader_deterministic_decode() {
         .join("test_basic")
         .join("simple_table-6f06afc0934a11f08d448925b7a9e804");
 
-    let data_file = match find_data_file(&test_table_dir) {
-        Some(f) => f,
-        None => {
-            eprintln!(
-                "Skipping test: No Data.db file found in {:?}",
-                test_table_dir
-            );
-            return;
-        }
-    };
+    let data_file =
+        find_data_file(&test_table_dir).expect("Data.db file must exist in dataset for this test");
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
@@ -207,46 +189,24 @@ async fn test_schema_aware_reader_deterministic_decode() {
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test --test schema_aware_reader_integration_test -- --ignored
 async fn test_nested_collections_consumed_byte_tracking() {
     let datasets_root = get_test_datasets_root();
 
     // Find the nested_collections_table directory
     let collections_dir = datasets_root.join("sstables").join("test_collections");
-    let nested_table_dir = if let Ok(entries) = std::fs::read_dir(&collections_dir) {
-        entries
-            .flatten()
-            .find(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("nested_collections_table")
-            })
-            .map(|e| e.path())
-    } else {
-        None
-    };
+    let nested_table_dir = std::fs::read_dir(&collections_dir)
+        .expect("test_collections directory must exist")
+        .flatten()
+        .find(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("nested_collections_table")
+        })
+        .map(|e| e.path())
+        .expect("nested_collections_table must exist in test_collections");
 
-    let nested_table_dir = match nested_table_dir {
-        Some(dir) => dir,
-        None => {
-            eprintln!(
-                "Skipping test: nested_collections_table not found in {:?}",
-                collections_dir
-            );
-            return;
-        }
-    };
-
-    let data_file = match find_data_file(&nested_table_dir) {
-        Some(f) => f,
-        None => {
-            eprintln!(
-                "Skipping test: No Data.db file found in {:?}",
-                nested_table_dir
-            );
-            return;
-        }
-    };
+    let data_file = find_data_file(&nested_table_dir)
+        .expect("Data.db file must exist in nested_collections_table");
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());

@@ -86,11 +86,12 @@ async fn test_repl_select_query_basic() -> Result<()> {
     let data_dir = get_sstables_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    // Skip if schema file not available
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema not found at {:?}", schema_file);
-        return Ok(());
-    }
+    // Assert schema file is available
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema not found at {:?}",
+        schema_file
+    );
 
     // Commands to send to REPL
     let input = "SELECT * FROM test_basic.simple_table LIMIT 3;\n:quit\n";
@@ -133,10 +134,11 @@ async fn test_repl_select_query_with_columns() -> Result<()> {
     let data_dir = get_sstables_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema not found");
-        return Ok(());
-    }
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema not found at {:?}",
+        schema_file
+    );
 
     // Test SELECT with specific columns and LIMIT
     let input = "SELECT id, name, age FROM test_basic.simple_table LIMIT 5;\n:quit\n";
@@ -161,10 +163,11 @@ async fn test_repl_config_command() -> Result<()> {
     let data_dir = get_sstables_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema not found");
-        return Ok(());
-    }
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema not found at {:?}",
+        schema_file
+    );
 
     // Test :config meta-command
     let input = ":config\n:quit\n";
@@ -190,10 +193,11 @@ async fn test_repl_schema_command() -> Result<()> {
     let data_dir = get_sstables_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema not found");
-        return Ok(());
-    }
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema not found at {:?}",
+        schema_file
+    );
 
     // Test :schema meta-command
     let input = ":schema\n:quit\n";
@@ -218,10 +222,11 @@ async fn test_repl_status_command() -> Result<()> {
     let data_dir = get_sstables_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema not found");
-        return Ok(());
-    }
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema not found at {:?}",
+        schema_file
+    );
 
     // Test :status meta-command
     let input = ":status\n:quit\n";
@@ -249,10 +254,11 @@ async fn test_repl_multiple_queries() -> Result<()> {
     let data_dir = get_sstables_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema not found");
-        return Ok(());
-    }
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema not found at {:?}",
+        schema_file
+    );
 
     // Execute multiple queries in sequence (avoid :status which may not be implemented)
     let input = r#"
@@ -286,10 +292,11 @@ async fn test_repl_returns_non_empty_rows() -> Result<()> {
     let data_dir = get_sstables_data_dir()?;
     let schema_file = get_schemas_dir().join("basic-types.cql");
 
-    if !schema_file.exists() {
-        eprintln!("Skipping test: schema not found");
-        return Ok(());
-    }
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema not found at {:?}",
+        schema_file
+    );
 
     // Query that should return rows
     let input = "SELECT * FROM test_basic.simple_table LIMIT 10;\n:quit\n";

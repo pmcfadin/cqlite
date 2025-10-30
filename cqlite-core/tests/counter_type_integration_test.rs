@@ -111,18 +111,16 @@ fn test_counter_table_exists() {
     let counter_table_path =
         test_root.join("sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9");
 
-    if counter_table_path.exists() {
-        println!(
-            "Counter table directory exists at: {:?}",
-            counter_table_path
-        );
-        assert!(counter_table_path.is_dir(), "Should be a directory");
-    } else {
-        println!(
-            "Skipping: Counter table not found at {:?}",
-            counter_table_path
-        );
-    }
+    assert!(
+        counter_table_path.exists(),
+        "Test requires full SSTable dataset: Counter table not found at {:?}",
+        counter_table_path
+    );
+    println!(
+        "Counter table directory exists at: {:?}",
+        counter_table_path
+    );
+    assert!(counter_table_path.is_dir(), "Should be a directory");
 }
 
 /// Test that SchemaAwareReader can open Counter SSTable
@@ -133,16 +131,12 @@ async fn test_counter_sstable_schema_aware_reader_init() {
     let test_table_dir =
         datasets_root.join("sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9");
 
-    let data_file = match find_data_file(&test_table_dir) {
-        Some(f) => f,
-        None => {
-            eprintln!(
-                "Skipping test: No Data.db file found in {:?}",
-                test_table_dir
-            );
-            return;
-        }
-    };
+    let data_file = find_data_file(&test_table_dir).unwrap_or_else(|| {
+        panic!(
+            "Test requires full SSTable dataset: No Data.db file found in {:?}",
+            test_table_dir
+        )
+    });
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());

@@ -15,8 +15,8 @@ use std::{path::PathBuf, sync::Arc};
 #[tokio::test]
 async fn test_index_without_summary_returns_zero() {
     // Test that parsing Index.db without Summary.db returns 0 offsets (no heuristics)
-    let datasets_root =
-        std::env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| "test-data/datasets".to_string());
+    let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
+        .expect("CQLITE_DATASETS_ROOT must be set for this test");
 
     let sstable_dir = format!(
         "{}/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804",
@@ -25,11 +25,11 @@ async fn test_index_without_summary_returns_zero() {
 
     let index_path = PathBuf::from(format!("{}/nb-1-big-Index.db", sstable_dir));
 
-    // Skip test if dataset not available (CI uses refs-only mode)
-    if !index_path.exists() {
-        println!("⏭️  Skipping test: Index.db file not present in dataset (refs-only mode)");
-        return;
-    }
+    assert!(
+        index_path.exists(),
+        "Index.db file must exist at {:?} for this test",
+        index_path
+    );
 
     let config = Config::memory_optimized();
     let platform = Arc::new(
@@ -57,13 +57,14 @@ async fn test_index_without_summary_returns_zero() {
 }
 
 #[tokio::test]
+#[ignore = "Known issue: Summary.db parser has C5 format compatibility issues (Issue #92)"]
 async fn test_index_with_summary_correlation() {
     // Test that parsing Index.db WITH Summary.db uses proper correlation for offsets
     // NOTE: Summary.db parser has known issues with C5 format (Issue #92 scope: Index.db only)
     // This test validates the correlation logic exists and will work when Summary parser is fixed
 
-    let datasets_root =
-        std::env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| "test-data/datasets".to_string());
+    let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
+        .expect("CQLITE_DATASETS_ROOT must be set for this test");
 
     let sstable_dir = format!(
         "{}/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804",
@@ -73,11 +74,10 @@ async fn test_index_with_summary_correlation() {
     let index_path = PathBuf::from(format!("{}/nb-1-big-Index.db", sstable_dir));
     let summary_path = PathBuf::from(format!("{}/nb-1-big-Summary.db", sstable_dir));
 
-    // Skip test if dataset not available (CI uses refs-only mode)
-    if !index_path.exists() || !summary_path.exists() {
-        println!("⏭️  Skipping test: SSTable files not present in dataset (refs-only mode)");
-        return;
-    }
+    assert!(
+        index_path.exists() && summary_path.exists(),
+        "Index.db and Summary.db files must exist for this test"
+    );
 
     let config = Config::memory_optimized();
     let platform = Arc::new(
@@ -86,14 +86,8 @@ async fn test_index_with_summary_correlation() {
             .expect("Failed to create Platform"),
     );
 
-    // Try to parse Summary.db - if it fails (known C5 format issues), skip gracefully
+    // Try to parse Summary.db - will fail with known C5 format issues
     let summary_reader_result = SummaryReader::open(&summary_path, Arc::clone(&platform)).await;
-
-    if summary_reader_result.is_err() {
-        println!("⏭️  Skipping test: Summary.db parser has known C5 format issues");
-        println!("   (Issue #92 scope: Index.db correlation logic - Summary parsing is separate)");
-        return;
-    }
 
     let summary_reader = summary_reader_result.unwrap();
 

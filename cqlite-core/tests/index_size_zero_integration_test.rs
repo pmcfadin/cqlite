@@ -63,15 +63,10 @@ async fn test_get_with_size_zero_fallback() {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-    // Find the actual Data.db file - skip if not present (refs-only dataset)
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            println!("   This test requires full SSTable binary files, not just reference data");
-            return;
-        }
-    };
+    // Find the actual Data.db file - must be present for this test
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Data.db file must exist for this test - requires full SSTable binary files, not just reference data");
 
     // Open SSTableReader
     let reader = match SSTableReader::open(&data_file, &config, platform.clone()).await {
@@ -86,13 +81,9 @@ async fn test_get_with_size_zero_fallback() {
     };
 
     // Verify Index.db has entries with size=0
-    let index_file = match find_file_with_pattern(&table_path, "-Index.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No Index.db file found");
-            return;
-        }
-    };
+    let index_file = find_file_with_pattern(&table_path, "-Index.db")
+        .await
+        .expect("Index.db file must exist for this test");
 
     let index_reader = match IndexReader::open(&index_file, platform).await {
         Ok(reader) => reader,
@@ -122,12 +113,11 @@ async fn test_get_with_size_zero_fallback() {
         partition_entries.len()
     );
 
-    if zero_size_count == 0 {
-        println!(
-            "⏭️  Skipping test: No size=0 entries found in Index.db (may not be Cassandra 5.0 format)"
-        );
-        return;
-    }
+    assert!(
+        zero_size_count > 0,
+        "Index.db must contain size=0 entries for this test (requires Cassandra 5.0 format). Found 0 out of {} entries",
+        partition_entries.len()
+    );
 
     // Test get() operation with a synthetic key
     // This should trigger the size=0 fallback path in data_access.rs lines 27-32
@@ -178,13 +168,9 @@ async fn test_scan_with_mixed_sizes() {
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
     // Find the actual Data.db file
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            return;
-        }
-    };
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Data.db file must exist for this test");
 
     let reader = match SSTableReader::open(&data_file, &config, platform.clone()).await {
         Ok(reader) => reader,
@@ -198,24 +184,13 @@ async fn test_scan_with_mixed_sizes() {
     };
 
     // Verify Index.db has size=0 entries
-    let index_file = match find_file_with_pattern(&table_path, "-Index.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No Index.db file found");
-            return;
-        }
-    };
+    let index_file = find_file_with_pattern(&table_path, "-Index.db")
+        .await
+        .expect("Index.db file must exist for this test");
 
-    let index_reader = match IndexReader::open(&index_file, platform).await {
-        Ok(reader) => reader,
-        Err(e) => {
-            println!(
-                "⚠️  Index loading failed: {}. This might indicate file format incompatibility.",
-                e
-            );
-            return;
-        }
-    };
+    let index_reader = IndexReader::open(&index_file, platform)
+        .await
+        .expect("Index.db file must be loadable for this test");
 
     let partition_entries = index_reader.get_partition_entries();
     let zero_size_count = partition_entries
@@ -223,12 +198,11 @@ async fn test_scan_with_mixed_sizes() {
         .filter(|e| e.data_size == 0)
         .count();
 
-    if zero_size_count == 0 {
-        println!(
-            "⏭️  Skipping test: No size=0 entries found in Index.db (may not be Cassandra 5.0 format)"
-        );
-        return;
-    }
+    assert!(
+        zero_size_count > 0,
+        "Index.db must contain size=0 entries for this test (requires Cassandra 5.0 format). Found 0 out of {} entries",
+        partition_entries.len()
+    );
 
     eprintln!(
         "Index has {} entries with size=0 - scan should trigger sequential fallback",
@@ -282,24 +256,13 @@ async fn test_sequential_scan_performance() {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            return;
-        }
-    };
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Data.db file must exist for this test");
 
-    let reader = match SSTableReader::open(&data_file, &config, platform).await {
-        Ok(reader) => reader,
-        Err(e) => {
-            println!(
-                "⚠️  SSTable loading failed: {}. This might indicate file format incompatibility.",
-                e
-            );
-            return;
-        }
-    };
+    let reader = SSTableReader::open(&data_file, &config, platform)
+        .await
+        .expect("SSTable must be loadable for this test");
 
     // Time the scan operation
     let table_id = TableId::from("test");
@@ -346,24 +309,13 @@ async fn test_size_zero_with_corrupt_data() {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
-    let data_file = match find_file_with_pattern(&table_path, "-Data.db").await {
-        Some(path) => path,
-        None => {
-            println!("⏭️  Skipping test: No SSTable Data.db files found (refs-only dataset in CI)");
-            return;
-        }
-    };
+    let data_file = find_file_with_pattern(&table_path, "-Data.db")
+        .await
+        .expect("Data.db file must exist for this test");
 
-    let reader = match SSTableReader::open(&data_file, &config, platform).await {
-        Ok(reader) => reader,
-        Err(e) => {
-            println!(
-                "⚠️  SSTable loading failed: {}. This might indicate file format incompatibility.",
-                e
-            );
-            return;
-        }
-    };
+    let reader = SSTableReader::open(&data_file, &config, platform)
+        .await
+        .expect("SSTable must be loadable for this test");
 
     // Attempt lookup that might hit corrupt/malformed blocks
     // Using a variety of synthetic keys to exercise different code paths

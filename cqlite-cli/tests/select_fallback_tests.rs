@@ -59,13 +59,11 @@ fn test_fallback_disabled_by_default() {
 
     // Use a SELECT query without schema/data-dir (ingestion unavailable)
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     let query = format!("SELECT * FROM {}", table_path.display());
 
@@ -94,13 +92,11 @@ fn test_fallback_disabled_by_default() {
 #[test]
 fn test_fallback_enabled_with_flag() {
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     let mut cmd = Command::cargo_bin("cqlite").expect("Failed to find cqlite binary");
 
@@ -134,13 +130,11 @@ fn test_fallback_enabled_with_flag() {
 #[test]
 fn test_fallback_enabled_with_env() {
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     let mut cmd = Command::cargo_bin("cqlite").expect("Failed to find cqlite binary");
 
@@ -178,25 +172,21 @@ fn test_fallback_enabled_with_env() {
 #[test]
 fn test_fallback_requires_ingestion_unavailable() {
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     // Create a dummy schema file
     let schema_dir = get_test_data_root().join("test_basic");
     let schema_file = schema_dir.join("schema.cql");
 
-    if !schema_file.exists() {
-        eprintln!(
-            "Skipping test: schema file not found at {}",
-            schema_file.display()
-        );
-        return;
-    }
+    assert!(
+        schema_file.exists(),
+        "Test requires full SSTable dataset: schema file not found at {}",
+        schema_file.display()
+    );
 
     let mut cmd = Command::cargo_bin("cqlite").expect("Failed to find cqlite binary");
 
@@ -229,13 +219,11 @@ fn test_fallback_requires_ingestion_unavailable() {
 #[test]
 fn test_fallback_only_for_select_queries() {
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     let query = format!("DESCRIBE TABLE {}", table_path.display());
 
@@ -266,13 +254,11 @@ fn test_fallback_only_for_select_queries() {
 #[test]
 fn test_fallback_simple_select_parsing() {
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     // Test various SELECT query formats
     let queries = vec![
@@ -353,13 +339,11 @@ fn test_fallback_invalid_path_error() {
 #[test]
 fn test_fallback_json_output() {
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     let mut cmd = Command::cargo_bin("cqlite").expect("Failed to find cqlite binary");
 
@@ -410,13 +394,11 @@ fn test_fallback_json_output() {
 #[test]
 fn test_fallback_csv_output() {
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     let mut cmd = Command::cargo_bin("cqlite").expect("Failed to find cqlite binary");
 
@@ -476,13 +458,11 @@ fn test_fallback_csv_output() {
 #[test]
 fn test_fallback_warning_message() {
     let table_path = get_simple_table_path();
-    if !table_path.exists() {
-        eprintln!(
-            "Skipping test: test data not found at {}",
-            table_path.display()
-        );
-        return;
-    }
+    assert!(
+        table_path.exists(),
+        "Test requires full SSTable dataset: test data not found at {}",
+        table_path.display()
+    );
 
     let mut cmd = Command::cargo_bin("cqlite").expect("Failed to find cqlite binary");
 
