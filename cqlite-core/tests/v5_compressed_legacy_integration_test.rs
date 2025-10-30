@@ -11,6 +11,14 @@ use cqlite_core::{Config, Platform};
 use std::path::Path;
 use std::sync::Arc;
 
+// Initialize logging for tests
+fn init_logging() {
+    let _ = env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init();
+}
+
 /// Test non-zero minima delta decoding with TTL table
 ///
 /// This test validates Issue #162 requirement: delta decoding produces correct absolute values
@@ -110,6 +118,8 @@ async fn test_non_zero_minima_delta_decoding_integration() {
 /// - [ReversedType(TimestampType), UTF8Type]
 #[tokio::test]
 async fn test_clustering_key_handling_integration() {
+    init_logging();
+
     let config = Config::default();
     let platform = Arc::new(
         Platform::new(&config)

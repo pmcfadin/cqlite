@@ -63,6 +63,12 @@ pub struct SSTableStatistics {
     /// Empty if SerializationHeader not found in Statistics.db.
     #[serde(default)]
     pub serialization_header_columns: Vec<super::header::ColumnInfo>,
+    /// Partition key definitions extracted from SerializationHeader (Issue #195)
+    #[serde(default)]
+    pub serialization_header_partition_keys: Vec<super::header::ColumnInfo>,
+    /// Clustering key definitions extracted from SerializationHeader (Issue #195)
+    #[serde(default)]
+    pub serialization_header_clustering_keys: Vec<super::header::ColumnInfo>,
 }
 
 /// Row count and distribution statistics
@@ -243,6 +249,8 @@ pub fn parse_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> 
             compression_stats,
             metadata,
             serialization_header_columns: vec![], // Not available in legacy format
+            serialization_header_partition_keys: vec![],
+            serialization_header_clustering_keys: vec![],
         },
     ))
 }
@@ -926,6 +934,8 @@ mod tests {
             },
             metadata: HashMap::new(),
             serialization_header_columns: vec![],
+            serialization_header_partition_keys: vec![],
+            serialization_header_clustering_keys: vec![],
         }
     }
 }

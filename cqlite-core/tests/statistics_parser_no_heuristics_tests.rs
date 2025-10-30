@@ -156,8 +156,10 @@ async fn test_nb_format_data_extraction_returns_error() {
             _row_stats,
             timestamp_stats,
             _table_stats,
-            _column_stats,
+            _partition_stats,
             _compression_stats,
+            partition_columns,
+            clustering_columns,
             columns,
         )) => {
             // Verify we extracted real values
@@ -166,9 +168,11 @@ async fn test_nb_format_data_extraction_returns_error() {
                 "Should extract non-zero EncodingStats from real binary data"
             );
             println!(
-                "PASS: Extracted EncodingStats: min_timestamp={}, min_deletion_time={}, columns={}",
+                "PASS: Extracted EncodingStats: min_timestamp={}, min_deletion_time={}, partition_columns={}, clustering_columns={}, columns={}",
                 timestamp_stats.min_timestamp,
                 timestamp_stats.min_deletion_time,
+                partition_columns.len(),
+                clustering_columns.len(),
                 columns.len()
             );
         }

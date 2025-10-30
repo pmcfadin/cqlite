@@ -142,13 +142,30 @@ impl SSTableReader {
         // This enables schema extraction for V5CompressedLegacy format
         let mut header = header; // Make mutable to populate columns
         if let Some(ref stats_reader) = statistics_reader {
-            let serialization_columns = &stats_reader.statistics().serialization_header_columns;
-            if !serialization_columns.is_empty() {
+            let statistics = stats_reader.statistics();
+            let partition_columns = &statistics.serialization_header_partition_keys;
+            let clustering_columns = &statistics.serialization_header_clustering_keys;
+            let regular_columns = &statistics.serialization_header_columns;
+
+            if !partition_columns.is_empty()
+                || !clustering_columns.is_empty()
+                || !regular_columns.is_empty()
+            {
                 log::debug!(
-                    "Populating header.columns from Statistics.db SerializationHeader: {} columns",
-                    serialization_columns.len()
+                    "Populating header columns from Statistics.db SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
+                    partition_columns.len(),
+                    clustering_columns.len(),
+                    regular_columns.len()
                 );
-                header.columns = serialization_columns.clone();
+
+                let mut merged_columns = Vec::with_capacity(
+                    partition_columns.len() + clustering_columns.len() + regular_columns.len(),
+                );
+                merged_columns.extend_from_slice(partition_columns);
+                merged_columns.extend_from_slice(clustering_columns);
+                merged_columns.extend_from_slice(regular_columns);
+
+                header.columns = merged_columns;
             }
         }
 

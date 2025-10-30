@@ -42,7 +42,14 @@ use crate::error::{Error, Result};
 use nom::{bytes::complete::take, number::complete::be_u32, IResult};
 
 /// Type alias for EncodingStats parse result to reduce complexity
-type EncodingStatsResult = (i64, i64, Option<i64>, Vec<super::header::ColumnInfo>);
+type EncodingStatsResult = (
+    i64,
+    i64,
+    Option<i64>,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+);
 
 /// Type alias for SerializationHeader parse result to reduce complexity
 type SerializationHeaderResult = (Vec<String>, Vec<String>, Vec<super::header::ColumnInfo>);
@@ -128,6 +135,7 @@ pub fn parse_nb_format_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> 
 /// # Returns
 ///
 /// Partial statistics with only TimestampStatistics populated from real data.
+#[allow(clippy::type_complexity)]
 pub fn parse_nb_format_statistics_data(
     input: &[u8],
     header: &StatisticsHeader,
@@ -138,12 +146,24 @@ pub fn parse_nb_format_statistics_data(
     PartitionStatistics,
     CompressionStatistics,
     Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
 )> {
     // Parse the EncodingStats section from the data following the header
     let result = parse_minimal_encoding_stats(input);
 
     match result {
-        Ok((_, (min_timestamp, min_deletion_time, min_ttl, columns))) => {
+        Ok((
+            _,
+            (
+                min_timestamp,
+                min_deletion_time,
+                min_ttl,
+                partition_columns,
+                clustering_columns,
+                regular_columns,
+            ),
+        )) => {
             // Create minimal statistics with only timestamp data populated
             let row_stats = RowStatistics {
                 total_rows: 0,
@@ -200,7 +220,9 @@ pub fn parse_nb_format_statistics_data(
                 table_stats,
                 partition_stats,
                 compression_stats,
-                columns,
+                partition_columns,
+                clustering_columns,
+                regular_columns,
             ))
         }
         Err(e) => {
@@ -249,35 +271,65 @@ fn parse_serialization_header(input: &[u8]) -> IResult<&[u8], SerializationHeade
     // This marks the beginning of the partition key type descriptor
     let mut search_offset = 0;
 
-    // Search for partition key type section (max search 8KB to avoid scanning entire file)
-    while search_offset + 10 < input.len() && search_offset < 8192 {
-        // Look for pattern: 0x00 0x00 0x28 "org..."
-        // where 0x28 is '(' indicating partition key type
-        // The VInt length comes before the 0x00 0x00, but we search for the marker pattern
-        if input[search_offset] == 0x00
-            && input[search_offset + 1] == 0x00
-            && input[search_offset + 2] == 0x28
-        // '(' character
-        {
+    // Search for SerializationHeader by finding "org.apache.cassandra.db.marshal" string
+    // and working backwards to find the 0x00 0x00 marker
+    // Format: [VInt unknown] [0x00 0x00] [VInt partition_type_len] [partition_type_string]
+    let marshal_pattern = b"org.apache.cassandra.db.marshal";
+
+    while search_offset + marshal_pattern.len() < input.len() && search_offset < 8192 {
+        if &input[search_offset..search_offset + marshal_pattern.len()] == marshal_pattern {
+            let context_start = search_offset.saturating_sub(10);
+            let context_end = (search_offset + 50).min(input.len());
             log::debug!(
-                "Found potential partition key marker at offset {}",
-                search_offset
+                "Found 'org.apache.cassandra.db.marshal' at offset {}, context (offset-10 to offset+50): {:02x?}",
+                search_offset,
+                &input[context_start..context_end]
             );
-            // Found potential partition key type marker
-            // Try to parse from the VInt before this offset
-            // The VInt could be 1-9 bytes before the marker
-            for vint_offset in 1..=9 {
-                if search_offset < vint_offset {
+
+            for lookback in 2..=15 {
+                if search_offset < lookback + 1 {
                     break;
                 }
-                let start_offset = search_offset - vint_offset;
-                let result = parse_serialization_header_at_offset(&input[start_offset..]);
-                if result.is_ok() {
-                    log::debug!(
-                        "Successfully parsed SerializationHeader at offset {}",
-                        start_offset
-                    );
-                    return result;
+                let marker_offset = search_offset - lookback;
+                if marker_offset + 1 < input.len() {
+                    let byte1 = input[marker_offset];
+                    let byte2 = input[marker_offset + 1];
+                    if byte1 == 0x00 && byte2 == 0x00 {
+                        log::debug!(
+                            "Found 0x00 0x00 marker at offset {} (lookback: {} from org.apache at {})",
+                            marker_offset,
+                            lookback,
+                            search_offset
+                        );
+                    } else if lookback <= 6 {
+                        log::debug!(
+                            "Lookback {} from {} (marker_offset={}): bytes are 0x{:02x} 0x{:02x} (expected 0x00 0x00)",
+                            lookback,
+                            search_offset,
+                            marker_offset,
+                            byte1,
+                            byte2
+                        );
+                    }
+                }
+                if marker_offset + 1 < input.len()
+                    && input[marker_offset] == 0x00
+                    && input[marker_offset + 1] == 0x00
+                {
+                    let result = parse_serialization_header_at_offset(&input[marker_offset..]);
+                    if result.is_ok() {
+                        log::debug!(
+                            "Successfully parsed SerializationHeader starting at marker offset {}",
+                            marker_offset
+                        );
+                        return result;
+                    } else {
+                        log::debug!(
+                            "Parse failed at marker offset {}: {:?}",
+                            marker_offset,
+                            result
+                        );
+                    }
                 }
             }
         }
@@ -308,109 +360,58 @@ fn parse_serialization_header(input: &[u8]) -> IResult<&[u8], SerializationHeade
         "Failed to locate SerializationHeader or regular columns: searched {} bytes",
         search_offset
     );
+
+    if let Some((pk_types, ck_types, cols)) = fallback_parse_serialization_header_ascii(input) {
+        log::debug!(
+            "ASCII fallback extracted SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
+            pk_types.len(),
+            ck_types.len(),
+            cols.len()
+        );
+        return Ok((input, (pk_types, ck_types, cols)));
+    }
+
     Ok((input, (Vec::new(), Vec::new(), Vec::new())))
 }
 
 /// Parse SerializationHeader structure starting at a known offset
 fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], SerializationHeaderResult> {
+    use nom::bytes::complete::tag;
+    use nom::number::complete::u8 as parse_u8;
+
     let _original_input = input;
 
-    // Step 1: Parse partition key type length (VInt)
-    let (input, partition_type_len) = parse_vuint(input)?;
+    // Step 1: Expect 0x00 0x00 marker
+    let (input, _) = tag(b"\x00\x00")(input)?;
+    log::debug!("Found 0x00 0x00 marker");
 
+    // Step 2: Parse partition key type (single byte length + string)
+    let (input, partition_type_len) = parse_u8(input)?;
     log::debug!("Partition key type length: {} bytes", partition_type_len);
 
-    // Step 2: Expect 0x00 0x00 marker
-    if input.len() < 2 || input[0] != 0x00 || input[1] != 0x00 {
-        log::debug!(
-            "Expected 0x00 0x00 marker after partition key type length, found: {:02x} {:02x}",
-            input[0],
-            input[1]
-        );
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
-    }
-    let input = &input[2..];
-
-    // Step 3: Parse partition key type string
-    if input.len() < partition_type_len as usize {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    let partition_type_bytes = &input[..partition_type_len as usize];
+    let (input, partition_type_bytes) =
+        nom::bytes::complete::take(partition_type_len as usize)(input)?;
     let partition_key_type = std::str::from_utf8(partition_type_bytes)
         .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
         .to_string();
 
     log::debug!("Partition key type: {}", partition_key_type);
 
-    let input = &input[partition_type_len as usize..];
-
-    // Step 4: Parse clustering key count (single byte, can be 0)
-    if input.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    let clustering_count = input[0] as usize;
-    let mut input = &input[1..];
-
+    // Step 3: Parse clustering key count (single byte)
+    let (input, clustering_count) = parse_u8(input)?;
     log::debug!("Clustering key count: {}", clustering_count);
 
-    // Step 5: Parse clustering key types
-    let mut clustering_key_types = Vec::with_capacity(clustering_count);
+    // Step 4: Parse clustering key types
+    let mut clustering_key_types = Vec::with_capacity(clustering_count as usize);
+    let mut input = input;
 
     for idx in 0..clustering_count {
-        // Find the end of the clustering key type descriptor
-        // Clustering types end with ')' when parentheses are balanced
-        // They may start with '[' (composite marker) or '(' (simple type)
-        // The '[' is just a prefix and doesn't have a matching ']'
+        // Parse clustering type length (single byte)
+        let (remaining, type_len) = parse_u8(input)?;
+        log::debug!("Clustering key {} type length: {} bytes", idx, type_len);
 
-        let mut type_end = 0;
-        let mut paren_depth = 0;
-        let mut found_end = false;
-
-        for (pos, &byte) in input.iter().enumerate() {
-            match byte {
-                b'(' => paren_depth += 1,
-                b')' => {
-                    if paren_depth > 0 {
-                        paren_depth -= 1;
-                        if paren_depth == 0 {
-                            // Found the end of this clustering key type
-                            type_end = pos + 1;
-                            found_end = true;
-                            break;
-                        }
-                    }
-                }
-                b'[' => {
-                    // Composite type marker - just skip it, doesn't affect balance
-                }
-                _ => {}
-            }
-        }
-
-        if !found_end || type_end == 0 {
-            log::debug!(
-                "Failed to find end of clustering key type {} at position",
-                idx
-            );
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
-        }
-
-        let clustering_type_bytes = &input[..type_end];
-        let clustering_type = std::str::from_utf8(clustering_type_bytes)
+        let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
+        let clustering_type = std::str::from_utf8(type_bytes)
             .map_err(|_| {
                 nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
             })?
@@ -419,12 +420,72 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
         log::debug!("Clustering key {} type: {}", idx, clustering_type);
 
         clustering_key_types.push(clustering_type);
-        input = &input[type_end..];
+        input = remaining;
     }
 
-    // Step 6: Parse regular columns section
-    // Look for marker followed by column definitions
-    let (input, (_backtrack_partition_keys, columns)) = parse_regular_columns(input)?;
+    // Step 5: Parse separator before regular columns (0x00)
+    let (input, _) = tag(b"\x00")(input)?;
+    log::debug!("Found 0x00 separator before columns section");
+
+    // Step 6: Parse regular column count (single byte)
+    let (mut input, column_count) = parse_u8(input)?;
+    log::debug!("Regular column count: {}", column_count);
+
+    // Step 7: Parse each regular column
+    let mut columns = Vec::with_capacity(column_count as usize);
+
+    for col_idx in 0..column_count {
+        // Column name length (single byte)
+        let (remaining, name_len) = parse_u8(input)?;
+        log::debug!("Column {} name length: {} bytes", col_idx, name_len);
+
+        // Column name (UTF-8 string)
+        let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
+        let column_name = std::str::from_utf8(name_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        // Column type length (single byte)
+        let (remaining, type_len) = parse_u8(remaining)?;
+        log::debug!(
+            "Column {} ('{}') type length: {} bytes",
+            col_idx,
+            column_name,
+            type_len
+        );
+
+        // Column type (UTF-8 string)
+        let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
+        let internal_type = std::str::from_utf8(type_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        input = remaining;
+
+        // Convert to CQL type
+        let cql_type = convert_marshal_type_to_cql(&internal_type);
+
+        log::debug!(
+            "Column {}: name='{}', type='{}' (CQL: '{}')",
+            col_idx,
+            column_name,
+            internal_type,
+            cql_type
+        );
+
+        columns.push(super::header::ColumnInfo {
+            name: column_name,
+            column_type: cql_type,
+            is_primary_key: false,
+            key_position: None,
+            is_static: false,
+            is_clustering: false,
+        });
+    }
 
     log::debug!(
         "Successfully parsed SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
@@ -540,49 +601,53 @@ fn parse_regular_columns(
 ) -> IResult<&[u8], (Vec<String>, Vec<super::header::ColumnInfo>)> {
     use super::header::ColumnInfo;
 
-    // Search for column section marker pattern: 0x00 0x00 [count]
-    // where [count] is the number of regular columns (1-50 typical)
     let mut search_offset = 0;
     let mut partition_key_types = Vec::new();
 
-    // Search for column section (max search 8KB to handle large gaps)
-    // The SerializationHeader can be up to 5KB into the file after histogram data
-    while search_offset + 3 < input.len() && search_offset < 8192 {
-        // Look for pattern: 0x00 0x00 [count] where count is 1-50
-        // This is the section marker followed by column count
-        if input[search_offset] == 0x00
-            && input[search_offset + 1] == 0x00
-            && input[search_offset + 2] > 0
-            && input[search_offset + 2] <= 50
-        {
-            // NEW: Extract partition key by backtracking from the marker
+    while search_offset + 2 < input.len() && search_offset < 8192 {
+        if input[search_offset] == 0x00 {
+            let (marker_offset, count_offset) =
+                if search_offset + 1 < input.len() && input[search_offset + 1] == 0x00 {
+                    (search_offset, search_offset + 2)
+                } else {
+                    (search_offset, search_offset + 1)
+                };
+
+            if count_offset >= input.len() {
+                break;
+            }
+
+            let column_count = input[count_offset] as usize;
+            if column_count == 0 || column_count > 50 {
+                search_offset += 1;
+                continue;
+            }
+
             log::debug!(
                 "Attempting to extract partition key by backtracking from marker at offset {}",
-                search_offset
+                marker_offset
             );
-            if let Some(pk_type) = extract_partition_key_before_marker(input, search_offset) {
+            if let Some(pk_type) = extract_partition_key_before_marker(input, marker_offset) {
                 log::debug!("Found partition key type before marker: {}", pk_type);
                 partition_key_types.push(pk_type);
             } else {
                 log::debug!(
                     "No partition key type found via backtracking at offset {}",
-                    search_offset
+                    marker_offset
                 );
             }
 
-            let column_count = input[search_offset + 2] as usize;
-            let mut pos = search_offset + 3;
+            let mut pos = count_offset + 1;
 
-            // Log pattern detection
-            let context_len = std::cmp::min(128, input.len() - search_offset);
-            let context_hex: String = input[search_offset..search_offset + context_len]
+            let context_len = std::cmp::min(128, input.len() - marker_offset);
+            let context_hex: String = input[marker_offset..marker_offset + context_len]
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect::<Vec<_>>()
                 .join(" ");
             log::debug!(
                 "Pattern found at offset {}: count={}, next 128 bytes: {}",
-                search_offset,
+                marker_offset,
                 column_count,
                 context_hex
             );
@@ -596,7 +661,7 @@ fn parse_regular_columns(
                     log::debug!(
                         "Column {} parsing failed at offset {}: position {} exceeds buffer length {}",
                         col_idx,
-                        search_offset,
+                        marker_offset,
                         pos,
                         input.len()
                     );
@@ -604,29 +669,26 @@ fn parse_regular_columns(
                     break;
                 }
 
-                // Column name length (VInt)
-                let (remaining, name_len) = match parse_vuint(&input[pos..]) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        log::debug!(
-                            "Column {} parsing failed at offset {}: VInt parse error for name_len at pos {}: {:?}",
-                            col_idx,
-                            search_offset,
-                            pos,
-                            e
-                        );
-                        parse_success = false;
-                        break;
-                    }
-                };
-                pos = input.len() - remaining.len();
+                if pos >= input.len() {
+                    log::debug!(
+                        "Column {} parsing failed at offset {}: no data available for name length byte (pos={}, len={})",
+                        col_idx,
+                        marker_offset,
+                        pos,
+                        input.len()
+                    );
+                    parse_success = false;
+                    break;
+                }
 
-                // Sanity check name length
-                if name_len == 0 || name_len > 200 || pos + name_len as usize > input.len() {
+                let name_len = input[pos] as usize;
+                pos += 1;
+
+                if name_len == 0 || name_len > 200 || pos + name_len > input.len() {
                     log::debug!(
                         "Column {} parsing failed at offset {}: name_len sanity check failed (name_len={}, pos={}, buffer_len={})",
                         col_idx,
-                        search_offset,
+                        marker_offset,
                         name_len,
                         pos,
                         input.len()
@@ -636,7 +698,7 @@ fn parse_regular_columns(
                 }
 
                 // Column name (UTF-8 string)
-                let name_bytes = &input[pos..pos + name_len as usize];
+                let name_bytes = &input[pos..pos + name_len];
                 let column_name = match std::str::from_utf8(name_bytes) {
                     Ok(s) => s.to_string(),
                     Err(e) => {
@@ -648,7 +710,7 @@ fn parse_regular_columns(
                         log::debug!(
                             "Column {} parsing failed at offset {}: UTF-8 decode error for column name at pos {} (len={}): {:?}, bytes: {}",
                             col_idx,
-                            search_offset,
+                            marker_offset,
                             pos,
                             name_len,
                             e,
@@ -658,33 +720,30 @@ fn parse_regular_columns(
                         break;
                     }
                 };
-                pos += name_len as usize;
+                pos += name_len;
 
-                // Column type length (VInt)
-                let (remaining, type_len) = match parse_vuint(&input[pos..]) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        log::debug!(
-                            "Column {} ('{}') parsing failed at offset {}: VInt parse error for type_len at pos {}: {:?}",
-                            col_idx,
-                            column_name,
-                            search_offset,
-                            pos,
-                            e
-                        );
-                        parse_success = false;
-                        break;
-                    }
-                };
-                pos = input.len() - remaining.len();
+                if pos >= input.len() {
+                    log::debug!(
+                        "Column {} ('{}') parsing failed at offset {}: no data available for type length byte (pos={}, len={})",
+                        col_idx,
+                        column_name,
+                        marker_offset,
+                        pos,
+                        input.len()
+                    );
+                    parse_success = false;
+                    break;
+                }
 
-                // Sanity check type length
-                if type_len == 0 || type_len > 200 || pos + type_len as usize > input.len() {
+                let type_len = input[pos] as usize;
+                pos += 1;
+
+                if type_len == 0 || type_len > 200 || pos + type_len > input.len() {
                     log::debug!(
                         "Column {} ('{}') parsing failed at offset {}: type_len sanity check failed (type_len={}, pos={}, buffer_len={})",
                         col_idx,
                         column_name,
-                        search_offset,
+                        marker_offset,
                         type_len,
                         pos,
                         input.len()
@@ -694,7 +753,7 @@ fn parse_regular_columns(
                 }
 
                 // Column type (Cassandra internal type name)
-                let type_bytes = &input[pos..pos + type_len as usize];
+                let type_bytes = &input[pos..pos + type_len];
                 let internal_type = match std::str::from_utf8(type_bytes) {
                     Ok(s) => s.to_string(),
                     Err(e) => {
@@ -707,7 +766,7 @@ fn parse_regular_columns(
                             "Column {} ('{}') parsing failed at offset {}: UTF-8 decode error for column type at pos {} (len={}): {:?}, bytes: {}",
                             col_idx,
                             column_name,
-                            search_offset,
+                            marker_offset,
                             pos,
                             type_len,
                             e,
@@ -717,7 +776,7 @@ fn parse_regular_columns(
                         break;
                     }
                 };
-                pos += type_len as usize;
+                pos += type_len;
 
                 // Convert Cassandra marshal type to CQL type
                 let cql_type = convert_marshal_type_to_cql(&internal_type);
@@ -739,7 +798,7 @@ fn parse_regular_columns(
                 log::debug!(
                     "Successfully parsed {} columns at offset {}: {:?}",
                     parsed_columns.len(),
-                    search_offset,
+                    marker_offset,
                     column_names
                 );
                 if !partition_key_types.is_empty() {
@@ -750,46 +809,8 @@ fn parse_regular_columns(
                     );
                 }
 
-                // NEW: Create synthetic ColumnInfo entries for partition keys
-                // SerializationHeader provides partition key TYPES but not NAMES
-                // We must create synthetic columns since partition keys are not in regular columns list
-                let mut all_columns = Vec::new();
-
-                for (pk_idx, pk_marshal_type) in partition_key_types.iter().enumerate() {
-                    let pk_cql_type = convert_marshal_type_to_cql(pk_marshal_type);
-
-                    // Generate synthetic partition key column name
-                    // Format: pk_<position> (e.g., "pk_0", "pk_1" for composite keys)
-                    let pk_name = if partition_key_types.len() == 1 {
-                        "id".to_string() // Single partition key - use conventional name
-                    } else {
-                        format!("pk_{}", pk_idx) // Composite partition key
-                    };
-
-                    let pk_column = ColumnInfo {
-                        name: pk_name.clone(),
-                        column_type: pk_cql_type.clone(),
-                        is_primary_key: true,
-                        key_position: Some(pk_idx as u16),
-                        is_static: false,
-                        is_clustering: false,
-                    };
-
-                    log::debug!(
-                        "Created synthetic partition key column '{}' at position {} (type: {})",
-                        pk_name,
-                        pk_idx,
-                        pk_cql_type
-                    );
-
-                    all_columns.push(pk_column);
-                }
-
-                // Add all regular columns AFTER partition keys
-                all_columns.extend(parsed_columns);
-
                 let remaining = &input[pos..];
-                return Ok((remaining, (partition_key_types, all_columns)));
+                return Ok((remaining, (partition_key_types, parsed_columns)));
             }
         }
 
@@ -804,20 +825,266 @@ fn parse_regular_columns(
     Ok((input, (Vec::new(), Vec::new())))
 }
 
+/// ASCII fallback parser for SerializationHeader when structured parsing fails
+fn fallback_parse_serialization_header_ascii(
+    input: &[u8],
+) -> Option<(Vec<String>, Vec<String>, Vec<super::header::ColumnInfo>)> {
+    use super::header::ColumnInfo;
+
+    // Helper to find subsequence
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    let mut partition_types = Vec::new();
+    let mut clustering_types = Vec::new();
+    let mut columns = Vec::new();
+
+    // Extract partition key types from CompositeType(...)
+    if let Some(comp_idx) = find_subsequence(input, b"CompositeType(") {
+        let start = comp_idx + "CompositeType(".len();
+        let mut end = start;
+        while end < input.len() && input[end] != b')' {
+            end += 1;
+        }
+        if end <= input.len() {
+            if let Ok(inner) = std::str::from_utf8(&input[start..end]) {
+                partition_types = inner
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+
+            // Attempt to extract clustering types immediately after the composite type string
+            let mut cursor = end + 1;
+            while cursor < input.len() && input[cursor] < 0x20 {
+                cursor += 1;
+            }
+            if cursor < input.len() && input[cursor] == b'(' {
+                cursor += 1;
+                let mut cluster_end = cursor;
+                while cluster_end < input.len() && input[cluster_end] >= 0x20 {
+                    cluster_end += 1;
+                }
+                if cluster_end > cursor {
+                    if let Ok(cluster_str) = std::str::from_utf8(&input[cursor..cluster_end]) {
+                        if cluster_str.contains("org.apache.cassandra.db.marshal") {
+                            clustering_types = cluster_str
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        }
+                    }
+                }
+                // Set scan position for column parsing after clustering types/control bytes
+                let mut scan_start = cluster_end;
+                while scan_start < input.len() && input[scan_start] < 0x20 {
+                    scan_start += 1;
+                }
+
+                // Parse regular columns using [len][name][type] pattern with control-byte delimiters
+                let mut idx = scan_start;
+                while idx < input.len() {
+                    let name_len = input[idx] as usize;
+                    if name_len == 0 || name_len > 64 {
+                        idx += 1;
+                        continue;
+                    }
+
+                    let name_start = idx + 1;
+                    let name_end = name_start + name_len;
+                    if name_end > input.len() {
+                        break;
+                    }
+
+                    let name_bytes = &input[name_start..name_end];
+                    if !name_bytes
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                    {
+                        idx += 1;
+                        continue;
+                    }
+
+                    if name_end >= input.len() || input[name_end] != b'(' {
+                        idx += 1;
+                        continue;
+                    }
+
+                    let type_start = name_end + 1;
+                    let mut type_end = type_start;
+                    while type_end < input.len() && input[type_end] >= 0x20 {
+                        type_end += 1;
+                    }
+
+                    if type_end == type_start {
+                        idx += 1;
+                        continue;
+                    }
+
+                    let type_bytes = &input[type_start..type_end];
+                    if !type_bytes.windows(10).any(|w| w == b"org.apach") {
+                        idx += 1;
+                        continue;
+                    }
+
+                    let column_name = match std::str::from_utf8(name_bytes) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => {
+                            idx += 1;
+                            continue;
+                        }
+                    };
+
+                    let internal_type = match std::str::from_utf8(type_bytes) {
+                        Ok(s) => s.trim().to_string(),
+                        Err(_) => {
+                            idx += 1;
+                            continue;
+                        }
+                    };
+
+                    let cql_type = convert_marshal_type_to_cql(&internal_type);
+                    columns.push(ColumnInfo {
+                        name: column_name,
+                        column_type: cql_type,
+                        is_primary_key: false,
+                        key_position: None,
+                        is_static: false,
+                        is_clustering: false,
+                    });
+
+                    // Advance past control bytes to next potential column entry
+                    idx = type_end;
+                    while idx < input.len() && input[idx] < 0x20 {
+                        idx += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if partition_types.is_empty() && columns.is_empty() {
+        return None;
+    }
+
+    Some((partition_types, clustering_types, columns))
+}
+
+/// Split a type argument list on top-level commas, ignoring nested parentheses
+fn split_type_arguments(input: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            ',' if depth == 0 => {
+                let part = input[start..idx].trim();
+                if !part.is_empty() {
+                    args.push(part);
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let tail = input[start..].trim();
+    if !tail.is_empty() {
+        args.push(tail);
+    }
+
+    args
+}
+
 /// Convert Cassandra internal marshal type to CQL type name
 fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
-    // Extract type name from fully-qualified class name
-    // Example: "org.apache.cassandra.db.marshal.Int32Type" -> "int"
-    let type_name = marshal_type
-        .split('.')
-        .next_back()
-        .unwrap_or(marshal_type)
-        .trim_end_matches("Type");
+    fn strip_wrapping_parens(mut value: &str) -> &str {
+        loop {
+            let trimmed = value.trim();
+            if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() > 2 {
+                value = &trimmed[1..trimmed.len() - 1];
+            } else {
+                return trimmed;
+            }
+        }
+    }
+
+    fn strip_namespace(type_name: &str) -> &str {
+        type_name.rsplit('.').next().unwrap_or(type_name)
+    }
+
+    fn strip_type_suffix(name: &str) -> &str {
+        name.trim_end_matches("Type")
+    }
+
+    let mut cleaned = strip_wrapping_parens(marshal_type);
+
+    // Normalize known wrappers by recursively converting inner types
+    for prefix in [
+        "org.apache.cassandra.db.marshal.ReversedType(",
+        "ReversedType(",
+    ] {
+        if let Some(inner) = cleaned.strip_prefix(prefix) {
+            let inner = inner.trim_end_matches(')');
+            return convert_marshal_type_to_cql(inner);
+        }
+    }
+
+    for prefix in ["org.apache.cassandra.db.marshal.FrozenType(", "FrozenType("] {
+        if let Some(inner) = cleaned.strip_prefix(prefix) {
+            let inner = inner.trim_end_matches(')');
+            return format!("frozen<{}>", convert_marshal_type_to_cql(inner));
+        }
+    }
+
+    for prefix in ["org.apache.cassandra.db.marshal.ListType(", "ListType("] {
+        if let Some(inner) = cleaned.strip_prefix(prefix) {
+            let inner = inner.trim_end_matches(')');
+            return format!("list<{}>", convert_marshal_type_to_cql(inner));
+        }
+    }
+
+    for prefix in ["org.apache.cassandra.db.marshal.SetType(", "SetType("] {
+        if let Some(inner) = cleaned.strip_prefix(prefix) {
+            let inner = inner.trim_end_matches(')');
+            return format!("set<{}>", convert_marshal_type_to_cql(inner));
+        }
+    }
+
+    for prefix in ["org.apache.cassandra.db.marshal.MapType(", "MapType("] {
+        if let Some(inner) = cleaned.strip_prefix(prefix) {
+            let inner = inner.trim_end_matches(')');
+            let args = split_type_arguments(inner);
+            if args.len() == 2 {
+                let key = convert_marshal_type_to_cql(args[0]);
+                let value = convert_marshal_type_to_cql(args[1]);
+                return format!("map<{}, {}>", key, value);
+            } else if args.len() == 1 {
+                let value = convert_marshal_type_to_cql(args[0]);
+                return format!("map<text, {}>", value);
+            }
+        }
+    }
+
+    cleaned = strip_wrapping_parens(cleaned);
+    let base = strip_type_suffix(strip_namespace(cleaned)).trim_end_matches(')');
 
     // Map common types to CQL equivalents
-    match type_name {
+    match base {
         "UTF8" => "text".to_string(),
         "Int32" => "int".to_string(),
+        "Integer" => "int".to_string(),
         "Long" => "bigint".to_string(),
         "Short" => "smallint".to_string(),
         "Byte" => "tinyint".to_string(),
@@ -835,16 +1102,76 @@ fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
         "Duration" => "duration".to_string(),
         "Time" => "time".to_string(),
         "Counter" => "counter".to_string(),
-        _ => {
-            // Unknown type - use lowercase version of type name
-            type_name.to_lowercase()
-        }
+        other => other.to_lowercase(),
     }
+}
+
+/// Construct ColumnInfo entries for partition key definitions found in SerializationHeader
+fn build_partition_key_columns(partition_types: &[String]) -> Vec<super::header::ColumnInfo> {
+    if partition_types.is_empty() {
+        return Vec::new();
+    }
+
+    let total = partition_types.len();
+    partition_types
+        .iter()
+        .enumerate()
+        .map(|(idx, marshal_type)| {
+            let cql_type = convert_marshal_type_to_cql(marshal_type);
+            let name = if total == 1 {
+                match cql_type.as_str() {
+                    "uuid" | "timeuuid" => "id".to_string(),
+                    _ => "partition_key".to_string(),
+                }
+            } else {
+                format!("partition_key_{}", idx)
+            };
+
+            super::header::ColumnInfo {
+                name,
+                column_type: cql_type,
+                is_primary_key: true,
+                key_position: Some(idx as u16),
+                is_static: false,
+                is_clustering: false,
+            }
+        })
+        .collect()
+}
+
+/// Construct ColumnInfo entries for clustering key definitions found in SerializationHeader
+fn build_clustering_key_columns(clustering_types: &[String]) -> Vec<super::header::ColumnInfo> {
+    if clustering_types.is_empty() {
+        return Vec::new();
+    }
+
+    let total = clustering_types.len();
+    clustering_types
+        .iter()
+        .enumerate()
+        .map(|(idx, marshal_type)| {
+            let cql_type = convert_marshal_type_to_cql(marshal_type);
+            let name = if total == 1 {
+                "clustering_key".to_string()
+            } else {
+                format!("clustering_key_{}", idx)
+            };
+
+            super::header::ColumnInfo {
+                name,
+                column_type: cql_type,
+                is_primary_key: true,
+                key_position: Some(idx as u16),
+                is_static: false,
+                is_clustering: true,
+            }
+        })
+        .collect()
 }
 
 /// Parse minimal EncodingStats section from nb-format Statistics.db
 ///
-/// Returns: (min_timestamp, min_deletion_time, min_ttl, columns)
+/// Returns: (min_timestamp, min_deletion_time, min_ttl, partition_keys, clustering_keys, columns)
 fn parse_minimal_encoding_stats(input: &[u8]) -> IResult<&[u8], EncodingStatsResult> {
     // Skip metadata_type (u32 BE) at start of data section
     let (input, _metadata_type) = be_u32(input)?;
@@ -897,24 +1224,26 @@ fn parse_minimal_encoding_stats(input: &[u8]) -> IResult<&[u8], EncodingStatsRes
         columns.len()
     );
 
-    // Mark clustering columns and assign positions (Issue #163)
-    // Clustering keys need to be matched with regular columns and marked appropriately
-    if !clustering_types.is_empty() {
-        // For now, we don't have column names for clustering keys from the type descriptors
-        // The clustering key information is just the types
-        // We need to match these with columns based on schema knowledge or other means
-        // For this initial implementation, we'll store clustering types as metadata
-        // and defer column matching to the schema layer
+    let partition_key_columns = build_partition_key_columns(&partition_types);
+    let clustering_key_columns = build_clustering_key_columns(&clustering_types);
 
-        // Note: Proper implementation requires extracting column names for clustering keys
-        // from the schema or matching with regular columns. This is a known limitation.
-        log::debug!(
-            "Clustering key types found: {:?}, but column name matching not yet implemented",
-            clustering_types
-        );
-    }
+    log::debug!(
+        "Constructed ColumnInfo entries from SerializationHeader: {} partition keys, {} clustering keys",
+        partition_key_columns.len(),
+        clustering_key_columns.len()
+    );
 
-    Ok((input, (min_timestamp, min_deletion_time, min_ttl, columns)))
+    Ok((
+        input,
+        (
+            min_timestamp,
+            min_deletion_time,
+            min_ttl,
+            partition_key_columns,
+            clustering_key_columns,
+            columns,
+        ),
+    ))
 }
 
 /// Main enhanced parser for real Statistics.db files (minimal implementation for Issue #162)
@@ -943,10 +1272,14 @@ pub fn parse_enhanced_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableSta
             table_stats,
             partition_stats,
             compression_stats,
+            partition_columns,
+            clustering_columns,
             columns,
         )) => {
             log::debug!(
-                "Successfully parsed Statistics.db: {} columns from SerializationHeader",
+                "Successfully parsed Statistics.db serialization header: {} partition keys, {} clustering keys, {} regular columns",
+                partition_columns.len(),
+                clustering_columns.len(),
                 columns.len()
             );
 
@@ -960,6 +1293,8 @@ pub fn parse_enhanced_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableSta
                 compression_stats,
                 metadata: std::collections::HashMap::new(),
                 serialization_header_columns: columns,
+                serialization_header_partition_keys: partition_columns,
+                serialization_header_clustering_keys: clustering_columns,
             };
 
             Ok((remaining, statistics))
@@ -1000,15 +1335,17 @@ mod tests {
         let mut test_data = vec![];
 
         // Partition key type: 41 bytes "(org.apache.cassandra.db.marshal.UUIDType"
-        test_data.push(0x29); // VInt: 41
+        let partition_type = b"(org.apache.cassandra.db.marshal.UUIDType";
         test_data.extend_from_slice(&[0x00, 0x00]); // Marker
-        test_data.extend_from_slice(b"(org.apache.cassandra.db.marshal.UUIDType");
+        test_data.push(partition_type.len() as u8);
+        test_data.extend_from_slice(partition_type);
 
         // Clustering key count = 0
         test_data.push(0x00);
 
-        // Regular columns section: marker (0x00 0x00) + count
-        test_data.extend_from_slice(&[0x00, 0x00, 0x02]); // section marker (2 bytes) + count 2
+        // Regular columns section: separator (0x00) + count
+        test_data.push(0x00); // section separator
+        test_data.push(0x02); // column count
 
         // Column 1: "id" (UUID)
         test_data.push(0x02); // name length = 2
@@ -1057,21 +1394,28 @@ mod tests {
         let mut test_data = vec![];
 
         // Partition key type: 41 bytes
-        test_data.push(0x29); // VInt: 41
+        let partition_type = b"(org.apache.cassandra.db.marshal.UUIDType";
         test_data.extend_from_slice(&[0x00, 0x00]); // Marker
-        test_data.extend_from_slice(b"(org.apache.cassandra.db.marshal.UUIDType");
+        test_data.push(partition_type.len() as u8);
+        test_data.extend_from_slice(partition_type);
 
         // Clustering key count = 2
         test_data.push(0x02);
 
         // Clustering key 1: ReversedType(TimestampType)
-        test_data.extend_from_slice(b"[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)");
+        let ck1 =
+            b"[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)";
+        test_data.push(ck1.len() as u8);
+        test_data.extend_from_slice(ck1);
 
         // Clustering key 2: UTF8Type
-        test_data.extend_from_slice(b"(org.apache.cassandra.db.marshal.UTF8Type)");
+        let ck2 = b"(org.apache.cassandra.db.marshal.UTF8Type)";
+        test_data.push(ck2.len() as u8);
+        test_data.extend_from_slice(ck2);
 
         // Regular columns section
-        test_data.extend_from_slice(&[0x00, 0x00, 0x02]); // section marker (2 bytes) + count 2
+        test_data.push(0x00); // separator
+        test_data.push(0x02); // count
 
         // Column 1: "data" (UTF8)
         test_data.push(0x04); // name length
@@ -1261,7 +1605,8 @@ mod tests {
         // Marker: 0x00 0x00 followed by column count
         // NOTE: In SerializationHeader, partition keys are NOT in the regular columns section
         // Only regular (non-key) columns are listed here
-        test_data.extend_from_slice(&[0x00, 0x00, 0x02]); // 2 regular columns
+        test_data.push(0x00); // separator
+        test_data.push(0x02); // 2 regular columns
 
         // Regular Column 1: "expiring_value" (Int32)
         test_data.push(0x0E); // name length = 14
@@ -1296,28 +1641,14 @@ mod tests {
             "org.apache.cassandra.db.marshal.UUIDType"
         );
 
-        // Verify columns: 1 synthetic partition key + 2 regular columns = 3 total
-        assert_eq!(
-            columns.len(),
-            3,
-            "Expected 1 synthetic PK + 2 regular columns"
-        );
-
-        // Column 0: synthetic partition key "id"
-        assert_eq!(columns[0].name, "id");
-        assert_eq!(columns[0].column_type, "uuid");
-        assert!(columns[0].is_primary_key);
-        assert_eq!(columns[0].key_position, Some(0));
-
-        // Column 1: regular column "expiring_value"
-        assert_eq!(columns[1].name, "expiring_value");
-        assert_eq!(columns[1].column_type, "int");
+        // Verify regular columns
+        assert_eq!(columns.len(), 2, "Expected 2 regular columns");
+        assert_eq!(columns[0].name, "expiring_value");
+        assert_eq!(columns[0].column_type, "int");
+        assert!(!columns[0].is_primary_key);
+        assert_eq!(columns[1].name, "session_info");
+        assert_eq!(columns[1].column_type, "text");
         assert!(!columns[1].is_primary_key);
-
-        // Column 2: regular column "session_info"
-        assert_eq!(columns[2].name, "session_info");
-        assert_eq!(columns[2].column_type, "text");
-        assert!(!columns[2].is_primary_key);
     }
 
     #[test]
@@ -1335,7 +1666,8 @@ mod tests {
         test_data.extend_from_slice(composite_type.as_bytes());
 
         // Marker + column count
-        test_data.extend_from_slice(&[0x00, 0x00, 0x01]);
+        test_data.push(0x00); // separator
+        test_data.push(0x01); // column count
 
         // Single column: "data" (UTF8)
         test_data.push(0x04);
@@ -1351,16 +1683,10 @@ mod tests {
         assert_eq!(partition_keys.len(), 1);
         assert_eq!(partition_keys[0], composite_type);
 
-        // Expect 2 columns: 1 synthetic partition key + 1 regular column
-        assert_eq!(columns.len(), 2);
-
-        // Column 0: synthetic partition key
-        assert_eq!(columns[0].name, "id");
-        assert!(columns[0].is_primary_key);
-
-        // Column 1: regular column "data"
-        assert_eq!(columns[1].name, "data");
-        assert!(!columns[1].is_primary_key);
+        // Expect 1 regular column
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "data");
+        assert!(!columns[0].is_primary_key);
     }
 
     #[test]
@@ -1371,7 +1697,8 @@ mod tests {
         let mut test_data = vec![];
 
         // Just the marker and columns, no partition key type before
-        test_data.extend_from_slice(&[0x00, 0x00, 0x01]); // Marker + count
+        test_data.push(0x00); // separator
+        test_data.push(0x01); // count
 
         // Column: "name" (UTF8)
         test_data.push(0x04);

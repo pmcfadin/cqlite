@@ -572,6 +572,8 @@ mod tests {
                 map
             },
             serialization_header_columns: vec![],
+            serialization_header_partition_keys: vec![],
+            serialization_header_clustering_keys: vec![],
         }
     }
 }
