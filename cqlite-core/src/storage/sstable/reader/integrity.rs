@@ -173,7 +173,7 @@ impl SSTableReader {
     ) -> Result<Vec<(RowKey, Value)>> {
         let mut results = Vec::new();
 
-        println!(
+        log::debug!(
             "Processing {} key groups for multi-generation merge",
             entries.len()
         );
@@ -184,7 +184,7 @@ impl SSTableReader {
         let batches: Vec<_> = entries.chunks(BATCH_SIZE).collect();
 
         for (batch_idx, batch) in batches.iter().enumerate() {
-            println!(
+            log::debug!(
                 "Processing batch {}/{} with {} entries",
                 batch_idx + 1,
                 batches.len(),
@@ -203,12 +203,12 @@ impl SSTableReader {
                     }
                 } else {
                     // Value was completely tombstoned
-                    println!("Value for key {:?} was completely tombstoned", key);
+                    log::debug!("Value for key {:?} was completely tombstoned", key);
                 }
             }
         }
 
-        println!(
+        log::debug!(
             "Multi-generation merge completed: {} final results from {} input groups",
             results.len(),
             entries.len()

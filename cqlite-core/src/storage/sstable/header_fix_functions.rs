@@ -15,8 +15,8 @@ pub fn parse_exact_header_size_standard(
         Ok((remaining, _parsed_header)) => {
             // The difference between original buffer and remaining is the exact header size
             let header_size = header_buffer.len() - remaining.len();
-            println!(
-                "📐 Parsed exact header size {} for standard format using nom parser",
+            log::debug!(
+                "Parsed exact header size {} for standard format using nom parser",
                 header_size
             );
 
@@ -35,7 +35,7 @@ pub fn parse_exact_header_size_standard(
             Ok(header_size)
         }
         Err(err) => {
-            println!("⚠️ Failed to parse header with nom: {:?}", err);
+            log::warn!("Failed to parse header with nom: {:?}", err);
             // Fallback to scanning for data start markers
             find_data_start_by_heuristic_scanning(header_buffer)
         }
@@ -64,8 +64,8 @@ pub fn find_data_start_by_heuristic_scanning(header_buffer: &[u8]) -> Result<usi
         // Check for known block markers
         for marker in BLOCK_MARKERS {
             if window.starts_with(marker) {
-                println!(
-                    "🔍 Found potential data start at offset {} (marker: {:02x?})",
+                log::debug!(
+                    "Found potential data start at offset {} (marker: {:02x?})",
                     offset, marker
                 );
                 return Ok(offset);
@@ -78,8 +78,8 @@ pub fn find_data_start_by_heuristic_scanning(header_buffer: &[u8]) -> Result<usi
             if offset + 8 < header_buffer.len() {
                 let next_bytes = &header_buffer[offset + 4..offset + 8];
                 if next_bytes.iter().any(|&b| b != 0) {
-                    println!(
-                        "🔍 Found potential data start after null padding at offset {}",
+                    log::debug!(
+                        "Found potential data start after null padding at offset {}",
                         offset + 4
                     );
                     return Ok(offset + 4);
@@ -95,8 +95,8 @@ pub fn find_data_start_by_heuristic_scanning(header_buffer: &[u8]) -> Result<usi
         512  // Use 512B for smaller files
     };
 
-    println!(
-        "⚠️ No data start markers found, using fallback size {}",
+    log::warn!(
+        "No data start markers found, using fallback size {}",
         fallback_size
     );
     Ok(fallback_size.min(header_buffer.len()))

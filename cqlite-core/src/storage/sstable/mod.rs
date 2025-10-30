@@ -269,28 +269,25 @@ impl SSTableManager {
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
 
-        eprintln!(
-            "[DEBUG SSTableManager] load_from_table_directories: processing {} directories",
+        log::debug!(
+            "SSTableManager::load_from_table_directories: processing {} directories",
             table_dirs.len()
         );
 
         for table_dir in table_dirs {
             // Check if directory exists
             if !self.platform.fs().exists(&table_dir).await? {
-                eprintln!("Warning: Table directory does not exist: {:?}", table_dir);
+                log::warn!("Table directory does not exist: {:?}", table_dir);
                 continue;
             }
 
-            eprintln!("[DEBUG SSTableManager] Scanning directory: {:?}", table_dir);
+            log::debug!("SSTableManager scanning directory: {:?}", table_dir);
 
             // Read directory contents
             let mut dir_entries = match self.platform.fs().read_dir(&table_dir).await {
                 Ok(entries) => entries,
                 Err(e) => {
-                    eprintln!(
-                        "Warning: Cannot read table directory {:?}: {}",
-                        table_dir, e
-                    );
+                    log::warn!("Cannot read table directory {:?}: {}", table_dir, e);
                     continue;
                 }
             };
@@ -303,7 +300,7 @@ impl SSTableManager {
                     // Check for Cassandra SSTable data files using the *-Data.db pattern
                     if filename.ends_with("-Data.db") {
                         files_found += 1;
-                        eprintln!("[DEBUG SSTableManager] Found SSTable file: {:?}", path);
+                        log::debug!("SSTableManager found SSTable file: {:?}", path);
 
                         let sstable_id = SSTableId::from_filename(filename);
                         // Try to open the SSTable reader
@@ -316,8 +313,8 @@ impl SSTableManager {
                         {
                             #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
                             Ok(mut reader) => {
-                                eprintln!(
-                                    "[DEBUG SSTableManager] Successfully loaded SSTable: {}",
+                                log::debug!(
+                                    "SSTableManager successfully loaded SSTable: {}",
                                     sstable_id.0
                                 );
 
@@ -326,8 +323,8 @@ impl SSTableManager {
                                 {
                                     let schema_reg_guard = self.schema_registry.read().await;
                                     if let Some(ref registry_rwlock) = *schema_reg_guard {
-                                        eprintln!(
-                                            "[DEBUG SSTableManager] Setting schema registry on reader: {}",
+                                        log::debug!(
+                                            "SSTableManager setting schema registry on reader: {}",
                                             sstable_id.0
                                         );
                                         reader.set_schema_registry(Arc::clone(registry_rwlock));
@@ -341,8 +338,8 @@ impl SSTableManager {
 
                                 // NEW: Extract table name and store by table name
                                 if let Some(table_name) = extract_table_name(&path) {
-                                    eprintln!(
-                                        "[DEBUG SSTableManager] Mapping table '{}' to SSTable '{}'",
+                                    log::debug!(
+                                        "SSTableManager mapping table '{}' to SSTable '{}'",
                                         table_name,
                                         path.display()
                                     );
@@ -352,33 +349,31 @@ impl SSTableManager {
                                         .or_insert_with(Vec::new)
                                         .push(reader_arc);
                                 } else {
-                                    eprintln!(
-                                        "[WARN SSTableManager] Could not extract table name from path: {}",
+                                    log::warn!(
+                                        "SSTableManager could not extract table name from path: {}",
                                         path.display()
                                     );
                                 }
                             }
                             Err(e) => {
                                 // Log warning but continue loading other SSTables
-                                eprintln!("Warning: Could not load SSTable file {:?}: {}", path, e);
+                                log::warn!("Could not load SSTable file {:?}: {}", path, e);
                             }
                         }
                     }
                 }
             }
 
-            eprintln!(
-                "[DEBUG SSTableManager] Directory scan complete: found {} Data.db files in {:?}",
-                files_found, table_dir
+            log::debug!(
+                "SSTableManager directory scan complete: found {} Data.db files in {:?}",
+                files_found,
+                table_dir
             );
         }
 
-        eprintln!(
-            "[DEBUG SSTableManager] Total SSTables loaded: {}",
-            readers.len()
-        );
-        eprintln!(
-            "[DEBUG SSTableManager] Tables discovered: {:?}",
+        log::debug!("SSTableManager total SSTables loaded: {}", readers.len());
+        log::debug!(
+            "SSTableManager tables discovered: {:?}",
             table_readers.keys().collect::<Vec<_>>()
         );
 
@@ -435,7 +430,7 @@ impl SSTableManager {
                         }
                         Err(_) => {
                             // Skip problematic SSTable files during initialization
-                            eprintln!("Warning: Could not load SSTable file: {:?}", path);
+                            log::warn!("Could not load SSTable file: {:?}", path);
                         }
                     }
                 }

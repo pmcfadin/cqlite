@@ -48,7 +48,7 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
 
             // Check file accessibility
             if let Err(e) = fs::metadata(&file_path) {
-                eprintln!("Warning: Cannot access file {:?}: {}", file_path, e);
+                log::warn!("Cannot access file {:?}: {}", file_path, e);
                 continue;
             }
 
@@ -93,7 +93,7 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
     generations.sort_by(|a, b| b.generation.cmp(&a.generation));
 
     // Log summary for debugging
-    eprintln!(
+    log::debug!(
         "Directory scan completed: {} total files, {} SSTable files, {} generations found",
         found_files,
         valid_sstable_files,

@@ -240,7 +240,7 @@ pub fn validate_generation_components_enhanced(
                             ));
                         } else {
                             // Log warning for empty optional files
-                            eprintln!("Warning: Optional component file is empty: {:?}", component);
+                            log::warn!("Optional component file is empty: {:?}", component);
                         }
                     }
 
@@ -522,7 +522,7 @@ pub fn test_all_directories<P: AsRef<Path>>(
                             results.push((dir_name.to_string(), report));
                         }
                         Err(e) => {
-                            eprintln!("Failed to validate directory {}: {}", dir_name, e);
+                            log::error!("Failed to validate directory {}: {}", dir_name, e);
                         }
                     }
                 }

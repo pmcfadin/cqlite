@@ -1390,10 +1390,7 @@ impl SchemaDiscoveryEngine {
                 }
                 Err(e) => {
                     // Log error but continue with other files
-                    eprintln!(
-                        "Warning: Failed to parse header from {:?}: {}",
-                        file_path, e
-                    );
+                    log::warn!("Failed to parse header from {:?}: {}", file_path, e);
                 }
             }
         }
@@ -1437,7 +1434,7 @@ impl SchemaDiscoveryEngine {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to sample data from {:?}: {}", file_path, e);
+                    log::warn!("Failed to sample data from {:?}: {}", file_path, e);
                 }
             }
         }

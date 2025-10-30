@@ -209,9 +209,10 @@ impl SelectExecutor {
     ) -> Result<Vec<QueryRow>> {
         let mut results = Vec::new();
 
-        eprintln!(
-            "[EXECUTOR] Executing SSTableScan: table=\"{}\", predicates={:?}",
-            table, predicates
+        log::info!(
+            "Executing SSTableScan: table=\"{}\", predicates={:?}",
+            table,
+            predicates
         );
 
         // Parse table ID to extract keyspace and table name
@@ -224,15 +225,15 @@ impl SelectExecutor {
             .await;
 
         if let Some(ref schema) = schema_opt {
-            eprintln!(
-                "[EXECUTOR] Found schema for {}.{} with {} columns",
+            log::info!(
+                "Found schema for {}.{} with {} columns",
                 schema.keyspace,
                 schema.table,
                 schema.columns.len()
             );
         } else {
-            eprintln!(
-                "[EXECUTOR] No schema found for {}.{}, proceeding without schema-aware parsing",
+            log::info!(
+                "No schema found for {}.{}, proceeding without schema-aware parsing",
                 keyspace.as_deref().unwrap_or("unknown"),
                 table_name
             );
@@ -245,7 +246,7 @@ impl SelectExecutor {
             .scan(table, None, None, None, schema_opt.as_ref())
             .await?;
 
-        eprintln!("[EXECUTOR] Scan returned {} rows", scan_results.len());
+        log::info!("Scan returned {} rows", scan_results.len());
 
         for (key, value) in scan_results {
             context.rows_processed += 1;
@@ -434,7 +435,7 @@ impl SelectExecutor {
             (Value::Integer(a), Value::BigInt(b)) => Ok((*a as i64).cmp(b) as i32),
             (Value::BigInt(a), Value::Integer(b)) => Ok(a.cmp(&(*b as i64)) as i32),
             _ => {
-                eprintln!("DEBUG: Cannot compare {:?} with {:?}", a, b);
+                log::debug!("Cannot compare {:?} with {:?}", a, b);
                 Err(Error::query_execution(
                     "Cannot compare incompatible types".to_string(),
                 ))

@@ -58,13 +58,15 @@ async fn read_next_block_with_retry(
             Err(e) => {
                 retry_count += 1;
                 if retry_count >= max_retries {
-                    eprintln!("Failed to read block after {} retries: {}", max_retries, e);
+                    log::error!("Failed to read block after {} retries: {}", max_retries, e);
                     return Err(e);
                 }
 
-                eprintln!(
+                log::warn!(
                     "Block read failed (attempt {}/{}): {}, retrying...",
-                    retry_count, max_retries, e
+                    retry_count,
+                    max_retries,
+                    e
                 );
 
                 // Brief delay before retry
@@ -83,9 +85,9 @@ async fn read_next_block_impl(
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
 ) -> Result<Option<Vec<u8>>> {
-    eprintln!("[DEBUG block_io::read_next_block_impl] Starting block read");
-    eprintln!(
-        "[DEBUG block_io::read_next_block_impl] Cassandra version: {:?}",
+    log::debug!("block_io::read_next_block_impl: Starting block read");
+    log::debug!(
+        "block_io::read_next_block_impl: Cassandra version: {:?}",
         cassandra_version
     );
 
@@ -99,7 +101,7 @@ async fn read_next_block_impl(
         | crate::parser::header::CassandraVersion::V5_0FormatF
         | crate::parser::header::CassandraVersion::V5_0FormatG
         | crate::parser::header::CassandraVersion::V5_0StaticColumns => {
-            eprintln!("[DEBUG block_io::read_next_block_impl] Using NB format chunk reader");
+            log::debug!("block_io::read_next_block_impl: Using NB format chunk reader");
 
             // Get file size for chunk size calculation
             let file_size = {
@@ -128,26 +130,26 @@ async fn read_next_block_impl(
     // Read block header with format-specific handling (BTI and Legacy only)
     let block_header = match cassandra_version {
         crate::parser::header::CassandraVersion::V5_0Bti => {
-            eprintln!(
-                "[DEBUG block_io::read_next_block_impl] Using BTI format block header reader"
-            );
+            log::debug!("block_io::read_next_block_impl: Using BTI format block header reader");
             read_bti_format_block_header(file).await?
         }
         _ => {
-            eprintln!(
-                "[DEBUG block_io::read_next_block_impl] Using legacy format block header reader"
-            );
+            log::debug!("block_io::read_next_block_impl: Using legacy format block header reader");
             read_legacy_format_block_header(file).await?
         }
     };
 
     let Some((compressed_size, checksum, current_pos)) = block_header else {
-        eprintln!("[DEBUG block_io::read_next_block_impl] Block header returned None (EOF)");
+        log::debug!("block_io::read_next_block_impl: Block header returned None (EOF)");
         return Ok(None); // EOF
     };
 
-    eprintln!("[DEBUG block_io::read_next_block_impl] Block header: compressed_size={}, checksum={}, pos={}",
-              compressed_size, checksum, current_pos);
+    log::debug!(
+        "block_io::read_next_block_impl: Block header: compressed_size={}, checksum={}, pos={}",
+        compressed_size,
+        checksum,
+        current_pos
+    );
 
     // Validate block size to prevent memory issues and detect corruption
     if compressed_size > 64 * 1024 * 1024 {
@@ -167,7 +169,7 @@ async fn read_next_block_impl(
     }
 
     if compressed_size == 0 {
-        println!("Encountered empty block at position {}", current_pos);
+        log::info!("Encountered empty block at position {}", current_pos);
         return Ok(Some(Vec::new()));
     }
 
@@ -187,10 +189,10 @@ async fn read_next_block_impl(
                 current_pos, checksum, computed_checksum
             )));
         }
-        println!("Block checksum validated: 0x{:08x}", checksum);
+        log::debug!("Block checksum validated: 0x{:08x}", checksum);
     }
 
-    println!(
+    log::debug!(
         "Successfully read block: {} bytes at position {}",
         block_data.len(),
         current_pos
@@ -212,7 +214,7 @@ async fn read_nb_format_chunk_data(
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     file_size: u64,
 ) -> Result<Option<Vec<u8>>> {
-    eprintln!("[DEBUG read_nb_format_chunk_data] Starting chunk read");
+    log::debug!("read_nb_format_chunk_data: Starting chunk read");
 
     // Must have CompressionInfo for NB format
     let Some(comp_info) = compression_info else {
@@ -225,16 +227,16 @@ async fn read_nb_format_chunk_data(
 
     // Check if all chunks read
     if chunk_idx >= comp_info.chunk_offsets.len() {
-        eprintln!(
-            "[DEBUG read_nb_format_chunk_data] All chunks read ({}/{})",
+        log::debug!(
+            "read_nb_format_chunk_data: All chunks read ({}/{})",
             chunk_idx,
             comp_info.chunk_offsets.len()
         );
         return Ok(None); // EOF
     }
 
-    eprintln!(
-        "[DEBUG read_nb_format_chunk_data] Reading chunk {}/{}",
+    log::debug!(
+        "read_nb_format_chunk_data: Reading chunk {}/{}",
         chunk_idx,
         comp_info.chunk_offsets.len()
     );
@@ -244,9 +246,10 @@ async fn read_nb_format_chunk_data(
         .compressed_chunk_offset(chunk_idx)
         .ok_or_else(|| Error::InvalidFormat(format!("No offset for chunk {}", chunk_idx)))?;
 
-    eprintln!(
-        "[DEBUG read_nb_format_chunk_data] Chunk {} offset: 0x{:x}",
-        chunk_idx, chunk_offset
+    log::debug!(
+        "read_nb_format_chunk_data: Chunk {} offset: 0x{:x}",
+        chunk_idx,
+        chunk_offset
     );
 
     // Calculate total chunk size (includes trailing 4-byte CRC32)
@@ -270,9 +273,12 @@ async fn read_nb_format_chunk_data(
     // Chunk data size = total_chunk_size - 4 bytes for trailing CRC
     let chunk_data_size = (total_chunk_size - 4) as usize;
 
-    eprintln!(
-        "[DEBUG read_nb_format_chunk_data] Chunk {} total_size={}, data_size={}, offset=0x{:x}",
-        chunk_idx, total_chunk_size, chunk_data_size, chunk_offset
+    log::debug!(
+        "read_nb_format_chunk_data: Chunk {} total_size={}, data_size={}, offset=0x{:x}",
+        chunk_idx,
+        total_chunk_size,
+        chunk_data_size,
+        chunk_offset
     );
 
     // Read chunk data and CRC32 from file
@@ -334,12 +340,13 @@ async fn read_nb_format_chunk_data(
         )));
     }
 
-    eprintln!(
-        "[DEBUG read_nb_format_chunk_data] CRC32 validated for chunk {}: 0x{:08x}",
-        chunk_idx, expected_crc
+    log::debug!(
+        "read_nb_format_chunk_data: CRC32 validated for chunk {}: 0x{:08x}",
+        chunk_idx,
+        expected_crc
     );
-    eprintln!(
-        "[DEBUG read_nb_format_chunk_data] Successfully read chunk {}: {} bytes (compressed)",
+    log::debug!(
+        "read_nb_format_chunk_data: Successfully read chunk {}: {} bytes (compressed)",
         chunk_idx,
         chunk_data.len()
     );
@@ -463,9 +470,10 @@ async fn read_large_block_streaming(
     let mut buffer = vec![0u8; buffer_size];
     let mut remaining = size;
 
-    println!(
+    log::info!(
         "Reading large block ({} bytes) using streaming with {} byte buffer",
-        size, buffer_size
+        size,
+        buffer_size
     );
 
     {

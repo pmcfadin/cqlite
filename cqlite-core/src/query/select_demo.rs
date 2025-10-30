@@ -8,10 +8,10 @@ use crate::query::parse_select;
 
 /// Demonstrate the revolutionary CQL SELECT capabilities
 pub fn demonstrate_select_parser() {
-    println!("🚀 REVOLUTIONARY CQL SELECT PARSER DEMONSTRATION");
-    println!("=================================================");
-    println!("The FIRST EVER CQL SELECT parser for direct SSTable access!");
-    println!();
+    log::info!("🚀 REVOLUTIONARY CQL SELECT PARSER DEMONSTRATION");
+    log::info!("=================================================");
+    log::info!("The FIRST EVER CQL SELECT parser for direct SSTable access!");
+    log::info!("");
 
     // Example 1: Basic SELECT
     demonstrate_basic_select();
@@ -30,8 +30,8 @@ pub fn demonstrate_select_parser() {
 }
 
 fn demonstrate_basic_select() {
-    println!("📋 BASIC SELECT STATEMENTS");
-    println!("--------------------------");
+    log::info!("📋 BASIC SELECT STATEMENTS");
+    log::info!("--------------------------");
 
     let queries = vec![
         "SELECT * FROM users",
@@ -43,23 +43,23 @@ fn demonstrate_basic_select() {
     for sql in queries {
         match parse_select(sql) {
             Ok(statement) => {
-                println!("✅ {}", sql);
-                println!("   → Parsed successfully!");
+                log::info!("✅ {}", sql);
+                log::info!("   → Parsed successfully!");
                 if statement.requires_aggregation() {
-                    println!("   → Requires aggregation");
+                    log::info!("   → Requires aggregation");
                 }
             }
             Err(e) => {
-                println!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", sql, e);
             }
         }
     }
-    println!();
+    log::info!("");
 }
 
 fn demonstrate_complex_where() {
-    println!("🔍 COMPLEX WHERE CLAUSES");
-    println!("------------------------");
+    log::info!("🔍 COMPLEX WHERE CLAUSES");
+    log::info!("------------------------");
 
     let queries = vec![
         "SELECT * FROM orders WHERE amount > 100 AND status = 'pending'",
@@ -74,25 +74,25 @@ fn demonstrate_complex_where() {
     for sql in queries {
         match parse_select(sql) {
             Ok(statement) => {
-                println!("✅ {}", sql);
+                log::info!("✅ {}", sql);
                 if let Some(where_clause) = &statement.where_clause {
-                    println!(
+                    log::info!(
                         "   → WHERE clause can be pushed to SSTable: {}",
                         where_clause.can_pushdown_to_sstable()
                     );
                 }
             }
             Err(e) => {
-                println!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", sql, e);
             }
         }
     }
-    println!();
+    log::info!("");
 }
 
 fn demonstrate_aggregation() {
-    println!("📊 AGGREGATION FUNCTIONS");
-    println!("-------------------------");
+    log::info!("📊 AGGREGATION FUNCTIONS");
+    log::info!("-------------------------");
 
     let queries = vec![
         "SELECT COUNT(*) FROM users",
@@ -106,33 +106,33 @@ fn demonstrate_aggregation() {
     for sql in queries {
         match parse_select(sql) {
             Ok(statement) => {
-                println!("✅ {}", sql);
-                println!(
+                log::info!("✅ {}", sql);
+                log::info!(
                     "   → Requires aggregation: {}",
                     statement.requires_aggregation()
                 );
-                println!(
+                log::info!(
                     "   → Has aggregate functions: {}",
                     statement.has_aggregate_functions()
                 );
                 if statement.group_by.is_some() {
-                    println!("   → GROUP BY detected");
+                    log::info!("   → GROUP BY detected");
                 }
                 if statement.having_clause.is_some() {
-                    println!("   → HAVING clause detected");
+                    log::info!("   → HAVING clause detected");
                 }
             }
             Err(e) => {
-                println!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", sql, e);
             }
         }
     }
-    println!();
+    log::info!("");
 }
 
 fn demonstrate_collections() {
-    println!("📦 COLLECTION OPERATIONS");
-    println!("-------------------------");
+    log::info!("📦 COLLECTION OPERATIONS");
+    log::info!("-------------------------");
 
     let queries = vec![
         "SELECT user_id, tags[0], tags[1] FROM user_profiles",
@@ -145,21 +145,21 @@ fn demonstrate_collections() {
     for sql in queries {
         match parse_select(sql) {
             Ok(statement) => {
-                println!("✅ {}", sql);
+                log::info!("✅ {}", sql);
                 let column_refs = statement.get_referenced_columns();
-                println!("   → Referenced columns: {}", column_refs.len());
+                log::info!("   → Referenced columns: {}", column_refs.len());
             }
             Err(e) => {
-                println!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", sql, e);
             }
         }
     }
-    println!();
+    log::info!("");
 }
 
 fn demonstrate_advanced_features() {
-    println!("🌟 ADVANCED FEATURES");
-    println!("--------------------");
+    log::info!("🌟 ADVANCED FEATURES");
+    log::info!("--------------------");
 
     let queries = vec![
         "SELECT * FROM users ORDER BY created_at DESC, name ASC LIMIT 10",
@@ -172,62 +172,62 @@ fn demonstrate_advanced_features() {
     for sql in queries {
         match parse_select(sql) {
             Ok(statement) => {
-                println!("✅ {}", sql);
+                log::info!("✅ {}", sql);
                 if statement.order_by.is_some() {
-                    println!("   → ORDER BY detected");
+                    log::info!("   → ORDER BY detected");
                 }
                 if statement.limit.is_some() {
-                    println!("   → LIMIT detected");
+                    log::info!("   → LIMIT detected");
                 }
                 if statement.offset.is_some() {
-                    println!("   → OFFSET detected");
+                    log::info!("   → OFFSET detected");
                 }
             }
             Err(e) => {
-                println!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", sql, e);
             }
         }
     }
-    println!();
+    log::info!("");
 }
 
 /// Show performance characteristics
 pub fn demonstrate_performance_features() {
-    println!("⚡ PERFORMANCE FEATURES");
-    println!("=======================");
-    println!("The SELECT parser includes revolutionary optimizations:");
-    println!();
+    log::info!("⚡ PERFORMANCE FEATURES");
+    log::info!("=======================");
+    log::info!("The SELECT parser includes revolutionary optimizations:");
+    log::info!("");
 
-    println!("🔥 PREDICATE PUSHDOWN:");
-    println!("   • WHERE conditions pushed to SSTable level");
-    println!("   • Bloom filter utilization for existence tests");
-    println!("   • Range queries optimized with SSTable sort order");
-    println!();
+    log::info!("🔥 PREDICATE PUSHDOWN:");
+    log::info!("   • WHERE conditions pushed to SSTable level");
+    log::info!("   • Bloom filter utilization for existence tests");
+    log::info!("   • Range queries optimized with SSTable sort order");
+    log::info!("");
 
-    println!("🚀 PARALLEL EXECUTION:");
-    println!("   • Multi-threaded SSTable scanning");
-    println!("   • Parallel aggregation with merge strategies");
-    println!("   • Adaptive parallelization based on data size");
-    println!();
+    log::info!("🚀 PARALLEL EXECUTION:");
+    log::info!("   • Multi-threaded SSTable scanning");
+    log::info!("   • Parallel aggregation with merge strategies");
+    log::info!("   • Adaptive parallelization based on data size");
+    log::info!("");
 
-    println!("💾 MEMORY EFFICIENCY:");
-    println!("   • Streaming results for large datasets");
-    println!("   • Configurable memory limits for aggregation");
-    println!("   • Lazy evaluation of projection expressions");
-    println!();
+    log::info!("💾 MEMORY EFFICIENCY:");
+    log::info!("   • Streaming results for large datasets");
+    log::info!("   • Configurable memory limits for aggregation");
+    log::info!("   • Lazy evaluation of projection expressions");
+    log::info!("");
 
-    println!("📈 QUERY OPTIMIZATION:");
-    println!("   • Cost-based optimization");
-    println!("   • Index selection and utilization");
-    println!("   • Statistics-driven planning");
+    log::info!("📈 QUERY OPTIMIZATION:");
+    log::info!("   • Cost-based optimization");
+    log::info!("   • Index selection and utilization");
+    log::info!("   • Statistics-driven planning");
 }
 
 /// Demonstrate real-world query examples
 pub fn demonstrate_real_world_examples() {
-    println!("🌍 REAL-WORLD QUERY EXAMPLES");
-    println!("=============================");
-    println!("Examples of queries this parser can handle:");
-    println!();
+    log::info!("🌍 REAL-WORLD QUERY EXAMPLES");
+    log::info!("=============================");
+    log::info!("Examples of queries this parser can handle:");
+    log::info!("");
 
     let examples = vec![
         (
@@ -261,23 +261,23 @@ pub fn demonstrate_real_world_examples() {
     ];
 
     for (category, queries) in examples {
-        println!("📊 {}:", category);
+        log::info!("📊 {}:", category);
         for query in queries {
             match parse_select(query) {
                 Ok(statement) => {
-                    println!("   ✅ Complex query parsed successfully");
-                    println!("      Aggregation: {}", statement.requires_aggregation());
-                    println!(
+                    log::info!("   ✅ Complex query parsed successfully");
+                    log::info!("      Aggregation: {}", statement.requires_aggregation());
+                    log::info!(
                         "      Columns: {}",
                         statement.get_referenced_columns().len()
                     );
                 }
                 Err(e) => {
-                    println!("   ❌ Parse error: {}", e);
+                    log::info!("   ❌ Parse error: {}", e);
                 }
             }
         }
-        println!();
+        log::info!("");
     }
 }
 

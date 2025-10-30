@@ -262,7 +262,7 @@ impl QueryExecutor {
 
         // Debug: log what table we're scanning for
         #[cfg(debug_assertions)]
-        eprintln!("DEBUG executor: Scanning for table: {:?}", table.name());
+        log::debug!("executor: Scanning for table: {:?}", table.name());
 
         // Check if we can parallelize the scan
         let can_parallelize = plan
@@ -478,7 +478,7 @@ impl QueryExecutor {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Worker {} error: {:?}", worker_id, e);
+                        log::error!("Worker {} error: {:?}", worker_id, e);
                     }
                 }
             });

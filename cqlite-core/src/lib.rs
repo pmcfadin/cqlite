@@ -303,9 +303,10 @@ impl Database {
 
         #[cfg(debug_assertions)]
         if let Ok(ref query_result) = result {
-            eprintln!(
-                "DEBUG: Database::execute('{}') returning rows_affected: {}",
-                sql, query_result.rows_affected
+            log::debug!(
+                "Database::execute('{}') returning rows_affected: {}",
+                sql,
+                query_result.rows_affected
             );
         }
 
@@ -506,8 +507,8 @@ mod tests {
             .unwrap();
 
         #[cfg(debug_assertions)]
-        eprintln!(
-            "DEBUG: Test INSERT assertion - rows_affected: {}",
+        log::debug!(
+            "Test INSERT assertion - rows_affected: {}",
             result.rows_affected
         );
 
@@ -520,10 +521,7 @@ mod tests {
             .unwrap();
 
         #[cfg(debug_assertions)]
-        eprintln!(
-            "DEBUG: Test SELECT assertion - rows.len(): {}",
-            result.rows.len()
-        );
+        log::debug!("Test SELECT assertion - rows.len(): {}", result.rows.len());
 
         assert_eq!(result.rows.len(), 1, "SELECT should return 1 row");
 

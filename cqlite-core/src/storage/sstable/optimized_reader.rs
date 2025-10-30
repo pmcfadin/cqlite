@@ -263,7 +263,7 @@ impl OptimizedSSTableReader {
 
         // Decide whether to use memory mapping
         let (mmap, file_handle) = if file_size >= opt_config.mmap_threshold_bytes {
-            println!("Using memory-mapped I/O for large file: {}MB", file_size / 1024 / 1024);
+            log::info!("Using memory-mapped I/O for large file: {}MB", file_size / 1024 / 1024);
             let mmap = unsafe {
                 MmapOptions::new()
                     .map(&file.into_std().await)?

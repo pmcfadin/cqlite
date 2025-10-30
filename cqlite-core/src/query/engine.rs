@@ -115,8 +115,8 @@ impl QueryEngine {
             // This ensures INSERT and SELECT use the same key generation logic
             if sql.contains("WHERE id =") && sql.split_whitespace().count() <= 8 {
                 #[cfg(debug_assertions)]
-                eprintln!(
-                    "DEBUG: Routing simple SELECT through normal executor for consistent key handling"
+                log::debug!(
+                    "Routing simple SELECT through normal executor for consistent key handling"
                 );
                 // Fall through to normal execution path for simple point lookups
             } else {

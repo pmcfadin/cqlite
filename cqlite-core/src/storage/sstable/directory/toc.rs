@@ -55,17 +55,19 @@ pub fn parse_toc_file_detailed<P: AsRef<Path>>(
                 if !components.contains(&component) {
                     components.push(component);
                 } else {
-                    eprintln!(
-                        "Warning: Duplicate component in TOC.txt line {}: {}",
-                        line_number, line
+                    log::warn!(
+                        "Duplicate component in TOC.txt line {}: {}",
+                        line_number,
+                        line
                     );
                 }
             }
             Err(_) => {
                 unknown_components.push(line.to_string());
-                eprintln!(
-                    "Warning: Unknown component in TOC.txt line {}: {}",
-                    line_number, line
+                log::warn!(
+                    "Unknown component in TOC.txt line {}: {}",
+                    line_number,
+                    line
                 );
             }
         }

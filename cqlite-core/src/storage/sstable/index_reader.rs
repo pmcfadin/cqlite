@@ -385,9 +385,12 @@ fn parse_simple_partition_key_with_offset<'a>(
 
     // Debug logging to verify parsing
     #[cfg(debug_assertions)]
-    eprintln!(
-        "[DEBUG IndexReader] Entry {}: marker={:#06x}, offset_len={}, data_offset={}",
-        entry_index, marker, offset_len, data_offset
+    log::debug!(
+        "IndexReader Entry {}: marker={:#06x}, offset_len={}, data_offset={}",
+        entry_index,
+        marker,
+        offset_len,
+        data_offset
     );
 
     // Size not stored in Index.db - will be determined during data read

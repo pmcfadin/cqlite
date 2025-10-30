@@ -163,9 +163,11 @@ impl ChunkDecompressor {
         let mut compressed_data = vec![0u8; compressed_size];
         reader.read_exact(&mut compressed_data).map_err(Error::Io)?;
 
-        println!(
-            "📦 Reading chunk {} at offset {} ({} bytes compressed)",
-            chunk_index, compressed_offset, compressed_size
+        log::debug!(
+            "Reading chunk {} at offset {} ({} bytes compressed)",
+            chunk_index,
+            compressed_offset,
+            compressed_size
         );
 
         // For modern formats, enforce strict CRC validation
@@ -426,11 +428,11 @@ pub fn create_decompressor_from_file(
         ))
     })?;
 
-    println!("📋 Loaded compression info:");
-    println!("   Algorithm: {}", compression_info.algorithm);
-    println!("   Chunk Length: {} bytes", compression_info.chunk_length);
-    println!("   Data Length: {} bytes", compression_info.data_length);
-    println!("   Chunk Count: {}", compression_info.chunk_offsets.len());
+    log::info!("Loaded compression info:");
+    log::info!("   Algorithm: {}", compression_info.algorithm);
+    log::info!("   Chunk Length: {} bytes", compression_info.chunk_length);
+    log::info!("   Data Length: {} bytes", compression_info.data_length);
+    log::info!("   Chunk Count: {}", compression_info.chunk_offsets.len());
 
     ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
 }

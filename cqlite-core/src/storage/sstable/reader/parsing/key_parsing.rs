@@ -215,7 +215,7 @@ impl SSTableReader {
             )));
         }
 
-        println!(
+        log::debug!(
             "Parsing v5 composite key with {} components",
             component_count
         );
@@ -244,7 +244,7 @@ impl SSTableReader {
             }
         }
 
-        println!("Parsed v5 composite key: {} total bytes", components.len());
+        log::debug!("Parsed v5 composite key: {} total bytes", components.len());
         Ok(RowKey::new(components))
     }
 
@@ -292,7 +292,7 @@ impl SSTableReader {
             components.pop();
         }
 
-        println!(
+        log::debug!(
             "Parsed legacy composite key: {} total bytes",
             components.len()
         );
@@ -327,7 +327,7 @@ impl SSTableReader {
 
             if offset < key_data.len() {
                 let clustering_data = &key_data[offset..];
-                println!(
+                log::debug!(
                     "Parsed clustering key: {} bytes after {} byte type prefix",
                     clustering_data.len(),
                     offset

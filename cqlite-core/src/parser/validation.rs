@@ -80,7 +80,7 @@ impl ParserValidator {
         self.validate_vint_performance()?;
 
         let duration = start_time.elapsed();
-        println!("✅ VInt validation completed in {:?}", duration);
+        log::info!("VInt validation completed in {:?}", duration);
         Ok(())
     }
 
@@ -189,15 +189,15 @@ impl ParserValidator {
         self.results.insert(test_name.to_string(), result.clone());
 
         if !result.passed {
-            println!(
-                "❌ VInt roundtrip validation failed: {}",
+            log::error!(
+                "VInt roundtrip validation failed: {}",
                 result
                     .error
                     .ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
-            println!(
-                "✅ VInt roundtrip validation passed ({} values, {:.2} MB/s)",
+            log::info!(
+                "VInt roundtrip validation passed ({} values, {:.2} MB/s)",
                 test_values.len(),
                 metrics.throughput_mbs
             );
@@ -275,14 +275,14 @@ impl ParserValidator {
         self.results.insert(test_name.to_string(), result.clone());
 
         if !result.passed {
-            println!(
-                "❌ VInt bit pattern validation failed: {}",
+            log::error!(
+                "VInt bit pattern validation failed: {}",
                 result
                     .error
                     .ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
-            println!("✅ VInt bit pattern validation passed");
+            log::info!("VInt bit pattern validation passed");
         }
 
         Ok(())
@@ -351,14 +351,14 @@ impl ParserValidator {
         self.results.insert(test_name.to_string(), result.clone());
 
         if !result.passed {
-            println!(
-                "❌ VInt boundary validation failed: {}",
+            log::error!(
+                "VInt boundary validation failed: {}",
                 result
                     .error
                     .ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
-            println!("✅ VInt boundary validation passed");
+            log::info!("VInt boundary validation passed");
         }
 
         Ok(())
@@ -462,15 +462,15 @@ impl ParserValidator {
         self.results.insert(test_name.to_string(), result.clone());
 
         if !result.passed {
-            println!(
-                "❌ VInt performance validation failed: {}",
+            log::error!(
+                "VInt performance validation failed: {}",
                 result
                     .error
                     .ok_or_else(|| Error::internal("Expected error but found none"))?
             );
         } else {
-            println!(
-                "✅ VInt performance validation passed: Encode {:.2} MB/s, Decode {:.2} MB/s",
+            log::info!(
+                "VInt performance validation passed: Encode {:.2} MB/s, Decode {:.2} MB/s",
                 encode_throughput, decode_throughput
             );
         }
@@ -480,7 +480,7 @@ impl ParserValidator {
 
     /// Run header validation tests
     pub fn validate_header(&mut self) -> Result<()> {
-        println!("🔍 Validating header parsing...");
+        log::info!("Validating header parsing...");
 
         // Test header serialization/deserialization roundtrip
         let test_header = self.create_test_header();
@@ -489,28 +489,28 @@ impl ParserValidator {
             Ok(serialized) => match header::parse_sstable_header(&serialized) {
                 Ok((remaining, parsed_header)) => {
                     if !remaining.is_empty() {
-                        println!("❌ Header parsing left {} unparsed bytes", remaining.len());
+                        log::error!("Header parsing left {} unparsed bytes", remaining.len());
                     } else if self.headers_equal(&test_header, &parsed_header) {
-                        println!("✅ Header validation passed");
+                        log::info!("Header validation passed");
                     } else {
-                        println!("❌ Header roundtrip produced different result");
+                        log::error!("Header roundtrip produced different result");
                     }
                 }
                 Err(e) => {
-                    println!("❌ Header parsing failed: {:?}", e);
+                    log::error!("Header parsing failed: {:?}", e);
                 }
             },
             Err(e) => {
-                println!("❌ Header serialization failed: {:?}", e);
+                log::error!("Header serialization failed: {:?}", e);
             }
         }
 
         Ok(())
     }
 
-    /// Run type system validation tests  
+    /// Run type system validation tests
     pub fn validate_types(&mut self) -> Result<()> {
-        println!("🔍 Validating type system...");
+        log::info!("Validating type system...");
 
         // Test all CQL type roundtrips
         let test_values = self.create_test_values();
@@ -521,19 +521,19 @@ impl ParserValidator {
                 // Skip type byte
                 Ok((remaining, parsed_value)) => {
                     if !remaining.is_empty() {
-                        println!(
-                            "❌ Type {:?} parsing left {} unparsed bytes",
+                        log::error!(
+                            "Type {:?} parsing left {} unparsed bytes",
                             type_id,
                             remaining.len()
                         );
                     } else if self.values_equal(&value, &parsed_value) {
-                        println!("✅ Type {:?} validation passed", type_id);
+                        log::info!("Type {:?} validation passed", type_id);
                     } else {
-                        println!("❌ Type {:?} roundtrip produced different result", type_id);
+                        log::error!("Type {:?} roundtrip produced different result", type_id);
                     }
                 }
                 Err(e) => {
-                    println!("❌ Type {:?} parsing failed: {:?}", type_id, e);
+                    log::error!("Type {:?} parsing failed: {:?}", type_id, e);
                 }
             }
         }

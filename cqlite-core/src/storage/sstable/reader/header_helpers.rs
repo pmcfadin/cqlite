@@ -39,9 +39,10 @@ pub(crate) fn extract_generation_from_path(path: &Path) -> u64 {
         for i in 0..parts.len() - 2 {
             if (parts[i] == "nb" || parts[i] == "mc" || parts[i] == "la") && i + 1 < parts.len() {
                 if let Ok(generation) = parts[i + 1].parse::<u64>() {
-                    println!(
+                    log::debug!(
                         "Extracted generation {} from pattern 2: {}",
-                        generation, filename
+                        generation,
+                        filename
                     );
                     return generation;
                 }

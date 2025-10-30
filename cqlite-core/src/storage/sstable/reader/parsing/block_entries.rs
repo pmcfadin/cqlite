@@ -423,8 +423,8 @@ impl SSTableReader {
                 Ok(consumed) => {
                     if consumed == 0 {
                         // No progress made, avoid infinite loop
-                        println!(
-                            "⚠️  State machine made no progress at offset {}, stopping",
+                        log::warn!(
+                            "State machine made no progress at offset {}, stopping",
                             offset
                         );
                         break;
@@ -436,14 +436,14 @@ impl SSTableReader {
                             let converted_entries =
                                 self.convert_parsed_row_to_entries(&parsed_row)?;
                             entries.extend(converted_entries);
-                            println!(
-                                "✅ Successfully parsed row with {} clustering rows",
+                            log::debug!(
+                                "Successfully parsed row with {} clustering rows",
                                 parsed_row.clustering_rows.len()
                             );
                         }
                     } else if _state_machine.has_error() {
-                        println!(
-                            "❌ State machine error: {}",
+                        log::warn!(
+                            "State machine error: {}",
                             _state_machine.error_message().unwrap_or("Unknown error")
                         );
                         // Try to continue with legacy parsing for this portion
@@ -453,7 +453,7 @@ impl SSTableReader {
                     offset += consumed;
                 }
                 Err(e) => {
-                    println!("❌ State machine processing error: {}", e);
+                    log::warn!("State machine processing error: {}", e);
                     // Fall back to legacy parsing
                     break;
                 }
@@ -462,8 +462,8 @@ impl SSTableReader {
 
         // If state machine didn't handle all data, fall back to legacy parsing for remainder
         if offset < data.len() {
-            println!(
-                "🔄 Falling back to legacy parsing for remaining {} bytes",
+            log::debug!(
+                "Falling back to legacy parsing for remaining {} bytes",
                 data.len() - offset
             );
             let legacy_entries = self.parse_block_entries_legacy(&data[offset..], schema)?;

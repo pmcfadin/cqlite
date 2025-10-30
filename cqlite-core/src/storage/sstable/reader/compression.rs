@@ -269,7 +269,7 @@ async fn scan_directory_for_compression_files(
         match load_compression_info(&compression_path).await {
             Ok(compression_info) => {
                 let algorithm = compression_info.get_algorithm();
-                println!(
+                log::debug!(
                     "Found CompressionInfo via directory scan at {:?} with algorithm: {:?}, chunks: {}",
                     compression_path,
                     algorithm,
@@ -281,9 +281,10 @@ async fn scan_directory_for_compression_files(
                 }
             }
             Err(e) => {
-                println!(
+                log::warn!(
                     "Failed to load CompressionInfo from {:?}: {}",
-                    compression_path, e
+                    compression_path,
+                    e
                 );
                 continue;
             }

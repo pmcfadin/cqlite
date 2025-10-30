@@ -311,14 +311,14 @@ fn parse_summary_data(input: &[u8]) -> IResult<&[u8], SummaryData> {
 
     // Parse header first
     let (remaining_input, header) = parse_summary_header(input).map_err(|e| {
-        eprintln!("Header parsing failed: {:?}", e);
+        log::error!("Header parsing failed: {:?}", e);
         e
     })?;
 
     // Validate we have enough data for the entries
     let expected_min_size = header.entry_count as usize * 22; // Minimum: 2 (key_len) + 0 (key) + 20 (other fields)
     if remaining_input.len() < expected_min_size {
-        eprintln!(
+        log::error!(
             "Insufficient data for {} entries. Need at least {} bytes, have {}",
             header.entry_count,
             expected_min_size,
@@ -330,9 +330,10 @@ fn parse_summary_data(input: &[u8]) -> IResult<&[u8], SummaryData> {
     // Parse entries with better error reporting
     let (input, entries) = count(parse_summary_entry, header.entry_count as usize)(remaining_input)
         .map_err(|e| {
-            eprintln!(
+            log::error!(
                 "Entry parsing failed for {} entries: {:?}",
-                header.entry_count, e
+                header.entry_count,
+                e
             );
             e
         })?;
@@ -340,7 +341,7 @@ fn parse_summary_data(input: &[u8]) -> IResult<&[u8], SummaryData> {
     // Validate entries are sorted by token (critical for correctness)
     for i in 1..entries.len() {
         if entries[i - 1].token > entries[i].token {
-            eprintln!(
+            log::error!(
                 "Entries not sorted by token at index {}: {} > {}",
                 i,
                 entries[i - 1].token,
@@ -353,9 +354,12 @@ fn parse_summary_data(input: &[u8]) -> IResult<&[u8], SummaryData> {
     // Validate token range consistency with header
     if let (Some(first), Some(_last)) = (entries.first(), entries.last()) {
         if first.token < header.min_token || _last.token > header.max_token {
-            eprintln!(
+            log::error!(
                 "Token range mismatch: entries [{}, {}] vs header [{}, {}]",
-                first.token, _last.token, header.min_token, header.max_token
+                first.token,
+                _last.token,
+                header.min_token,
+                header.max_token
             );
             return Err(nom::Err::Error(NomError::new(input, ErrorKind::Verify)));
         }
