@@ -40,6 +40,21 @@ pub struct QueryCacheEntry {
     pub hit_count: u64,
 }
 
+/// Schema availability status for diagnostic purposes
+#[derive(Debug, Clone)]
+pub enum SchemaStatus {
+    /// Schema is available and ready for queries
+    Available { keyspace: String, table: String },
+    /// Schema not found in registry
+    Missing { table: String, reason: String },
+    /// Schema extraction failed from SSTable
+    ExtractionFailed {
+        table: String,
+        cause: String,
+        suggestion: String,
+    },
+}
+
 /// Query engine with caching and statistics
 #[derive(Debug)]
 pub struct QueryEngine {
@@ -49,6 +64,8 @@ pub struct QueryEngine {
     planner: QueryPlanner,
     /// Query executor
     executor: QueryExecutor,
+    /// Schema manager reference
+    schema_manager: Arc<SchemaManager>,
     /// Advanced SELECT optimizer
     #[cfg(feature = "state_machine")]
     select_optimizer: SelectOptimizer,
@@ -87,6 +104,7 @@ impl QueryEngine {
             parser,
             planner,
             executor,
+            schema_manager: schema.clone(),
             #[cfg(feature = "state_machine")]
             select_optimizer,
             #[cfg(feature = "state_machine")]
@@ -435,6 +453,32 @@ impl QueryEngine {
         }
     }
 
+    /// Check if schema is available for a table
+    pub async fn has_schema_for_table(&self, table: &str) -> bool {
+        self.schema_manager.get_table_schema(table).await.is_ok()
+    }
+
+    /// Get detailed schema status for debugging
+    pub async fn schema_status(&self, table: &str) -> SchemaStatus {
+        match self.schema_manager.get_table_schema(table).await {
+            Ok(schema) => SchemaStatus::Available {
+                keyspace: schema.keyspace.clone(),
+                table: schema.table.clone(),
+            },
+            Err(Error::Schema(msg)) if msg.contains("not found") => {
+                SchemaStatus::Missing {
+                    table: table.to_string(),
+                    reason: msg,
+                }
+            }
+            Err(e) => SchemaStatus::ExtractionFailed {
+                table: table.to_string(),
+                cause: e.to_string(),
+                suggestion: "Verify SSTable files are valid Cassandra 5.0 format and Statistics.db contains SerializationHeader".to_string(),
+            },
+        }
+    }
+
     /// Update execution statistics
     fn update_execution_stats(&self, result: &mut QueryResult, start_time: Instant) {
         let execution_time = start_time.elapsed();
@@ -716,6 +760,49 @@ mod tests {
 
         // Cache should only have 2 entries due to eviction
         assert_eq!(query_engine.cache_stats().plan_cache_size, 2);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "state_machine")]
+    async fn test_schema_validation_api() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+
+        let storage = Arc::new(
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(
+            crate::schema::SchemaManager::new(temp_dir.path())
+                .await
+                .unwrap(),
+        );
+        let memory = Arc::new(crate::memory::MemoryManager::new(&config).unwrap());
+
+        let query_engine = QueryEngine::new(storage, schema, memory, &config).unwrap();
+
+        // Test has_schema_for_table with non-existent table
+        let has_schema = query_engine.has_schema_for_table("nonexistent_table").await;
+        assert!(!has_schema, "Should return false for non-existent table");
+
+        // Test schema_status with non-existent table
+        let status = query_engine.schema_status("nonexistent_table").await;
+        match status {
+            SchemaStatus::Missing { .. } | SchemaStatus::ExtractionFailed { .. } => {
+                // Expected - either missing or extraction failed is correct
+            }
+            SchemaStatus::Available { .. } => {
+                panic!("Should not be Available for non-existent table");
+            }
+        }
     }
 }
 

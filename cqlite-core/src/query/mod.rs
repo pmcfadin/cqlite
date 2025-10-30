@@ -40,6 +40,7 @@ pub mod select_parser;
 
 pub use engine::{
     AnalyzeResult, CacheStats, ExplainResult, QueryCacheEntry, QueryEngine as AdvancedQueryEngine,
+    SchemaStatus,
 };
 pub use executor::{
     QueryExecutor, QueryResult as ExecutorQueryResult, QueryRow as ExecutorQueryRow,
@@ -140,6 +141,16 @@ impl QueryEngine {
     /// Get cache statistics
     pub fn cache_stats(&self) -> CacheStats {
         self.advanced_engine.cache_stats()
+    }
+
+    /// Check if schema is available for a table
+    pub async fn has_schema_for_table(&self, table: &str) -> bool {
+        self.advanced_engine.has_schema_for_table(table).await
+    }
+
+    /// Get detailed schema status for debugging
+    pub async fn schema_status(&self, table: &str) -> SchemaStatus {
+        self.advanced_engine.schema_status(table).await
     }
 }
 

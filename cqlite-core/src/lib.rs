@@ -47,6 +47,10 @@ pub use crate::{
     types::*,
 };
 
+// Re-export query types when state_machine feature is enabled
+#[cfg(feature = "state_machine")]
+pub use query::SchemaStatus;
+
 use std::path::Path;
 #[cfg(feature = "state_machine")]
 use std::path::PathBuf;
@@ -339,6 +343,58 @@ impl Database {
     #[cfg(feature = "state_machine")]
     pub async fn explain(&self, sql: &str) -> Result<query::ExplainResult> {
         self.query.explain(sql).await
+    }
+
+    /// Check if schema is available for a table
+    ///
+    /// This is a fast boolean check useful for pre-flight validation.
+    /// For detailed diagnostic information, use `schema_status()`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use cqlite_core::{Database, Config};
+    /// # tokio_test::block_on(async {
+    /// let db = Database::open(std::path::Path::new("./data"), Config::default()).await?;
+    ///
+    /// if !db.has_schema_for_table("users").await {
+    ///     eprintln!("Warning: No schema found for 'users' table");
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # });
+    /// ```
+    #[cfg(feature = "state_machine")]
+    pub async fn has_schema_for_table(&self, table: &str) -> bool {
+        self.query.has_schema_for_table(table).await
+    }
+
+    /// Get detailed schema status for debugging
+    ///
+    /// Returns diagnostic information about schema availability including
+    /// reasons for missing schemas or extraction failures.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use cqlite_core::{Database, Config};
+    /// # use cqlite_core::query::SchemaStatus;
+    /// # tokio_test::block_on(async {
+    /// let db = Database::open(std::path::Path::new("./data"), Config::default()).await?;
+    ///
+    /// match db.schema_status("users").await {
+    ///     SchemaStatus::Available { .. } => println!("Schema ready"),
+    ///     SchemaStatus::ExtractionFailed { cause, suggestion, .. } => {
+    ///         eprintln!("Schema extraction failed: {}", cause);
+    ///         eprintln!("Suggestion: {}", suggestion);
+    ///     }
+    ///     _ => {}
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # });
+    /// ```
+    #[cfg(feature = "state_machine")]
+    pub async fn schema_status(&self, table: &str) -> query::SchemaStatus {
+        self.query.schema_status(table).await
     }
 
     /// Get database statistics

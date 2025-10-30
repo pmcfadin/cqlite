@@ -214,7 +214,8 @@ async fn run_main() -> Result<()> {
     if let Some(query) = cli.execute {
         // Issue #142: Experimental fallback to read-sstable for SELECT when ingestion unavailable
         // This is a temporary feature (disabled by default) that will be removed in M3
-        if cli.enable_select_fallback {
+        // Check this FIRST before schema validation to avoid false negatives
+        let will_use_fallback = if cli.enable_select_fallback {
             // Check if ingestion is unavailable (no schema or no data source)
             let ingestion_unavailable =
                 cli.schema.is_none() || (cli.data_dir.is_none() && cli.dataset.is_none());
@@ -222,36 +223,91 @@ async fn run_main() -> Result<()> {
             // Check if query is a SELECT statement
             let is_select_query = query.trim().to_uppercase().starts_with("SELECT");
 
-            if ingestion_unavailable && is_select_query {
-                eprintln!("⚠️  Using experimental read-sstable fallback (temporary feature, disabled by default)");
+            ingestion_unavailable && is_select_query
+        } else {
+            false
+        };
 
-                // Extract table path from SELECT query using simple regex
-                // Supports patterns like: SELECT * FROM /path/to/table or SELECT * FROM path/to/table
-                let table_path_result = extract_table_path_from_select(&query);
+        // Issue #199: Pre-flight schema validation to fail-fast on schema/data mismatch
+        // Only validate if NOT using fallback (fallback doesn't use schema)
+        #[cfg(feature = "state_machine")]
+        if !will_use_fallback {
+            // Extract table name from query for validation
+            // This uses a simple pattern match - for full parsing see query planner
+            let table_name_result = extract_table_name_from_query(&query);
 
-                match table_path_result {
-                    Ok(table_path) => {
-                        eprintln!("📂 Extracted table path: {}", table_path.display());
+            if let Ok(table_name) = table_name_result {
+                // Check schema availability before query execution
+                if !database.has_schema_for_table(&table_name).await {
+                    // Get detailed status for error message
+                    let status = database.schema_status(&table_name).await;
 
-                        // Call read-sstable command with extracted path
-                        return commands::read_sstable::execute_read_sstable_command(
-                            &table_path,
-                            cli.format,
-                            cli.limit,
-                            0,     // skip
-                            false, // keys_only
-                            false, // raw
-                            cli.verbose > 0,
-                        )
-                        .await;
+                    match status {
+                        cqlite_core::SchemaStatus::Missing { reason, .. } => {
+                            return Err(anyhow::anyhow!(
+                                "Schema not found for table '{}'\n\n\
+                                 Cause: {}\n\n\
+                                 Troubleshooting:\n\
+                                 1. Verify table name matches schema definition\n\
+                                 2. Check that schema file was loaded correctly\n\
+                                 3. Use 'read-sstable' command to inspect SSTable contents directly",
+                                table_name,
+                                reason
+                            ));
+                        }
+                        cqlite_core::SchemaStatus::ExtractionFailed {
+                            cause, suggestion, ..
+                        } => {
+                            return Err(anyhow::anyhow!(
+                                "Schema extraction failed for table '{}'\n\n\
+                                 Cause: {}\n\n\
+                                 Troubleshooting:\n\
+                                 1. {}\n\
+                                 2. Verify SSTable files are valid Cassandra 5.0 format\n\
+                                 3. Check that Statistics.db contains SerializationHeader\n\
+                                 4. Try regenerating SSTables from CQL schema",
+                                table_name,
+                                cause,
+                                suggestion
+                            ));
+                        }
+                        _ => {} // Schema available, continue to query execution
                     }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "SELECT fallback failed: {}. \
+                }
+            }
+            // If table name extraction fails, let query planner handle it
+        }
+
+        // Execute the fallback if conditions are met
+        if will_use_fallback {
+            eprintln!("⚠️  Using experimental read-sstable fallback (temporary feature, disabled by default)");
+
+            // Extract table path from SELECT query using simple regex
+            // Supports patterns like: SELECT * FROM /path/to/table or SELECT * FROM path/to/table
+            let table_path_result = extract_table_path_from_select(&query);
+
+            match table_path_result {
+                Ok(table_path) => {
+                    eprintln!("📂 Extracted table path: {}", table_path.display());
+
+                    // Call read-sstable command with extracted path
+                    return commands::read_sstable::execute_read_sstable_command(
+                        &table_path,
+                        cli.format,
+                        cli.limit,
+                        0,     // skip
+                        false, // keys_only
+                        false, // raw
+                        cli.verbose > 0,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "SELECT fallback failed: {}. \
                              Provide schema and data-dir for full query engine support.",
-                            e
-                        ));
-                    }
+                        e
+                    ));
                 }
             }
         }
@@ -494,6 +550,69 @@ fn create_core_config(cli_config: &config::Config) -> Result<CoreConfig> {
         .map_err(|e| anyhow::anyhow!("Invalid database configuration: {}", e))?;
 
     Ok(core_config)
+}
+
+/// Extract table name from query for schema validation (Issue #199)
+///
+/// This is a simple pattern match for pre-flight validation.
+/// The query planner will do full parsing during execution.
+fn extract_table_name_from_query(query: &str) -> Result<String> {
+    let normalized = query.trim().to_uppercase();
+
+    // Handle SELECT statements
+    if let Some(from_pos) = normalized.find("FROM") {
+        let after_from = query[from_pos + 4..].trim();
+        let table_name = after_from
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No table name found after FROM clause"))?;
+
+        // Remove trailing semicolon or WHERE clause
+        let cleaned = table_name
+            .trim_end_matches(';')
+            .split_whitespace()
+            .next()
+            .unwrap_or(table_name);
+
+        return Ok(cleaned.to_string());
+    }
+
+    // Handle INSERT statements
+    if let Some(into_pos) = normalized.find("INTO") {
+        let after_into = query[into_pos + 4..].trim();
+        let table_name = after_into
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No table name found after INTO clause"))?;
+
+        return Ok(table_name.trim_end_matches(';').to_string());
+    }
+
+    // Handle UPDATE statements
+    if let Some(update_pos) = normalized.find("UPDATE") {
+        let after_update = query[update_pos + 6..].trim();
+        let table_name = after_update
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No table name found after UPDATE clause"))?;
+
+        return Ok(table_name.trim_end_matches(';').to_string());
+    }
+
+    // Handle DELETE statements
+    if normalized.find("DELETE").is_some() {
+        if let Some(from_pos) = normalized.find("FROM") {
+            let after_from = query[from_pos + 4..].trim();
+            let table_name = after_from
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("No table name found after FROM clause"))?;
+
+            return Ok(table_name.trim_end_matches(';').to_string());
+        }
+    }
+
+    Err(anyhow::anyhow!("Unable to extract table name from query"))
 }
 
 /// Extract table path from SELECT query for fallback routing (Issue #142)
