@@ -574,7 +574,10 @@ fn extract_table_name_from_query(query: &str) -> Result<String> {
             .next()
             .unwrap_or(table_name);
 
-        return Ok(cleaned.to_string());
+        // Handle qualified table names (keyspace.table) - extract just the table part
+        let table_only = cleaned.split('.').last().unwrap_or(cleaned);
+
+        return Ok(table_only.to_string());
     }
 
     // Handle INSERT statements
@@ -585,7 +588,10 @@ fn extract_table_name_from_query(query: &str) -> Result<String> {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No table name found after INTO clause"))?;
 
-        return Ok(table_name.trim_end_matches(';').to_string());
+        // Handle qualified table names (keyspace.table)
+        let cleaned = table_name.trim_end_matches(';');
+        let table_only = cleaned.split('.').last().unwrap_or(cleaned);
+        return Ok(table_only.to_string());
     }
 
     // Handle UPDATE statements
@@ -596,7 +602,10 @@ fn extract_table_name_from_query(query: &str) -> Result<String> {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No table name found after UPDATE clause"))?;
 
-        return Ok(table_name.trim_end_matches(';').to_string());
+        // Handle qualified table names (keyspace.table)
+        let cleaned = table_name.trim_end_matches(';');
+        let table_only = cleaned.split('.').last().unwrap_or(cleaned);
+        return Ok(table_only.to_string());
     }
 
     // Handle DELETE statements
@@ -608,7 +617,10 @@ fn extract_table_name_from_query(query: &str) -> Result<String> {
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("No table name found after FROM clause"))?;
 
-            return Ok(table_name.trim_end_matches(';').to_string());
+            // Handle qualified table names (keyspace.table)
+            let cleaned = table_name.trim_end_matches(';');
+            let table_only = cleaned.split('.').last().unwrap_or(cleaned);
+            return Ok(table_only.to_string());
         }
     }
 

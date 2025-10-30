@@ -1,0 +1,3 @@
+Error: Ingestion failed: Schema error: Schema loading failed with 1 error(s): FileRead: Failed to discover files: Invalid path: Path does not exist: /nonexistent/schema.cql
+
+Hint: Use ':schema load <file>' or '--schema <path>' to provide schema
