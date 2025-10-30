@@ -16,7 +16,7 @@ use cqlite_core::{
 };
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Get the test datasets root from environment or default location
@@ -30,8 +30,28 @@ fn get_test_datasets_root() -> PathBuf {
         })
 }
 
+/// Find a table directory by name pattern (e.g., "simple_table-<uuid>")
+fn find_table_dir(datasets_root: &Path, table_name: &str) -> Option<PathBuf> {
+    let sstable_path = datasets_root.join("sstables/test_basic");
+
+    if let Ok(entries) = std::fs::read_dir(&sstable_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if dir_name.starts_with(&format!("{}-", table_name)) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Find a Data.db file in the given table directory
-fn find_data_file(table_dir: &PathBuf) -> Option<PathBuf> {
+fn find_data_file(table_dir: &Path) -> Option<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(table_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -116,10 +136,8 @@ fn create_nested_collections_schema() -> TableSchema {
 #[tokio::test]
 async fn test_format_detection_from_real_sstable() {
     let datasets_root = get_test_datasets_root();
-    let test_table_dir = datasets_root
-        .join("sstables")
-        .join("test_basic")
-        .join("simple_table-6f06afc0934a11f08d448925b7a9e804");
+    let test_table_dir = find_table_dir(&datasets_root, "simple_table")
+        .expect("simple_table directory must exist in test_basic");
 
     let data_file =
         find_data_file(&test_table_dir).expect("Data.db file must exist in dataset for this test");
@@ -153,10 +171,8 @@ async fn test_format_detection_from_real_sstable() {
 #[tokio::test]
 async fn test_schema_aware_reader_deterministic_decode() {
     let datasets_root = get_test_datasets_root();
-    let test_table_dir = datasets_root
-        .join("sstables")
-        .join("test_basic")
-        .join("simple_table-6f06afc0934a11f08d448925b7a9e804");
+    let test_table_dir = find_table_dir(&datasets_root, "simple_table")
+        .expect("simple_table directory must exist in test_basic");
 
     let data_file =
         find_data_file(&test_table_dir).expect("Data.db file must exist in dataset for this test");

@@ -10,7 +10,27 @@ use cqlite_core::{
     platform::Platform,
     storage::sstable::{index_reader::IndexReader, summary_reader::SummaryReader},
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{fs, path::PathBuf, sync::Arc};
+
+/// Find a table directory by name pattern (e.g., "simple_table-<uuid>")
+fn find_table_dir(datasets_root: &str, table_name: &str) -> Option<PathBuf> {
+    let sstable_path = PathBuf::from(datasets_root).join("sstables/test_basic");
+
+    if let Ok(entries) = fs::read_dir(&sstable_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if dir_name.starts_with(&format!("{}-", table_name)) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
 
 #[tokio::test]
 async fn test_index_without_summary_returns_zero() {
@@ -18,12 +38,10 @@ async fn test_index_without_summary_returns_zero() {
     let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
         .expect("CQLITE_DATASETS_ROOT must be set for this test");
 
-    let sstable_dir = format!(
-        "{}/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804",
-        datasets_root
-    );
+    let sstable_dir = find_table_dir(&datasets_root, "simple_table")
+        .expect("simple_table directory must exist in test_basic");
 
-    let index_path = PathBuf::from(format!("{}/nb-1-big-Index.db", sstable_dir));
+    let index_path = sstable_dir.join("nb-1-big-Index.db");
 
     assert!(
         index_path.exists(),
@@ -66,13 +84,11 @@ async fn test_index_with_summary_correlation() {
     let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
         .expect("CQLITE_DATASETS_ROOT must be set for this test");
 
-    let sstable_dir = format!(
-        "{}/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804",
-        datasets_root
-    );
+    let sstable_dir = find_table_dir(&datasets_root, "simple_table")
+        .expect("simple_table directory must exist in test_basic");
 
-    let index_path = PathBuf::from(format!("{}/nb-1-big-Index.db", sstable_dir));
-    let summary_path = PathBuf::from(format!("{}/nb-1-big-Summary.db", sstable_dir));
+    let index_path = sstable_dir.join("nb-1-big-Index.db");
+    let summary_path = sstable_dir.join("nb-1-big-Summary.db");
 
     assert!(
         index_path.exists() && summary_path.exists(),
