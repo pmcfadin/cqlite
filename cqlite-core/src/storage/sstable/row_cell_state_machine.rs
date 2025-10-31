@@ -608,19 +608,44 @@ impl RowCellStateMachine {
     fn parse_single_clustering_row(&mut self, data: &[u8]) -> Result<(usize, ClusteringRow)> {
         let mut offset = 0;
 
-        // Parse clustering key length (VInt)
-        let (remaining, key_len) = parse_vint_length(&data[offset..])
-            .map_err(|_| Error::corruption("Failed to parse clustering key length"))?;
-        offset = data.len() - remaining.len();
+        // Check if this format uses byte-comparable encoding
+        let is_byte_comparable = matches!(self.version, CassandraVersion::V5_0NewBigFormat);
 
-        if key_len > remaining.len() {
-            return Err(Error::corruption(
-                "Clustering key length exceeds available data",
-            ));
-        }
+        let clustering_key = if is_byte_comparable {
+            // Use byte-comparable decoder for clustering key
+            use crate::storage::sstable::reader::parsing::byte_comparable::decode_byte_comparable_key;
 
-        let clustering_key = remaining[..key_len].to_vec();
-        offset += key_len;
+            let (remaining, key_components) =
+                decode_byte_comparable_key(&data[offset..]).map_err(|_| {
+                    Error::corruption("Failed to decode byte-comparable clustering key")
+                })?;
+
+            let consumed = data.len() - offset - remaining.len();
+            offset += consumed;
+
+            // Flatten components into single byte array
+            let mut key_bytes = Vec::new();
+            for component in &key_components {
+                key_bytes.extend_from_slice(component);
+            }
+            key_bytes
+        } else {
+            // VInt-based parsing for other formats
+            // Parse clustering key length (VInt)
+            let (remaining, key_len) = parse_vint_length(&data[offset..])
+                .map_err(|_| Error::corruption("Failed to parse clustering key length"))?;
+            offset = data.len() - remaining.len();
+
+            if key_len > remaining.len() {
+                return Err(Error::corruption(
+                    "Clustering key length exceeds available data",
+                ));
+            }
+
+            let key = remaining[..key_len].to_vec();
+            offset += key_len;
+            key
+        };
 
         // Parse row timestamp (8 bytes)
         if data.len() < offset + 8 {

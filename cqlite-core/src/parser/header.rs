@@ -70,6 +70,15 @@ pub enum CassandraVersion {
     ///
     /// Magic number: 0xF07C_5C00
     V5_0WideRows,
+    /// Cassandra 5.0 NewBig Format with byte-comparable keys (CEP-25)
+    ///
+    /// This format uses byte-comparable encoding for partition and clustering keys,
+    /// which differs from VInt-based encoding. Keys use component separators (0x40)
+    /// and terminators (0x38), with type-specific encodings (sign bit flipping for
+    /// integers, escape sequences for text).
+    ///
+    /// Magic number: 0xD464_5400
+    V5_0NewBigFormat,
 }
 
 impl CassandraVersion {
@@ -93,6 +102,7 @@ impl CassandraVersion {
             CassandraVersion::V5_0ComplexTypes => 0x8236_5C00, // Cassandra 5.0 Complex Types
             CassandraVersion::V5_0TypedCollections => 0x0F3C_0000, // Cassandra 5.0 Typed Collections
             CassandraVersion::V5_0WideRows => 0xF07C_5C00,         // Cassandra 5.0 Wide Rows
+            CassandraVersion::V5_0NewBigFormat => 0xD464_5400, // Cassandra 5.0 NewBig with byte-comparable keys
         }
     }
 
@@ -150,6 +160,9 @@ impl CassandraVersion {
             // Cassandra 5.0 Wide Rows format (clustering columns, large partitions)
             0xF07C_5C00 => Some(CassandraVersion::V5_0WideRows),
 
+            // Cassandra 5.0 NewBig Format with byte-comparable keys
+            0xD464_5400 => Some(CassandraVersion::V5_0NewBigFormat),
+
             _ => None,
         }
     }
@@ -174,6 +187,9 @@ impl CassandraVersion {
             CassandraVersion::V5_0ComplexTypes => "Cassandra 5.0 Complex Types format",
             CassandraVersion::V5_0TypedCollections => "Cassandra 5.0 Typed Collections format",
             CassandraVersion::V5_0WideRows => "Cassandra 5.0 Wide Rows format",
+            CassandraVersion::V5_0NewBigFormat => {
+                "Cassandra 5.0 NewBig Format (byte-comparable keys)"
+            }
         }
     }
 
@@ -216,6 +232,14 @@ impl CassandraVersion {
             // V5_0Uncompressed uses legacy 'oa' format without compression
             // Maps to LegacyOA since it lacks CompressionInfo.db
             CassandraVersion::V5_0Uncompressed => DataFormat::LegacyOA,
+
+            // V5_0NewBigFormat uses byte-comparable encoding (CEP-25)
+            // This is a modern format with VInt encoding for row data but
+            // byte-comparable encoding for keys. Log for investigation.
+            CassandraVersion::V5_0NewBigFormat => {
+                log::warn!("V5_0NewBigFormat detected (magic 0xD4645400), using V5CompressedLegacy classification");
+                DataFormat::V5CompressedLegacy
+            }
 
             // V5_0NewBig and V5_0Bti use true 'oa' format with VInt encoding
             // These are the only formats that should use RowCellStateMachine
@@ -289,6 +313,7 @@ pub const SUPPORTED_MAGIC_NUMBERS: &[u32] = &[
     0x8236_5C00, // Cassandra 5.0 Complex Types format
     0x0F3C_0000, // Cassandra 5.0 Typed Collections format
     0xF07C_5C00, // Cassandra 5.0 Wide Rows format
+    0xD464_5400, // Cassandra 5.0 NewBig Format (byte-comparable keys)
     0x2C00_0000, // Extended format variant A
     0xC302_0000, // Extended format variant B
     0xF81E_0000, // Extended format variant C
@@ -436,7 +461,8 @@ pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion
         | CassandraVersion::V5_0Uncompressed
         | CassandraVersion::V5_0ComplexTypes
         | CassandraVersion::V5_0TypedCollections
-        | CassandraVersion::V5_0WideRows => {
+        | CassandraVersion::V5_0WideRows
+        | CassandraVersion::V5_0NewBigFormat => {
             // Newer formats may have different version schemes
             // Accept a wider range of versions for forward compatibility
             // V5_0DataFormat uses 0x0010, V5_0FormatC uses 0xF21F, V5_0FormatD uses 0xF209
@@ -572,7 +598,8 @@ pub fn parse_sstable_header(input: &[u8]) -> IResult<&[u8], SSTableHeader> {
         | CassandraVersion::V5_0Uncompressed
         | CassandraVersion::V5_0ComplexTypes
         | CassandraVersion::V5_0TypedCollections
-        | CassandraVersion::V5_0WideRows => {
+        | CassandraVersion::V5_0WideRows
+        | CassandraVersion::V5_0NewBigFormat => {
             return parse_cassandra5_simplified_header(input, cassandra_version, version);
         }
         _ => {

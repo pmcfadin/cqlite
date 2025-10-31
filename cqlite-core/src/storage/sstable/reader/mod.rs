@@ -18,7 +18,7 @@ mod header;
 mod header_helpers;
 mod integrity;
 mod key_digest;
-mod parsing;
+pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
 #[cfg(test)]
 mod tests;

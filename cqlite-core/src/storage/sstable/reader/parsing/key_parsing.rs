@@ -62,6 +62,32 @@ impl SSTableReader {
     ) -> Result<RowKey> {
         use crate::parser::vint::parse_vint_length;
 
+        // Check if this format uses byte-comparable encoding
+        let is_byte_comparable = matches!(
+            self.header.cassandra_version,
+            crate::parser::header::CassandraVersion::V5_0NewBigFormat
+        );
+
+        if is_byte_comparable {
+            // Use byte-comparable decoder
+            let (_, components) = super::byte_comparable::decode_byte_comparable_key(key_data)
+                .map_err(|_| Error::corruption("Failed to decode byte-comparable partition key"))?;
+
+            log::debug!(
+                "parse_key_with_schema: Decoded {} byte-comparable components",
+                components.len()
+            );
+
+            // Build compound key from decoded components
+            let mut compound_key_data = Vec::new();
+            for component in components {
+                compound_key_data.extend_from_slice(&component);
+            }
+
+            return Ok(RowKey::new(compound_key_data));
+        }
+
+        // VInt-based parsing for other formats
         let mut offset = 0;
         let mut key_components = Vec::new();
 

@@ -92,7 +92,8 @@ async fn detect_compression_heuristic(
         | crate::parser::header::CassandraVersion::V5_0Uncompressed
         | crate::parser::header::CassandraVersion::V5_0ComplexTypes
         | crate::parser::header::CassandraVersion::V5_0TypedCollections
-        | crate::parser::header::CassandraVersion::V5_0WideRows => {
+        | crate::parser::header::CassandraVersion::V5_0WideRows
+        | crate::parser::header::CassandraVersion::V5_0NewBigFormat => {
             // Modern formats should never use heuristics - this is an error
             log::error!(
                 "Heuristic compression detection called for modern format: {:?}",

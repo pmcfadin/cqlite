@@ -9,6 +9,7 @@
 
 // Sub-modules
 mod block_entries;
+pub(crate) mod byte_comparable; // Needs to be accessible from row_cell_state_machine
 mod key_parsing;
 mod v5_compressed_legacy;
 mod value_parsing;
