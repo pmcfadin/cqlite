@@ -624,7 +624,11 @@ mod tests {
     /// This test directly parses the stock_prices Index.db file which contains 3 partition entries (AMZN, GOOG, AAPL).
     /// Note: Data.db.jsonl only has 2 entries, suggesting incomplete test data or filtering at a higher level.
     /// The file uses a BTI format with actual partition keys (not MD5 digests).
+    ///
+    /// **Note:** This test requires test data files and is ignored in minimal CI builds.
+    /// Run with: `cargo test --package cqlite-core -- --ignored`
     #[tokio::test]
+    #[ignore = "Requires test data files (CQLITE_DATASETS_ROOT)"]
     async fn test_stock_prices_index_db_parsing() {
         let datasets_root = env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| {
             "/Users/patrick/local_projects/cqlite/test-data/datasets".to_string()
@@ -690,7 +694,11 @@ mod tests {
     ///
     /// This test uses the high-level IndexReader API to open the stock_prices Index.db.
     /// It should successfully parse at least 2 partition entries (Index.db has 3 total).
+    ///
+    /// **Note:** This test requires test data files and is ignored in minimal CI builds.
+    /// Run with: `cargo test --package cqlite-core -- --ignored`
     #[tokio::test]
+    #[ignore = "Requires test data files (CQLITE_DATASETS_ROOT)"]
     async fn test_stock_prices_index_reader() {
         let datasets_root = env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| {
             "/Users/patrick/local_projects/cqlite/test-data/datasets".to_string()
@@ -755,7 +763,11 @@ mod tests {
     ///
     /// This test verifies that SSTableReader correctly loads the Index.db
     /// and can access partition entries (at least 2, Index.db has 3 total).
+    ///
+    /// **Note:** This test requires test data files and is ignored in minimal CI builds.
+    /// Run with: `cargo test --package cqlite-core -- --ignored`
     #[tokio::test]
+    #[ignore = "Requires test data files (CQLITE_DATASETS_ROOT)"]
     async fn test_stock_prices_sstable_reader_integration() {
         let datasets_root = env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| {
             "/Users/patrick/local_projects/cqlite/test-data/datasets".to_string()
