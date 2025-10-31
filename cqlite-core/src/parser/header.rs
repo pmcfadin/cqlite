@@ -565,6 +565,7 @@ pub fn parse_sstable_header(input: &[u8]) -> IResult<&[u8], SSTableHeader> {
         | CassandraVersion::V5_0FormatD
         | CassandraVersion::V5_0FormatE
         | CassandraVersion::V5_0FormatF
+        | CassandraVersion::V5_0FormatG
         | CassandraVersion::V5_0DataFormat
         | CassandraVersion::V5_0NewBig
         | CassandraVersion::V5_0StaticColumns
