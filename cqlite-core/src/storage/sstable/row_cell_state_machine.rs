@@ -624,7 +624,8 @@ impl RowCellStateMachine {
             offset += consumed;
 
             // Flatten components into single byte array
-            let mut key_bytes = Vec::new();
+            let total_size: usize = key_components.iter().map(|c| c.len()).sum();
+            let mut key_bytes = Vec::with_capacity(total_size);
             for component in &key_components {
                 key_bytes.extend_from_slice(component);
             }

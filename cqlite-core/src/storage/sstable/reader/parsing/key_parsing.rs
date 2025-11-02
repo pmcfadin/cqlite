@@ -79,7 +79,8 @@ impl SSTableReader {
             );
 
             // Build compound key from decoded components
-            let mut compound_key_data = Vec::new();
+            let total_size: usize = components.iter().map(|c| c.len()).sum();
+            let mut compound_key_data = Vec::with_capacity(total_size);
             for component in components {
                 compound_key_data.extend_from_slice(&component);
             }
@@ -168,7 +169,8 @@ impl SSTableReader {
         }
 
         // Create compound key from decoded components
-        let mut compound_key_data = Vec::new();
+        let total_size: usize = key_components.iter().map(|c| c.len()).sum();
+        let mut compound_key_data = Vec::with_capacity(total_size);
         for component in key_components {
             compound_key_data.extend_from_slice(&component);
         }

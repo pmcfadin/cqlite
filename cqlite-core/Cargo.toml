@@ -102,6 +102,10 @@ harness = false
 name = "m1_performance"
 harness = false
 
+[[bench]]
+name = "component_flattening"
+harness = false
+
 [features]
 # M2+ production defaults: Full query engine enabled
 default = ["all-compression", "state_machine"]

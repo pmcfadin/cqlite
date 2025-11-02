@@ -995,4 +995,162 @@ mod tests {
             _ => panic!("Expected blob value for unknown column"),
         }
     }
+
+    /// Test component flattening pre-allocation optimization (Issue #209)
+    /// Verifies that pre-allocating the vector prevents reallocations
+    #[test]
+    fn test_component_flattening_no_reallocation() {
+        // Verify pre-allocation prevents reallocations
+        let components = vec![
+            vec![0u8; 16], // UUID
+            vec![0u8; 8],  // i64 timestamp
+            vec![0u8; 24], // TEXT string (variable length)
+        ];
+
+        let total_size: usize = components.iter().map(|c| c.len()).sum();
+        assert_eq!(total_size, 48, "Total size should be 16+8+24=48");
+
+        let mut key_data = Vec::with_capacity(total_size);
+
+        // Verify initial capacity is exact
+        assert_eq!(key_data.capacity(), 48, "Capacity should match total size");
+
+        for component in &components {
+            let capacity_before = key_data.capacity();
+            key_data.extend_from_slice(component);
+            // Verify no reallocation occurred
+            assert_eq!(
+                key_data.capacity(),
+                capacity_before,
+                "Capacity should not change - no reallocation"
+            );
+        }
+
+        assert_eq!(key_data.len(), 48, "Final length should be 48 bytes");
+        assert_eq!(key_data.capacity(), 48, "No excess capacity");
+    }
+
+    /// Test component flattening edge cases (Issue #209)
+    /// Tests 0, 1, and many components to ensure robustness
+    #[test]
+    fn test_component_flattening_edge_cases() {
+        // Test edge cases: 0, 1, and many components
+
+        // Empty components
+        let components: Vec<Vec<u8>> = vec![];
+        let total_size: usize = components.iter().map(|c| c.len()).sum();
+        assert_eq!(total_size, 0);
+        let mut key_data = Vec::with_capacity(total_size);
+        for component in &components {
+            key_data.extend_from_slice(component);
+        }
+        assert_eq!(key_data.len(), 0);
+
+        // Single component
+        let components = vec![vec![0u8; 16]];
+        let total_size: usize = components.iter().map(|c| c.len()).sum();
+        assert_eq!(total_size, 16);
+        let mut key_data = Vec::with_capacity(total_size);
+        for component in &components {
+            key_data.extend_from_slice(component);
+        }
+        assert_eq!(key_data.len(), 16);
+        assert_eq!(key_data.capacity(), 16);
+
+        // Many components (stress test)
+        let components: Vec<Vec<u8>> = (0..100).map(|_| vec![0u8; 8]).collect();
+        let total_size: usize = components.iter().map(|c| c.len()).sum();
+        assert_eq!(total_size, 800);
+        let mut key_data = Vec::with_capacity(total_size);
+        for component in &components {
+            key_data.extend_from_slice(component);
+        }
+        assert_eq!(key_data.len(), 800);
+        assert_eq!(key_data.capacity(), 800);
+    }
+
+    /// Test component flattening with realistic patterns (Issue #209)
+    /// Uses real-world composite key patterns
+    #[test]
+    fn test_component_flattening_realistic_patterns() {
+        // Pattern 1: UUID + Timestamp (common time-series pattern)
+        let components = vec![
+            vec![0u8; 16], // UUID (16 bytes)
+            vec![0u8; 8],  // i64 timestamp (8 bytes)
+        ];
+        let total_size: usize = components.iter().map(|c| c.len()).sum();
+        assert_eq!(total_size, 24);
+
+        let mut key_data = Vec::with_capacity(total_size);
+        let initial_capacity = key_data.capacity();
+        for component in &components {
+            key_data.extend_from_slice(component);
+        }
+        assert_eq!(key_data.capacity(), initial_capacity, "No reallocation");
+        assert_eq!(key_data.len(), 24);
+
+        // Pattern 2: Composite text keys (tenant_id, user_id, session_id)
+        let components = vec![
+            vec![0u8; 24], // tenant_id (variable text, avg 24 bytes)
+            vec![0u8; 32], // user_id (variable text, avg 32 bytes)
+            vec![0u8; 16], // session_id (variable text, avg 16 bytes)
+        ];
+        let total_size: usize = components.iter().map(|c| c.len()).sum();
+        assert_eq!(total_size, 72);
+
+        let mut key_data = Vec::with_capacity(total_size);
+        let initial_capacity = key_data.capacity();
+        for component in &components {
+            key_data.extend_from_slice(component);
+        }
+        assert_eq!(key_data.capacity(), initial_capacity, "No reallocation");
+        assert_eq!(key_data.len(), 72);
+
+        // Pattern 3: Complex multi-component key (6 components)
+        let components: Vec<Vec<u8>> = (0..6).map(|i| vec![0u8; 16 + (i % 4) * 8]).collect();
+        let total_size: usize = components.iter().map(|c| c.len()).sum();
+
+        let mut key_data = Vec::with_capacity(total_size);
+        let initial_capacity = key_data.capacity();
+        for component in &components {
+            key_data.extend_from_slice(component);
+        }
+        assert_eq!(key_data.capacity(), initial_capacity, "No reallocation");
+        assert_eq!(key_data.len(), total_size);
+    }
+
+    /// Test that component flattening produces correct output (Issue #209)
+    /// Verifies data correctness in addition to allocation behavior
+    #[test]
+    fn test_component_flattening_correctness() {
+        // Create components with distinguishable data
+        let component1 = vec![1u8, 2, 3, 4];
+        let component2 = vec![5u8, 6, 7, 8];
+        let component3 = vec![9u8, 10, 11, 12];
+        let components = vec![component1.clone(), component2.clone(), component3.clone()];
+
+        // Flatten with pre-allocation (optimized)
+        let total_size: usize = components.iter().map(|c| c.len()).sum();
+        let mut key_data_optimized = Vec::with_capacity(total_size);
+        for component in &components {
+            key_data_optimized.extend_from_slice(component);
+        }
+
+        // Flatten without pre-allocation (baseline)
+        let mut key_data_baseline = Vec::new();
+        for component in &components {
+            key_data_baseline.extend_from_slice(component);
+        }
+
+        // Both should produce identical results
+        assert_eq!(
+            key_data_optimized, key_data_baseline,
+            "Optimized and baseline should produce identical output"
+        );
+
+        // Verify content matches expected concatenation
+        let expected: Vec<u8> = [component1, component2, component3].concat();
+        assert_eq!(key_data_optimized, expected);
+        assert_eq!(key_data_optimized.len(), 12);
+    }
 }
