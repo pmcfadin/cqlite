@@ -30,13 +30,16 @@ impl SSTableReader {
         match self.header.cassandra_version {
             crate::parser::header::CassandraVersion::V5_0NewBig
             | crate::parser::header::CassandraVersion::V5_0Bti
-            | crate::parser::header::CassandraVersion::V5_0NewBigFormat => {
-                Err(Error::Schema(format!(
-                    "Non-schema key parsing fallback not allowed for modern format {:?}. \
+            | crate::parser::header::CassandraVersion::V5_0NewBigFormat
+            | crate::parser::header::CassandraVersion::V5_0Uncompressed
+            | crate::parser::header::CassandraVersion::V5_0ComplexTypes
+            | crate::parser::header::CassandraVersion::V5_0TypedCollections
+            | crate::parser::header::CassandraVersion::V5_0WideRows
+            | crate::parser::header::CassandraVersion::V5_0FormatG => Err(Error::Schema(format!(
+                "Non-schema key parsing fallback not allowed for modern format {:?}. \
                      Use SchemaAwareReader with proper schema registry.",
-                    self.header.cassandra_version
-                )))
-            }
+                self.header.cassandra_version
+            ))),
             _ => {
                 // Legacy formats can return raw key data as last resort
                 #[cfg(feature = "legacy-heuristics")]
