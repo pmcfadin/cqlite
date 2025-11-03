@@ -247,7 +247,9 @@ impl RowCellStateMachine {
         // For modern formats, ensure schema is available before processing
         // Only enforce schema requirements for explicitly identified modern formats
         match self.version {
-            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+            CassandraVersion::V5_0NewBig
+            | CassandraVersion::V5_0Bti
+            | CassandraVersion::V5_0NewBigFormat => {
                 // Modern formats always require schema
                 if self.schema.is_none() {
                     return Err(Error::Schema(format!(
@@ -818,7 +820,9 @@ impl RowCellStateMachine {
                                 _ => {
                                     if matches!(
                                         self.version,
-                                        CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti
+                                        CassandraVersion::V5_0NewBig
+                                            | CassandraVersion::V5_0Bti
+                                            | CassandraVersion::V5_0NewBigFormat
                                     ) {
                                         return Err(Error::Schema(format!(
                                             "Failed to parse column '{}' with data type '{}' in modern format {:?}. Blob fallback is disabled for modern formats.",
@@ -833,7 +837,9 @@ impl RowCellStateMachine {
                     } else {
                         // For modern formats, unknown types are not allowed
                         match self.version {
-                            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                            CassandraVersion::V5_0NewBig
+                            | CassandraVersion::V5_0Bti
+                            | CassandraVersion::V5_0NewBigFormat => {
                                 return Err(Error::Schema(format!(
                                     "Unknown data type '{}' for column '{}' in modern format {:?}. All types must be explicitly supported.",
                                     column.data_type, column_name, self.version
@@ -845,7 +851,9 @@ impl RowCellStateMachine {
                 } else {
                     // For modern formats, all columns must be in schema
                     match self.version {
-                        CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                        CassandraVersion::V5_0NewBig
+                        | CassandraVersion::V5_0Bti
+                        | CassandraVersion::V5_0NewBigFormat => {
                             return Err(Error::Schema(format!(
                                 "Column '{}' not found in schema for modern format {:?}. All columns must be declared in schema.",
                                 column_name, self.version
@@ -857,7 +865,9 @@ impl RowCellStateMachine {
             } else {
                 // For modern formats, schema is required
                 match self.version {
-                    CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                    CassandraVersion::V5_0NewBig
+                    | CassandraVersion::V5_0Bti
+                    | CassandraVersion::V5_0NewBigFormat => {
                         return Err(Error::Schema(format!(
                             "Schema is required for parsing modern format {:?}. Blob fallback is disabled.",
                             self.version
@@ -1026,13 +1036,13 @@ impl RowCellStateMachine {
     fn parse_row_basic(&mut self, _data: &[u8]) -> Result<usize> {
         // Modern formats should never use basic fallback parsing with blob values
         match self.version {
-            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                Err(Error::Schema(format!(
-                    "Basic fallback parsing with blob values not allowed for modern format {:?}. \
+            CassandraVersion::V5_0NewBig
+            | CassandraVersion::V5_0Bti
+            | CassandraVersion::V5_0NewBigFormat => Err(Error::Schema(format!(
+                "Basic fallback parsing with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
-                    self.version
-                )))
-            }
+                self.version
+            ))),
             _ => {
                 // Legacy formats can use basic parsing as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
@@ -1058,13 +1068,13 @@ impl RowCellStateMachine {
     fn create_fallback_row(&self, _data: &[u8]) -> Result<ParsedRow> {
         // Modern formats should never create fallback rows with blob values
         match self.version {
-            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                Err(Error::Schema(format!(
-                    "Fallback row creation with blob values not allowed for modern format {:?}. \
+            CassandraVersion::V5_0NewBig
+            | CassandraVersion::V5_0Bti
+            | CassandraVersion::V5_0NewBigFormat => Err(Error::Schema(format!(
+                "Fallback row creation with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
-                    self.version
-                )))
-            }
+                self.version
+            ))),
             _ => {
                 // Legacy formats can create fallback rows as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
@@ -1115,13 +1125,13 @@ impl RowCellStateMachine {
     fn parse_as_single_cell_row(&self, _data: &[u8]) -> Result<ParsedRow> {
         // Modern formats should never parse as single cell with blob values
         match self.version {
-            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                Err(Error::Schema(format!(
-                    "Single cell parsing with blob values not allowed for modern format {:?}. \
+            CassandraVersion::V5_0NewBig
+            | CassandraVersion::V5_0Bti
+            | CassandraVersion::V5_0NewBigFormat => Err(Error::Schema(format!(
+                "Single cell parsing with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
-                    self.version
-                )))
-            }
+                self.version
+            ))),
             _ => {
                 // Legacy formats can parse as single cell as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
@@ -1144,13 +1154,13 @@ impl RowCellStateMachine {
     fn parse_using_sstable_patterns(&self, _data: &[u8]) -> Result<ParsedRow> {
         // Modern formats should never use pattern-based parsing with blob values
         match self.version {
-            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                Err(Error::Schema(format!(
-                    "Pattern-based parsing with blob values not allowed for modern format {:?}. \
+            CassandraVersion::V5_0NewBig
+            | CassandraVersion::V5_0Bti
+            | CassandraVersion::V5_0NewBigFormat => Err(Error::Schema(format!(
+                "Pattern-based parsing with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
-                    self.version
-                )))
-            }
+                self.version
+            ))),
             _ => {
                 // Legacy formats can use pattern parsing as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
@@ -1174,13 +1184,13 @@ impl RowCellStateMachine {
     fn parse_using_byte_analysis(&self, _data: &[u8]) -> Result<ParsedRow> {
         // Modern formats should never use byte analysis parsing with blob values
         match self.version {
-            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                Err(Error::Schema(format!(
-                    "Byte analysis parsing with blob values not allowed for modern format {:?}. \
+            CassandraVersion::V5_0NewBig
+            | CassandraVersion::V5_0Bti
+            | CassandraVersion::V5_0NewBigFormat => Err(Error::Schema(format!(
+                "Byte analysis parsing with blob values not allowed for modern format {:?}. \
                      Proper schema-driven parsing is required.",
-                    self.version
-                )))
-            }
+                self.version
+            ))),
             _ => {
                 // Legacy formats can use byte analysis as last resort
                 #[cfg(not(feature = "legacy-heuristics"))]
@@ -1235,7 +1245,9 @@ impl RowCellStateMachine {
         // For modern formats, check if we have schema before attempting to parse static columns
         // This prevents blob fallback for unknown columns in modern formats
         match self.version {
-            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+            CassandraVersion::V5_0NewBig
+            | CassandraVersion::V5_0Bti
+            | CassandraVersion::V5_0NewBigFormat => {
                 if self.schema.is_none() {
                     return Err(Error::Schema(format!(
                         "Blob fallback not allowed for static row parsing in modern format {:?}. Schema is required.",
@@ -1310,7 +1322,9 @@ impl RowCellStateMachine {
                 let value_data = &remaining[..value_len];
                 // Use schema-aware parsing if available, otherwise fallback to blob
                 match self.version {
-                    CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
+                    CassandraVersion::V5_0NewBig
+                    | CassandraVersion::V5_0Bti
+                    | CassandraVersion::V5_0NewBigFormat => {
                         // Modern formats require schema
                         if let Some(ref schema) = self.schema {
                             if let Some(column) =
