@@ -21,21 +21,42 @@ pub(crate) use super::header_helpers::{
 };
 
 /// Extract keyspace name from SSTable file path
+///
+/// SSTable paths follow Cassandra convention:
+/// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`
+///
+/// This function extracts the keyspace directory name (grandparent of the Data.db file).
 fn extract_keyspace_from_path(path: &Path) -> String {
+    // Get parent directory containing table_name-uuid
     path.parent()
-        .and_then(|p| p.file_name())
+        .and_then(|table_dir| {
+            // Get keyspace directory (parent of table directory)
+            table_dir.parent()
+        })
+        .and_then(|keyspace_dir| keyspace_dir.file_name())
         .and_then(|n| n.to_str())
-        .and_then(|s| s.split('-').next())
         .unwrap_or("unknown")
         .to_string()
 }
 
 /// Extract table name from SSTable file path
+///
+/// SSTable paths follow Cassandra convention:
+/// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`
+///
+/// This function extracts the table name from the parent directory, stripping the UUID suffix.
+/// Format: "table_name-uuid" → "table_name"
 fn extract_table_name_from_path(path: &Path) -> String {
-    path.file_stem()
+    path.parent()
+        .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .and_then(|s| {
+            // Split on last hyphen to handle table names containing hyphens
+            // Format: "table_name-uuid" or "user-profiles-abc123"
+            s.rsplit_once('-').map(|(table_name, _uuid)| table_name)
+        })
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// Check if a value appears to be ASCII corruption
@@ -269,12 +290,18 @@ pub(crate) async fn parse_header_with_version_detection(
 
     // Try to parse using the existing header parser (using actual_header)
     match parse_sstable_header(actual_header) {
-        Ok((_, header)) => {
+        Ok((_, mut header)) => {
             log::debug!(
                 "Successfully parsed header for file '{}' with version: {:?}",
                 path.display(),
                 header.cassandra_version
             );
+
+            // Override keyspace/table_name with correct values extracted from path
+            // This fixes Issue where simplified header parsers use hardcoded "test_keyspace"/"test_table" defaults
+            header.keyspace = extract_keyspace_from_path(path);
+            header.table_name = extract_table_name_from_path(path);
+
             Ok(header)
         }
         Err(parse_error) => {
