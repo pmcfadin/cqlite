@@ -42,4 +42,5 @@ Contributions: keep chapters under ~300-600 lines; split when larger.
 - Appendix D — [Tools & Workflows](chapters/appendix-d-tools-and-workflows.md)
 - Appendix E — [Glossary](chapters/appendix-e-glossary.md)
 - Appendix F — [Known Limitations](chapters/appendix-f-known-limitations.md)
+- Appendix G — [Cassandra 5.0 Compression Chunk Formats](chapters/appendix-g-compression-chunk-formats.md)
 

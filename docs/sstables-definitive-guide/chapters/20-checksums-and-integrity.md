@@ -41,19 +41,27 @@ Starting with certain Cassandra versions, some SSTable components in **legacy fo
 ```
 [4 bytes: CRC32 checksum] [remaining bytes: actual header data]
 │                          │
-│                          └─ Starts with magic number (e.g., 0x00400000)
+│                          └─ Starts with magic number (e.g., 0x6F610000 for 'oa' format)
 └─ CRC32 of all subsequent header bytes
 ```
 
-**Example from real Cassandra 5.0 data:**
+**Example from legacy Cassandra data (OA format):**
 ```
 Offset  Bytes                 Interpretation
 ------  --------------------  ---------------------------
-0x00    f1 18 5c 00          CRC32 = 0xf1185c00
-0x04    00 40 00 00          Magic = 0x00400000 (V5_0NewBig)
-0x08    f2 09                Version = 0xf209
+0x00    XX XX XX XX          CRC32 checksum
+0x04    6F 61 00 00          Magic = 0x6F610000 ('oa' legacy format)
+0x08    00 01                Version
 0x0a    ...                  Remaining header data
 ```
+
+> **IMPORTANT: NB Format is Headerless (Issue #211)**
+>
+> NB format Data.db files (`nb-*-big-Data.db`) have **NO magic number or header**.
+> The file starts directly with compressed chunk data. The value `0x00400000` that
+> sometimes appears at offset 0 is the **LZ4 chunk length prefix** (16384 in
+> little-endian = `0x00004000`), NOT a magic number. NB format is identified solely
+> by filename pattern, not by file content. See Chapter 9 for NB format details.
 
 ### Detection Algorithm
 

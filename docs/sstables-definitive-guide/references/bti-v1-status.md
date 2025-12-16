@@ -49,8 +49,12 @@ selected_format: bti
 
 | Format | File Prefix | Format ID | Example Filename |
 |--------|-------------|-----------|------------------|
-| BIG (legacy) | `nb-` | Various (e.g., `0x6F61` for `oa`, `0x0040` for `nb`) | `nb-1-big-Data.db` |
+| BIG (legacy) | `nb-` | **Headerless** - identified by filename only | `nb-1-big-Data.db` |
 | BTI (trie-indexed) | Format-specific | `0x6461` (`da` in hex) | `ac-1-bti-Data.db` or similar |
+
+> **Note (Issue #211):** NB format Data.db files are **headerless** - they have no magic number.
+> The format is identified solely by the `nb-` filename prefix. The `0x6F61` ('oa') magic
+> is for legacy OA format files, not NB format.
 
 **Key Distinction:**
 - BIG format: Uses `Index.db` and `Summary.db` for partition lookups
