@@ -1,0 +1,180 @@
+# Smoke Tests - All Tables
+#
+# Issue #200: Comprehensive smoke testing for all 33 test tables across all keyspaces
+#
+# This workflow validates that every test table in the datasets can be successfully
+# loaded using the read-sstable command. It provides a comprehensive health check
+# of parsing coverage across all data types, collection types, and table structures.
+#
+# Expected Pass Rate:
+#   - Current: 8/33 tables (baseline)
+#   - Target: 33/33 tables (100% coverage)
+#
+# Results:
+#   - Detailed validation matrix: test-data/validation-matrix.md
+#   - Per-table JSON outputs: smoke-test-results/*.json
+#   - Failure artifacts uploaded on CI failure
+
+name: Smoke Tests - All Tables
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  DATASET_TAG: datasets-v2
+  DATASET_ASSET: cassandra5-small-full.tar.gz
+  DATASET_SHA256: 5be43811bbee320a412aaf79aa63134ec1e2ec5434c03815a082b4a31bd86c55
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+  OUTPUT_DIR: ${{ github.workspace }}/smoke-test-results
+
+jobs:
+  smoke-test-all-tables:
+    name: Comprehensive Table Loading Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Restore dataset cache
+        id: dataset-cache
+        uses: actions/cache@v4
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}
+
+      - name: Fetch datasets if cache miss
+        if: steps.dataset-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          echo "📦 Downloading dataset: ${DATASET_ASSET}"
+          mkdir -p test-data/datasets
+          curl -fsSL -o /tmp/${DATASET_ASSET} \
+            https://github.com/pmcfadin/cqlite/releases/download/${DATASET_TAG}/${DATASET_ASSET}
+
+          echo "🔐 Verifying checksum..."
+          echo "${DATASET_SHA256}  /tmp/${DATASET_ASSET}" | sha256sum -c -
+
+          echo "📂 Extracting dataset..."
+          tar -xzf /tmp/${DATASET_ASSET} -C .
+
+          echo "✅ Dataset ready"
+
+      - name: Sanity check dataset exists
+        run: |
+          echo "🔍 Verifying dataset structure..."
+
+          # Check metadata file exists
+          if [ ! -f test-data/datasets/metadata.yml ]; then
+            echo "❌ Missing metadata.yml"
+            exit 1
+          fi
+
+          # Check SSTables directory exists
+          if [ ! -d test-data/datasets/sstables ]; then
+            echo "❌ Missing sstables directory"
+            exit 1
+          fi
+
+          # Count Data.db files
+          DATA_FILES=$(find test-data/datasets/sstables -name "*-Data.db" | wc -l)
+          echo "✅ Found ${DATA_FILES} Data.db files"
+
+          if [ "${DATA_FILES}" -eq 0 ]; then
+            echo "❌ No Data.db files found"
+            exit 1
+          fi
+
+          # List keyspaces
+          echo ""
+          echo "📊 Available keyspaces:"
+          ls -1 test-data/datasets/sstables/
+
+      - name: Build CQLite CLI
+        run: |
+          echo "🔨 Building CLI binary (release mode)..."
+          cargo build --package cqlite-cli --bin cqlite --release
+          echo "✅ CLI binary built at target/release/cqlite"
+
+          # Verify binary exists and is executable
+          ls -lh target/release/cqlite
+          file target/release/cqlite
+
+      - name: Run comprehensive smoke tests
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_CLI: ${{ github.workspace }}/target/release/cqlite
+          OUTPUT_DIR: ${{ github.workspace }}/smoke-test-results
+        run: |
+          echo "🧪 Running smoke tests on all 33 test tables..."
+          echo ""
+          echo "Configuration:"
+          echo "  CLI:          ${CQLITE_CLI}"
+          echo "  Datasets:     ${CQLITE_DATASETS_ROOT}"
+          echo "  Output:       ${OUTPUT_DIR}"
+          echo ""
+
+          # Make script executable
+          chmod +x test-data/scripts/smoke-test-all-tables.sh
+
+          # Run smoke tests (script handles all error reporting)
+          ./test-data/scripts/smoke-test-all-tables.sh
+
+      - name: Upload smoke test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-results
+          path: |
+            smoke-test-results/*.txt
+            smoke-test-results/*.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload validation matrix
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-matrix
+          path: test-data/validation-matrix.md
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Summary comment
+        if: always()
+        run: |
+          echo "📊 Smoke Test Summary"
+          echo ""
+
+          if [ '${{ job.status }}' == 'success' ]; then
+            echo "✅ All tables passed smoke testing"
+            echo ""
+            echo "Next steps:"
+            echo "  - Review validation matrix: test-data/validation-matrix.md"
+            echo "  - Check coverage across all keyspaces and data types"
+          else
+            echo "❌ Some tables failed smoke testing"
+            echo ""
+            echo "Debugging:"
+            echo "  1. Download smoke-test-results artifact for detailed output"
+            echo "  2. Review validation-matrix.md for failure patterns"
+            echo "  3. Check individual table JSON outputs in smoke-test-results/"
+            echo ""
+            echo "Issue: https://github.com/pmcfadin/cqlite/issues/200"
+          fi
