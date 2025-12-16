@@ -105,6 +105,7 @@ fn test_arc_lookup_table_memory_efficiency() {
 
         partition_entries.push(PartitionIndexEntry {
             key_digest: Arc::from(key_digest.into_boxed_slice()),
+            raw_key: None, // Issue #212: BTI format raw key
             data_offset: i as u64 * 4096,
             data_size: 4096,
             promoted_index: None,
@@ -291,6 +292,7 @@ fn benchmark_arc_vs_vec_performance() {
 
         arc_partition_entries.push(PartitionIndexEntry {
             key_digest: Arc::from(key_digest.into_boxed_slice()),
+            raw_key: None, // Issue #212: BTI format raw key
             data_offset: i as u64 * 4096,
             data_size: 4096,
             promoted_index: None,
@@ -361,6 +363,7 @@ fn test_arc_edge_cases() {
     // Test single entry
     let single_entry = [PartitionIndexEntry {
         key_digest: Arc::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+        raw_key: None, // Issue #212: BTI format raw key
         data_offset: 1024,
         data_size: 4096,
         promoted_index: None,
@@ -378,12 +381,14 @@ fn test_arc_edge_cases() {
     let duplicate_entries = [
         PartitionIndexEntry {
             key_digest: Arc::clone(&duplicate_arc),
+            raw_key: None, // Issue #212: BTI format raw key
             data_offset: 1024,
             data_size: 4096,
             promoted_index: None,
         },
         PartitionIndexEntry {
             key_digest: Arc::clone(&duplicate_arc), // Same Arc (shared reference)
+            raw_key: None,                          // Issue #212: BTI format raw key
             data_offset: 2048,
             data_size: 4096,
             promoted_index: None,
@@ -433,6 +438,7 @@ fn property_test_arc_lookup_correctness() {
 
             partition_entries.push(PartitionIndexEntry {
                 key_digest: Arc::from(key_digest.into_boxed_slice()),
+                raw_key: None, // Issue #212: BTI format raw key
                 data_offset: i as u64 * 4096,
                 data_size: 4096,
                 promoted_index: None,
@@ -515,6 +521,7 @@ fn test_arc_no_memory_leaks() {
 
                 partition_entries.push(PartitionIndexEntry {
                     key_digest: Arc::from(key_digest.into_boxed_slice()),
+                    raw_key: None, // Issue #212: BTI format raw key
                     data_offset: i as u64 * 4096,
                     data_size: 4096,
                     promoted_index: None,
@@ -569,6 +576,7 @@ fn test_arc_reference_counting() {
 
     let entry = PartitionIndexEntry {
         key_digest: Arc::clone(&arc_key),
+        raw_key: None, // Issue #212: BTI format raw key
         data_offset: 1024,
         data_size: 4096,
         promoted_index: None,

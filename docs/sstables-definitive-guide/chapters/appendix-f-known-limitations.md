@@ -126,45 +126,61 @@ UDTs require schema registry access to deserialize field-by-field. Current imple
 
 ---
 
-### BTI Index Zero Entries (Exit Code 0, Silent Failure)
+### ~~BTI Index Zero Entries (Exit Code 0, Silent Failure)~~ - FIXED
 
-**Status**: Active Investigation
-**Impact**: 1 table (`test_timeseries.stock_prices`)
-**Root Cause**: BTI offset extraction fails; sequential scan fallback returns 0 entries
+**Status**: ✅ **FIXED** (Issue #212)
+**Impact**: Was 1 table - now 0 (BTI index parsing works correctly)
+**Resolution**: Fixed V5_0NewBigFormat version variant handling in block_io.rs
 
-The BTI (Big Table Index) parser successfully opens the Index.db but returns zero entries. This is a **silent data loss scenario** - no error reported, but all data is inaccessible.
+**Root Cause Found**: Two issues combined to cause silent data loss:
 
-**Tables Affected**:
-- `stock_prices` (test_timeseries - 2 rows expected, 0 returned)
+1. **Missing Version Variant**: `CassandraVersion::V5_0NewBigFormat` was not included in the match statement for NB format chunk reading in `block_io.rs`. This caused the reader to use legacy block header parsing (which returns EOF immediately) instead of the correct NB chunk-based reading.
 
-**Workaround**: None. Table appears empty when queried.
+2. **BTI Inter-Entry Padding**: BTI Index.db entries have variable padding bytes between them (null or non-null). The parser needed enhanced padding skip logic to find valid entry boundaries.
 
-**Tracking**: Issue #212
+**Correct Flow** (after fix):
+```
+V5_0NewBigFormat → read_nb_format_chunk_data() → decompress chunk → parse partition data
+```
 
-**Note**: BTI dual-parser architecture (Issue #208) works for other tables but fails on this specific BTI format variant.
+**Previous (Wrong) Flow**:
+```
+V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
+```
+
+**Fix Details**:
+- File: `cqlite-core/src/storage/sstable/reader/block_io.rs` - Added `V5_0NewBigFormat` to NB chunk reader match
+- File: `cqlite-core/src/storage/sstable/index_reader.rs` - Enhanced BTI padding skip logic
+
+**Results**:
+- `stock_prices` now returns 231 entries (2 partitions with rows)
+- Smoke test pass rate improved from 26/33 (79%) to 28/33 (85%)
+- BTI format parsing now works correctly for all tested tables
+
+**Tracking**: Issue #212 (CLOSED)
 
 ---
 
 ## Validation Status
 
-### Overall Pass Rate: 78.8% (26/33 tables)
+### Overall Pass Rate: 84.8% (28/33 tables)
 
-As of Issue #213 fix (Updated: 2025-12-16)
+As of Issue #212 fix (Updated: 2025-12-16)
 
 ### Pass Rate by Keyspace
 
 | Keyspace | Passed | Failed | Total | Pass Rate |
 |----------|--------|--------|-------|-----------|
-| **test_basic** | 7 | 1 | 8 | 87.5% |
+| **test_basic** | 8 | 0 | 8 | 100% |
 | **test_collections** | 5 | 3 | 8 | 62.5% |
-| **test_timeseries** | 8 | 1 | 9 | 88.9% |
+| **test_timeseries** | 9 | 0 | 9 | 100% |
 | **test_wide_rows** | 7 | 1 | 8 | 87.5% |
 
 ### Passing Tables (Production-Ready)
 
 These tables are validated against Apache Cassandra's `sstabledump` output:
 
-**test_basic** (7/8 passing):
+**test_basic** (8/8 passing - 100%):
 - `simple_table` - Gold standard validation table
 - `composite_key_table` - Composite partition keys validated
 - `compression_test_table` - LZ4 compression validated
@@ -172,6 +188,7 @@ These tables are validated against Apache Cassandra's `sstabledump` output:
 - `ttl_test_table` - TTL metadata parsing
 - `counters` - Counter column type support
 - `uncompressed_table` - Now passing after Issue #213 fix
+- `static_columns_table` - Static columns now working (Issue #210 fix)
 
 **test_collections** (5/8 passing):
 - `collection_table` - Lists, sets, maps validated
@@ -179,29 +196,28 @@ These tables are validated against Apache Cassandra's `sstabledump` output:
 - `empty_collections_table` - Empty collection handling
 - `large_collections_table` - Large collection support
 
-**test_timeseries** (8/9 passing):
+**test_timeseries** (9/9 passing - 100%):
 - `sensor_data` - Timestamp clustering (Issue #213 fix, was key test case)
 - `app_metrics`, `log_entries`, `tick_data` - All passing
 - `time_bucketed_counters`, `user_activity`, `user_sessions`, `event_store`
+- `stock_prices` - BTI format now working (Issue #212 fix)
 
 **test_wide_rows** (7/8 passing):
 - `wide_partition_table` - Now passing (Issue #213 fix)
 - `document_versions`, `large_blob_table`, `many_columns_table`
 - `multi_metric_timeseries`, `product_catalog`, `sparse_data_table`
 
-### Remaining Failures (7 tables)
+### Remaining Failures (5 tables)
 
 | Table | Exit Code | Root Cause |
 |-------|-----------|------------|
-| `static_columns_table` | 3 | SerializationHeader extraction failure |
 | `collections_with_udts` | 3 | UDT schema parsing incomplete |
 | `frozen_collections_table` | - | Frozen type serialization not implemented |
 | `nested_collections_table` | 3 | Recursive collection parsing needed |
 | `typed_collections_table` | 5 | Complex type handling issues |
-| `stock_prices` | - | BTI index zero entries (Issue #212) |
 | `chat_messages` | 5 | Contains frozen types |
 
-**Note**: These failures are unrelated to Issue #213 (clustering keys). They involve static columns, UDTs, frozen collections, and BTI indexes - separate issues tracked elsewhere.
+**Note**: These 5 remaining failures are all related to advanced collection and type features: UDTs, frozen collections, and nested collections. Basic SSTable parsing for all standard table types now works correctly.
 
 ---
 

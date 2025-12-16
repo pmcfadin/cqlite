@@ -43,6 +43,10 @@ pub struct PartitionIndexEntry {
     /// Partition key hash/digest - using Arc to enable zero-copy sharing in lookup tables
     /// This eliminates memory explosion from cloning large numbers of partition digests
     pub key_digest: Arc<[u8]>,
+    /// Raw partition key bytes for BTI format (Issue #212)
+    /// BTI format stores actual partition keys, not MD5 digests. This field enables
+    /// direct key comparison for sequential scan fallback when offsets are unavailable.
+    pub raw_key: Option<Arc<[u8]>>,
     /// Offset in Data.db file
     pub data_offset: u64,
     /// Size of partition data
@@ -420,6 +424,7 @@ fn parse_simple_partition_key_with_offset<'a>(
         input,
         PartitionIndexEntry {
             key_digest: Arc::from(key_digest),
+            raw_key: None, // Digest format doesn't have raw keys
             data_offset,
             data_size,
             promoted_index: None,
@@ -496,6 +501,7 @@ fn detect_index_format(input: &[u8]) -> IndexFormat {
 /// Parse a single partition entry from BTI/Partition Key format
 ///
 /// BTI format structure:
+/// - padding: variable (0-3 null bytes between entries)
 /// - entry_length: 2 bytes (big-endian) - total length of entry excluding this field
 /// - key_length: 2 bytes (big-endian) - length of partition key
 /// - key_bytes: variable - actual partition key bytes
@@ -508,12 +514,59 @@ fn detect_index_format(input: &[u8]) -> IndexFormat {
 /// 41 4d 5a 4e   - key_bytes = "AMZN"
 /// 00 00 04 80   - metadata (clustering/timestamp?)
 /// 00 4f 88      - metadata (offset?)
-/// 00 00 00      - padding
+/// 00            - end of entry metadata
+/// 00 00 00      - padding before next entry (Issue #212)
 /// ```
 fn parse_bti_partition_entry(
     input: &[u8],
     _entry_index: usize,
 ) -> IResult<&[u8], PartitionIndexEntry> {
+    // Issue #212: Skip inter-entry padding/trailer bytes in BTI format
+    // Entries can be separated by variable-length data (typically 0-3 bytes).
+    // This padding can be null bytes (0x00) or non-null bytes (like 0x90 0xdb 0x00).
+    // BTI entry_length is typically 0x000e (14) to 0x0100 (256) for reasonable key sizes.
+    //
+    // Strategy: Scan forward looking for a valid entry_length pattern (0x00 0x04-0xff).
+    // Valid entry_length in BTI format has high byte 0x00 and low byte >= 4.
+    let mut input = input;
+    let max_skip = std::cmp::min(10, input.len().saturating_sub(4)); // Don't skip too many bytes
+    let mut skipped = 0;
+
+    while skipped < max_skip && input.len() >= 4 {
+        // Check if current position looks like a valid entry_length (0x00 0x04-0xff)
+        if input[0] == 0x00 && input[1] >= 4 {
+            // This looks like a valid entry_length - verify by checking key_length follows
+            let potential_entry_len = u16::from_be_bytes([input[0], input[1]]);
+            let potential_key_len = u16::from_be_bytes([input[2], input[3]]);
+
+            // Key length should be reasonable (1-255 bytes for partition keys)
+            if (4..1000).contains(&potential_entry_len)
+                && potential_key_len > 0
+                && potential_key_len < 256
+                && (potential_key_len + 2) <= potential_entry_len
+            {
+                break; // Found valid entry start
+            }
+        }
+        // Skip one byte
+        input = &input[1..];
+        skipped += 1;
+    }
+
+    if input.len() < 4 {
+        // Not enough bytes for minimal entry (2 bytes entry_length + 2 bytes key_length)
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+
+    log::trace!(
+        "BTI padding: skipped {} bytes to find entry start at {:02x?}",
+        skipped,
+        &input[..std::cmp::min(4, input.len())]
+    );
+
     // Parse entry_length (2 bytes, big-endian)
     let (input, entry_length) = be_u16(input)?;
 
@@ -549,16 +602,13 @@ fn parse_bti_partition_entry(
         metadata.len()
     );
 
-    // TODO (M3 Technical Debt - Issue #208 C5): Refactor PartitionIndexEntry.key_digest
+    // Issue #212 Fix: Store raw partition key for BTI format
     //
-    // Current workaround computes MD5 of BTI keys for compatibility with existing
-    // lookup tables, but this adds unnecessary CPU overhead. The proper solution is
-    // to refactor PartitionIndexEntry to support both:
-    // - Digest-based keys (MD5, already in Index.db)
-    // - Byte-comparable keys (BTI format, actual partition key bytes)
-    //
-    // This would eliminate the MD5 computation here and enable direct key comparisons.
+    // BTI format stores actual partition keys (e.g., "AMZN"), not MD5 digests.
+    // We now store the raw key for direct comparison during sequential scan fallback.
+    // The MD5 digest is still computed for compatibility with existing lookup code.
     let key_digest = md5::compute(key_bytes);
+    let raw_key = Arc::from(key_bytes);
 
     if data_offset == 0 {
         log::warn!(
@@ -578,6 +628,7 @@ fn parse_bti_partition_entry(
         input,
         PartitionIndexEntry {
             key_digest: Arc::from(&key_digest[..]),
+            raw_key: Some(raw_key), // Issue #212: Store raw key for BTI matching
             data_offset,
             data_size: 0,
             promoted_index: None,

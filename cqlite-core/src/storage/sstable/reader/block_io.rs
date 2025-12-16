@@ -103,6 +103,7 @@ async fn read_next_block_impl(
 
     match cassandra_version {
         crate::parser::header::CassandraVersion::V5_0NewBig
+        | crate::parser::header::CassandraVersion::V5_0NewBigFormat // Issue #212: BTI SSTables with byte-comparable keys
         | crate::parser::header::CassandraVersion::V5_0DataFormat
         | crate::parser::header::CassandraVersion::V5_0FormatC
         | crate::parser::header::CassandraVersion::V5_0FormatD

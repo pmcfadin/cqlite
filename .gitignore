@@ -26,6 +26,7 @@ logs/
 # Test data
 test-data/sstables/
 test-data/output/
+test-data/scripts/smoke-test-all-tables-results/
 *.sstable
 *.db
 
