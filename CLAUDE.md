@@ -145,4 +145,5 @@ cargo build --no-default-features --features all-compression,metrics
 
 - **Definitive Guide**: `docs/sstables-definitive-guide/`
 - **Project Issues**: https://github.com/pmcfadin/cqlite/issues
-- **Cassandra Source**: https://github.com/apache/cassandra/tree/cassandra-5.0.0
+- **Cassandra Source (local)**: `~/local_projects/cassandra` - Full Cassandra 5.0 codebase
+- **Cassandra Source (remote)**: https://github.com/apache/cassandra/tree/cassandra-5.0.0
