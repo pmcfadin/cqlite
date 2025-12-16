@@ -94,9 +94,40 @@ impl SSTableReader {
             return Ok(RowKey::new(compound_key_data));
         }
 
-        // VInt-based parsing for other formats
+        // Handle single-component partition keys (no VInt prefix - raw bytes)
+        // Multi-component (composite) partition keys have VInt length prefixes per component
+        if schema.partition_keys.len() == 1 {
+            // Single partition key column: key_data is the raw value (no length prefix)
+            let partition_column = &schema.partition_keys[0];
+            let comparator =
+                ComparatorType::from_data_type(&partition_column.data_type).map_err(|e| {
+                    Error::Schema(format!(
+                        "Invalid partition key type '{}': {}",
+                        partition_column.data_type, e
+                    ))
+                })?;
+
+            log::debug!(
+                "parse_key_with_schema: Single partition key column '{}' ({}), raw key length: {}",
+                partition_column.name,
+                partition_column.data_type,
+                key_data.len()
+            );
+
+            // Decode and return the single component directly
+            let decoded_component = self.decode_key_component(key_data, &comparator)?;
+            return Ok(RowKey::new(decoded_component));
+        }
+
+        // Multi-component (composite) partition keys: VInt-based parsing
         let mut offset = 0;
         let mut key_components = Vec::new();
+
+        log::debug!(
+            "parse_key_with_schema: Composite partition key with {} components, key length: {}",
+            schema.partition_keys.len(),
+            key_data.len()
+        );
 
         // Parse partition key components using exact comparator types
         for partition_column in &schema.partition_keys {
@@ -104,7 +135,7 @@ impl SSTableReader {
                 break;
             }
 
-            // Parse component length (vint)
+            // Parse component length (vint) - only for composite keys
             let (remaining, component_len) = parse_vint_length(&key_data[offset..])
                 .map_err(|_| Error::corruption("Failed to parse partition key component length"))?;
             offset = key_data.len() - remaining.len();
@@ -118,11 +149,10 @@ impl SSTableReader {
             // Extract component data
             let component_data = &remaining[..component_len];
 
-            // DEPRECATED: This should use SchemaAwareReader with proper comparators
             let comparator =
                 ComparatorType::from_data_type(&partition_column.data_type).map_err(|e| {
                     Error::Schema(format!(
-                        "Invalid partition key type '{}' - use SchemaAwareReader: {}",
+                        "Invalid partition key type '{}': {}",
                         partition_column.data_type, e
                     ))
                 })?;
