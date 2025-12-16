@@ -86,20 +86,45 @@ For implementation details, see Appendix C.
 
 The V5CompressedLegacy format (BigFormat with compression, "nb" file prefix) uses a structured row header with delta-encoded metadata fields. This format is used by Cassandra 5.0 SSTables with the legacy "big" format and compression enabled.
 
-### Row Header Structure
+### Row Structure (Corrected - Issue #213)
+
+The complete row format, confirmed via Cassandra's `UnfilteredSerializer.java`:
 
 ```
 [row_flags: u8]
 [extended_flags: u8 if 0x80 set]
+[clustering_prefix: variable]          ← For tables with clustering keys
 [row_size: VInt]
 [prev_size: VInt]
-[timestamp: VInt if 0x04 set] ← Delta from min_timestamp
-[ttl: VInt if 0x08 set] ← Delta from min_ttl
-[deletion: 2 VInts if 0x10 set] ← First is delta from min_local_deletion_time
+[timestamp: VInt if 0x04 set]          ← Delta from min_timestamp
+[ttl: VInt if 0x08 set]                ← Delta from min_ttl
+[deletion: 2 VInts if 0x10 set]        ← local_deletion_time delta + deletion timestamp
 [column_bitmap: VInt + bytes if NOT 0x20]
+[cell_data...]
 ```
 
-All delta-encoded fields are stored as offsets from minimum values found in Statistics.db. This compression technique reduces on-disk size for tables with similar timestamp/TTL values.
+**Critical Note**: For tables WITH clustering keys, the clustering prefix comes IMMEDIATELY after flags and BEFORE `row_size`. This differs from initial documentation which placed `row_size` immediately after flags.
+
+### Clustering Prefix Format
+
+For tables with clustering keys, values are encoded between flags and row_size:
+
+```
+[header: VInt]                         ← 2 bits per clustering column
+[value_1: type-specific]               ← Only if state indicates PRESENT
+[value_2: type-specific]
+...
+```
+
+The header VInt uses 2 bits per column to indicate state:
+- `00` (0): Value PRESENT - followed by type-specific bytes
+- `01` (1): Value EMPTY - zero-length (no bytes follow)
+- `10` (2): Value NULL - no bytes follow
+- `11` (3): Reserved
+
+Type-specific encoding:
+- **Fixed-width types** (timestamp, int, bigint, UUID): Raw bytes, no length prefix
+- **Variable-width types** (text, varchar, blob): VInt length prefix + bytes
 
 ### Row Flags
 
@@ -143,10 +168,10 @@ Each bit indicates column presence:
 ### Validation
 
 This format specification is confirmed through:
-- Implementation: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs` (lines 254-445)
-- Integration tests: `cqlite-core/tests/v5_compressed_legacy_integration_test.rs`
-- Test data: Real Cassandra 5.0 SSTables with non-zero minima (ttl_test_table, composite_key_table)
-- Validation: All parsed values match sstabledump output
+- Implementation: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+- Cassandra Source: `org.apache.cassandra.db.rows.UnfilteredSerializer.java` (lines 151-210)
+- Integration tests: All 26/33 test tables pass (tables with clustering keys now work)
+- Test data: Real Cassandra 5.0 SSTables including sensor_data, wide_partition_table, app_metrics
 
 ### References
 

@@ -439,22 +439,16 @@ impl V5CompressedLegacyParser {
         Ok(results)
     }
 
-    /// Parse row header with delta-decoded timestamps/TTL/deletion (Issue #162)
+    /// Parse row flags only (Issue #213 fix: split from parse_row_header)
     ///
     /// # Format
     /// ```text
     /// [row_flags: u8]
     /// [extended_flags: u8 if 0x80 set]
-    /// [row_size: VInt] ← CRITICAL: Total bytes for this row (header + cells)
-    /// [prev_size: VInt]
-    /// [timestamp: VInt if 0x04 set] ← Delta from min_timestamp
-    /// [ttl: VInt if 0x08 set] ← Delta from min_ttl
-    /// [deletion: 2 VInts if 0x10 set] ← First is delta from min_local_deletion_time
-    /// [column_bitmap: VInt + bytes if NOT 0x20]
     /// ```
     ///
-    /// Returns RowHeader with decoded metadata, calculated header_size, and row_size.
-    fn parse_row_header(&self, data: &[u8], offset: usize) -> Result<(RowHeader, u64)> {
+    /// Returns (row_flags, extended_flags, bytes_consumed)
+    fn parse_row_flags(&self, data: &[u8], offset: usize) -> Result<(u8, Option<u8>, usize)> {
         let mut pos = offset;
 
         // Read row flags
@@ -472,23 +466,50 @@ impl V5CompressedLegacyParser {
         );
 
         // Read extended flags if present
-        if (row_flags & ROW_HAS_EXTENDED_FLAGS) != 0 {
+        let extended_flags = if (row_flags & ROW_HAS_EXTENDED_FLAGS) != 0 {
             if pos >= data.len() {
                 return Err(Error::corruption(
                     "V5CompressedLegacy: Unexpected end reading extended flags",
                 ));
             }
-            let _extended_flags = data[pos];
+            let ext = data[pos];
             pos += 1;
-        }
+            Some(ext)
+        } else {
+            None
+        };
 
-        // V5CompressedLegacy format header structure (Issue #162):
-        // [row_flags: u8] [extended_flags: u8 if 0x80 set]
-        // [row_size: VInt] [prev_size: VInt]
-        // [timestamp: VInt if 0x04] [ttl: VInt if 0x08] [deletion: 2 VInts if 0x10]
-        // [column_bitmap: VInt + bytes if NOT 0x20]
-        //
-        // Parse fields in order WITHOUT scanning for 0x08 marker.
+        let bytes_consumed = pos - offset;
+        Ok((row_flags, extended_flags, bytes_consumed))
+    }
+
+    /// Parse row metadata AFTER flags and clustering prefix (Issue #213 fix)
+    ///
+    /// # Corrected Format (from Cassandra UnfilteredSerializer.java)
+    /// ```text
+    /// [row_flags: u8]           ← Parsed by parse_row_flags()
+    /// [extended_flags: u8]      ← Parsed by parse_row_flags()
+    /// [clustering_prefix]       ← Parsed by parse_clustering_prefix()
+    /// [row_size: VInt]          ← This function starts here
+    /// [prev_size: VInt]
+    /// [timestamp: VInt if 0x04 set] ← Delta from min_timestamp
+    /// [ttl: VInt if 0x08 set] ← Delta from min_ttl
+    /// [deletion: 2 VInts if 0x10 set]
+    /// [column_bitmap: VInt + bytes if NOT 0x20]
+    /// ```
+    ///
+    /// Returns RowHeader with decoded metadata, calculated header_size, and row_size.
+    fn parse_row_metadata(
+        &self,
+        data: &[u8],
+        offset: usize,
+        row_flags: u8,
+        _extended_flags: Option<u8>,
+    ) -> Result<(RowHeader, u64)> {
+        let mut pos = offset;
+
+        // V5CompressedLegacy format: row_size and prev_size come AFTER clustering
+        // (which has already been parsed before this function is called)
 
         // Read row size (VInt) - CRITICAL for partition boundary detection!
         debug!(
@@ -1059,8 +1080,36 @@ impl V5CompressedLegacyParser {
             schema.columns.len()
         );
 
-        // Parse row header with delta-decoded timestamps/TTL/deletion (Issue #162)
-        let (row_header, row_size) = self.parse_row_header(data, offset)?;
+        // ISSUE #213 FIX: Correct parsing order for V5CompressedLegacy format
+        //
+        // The CORRECT format from Cassandra UnfilteredSerializer.java is:
+        //   1. [row_flags: u8]
+        //   2. [extended_flags: u8 if 0x80 set]
+        //   3. [clustering_prefix: variable]  ← BEFORE row_size!
+        //   4. [row_size: VInt]
+        //   5. [prev_size: VInt]
+        //   6. [row_body: timestamp, ttl, deletion, bitmap, cells]
+        //
+        // The previous code parsed row_size BEFORE clustering, which caused
+        // clustering key bytes to be misinterpreted as row_size (often 0).
+
+        // Step 1: Parse row flags (1-2 bytes)
+        let (row_flags, extended_flags, flags_size) = self.parse_row_flags(data, offset)?;
+        offset += flags_size;
+
+        // Step 2: Parse clustering prefix BEFORE row_size (Issue #213 fix)
+        // This is the critical change - clustering comes AFTER flags but BEFORE row_size
+        let (clustering_values, offset) = self.parse_clustering_prefix(data, offset, schema)?;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsed {} clustering values after flags, now at offset {}",
+            clustering_values.len(),
+            offset
+        );
+
+        // Step 3: Parse row metadata (row_size, prev_size, timestamps, etc.)
+        let (row_header, row_size) =
+            self.parse_row_metadata(data, offset, row_flags, extended_flags)?;
 
         // CRITICAL VALIDATION: row_size must be reasonable
         //
@@ -1088,7 +1137,7 @@ impl V5CompressedLegacyParser {
         // This is NOT corruption - it's the intended file layout.
 
         log::debug!(
-            "V5CompressedLegacy: Parsed row header at offset {}: header_size={} bytes, row_size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
+            "V5CompressedLegacy: Parsed row metadata at offset {}: header_size={} bytes, row_size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
             offset, row_header.header_size, row_size, row_header.timestamp, row_header.ttl, row_header.local_deletion_time
         );
 
@@ -1109,7 +1158,8 @@ impl V5CompressedLegacyParser {
             );
 
             // Calculate offset after row data (based on row_size from header)
-            let after_row_offset = input_offset + row_size as usize;
+            // Note: row_size is measured from AFTER clustering, so we add offset (after clustering)
+            let after_row_offset = offset + row_size as usize;
 
             // Skip the trailing field to reach the next partition
             if after_row_offset + ROW_TRAILING_FIELD_SIZE > data.len() {
@@ -1133,29 +1183,12 @@ impl V5CompressedLegacyParser {
             return Ok((cells, Some(row_header), next_offset));
         }
 
-        // Advance offset to start of clustering prefix / cell data
-        debug!(
-            "V5CompressedLegacy: BEFORE advancing offset: offset={}, row_header.header_size={}",
-            offset, row_header.header_size
-        );
-        offset += row_header.header_size;
-        debug!("V5CompressedLegacy: AFTER advancing offset: offset={}, data[offset]={:02x}, data[offset+1]={:02x}", offset, data[offset], data[offset+1]);
-
-        // CRITICAL FIX: Parse clustering prefix BEFORE cell data
-        // Clustering prefix encodes clustering key values between row header and cells
-        let (clustering_values, new_offset) = self.parse_clustering_prefix(data, offset, schema)?;
-        offset = new_offset;
+        // Advance offset past row metadata to start of cell data
+        let mut offset = offset + row_header.header_size;
 
         log::debug!(
-            "V5CompressedLegacy: Parsed {} clustering values, cell data starts at offset {}",
-            clustering_values.len(),
-            offset
-        );
-
-        log::debug!(
-            "V5CompressedLegacy: Cell data starts at offset {} (after {} byte header + clustering prefix), first 32 bytes: {}",
+            "V5CompressedLegacy: Cell data starts at offset {}, first 32 bytes: {}",
             offset,
-            row_header.header_size,
             hex::encode(&data[offset..std::cmp::min(offset + 32, data.len())])
         );
 
@@ -2385,7 +2418,14 @@ mod tests {
             Some(min_ttl),
         );
 
-        let (row_header, row_size) = parser.parse_row_header(&data, 0).unwrap();
+        // Issue #213: Use split functions - parse flags first, then metadata
+        let (row_flags, extended_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
+        assert_eq!(flags_size, 1, "Flags should consume 1 byte");
+
+        // For testing, since there's no clustering in this test data, metadata starts at offset 1
+        let (row_header, row_size) = parser
+            .parse_row_metadata(&data, flags_size, row_flags, extended_flags)
+            .unwrap();
 
         // Verify delta decoding: absolute_timestamp = min_timestamp + delta
         assert_eq!(
@@ -2424,7 +2464,11 @@ mod tests {
             None,
         );
 
-        let (row_header, _row_size) = parser.parse_row_header(&data, 0).unwrap();
+        // Issue #213: Use split functions - parse flags first, then metadata
+        let (row_flags, extended_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
+        let (row_header, _row_size) = parser
+            .parse_row_metadata(&data, flags_size, row_flags, extended_flags)
+            .unwrap();
 
         // Verify delta decoding: absolute_deletion_time = min_local_deletion_time + delta
         assert_eq!(
@@ -2456,9 +2500,10 @@ mod tests {
             None,
         );
 
-        // This tests that parse_row_header handles column bitmap correctly
-        // The bitmap parsing happens after the metadata fields
-        let result = parser.parse_row_header(&data, 0);
+        // Issue #213: Use split functions - parse flags first, then metadata
+        // This tests that parse_row_metadata handles column bitmap correctly
+        let (row_flags, extended_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
+        let result = parser.parse_row_metadata(&data, flags_size, row_flags, extended_flags);
 
         // Should succeed without panicking on bitmap parsing
         assert!(
@@ -2470,11 +2515,12 @@ mod tests {
         // Verify header was parsed (has timestamp)
         assert_eq!(row_header.timestamp, Some(0));
 
-        // Verify header_size includes bitmap overhead
-        // flags(1) + size(1) + prev(1) + timestamp(1) + column_count(1) + bitmap(1) = 6
+        // Verify header_size includes bitmap overhead (but NOT flags now)
+        // size(1) + prev(1) + timestamp(1) + column_count(1) + bitmap(1) = 5
+        // (flags are parsed separately now)
         assert_eq!(
-            row_header.header_size, 6,
-            "Header size should include column bitmap"
+            row_header.header_size, 5,
+            "Header size should include column bitmap but not flags (parsed separately)"
         );
     }
 
