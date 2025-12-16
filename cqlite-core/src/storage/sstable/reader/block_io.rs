@@ -92,6 +92,15 @@ async fn read_next_block_impl(
     );
 
     // NB format uses ChunkReader logic - returns compressed chunk data directly
+    // V5_0Uncompressed format: read raw data directly (no block headers, no compression)
+    if matches!(
+        cassandra_version,
+        crate::parser::header::CassandraVersion::V5_0Uncompressed
+    ) {
+        log::debug!("block_io::read_next_block_impl: Using uncompressed direct read");
+        return read_uncompressed_data_block(file).await;
+    }
+
     match cassandra_version {
         crate::parser::header::CassandraVersion::V5_0NewBig
         | crate::parser::header::CassandraVersion::V5_0DataFormat
@@ -501,4 +510,89 @@ async fn read_large_block_streaming(
     }
 
     Ok(block_data)
+}
+
+/// Read uncompressed data block for V5_0Uncompressed format
+///
+/// This format has no compression and no block headers - the entire data section
+/// after the 4096-byte file header is raw partition data. We read remaining data
+/// from current position to EOF, returning it as a single block.
+async fn read_uncompressed_data_block(
+    file: &Arc<Mutex<BufReader<File>>>,
+) -> Result<Option<Vec<u8>>> {
+    let (current_pos, file_size) = {
+        let mut file_guard = file.lock().await;
+        let current = file_guard.stream_position().await.map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Failed to get stream position: {}",
+                e
+            )))
+        })?;
+
+        // Get file size
+        file_guard
+            .seek(std::io::SeekFrom::End(0))
+            .await
+            .map_err(|e| {
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to seek to end: {}",
+                    e
+                )))
+            })?;
+        let size = file_guard.stream_position().await.map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Failed to get file size: {}",
+                e
+            )))
+        })?;
+
+        // Seek back to current position
+        file_guard
+            .seek(std::io::SeekFrom::Start(current))
+            .await
+            .map_err(|e| {
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to seek back to position: {}",
+                    e
+                )))
+            })?;
+
+        (current, size)
+    };
+
+    // Calculate remaining bytes
+    let remaining = file_size.saturating_sub(current_pos) as usize;
+
+    if remaining == 0 {
+        log::debug!(
+            "read_uncompressed_data_block: EOF reached at position {}",
+            current_pos
+        );
+        return Ok(None);
+    }
+
+    log::debug!(
+        "read_uncompressed_data_block: Reading {} bytes from position {}",
+        remaining,
+        current_pos
+    );
+
+    // Read remaining data
+    let mut data = vec![0u8; remaining];
+    {
+        let mut file_guard = file.lock().await;
+        file_guard.read_exact(&mut data).await.map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Failed to read uncompressed data block ({} bytes): {}",
+                remaining, e
+            )))
+        })?;
+    }
+
+    log::debug!(
+        "read_uncompressed_data_block: Successfully read {} bytes",
+        data.len()
+    );
+
+    Ok(Some(data))
 }
