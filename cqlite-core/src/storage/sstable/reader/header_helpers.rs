@@ -74,6 +74,15 @@ pub(crate) fn calculate_actual_header_size(
     header: &SSTableHeader,
     header_buffer: &[u8],
 ) -> Result<usize> {
+    // Check for headerless NB format files FIRST (Issue #211)
+    // NB format Data.db files are headerless - metadata is in separate component files.
+    // When create_minimal_nb_header() is used, it sets version=0 as a sentinel value.
+    // In this case, the header_buffer contains compressed row data, not a header.
+    if header.cassandra_version == CassandraVersion::V5_0NewBig && header.version == 0 {
+        debug!("Headerless NB format detected (version=0) - Data.db starts at offset 0");
+        return Ok(0);
+    }
+
     // Use proper structured parsing to find the end of the header
     match header.cassandra_version {
         CassandraVersion::V5_0NewBig => {

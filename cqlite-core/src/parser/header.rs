@@ -89,7 +89,8 @@ impl CassandraVersion {
             CassandraVersion::V5_0Alpha => 0xAD01_0000,   // Cassandra 5.0 Alpha
             CassandraVersion::V5_0Beta => 0xA007_0000,    // Cassandra 5.0 Beta
             CassandraVersion::V5_0Release => 0x4316_0000, // Cassandra 5.0 Release
-            CassandraVersion::V5_0NewBig => 0x0040_0000,  // Cassandra 5.0 'nb' (new big) format
+            // V5_0NewBig is detected via filename pattern, NOT magic number (Data.db is headerless)
+            CassandraVersion::V5_0NewBig => 0x0000_0000, // Sentinel: headerless format
             CassandraVersion::V5_0Bti => 0x6461_0000, // Cassandra 5.0 BTI (Big Trie-Indexed) format
             CassandraVersion::V5_0DataFormat => 0x8080_015c, // Cassandra 5.0 Data.db format
             CassandraVersion::V5_0FormatC => 0x8c33_0000, // Cassandra 5.0 Format C
@@ -121,8 +122,8 @@ impl CassandraVersion {
             // Cassandra 5.0 Release format
             0x4316_0000..=0x4316_FFFF => Some(CassandraVersion::V5_0Release),
 
-            // Cassandra 5.0 'nb' (new big) format
-            0x0040_0000..=0x0040_FFFF => Some(CassandraVersion::V5_0NewBig),
+            // 0x0040_0000 REMOVED - Not a magic number! NB format is detected via filename pattern.
+            // The value 0x00400000 is actually LZ4 chunk length prefix (16384 in LE).
 
             // Cassandra 5.0 BTI (Big Trie-Indexed) format
             0x6461_0000..=0x6461_FFFF => Some(CassandraVersion::V5_0Bti),
@@ -229,9 +230,9 @@ impl CassandraVersion {
             | CassandraVersion::V5_0TypedCollections
             | CassandraVersion::V5_0WideRows => DataFormat::V5CompressedLegacy,
 
-            // V5_0Uncompressed uses legacy 'oa' format without compression
-            // Maps to LegacyOA since it lacks CompressionInfo.db
-            CassandraVersion::V5_0Uncompressed => DataFormat::LegacyOA,
+            // V5_0Uncompressed uses same row format as V5CompressedLegacy, just without compression
+            // The on-disk serialization (partition keys, rows, cells) is identical
+            CassandraVersion::V5_0Uncompressed => DataFormat::V5CompressedLegacy,
 
             // V5_0NewBigFormat uses byte-comparable encoding (CEP-25)
             // This is a modern format with VInt encoding for row data but
@@ -241,11 +242,13 @@ impl CassandraVersion {
                 DataFormat::V5CompressedLegacy
             }
 
-            // V5_0NewBig and V5_0Bti use true 'oa' format with VInt encoding
-            // These are the only formats that should use RowCellStateMachine
-            CassandraVersion::V5_0NewBig | CassandraVersion::V5_0Bti => {
-                DataFormat::V5UncompressedOA
-            }
+            // V5_0NewBig (NB format) uses V5CompressedLegacy format (Issue #211)
+            // NB format Data.db files are headerless with compressed row data using u16 length prefixes
+            // This is NOT the OA format with VInt encoding - it's the same format as other C5 test data
+            CassandraVersion::V5_0NewBig => DataFormat::V5CompressedLegacy,
+
+            // V5_0Bti uses true 'oa' format with VInt encoding (BTI trie-indexed format)
+            CassandraVersion::V5_0Bti => DataFormat::V5UncompressedOA,
 
             // Alpha/Beta/Release formats - treat as legacy for now
             // TODO: Verify actual format used by these versions
@@ -295,12 +298,15 @@ pub enum DataFormat {
 pub const SSTABLE_MAGIC: u32 = 0x6F61_0000; // 'oa' followed by version bytes
 
 /// All supported magic numbers
+/// NOTE: NB format Data.db files are HEADERLESS - first bytes are row data or
+/// compressed chunk data, NOT a magic number. The value 0x00400000 was incorrectly
+/// listed here as it matches LZ4 chunk length prefixes (16384 in LE = 0x00004000).
 pub const SUPPORTED_MAGIC_NUMBERS: &[u32] = &[
     0x6F61_0000, // Legacy 'oa' format
     0xAD01_0000, // Cassandra 5.0 Alpha
     0xA007_0000, // Cassandra 5.0 Beta
     0x4316_0000, // Cassandra 5.0 Release
-    0x0040_0000, // Cassandra 5.0 'nb' (new big) format
+    // 0x0040_0000 REMOVED - This is NOT a magic number! It's LZ4 chunk length prefix.
     0x6461_0000, // Cassandra 5.0 BTI (Big Trie-Indexed) format
     0x8080_015c, // Cassandra 5.0 Data.db format
     0x8c33_0000, // Cassandra 5.0 Format C
@@ -843,21 +849,23 @@ mod tests {
     }
 
     #[test]
-    fn test_magic_and_version_cassandra_5_newbig() {
-        let mut data = Vec::new();
-        data.extend_from_slice(&CassandraVersion::V5_0NewBig.magic_number().to_be_bytes());
-        // Standard format: version immediately follows magic number
-        data.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
-
-        let (remaining, (cassandra_version, version)) = parse_magic_and_version(&data).unwrap();
-        assert_eq!(cassandra_version, CassandraVersion::V5_0NewBig);
-        assert_eq!(version, SUPPORTED_VERSION);
-
-        // Should consume exactly 6 bytes (4 for magic + 2 for version)
+    fn test_v5_newbig_is_headerless() {
+        // V5_0NewBig (NB format) is detected via filename pattern, NOT magic number.
+        // NB format Data.db files are headerless - first bytes are compressed row data.
+        // The magic_number() method returns 0x0000_0000 as a sentinel value.
+        // See Issue #211 for details.
         assert_eq!(
-            data.len() - remaining.len(),
-            6,
-            "Parser should consume exactly 6 bytes"
+            CassandraVersion::V5_0NewBig.magic_number(),
+            0x0000_0000,
+            "V5_0NewBig should return sentinel 0x0000_0000 (headerless format)"
+        );
+
+        // Attempting to parse 0x0000_0000 as magic should fail (not recognized)
+        let data = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let result = parse_magic_and_version(&data);
+        assert!(
+            result.is_err(),
+            "0x0000_0000 should not be a valid magic number"
         );
     }
 
@@ -890,9 +898,14 @@ mod tests {
             CassandraVersion::from_magic_number(0x4316_0000),
             Some(CassandraVersion::V5_0Release)
         );
+        // NOTE: V5_0NewBig (NB format) is detected via filename pattern, NOT magic number.
+        // NB format Data.db files are headerless - first bytes are compressed row data.
+        // The value 0x0040_0000 is actually LZ4 chunk length prefix (16384 in LE).
+        // See Issue #211 for details.
         assert_eq!(
             CassandraVersion::from_magic_number(0x0040_0000),
-            Some(CassandraVersion::V5_0NewBig)
+            None, // Not a valid magic number
+            "0x0040_0000 should NOT map to V5_0NewBig - it's LZ4 chunk length prefix"
         );
         assert_eq!(
             CassandraVersion::from_magic_number(0x6461_0000),
@@ -1155,12 +1168,15 @@ mod tests {
             DataFormat::V5CompressedLegacy
         );
 
-        // V5_0NewBig and V5_0Bti should use true OA format (VInt encoding)
+        // V5_0NewBig (NB format) uses V5CompressedLegacy format - same as other C5 test data
+        // NB format Data.db files are headerless with compressed row data using u16 length prefixes.
+        // See Issue #211 for details.
         assert_eq!(
             CassandraVersion::V5_0NewBig.data_format(),
-            DataFormat::V5UncompressedOA,
-            "V5_0NewBig should use V5UncompressedOA (VInt encoding)"
+            DataFormat::V5CompressedLegacy,
+            "V5_0NewBig should use V5CompressedLegacy (u16 lengths, not VInt)"
         );
+        // V5_0Bti (BTI trie-indexed format) uses true OA format with VInt encoding
         assert_eq!(
             CassandraVersion::V5_0Bti.data_format(),
             DataFormat::V5UncompressedOA,
@@ -1217,11 +1233,12 @@ mod tests {
             "Cassandra 5.0 Uncompressed format"
         );
 
-        // Test data_format - should use LegacyOA since it has no CompressionInfo.db
+        // Test data_format - should use V5CompressedLegacy since row format is identical
+        // The only difference is compression is disabled, not the row serialization format
         assert_eq!(
             CassandraVersion::V5_0Uncompressed.data_format(),
-            DataFormat::LegacyOA,
-            "V5_0Uncompressed should use LegacyOA (no compression)"
+            DataFormat::V5CompressedLegacy,
+            "V5_0Uncompressed should use V5CompressedLegacy (same row format, no compression)"
         );
     }
 

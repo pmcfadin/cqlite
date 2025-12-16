@@ -70,6 +70,9 @@ impl SSTableReader {
         let file = Arc::new(Mutex::new(BufReader::new(file)));
 
         // Parse header - read available bytes, not a fixed size
+        // NOTE: For NB format files (Cassandra 4.x+), Data.db often contains compressed row data
+        // with no embedded header. The header.rs module detects this via filename pattern and
+        // returns a minimal header loaded from Statistics.db instead.
         let header_size = std::cmp::min(4096, file_size as usize);
         let mut header_buffer = vec![0u8; header_size];
         {
