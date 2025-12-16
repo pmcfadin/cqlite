@@ -423,16 +423,107 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
         input = remaining;
     }
 
-    // Step 5: Parse separator before regular columns (0x00)
-    let (input, _) = tag(b"\x00")(input)?;
-    log::debug!("Found 0x00 separator before columns section");
+    // Step 5: Parse static column count (NOT a separator - this was the bug!)
+    // When static_count = 0, this byte is 0x00 which made simple tables work.
+    // But when static_count > 0, parsing failed.
+    let (input, static_count) = parse_u8(input)?;
+    log::debug!("Static column count: {}", static_count);
+
+    // Step 5a: Parse static columns
+    let mut static_columns = Vec::with_capacity(static_count as usize);
+    let mut input = input;
+
+    for static_idx in 0..static_count {
+        // Static column name length (single byte)
+        let (remaining, name_len) = parse_u8(input)?;
+        log::debug!(
+            "Static column {} name length: {} bytes",
+            static_idx,
+            name_len
+        );
+
+        // Validate name length (match validation in parse_regular_columns)
+        if name_len == 0 || name_len > 200 {
+            log::debug!(
+                "Static column {} name_len sanity check failed: {}",
+                static_idx,
+                name_len
+            );
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        // Static column name (UTF-8 string)
+        let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
+        let column_name = std::str::from_utf8(name_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        // Static column type length (single byte)
+        let (remaining, type_len) = parse_u8(remaining)?;
+        log::debug!(
+            "Static column {} ('{}') type length: {} bytes",
+            static_idx,
+            column_name,
+            type_len
+        );
+
+        // Validate type length (match validation in parse_regular_columns)
+        if type_len == 0 || type_len > 200 {
+            log::debug!(
+                "Static column {} ('{}') type_len sanity check failed: {}",
+                static_idx,
+                column_name,
+                type_len
+            );
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        // Static column type (UTF-8 string)
+        let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
+        let internal_type = std::str::from_utf8(type_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        let cql_type = convert_marshal_type_to_cql(&internal_type);
+
+        log::debug!(
+            "Static column {}: name='{}', type='{}' (CQL: '{}')",
+            static_idx,
+            column_name,
+            internal_type,
+            cql_type
+        );
+
+        static_columns.push(super::header::ColumnInfo {
+            name: column_name,
+            column_type: cql_type,
+            is_primary_key: false,
+            key_position: None,
+            is_static: true, // Mark as static column!
+            is_clustering: false,
+        });
+
+        input = remaining;
+    }
+
+    log::debug!("Parsed {} static columns", static_columns.len());
 
     // Step 6: Parse regular column count (single byte)
     let (mut input, column_count) = parse_u8(input)?;
     log::debug!("Regular column count: {}", column_count);
 
     // Step 7: Parse each regular column
-    let mut columns = Vec::with_capacity(column_count as usize);
+    let mut columns = Vec::with_capacity(column_count as usize + static_columns.len());
 
     for col_idx in 0..column_count {
         // Column name length (single byte)
@@ -487,16 +578,23 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
         });
     }
 
+    // Merge static columns (first) with regular columns
+    // Static columns come before regular columns in the combined list
+    let mut all_columns = static_columns;
+    all_columns.append(&mut columns);
+
     log::debug!(
-        "Successfully parsed SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
+        "Successfully parsed SerializationHeader: {} partition keys, {} clustering keys, {} static columns, {} regular columns ({} total)",
         1, // Always 1 partition key in current implementation
         clustering_key_types.len(),
-        columns.len()
+        all_columns.iter().filter(|c| c.is_static).count(),
+        all_columns.iter().filter(|c| !c.is_static).count(),
+        all_columns.len()
     );
 
     Ok((
         input,
-        (vec![partition_key_type], clustering_key_types, columns),
+        (vec![partition_key_type], clustering_key_types, all_columns),
     ))
 }
 
@@ -1458,6 +1556,106 @@ mod tests {
         assert_eq!(columns[0].column_type, "text");
         assert_eq!(columns[1].name, "value");
         assert_eq!(columns[1].column_type, "int");
+    }
+
+    #[test]
+    fn test_serialization_header_with_static_columns() {
+        // Test SerializationHeader with static columns (Issue #210)
+        // Schema: partition key (uuid), clustering key (timestamp),
+        //         static column (text), regular columns (text, int)
+
+        let mut test_data = vec![];
+
+        // Marker
+        test_data.extend_from_slice(&[0x00, 0x00]);
+
+        // Partition key type: UUIDType (40 bytes)
+        let partition_type = b"org.apache.cassandra.db.marshal.UUIDType";
+        test_data.push(partition_type.len() as u8);
+        test_data.extend_from_slice(partition_type);
+
+        // Clustering key count = 1
+        test_data.push(0x01);
+
+        // Clustering key 1: TimestampType (45 bytes)
+        let ck1 = b"org.apache.cassandra.db.marshal.TimestampType";
+        test_data.push(ck1.len() as u8);
+        test_data.extend_from_slice(ck1);
+
+        // Static column count = 1 (NOT a separator - this is the key fix!)
+        test_data.push(0x01);
+
+        // Static column 1: "static_data" (UTF8Type)
+        test_data.push(0x0b); // name length = 11
+        test_data.extend_from_slice(b"static_data");
+        test_data.push(0x28); // type length = 40
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
+
+        // Regular column count = 2
+        test_data.push(0x02);
+
+        // Regular column 1: "row_data" (UTF8)
+        test_data.push(0x08); // name length
+        test_data.extend_from_slice(b"row_data");
+        test_data.push(0x28); // type length = 40
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
+
+        // Regular column 2: "row_value" (Int32)
+        test_data.push(0x09); // name length
+        test_data.extend_from_slice(b"row_value");
+        test_data.push(0x29); // type length = 41
+        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.Int32Type");
+
+        // Add garbage data before SerializationHeader
+        let mut full_data = vec![0xFF; 100];
+        full_data.extend_from_slice(&test_data);
+
+        let result = parse_serialization_header(&full_data);
+        assert!(
+            result.is_ok(),
+            "Failed to parse SerializationHeader with static columns: {:?}",
+            result.err()
+        );
+
+        let (_remaining, (partition_types, clustering_types, columns)) = result.unwrap();
+
+        // Verify partition key
+        assert_eq!(partition_types.len(), 1);
+        assert!(partition_types[0].contains("UUIDType"));
+
+        // Verify clustering keys
+        assert_eq!(clustering_types.len(), 1);
+        assert!(clustering_types[0].contains("TimestampType"));
+
+        // Verify columns (static + regular = 3 total)
+        assert_eq!(
+            columns.len(),
+            3,
+            "Expected 3 columns (1 static + 2 regular)"
+        );
+
+        // Static column should be first and marked as static
+        assert_eq!(columns[0].name, "static_data");
+        assert_eq!(columns[0].column_type, "text");
+        assert!(
+            columns[0].is_static,
+            "static_data should be marked as static"
+        );
+
+        // Regular columns should NOT be static
+        assert_eq!(columns[1].name, "row_data");
+        assert_eq!(columns[1].column_type, "text");
+        assert!(
+            !columns[1].is_static,
+            "row_data should NOT be marked as static"
+        );
+
+        assert_eq!(columns[2].name, "row_value");
+        assert_eq!(columns[2].column_type, "int");
+        assert!(
+            !columns[2].is_static,
+            "row_value should NOT be marked as static"
+        );
     }
 
     #[test]

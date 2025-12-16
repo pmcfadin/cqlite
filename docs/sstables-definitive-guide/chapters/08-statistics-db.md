@@ -78,12 +78,55 @@ For an implementation walkthrough of parsing and reporting helpers, see Appendix
 - The sample shows P50 partition size ≈ 770 B and totalRows=1000, implying light rows and low IO per partition, favoring read-ahead windows at or near one chunk (see Ch. 9).
 - Compression ratio ≈ 0.98 suggests low compressibility (random-looking bytes in `description`), so prioritize CPU over disk savings.
 
+## SerializationHeader Component
+
+Statistics.db in Cassandra 5.0 (nb-format) also contains an embedded **SerializationHeader** component that defines the table schema used when writing the SSTable. This is critical for correctly deserializing Data.db content.
+
+### Binary Format
+
+The SerializationHeader follows this structure (from `SerializationHeader.java`):
+
+```
+[VInt pk_type_len] [pk_type_string]           -- partition key type
+[VInt ck_count]                                -- clustering key count
+  for each clustering key:
+    [VInt ck_len] [ck_type_string]            -- clustering key type
+[VInt static_count]                            -- static column count (0 if none)
+  for each static column:
+    [VInt name_len] [name] [VInt type_len] [type]
+[VInt reg_count]                               -- regular column count
+  for each regular column:
+    [VInt name_len] [name] [VInt type_len] [type]
+```
+
+**Key insight**: When `static_count = 0`, the VInt encodes as `0x00`. This can appear to be a separator, but it is actually the static column count. Tables with static columns will have `static_count > 0` and include the static column definitions between clustering keys and regular columns.
+
+### Example: Table with Static Columns
+
+For `static_columns_table` with schema:
+- Partition key: `id` (uuid)
+- Clustering key: `event_time` (timestamp)
+- Static column: `static_data` (text)
+- Regular columns: `row_data` (text), `row_value` (int)
+
+The SerializationHeader contains:
+```
+pk_type: org.apache.cassandra.db.marshal.UUIDType
+ck_count: 1
+ck_types: [org.apache.cassandra.db.marshal.TimestampType]
+static_count: 1
+static_columns: [{name: "static_data", type: "UTF8Type"}]
+reg_count: 2
+regular_columns: [{name: "row_data", type: "UTF8Type"}, {name: "row_value", type: "Int32Type"}]
+```
+
 ### References
 - Cassandra 5.0.0:
   - `StatsMetadata`: [org.apache.cassandra.io.sstable.metadata.StatsMetadata](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java)
   - `MetadataCollector`: [org.apache.cassandra.io.sstable.metadata.MetadataCollector](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)
   - `MetadataSerializer`: [org.apache.cassandra.io.sstable.metadata.MetadataSerializer](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/metadata/MetadataSerializer.java)
-  
+  - `SerializationHeader`: [org.apache.cassandra.db.SerializationHeader](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/SerializationHeader.java)
+
 For implementation details, see Appendix C.
 
 
