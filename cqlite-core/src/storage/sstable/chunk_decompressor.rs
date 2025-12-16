@@ -219,74 +219,84 @@ impl ChunkDecompressor {
         Ok(decompressed)
     }
 
-    /// Decompress LZ4 chunk - strict mode for modern formats
+    /// Decompress LZ4 chunk - Cassandra uses 4-byte little-endian length prefix
     fn decompress_lz4_chunk(&self, compressed_data: &[u8], chunk_index: usize) -> Result<Vec<u8>> {
         let file_info = match &self.data_file_path {
             Some(path) => format!(" in file {}", path),
             None => String::new(),
         };
 
-        if compressed_data.is_empty() {
+        if compressed_data.len() < 4 {
             return Err(Error::InvalidFormat(format!(
-                "Empty compressed data for chunk {}{}",
-                chunk_index, file_info
+                "LZ4 compressed data too short for chunk {}{} (need at least 4 bytes for length prefix, got {})",
+                chunk_index, file_info, compressed_data.len()
             )));
         }
 
-        // For modern formats, use strict decompression based on CompressionInfo metadata
-        // Remove all decompression guessing - use metadata-driven approach only
-        if self.cassandra_version != crate::parser::header::CassandraVersion::Legacy {
-            // Modern format: strict metadata-driven decompression
-            let expected_size = self.compression_info.chunk_length as usize;
-            match lz4_flex::decompress(compressed_data, expected_size) {
-                Ok(decompressed) => {
-                    if decompressed.len() != expected_size {
-                        return Err(Error::InvalidFormat(format!(
-                            "LZ4 decompressed size mismatch for chunk {} at offset 0x{:x}: expected {}, got {}. No fallback allowed for modern formats{}",
-                            chunk_index,
-                            self.compression_info
-                                .chunk_offsets
-                                .get(chunk_index)
-                                .unwrap_or(&0),
-                            expected_size,
-                            decompressed.len(),
-                            file_info
-                        )));
-                    }
-                    Ok(decompressed)
+        // CRITICAL: Cassandra's LZ4Compressor prepends a 4-byte little-endian length prefix
+        // See: org.apache.cassandra.io.compress.LZ4Compressor.decompress() lines 169-172
+        // This is NOT the lz4_flex size-prepended format (which uses varint encoding)
+        let decompressed_length = u32::from_le_bytes([
+            compressed_data[0],
+            compressed_data[1],
+            compressed_data[2],
+            compressed_data[3],
+        ]) as usize;
+
+        // Validate the decompressed length against expected chunk size
+        let expected_size = self.compression_info.chunk_length as usize;
+
+        // For all chunks except possibly the last one, decompressed length should match chunk_length
+        if chunk_index < self.compression_info.chunk_offsets.len() - 1
+            && decompressed_length != expected_size
+        {
+            return Err(Error::InvalidFormat(format!(
+                "LZ4 length prefix mismatch for chunk {} at offset 0x{:x}: expected {}, got {} (first 4 bytes: {:02x} {:02x} {:02x} {:02x}){}",
+                chunk_index,
+                self.compression_info
+                    .chunk_offsets
+                    .get(chunk_index)
+                    .unwrap_or(&0),
+                expected_size,
+                decompressed_length,
+                compressed_data[0],
+                compressed_data[1],
+                compressed_data[2],
+                compressed_data[3],
+                file_info
+            )));
+        }
+
+        // Skip the 4-byte length prefix and decompress the actual LZ4 data
+        let lz4_data = &compressed_data[4..];
+
+        match lz4_flex::decompress(lz4_data, decompressed_length) {
+            Ok(decompressed) => {
+                if decompressed.len() != decompressed_length {
+                    return Err(Error::InvalidFormat(format!(
+                        "LZ4 decompression size mismatch for chunk {} at offset 0x{:x}: expected {}, got {}{}",
+                        chunk_index,
+                        self.compression_info
+                            .chunk_offsets
+                            .get(chunk_index)
+                            .unwrap_or(&0),
+                        decompressed_length,
+                        decompressed.len(),
+                        file_info
+                    )));
                 }
-                Err(e) => Err(Error::InvalidFormat(format!(
-                    "LZ4 decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats{}",
-                    chunk_index,
-                    self.compression_info
-                        .chunk_offsets
-                        .get(chunk_index)
-                        .unwrap_or(&0),
-                    e,
-                    file_info
-                ))),
+                Ok(decompressed)
             }
-        } else {
-            // Legacy format: try multiple approaches for compatibility (ONLY for legacy formats)
-            match lz4_flex::decompress_size_prepended(compressed_data) {
-                Ok(decompressed) => Ok(decompressed),
-                Err(e) => {
-                    let expected_size = self.compression_info.chunk_length as usize;
-                    match lz4_flex::decompress(compressed_data, expected_size) {
-                        Ok(decompressed) => Ok(decompressed),
-                        Err(_) => Err(Error::InvalidFormat(format!(
-                            "LZ4 decompression failed for legacy chunk {} at offset 0x{:x}: {}{}",
-                            chunk_index,
-                            self.compression_info
-                                .chunk_offsets
-                                .get(chunk_index)
-                                .unwrap_or(&0),
-                            e,
-                            file_info
-                        ))),
-                    }
-                }
-            }
+            Err(e) => Err(Error::InvalidFormat(format!(
+                "LZ4 decompression failed for chunk {} at offset 0x{:x}: {}{}",
+                chunk_index,
+                self.compression_info
+                    .chunk_offsets
+                    .get(chunk_index)
+                    .unwrap_or(&0),
+                e,
+                file_info
+            ))),
         }
     }
 
