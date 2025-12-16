@@ -1,89 +1,29 @@
----
-name: Agents Directory
-type: documentation
-category: agents
-description: Sub-agent definitions organized by type and purpose with specific capabilities and tool restrictions
----
+# CQLite Subagents
 
-# Claude Code Agents Directory Structure
+Focused subagents for CQLite development. These are automatically invoked by Claude when relevant.
 
-This directory contains sub-agent definitions organized by type and purpose. Each agent has specific capabilities, tool restrictions, and naming conventions that trigger automatic delegation.
+## Available Agents
 
-## Directory Structure
+| Agent | Model | Purpose |
+|-------|-------|---------|
+| `sstable-developer` | sonnet | SSTable parsing, binary format debugging, Cassandra 5 compatibility |
+| `rust-reviewer` | sonnet | Code review, quality standards enforcement |
+| `test-validator` | haiku | Test execution, sstabledump validation, failure investigation |
 
-```
-.claude/agents/
-├── README.md                    # This file
-├── _templates/                  # Agent templates
-│   ├── base-agent.yaml
-│   └── agent-types.md
-├── development/                 # Development agents
-│   ├── backend/
-│   ├── frontend/
-│   ├── fullstack/
-│   └── api/
-├── testing/                     # Testing agents
-│   ├── unit/
-│   ├── integration/
-│   ├── e2e/
-│   └── performance/
-├── architecture/                # Architecture agents
-│   ├── system-design/
-│   ├── database/
-│   ├── cloud/
-│   └── security/
-├── devops/                      # DevOps agents
-│   ├── ci-cd/
-│   ├── infrastructure/
-│   ├── monitoring/
-│   └── deployment/
-├── documentation/               # Documentation agents
-│   ├── api-docs/
-│   ├── user-guides/
-│   ├── technical/
-│   └── readme/
-├── analysis/                    # Analysis agents
-│   ├── code-review/
-│   ├── performance/
-│   ├── security/
-│   └── refactoring/
-├── data/                        # Data agents
-│   ├── etl/
-│   ├── analytics/
-│   ├── ml/
-│   └── visualization/
-└── specialized/                 # Specialized agents
-    ├── mobile/
-    ├── embedded/
-    ├── blockchain/
-    └── ai-ml/
-```
+## Usage
 
-## Naming Conventions
+Agents are invoked automatically based on task context. You can also explicitly request them:
 
-Agent files follow this naming pattern:
-`[type]-[specialization]-[capability].agent.yaml`
+- "Use the sstable-developer agent to debug this parsing issue"
+- "Have the rust-reviewer check this PR"
+- "Run test-validator to check current pass rate"
 
-Examples:
-- `dev-backend-api.agent.yaml`
-- `test-unit-jest.agent.yaml`
-- `arch-cloud-aws.agent.yaml`
-- `docs-api-openapi.agent.yaml`
+## Related Skills
 
-## Automatic Delegation Triggers
+Skills in `.claude/skills/` provide domain knowledge that's auto-loaded:
 
-Claude Code automatically delegates to agents based on:
-1. **Keywords in user request**: "test", "deploy", "document", "review"
-2. **File patterns**: `*.test.js` → testing agent, `*.tf` → infrastructure agent
-3. **Task complexity**: Multi-step tasks spawn coordinator agents
-4. **Domain detection**: Database queries → data agent, API endpoints → backend agent
-
-## Tool Restrictions
-
-Each agent type has specific tool access:
-- **Development agents**: Full file system access, code execution
-- **Testing agents**: Test runners, coverage tools, limited write access
-- **Architecture agents**: Read-only access, diagram generation
-- **Documentation agents**: Markdown tools, read access, limited write to docs/
-- **DevOps agents**: Infrastructure tools, deployment scripts, environment access
-- **Analysis agents**: Read-only access, static analysis tools
+- `sstable-parsing` - Format specifications, debugging techniques
+- `cql-type-system` - CQL type deserialization
+- `rust-patterns` - Rust-specific patterns for this codebase
+- `ci-cd-validation` - Pre-push validation checklist
+- `test-data-management` - Working with test SSTables

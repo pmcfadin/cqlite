@@ -41,4 +41,5 @@ Contributions: keep chapters under ~300-600 lines; split when larger.
 - Appendix C — [Reference Walkthroughs with Code](chapters/appendix-c-walkthroughs.md)
 - Appendix D — [Tools & Workflows](chapters/appendix-d-tools-and-workflows.md)
 - Appendix E — [Glossary](chapters/appendix-e-glossary.md)
+- Appendix F — [Known Limitations](chapters/appendix-f-known-limitations.md)
 

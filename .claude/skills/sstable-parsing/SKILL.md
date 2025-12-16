@@ -45,9 +45,15 @@ Contains sampling of index entries for faster lookups
 
 ## Format References
 
-See detailed format specifications in:
-- [cassandra5-format-reference.md](cassandra5-format-reference.md) - Complete row format
-- [compression-formats.md](compression-formats.md) - Compression block format
+**Primary Source of Truth**: `docs/sstables-definitive-guide/`
+
+Key chapters:
+- **Ch.5**: Data.db Format - Row layout, flags, V5CompressedLegacy
+- **Ch.6**: Index.db and Summary.db - Partition lookups
+- **Ch.9**: CompressionInfo.db - Compression metadata, chunking
+- **Ch.17**: BTI Formats - Trie-based indexes
+- **Appendix B**: Encoding Cheat Sheet - VInt, cell flags
+- **Appendix F**: Known Limitations - What doesn't work yet
 
 ## Common Debugging Techniques
 
