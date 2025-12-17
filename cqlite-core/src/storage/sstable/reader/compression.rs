@@ -388,3 +388,239 @@ pub fn extract_sstable_base_name(path: &Path) -> Option<String> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // =========================================================================
+    // extract_sstable_base_name tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_sstable_base_name_standard_data_file() {
+        let path = PathBuf::from("nb-1-big-Data.db");
+        assert_eq!(
+            extract_sstable_base_name(&path),
+            Some("nb-1-big".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name_index_file() {
+        let path = PathBuf::from("nb-2-big-Index.db");
+        assert_eq!(
+            extract_sstable_base_name(&path),
+            Some("nb-2-big".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name_compression_info() {
+        let path = PathBuf::from("nb-45-big-CompressionInfo.db");
+        assert_eq!(
+            extract_sstable_base_name(&path),
+            Some("nb-45-big".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name_with_full_path() {
+        let path = PathBuf::from("/var/lib/cassandra/data/keyspace/table-uuid/nb-1-big-Data.db");
+        assert_eq!(
+            extract_sstable_base_name(&path),
+            Some("nb-1-big".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name_statistics() {
+        let path = PathBuf::from("nb-100-big-Statistics.db");
+        assert_eq!(
+            extract_sstable_base_name(&path),
+            Some("nb-100-big".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name_too_few_parts() {
+        // Non-standard naming - should return None
+        let path = PathBuf::from("invalid.db");
+        assert_eq!(extract_sstable_base_name(&path), None);
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name_no_extension() {
+        let path = PathBuf::from("nb-1-big-Data");
+        assert_eq!(extract_sstable_base_name(&path), None);
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name_wrong_extension() {
+        let path = PathBuf::from("nb-1-big-Data.txt");
+        assert_eq!(extract_sstable_base_name(&path), None);
+    }
+
+    #[test]
+    fn test_extract_sstable_base_name_three_parts() {
+        // Only 3 parts after split - should return None
+        let path = PathBuf::from("nb-1-big.db");
+        assert_eq!(extract_sstable_base_name(&path), None);
+    }
+
+    // =========================================================================
+    // extract_generation_number tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_generation_number_standard() {
+        assert_eq!(extract_generation_number("nb-1-big-Data.db"), Some(1));
+        assert_eq!(extract_generation_number("nb-45-big-Index.db"), Some(45));
+        assert_eq!(
+            extract_generation_number("nb-100-big-CompressionInfo.db"),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn test_extract_generation_number_large() {
+        assert_eq!(
+            extract_generation_number("nb-999999-big-Data.db"),
+            Some(999999)
+        );
+    }
+
+    #[test]
+    fn test_extract_generation_number_no_match() {
+        assert_eq!(extract_generation_number("other-format.db"), None);
+        assert_eq!(extract_generation_number("Data.db"), None);
+    }
+
+    #[test]
+    fn test_extract_generation_number_malformed() {
+        // Missing trailing dash after number
+        assert_eq!(extract_generation_number("nb-1"), None);
+        // Non-numeric generation
+        assert_eq!(extract_generation_number("nb-abc-big-Data.db"), None);
+    }
+
+    // =========================================================================
+    // score_compression_file_match tests
+    // =========================================================================
+
+    #[test]
+    fn test_score_compression_file_match_exact_base() {
+        let sstable = PathBuf::from("nb-1-big-Data.db");
+        let compression = PathBuf::from("nb-1-big-CompressionInfo.db");
+        let score = score_compression_file_match(&compression, &sstable);
+        // Should get 100 (exact match) + 50 (gen match) + 25 (format match) = 175
+        assert!(
+            score >= 100,
+            "Expected high score for exact base match, got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_score_compression_file_match_generation_only() {
+        let sstable = PathBuf::from("nb-45-big-Data.db");
+        let compression = PathBuf::from("nb-45-other-CompressionInfo.db");
+        let score = score_compression_file_match(&compression, &sstable);
+        // Generation matches (45) but not exact base name
+        assert!(
+            score >= 50,
+            "Expected score for generation match, got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_score_compression_file_match_generic() {
+        let sstable = PathBuf::from("nb-1-big-Data.db");
+        let compression = PathBuf::from("CompressionInfo.db");
+        let score = score_compression_file_match(&compression, &sstable);
+        // Generic fallback gets lowest score (1)
+        assert_eq!(score, 1, "Expected score 1 for generic CompressionInfo.db");
+    }
+
+    #[test]
+    fn test_score_compression_file_match_no_filename() {
+        let sstable = PathBuf::from("");
+        let compression = PathBuf::from("");
+        let score = score_compression_file_match(&compression, &sstable);
+        assert_eq!(score, 0, "Expected 0 for empty paths");
+    }
+
+    #[test]
+    fn test_score_compression_file_match_different_generation() {
+        let sstable = PathBuf::from("nb-1-big-Data.db");
+        let compression = PathBuf::from("nb-99-big-CompressionInfo.db");
+        let score = score_compression_file_match(&compression, &sstable);
+        // Different generation - should get format match (25) but not gen match (50)
+        assert!(
+            score < 100,
+            "Expected lower score for different generation, got {}",
+            score
+        );
+    }
+
+    // =========================================================================
+    // get_standard_compression_patterns tests
+    // =========================================================================
+
+    #[test]
+    fn test_get_standard_compression_patterns_includes_base_name() {
+        let path = PathBuf::from("nb-1-big-Data.db");
+        let patterns = get_standard_compression_patterns(&path);
+
+        assert!(
+            patterns.contains(&"nb-1-big-CompressionInfo.db".to_string()),
+            "Should include pattern for base name: {:?}",
+            patterns
+        );
+    }
+
+    #[test]
+    fn test_get_standard_compression_patterns_includes_generations() {
+        let path = PathBuf::from("nb-1-big-Data.db");
+        let patterns = get_standard_compression_patterns(&path);
+
+        // Should include common generation patterns
+        assert!(
+            patterns.contains(&"nb-1-big-CompressionInfo.db".to_string()),
+            "Should include generation 1: {:?}",
+            patterns
+        );
+        assert!(
+            patterns.contains(&"nb-45-big-CompressionInfo.db".to_string()),
+            "Should include generation 45: {:?}",
+            patterns
+        );
+    }
+
+    #[test]
+    fn test_get_standard_compression_patterns_includes_fallback() {
+        let path = PathBuf::from("nb-1-big-Data.db");
+        let patterns = get_standard_compression_patterns(&path);
+
+        assert!(
+            patterns.contains(&"CompressionInfo.db".to_string()),
+            "Should include generic fallback: {:?}",
+            patterns
+        );
+    }
+
+    #[test]
+    fn test_get_standard_compression_patterns_non_standard_path() {
+        let path = PathBuf::from("weird-file.db");
+        let patterns = get_standard_compression_patterns(&path);
+
+        // Should still include fallback patterns even for non-standard paths
+        assert!(
+            patterns.contains(&"CompressionInfo.db".to_string()),
+            "Should include generic fallback for non-standard path: {:?}",
+            patterns
+        );
+    }
+}

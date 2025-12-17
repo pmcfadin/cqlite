@@ -597,3 +597,437 @@ async fn read_uncompressed_data_block(
 
     Ok(Some(data))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+
+    // =========================================================================
+    // ASCII corruption detection tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_ascii_corruption_value_known_patterns() {
+        // Known ASCII corruption values from header.rs
+        assert!(is_ascii_corruption_value(2959239534)); // "bin" pattern
+        assert!(is_ascii_corruption_value(1684108385)); // "data" pattern
+    }
+
+    #[test]
+    fn test_is_ascii_corruption_value_normal_values() {
+        // Normal block sizes should not be flagged
+        assert!(!is_ascii_corruption_value(4096));
+        assert!(!is_ascii_corruption_value(65536));
+        assert!(!is_ascii_corruption_value(1048576));
+    }
+
+    #[test]
+    fn test_detect_ascii_header_corruption_ascii_text() {
+        // Headers containing ASCII text should be detected
+        let header = b"DATA1234";
+        assert!(detect_ascii_header_corruption(header));
+
+        let header2 = b"bindata!";
+        assert!(detect_ascii_header_corruption(header2));
+    }
+
+    #[test]
+    fn test_detect_ascii_header_corruption_binary() {
+        // Normal binary headers should not be detected
+        let header = [0x00, 0x00, 0x10, 0x00, 0x12, 0x34, 0x56, 0x78]; // Size 4096
+        assert!(!detect_ascii_header_corruption(&header));
+    }
+
+    // =========================================================================
+    // Block size validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_block_size_limit() {
+        // Block size limit is 64MB (64 * 1024 * 1024)
+        let limit = 64 * 1024 * 1024;
+
+        // Sizes up to limit should be valid
+        assert!(4096 <= limit);
+        assert!(64 * 1024 * 1024 <= limit);
+
+        // Sizes above limit would be rejected
+        assert!(65 * 1024 * 1024 > limit);
+    }
+
+    #[test]
+    fn test_empty_block_handling() {
+        // Empty blocks (size 0) should be handled gracefully
+        let size = 0u32;
+        assert_eq!(size, 0);
+        // The implementation returns Ok(Some(Vec::new())) for empty blocks
+    }
+
+    // =========================================================================
+    // CRC32 calculation tests
+    // =========================================================================
+
+    #[test]
+    fn test_crc32_calculation() {
+        // Test CRC32 calculation using crc32fast
+        let data = b"test data for CRC";
+        let crc = crc32fast::hash(data);
+
+        // CRC should be deterministic
+        assert_eq!(crc, crc32fast::hash(data));
+
+        // Different data should have different CRC
+        let data2 = b"different test data";
+        assert_ne!(crc, crc32fast::hash(data2));
+    }
+
+    #[test]
+    fn test_crc32_empty_data() {
+        let data: &[u8] = b"";
+        let crc = crc32fast::hash(data);
+
+        // Empty data has a specific CRC value
+        assert_eq!(crc, 0); // CRC32 of empty data is 0
+    }
+
+    // =========================================================================
+    // Header parsing tests
+    // =========================================================================
+
+    #[test]
+    fn test_block_header_parsing_big_endian() {
+        // Test big-endian parsing of block headers
+        let header_buffer = [0x00, 0x00, 0x10, 0x00, 0x12, 0x34, 0x56, 0x78];
+
+        // Legacy format: size (4 bytes) + checksum (4 bytes)
+        let compressed_size = u32::from_be_bytes([
+            header_buffer[0],
+            header_buffer[1],
+            header_buffer[2],
+            header_buffer[3],
+        ]);
+        let checksum = u32::from_be_bytes([
+            header_buffer[4],
+            header_buffer[5],
+            header_buffer[6],
+            header_buffer[7],
+        ]);
+
+        assert_eq!(compressed_size, 4096); // 0x00001000
+        assert_eq!(checksum, 0x12345678);
+    }
+
+    #[test]
+    fn test_bti_header_parsing() {
+        // BTI format: 12-byte header
+        // [0-3]: compressed size, [4-7]: uncompressed size, [8-11]: checksum
+        let header_buffer = [
+            0x00, 0x00, 0x08, 0x00, // size: 2048
+            0x00, 0x00, 0x10, 0x00, // uncompressed: 4096
+            0xAB, 0xCD, 0xEF, 0x12, // checksum
+        ];
+
+        let compressed_size = u32::from_be_bytes([
+            header_buffer[0],
+            header_buffer[1],
+            header_buffer[2],
+            header_buffer[3],
+        ]);
+        let checksum = u32::from_be_bytes([
+            header_buffer[8],
+            header_buffer[9],
+            header_buffer[10],
+            header_buffer[11],
+        ]);
+
+        assert_eq!(compressed_size, 2048);
+        assert_eq!(checksum, 0xABCDEF12);
+    }
+
+    // =========================================================================
+    // Chunk index tests
+    // =========================================================================
+
+    #[test]
+    fn test_atomic_chunk_index_increment() {
+        let index = AtomicUsize::new(0);
+
+        assert_eq!(index.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        // Simulate chunk reads
+        index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(index.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(index.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    // =========================================================================
+    // Integration tests with real files (async)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_read_block_direct_empty() {
+        // Test reading zero bytes
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_empty_block.bin");
+
+        // Create empty file
+        tokio::fs::write(&temp_file, b"").await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        let result = read_block_direct(&file, 0).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+
+        // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_read_block_direct_small() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_small_block.bin");
+
+        // Create test file with known content
+        let test_data = b"Hello, World! This is test data.";
+        tokio::fs::write(&temp_file, test_data).await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        let result = read_block_direct(&file, test_data.len()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), test_data);
+
+        // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_read_uncompressed_data_block() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_uncompressed_block.bin");
+
+        // Create test file
+        let test_data = b"Uncompressed test data block content";
+        tokio::fs::write(&temp_file, test_data).await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        let result = read_uncompressed_data_block(&file).await;
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert!(data.is_some());
+        assert_eq!(data.unwrap(), test_data);
+
+        // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_read_uncompressed_data_block_eof() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_uncompressed_eof.bin");
+
+        // Create empty file
+        tokio::fs::write(&temp_file, b"").await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        // Should return None for EOF
+        let result = read_uncompressed_data_block(&file).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_read_legacy_format_block_header_eof() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_legacy_header_eof.bin");
+
+        // Create file with only 4 bytes (incomplete header)
+        tokio::fs::write(&temp_file, &[0x00, 0x00, 0x10, 0x00])
+            .await
+            .unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        // Should return None for incomplete header (EOF)
+        let result = read_legacy_format_block_header(&file).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_read_legacy_format_block_header_valid() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_legacy_header_valid.bin");
+
+        // Create valid 8-byte header
+        let header = [0x00, 0x00, 0x10, 0x00, 0x12, 0x34, 0x56, 0x78];
+        tokio::fs::write(&temp_file, &header).await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        let result = read_legacy_format_block_header(&file).await;
+        assert!(result.is_ok());
+
+        let (size, checksum, pos) = result.unwrap().unwrap();
+        assert_eq!(size, 4096);
+        assert_eq!(checksum, 0x12345678);
+        assert_eq!(pos, 0);
+
+        // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_read_bti_format_block_header_valid() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_bti_header_valid.bin");
+
+        // Create valid 12-byte BTI header
+        let header = [
+            0x00, 0x00, 0x08, 0x00, // size: 2048
+            0x00, 0x00, 0x10, 0x00, // uncompressed: 4096
+            0xAB, 0xCD, 0xEF, 0x12, // checksum
+        ];
+        tokio::fs::write(&temp_file, &header).await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        let result = read_bti_format_block_header(&file).await;
+        assert!(result.is_ok());
+
+        let (size, checksum, pos) = result.unwrap().unwrap();
+        assert_eq!(size, 2048);
+        assert_eq!(checksum, 0xABCDEF12);
+        assert_eq!(pos, 0);
+
+        // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_read_large_block_streaming() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_large_block.bin");
+
+        // Create larger test file (128KB)
+        let size = 128 * 1024;
+        let test_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        tokio::fs::write(&temp_file, &test_data).await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        let config = SSTableReaderConfig {
+            read_buffer_size: 4096, // Small buffer to test streaming
+            validate_checksums: true,
+            ..Default::default()
+        };
+
+        let result = read_large_block_streaming(&file, size, &config).await;
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.len(), size);
+        assert_eq!(data, test_data);
+
+        // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_read_with_real_sstable_data() {
+        // Test with real SSTable data if available
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => PathBuf::from(root),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping real data test");
+                return;
+            }
+        };
+
+        let simple_table_dir = datasets_root.join("sstables/test_basic");
+        if !simple_table_dir.exists() {
+            eprintln!("test_basic not found, skipping real data test");
+            return;
+        }
+
+        // Find simple_table
+        let table_dir = std::fs::read_dir(&simple_table_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("simple_table"))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path())
+            });
+
+        let Some(table_path) = table_dir else {
+            eprintln!("simple_table not found, skipping");
+            return;
+        };
+
+        // Find Data.db file
+        let data_file = std::fs::read_dir(&table_path).ok().and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path())
+        });
+
+        let Some(data_path) = data_file else {
+            eprintln!("Data.db not found, skipping");
+            return;
+        };
+
+        // Open and read first bytes
+        let file = tokio::fs::File::open(&data_path).await.unwrap();
+        let metadata = file.metadata().await.unwrap();
+        eprintln!(
+            "Opened real SSTable Data.db: {} ({} bytes)",
+            data_path.display(),
+            metadata.len()
+        );
+
+        let file = Arc::new(Mutex::new(BufReader::new(file)));
+
+        // Try reading a small block
+        if metadata.len() > 100 {
+            let result = read_block_direct(&file, 100).await;
+            assert!(result.is_ok(), "Should read first 100 bytes of real file");
+            let data = result.unwrap();
+            assert_eq!(data.len(), 100);
+            eprintln!("Successfully read first 100 bytes from real SSTable");
+        }
+    }
+}

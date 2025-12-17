@@ -683,3 +683,445 @@ impl SSTableReader {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // table_ids_match tests
+    // =========================================================================
+
+    #[test]
+    fn test_table_ids_match_exact() {
+        // Exact match cases
+        let id1 = TableId::new("simple_table".to_string());
+        let id2 = TableId::new("simple_table".to_string());
+        assert!(table_ids_match(&id1, &id2));
+
+        let id3 = TableId::new("test_basic.simple_table".to_string());
+        let id4 = TableId::new("test_basic.simple_table".to_string());
+        assert!(table_ids_match(&id3, &id4));
+    }
+
+    #[test]
+    fn test_table_ids_match_qualified_vs_unqualified() {
+        // Qualified matches unqualified
+        let qualified = TableId::new("test_basic.simple_table".to_string());
+        let unqualified = TableId::new("simple_table".to_string());
+
+        assert!(table_ids_match(&qualified, &unqualified));
+        assert!(table_ids_match(&unqualified, &qualified));
+    }
+
+    #[test]
+    fn test_table_ids_match_different_keyspaces() {
+        // Different keyspaces but same table name - should match on table name
+        let id1 = TableId::new("keyspace1.users".to_string());
+        let id2 = TableId::new("keyspace2.users".to_string());
+
+        assert!(
+            table_ids_match(&id1, &id2),
+            "Same table name should match across keyspaces"
+        );
+    }
+
+    #[test]
+    fn test_table_ids_match_completely_different() {
+        // Completely different tables - should not match
+        let id1 = TableId::new("users".to_string());
+        let id2 = TableId::new("orders".to_string());
+
+        assert!(!table_ids_match(&id1, &id2));
+
+        let id3 = TableId::new("test.users".to_string());
+        let id4 = TableId::new("test.orders".to_string());
+
+        assert!(!table_ids_match(&id3, &id4));
+    }
+
+    #[test]
+    fn test_table_ids_match_edge_cases() {
+        // Table names with dots (unusual but possible)
+        let id1 = TableId::new("schema.table.subtable".to_string());
+        let id2 = TableId::new("subtable".to_string());
+
+        assert!(
+            table_ids_match(&id1, &id2),
+            "Should match on last component"
+        );
+    }
+
+    #[test]
+    fn test_table_ids_match_empty() {
+        // Empty table IDs
+        let id1 = TableId::new("".to_string());
+        let id2 = TableId::new("".to_string());
+
+        assert!(table_ids_match(&id1, &id2), "Empty IDs should match");
+    }
+
+    // =========================================================================
+    // Key comparison tests
+    // =========================================================================
+
+    #[test]
+    fn test_row_key_comparison() {
+        let key1 = RowKey::new(vec![1, 2, 3]);
+        let key2 = RowKey::new(vec![1, 2, 3]);
+        let key3 = RowKey::new(vec![1, 2, 4]);
+
+        assert_eq!(key1, key2);
+        assert_ne!(key1, key3);
+        assert!(key1 < key3);
+    }
+
+    #[test]
+    fn test_row_key_ordering() {
+        let key_a = RowKey::new(vec![0x01]);
+        let key_b = RowKey::new(vec![0x02]);
+        let key_c = RowKey::new(vec![0x01, 0x00]); // Longer but starts with 0x01
+
+        assert!(key_a < key_b);
+        assert!(key_a < key_c); // Shorter prefix comes first in lexicographic order
+    }
+
+    // =========================================================================
+    // Value tests
+    // =========================================================================
+
+    #[test]
+    fn test_value_blob_creation() {
+        let data = vec![1, 2, 3, 4, 5];
+        let value = Value::Blob(data.clone());
+
+        if let Value::Blob(v) = value {
+            assert_eq!(v, data);
+        } else {
+            panic!("Expected Value::Blob");
+        }
+    }
+
+    // =========================================================================
+    // Integration tests with real SSTable data
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_get_nonexistent_key() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        // Test with real SSTable data if available
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => PathBuf::from(root),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+                return;
+            }
+        };
+
+        let simple_table_dir = datasets_root.join("sstables/test_basic");
+        if !simple_table_dir.exists() {
+            eprintln!("test_basic not found, skipping test");
+            return;
+        }
+
+        // Find simple_table
+        let table_dir = std::fs::read_dir(&simple_table_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("simple_table"))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path())
+            });
+
+        let Some(table_path) = table_dir else {
+            eprintln!("simple_table not found, skipping");
+            return;
+        };
+
+        // Find Data.db file
+        let data_file = std::fs::read_dir(&table_path).ok().and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path())
+        });
+
+        let Some(data_path) = data_file else {
+            eprintln!("Data.db not found, skipping");
+            return;
+        };
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("Failed to create platform"),
+        );
+
+        let reader = SSTableReader::open(&data_path, &config, platform)
+            .await
+            .expect("Failed to open SSTable");
+
+        // Try to get a key that doesn't exist
+        let table_id = TableId::new("test_basic.simple_table".to_string());
+        let nonexistent_key = RowKey::new(vec![0xFF, 0xFF, 0xFF, 0xFF]); // Very unlikely to exist
+
+        let result = reader.get(&table_id, &nonexistent_key).await;
+        assert!(
+            result.is_ok(),
+            "get() should succeed even for nonexistent key"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "Nonexistent key should return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_limit() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => PathBuf::from(root),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+                return;
+            }
+        };
+
+        let simple_table_dir = datasets_root.join("sstables/test_basic");
+        if !simple_table_dir.exists() {
+            eprintln!("test_basic not found, skipping test");
+            return;
+        }
+
+        // Find simple_table
+        let table_dir = std::fs::read_dir(&simple_table_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("simple_table"))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path())
+            });
+
+        let Some(table_path) = table_dir else {
+            eprintln!("simple_table not found, skipping");
+            return;
+        };
+
+        let data_file = std::fs::read_dir(&table_path).ok().and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path())
+        });
+
+        let Some(data_path) = data_file else {
+            eprintln!("Data.db not found, skipping");
+            return;
+        };
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("Failed to create platform"),
+        );
+
+        let reader = SSTableReader::open(&data_path, &config, platform)
+            .await
+            .expect("Failed to open SSTable");
+
+        let table_id = TableId::new("test_basic.simple_table".to_string());
+
+        // Test scan with limit
+        let result = reader.scan(&table_id, None, None, Some(5), None).await;
+        assert!(result.is_ok(), "scan() should succeed");
+
+        let entries = result.unwrap();
+        assert!(
+            entries.len() <= 5,
+            "Scan with limit 5 should return at most 5 entries, got {}",
+            entries.len()
+        );
+
+        eprintln!("Scan with limit 5 returned {} entries", entries.len());
+    }
+
+    #[tokio::test]
+    async fn test_scan_full_table() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => PathBuf::from(root),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+                return;
+            }
+        };
+
+        let simple_table_dir = datasets_root.join("sstables/test_basic");
+        if !simple_table_dir.exists() {
+            eprintln!("test_basic not found, skipping test");
+            return;
+        }
+
+        // Find simple_table
+        let table_dir = std::fs::read_dir(&simple_table_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("simple_table"))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path())
+            });
+
+        let Some(table_path) = table_dir else {
+            eprintln!("simple_table not found, skipping");
+            return;
+        };
+
+        let data_file = std::fs::read_dir(&table_path).ok().and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path())
+        });
+
+        let Some(data_path) = data_file else {
+            eprintln!("Data.db not found, skipping");
+            return;
+        };
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("Failed to create platform"),
+        );
+
+        let reader = SSTableReader::open(&data_path, &config, platform)
+            .await
+            .expect("Failed to open SSTable");
+
+        let table_id = TableId::new("test_basic.simple_table".to_string());
+
+        // Full table scan (no limit)
+        let result = reader.scan(&table_id, None, None, None, None).await;
+        assert!(result.is_ok(), "Full scan should succeed");
+
+        let entries = result.unwrap();
+        eprintln!("Full scan returned {} entries", entries.len());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_entries() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => PathBuf::from(root),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+                return;
+            }
+        };
+
+        let simple_table_dir = datasets_root.join("sstables/test_basic");
+        if !simple_table_dir.exists() {
+            eprintln!("test_basic not found, skipping test");
+            return;
+        }
+
+        // Find simple_table
+        let table_dir = std::fs::read_dir(&simple_table_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("simple_table"))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path())
+            });
+
+        let Some(table_path) = table_dir else {
+            eprintln!("simple_table not found, skipping");
+            return;
+        };
+
+        let data_file = std::fs::read_dir(&table_path).ok().and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path())
+        });
+
+        let Some(data_path) = data_file else {
+            eprintln!("Data.db not found, skipping");
+            return;
+        };
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("Failed to create platform"),
+        );
+
+        let reader = SSTableReader::open(&data_path, &config, platform)
+            .await
+            .expect("Failed to open SSTable");
+
+        // Get all entries (for compaction use case)
+        let result = reader.get_all_entries().await;
+        assert!(result.is_ok(), "get_all_entries() should succeed");
+
+        let entries = result.unwrap();
+        eprintln!("get_all_entries() returned {} entries", entries.len());
+    }
+}

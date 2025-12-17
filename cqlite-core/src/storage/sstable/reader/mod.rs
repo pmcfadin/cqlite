@@ -34,6 +34,10 @@ pub use types::{
 #[doc(hidden)]
 pub use parsing::PublicV5CompressedLegacyParser as V5CompressedLegacyParser;
 
+// Re-export compression utilities for testing (Issue #202)
+#[doc(hidden)]
+pub use compression::extract_sstable_base_name;
+
 // Internal imports from submodules
 use compression::detect_and_initialize_compression;
 use header::{
