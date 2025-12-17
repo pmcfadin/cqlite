@@ -41,6 +41,16 @@ use super::vint::{parse_vint, parse_vuint};
 use crate::error::{Error, Result};
 use nom::{bytes::complete::take, number::complete::be_u32, IResult};
 
+/// Cassandra MetadataType enum ordinals (from MetadataType.java)
+/// Used to identify component types in Statistics.db TOC
+#[allow(dead_code)]
+const METADATA_TYPE_VALIDATION: u32 = 0;
+#[allow(dead_code)]
+const METADATA_TYPE_COMPACTION: u32 = 1;
+#[allow(dead_code)]
+const METADATA_TYPE_STATS: u32 = 2;
+const METADATA_TYPE_HEADER: u32 = 3; // SerializationHeader
+
 /// Type alias for EncodingStats parse result to reduce complexity
 type EncodingStatsResult = (
     i64,
@@ -108,6 +118,83 @@ pub fn parse_nb_format_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> 
     ))
 }
 
+/// Parse Statistics.db Table of Contents to get component offsets (Issue #216)
+///
+/// Statistics.db format (from Cassandra MetadataSerializer.java):
+/// - [4 bytes] number_of_components (u32 BE)
+/// - [4 bytes] checksum (u32 BE)
+/// - [TOC] component_type (u32) | offset (u32) for each component
+/// - [Component data...]
+///
+/// MetadataType enum ordinals:
+/// - 0 = VALIDATION
+/// - 1 = COMPACTION
+/// - 2 = STATS
+/// - 3 = HEADER (SerializationHeader)
+///
+/// Returns the offset to the HEADER component (SerializationHeader), or None if not found.
+fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usize> {
+    if input.len() < 8 {
+        log::debug!("Statistics.db too small for TOC: {} bytes", input.len());
+        return None;
+    }
+
+    // Parse number of components
+    let num_components = u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as usize;
+    log::debug!("Statistics.db TOC: {} components", num_components);
+
+    // Skip checksum (bytes 4-7)
+    // TOC starts at byte 8
+
+    let toc_start = 8;
+    let toc_entry_size = 8; // 4 bytes type + 4 bytes offset
+
+    if input.len() < toc_start + (num_components * toc_entry_size) {
+        log::debug!(
+            "Statistics.db too small for {} TOC entries: {} bytes",
+            num_components,
+            input.len()
+        );
+        return None;
+    }
+
+    // Search for HEADER component (type 3)
+    for i in 0..num_components {
+        let entry_offset = toc_start + (i * toc_entry_size);
+        let component_type = u32::from_be_bytes([
+            input[entry_offset],
+            input[entry_offset + 1],
+            input[entry_offset + 2],
+            input[entry_offset + 3],
+        ]);
+        let component_offset = u32::from_be_bytes([
+            input[entry_offset + 4],
+            input[entry_offset + 5],
+            input[entry_offset + 6],
+            input[entry_offset + 7],
+        ]) as usize;
+
+        log::debug!(
+            "TOC entry {}: type={} offset=0x{:x}",
+            i,
+            component_type,
+            component_offset
+        );
+
+        if component_type == METADATA_TYPE_HEADER {
+            log::debug!(
+                "Found HEADER component at offset 0x{:x} ({})",
+                component_offset,
+                component_offset
+            );
+            return Some(component_offset);
+        }
+    }
+
+    log::debug!("HEADER component not found in Statistics.db TOC");
+    None
+}
+
 /// Parse minimal nb-format statistics data for delta-coding baseline (Issue #162)
 ///
 /// This implementation parses ONLY the EncodingStats fields required for delta decoding:
@@ -139,6 +226,7 @@ pub fn parse_nb_format_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> 
 pub fn parse_nb_format_statistics_data(
     input: &[u8],
     header: &StatisticsHeader,
+    full_input: &[u8],
 ) -> Result<(
     RowStatistics,
     TimestampStatistics,
@@ -149,8 +237,11 @@ pub fn parse_nb_format_statistics_data(
     Vec<super::header::ColumnInfo>,
     Vec<super::header::ColumnInfo>,
 )> {
+    // Get HEADER offset from TOC (Issue #216)
+    let header_offset = parse_statistics_toc_for_header_offset(full_input);
+
     // Parse the EncodingStats section from the data following the header
-    let result = parse_minimal_encoding_stats(input);
+    let result = parse_minimal_encoding_stats(input, full_input, header_offset);
 
     match result {
         Ok((
@@ -286,49 +377,69 @@ fn parse_serialization_header(input: &[u8]) -> IResult<&[u8], SerializationHeade
                 &input[context_start..context_end]
             );
 
-            for lookback in 2..=15 {
-                if search_offset < lookback + 1 {
+            // Issue #216 fix: Look for the pattern [prev_zero] [pk_type_len] "org.apache..."
+            // where pk_type_len is a valid VInt length (0x01-0x7F for single byte, or multi-byte VInt)
+            // The prev_zero is typically the last byte of EncodingStats (minTTL=0) or another zero field.
+            //
+            // We need to find the START of the partition key type length, which is:
+            // - 1 byte before "org.apache..." for single-byte lengths (0x28 = 40 bytes for UUIDType)
+            // - 2 bytes before for two-byte VInt lengths (0x80 0xXX)
+
+            for lookback in 1..=15 {
+                if search_offset < lookback {
                     break;
                 }
-                let marker_offset = search_offset - lookback;
-                if marker_offset + 1 < input.len() {
-                    let byte1 = input[marker_offset];
-                    let byte2 = input[marker_offset + 1];
-                    if byte1 == 0x00 && byte2 == 0x00 {
-                        log::debug!(
-                            "Found 0x00 0x00 marker at offset {} (lookback: {} from org.apache at {})",
-                            marker_offset,
-                            lookback,
-                            search_offset
-                        );
-                    } else if lookback <= 6 {
-                        log::debug!(
-                            "Lookback {} from {} (marker_offset={}): bytes are 0x{:02x} 0x{:02x} (expected 0x00 0x00)",
-                            lookback,
-                            search_offset,
-                            marker_offset,
-                            byte1,
-                            byte2
-                        );
+                let type_len_offset = search_offset - lookback;
+
+                // Check if this could be a valid pk_type_len
+                // For single-byte VInt: values 0x01-0x7F
+                // For two-byte VInt: first byte has high bit set (0x80-0xFF)
+                let first_byte = input[type_len_offset];
+
+                // Common partition key type lengths:
+                // - UUIDType: 40 bytes (0x28)
+                // - UTF8Type: 40 bytes (0x28)
+                // - Int32Type: 41 bytes (0x29)
+                // - TimestampType: 45 bytes (0x2D)
+                // - CompositeType: ~80-150 bytes (0x50-0x96 or multi-byte VInt)
+
+                // Single-byte VInt: 0x20-0x7F are reasonable pk_type lengths (32-127 bytes)
+                let is_valid_single_byte_len = (0x20..=0x7F).contains(&first_byte);
+
+                // Two-byte VInt: 0x80-0xBF with continuation
+                let is_multi_byte_vint = first_byte >= 0x80;
+
+                if is_valid_single_byte_len || is_multi_byte_vint {
+                    // Try parsing from this offset using sequential parser
+                    let result = parse_serialization_header_sequential(&input[type_len_offset..]);
+                    if let Ok((remaining, (pk_types, ck_types, cols))) = result {
+                        // Validate: partition key type should contain expected substring
+                        if !pk_types.is_empty()
+                            && pk_types[0].contains("org.apache.cassandra.db.marshal")
+                        {
+                            log::debug!(
+                                "Successfully parsed SerializationHeader at offset {} (lookback: {}): pk_type={}",
+                                type_len_offset,
+                                lookback,
+                                pk_types[0]
+                            );
+                            return Ok((remaining, (pk_types, ck_types, cols)));
+                        }
                     }
                 }
-                if marker_offset + 1 < input.len()
-                    && input[marker_offset] == 0x00
-                    && input[marker_offset + 1] == 0x00
-                {
-                    let result = parse_serialization_header_at_offset(&input[marker_offset..]);
-                    if result.is_ok() {
-                        log::debug!(
-                            "Successfully parsed SerializationHeader starting at marker offset {}",
-                            marker_offset
-                        );
-                        return result;
-                    } else {
-                        log::debug!(
-                            "Parse failed at marker offset {}: {:?}",
-                            marker_offset,
-                            result
-                        );
+
+                // Also try the legacy 0x00 0x00 marker for backward compatibility
+                if type_len_offset > 0 {
+                    let prev_offset = type_len_offset - 1;
+                    if input[prev_offset] == 0x00 && input[type_len_offset] == 0x00 {
+                        let result = parse_serialization_header_at_offset(&input[prev_offset..]);
+                        if result.is_ok() {
+                            log::debug!(
+                                "Successfully parsed SerializationHeader at legacy marker offset {}",
+                                prev_offset
+                            );
+                            return result;
+                        }
                     }
                 }
             }
@@ -1103,6 +1214,30 @@ fn fallback_parse_serialization_header_ascii(
     Some((partition_types, clustering_types, columns))
 }
 
+/// Extract inner type from parameterized type string with proper parenthesis matching
+///
+/// Given a string that starts AFTER the opening parenthesis of a wrapper type,
+/// returns the content up to (but not including) the matching closing parenthesis.
+///
+/// Example: For input "ListType(Int32Type))" (after stripping "FrozenType("),
+/// returns Some("ListType(Int32Type)") - the content before the MATCHING close paren.
+fn extract_inner_type(type_with_close_paren: &str) -> Option<&str> {
+    let mut depth = 1; // We're already inside one opening paren (the wrapper type)
+    for (idx, ch) in type_with_close_paren.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&type_with_close_paren[..idx]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None // Unmatched parentheses
+}
+
 /// Split a type argument list on top-level commas, ignoring nested parentheses
 fn split_type_arguments(input: &str) -> Vec<&str> {
     let mut args = Vec::new();
@@ -1159,48 +1294,54 @@ fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
     let mut cleaned = strip_wrapping_parens(marshal_type);
 
     // Normalize known wrappers by recursively converting inner types
+    // Use extract_inner_type() for proper parenthesis matching (fixes nested types)
     for prefix in [
         "org.apache.cassandra.db.marshal.ReversedType(",
         "ReversedType(",
     ] {
-        if let Some(inner) = cleaned.strip_prefix(prefix) {
-            let inner = inner.trim_end_matches(')');
-            return convert_marshal_type_to_cql(inner);
+        if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
+            if let Some(inner) = extract_inner_type(params_with_close) {
+                return convert_marshal_type_to_cql(inner);
+            }
         }
     }
 
     for prefix in ["org.apache.cassandra.db.marshal.FrozenType(", "FrozenType("] {
-        if let Some(inner) = cleaned.strip_prefix(prefix) {
-            let inner = inner.trim_end_matches(')');
-            return format!("frozen<{}>", convert_marshal_type_to_cql(inner));
+        if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
+            if let Some(inner) = extract_inner_type(params_with_close) {
+                return format!("frozen<{}>", convert_marshal_type_to_cql(inner));
+            }
         }
     }
 
     for prefix in ["org.apache.cassandra.db.marshal.ListType(", "ListType("] {
-        if let Some(inner) = cleaned.strip_prefix(prefix) {
-            let inner = inner.trim_end_matches(')');
-            return format!("list<{}>", convert_marshal_type_to_cql(inner));
+        if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
+            if let Some(inner) = extract_inner_type(params_with_close) {
+                return format!("list<{}>", convert_marshal_type_to_cql(inner));
+            }
         }
     }
 
     for prefix in ["org.apache.cassandra.db.marshal.SetType(", "SetType("] {
-        if let Some(inner) = cleaned.strip_prefix(prefix) {
-            let inner = inner.trim_end_matches(')');
-            return format!("set<{}>", convert_marshal_type_to_cql(inner));
+        if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
+            if let Some(inner) = extract_inner_type(params_with_close) {
+                return format!("set<{}>", convert_marshal_type_to_cql(inner));
+            }
         }
     }
 
     for prefix in ["org.apache.cassandra.db.marshal.MapType(", "MapType("] {
-        if let Some(inner) = cleaned.strip_prefix(prefix) {
-            let inner = inner.trim_end_matches(')');
-            let args = split_type_arguments(inner);
-            if args.len() == 2 {
-                let key = convert_marshal_type_to_cql(args[0]);
-                let value = convert_marshal_type_to_cql(args[1]);
-                return format!("map<{}, {}>", key, value);
-            } else if args.len() == 1 {
-                let value = convert_marshal_type_to_cql(args[0]);
-                return format!("map<text, {}>", value);
+        if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
+            if let Some(inner) = extract_inner_type(params_with_close) {
+                let args = split_type_arguments(inner);
+                if args.len() == 2 {
+                    let key = convert_marshal_type_to_cql(args[0]);
+                    let value = convert_marshal_type_to_cql(args[1]);
+                    return format!("map<{}, {}>", key, value);
+                } else if args.len() == 1 {
+                    let value = convert_marshal_type_to_cql(args[0]);
+                    return format!("map<text, {}>", value);
+                }
             }
         }
     }
@@ -1297,10 +1438,542 @@ fn build_clustering_key_columns(clustering_types: &[String]) -> Vec<super::heade
         .collect()
 }
 
+/// Parse SerializationHeader using sequential VInt parsing (Issue #216)
+///
+/// This function assumes the input starts EXACTLY at the SerializationHeader
+/// (immediately after EncodingStats). It does NOT search for markers.
+///
+/// Format (from SerializationHeader.java):
+/// [VInt pk_type_len] [pk_type_string]
+/// [VInt ck_count] [for each: VInt ck_type_len, ck_type_string]
+/// [VInt static_count] [for each: VInt name_len, name, VInt type_len, type]
+/// [VInt regular_count] [for each: VInt name_len, name, VInt type_len, type]
+fn parse_serialization_header_sequential(
+    input: &[u8],
+) -> IResult<&[u8], SerializationHeaderResult> {
+    // Step 1: Parse partition key type (VInt length + string)
+    let (input, pk_type_len) = parse_vuint(input)?;
+
+    // Validate partition key type length
+    if pk_type_len == 0 || pk_type_len > 500 {
+        log::debug!(
+            "Invalid partition key type length: {} (expected 1-500)",
+            pk_type_len
+        );
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    let (input, pk_type_bytes) = nom::bytes::complete::take(pk_type_len as usize)(input)?;
+    let partition_key_type = std::str::from_utf8(pk_type_bytes)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
+        .to_string();
+
+    log::debug!(
+        "Sequential parser: partition key type (len={}): {}",
+        pk_type_len,
+        partition_key_type
+    );
+
+    // Step 2: Parse clustering key count and types
+    let (input, clustering_count) = parse_vuint(input)?;
+    let clustering_count = clustering_count as usize;
+
+    if clustering_count > 100 {
+        log::debug!(
+            "Invalid clustering key count: {} (expected 0-100)",
+            clustering_count
+        );
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    log::debug!(
+        "Sequential parser: clustering key count: {}",
+        clustering_count
+    );
+
+    let mut clustering_key_types = Vec::with_capacity(clustering_count);
+    let mut input = input;
+
+    for idx in 0..clustering_count {
+        let (remaining, type_len) = parse_vuint(input)?;
+
+        if type_len == 0 || type_len > 500 {
+            log::debug!("Invalid clustering key {} type length: {}", idx, type_len);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
+        let clustering_type = std::str::from_utf8(type_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        log::debug!(
+            "Sequential parser: clustering key {} type (len={}): {}",
+            idx,
+            type_len,
+            clustering_type
+        );
+
+        clustering_key_types.push(clustering_type);
+        input = remaining;
+    }
+
+    // Step 3: Parse static columns
+    let (input, static_count) = parse_vuint(input)?;
+    let static_count = static_count as usize;
+
+    if static_count > 200 {
+        log::debug!(
+            "Invalid static column count: {} (expected 0-200)",
+            static_count
+        );
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    log::debug!("Sequential parser: static column count: {}", static_count);
+
+    let mut static_columns = Vec::with_capacity(static_count);
+    let mut input = input;
+
+    for idx in 0..static_count {
+        // Column name (VInt length + UTF-8)
+        let (remaining, name_len) = parse_vuint(input)?;
+
+        if name_len == 0 || name_len > 200 {
+            log::debug!("Invalid static column {} name length: {}", idx, name_len);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
+        let column_name = std::str::from_utf8(name_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        // Column type (VInt length + UTF-8)
+        let (remaining, type_len) = parse_vuint(remaining)?;
+
+        if type_len == 0 || type_len > 1000 {
+            log::debug!(
+                "Invalid static column '{}' type length: {}",
+                column_name,
+                type_len
+            );
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
+        let internal_type = std::str::from_utf8(type_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        let cql_type = convert_marshal_type_to_cql(&internal_type);
+
+        log::debug!(
+            "Sequential parser: static column {}: name='{}', type='{}'",
+            idx,
+            column_name,
+            cql_type
+        );
+
+        static_columns.push(super::header::ColumnInfo {
+            name: column_name,
+            column_type: cql_type,
+            is_primary_key: false,
+            key_position: None,
+            is_static: true,
+            is_clustering: false,
+        });
+
+        input = remaining;
+    }
+
+    // Step 4: Parse regular columns
+    let (input, regular_count) = parse_vuint(input)?;
+    let regular_count = regular_count as usize;
+
+    if regular_count > 500 {
+        log::debug!(
+            "Invalid regular column count: {} (expected 0-500)",
+            regular_count
+        );
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    log::debug!("Sequential parser: regular column count: {}", regular_count);
+
+    let mut regular_columns = Vec::with_capacity(regular_count);
+    let mut input = input;
+
+    for idx in 0..regular_count {
+        // Column name (VInt length + UTF-8)
+        let (remaining, name_len) = parse_vuint(input)?;
+
+        if name_len == 0 || name_len > 200 {
+            log::debug!("Invalid regular column {} name length: {}", idx, name_len);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
+        let column_name = std::str::from_utf8(name_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        // Column type (VInt length + UTF-8)
+        let (remaining, type_len) = parse_vuint(remaining)?;
+
+        if type_len == 0 || type_len > 1000 {
+            log::debug!(
+                "Invalid regular column '{}' type length: {}",
+                column_name,
+                type_len
+            );
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
+        let internal_type = std::str::from_utf8(type_bytes)
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?
+            .to_string();
+
+        let cql_type = convert_marshal_type_to_cql(&internal_type);
+
+        log::debug!(
+            "Sequential parser: regular column {}: name='{}', type='{}'",
+            idx,
+            column_name,
+            cql_type
+        );
+
+        regular_columns.push(super::header::ColumnInfo {
+            name: column_name,
+            column_type: cql_type,
+            is_primary_key: false,
+            key_position: None,
+            is_static: false,
+            is_clustering: false,
+        });
+
+        input = remaining;
+    }
+
+    // Combine static and regular columns (static columns first)
+    let mut all_columns = static_columns;
+    all_columns.extend(regular_columns);
+
+    log::debug!(
+        "Sequential parser complete: partition_key='{}', {} clustering keys, {} total columns",
+        partition_key_type,
+        clustering_key_types.len(),
+        all_columns.len()
+    );
+
+    Ok((
+        input,
+        (vec![partition_key_type], clustering_key_types, all_columns),
+    ))
+}
+
+/// Parse SerializationHeader.Component from TOC HEADER offset (Issue #216)
+///
+/// This parses the full HEADER component structure as written by Cassandra's
+/// SerializationHeader.Component.Serializer.serialize():
+///
+/// 1. EncodingStats (minTimestamp, minLocalDeletionTime, minTTL as VInts)
+/// 2. keyType (VInt len + type string)
+/// 3. clusteringTypes (VInt count + [VInt len + type string]*)
+/// 4. staticColumns (VInt count + [VInt name_len + name + VInt type_len + type]*)
+/// 5. regularColumns (VInt count + [VInt name_len + name + VInt type_len + type]*)
+fn parse_serialization_header_at_toc_offset(
+    input: &[u8],
+) -> IResult<&[u8], SerializationHeaderResult> {
+    log::debug!(
+        "Parsing SerializationHeader.Component from TOC offset, {} bytes available",
+        input.len()
+    );
+
+    // Step 1: Skip EncodingStats (3 VInts: minTimestamp, minLocalDeletionTime, minTTL)
+    let (input, _min_timestamp) = parse_vint(input)?;
+    let (input, _min_local_deletion_time) = parse_vint(input)?;
+    let (input, _min_ttl) = parse_vint(input)?;
+
+    log::debug!("Skipped EncodingStats in HEADER component");
+
+    // Step 2: Parse keyType (partition key type)
+    let (input, pk_type_len) = parse_vuint(input)?;
+    if pk_type_len == 0 || pk_type_len > 1000 {
+        log::debug!("Invalid pk_type_len: {}", pk_type_len);
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    let (input, pk_type_bytes) = take(pk_type_len as usize)(input)?;
+    let partition_key_type = match std::str::from_utf8(pk_type_bytes) {
+        Ok(s) => convert_marshal_type_to_cql(s),
+        Err(_) => {
+            log::debug!("Invalid UTF-8 in partition key type");
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+    };
+
+    log::debug!(
+        "HEADER: Partition key type: {} ({} bytes)",
+        partition_key_type,
+        pk_type_len
+    );
+
+    // Step 3: Parse clusteringTypes
+    let (input, clustering_count) = parse_vuint(input)?;
+    log::debug!("HEADER: {} clustering key types", clustering_count);
+
+    let mut input = input;
+    let mut clustering_key_types = Vec::new();
+
+    for i in 0..clustering_count {
+        let (remaining, ck_type_len) = parse_vuint(input)?;
+        if ck_type_len == 0 || ck_type_len > 1000 {
+            log::debug!("Invalid clustering key type length: {}", ck_type_len);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, ck_type_bytes) = take(ck_type_len as usize)(remaining)?;
+        let ck_type = match std::str::from_utf8(ck_type_bytes) {
+            Ok(s) => convert_marshal_type_to_cql(s),
+            Err(_) => {
+                log::debug!("Invalid UTF-8 in clustering key type {}", i);
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        };
+
+        log::debug!(
+            "HEADER: Clustering key {}: {} ({} bytes)",
+            i,
+            ck_type,
+            ck_type_len
+        );
+        clustering_key_types.push(ck_type);
+        input = remaining;
+    }
+
+    // Step 4: Parse staticColumns
+    let (input, static_count) = parse_vuint(input)?;
+    log::debug!("HEADER: {} static columns", static_count);
+
+    let mut input = input;
+    let mut static_columns = Vec::new();
+
+    for i in 0..static_count {
+        // Column name
+        let (remaining, name_len) = parse_vuint(input)?;
+        if name_len == 0 || name_len > 1000 {
+            log::debug!("Invalid static column name length: {}", name_len);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, name_bytes) = take(name_len as usize)(remaining)?;
+        let column_name = match std::str::from_utf8(name_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                log::debug!("Invalid UTF-8 in static column name {}", i);
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        };
+
+        // Column type
+        let (remaining, type_len) = parse_vuint(remaining)?;
+        if type_len == 0 || type_len > 1000 {
+            log::debug!("Invalid static column type length: {}", type_len);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, type_bytes) = take(type_len as usize)(remaining)?;
+        let cql_type = match std::str::from_utf8(type_bytes) {
+            Ok(s) => convert_marshal_type_to_cql(s),
+            Err(_) => {
+                log::debug!("Invalid UTF-8 in static column type {}", i);
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        };
+
+        log::debug!(
+            "HEADER: Static column '{}': {} ({} bytes)",
+            column_name,
+            cql_type,
+            type_len
+        );
+
+        static_columns.push(super::header::ColumnInfo {
+            name: column_name,
+            column_type: cql_type,
+            is_primary_key: false,
+            key_position: None,
+            is_static: true,
+            is_clustering: false,
+        });
+
+        input = remaining;
+    }
+
+    // Step 5: Parse regularColumns
+    let (input, regular_count) = parse_vuint(input)?;
+    log::debug!("HEADER: {} regular columns", regular_count);
+
+    let mut input = input;
+    let mut regular_columns = Vec::new();
+
+    for i in 0..regular_count {
+        // Column name
+        let (remaining, name_len) = parse_vuint(input)?;
+        if name_len == 0 || name_len > 1000 {
+            log::debug!("Invalid regular column name length: {}", name_len);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, name_bytes) = take(name_len as usize)(remaining)?;
+        let column_name = match std::str::from_utf8(name_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                log::debug!("Invalid UTF-8 in regular column name {}", i);
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        };
+
+        // Column type
+        let (remaining, type_len) = parse_vuint(remaining)?;
+        if type_len == 0 || type_len > 1000 {
+            log::debug!("Invalid regular column type length: {}", type_len);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let (remaining, type_bytes) = take(type_len as usize)(remaining)?;
+        let cql_type = match std::str::from_utf8(type_bytes) {
+            Ok(s) => convert_marshal_type_to_cql(s),
+            Err(_) => {
+                log::debug!("Invalid UTF-8 in regular column type {}", i);
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        };
+
+        log::debug!(
+            "HEADER: Regular column '{}': {} ({} bytes)",
+            column_name,
+            cql_type,
+            type_len
+        );
+
+        regular_columns.push(super::header::ColumnInfo {
+            name: column_name,
+            column_type: cql_type,
+            is_primary_key: false,
+            key_position: None,
+            is_static: false,
+            is_clustering: false,
+        });
+
+        input = remaining;
+    }
+
+    // Combine static and regular columns
+    let mut all_columns = static_columns;
+    all_columns.extend(regular_columns);
+
+    log::debug!(
+        "HEADER parsing complete: partition_key='{}', {} clustering keys, {} total columns",
+        partition_key_type,
+        clustering_key_types.len(),
+        all_columns.len()
+    );
+
+    Ok((
+        input,
+        (vec![partition_key_type], clustering_key_types, all_columns),
+    ))
+}
+
 /// Parse minimal EncodingStats section from nb-format Statistics.db
 ///
 /// Returns: (min_timestamp, min_deletion_time, min_ttl, partition_keys, clustering_keys, columns)
-fn parse_minimal_encoding_stats(input: &[u8]) -> IResult<&[u8], EncodingStatsResult> {
+///
+/// # Arguments
+/// * `input` - The data starting at the STATS component
+/// * `full_input` - The complete Statistics.db content (needed for TOC-based HEADER lookup)
+/// * `header_offset` - Optional offset to SerializationHeader from TOC (Issue #216)
+fn parse_minimal_encoding_stats<'a>(
+    input: &'a [u8],
+    full_input: &[u8],
+    header_offset: Option<usize>,
+) -> IResult<&'a [u8], EncodingStatsResult> {
     // Skip metadata_type (u32 BE) at start of data section
     let (input, _metadata_type) = be_u32(input)?;
 
@@ -1341,9 +2014,43 @@ fn parse_minimal_encoding_stats(input: &[u8]) -> IResult<&[u8], EncodingStatsRes
         Some(min_ttl_value)
     };
 
-    // Parse SerializationHeader (Issue #163)
-    // This parses partition keys, clustering keys, and regular columns
-    let (input, (partition_types, clustering_types, columns)) = parse_serialization_header(input)?;
+    // Parse SerializationHeader (Issue #216)
+    // Use TOC-based offset if available, otherwise fall back to marker-based search
+    let (partition_types, clustering_types, columns) = if let Some(offset) = header_offset {
+        // Use direct offset from TOC - most reliable method
+        if offset < full_input.len() {
+            let header_data = &full_input[offset..];
+            log::debug!(
+                "Parsing SerializationHeader at TOC offset 0x{:x} ({} bytes available)",
+                offset,
+                header_data.len()
+            );
+
+            // The HEADER component starts with some prefix data before the actual schema.
+            // Look for the partition key type marker pattern.
+            // Format at offset: [prefix VInts] [0x00]? [VInt pk_type_len] [pk_type_string...]
+            match parse_serialization_header_at_toc_offset(header_data) {
+                Ok((_, result)) => result,
+                Err(e) => {
+                    log::debug!(
+                        "TOC-based header parsing failed: {:?}, falling back to marker search",
+                        e
+                    );
+                    parse_serialization_header(input)?.1
+                }
+            }
+        } else {
+            log::debug!(
+                "TOC offset 0x{:x} exceeds input length {}, using marker search",
+                offset,
+                full_input.len()
+            );
+            parse_serialization_header(input)?.1
+        }
+    } else {
+        // Fall back to marker-based search
+        parse_serialization_header(input)?.1
+    };
 
     log::debug!(
         "Parsed SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
@@ -1391,7 +2098,8 @@ pub fn parse_enhanced_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableSta
     let (remaining, header) = parse_nb_format_header(input)?;
 
     // Parse minimal statistics data (EncodingStats + SerializationHeader columns)
-    let result = parse_nb_format_statistics_data(remaining, &header);
+    // Pass full input for TOC-based HEADER offset lookup (Issue #216)
+    let result = parse_nb_format_statistics_data(remaining, &header, input);
 
     match result {
         Ok((
@@ -1758,7 +2466,7 @@ mod tests {
         };
 
         let dummy_data = vec![0xFF; 10]; // Too short to parse properly
-        let result = parse_nb_format_statistics_data(&dummy_data, &header);
+        let result = parse_nb_format_statistics_data(&dummy_data, &header, &dummy_data);
 
         // Should return error because data is too short for VInt parsing
         assert!(result.is_err());

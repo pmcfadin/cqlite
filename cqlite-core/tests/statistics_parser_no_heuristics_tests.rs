@@ -143,7 +143,7 @@ async fn test_nb_format_data_extraction_returns_error() {
     );
 
     // Attempt to extract statistics data (Issue #162: now succeeds for minimal EncodingStats)
-    let result = parse_nb_format_statistics_data(remaining, &header);
+    let result = parse_nb_format_statistics_data(remaining, &header, &file_bytes);
 
     // Issue #162: Minimal parsing succeeds (extracts EncodingStats only)
     assert!(
@@ -622,7 +622,8 @@ fn test_error_messages_reference_issues() {
     };
 
     let insufficient_data = vec![0u8; 5]; // Too little data for VInt parsing
-    let result = parse_nb_format_statistics_data(&insufficient_data, &dummy_header);
+    let result =
+        parse_nb_format_statistics_data(&insufficient_data, &dummy_header, &insufficient_data);
 
     // Issue #162: Parser now attempts minimal parsing and fails on insufficient data
     assert!(result.is_err(), "Should return error for insufficient data");

@@ -37,58 +37,95 @@ When `static_count = 0`, it encodes as `0x00`, making simple tables work. But wh
 
 ---
 
-### Frozen Collection and Type Support (Exit Code 3)
+### ~~SerializationHeader Marker Search Failures~~ - FIXED
 
-**Status**: Partially Implemented
-**Impact**: 3 tables
-**Root Cause**: SerializationHeader extraction fails; frozen types use different serialization format
+**Status**: ✅ **FIXED** (Issue #216)
+**Impact**: Was 5 tables - now 0 (SerializationHeader parsing works for all collection-heavy tables)
+**Resolution**: Implemented TOC-based offset lookup and sequential parsing
 
-Frozen collections and frozen UDTs are serialized as single binary blobs rather than multi-cell structures. Current parser cannot extract their metadata from Statistics.db.
+**Root Cause Found**: The marker-based search (`0x00 0x00` pattern) for SerializationHeader was unreliable because:
+- Collection type strings are long (80-200+ bytes) with multi-byte VInt length encoding
+- Multiple `0x00 0x00` patterns exist in Statistics.db histogram data
+- The parser picked patterns inside column data instead of the actual header start
 
-**Tables Affected**:
-- `frozen_collections_table` (test_collections)
-- `typed_collections_table` (test_collections)
-- `chat_messages` (test_wide_rows - includes frozen types)
+**Solution Implemented**:
+1. **TOC-Based Offset Lookup**: Statistics.db contains a Table of Contents at the start:
+   - `[4 bytes num_components] [4 bytes checksum] [TOC entries...]`
+   - Each TOC entry: `[4 bytes component_type] [4 bytes offset]`
+   - Component type 3 (HEADER) points directly to SerializationHeader
+2. **Sequential VInt Parsing**: New `parse_serialization_header_at_toc_offset()` parses:
+   - EncodingStats (3 VInts: minTimestamp, minLocalDeletionTime, minTTL)
+   - Partition key type (VInt len + string)
+   - Clustering types (VInt count + types)
+   - Static columns (VInt count + columns)
+   - Regular columns (VInt count + columns)
+3. **Proper Nested Type Conversion**: `extract_inner_type()` helper uses parenthesis depth tracking instead of `trim_end_matches(')')` to correctly handle nested types like `frozen<map<text, list<int>>>`
 
-**Workaround**: None for frozen collections. Regular (non-frozen) collections work correctly.
+**Previously Affected Tables** (now all parsing correctly):
+- `frozen_collections_table` - FrozenType(MapType) ✅
+- `typed_collections_table` - ListType, SetType, MapType ✅
+- `nested_collections_table` - MapType(FrozenType(ListType)) ✅
+- `collections_with_udts` - MapType(FrozenType(UserType)) ✅
+- `chat_messages` - MapType(FrozenType(SetType)) ✅
 
-**Note**: Regular collection parsing (lists, sets, maps) works correctly as demonstrated by `collection_table` (12 integration tests, 499 rows validated).
+**Note**: While SerializationHeader parsing is fixed, these tables still fail smoke tests due to separate Data.db parsing issues (complex cell flags 0xc1-0xcf for collection types). This is a V5CompressedLegacy parser limitation, not a Statistics.db issue.
 
-**Tracking**: Issue #210
+**Tracking**: Issue #216 (CLOSED)
 
 ---
 
-### Nested Collection Parsing (Exit Code 3)
+### User-Defined Type (UDT) Parsing (Data.db Cell Flags)
 
-**Status**: Not Implemented
-**Impact**: 1 table (`test_collections.nested_collections_table`)
-**Root Cause**: Requires recursive parser; currently blocked by SerializationHeader extraction failure
-
-Collections containing other collections (e.g., `map<text, list<int>>`, `list<set<text>>`) require recursive type parsing. Implementation is feasible but low priority.
-
-**Tables Affected**:
-- `nested_collections_table` (test_collections keyspace)
-
-**Workaround**: None. Avoid nested collections or use Cassandra tools.
-
-**Tracking**: Issue #210 (SerializationHeader), deferred nested parsing to M3
-
----
-
-### User-Defined Type (UDT) Parsing
-
-**Status**: Minimal Implementation (Issue #154)
+**Status**: Blocked by V5CompressedLegacy parser limitations
 **Impact**: 1 table (`test_collections.collections_with_udts`)
-**Root Cause**: UDT schema extraction incomplete; SerializationHeader parsing fails
+**Root Cause**: Data.db cell flags 0xc1-0xcf for complex/collection cells not handled
 
-UDTs require schema registry access to deserialize field-by-field. Current implementation may have gaps in UDT field parsing.
+UDT SerializationHeader parsing now works correctly (Issue #216 fixed). The remaining issue is in Data.db parsing: collection and UDT cells use extended cell flags (0xc1, 0xc2, etc.) that the V5CompressedLegacy parser doesn't currently handle.
 
 **Tables Affected**:
 - `collections_with_udts` (test_collections keyspace)
 
-**Workaround**: None for UDT-containing tables.
+**Evidence**:
+```
+V5CompressedLegacy: Invalid cell flags 0xc1 at offset 37 (expected 0x00-0x1F)
+```
 
-**Tracking**: Issue #154, Issue #210
+**Workaround**: Use `sstabledump` for UDT-containing tables.
+
+**Tracking**: Issue #154 (UDT parsing), new issue needed for collection cell flags
+
+---
+
+### Complex Collection Cell Flags in Data.db (Exit Code 3/5)
+
+**Status**: Open - needs investigation
+**Impact**: 5 tables with complex collection types
+**Root Cause**: V5CompressedLegacy parser doesn't handle cell flags above 0x1F
+
+The Data.db parser expects simple cell flags (0x00-0x1F) but collection types use extended flags (0xc1-0xcf) that indicate complex cell structures.
+
+**Tables Affected**:
+- `frozen_collections_table` - Returns 0 entries (silent failure)
+- `typed_collections_table` - Block size error (exit code 5)
+- `nested_collections_table` - Returns entries but no cell values (exit code 3)
+- `collections_with_udts` - Returns entries but no cell values (exit code 3)
+- `chat_messages` - Block size error (exit code 5)
+
+**Evidence**:
+```
+V5CompressedLegacy: Invalid cell flags 0xc1 at offset 37 (expected 0x00-0x1F)
+V5CompressedLegacy: Invalid cell flags 0xc2 at offset 460 (expected 0x00-0x1F)
+V5CompressedLegacy: No cells extracted for partition 0 row 1
+```
+
+**Technical Details**:
+- Simple cells: flags 0x00-0x1F (regular values, nulls, deletions)
+- Complex cells: flags 0xc0+ (collections, UDTs, frozen types)
+- Flag 0xc1-0xcf likely encode collection element counts or structure markers
+
+**Workaround**: Use `sstabledump` for collection-heavy tables.
+
+**Tracking**: New issue needed
 
 ---
 
@@ -165,7 +202,9 @@ V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
 
 ### Overall Pass Rate: 84.8% (28/33 tables)
 
-As of Issue #212 fix (Updated: 2025-12-16)
+As of Issue #216 fix (Updated: 2025-12-17)
+
+**Note**: Statistics.db/SerializationHeader parsing now works for all 33 tables (Issue #216 fixed). The remaining 5 failures are Data.db parsing issues with complex cell flags (0xc1-0xcf) for collections. These require V5CompressedLegacy parser updates (separate issue).
 
 ### Pass Rate by Keyspace
 
@@ -375,24 +414,38 @@ cargo build --no-default-features --features all-compression
 
 ## Issue References
 
-### Active Issues (P0 - Blocking)
+### Active Issues (P0/P1 - Blocking M1 Completion)
 
-- **Issue #211**: Partition key parsing failures (19 tables, 57.6% of failures)
-  - Root cause: Byte offset miscalculation in compressed blocks
-  - Priority: P0 - Largest blocker
-  - ETA: Under investigation
+- **Issue #215**: SerializationHeader VInt parsing for complex types (5 tables)
+  - Root cause: VInt fix applied; marker search issue remains
+  - Priority: P0 - Critical path blocker
+  - Status: Partial fix applied (VInt), marker search fix in Issue #216
 
-- **Issue #210**: SerializationHeader extraction failures (4 tables)
-  - Root cause: enhanced_statistics_parser.rs cannot locate header for complex schemas
-  - Priority: P0 - Blocks static columns, frozen types
-  - ETA: Under investigation
+- **Issue #216**: SerializationHeader marker search refactor (5 tables)
+  - Root cause: `0x00 0x00` marker search finds wrong location in collection-heavy tables
+  - Priority: P1 - Required for 100% pass rate
+  - Status: In progress - refactoring to sequential parsing
+  - Tables: frozen_collections, typed_collections, nested_collections, collections_with_udts, chat_messages
 
-- **Issue #212**: BTI index zero entries (1 table)
-  - Root cause: BTI offset extraction fails, silent data loss
-  - Priority: P1 - Silent failure, but limited scope
-  - ETA: Under investigation
+### Completed Issues (Fixed - Dec 2025)
 
-### Completed Issues (Fixed)
+- **Issue #210**: Static columns in SerializationHeader - FIXED
+  - Status: Fixed (VInt + static column section parsing)
+  - Result: `static_columns_table` now passing
+
+- **Issue #211**: LZ4 compression chunk format - FIXED
+  - Status: Fixed (correct chunk header parsing)
+  - Result: 19 tables unblocked
+
+- **Issue #212**: BTI index zero entries - FIXED
+  - Status: Fixed (V5_0NewBigFormat variant handling)
+  - Result: `stock_prices` now passing
+
+- **Issue #213**: Clustering key parsing order - FIXED
+  - Status: Fixed (clustering prefix before row_size)
+  - Result: sensor_data, wide_partition_table, and many others now passing
+
+### Completed Issues (Fixed - Earlier)
 
 - **Issue #206**: V5_0FormatG Counter Support
   - Status: Fixed (1-line header routing fix)
@@ -401,7 +454,6 @@ cargo build --no-default-features --features all-compression
 - **Issue #207**: Byte-Comparable Key Encoding (CEP-25)
   - Status: Completed
   - Result: V5_0NewBigFormat (0xD4645400) now recognized
-  - Note: May have introduced regression (Issue #211)
 
 - **Issue #208**: BTI Index.db Format Support
   - Status: Completed

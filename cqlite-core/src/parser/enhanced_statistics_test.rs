@@ -350,7 +350,8 @@ mod tests {
         // Test statistics extraction with insufficient data returns error
         // (Issue #162: Minimal parser implemented for EncodingStats only)
         let insufficient_data = vec![0u8; 10]; // Not enough for full parse
-        let result = parse_nb_format_statistics_data(&insufficient_data, &header);
+        let result =
+            parse_nb_format_statistics_data(&insufficient_data, &header, &insufficient_data);
         assert!(
             result.is_err(),
             "Statistics data extraction should fail with insufficient data"
