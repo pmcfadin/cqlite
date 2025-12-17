@@ -645,7 +645,8 @@ async fn test_integration_table_loading() {
                 // Test basic operations
                 let _stats = reader.stats().await.cloned().unwrap_or_default();
                 let _timestamp_range = reader.get_timestamp_range().await;
-                let _token_range = reader.iterate_token_range(-1000, 1000).await;
+                // Note: iterate_token_range is deprecated (Issue #218) - use iterate_all_partitions
+                let _partitions = reader.iterate_all_partitions().await;
 
                 loaded_sstables.push(LoadedSSTableInfo {
                     name: base_name.to_string(),

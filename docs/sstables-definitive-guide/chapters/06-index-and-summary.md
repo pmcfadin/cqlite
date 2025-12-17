@@ -87,13 +87,99 @@ promoted_index = read_bytes(payload_len) if payload_len > 0
 
 Promoted index (BIG): emitted for wide partitions to accelerate within-partition seeks. Readers detect presence via entry payload structure and fall back to scan when absent. See `org.apache.cassandra.io.sstable.format.big` reader/writer for details.
 
-## Summary Sampling and Navigation
+## Summary.db Format
 
-`Summary.db` samples index entries for faster navigation.
+`Summary.db` samples index entries for faster navigation. It contains a subset of partition keys at configurable intervals (default: every 128 partitions).
 
-## Token Range Iteration
+### File Structure
 
-Token-range iterators advance by consulting sampled tokens in `Summary.db`, then scanning contiguous partitions in `Index.db` over the range.
+```
++------------------------+
+| Header (24 bytes)      |
++------------------------+
+| Offset Table (LE u32[])| <- Little-endian!
++------------------------+
+| Entry Data             |
+|   key + position (BE)  |
++------------------------+
+| First Key (serialized) |
++------------------------+
+| Last Key (serialized)  |
++------------------------+
+```
+
+### Header Format (24 bytes, big-endian)
+
+```c
+struct summary_header {
+    be32 min_index_interval;      // Minimum partitions between entries (usually 128)
+    be32 entries_count;           // Number of sampled entries
+    be64 summary_entries_size;    // Size of offset table + entry data
+    be32 sampling_level;          // Sampling level (1-128)
+    be32 size_at_full_sampling;   // Entries at full sampling
+};
+```
+
+Annotated example:
+```
+00000000: 00 00 00 80  // min_index_interval = 128
+00000004: 00 00 00 08  // entries_count = 8
+00000008: 00 00 00 00 00 00 00 e0  // summary_entries_size = 224
+00000010: 00 00 00 80  // sampling_level = 128
+00000014: 00 00 00 08  // size_at_full_sampling = 8
+```
+
+### Offset Table (Little-Endian!)
+
+**Critical gotcha**: Unlike all other Cassandra formats, the offset table uses **little-endian** encoding.
+
+```c
+le32 offsets[entries_count];  // Offset to each entry within entry data section
+```
+
+Example for 3 entries:
+```
+00000018: 00 00 00 00  // Entry 0 at offset 0
+0000001c: 18 00 00 00  // Entry 1 at offset 24 (LE!)
+00000020: 30 00 00 00  // Entry 2 at offset 48 (LE!)
+```
+
+### Entry Format
+
+Entries have **no length prefix**. Key boundaries are determined by offset differences.
+
+```c
+struct summary_entry {
+    byte key[];        // Variable length - no prefix!
+    be64 position;     // Position in Index.db file
+};
+```
+
+Key length calculation:
+```
+key_length = next_offset - current_offset - 8  // Subtract 8 for position field
+```
+
+**Important**: Tokens are NOT stored in Summary.db entries. The `position` field points to a byte offset in Index.db, not a token.
+
+### Serialized Keys (File End)
+
+```c
+struct serialized_key {
+    be32 size;
+    byte key[size];
+};
+```
+
+First and last keys are serialized at the end of the file for quick boundary lookups.
+
+## Partition Lookup Flow
+
+1. **Summary.db lookup**: Binary search by partition key to find nearest sampled entry
+2. **Index.db scan**: Read from `position` offset, scan forward to find exact partition
+3. **Data.db seek**: Use offset from Index.db entry to read partition data
+
+Note: Token-based iteration is not directly supported by Summary.db since tokens are not stored. Token iteration must compute tokens from partition keys.
 
 ### BTI Notes
 - BTI’s indexing can alter how promoted index information is structured; the high-level flow (Summary → Index → Data) remains intact, but entry payloads differ. Ensure readers gate parsing on `Descriptor` format.

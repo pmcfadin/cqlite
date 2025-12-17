@@ -67,24 +67,25 @@ impl SSTableReader {
         Ok(None)
     }
 
-    /// Enhanced token range iteration using Summary.db reader
-    pub async fn iterate_token_range(
-        &self,
-        start_token: i64,
-        end_token: i64,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    /// Enhanced partition iteration using Summary.db reader
+    ///
+    /// Note: Token-based range queries are not directly supported because Summary.db
+    /// does not store token values (Issue #218). Instead, this iterates all summary
+    /// entries and returns all partition data.
+    ///
+    /// For token-based filtering, compute tokens from partition keys after retrieval.
+    pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, Value)>> {
         if let Some(summary_reader) = &self.summary_reader {
-            // Use Summary.db reader for efficient token range queries
-            let token_entries = summary_reader.find_entries_in_range(start_token, end_token);
+            let entries = summary_reader.get_entries();
             let mut results = Vec::new();
 
-            for entry in token_entries {
+            for entry in entries {
                 // Use Summary.db entry to find the corresponding Index.db entry
                 if let Some(_index_reader) = &self.index_reader {
-                    // The summary entry provides an index offset, which points to Index.db data
-                    // We need to read the partition data from the Data.db offset stored in Index.db
+                    // The summary entry provides a position in Index.db
+                    // We need to read the partition data from Data.db
 
-                    // For now, reconstruct the partition key from the summary entry
+                    // For now, use the partition key from the summary entry
                     let partition_key_bytes = &entry.partition_key;
 
                     // Look up the partition in Index.db to get the actual data offset
@@ -98,10 +99,7 @@ impl SSTableReader {
                             .await?
                         {
                             Some(partition_entries) => {
-                                // Filter entries within the token range
                                 for (row_key, value) in partition_entries {
-                                    // TODO: Compute actual token for row_key and filter by range
-                                    // For now, include all rows from partitions in range
                                     results.push((row_key, value));
                                 }
                             }
@@ -111,20 +109,39 @@ impl SSTableReader {
                         }
                     }
                 } else {
-                    log::error!("Index reader not available for token range iteration");
+                    log::error!("Index reader not available for partition iteration");
                     return Err(Error::corruption(
-                        "Index reader required for real token range iteration - synthetic data not allowed for Issue #35",
+                        "Index reader required for partition iteration - synthetic data not allowed for Issue #35",
                     ));
                 }
             }
 
-            debug!("Token range iteration found {} entries", results.len());
+            debug!("Partition iteration found {} entries", results.len());
             return Ok(results);
         }
 
         // Fallback to existing scan method
         self.sequential_scan(&TableId::from("default"), None, None, None, None)
             .await
+    }
+
+    /// Token range iteration (deprecated - tokens not stored in Summary.db)
+    ///
+    /// This method is kept for API compatibility but simply delegates to
+    /// `iterate_all_partitions()` since Summary.db does not store token values.
+    /// Token filtering should be done by the caller after retrieval.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Summary.db does not store tokens. Use iterate_all_partitions() and filter by computed tokens."
+    )]
+    pub async fn iterate_token_range(
+        &self,
+        _start_token: i64,
+        _end_token: i64,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        // Token values are not stored in Summary.db (Issue #218)
+        // Delegate to all-partition iteration
+        self.iterate_all_partitions().await
     }
 
     /// Get min/max timestamps from Statistics.db reader
@@ -140,35 +157,20 @@ impl SSTableReader {
         Ok(None)
     }
 
-    /// Get token coverage from Statistics.db reader
+    /// Get token coverage (deprecated - tokens not stored in Summary.db)
+    ///
+    /// Note: As of Issue #218, Summary.db does not store token values.
+    /// This method now returns None since token coverage cannot be determined
+    /// from Summary.db alone. Token computation requires partition keys and
+    /// the partitioner algorithm.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Summary.db does not store tokens. Compute tokens from partition keys using the partitioner."
+    )]
     pub async fn get_token_coverage(&self) -> Result<Option<(i64, i64)>> {
-        if let Some(summary_reader) = &self.summary_reader {
-            // Get token range from Summary.db instead of Statistics.db
-            let summary_data = summary_reader.get_entries();
-            if !summary_data.is_empty() {
-                let min_token = summary_data
-                    .first()
-                    .ok_or_else(|| {
-                        Error::corruption(
-                            "Summary data is unexpectedly empty after non-empty check",
-                        )
-                    })?
-                    .token;
-                let max_token = summary_data
-                    .last()
-                    .ok_or_else(|| {
-                        Error::corruption(
-                            "Summary data is unexpectedly empty after non-empty check",
-                        )
-                    })?
-                    .token;
-                debug!(
-                    "Retrieved token coverage from Summary.db: {} to {}",
-                    min_token, max_token
-                );
-                return Ok(Some((min_token, max_token)));
-            }
-        }
+        // Token values are not stored in Summary.db (Issue #218)
+        // Return None - caller should compute tokens from partition keys if needed
+        debug!("get_token_coverage: Summary.db does not store token values");
         Ok(None)
     }
 

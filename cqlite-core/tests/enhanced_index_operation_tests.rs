@@ -137,9 +137,10 @@ async fn test_sstable_reader_index_operations(reader: &SSTableReader) {
         .await;
     println!("✓ Tested lookup_partition_with_schema_context");
 
-    // Test 3: iterate_token_range (should not be dead code)
-    let _token_iteration = reader.iterate_token_range(0, i64::MAX).await;
-    println!("✓ Tested iterate_token_range");
+    // Test 3: iterate_all_partitions (should not be dead code)
+    // Note: iterate_token_range deprecated (Issue #218)
+    let _partitions = reader.iterate_all_partitions().await;
+    println!("✓ Tested iterate_all_partitions");
 
     // These operations prove that index-derived functionality is not dead code
     println!("✓ All index-derived operations are reachable and functional");

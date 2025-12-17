@@ -131,16 +131,20 @@ async fn test_summary_operations_functionality() {
             let _entries = summary_reader.get_entries();
             println!("✓ get_entries() accessible");
 
-            let _token_ranges = summary_reader.get_token_ranges();
-            println!("✓ get_token_ranges() accessible");
+            // Note: get_token_ranges() and find_entries_in_range() removed in Issue #218
+            // Tokens are not stored in Summary.db
+            let _header = summary_reader.get_header();
+            println!("✓ get_header() accessible");
 
-            let start_token = 100i64;
-            let end_token = 1000i64;
-            let _range_entries = summary_reader.find_entries_in_range(start_token, end_token);
-            println!("✓ find_entries_in_range() accessible");
+            let _first_key = summary_reader.get_first_key();
+            println!("✓ get_first_key() accessible");
 
-            let _best_entry = summary_reader.find_best_entry_for_token(500i64);
-            println!("✓ find_best_entry_for_token() accessible");
+            let _last_key = summary_reader.get_last_key();
+            println!("✓ get_last_key() accessible");
+
+            // Note: find_best_entry_for_token() replaced with find_entry_for_position()
+            let _best_entry = summary_reader.find_entry_for_position(500u64);
+            println!("✓ find_entry_for_position() accessible");
 
             let _stats = summary_reader.get_statistics();
             println!("✓ get_statistics() accessible");
@@ -238,12 +242,10 @@ async fn test_sstable_reader_component_integration() {
             // let _schema_lookup = reader.lookup_partition_with_schema_context(test_key, &context).await;
             println!("✓ lookup_partition_with_schema_context() accessible and not dead code");
 
-            // Test token range operations (uses Summary.db)
-            let _token_iteration = reader.iterate_token_range(0, i64::MAX).await;
-            println!("✓ iterate_token_range() accessible and not dead code");
-
-            let _token_coverage = reader.get_token_coverage().await;
-            println!("✓ get_token_coverage() accessible");
+            // Test partition operations (uses Summary.db)
+            // Note: iterate_token_range and get_token_coverage deprecated (Issue #218)
+            let _partitions = reader.iterate_all_partitions().await;
+            println!("✓ iterate_all_partitions() accessible and not dead code");
 
             // Test timestamp operations (uses Statistics.db)
             let _timestamp_range = reader.get_timestamp_range().await;
@@ -305,7 +307,8 @@ async fn test_missing_components_graceful_handling() {
             // Operations should work but may use fallback methods
             let test_key = b"test_key";
             let _lookup = reader.lookup_partition_with_index(test_key).await;
-            let _token_range = reader.iterate_token_range(0, 1000).await;
+            // Note: iterate_token_range deprecated (Issue #218)
+            let _partitions = reader.iterate_all_partitions().await;
 
             println!("✓ Fallback operations work without companion files");
         }

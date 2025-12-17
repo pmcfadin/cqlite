@@ -9,7 +9,7 @@
 
 This document provides the definitive specification for the SSTable Summary.db file format used by Apache Cassandra. The research was conducted through analysis of official documentation, source code examination, and real binary data analysis from Cassandra 5.0 SSTables.
 
-**KEY FINDING**: The current implementation in `src/storage/sstable/summary_reader.rs:254` uses an **incorrect format assumption**. The actual Cassandra format follows the ScyllaDB-documented specification with different header layout and entry structure.
+**STATUS**: As of Issue #218 (December 2025), the implementation in `src/storage/sstable/summary_reader.rs` has been **corrected** to match this specification.
 
 ## Actual Format Specification
 
@@ -36,7 +36,7 @@ struct summary_header {
 };
 ```
 
-**Total Header Size**: 20 bytes
+**Total Header Size**: 24 bytes (not 20 - includes full 64-bit summary_entries_size)
 
 ### Real Data Analysis
 
@@ -83,16 +83,9 @@ struct serialized_key {
 };
 ```
 
-## Format Differences from Current Implementation
+## Format Summary
 
-### Current Implementation Issues
-
-1. **Wrong Header Format**: Expects `version(u32), entry_count(u32), sampling_rate(u32), min_token(i64), max_token(i64), data_size(u64), checksum(u32)`
-2. **Wrong Entry Format**: Expects `key_len(u16), partition_key(var), token(i64), index_offset(u64), position(u32)`
-3. **Missing Offset Table**: Doesn't account for the offset table before entries
-4. **Incorrect Data Types**: Uses wrong field types and sizes
-
-### Correct Header Fields
+### Header Fields (24 bytes)
 
 | Field | Type | Size | Description |
 |-------|------|------|-------------|
@@ -102,104 +95,16 @@ struct serialized_key {
 | sampling_level | be32 | 4 | Sampling level (1-128) |
 | size_at_full_sampling | be32 | 4 | Entries at full sampling |
 
-### Correct Entry Format
+### Entry Format
 
 1. **Offset Table**: Array of `uint32` offsets (little-endian) to locate each entry
 2. **Entries**: Variable-length keys followed by `be64` position
 3. **No embedded tokens**: Token values are not stored in summary entries
 4. **No key length prefix**: Key boundaries determined by offset differences
 
-## Implementation Recommendations
+## Implementation Reference
 
-### 1. Update Header Parser
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SummaryHeader {
-    pub min_index_interval: u32,
-    pub entries_count: u32,
-    pub summary_entries_size: u64,
-    pub sampling_level: u32,
-    pub size_at_full_sampling: u32,
-}
-
-fn parse_summary_header(input: &[u8]) -> IResult<&[u8], SummaryHeader> {
-    let (input, min_index_interval) = be_u32(input)?;
-    let (input, entries_count) = be_u32(input)?;
-    let (input, summary_entries_size) = be_u64(input)?;
-    let (input, sampling_level) = be_u32(input)?;
-    let (input, size_at_full_sampling) = be_u32(input)?;
-
-    Ok((input, SummaryHeader {
-        min_index_interval,
-        entries_count,
-        summary_entries_size,
-        sampling_level,
-        size_at_full_sampling,
-    }))
-}
-```
-
-### 2. Update Entry Parser
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SummaryEntry {
-    pub partition_key: Vec<u8>,
-    pub position: u64,  // Position in index file
-}
-
-fn parse_summary_entries(input: &[u8], header: &SummaryHeader) -> IResult<&[u8], Vec<SummaryEntry>> {
-    // Parse offset table (little-endian)
-    let (mut input, offsets) = count(le_u32, header.entries_count as usize)(input)?;
-
-    let entries_data_start = input;
-    let mut entries = Vec::with_capacity(header.entries_count as usize);
-
-    for i in 0..header.entries_count as usize {
-        let start_offset = offsets[i] as usize;
-        let end_offset = if i + 1 < offsets.len() {
-            offsets[i + 1] as usize
-        } else {
-            header.summary_entries_size as usize - (offsets.len() * 4)
-        };
-
-        let key_len = end_offset - start_offset - 8; // Subtract 8 bytes for position
-        let entry_data = &entries_data_start[start_offset..end_offset];
-
-        let (_, entry) = parse_single_entry(entry_data, key_len)?;
-        entries.push(entry);
-    }
-
-    Ok((input, entries))
-}
-
-fn parse_single_entry(input: &[u8], key_len: usize) -> IResult<&[u8], SummaryEntry> {
-    let (input, partition_key) = take(key_len)(input)?;
-    let (input, position) = be_u64(input)?;
-
-    Ok((input, SummaryEntry {
-        partition_key: partition_key.to_vec(),
-        position,
-    }))
-}
-```
-
-### 3. Parse Serialized Keys
-
-```rust
-fn parse_serialized_keys(input: &[u8]) -> IResult<&[u8], (Vec<u8>, Vec<u8>)> {
-    let (input, first_key) = parse_serialized_key(input)?;
-    let (input, last_key) = parse_serialized_key(input)?;
-    Ok((input, (first_key, last_key)))
-}
-
-fn parse_serialized_key(input: &[u8]) -> IResult<&[u8], Vec<u8>> {
-    let (input, size) = be_u32(input)?;
-    let (input, key) = take(size)(input)?;
-    Ok((input, key.to_vec()))
-}
-```
+See `cqlite-core/src/storage/sstable/summary_reader.rs` for the current implementation that follows this specification.
 
 ## Testing and Validation
 

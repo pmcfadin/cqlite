@@ -389,7 +389,8 @@ async fn test_sstable_reader_discovery(dir: &Path, base_name: &str) {
             // Test that component-dependent operations work
             let test_key = b"discovery_test_key";
             let _index_lookup = reader.lookup_partition_with_index(test_key).await;
-            let _token_range = reader.iterate_token_range(-1000, 1000).await;
+            // Note: iterate_token_range is deprecated (Issue #218) - use iterate_all_partitions
+            let _partitions = reader.iterate_all_partitions().await;
             let _timestamp_range = reader.get_timestamp_range().await;
 
             println!(

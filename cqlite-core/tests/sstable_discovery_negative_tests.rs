@@ -281,8 +281,9 @@ async fn test_malformed_component_files() {
                         println!("✓ Index lookup handled malformed Index.db");
                     }
                     "Summary.db" => {
-                        let _result = reader.iterate_token_range(-1000, 1000).await;
-                        println!("✓ Token range iteration handled malformed Summary.db");
+                        // Note: iterate_token_range deprecated (Issue #218)
+                        let _result = reader.iterate_all_partitions().await;
+                        println!("✓ Partition iteration handled malformed Summary.db");
                     }
                     "Statistics.db" => {
                         let _result = reader.stats().await.cloned().unwrap_or_default();

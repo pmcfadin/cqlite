@@ -372,7 +372,8 @@ async fn test_index_lookup_performance(reader: &SSTableReader) {
 }
 
 async fn test_token_range_performance(reader: &SSTableReader) {
-    let _token_range = reader.iterate_token_range(-1000000, 1000000).await;
+    // Note: iterate_token_range is deprecated (Issue #218) - use iterate_all_partitions
+    let _partitions = reader.iterate_all_partitions().await;
 }
 
 async fn test_timestamp_range_performance(reader: &SSTableReader) {
@@ -380,7 +381,8 @@ async fn test_timestamp_range_performance(reader: &SSTableReader) {
 }
 
 async fn test_token_coverage_performance(reader: &SSTableReader) {
-    let _token_coverage = reader.get_token_coverage().await;
+    // Note: get_token_coverage is deprecated (Issue #218) - tokens not stored in Summary.db
+    let _timestamp_range = reader.get_timestamp_range().await;
 }
 
 async fn test_operation_memory_stability(reader: &SSTableReader) {
@@ -390,7 +392,8 @@ async fn test_operation_memory_stability(reader: &SSTableReader) {
     for i in 0..10 {
         let test_key = format!("memory_test_key_{}", i).into_bytes();
         let _lookup = reader.lookup_partition_with_index(&test_key).await;
-        let _token_range = reader.iterate_token_range(i * 1000, (i + 1) * 1000).await;
+        // Note: iterate_token_range is deprecated (Issue #218) - use iterate_all_partitions
+        let _partitions = reader.iterate_all_partitions().await;
     }
 
     let memory_after_ops = get_memory_usage();

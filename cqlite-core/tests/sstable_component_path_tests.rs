@@ -359,7 +359,7 @@ mod component_integration_tests {
                 // Test that component readers are loaded (even if they contain mock data)
                 // Note: These operations may fail due to mock data, but that's expected
                 let _ = reader.get_timestamp_range().await;
-                let _ = reader.get_token_coverage().await;
+                // Note: get_token_coverage is deprecated (Issue #218) - tokens not stored in Summary.db
             }
             Err(e) => {
                 println!(
@@ -393,8 +393,9 @@ mod component_integration_tests {
             // Schema context lookup requires a ParsingContext - skip for now
             // let _schema_lookup_result = reader.lookup_partition_with_schema_context(test_key, context).await;
 
-            // Test token range iteration (uses Summary.db)
-            let _token_range_result = reader.iterate_token_range(0, i64::MAX).await;
+            // Test partition iteration (uses Summary.db)
+            // Note: iterate_token_range is deprecated (Issue #218) - use iterate_all_partitions
+            let _partitions = reader.iterate_all_partitions().await;
 
             // These methods should be reachable and not marked as dead code
             println!("✓ Index-derived operations are accessible and not dead code");

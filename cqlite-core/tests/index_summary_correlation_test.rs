@@ -122,12 +122,14 @@ async fn test_index_with_summary_correlation() {
         let index_byte_position = (idx * 18) as u64;
 
         // Check if this entry matches a Summary sample
+        // Note: index_offset renamed to position in Issue #218
         if let Some(summary_entry) = summary_entries
             .iter()
-            .find(|e| e.index_offset == index_byte_position)
+            .find(|e| e.position == index_byte_position)
         {
+            // Summary.db position points to Index.db offset
             assert_eq!(
-                entry.data_offset, summary_entry.position as u64,
+                entry.data_offset, summary_entry.position,
                 "Entry at index {} should match Summary.db position",
                 idx
             );
