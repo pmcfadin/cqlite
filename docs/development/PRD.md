@@ -15,7 +15,7 @@
 | **CLI (`cqlite`)**      | • **One‑shot mode**: `--schema`, `--data-dir`, optional `--query` & \`--out {json                                                                                                                                                                | csv | parquet}\`<br>• **REPL mode**: interactive attach / query / export |
 | **Output Formats**      | JSON, CSV, Parquet (pluggable writers)                                                                                                                                                                                                           |     |                                                                    |
 | **Language Bindings**   | Typed APIs for Python (async), Node.js (TS defs), WASM (IndexedDB)                                                                                                                                                                               |     |                                                                    |
-| **Writing (Post‑MVP)**  | Generate Cassandra 5 SSTables with schema validation & compression                                                                                                                                                                               |     |                                                                    |
+| ~~Writing (Post-MVP)~~  | ~~Generate Cassandra 5 SSTables~~ REMOVED - CQLite is read-only                                                                                                                                                                                                                     |     |                                                                    |
 | **Performance Targets** | Set after functional parity; goal: *faster than native Cassandra bulk tools*                                                                                                                                                                     |     |                                                                    |
 
 ---
@@ -45,12 +45,15 @@ tests/              # shared fixtures (Cassandra 5 SSTables)
 
 | #      | Deliverable                | Key Exit Criteria                                                                         |
 | ------ | -------------------------- | ----------------------------------------------------------------------------------------- |
-| **M1** | **Core Reading Library**   | Reads any Cassandra 5 SSTable; all CQL/UDT types; compression OK; 95 % unit‑test coverage |
+| **M1** | **Core Reading Library**   | Reads any Cassandra 5 SSTable; all CQL/UDT types; compression OK; 75 % unit‑test coverage |
 | **M2** | **CLI (REPL + one‑shot)**  | Human can query & verify data from disk; basic `SELECT … WHERE …`                         |
 | **M3** | **Output Writers**         | JSON, CSV, Parquet export work end‑to‑end via CLI                                         |
 | **M4** | **Language Bindings**      | `pip install cqlite`, `npm i cqlite`; CI wheels & native modules                          |
-| **M5** | **Write Support**          | Generates valid Cassandra 5 SSTables; passes read‑back tests                              |
+| **M5** | ~~Write Support~~          | ~~Generates valid Cassandra 5 SSTables~~ REMOVED (Issues #175, #176)                                                   |
 | **M6** | **Perf & Size Validation** | Benchmarks > native bulk tools; WASM < 2 MB; publish v1.0 release                         |
+
+> **Revision Note (Dec 2025)**: M1 coverage target revised from 95% to 75% per prioritization review. M5 (Write Support) permanently removed - CQLite is a read-only library (Issues #175, #176, #23, #12).
+
 
 ---
 
@@ -62,7 +65,7 @@ tests/              # shared fixtures (Cassandra 5 SSTables)
 | CLI         | Integration & snapshot tests for commands/output   | `assert_cmd`, `insta`              |
 | Bindings    | Language‑specific unit + FFI smoke tests           | `pytest`, `jest`, web‑worker tests |
 | Integration | End‑to‑end: read → export → read‑back              | GitHub Actions matrix              |
-| CI/CD       | PR lint, fmt, unit, integration; codecov gate 90 % | GitHub Actions                     |
+| CI/CD       | PR lint, fmt, unit, integration; codecov gate 75 % | GitHub Actions                     |
 
 ---
 
