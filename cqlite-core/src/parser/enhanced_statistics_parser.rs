@@ -463,22 +463,22 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
             })?
             .to_string();
 
-        // Static column type length (single byte)
-        let (remaining, type_len) = parse_u8(remaining)?;
+        // Static column type length (VInt - can exceed 127 for collection types)
+        let (remaining, type_len_u64) = parse_vuint(remaining)?;
         log::debug!(
             "Static column {} ('{}') type length: {} bytes",
             static_idx,
             column_name,
-            type_len
+            type_len_u64
         );
 
         // Validate type length (match validation in parse_regular_columns)
-        if type_len == 0 || type_len > 200 {
+        if type_len_u64 == 0 || type_len_u64 > 1000 {
             log::debug!(
                 "Static column {} ('{}') type_len sanity check failed: {}",
                 static_idx,
                 column_name,
-                type_len
+                type_len_u64
             );
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
@@ -487,7 +487,7 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
         }
 
         // Static column type (UTF-8 string)
-        let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
+        let (remaining, type_bytes) = nom::bytes::complete::take(type_len_u64 as usize)(remaining)?;
         let internal_type = std::str::from_utf8(type_bytes)
             .map_err(|_| {
                 nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
@@ -538,17 +538,31 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
             })?
             .to_string();
 
-        // Column type length (single byte)
-        let (remaining, type_len) = parse_u8(remaining)?;
+        // Column type length (VInt - can exceed 127 for collection types)
+        let (remaining, type_len_u64) = parse_vuint(remaining)?;
         log::debug!(
             "Column {} ('{}') type length: {} bytes",
             col_idx,
             column_name,
-            type_len
+            type_len_u64
         );
 
+        // Validate type length (consistent with parse_regular_columns and static columns)
+        if type_len_u64 == 0 || type_len_u64 > 1000 {
+            log::debug!(
+                "Column {} ('{}') type_len validation failed: {}",
+                col_idx,
+                column_name,
+                type_len_u64
+            );
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
         // Column type (UTF-8 string)
-        let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
+        let (remaining, type_bytes) = nom::bytes::complete::take(type_len_u64 as usize)(remaining)?;
         let internal_type = std::str::from_utf8(type_bytes)
             .map_err(|_| {
                 nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
@@ -833,10 +847,26 @@ fn parse_regular_columns(
                     break;
                 }
 
-                let type_len = input[pos] as usize;
-                pos += 1;
+                // Parse type length as VInt (can exceed 127 for collection types)
+                let type_len_result = parse_vuint(&input[pos..]);
+                let (type_remaining, type_len_u64) = match type_len_result {
+                    Ok(r) => r,
+                    Err(_) => {
+                        log::debug!(
+                            "Column {} ('{}') parsing failed at offset {}: VInt parse error at pos {}",
+                            col_idx,
+                            column_name,
+                            marker_offset,
+                            pos
+                        );
+                        parse_success = false;
+                        break;
+                    }
+                };
+                let type_len = type_len_u64 as usize;
+                pos = input.len() - type_remaining.len();
 
-                if type_len == 0 || type_len > 200 || pos + type_len > input.len() {
+                if type_len == 0 || type_len > 1000 || pos + type_len > input.len() {
                     log::debug!(
                         "Column {} ('{}') parsing failed at offset {}: type_len sanity check failed (type_len={}, pos={}, buffer_len={})",
                         col_idx,
