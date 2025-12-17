@@ -140,27 +140,47 @@ fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usize> {
     }
 
     // Parse number of components
-    let num_components = u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as usize;
+    let num_components = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
     log::debug!("Statistics.db TOC: {} components", num_components);
+
+    // Sanity check: Cassandra has exactly 4 MetadataType enum values
+    // (VALIDATION=0, COMPACTION=1, STATS=2, HEADER=3)
+    // A value > 100 indicates corrupted or malicious data
+    if num_components > 100 {
+        log::warn!(
+            "Suspicious num_components={} in Statistics.db TOC (expected <=4)",
+            num_components
+        );
+        return None;
+    }
 
     // Skip checksum (bytes 4-7)
     // TOC starts at byte 8
 
-    let toc_start = 8;
-    let toc_entry_size = 8; // 4 bytes type + 4 bytes offset
+    let toc_start: usize = 8;
+    let toc_entry_size: usize = 8; // 4 bytes type + 4 bytes offset
 
-    if input.len() < toc_start + (num_components * toc_entry_size) {
+    // Use checked_mul to prevent integer overflow on multiplication
+    let toc_size = (num_components as usize)
+        .checked_mul(toc_entry_size)
+        .and_then(|size| size.checked_add(toc_start))?;
+
+    if input.len() < toc_size {
         log::debug!(
-            "Statistics.db too small for {} TOC entries: {} bytes",
+            "Statistics.db too small for {} TOC entries: {} bytes (need {})",
             num_components,
-            input.len()
+            input.len(),
+            toc_size
         );
         return None;
     }
 
     // Search for HEADER component (type 3)
-    for i in 0..num_components {
-        let entry_offset = toc_start + (i * toc_entry_size);
+    for i in 0..num_components as usize {
+        // Use checked arithmetic to prevent overflow in entry offset calculation
+        let entry_offset = i
+            .checked_mul(toc_entry_size)
+            .and_then(|offset| offset.checked_add(toc_start))?;
         let component_type = u32::from_be_bytes([
             input[entry_offset],
             input[entry_offset + 1],
@@ -584,7 +604,7 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
         );
 
         // Validate type length (match validation in parse_regular_columns)
-        if type_len_u64 == 0 || type_len_u64 > 1000 {
+        if type_len_u64 == 0 || type_len_u64 > 500 {
             log::debug!(
                 "Static column {} ('{}') type_len sanity check failed: {}",
                 static_idx,
@@ -595,6 +615,12 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
                 input,
                 nom::error::ErrorKind::Verify,
             )));
+        }
+        if type_len_u64 > 300 {
+            log::warn!(
+                "Unusually long static column type string: {} bytes (typical <300)",
+                type_len_u64
+            );
         }
 
         // Static column type (UTF-8 string)
@@ -659,7 +685,7 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
         );
 
         // Validate type length (consistent with parse_regular_columns and static columns)
-        if type_len_u64 == 0 || type_len_u64 > 1000 {
+        if type_len_u64 == 0 || type_len_u64 > 500 {
             log::debug!(
                 "Column {} ('{}') type_len validation failed: {}",
                 col_idx,
@@ -670,6 +696,12 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
                 input,
                 nom::error::ErrorKind::Verify,
             )));
+        }
+        if type_len_u64 > 300 {
+            log::warn!(
+                "Unusually long column type string: {} bytes (typical <300)",
+                type_len_u64
+            );
         }
 
         // Column type (UTF-8 string)
@@ -977,7 +1009,7 @@ fn parse_regular_columns(
                 let type_len = type_len_u64 as usize;
                 pos = input.len() - type_remaining.len();
 
-                if type_len == 0 || type_len > 1000 || pos + type_len > input.len() {
+                if type_len == 0 || type_len > 500 || pos + type_len > input.len() {
                     log::debug!(
                         "Column {} ('{}') parsing failed at offset {}: type_len sanity check failed (type_len={}, pos={}, buffer_len={})",
                         col_idx,
@@ -1229,6 +1261,10 @@ fn extract_inner_type(type_with_close_paren: &str) -> Option<&str> {
             ')' => {
                 depth -= 1;
                 if depth == 0 {
+                    // Return None if extracted string is empty (malformed input like ")")
+                    if idx == 0 {
+                        return None;
+                    }
                     return Some(&type_with_close_paren[..idx]);
                 }
             }
@@ -1249,6 +1285,12 @@ fn split_type_arguments(input: &str) -> Vec<&str> {
             ')' => {
                 if depth > 0 {
                     depth -= 1;
+                } else {
+                    log::warn!(
+                        "Unmatched closing parenthesis at position {} in type arguments: '{}'",
+                        idx,
+                        input
+                    );
                 }
             }
             ',' if depth == 0 => {
@@ -1571,7 +1613,7 @@ fn parse_serialization_header_sequential(
         // Column type (VInt length + UTF-8)
         let (remaining, type_len) = parse_vuint(remaining)?;
 
-        if type_len == 0 || type_len > 1000 {
+        if type_len == 0 || type_len > 500 {
             log::debug!(
                 "Invalid static column '{}' type length: {}",
                 column_name,
@@ -1653,7 +1695,7 @@ fn parse_serialization_header_sequential(
         // Column type (VInt length + UTF-8)
         let (remaining, type_len) = parse_vuint(remaining)?;
 
-        if type_len == 0 || type_len > 1000 {
+        if type_len == 0 || type_len > 500 {
             log::debug!(
                 "Invalid regular column '{}' type length: {}",
                 column_name,
@@ -1737,12 +1779,18 @@ fn parse_serialization_header_at_toc_offset(
 
     // Step 2: Parse keyType (partition key type)
     let (input, pk_type_len) = parse_vuint(input)?;
-    if pk_type_len == 0 || pk_type_len > 1000 {
+    if pk_type_len == 0 || pk_type_len > 500 {
         log::debug!("Invalid pk_type_len: {}", pk_type_len);
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Verify,
         )));
+    }
+    if pk_type_len > 300 {
+        log::warn!(
+            "Unusually long partition key type string: {} bytes (typical <300)",
+            pk_type_len
+        );
     }
 
     let (input, pk_type_bytes) = take(pk_type_len as usize)(input)?;
@@ -1765,19 +1813,36 @@ fn parse_serialization_header_at_toc_offset(
 
     // Step 3: Parse clusteringTypes
     let (input, clustering_count) = parse_vuint(input)?;
+    // Sanity check: Cassandra tables rarely have >100 clustering keys
+    if clustering_count > 1000 {
+        log::warn!(
+            "Suspicious clustering_count={} in SerializationHeader (expected <100)",
+            clustering_count
+        );
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
     log::debug!("HEADER: {} clustering key types", clustering_count);
 
     let mut input = input;
-    let mut clustering_key_types = Vec::new();
+    let mut clustering_key_types = Vec::with_capacity(clustering_count as usize);
 
     for i in 0..clustering_count {
         let (remaining, ck_type_len) = parse_vuint(input)?;
-        if ck_type_len == 0 || ck_type_len > 1000 {
+        if ck_type_len == 0 || ck_type_len > 500 {
             log::debug!("Invalid clustering key type length: {}", ck_type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
+        }
+        if ck_type_len > 300 {
+            log::warn!(
+                "Unusually long clustering key type string: {} bytes (typical <300)",
+                ck_type_len
+            );
         }
 
         let (remaining, ck_type_bytes) = take(ck_type_len as usize)(remaining)?;
@@ -1804,15 +1869,26 @@ fn parse_serialization_header_at_toc_offset(
 
     // Step 4: Parse staticColumns
     let (input, static_count) = parse_vuint(input)?;
+    // Sanity check: Cassandra tables rarely have >1000 static columns
+    if static_count > 10000 {
+        log::warn!(
+            "Suspicious static_count={} in SerializationHeader (expected <1000)",
+            static_count
+        );
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
     log::debug!("HEADER: {} static columns", static_count);
 
     let mut input = input;
-    let mut static_columns = Vec::new();
+    let mut static_columns = Vec::with_capacity(static_count as usize);
 
     for i in 0..static_count {
         // Column name
         let (remaining, name_len) = parse_vuint(input)?;
-        if name_len == 0 || name_len > 1000 {
+        if name_len == 0 || name_len > 200 {
             log::debug!("Invalid static column name length: {}", name_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
@@ -1834,12 +1910,18 @@ fn parse_serialization_header_at_toc_offset(
 
         // Column type
         let (remaining, type_len) = parse_vuint(remaining)?;
-        if type_len == 0 || type_len > 1000 {
+        if type_len == 0 || type_len > 500 {
             log::debug!("Invalid static column type length: {}", type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
+        }
+        if type_len > 300 {
+            log::warn!(
+                "Unusually long static column type string: {} bytes (typical <300)",
+                type_len
+            );
         }
 
         let (remaining, type_bytes) = take(type_len as usize)(remaining)?;
@@ -1875,15 +1957,26 @@ fn parse_serialization_header_at_toc_offset(
 
     // Step 5: Parse regularColumns
     let (input, regular_count) = parse_vuint(input)?;
+    // Sanity check: Cassandra tables rarely have >1000 regular columns
+    if regular_count > 10000 {
+        log::warn!(
+            "Suspicious regular_count={} in SerializationHeader (expected <1000)",
+            regular_count
+        );
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
     log::debug!("HEADER: {} regular columns", regular_count);
 
     let mut input = input;
-    let mut regular_columns = Vec::new();
+    let mut regular_columns = Vec::with_capacity(regular_count as usize);
 
     for i in 0..regular_count {
         // Column name
         let (remaining, name_len) = parse_vuint(input)?;
-        if name_len == 0 || name_len > 1000 {
+        if name_len == 0 || name_len > 200 {
             log::debug!("Invalid regular column name length: {}", name_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
@@ -1905,12 +1998,18 @@ fn parse_serialization_header_at_toc_offset(
 
         // Column type
         let (remaining, type_len) = parse_vuint(remaining)?;
-        if type_len == 0 || type_len > 1000 {
+        if type_len == 0 || type_len > 500 {
             log::debug!("Invalid regular column type length: {}", type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
+        }
+        if type_len > 300 {
+            log::warn!(
+                "Unusually long regular column type string: {} bytes (typical <300)",
+                type_len
+            );
         }
 
         let (remaining, type_bytes) = take(type_len as usize)(remaining)?;
@@ -2032,7 +2131,7 @@ fn parse_minimal_encoding_stats<'a>(
             match parse_serialization_header_at_toc_offset(header_data) {
                 Ok((_, result)) => result,
                 Err(e) => {
-                    log::debug!(
+                    log::warn!(
                         "TOC-based header parsing failed: {:?}, falling back to marker search",
                         e
                     );
@@ -2040,7 +2139,7 @@ fn parse_minimal_encoding_stats<'a>(
                 }
             }
         } else {
-            log::debug!(
+            log::warn!(
                 "TOC offset 0x{:x} exceeds input length {}, using marker search",
                 offset,
                 full_input.len()
