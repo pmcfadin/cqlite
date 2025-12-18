@@ -200,11 +200,28 @@ V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
 
 ## Validation Status
 
-### Overall Pass Rate: 100% (33/33 tables) ✅ COMPLETE
+### Overall Pass Rate: 100% (33/33 tables) ✅ COMPLETE (macOS)
 
 As of Issue #220 fix (Updated: 2025-12-18)
 
-**Note**: All SSTable component parsers and cell type handling are now complete. All 33 test tables pass validation!
+**Note**: All SSTable component parsers and cell type handling are now complete. All 33 test tables pass validation on macOS!
+
+### CI Environment Issue (Issue #225)
+
+**Status**: 🔶 **INVESTIGATING** - Linux CI fails for 2 tables
+
+| Environment | Tables Passing | Status |
+|-------------|----------------|--------|
+| macOS (local) | 33/33 | ✅ All pass |
+| Linux (CI) | 31/33 | ❌ 2 fail with SIGABRT |
+
+**Affected Tables on Linux CI**:
+- `test_collections.large_collections_table` - Exit code 134
+- `test_timeseries.app_metrics` - Exit code 134
+
+**Root Cause**: Unknown - same binary data (verified by MD5), but panics only on Linux release builds with `panic = "abort"`. Likely platform-specific behavior in complex collection parsing.
+
+**Tracking**: Issue #225 (OPEN)
 
 ### Pass Rate by Keyspace
 
