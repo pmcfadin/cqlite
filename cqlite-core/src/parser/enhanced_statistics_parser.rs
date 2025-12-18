@@ -604,7 +604,7 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
         );
 
         // Validate type length (match validation in parse_regular_columns)
-        if type_len_u64 == 0 || type_len_u64 > 500 {
+        if type_len_u64 == 0 || type_len_u64 > 5000 {
             log::debug!(
                 "Static column {} ('{}') type_len sanity check failed: {}",
                 static_idx,
@@ -616,9 +616,9 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
                 nom::error::ErrorKind::Verify,
             )));
         }
-        if type_len_u64 > 300 {
+        if type_len_u64 > 1000 {
             log::warn!(
-                "Unusually long static column type string: {} bytes (typical <300)",
+                "Unusually long static column type string: {} bytes (typical <1000)",
                 type_len_u64
             );
         }
@@ -685,7 +685,7 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
         );
 
         // Validate type length (consistent with parse_regular_columns and static columns)
-        if type_len_u64 == 0 || type_len_u64 > 500 {
+        if type_len_u64 == 0 || type_len_u64 > 5000 {
             log::debug!(
                 "Column {} ('{}') type_len validation failed: {}",
                 col_idx,
@@ -697,9 +697,9 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
                 nom::error::ErrorKind::Verify,
             )));
         }
-        if type_len_u64 > 300 {
+        if type_len_u64 > 1000 {
             log::warn!(
-                "Unusually long column type string: {} bytes (typical <300)",
+                "Unusually long column type string: {} bytes (typical <1000)",
                 type_len_u64
             );
         }
@@ -1009,7 +1009,7 @@ fn parse_regular_columns(
                 let type_len = type_len_u64 as usize;
                 pos = input.len() - type_remaining.len();
 
-                if type_len == 0 || type_len > 500 || pos + type_len > input.len() {
+                if type_len == 0 || type_len > 5000 || pos + type_len > input.len() {
                     log::debug!(
                         "Column {} ('{}') parsing failed at offset {}: type_len sanity check failed (type_len={}, pos={}, buffer_len={})",
                         col_idx,
@@ -1335,6 +1335,13 @@ fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
 
     let mut cleaned = strip_wrapping_parens(marshal_type);
 
+    // Special case: Preserve UserType definitions unchanged
+    // UserType contains critical metadata (keyspace, type name, field definitions) that must
+    // reach the parser intact. Converting it to a simplified CQL type would lose this information.
+    if cleaned.contains("org.apache.cassandra.db.marshal.UserType(") {
+        return marshal_type.to_string();
+    }
+
     // Normalize known wrappers by recursively converting inner types
     // Use extract_inner_type() for proper parenthesis matching (fixes nested types)
     for prefix in [
@@ -1497,9 +1504,9 @@ fn parse_serialization_header_sequential(
     let (input, pk_type_len) = parse_vuint(input)?;
 
     // Validate partition key type length
-    if pk_type_len == 0 || pk_type_len > 500 {
+    if pk_type_len == 0 || pk_type_len > 5000 {
         log::debug!(
-            "Invalid partition key type length: {} (expected 1-500)",
+            "Invalid partition key type length: {} (expected 1-2000)",
             pk_type_len
         );
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -1545,7 +1552,7 @@ fn parse_serialization_header_sequential(
     for idx in 0..clustering_count {
         let (remaining, type_len) = parse_vuint(input)?;
 
-        if type_len == 0 || type_len > 500 {
+        if type_len == 0 || type_len > 5000 {
             log::debug!("Invalid clustering key {} type length: {}", idx, type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
@@ -1613,7 +1620,7 @@ fn parse_serialization_header_sequential(
         // Column type (VInt length + UTF-8)
         let (remaining, type_len) = parse_vuint(remaining)?;
 
-        if type_len == 0 || type_len > 500 {
+        if type_len == 0 || type_len > 5000 {
             log::debug!(
                 "Invalid static column '{}' type length: {}",
                 column_name,
@@ -1695,7 +1702,7 @@ fn parse_serialization_header_sequential(
         // Column type (VInt length + UTF-8)
         let (remaining, type_len) = parse_vuint(remaining)?;
 
-        if type_len == 0 || type_len > 500 {
+        if type_len == 0 || type_len > 5000 {
             log::debug!(
                 "Invalid regular column '{}' type length: {}",
                 column_name,
@@ -1779,16 +1786,16 @@ fn parse_serialization_header_at_toc_offset(
 
     // Step 2: Parse keyType (partition key type)
     let (input, pk_type_len) = parse_vuint(input)?;
-    if pk_type_len == 0 || pk_type_len > 500 {
+    if pk_type_len == 0 || pk_type_len > 5000 {
         log::debug!("Invalid pk_type_len: {}", pk_type_len);
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Verify,
         )));
     }
-    if pk_type_len > 300 {
+    if pk_type_len > 1000 {
         log::warn!(
-            "Unusually long partition key type string: {} bytes (typical <300)",
+            "Unusually long partition key type string: {} bytes (typical <1000)",
             pk_type_len
         );
     }
@@ -1831,16 +1838,16 @@ fn parse_serialization_header_at_toc_offset(
 
     for i in 0..clustering_count {
         let (remaining, ck_type_len) = parse_vuint(input)?;
-        if ck_type_len == 0 || ck_type_len > 500 {
+        if ck_type_len == 0 || ck_type_len > 5000 {
             log::debug!("Invalid clustering key type length: {}", ck_type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
         }
-        if ck_type_len > 300 {
+        if ck_type_len > 1000 {
             log::warn!(
-                "Unusually long clustering key type string: {} bytes (typical <300)",
+                "Unusually long clustering key type string: {} bytes (typical <1000)",
                 ck_type_len
             );
         }
@@ -1910,16 +1917,16 @@ fn parse_serialization_header_at_toc_offset(
 
         // Column type
         let (remaining, type_len) = parse_vuint(remaining)?;
-        if type_len == 0 || type_len > 500 {
+        if type_len == 0 || type_len > 5000 {
             log::debug!("Invalid static column type length: {}", type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
         }
-        if type_len > 300 {
+        if type_len > 1000 {
             log::warn!(
-                "Unusually long static column type string: {} bytes (typical <300)",
+                "Unusually long static column type string: {} bytes (typical <1000)",
                 type_len
             );
         }
@@ -1998,16 +2005,16 @@ fn parse_serialization_header_at_toc_offset(
 
         // Column type
         let (remaining, type_len) = parse_vuint(remaining)?;
-        if type_len == 0 || type_len > 500 {
+        if type_len == 0 || type_len > 5000 {
             log::debug!("Invalid regular column type length: {}", type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
         }
-        if type_len > 300 {
+        if type_len > 1000 {
             log::warn!(
-                "Unusually long regular column type string: {} bytes (typical <300)",
+                "Unusually long regular column type string: {} bytes (typical <1000)",
                 type_len
             );
         }
@@ -2497,6 +2504,7 @@ mod tests {
 
     #[test]
     fn test_marshal_type_conversion() {
+        // Simple types should be converted to CQL names
         assert_eq!(
             convert_marshal_type_to_cql("org.apache.cassandra.db.marshal.Int32Type"),
             "int"
@@ -2520,6 +2528,28 @@ mod tests {
         assert_eq!(
             convert_marshal_type_to_cql("org.apache.cassandra.db.marshal.SimpleDataType"),
             "simpledata"
+        );
+
+        // UserType should be preserved unchanged (contains critical metadata)
+        let udt = "org.apache.cassandra.db.marshal.UserType(test_collections,616464726573735f74797065,737472656574:org.apache.cassandra.db.marshal.UTF8Type,63697479:org.apache.cassandra.db.marshal.UTF8Type)";
+        assert_eq!(
+            convert_marshal_type_to_cql(udt),
+            udt,
+            "UserType definitions must be preserved to retain keyspace, type name, and field metadata"
+        );
+
+        // Frozen UserType should also be preserved
+        let frozen_udt = "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_collections,616464726573735f74797065,737472656574:org.apache.cassandra.db.marshal.UTF8Type))";
+        assert!(
+            convert_marshal_type_to_cql(frozen_udt).contains("UserType("),
+            "UserType inside FrozenType should be preserved"
+        );
+
+        // List of frozen UDT should preserve the UserType
+        let list_udt = "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_collections,616464726573735f74797065,737472656574:org.apache.cassandra.db.marshal.UTF8Type)))";
+        assert!(
+            convert_marshal_type_to_cql(list_udt).contains("UserType("),
+            "UserType inside List should be preserved"
         );
     }
 

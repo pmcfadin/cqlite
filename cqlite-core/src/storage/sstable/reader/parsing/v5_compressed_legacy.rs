@@ -52,6 +52,14 @@ use crate::{
 /// element count limit to prevent memory exhaustion from malicious/corrupted data.
 const MAX_FROZEN_COLLECTION_SIZE: u64 = 100_000;
 
+/// Maximum number of fields allowed in a UDT to prevent memory exhaustion.
+/// This is a safety limit; real-world UDTs rarely exceed 100 fields.
+const MAX_UDT_FIELD_COUNT: usize = 1000;
+
+/// Maximum nesting depth for type definitions to prevent stack overflow.
+/// This covers recursive UDTs and deeply nested collections (e.g., list<list<list<...>>>).
+const MAX_TYPE_NESTING_DEPTH: usize = 10;
+
 /// Row header data extracted from V5CompressedLegacy row
 #[derive(Debug, Clone)]
 struct RowHeader {
@@ -1199,9 +1207,13 @@ impl V5CompressedLegacyParser {
             hex::encode(&data[offset..std::cmp::min(offset + 32, data.len())])
         );
 
-        // Cell flags validation: First byte should be valid cell flags (0x00-0x1F)
+        // Cell flags validation: First byte should be valid cell flags (0x00-0x1F) for simple cells
         // Common flags: 0x00 (basic cell), 0x08 (USE_ROW_TIMESTAMP), 0x04 (HAS_EMPTY_VALUE)
         // Deleted cells have 0x01 (IS_DELETED), expiring cells have 0x02 (IS_EXPIRING)
+        //
+        // NOTE: For complex columns (non-frozen collections), the first byte is a VInt for the
+        // cell count, which may have values > 0x1F. This is normal and not an error.
+        // The validation below is only accurate for tables with all simple cells.
         if offset < data.len() {
             let first_byte = data[offset];
             if first_byte <= 0x1F {
@@ -1210,8 +1222,8 @@ impl V5CompressedLegacyParser {
                     first_byte, offset
                 );
             } else {
-                warn!(
-                    "V5CompressedLegacy: Invalid cell flags 0x{:02x} at offset {} (expected 0x00-0x1F)",
+                debug!(
+                    "V5CompressedLegacy: First byte 0x{:02x} at offset {} (> 0x1F) - may be VInt for complex column cell count",
                     first_byte, offset
                 );
             }
@@ -1311,7 +1323,7 @@ impl V5CompressedLegacyParser {
                     "V5CompressedLegacy: Column '{}' is complex (non-frozen collection), using parse_complex_column",
                     column.name
                 );
-                self.parse_complex_column(data, offset, column, has_complex_deletion)
+                self.parse_complex_column(data, offset, column, has_complex_deletion, reader)
             } else {
                 self.parse_cell_value_schema_order(data, offset, column, reader)
             };
@@ -2290,7 +2302,10 @@ impl V5CompressedLegacyParser {
     /// Check if a type string represents a UDT (User-Defined Type).
     /// Detects Cassandra's internal format: org.apache.cassandra.db.marshal.UserType(...)
     fn is_udt_type(type_str: &str) -> bool {
-        type_str.contains("org.apache.cassandra.db.marshal.UserType")
+        // Case-insensitive check for UDT type marker
+        type_str
+            .to_lowercase()
+            .contains("org.apache.cassandra.db.marshal.usertype")
     }
 
     /// Parse a UDT type string to extract the UDT definition.
@@ -2308,24 +2323,41 @@ impl V5CompressedLegacyParser {
     /// )
     /// ```
     fn parse_udt_type_definition(type_str: &str) -> Result<UdtTypeDef> {
-        // Find the UserType(...) portion
+        Self::parse_udt_type_definition_with_depth(type_str, 0)
+    }
+
+    /// Internal implementation of parse_udt_type_definition with recursion depth tracking.
+    fn parse_udt_type_definition_with_depth(type_str: &str, depth: usize) -> Result<UdtTypeDef> {
+        // Check recursion depth to prevent stack overflow
+        if depth > MAX_TYPE_NESTING_DEPTH {
+            return Err(Error::schema(format!(
+                "UDT nesting depth {} exceeds maximum {}. Type string: {}",
+                depth,
+                MAX_TYPE_NESTING_DEPTH,
+                type_str.chars().take(100).collect::<String>()
+            )));
+        }
+
+        // Find the UserType(...) portion (case-insensitive search)
         let start_marker = "org.apache.cassandra.db.marshal.UserType(";
-        let start_idx = type_str
-            .find(start_marker)
+        let type_lower = type_str.to_lowercase();
+        let start_marker_lower = start_marker.to_lowercase();
+        let start_idx = type_lower
+            .find(&start_marker_lower)
             .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
 
         // Find the matching close paren (handling nested types)
         let inner_start = start_idx + start_marker.len();
-        let mut depth = 1;
+        let mut paren_depth = 1;
         let mut end_idx = inner_start;
         let chars: Vec<char> = type_str[inner_start..].chars().collect();
 
         for (i, c) in chars.iter().enumerate() {
             match c {
-                '(' => depth += 1,
+                '(' => paren_depth += 1,
                 ')' => {
-                    depth -= 1;
-                    if depth == 0 {
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
                         end_idx = inner_start + i;
                         break;
                     }
@@ -2334,7 +2366,7 @@ impl V5CompressedLegacyParser {
             }
         }
 
-        if depth != 0 {
+        if paren_depth != 0 {
             return Err(Error::schema(format!(
                 "Unbalanced parentheses in UserType: {}",
                 type_str
@@ -2353,7 +2385,11 @@ impl V5CompressedLegacyParser {
         }
 
         // First part is keyspace
-        let keyspace = parts[0].trim().to_string();
+        let keyspace = parts[0].trim();
+        if keyspace.is_empty() {
+            return Err(Error::schema("UDT keyspace cannot be empty"));
+        }
+        let keyspace = keyspace.to_string();
 
         // Second part is hex-encoded type name
         let udt_name = Self::decode_hex_name(parts[1].trim())?;
@@ -2372,7 +2408,8 @@ impl V5CompressedLegacyParser {
                 let field_type_str = &field_def[colon_idx + 1..];
 
                 let field_name = Self::decode_hex_name(field_name_hex)?;
-                let field_type = Self::parse_cassandra_type(field_type_str)?;
+                // Use depth-aware version to track recursion through UDT fields
+                let field_type = Self::parse_cassandra_type_with_depth(field_type_str, depth)?;
 
                 udt_def = udt_def.with_field(field_name, field_type, true);
             } else {
@@ -2419,29 +2456,44 @@ impl V5CompressedLegacyParser {
 
     /// Decode a hex-encoded name (e.g., "616464726573735f74797065" -> "address_type")
     fn decode_hex_name(hex: &str) -> Result<String> {
-        let bytes = hex::decode(hex).map_err(|e| {
-            Error::schema(format!("Invalid hex-encoded UDT name '{}': {}", hex, e))
-        })?;
+        let bytes = hex::decode(hex)
+            .map_err(|e| Error::schema(format!("Invalid hex-encoded UDT name '{}': {}", hex, e)))?;
         String::from_utf8(bytes)
             .map_err(|e| Error::schema(format!("Invalid UTF-8 in UDT name '{}': {}", hex, e)))
     }
 
     /// Parse a Cassandra type string into a CqlType.
     /// Handles: UTF8Type, Int32Type, ListType(...), SetType(...), MapType(...), UserType(...), FrozenType(...)
+    #[allow(dead_code)]
     fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
+        Self::parse_cassandra_type_with_depth(type_str, 0)
+    }
+
+    /// Internal implementation of parse_cassandra_type with recursion depth tracking.
+    fn parse_cassandra_type_with_depth(type_str: &str, depth: usize) -> Result<CqlType> {
+        // Check recursion depth to prevent stack overflow
+        if depth > MAX_TYPE_NESTING_DEPTH {
+            return Err(Error::schema(format!(
+                "Type nesting depth {} exceeds maximum {}. Type string: {}",
+                depth,
+                MAX_TYPE_NESTING_DEPTH,
+                type_str.chars().take(100).collect::<String>()
+            )));
+        }
+
         let type_str = type_str.trim();
 
         // Handle FrozenType wrapper
         if type_str.starts_with("org.apache.cassandra.db.marshal.FrozenType(") {
             let inner_start = "org.apache.cassandra.db.marshal.FrozenType(".len();
             let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
-            let inner_type = Self::parse_cassandra_type(&inner)?;
+            let inner_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
             return Ok(CqlType::Frozen(Box::new(inner_type)));
         }
 
         // Handle UserType (nested UDT)
         if type_str.starts_with("org.apache.cassandra.db.marshal.UserType(") {
-            let udt_def = Self::parse_udt_type_definition(type_str)?;
+            let udt_def = Self::parse_udt_type_definition_with_depth(type_str, depth + 1)?;
             let fields: Vec<(String, CqlType)> = udt_def
                 .fields
                 .into_iter()
@@ -2454,14 +2506,14 @@ impl V5CompressedLegacyParser {
         if type_str.starts_with("org.apache.cassandra.db.marshal.ListType(") {
             let inner_start = "org.apache.cassandra.db.marshal.ListType(".len();
             let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
-            let elem_type = Self::parse_cassandra_type(&inner)?;
+            let elem_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
             return Ok(CqlType::List(Box::new(elem_type)));
         }
 
         if type_str.starts_with("org.apache.cassandra.db.marshal.SetType(") {
             let inner_start = "org.apache.cassandra.db.marshal.SetType(".len();
             let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
-            let elem_type = Self::parse_cassandra_type(&inner)?;
+            let elem_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
             return Ok(CqlType::Set(Box::new(elem_type)));
         }
 
@@ -2475,8 +2527,8 @@ impl V5CompressedLegacyParser {
                     type_str
                 )));
             }
-            let key_type = Self::parse_cassandra_type(&parts[0])?;
-            let val_type = Self::parse_cassandra_type(&parts[1])?;
+            let key_type = Self::parse_cassandra_type_with_depth(&parts[0], depth + 1)?;
+            let val_type = Self::parse_cassandra_type_with_depth(&parts[1], depth + 1)?;
             return Ok(CqlType::Map(Box::new(key_type), Box::new(val_type)));
         }
 
@@ -2544,6 +2596,16 @@ impl V5CompressedLegacyParser {
         _column: &crate::schema::Column,
         reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize)> {
+        // Validate field count to prevent memory exhaustion
+        if udt_def.fields.len() > MAX_UDT_FIELD_COUNT {
+            return Err(Error::schema(format!(
+                "UDT '{}' has {} fields, exceeds maximum {}",
+                udt_def.name,
+                udt_def.fields.len(),
+                MAX_UDT_FIELD_COUNT
+            )));
+        }
+
         let mut current_offset = offset;
         let mut fields = Vec::with_capacity(udt_def.fields.len());
 
@@ -2584,10 +2646,7 @@ impl V5CompressedLegacyParser {
 
             let field_value = if field_len == -1 {
                 // Null field
-                log::debug!(
-                    "V5CompressedLegacy: UDT field '{}' is null",
-                    field_def.name
-                );
+                log::debug!("V5CompressedLegacy: UDT field '{}' is null", field_def.name);
                 None
             } else if field_len == 0 {
                 // Empty field - create empty value based on type
@@ -2600,8 +2659,7 @@ impl V5CompressedLegacyParser {
                 // Validation: reject other negative values
                 return Err(Error::corruption(format!(
                     "UDT field '{}': invalid negative field length {}",
-                    field_def.name,
-                    field_len
+                    field_def.name, field_len
                 )));
             } else {
                 // Field with data
@@ -2626,7 +2684,8 @@ impl V5CompressedLegacyParser {
                 );
 
                 // Parse field value based on its type
-                let value = self.parse_udt_field_value(field_data, &field_def.field_type, reader)?;
+                let value =
+                    self.parse_udt_field_value(field_data, &field_def.field_type, reader)?;
                 Some(value)
             };
 
@@ -2703,8 +2762,11 @@ impl V5CompressedLegacyParser {
                 Ok(Value::Float(f64::from_bits(bits)))
             }
             CqlType::Boolean => {
-                if data.is_empty() {
-                    return Err(Error::corruption("Boolean field is empty"));
+                if data.len() != 1 {
+                    return Err(Error::corruption(format!(
+                        "Boolean field requires 1 byte, got {}",
+                        data.len()
+                    )));
                 }
                 Ok(Value::Boolean(data[0] != 0))
             }
@@ -2753,7 +2815,8 @@ impl V5CompressedLegacyParser {
                 // Nested UDT - recursively parse
                 let mut nested_def = UdtTypeDef::new("".to_string(), name.clone());
                 for (field_name, field_type) in field_defs {
-                    nested_def = nested_def.with_field(field_name.clone(), field_type.clone(), true);
+                    nested_def =
+                        nested_def.with_field(field_name.clone(), field_type.clone(), true);
                 }
                 let dummy_column = crate::schema::Column {
                     name: name.clone(),
@@ -2761,7 +2824,8 @@ impl V5CompressedLegacyParser {
                     nullable: true,
                     default: None,
                 };
-                let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column, reader)?;
+                let (value, _) =
+                    self.parse_udt_value(data, 0, &nested_def, &dummy_column, reader)?;
                 Ok(value)
             }
             _ => {
@@ -2899,11 +2963,33 @@ impl V5CompressedLegacyParser {
     /// a different format: [complex_deletion_time?] [cell_count] [cells...]
     fn is_complex_column(data_type: &str) -> bool {
         let dt = data_type.to_lowercase();
-        // Non-frozen collections start directly with list/set/map
-        // Frozen collections start with "frozen<list<..." etc.
-        // Frozen types are serialized as single cells with blob value.
-        (dt.starts_with("list<") || dt.starts_with("set<") || dt.starts_with("map<"))
-            && !dt.contains("frozen")
+        // Non-frozen collections start directly with list/set/map (CQL syntax)
+        // or org.apache.cassandra.db.marshal.ListType/SetType/MapType (internal syntax)
+        // Collections containing frozen element types (e.g., list<frozen<...>>) are still complex
+        // collections because the outer collection is not frozen - only the elements are.
+        // Only frozen<list<...>> etc. are not complex (they're single-cell frozen types)
+
+        // Check for frozen collections (which are NOT complex)
+        if dt.starts_with("frozen<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.frozentype(")
+        {
+            return false;
+        }
+
+        // Check for CQL-style collection types
+        if dt.starts_with("list<") || dt.starts_with("set<") || dt.starts_with("map<") {
+            return true;
+        }
+
+        // Check for Cassandra internal collection types
+        if dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
+            || dt.starts_with("org.apache.cassandra.db.marshal.settype(")
+            || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
+        {
+            return true;
+        }
+
+        false
     }
 
     /// Parse a complex column (non-frozen collection).
@@ -2926,6 +3012,7 @@ impl V5CompressedLegacyParser {
         mut offset: usize,
         column: &crate::schema::Column,
         has_complex_deletion: bool,
+        reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         log::debug!(
             "V5CompressedLegacy: Parsing complex column '{}' type='{}' has_complex_deletion={} at offset {}",
@@ -2977,8 +3064,7 @@ impl V5CompressedLegacyParser {
             offset
         );
 
-        // Step 3: Skip all cells (parse but don't aggregate values yet)
-        // Future work can add proper value aggregation here
+        // Step 3: Parse all cells and aggregate values
         // Convert cell_count to usize safely to prevent overflow on 32-bit systems
         let cell_count_usize: usize = cell_count.try_into().map_err(|_| {
             Error::corruption(format!(
@@ -2987,19 +3073,106 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
-        for i in 0..cell_count_usize {
-            offset = self.skip_complex_cell(data, offset, &column.name, i as u64)?;
-        }
-
-        // Step 4: Return placeholder value based on collection type
+        // Determine collection type and extract element type(s)
         let dt = column.data_type.to_lowercase();
-        let value = if dt.starts_with("list<") {
-            Value::List(Vec::new())
-        } else if dt.starts_with("set<") {
-            Value::Set(Vec::new())
-        } else if dt.starts_with("map<") {
-            Value::Map(Vec::new())
+        let value = if dt.starts_with("list<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
+        {
+            // Parse list elements
+            let element_type = self.extract_collection_element_type(&column.data_type, "list")?;
+            let mut elements = Vec::with_capacity(cell_count_usize);
+
+            for i in 0..cell_count_usize {
+                let (cell_value, _path, new_offset) = self.parse_complex_cell_value(
+                    data,
+                    offset,
+                    &element_type,
+                    column,
+                    i as u64,
+                    reader,
+                )?;
+                offset = new_offset;
+
+                // Add non-null values to the list
+                if let Some(val) = cell_value {
+                    elements.push(val);
+                }
+            }
+
+            Value::List(elements)
+        } else if dt.starts_with("set<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.settype(")
+        {
+            // Parse set elements
+            let element_type = self.extract_collection_element_type(&column.data_type, "set")?;
+            let mut elements = Vec::with_capacity(cell_count_usize);
+
+            for i in 0..cell_count_usize {
+                let (cell_value, _path, new_offset) = self.parse_complex_cell_value(
+                    data,
+                    offset,
+                    &element_type,
+                    column,
+                    i as u64,
+                    reader,
+                )?;
+                offset = new_offset;
+
+                // Add non-null values to the set
+                if let Some(val) = cell_value {
+                    elements.push(val);
+                }
+            }
+
+            Value::Set(elements)
+        } else if dt.starts_with("map<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
+        {
+            // Parse map entries
+            let (key_type, value_type) = self.extract_map_types(&column.data_type)?;
+            let mut entries = Vec::with_capacity(cell_count_usize);
+
+            for i in 0..cell_count_usize {
+                let (cell_value, path_bytes, new_offset) = self.parse_complex_cell_value(
+                    data,
+                    offset,
+                    &value_type,
+                    column,
+                    i as u64,
+                    reader,
+                )?;
+                offset = new_offset;
+
+                // For maps, the cell path IS the key
+                // Parse the path as the key using the key type
+                // Note: Cell path keys are stored WITHOUT length prefixes (raw bytes only)
+                if !path_bytes.is_empty() {
+                    log::debug!(
+                        "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
+                        column.name,
+                        key_type,
+                        path_bytes.len()
+                    );
+                    // For cell path keys, parse directly without expecting length prefixes
+                    let key_value =
+                        self.parse_cell_path_key(&path_bytes, &key_type, &column.name)?;
+
+                    // Add non-null entries to the map
+                    if let Some(val) = cell_value {
+                        entries.push((key_value, val));
+                    } else {
+                        // Map entry with null value (tombstone for that key)
+                        entries.push((key_value, Value::Null));
+                    }
+                }
+            }
+
+            Value::Map(entries)
         } else {
+            // Unknown complex column type, skip cells
+            for i in 0..cell_count_usize {
+                offset = self.skip_complex_cell(data, offset, &column.name, i as u64)?;
+            }
             Value::Null
         };
 
@@ -3010,6 +3183,182 @@ impl V5CompressedLegacyParser {
         );
 
         Ok((value, offset))
+    }
+
+    /// Parse a single complex cell and extract its value.
+    /// Complex cells have: [flags] [timestamp?] [deletion?] [ttl?] [cell_path] [value?]
+    ///
+    /// Returns: (Optional<Value>, cell_path_bytes, new_offset)
+    /// - Value is None if cell is deleted or has empty value
+    /// - cell_path contains the raw path bytes (used as map key for map<> types)
+    fn parse_complex_cell_value(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        element_type: &str,
+        column: &crate::schema::Column,
+        cell_index: u64,
+        _reader: &super::super::types::SSTableReader,
+    ) -> Result<(Option<Value>, Vec<u8>, usize)> {
+        log::debug!(
+            "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} element_type='{}' starting at offset {}",
+            column.name,
+            cell_index,
+            element_type,
+            offset
+        );
+
+        // Step 1: Cell flags (standard 0x00-0x1F range)
+        if offset >= data.len() {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: unexpected end at flags (offset {})",
+                column.name, cell_index, offset
+            )));
+        }
+        let flags = data[offset];
+        offset += 1;
+
+        // Validate flags are in valid range
+        if flags > 0x1F {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: invalid flags 0x{:02x} at offset {} (expected 0x00-0x1F)",
+                column.name,
+                cell_index,
+                flags,
+                offset - 1
+            )));
+        }
+
+        let is_deleted = (flags & 0x01) != 0;
+        let is_expiring = (flags & 0x02) != 0;
+        let has_empty_value = (flags & 0x04) != 0;
+        let use_row_timestamp = (flags & 0x08) != 0;
+        let use_row_ttl = (flags & 0x10) != 0;
+
+        log::debug!(
+            "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} flags=0x{:02x} (deleted={}, expiring={}, empty_value={}, use_row_ts={}, use_row_ttl={})",
+            column.name,
+            cell_index,
+            flags,
+            is_deleted,
+            is_expiring,
+            has_empty_value,
+            use_row_timestamp,
+            use_row_ttl
+        );
+
+        // Step 2: Timestamp (if not using row timestamp)
+        if !use_row_timestamp {
+            let (remaining, _ts) = parse_vint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse timestamp at offset {}: {:?}",
+                    column.name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 3: Local deletion time (if deleted/expiring and not using row TTL)
+        if !use_row_ttl && (is_deleted || is_expiring) {
+            let (remaining, _ldt) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse localDeletionTime at offset {}: {:?}",
+                    column.name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 4: TTL (if expiring and not using row TTL)
+        if !use_row_ttl && is_expiring {
+            let (remaining, _ttl) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse TTL at offset {}: {:?}",
+                    column.name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 5: Cell path (VInt length + bytes)
+        let (remaining, path_len) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Complex cell {}.{}: failed to parse path length at offset {}: {:?}",
+                column.name, cell_index, offset, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        // Bounds check before reading path
+        if offset + path_len as usize > data.len() {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: cell path requires {} bytes but only {} available at offset {}",
+                column.name,
+                cell_index,
+                path_len,
+                data.len().saturating_sub(offset),
+                offset
+            )));
+        }
+
+        let path_bytes = data[offset..offset + path_len as usize].to_vec();
+        offset += path_len as usize;
+
+        // Step 6: Value (if not empty and not deleted)
+        let value = if is_deleted || has_empty_value {
+            log::debug!(
+                "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} is deleted or empty",
+                column.name,
+                cell_index
+            );
+            None
+        } else {
+            let (remaining, value_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse value length at offset {}: {:?}",
+                    column.name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+            // Bounds check before reading value
+            if offset + value_len as usize > data.len() {
+                return Err(Error::corruption(format!(
+                    "Complex cell {}.{}: value requires {} bytes but only {} available at offset {}",
+                    column.name,
+                    cell_index,
+                    value_len,
+                    data.len().saturating_sub(offset),
+                    offset
+                )));
+            }
+
+            let value_data = &data[offset..offset + value_len as usize];
+            offset += value_len as usize;
+
+            // Parse the value based on element type
+            // For complex cell values (inside collections), the value is stored as raw bytes
+            // without cell flags. Use parse_raw_type_value for all types.
+            let parsed_value = self
+                .parse_raw_type_value(value_data, 0, element_type, &column.name)
+                .map(|(val, _)| val)?;
+            Some(parsed_value)
+        };
+
+        log::debug!(
+            "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} complete, value={:?}, final offset {}",
+            column.name,
+            cell_index,
+            value.is_some(),
+            offset
+        );
+
+        Ok((value, path_bytes, offset))
     }
 
     /// Skip over a single complex cell without fully parsing its value.
@@ -3178,49 +3527,77 @@ impl V5CompressedLegacyParser {
         Ok(offset)
     }
 
-    /// Extract element type from list<T> or set<T> type string
+    /// Extract element type from list<T> or set<T> type string (CQL or Cassandra internal format)
     fn extract_collection_element_type(&self, type_str: &str, collection: &str) -> Result<String> {
-        let prefix = format!("{}<", collection);
-        if !type_str.starts_with(&prefix) || !type_str.ends_with('>') {
-            return Err(Error::schema(format!(
-                "Invalid {} type format: {}",
-                collection, type_str
-            )));
+        let type_lower = type_str.to_lowercase();
+
+        // Check for Cassandra internal format first: org.apache.cassandra.db.marshal.ListType(...)
+        let internal_prefix_lower = format!("org.apache.cassandra.db.marshal.{}type(", collection);
+        if type_lower.starts_with(&internal_prefix_lower) && type_lower.ends_with(')') {
+            // Use the lowercase prefix length to extract from the original string
+            let inner = &type_str[internal_prefix_lower.len()..type_str.len() - 1];
+            if inner.is_empty() {
+                return Err(Error::schema(format!(
+                    "Empty {} element type: {}",
+                    collection, type_str
+                )));
+            }
+            return Ok(inner.to_string());
         }
 
-        let inner = &type_str[prefix.len()..type_str.len() - 1];
-        if inner.is_empty() {
-            return Err(Error::schema(format!(
-                "Empty {} element type: {}",
-                collection, type_str
-            )));
+        // Check for CQL format: list<T>, set<T>
+        let prefix_lower = format!("{}<", collection);
+        if type_lower.starts_with(&prefix_lower) && type_lower.ends_with('>') {
+            // Use the lowercase prefix length to extract from the original string
+            let inner = &type_str[prefix_lower.len()..type_str.len() - 1];
+            if inner.is_empty() {
+                return Err(Error::schema(format!(
+                    "Empty {} element type: {}",
+                    collection, type_str
+                )));
+            }
+            return Ok(inner.to_string());
         }
 
-        Ok(inner.to_string())
+        Err(Error::schema(format!(
+            "Invalid {} type format: {}",
+            collection, type_str
+        )))
     }
 
-    /// Extract key and value types from map<K,V> type string
+    /// Extract key and value types from map<K,V> type string (CQL or Cassandra internal format)
     fn extract_map_types(&self, type_str: &str) -> Result<(String, String)> {
-        if !type_str.starts_with("map<") || !type_str.ends_with('>') {
+        let type_lower = type_str.to_lowercase();
+
+        // Determine the inner content based on format
+        let inner = if type_lower.starts_with("org.apache.cassandra.db.marshal.maptype(")
+            && type_str.ends_with(')')
+        {
+            // Cassandra internal format: org.apache.cassandra.db.marshal.MapType(K,V)
+            let prefix = "org.apache.cassandra.db.marshal.MapType(";
+            &type_str[prefix.len()..type_str.len() - 1]
+        } else if type_lower.starts_with("map<") && type_str.ends_with('>') {
+            // CQL format: map<K,V>
+            &type_str[4..type_str.len() - 1]
+        } else {
             return Err(Error::schema(format!(
                 "Invalid map type format: {}",
                 type_str
             )));
-        }
+        };
 
-        let inner = &type_str[4..type_str.len() - 1];
         if inner.is_empty() {
             return Err(Error::schema(format!("Empty map types: {}", type_str)));
         }
 
-        // Split by comma, handling nested angle brackets
+        // Split by comma, handling nested angle brackets and parentheses
         let mut depth = 0;
         let mut split_pos = None;
 
         for (i, ch) in inner.chars().enumerate() {
             match ch {
-                '<' => depth += 1,
-                '>' => depth -= 1,
+                '<' | '(' => depth += 1,
+                '>' | ')' => depth -= 1,
                 ',' if depth == 0 => {
                     split_pos = Some(i);
                     break;
@@ -3271,6 +3648,37 @@ impl V5CompressedLegacyParser {
         let normalized_type = type_str.to_lowercase();
 
         let value = match normalized_type.as_str() {
+            // Cassandra internal type names (full package paths)
+            "org.apache.cassandra.db.marshal.utf8type"
+            | "org.apache.cassandra.db.marshal.asciitype"
+            | "org.apache.cassandra.db.marshal.varchartype" => {
+                // Text: [VInt len][text bytes]
+                let (remaining, text_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse text length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let text_len = text_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if offset + text_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need {} bytes for text, only {} available",
+                        column_name,
+                        text_len,
+                        data.len() - offset
+                    )));
+                }
+
+                let text_bytes = &data[offset..offset + text_len];
+                let text = String::from_utf8(text_bytes.to_vec())
+                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in text: {}", e)))?;
+                offset += text_len;
+                Value::Text(text)
+            }
+
             "boolean" => {
                 // Boolean: 1 byte
                 if offset >= data.len() {
@@ -3774,39 +4182,35 @@ impl V5CompressedLegacyParser {
             }
 
             // Handle UDT (User-Defined Type) inside frozen collections
-            type_str if Self::is_udt_type(type_str) => {
+            // Note: We match against normalized (lowercased) but need original case for parsing
+            normalized if Self::is_udt_type(normalized) => {
                 log::debug!(
                     "Frozen element '{}': parsing UDT type '{}'",
                     column_name,
                     type_str
                 );
 
-                // Parse UDT definition from the type string
+                // Parse UDT definition from the ORIGINAL type string (not lowercased)
+                // because UserType parsing expects exact case "UserType"
                 let udt_def = Self::parse_udt_type_definition(type_str)?;
 
-                // UDTs inside frozen collections have VInt length prefix
-                let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "Frozen UDT '{}': failed to parse blob length: {:?}",
-                        column_name, e
-                    ))
-                })?;
-                let blob_len = blob_len as usize;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-                offset += bytes_consumed;
+                // UDT data: The VInt length prefix has already been consumed by the caller
+                // (either complex cell parser or frozen collection element parser).
+                // The data slice passed to parse_raw_type_value is already the raw UDT bytes.
+                let udt_data = &data[offset..];
 
-                if offset + blob_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen UDT '{}': need {} bytes but only {} available",
-                        column_name,
-                        blob_len,
-                        data.len() - offset
-                    )));
-                }
-
-                // Extract UDT data blob
-                let udt_data = &data[offset..offset + blob_len];
-                offset += blob_len;
+                // Debug: Log the UDT data hex dump
+                log::debug!(
+                    "Frozen UDT '{}': data_len={}, hex dump: {}",
+                    column_name,
+                    udt_data.len(),
+                    udt_data
+                        .iter()
+                        .take(64)
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
 
                 // TODO(Issue #220): Full UDT parsing requires SSTableReader for nested types.
                 // parse_raw_type_value is called in frozen collection contexts where we don't
@@ -3814,6 +4218,17 @@ impl V5CompressedLegacyParser {
                 // complex nested types.
                 //
                 // Temporary solution: Parse UDT with limited nested type support
+
+                // Validate field count to prevent memory exhaustion
+                if udt_def.fields.len() > MAX_UDT_FIELD_COUNT {
+                    return Err(Error::schema(format!(
+                        "UDT '{}' has {} fields, exceeds maximum {}",
+                        udt_def.name,
+                        udt_def.fields.len(),
+                        MAX_UDT_FIELD_COUNT
+                    )));
+                }
+
                 let mut current_offset = 0;
                 let mut fields = Vec::with_capacity(udt_def.fields.len());
 
@@ -3842,6 +4257,16 @@ impl V5CompressedLegacyParser {
                         udt_data[current_offset + 2],
                         udt_data[current_offset + 3],
                     ]);
+                    log::debug!(
+                        "Frozen UDT field '{}' at offset {}: length bytes={:02x} {:02x} {:02x} {:02x}, parsed length={}",
+                        field_def.name,
+                        current_offset,
+                        udt_data[current_offset],
+                        udt_data[current_offset + 1],
+                        udt_data[current_offset + 2],
+                        udt_data[current_offset + 3],
+                        field_len
+                    );
                     current_offset += 4;
 
                     let field_value = if field_len == -1 {
@@ -3856,8 +4281,7 @@ impl V5CompressedLegacyParser {
                         // Validation: reject other negative values
                         return Err(Error::corruption(format!(
                             "Frozen UDT field '{}': invalid negative field length {}",
-                            field_def.name,
-                            field_len
+                            field_def.name, field_len
                         )));
                     } else {
                         // Field with data
@@ -3882,7 +4306,8 @@ impl V5CompressedLegacyParser {
                         );
 
                         // Parse simple field types directly, complex types as blob
-                        let value = Self::parse_simple_udt_field_value(field_data, &field_def.field_type)?;
+                        let value =
+                            Self::parse_simple_udt_field_value(field_data, &field_def.field_type)?;
                         Some(value)
                     };
 
@@ -3897,6 +4322,9 @@ impl V5CompressedLegacyParser {
                     keyspace: udt_def.keyspace.clone(),
                     fields,
                 };
+
+                // Update offset to point after the UDT data we consumed
+                offset += current_offset;
 
                 Value::Udt(udt_value)
             }
@@ -3935,6 +4363,106 @@ impl V5CompressedLegacyParser {
         };
 
         Ok((value, offset))
+    }
+
+    /// Parse a cell path key (for map keys stored in cell paths).
+    /// Cell path keys are stored as raw bytes WITHOUT length prefixes.
+    fn parse_cell_path_key(&self, data: &[u8], type_str: &str, column_name: &str) -> Result<Value> {
+        let normalized_type = type_str.to_lowercase();
+
+        match normalized_type.as_str() {
+            // Text types: raw UTF-8 bytes (no length prefix)
+            "org.apache.cassandra.db.marshal.utf8type"
+            | "org.apache.cassandra.db.marshal.asciitype"
+            | "org.apache.cassandra.db.marshal.varchartype"
+            | "text"
+            | "varchar"
+            | "ascii" => {
+                let text = String::from_utf8(data.to_vec())
+                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in map key: {}", e)))?;
+                Ok(Value::Text(text))
+            }
+
+            // UUID types: 16 bytes
+            "org.apache.cassandra.db.marshal.uuidtype"
+            | "org.apache.cassandra.db.marshal.timeuuidtype"
+            | "uuid"
+            | "timeuuid" => {
+                if data.len() != 16 {
+                    return Err(Error::corruption(format!(
+                        "Map key UUID requires 16 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let uuid_bytes: [u8; 16] = data[0..16]
+                    .try_into()
+                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+                Ok(Value::Uuid(uuid_bytes))
+            }
+
+            // Int types: 4 bytes big-endian
+            "org.apache.cassandra.db.marshal.int32type" | "int" => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Map key int requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Integer(v))
+            }
+
+            // BigInt types: 8 bytes big-endian
+            "org.apache.cassandra.db.marshal.longtype" | "bigint" | "counter" => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "Map key bigint requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::BigInt(v))
+            }
+
+            // Date types: 4 bytes (days since epoch as i32)
+            "org.apache.cassandra.db.marshal.simpledatetype" | "date" => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Map key date requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let days = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Date(days))
+            }
+
+            // Timestamp types: 8 bytes (milliseconds since epoch)
+            "org.apache.cassandra.db.marshal.timestamptype" | "timestamp" => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "Map key timestamp requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let millis = i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::Timestamp(millis))
+            }
+
+            // Fallback: return as blob
+            _ => {
+                log::debug!(
+                    "Map key type '{}' for column '{}' parsed as blob ({} bytes)",
+                    type_str,
+                    column_name,
+                    data.len()
+                );
+                Ok(Value::Blob(data.to_vec()))
+            }
+        }
     }
 
     /// Parse frozen list value (raw version without Column parameter)
@@ -4795,5 +5323,118 @@ mod tests {
             .extract_collection_element_type(&inner_set, "set")
             .unwrap();
         assert_eq!(element_type, "uuid");
+    }
+
+    #[test]
+    fn test_udt_field_count_limit() {
+        // Test parse_udt_type_definition with excessive fields
+        // Build a UDT type string with MAX_UDT_FIELD_COUNT + 1 fields
+        let mut field_defs = Vec::new();
+        for i in 0..=MAX_UDT_FIELD_COUNT {
+            let field_name_hex = hex::encode(format!("field_{}", i));
+            field_defs.push(format!(
+                "{}:org.apache.cassandra.db.marshal.Int32Type",
+                field_name_hex
+            ));
+        }
+
+        let type_str = format!(
+            "org.apache.cassandra.db.marshal.UserType(test_ks,{},{})",
+            hex::encode("test_udt"),
+            field_defs.join(",")
+        );
+
+        // Parse the UDT definition (this will succeed - we only validate field count during value parsing)
+        let udt_def = V5CompressedLegacyParser::parse_udt_type_definition(&type_str).unwrap();
+        assert_eq!(udt_def.fields.len(), MAX_UDT_FIELD_COUNT + 1);
+
+        // Create a parser
+        let parser = V5CompressedLegacyParser::new(
+            "test_ks".to_string(),
+            "test_table".to_string(),
+            0,
+            0,
+            None,
+        );
+
+        // When parsing a value with too many fields, it should fail validation
+        // The validation check in parse_raw_type_value at line 4182 will catch this
+        let data = vec![0u8; 4 * (MAX_UDT_FIELD_COUNT + 1)]; // Minimal data (all nulls)
+
+        // Test through parse_raw_type_value which has the validation
+        // Signature: parse_raw_type_value(data, offset, type_str, column_name)
+        let result = parser.parse_raw_type_value(&data, 0, &type_str, "test_col");
+        assert!(
+            result.is_err(),
+            "Should reject UDT with more than MAX_UDT_FIELD_COUNT fields"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("exceeds maximum"),
+            "Error should mention exceeding maximum"
+        );
+    }
+
+    #[test]
+    fn test_type_nesting_depth_limit() {
+        // Build a deeply nested type string that exceeds MAX_TYPE_NESTING_DEPTH
+        let mut type_str = "org.apache.cassandra.db.marshal.UTF8Type".to_string();
+
+        // Wrap it in ListType MAX_TYPE_NESTING_DEPTH + 1 times
+        for _ in 0..=MAX_TYPE_NESTING_DEPTH {
+            type_str = format!("org.apache.cassandra.db.marshal.ListType({})", type_str);
+        }
+
+        // This should fail due to depth limit
+        let result = V5CompressedLegacyParser::parse_cassandra_type_with_depth(&type_str, 0);
+        assert!(
+            result.is_err(),
+            "Should reject type with nesting depth > MAX_TYPE_NESTING_DEPTH"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("nesting depth"),
+            "Error should mention nesting depth"
+        );
+
+        // Build a type string with exactly MAX_TYPE_NESTING_DEPTH levels
+        let mut ok_type_str = "org.apache.cassandra.db.marshal.UTF8Type".to_string();
+        for _ in 0..MAX_TYPE_NESTING_DEPTH {
+            ok_type_str = format!("org.apache.cassandra.db.marshal.ListType({})", ok_type_str);
+        }
+
+        // This should succeed
+        let result = V5CompressedLegacyParser::parse_cassandra_type_with_depth(&ok_type_str, 0);
+        assert!(
+            result.is_ok(),
+            "Should accept type with nesting depth == MAX_TYPE_NESTING_DEPTH"
+        );
+    }
+
+    #[test]
+    fn test_nested_udt_depth_limit() {
+        // Build a deeply nested UDT type string
+        // Inner UDT: UserType(ks,hex(inner),field1:UTF8Type)
+        let inner_udt = "org.apache.cassandra.db.marshal.UserType(ks,696e6e6572,666965746431:org.apache.cassandra.db.marshal.UTF8Type)";
+
+        // Wrap it recursively
+        let mut type_str = inner_udt.to_string();
+        for i in 0..=MAX_TYPE_NESTING_DEPTH {
+            let hex_name = hex::encode(format!("nested_{}", i));
+            let hex_field = hex::encode("field");
+            type_str = format!(
+                "org.apache.cassandra.db.marshal.UserType(ks,{},{}:{})",
+                hex_name, hex_field, type_str
+            );
+        }
+
+        // This should fail due to depth limit
+        let result = V5CompressedLegacyParser::parse_udt_type_definition_with_depth(&type_str, 0);
+        assert!(
+            result.is_err(),
+            "Should reject UDT with nesting depth > MAX_TYPE_NESTING_DEPTH"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("nesting depth"),
+            "Error should mention nesting depth"
+        );
     }
 }

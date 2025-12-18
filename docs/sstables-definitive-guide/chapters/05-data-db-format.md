@@ -62,9 +62,40 @@ Endianness:
 - Range tombstone: spans clustering ranges
 - TTL/expiring: cells carry ttl and local deletion time; expired cells are omitted at read
 
-### Collections and UDTs (overview)
-- Collections (list/set/map) serialize element counts and element/value pairs; element-level tombstones are possible and must be merged (see Ch. 11).
-- UDTs serialize fields in schema order with presence bits for null handling.
+### Collections and UDTs
+
+**Collections** (list/set/map) have two storage modes:
+- **Frozen** (`frozen<list<...>>`): Single-cell storage, entire collection serialized as one blob
+- **Non-frozen** (`list<...>`): Multi-cell storage, each element stored as separate cell
+
+**Non-frozen collection cell format** (complex columns):
+```
+[flags: u8]
+[timestamp: VInt if not USE_ROW_TIMESTAMP_MASK]
+[local_deletion_time: VInt if deleted/expiring]
+[ttl: VInt if expiring]
+[cell_path: VInt length + bytes]  ← List: UUID, Set: element value, Map: key
+[value: VInt length + bytes]      ← Element/value data
+```
+
+**UDTs** (User-Defined Types) serialize fields in schema order with 4-byte BE length prefixes:
+```
+[field_1_length: 4-byte BE i32][field_1_data]
+[field_2_length: 4-byte BE i32][field_2_data]
+...
+```
+
+**UDT field length semantics** (confirmed via Issue #220):
+- `-1` (0xFFFFFFFF): Field is NULL
+- `0` (0x00000000): Field is empty (zero-length but present)
+- `>0`: Number of bytes of field data following
+- Trailing omitted fields are implicitly NULL
+
+**Critical distinction**: The **outer** type determines storage:
+- `list<frozen<udt>>` = multi-cell (each UDT element is separate cell)
+- `frozen<list<udt>>` = single-cell (entire list is one blob)
+
+See `tables/type-mapping-complex.md` for detailed format specifications.
 
 ### Key Takeaways
 - `Data.db` is schema-driven and encodes partitions as unfiltered row streams.

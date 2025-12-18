@@ -37,8 +37,30 @@ Upstream references:
 - `org.apache.cassandra.db.SerializationHeader`
 - `org.apache.cassandra.db.rows.*`
 
+## UDT Field Encoding (Issue #220)
+
+UDT fields use **4-byte big-endian i32** length prefixes (NOT VInt):
+```
+[field_length: 4-byte BE i32][field_data: variable]
+```
+
+**Length semantics**:
+| Value | Meaning |
+|-------|---------|
+| `-1` (0xFFFFFFFF) | NULL field |
+| `0` (0x00000000) | Empty field (zero-length, present) |
+| `>0` | Byte count of field data |
+
+**UDT type string format** (in Statistics.db):
+```
+org.apache.cassandra.db.marshal.UserType(keyspace,hex_name,field:type,...)
+```
+- Names are hex-encoded: `616464726573735f74797065` = "address_type"
+- Can exceed 500 bytes for complex nested UDTs (up to 5000 bytes supported)
+
 ## Key Takeaways
 - Expect VInt before variable-sized payloads; decode, then slice the value.
+- **Exception**: UDT fields use fixed 4-byte BE i32 lengths, not VInt.
 - Signed fields that use ZigZag appear primarily in legacy contexts; length fields are non-negative.
 
 ## References
