@@ -21,6 +21,7 @@ pub(crate) async fn read_next_block(
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
+    header_offset: u64,
 ) -> Result<Option<Vec<u8>>> {
     read_next_block_with_retry(
         file,
@@ -28,6 +29,7 @@ pub(crate) async fn read_next_block(
         config,
         compression_info,
         current_chunk_index,
+        header_offset,
         3,
     )
     .await
@@ -40,6 +42,7 @@ async fn read_next_block_with_retry(
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
+    header_offset: u64,
     max_retries: usize,
 ) -> Result<Option<Vec<u8>>> {
     let mut retry_count = 0;
@@ -51,6 +54,7 @@ async fn read_next_block_with_retry(
             config,
             compression_info,
             current_chunk_index,
+            header_offset,
         )
         .await
         {
@@ -84,6 +88,7 @@ async fn read_next_block_impl(
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
+    _header_offset: u64, // Unused for NB format; kept for potential future BTI/Legacy use
 ) -> Result<Option<Vec<u8>>> {
     log::debug!("block_io::read_next_block_impl: Starting block read");
     log::debug!(
@@ -112,9 +117,12 @@ async fn read_next_block_impl(
         | crate::parser::header::CassandraVersion::V5_0FormatG
         | crate::parser::header::CassandraVersion::V5_0StaticColumns
         | crate::parser::header::CassandraVersion::V5_0ComplexTypes
-        | crate::parser::header::CassandraVersion::V5_0TypedCollections => {
-            // Issue #219: V5_0ComplexTypes (0x82365C00) uses NB format chunk reader
-            // Issue #221: V5_0TypedCollections (0x0F3C0000) also uses NB format chunk reader
+        | crate::parser::header::CassandraVersion::V5_0TypedCollections
+        | crate::parser::header::CassandraVersion::V5_0WideRows => {
+            // NB format versions using chunked compression (Snappy/LZ4):
+            // - V5_0ComplexTypes (0x82365C00) - added in Issue #219
+            // - V5_0TypedCollections (0x0F3C0000) - added in Issue #221
+            // - V5_0WideRows (0xF07C5C00) - added in Issue #219 (Snappy collision handling)
             log::debug!("block_io::read_next_block_impl: Using NB format chunk reader");
 
             // Get file size for chunk size calculation
@@ -128,11 +136,16 @@ async fn read_next_block_impl(
             };
 
             // Read chunk with CRC validation
+            // Note: For NB format files, CompressionInfo chunk offsets are always relative
+            // to the start of the Data.db file (offset 0). Any embedded SSTable header is
+            // part of the compressed data, not a separate uncompressed prefix.
+            // Therefore, we always use header_offset=0 for NB format chunk reading.
             return read_nb_format_chunk_data(
                 file,
                 compression_info,
                 current_chunk_index,
                 file_size,
+                0, // NB format: chunk offsets are relative to file start
             )
             .await;
         }
@@ -222,11 +235,23 @@ async fn read_next_block_impl(
 /// 2. Reads the compressed chunk bytes
 /// 3. Reads and validates the trailing CRC32 checksum
 /// 4. Returns compressed chunk data ready for decompression
+///
+/// # Offset Handling
+///
+/// For NB format files, CompressionInfo chunk offsets are ABSOLUTE file positions
+/// (relative to byte 0 of Data.db), not relative to any header. This applies to:
+/// - Headerless files (most common): chunk 0 starts at offset 0
+/// - Snappy collision cases (Issue #219): correctly detected as headerless
+///
+/// The `header_offset` parameter is preserved for potential future BTI/Legacy format
+/// support where chunk offsets may be relative to compressed data start, but for
+/// NB format it should always be 0.
 async fn read_nb_format_chunk_data(
     file: &Arc<Mutex<BufReader<File>>>,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     file_size: u64,
+    header_offset: u64,
 ) -> Result<Option<Vec<u8>>> {
     log::debug!("read_nb_format_chunk_data: Starting chunk read");
 
@@ -299,16 +324,18 @@ async fn read_nb_format_chunk_data(
     let (chunk_data, expected_crc) = {
         let mut file_guard = file.lock().await;
 
-        // Seek to chunk offset
+        // Seek to chunk offset (adjusted by header_offset for files with embedded headers)
+        // CompressionInfo chunk offsets are relative to start of compressed data
+        let absolute_offset = chunk_offset + header_offset;
         file_guard
-            .seek(std::io::SeekFrom::Start(chunk_offset))
+            .seek(std::io::SeekFrom::Start(absolute_offset))
             .await
             .map_err(|e| {
                 Error::Io(std::io::Error::new(
                     e.kind(),
                     format!(
-                        "Failed to seek to chunk {} at offset 0x{:x}: {}",
-                        chunk_idx, chunk_offset, e
+                        "Failed to seek to chunk {} at offset 0x{:x} (header_offset={}): {}",
+                        chunk_idx, absolute_offset, header_offset, e
                     ),
                 ))
             })?;

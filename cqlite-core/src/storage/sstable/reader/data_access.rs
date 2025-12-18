@@ -679,6 +679,7 @@ impl SSTableReader {
             &self.config,
             &self.compression_info,
             &self.current_chunk_index,
+            self.actual_header_size as u64,
         )
         .await
     }

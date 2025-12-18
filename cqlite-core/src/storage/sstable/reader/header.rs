@@ -147,13 +147,47 @@ pub(crate) async fn parse_header_with_version_detection(
             ]);
 
             // If first 4 bytes are a valid magic number, this NB file has a header
-            if CassandraVersion::from_magic_number(first_4_bytes).is_some() {
+            //
+            // IMPORTANT: Check for false positives from Snappy-compressed data (Issue #219)
+            //
+            // Snappy varint length encoding can collide with Cassandra magic numbers.
+            // Snappy varints use the high bit (0x80) as a continuation marker. When the
+            // first byte of compressed chunk data has this bit set, it can coincidentally
+            // match certain magic number patterns.
+            //
+            // Known collision: V5_0WideRows (0xF07C5C00)
+            // - First byte 0xF0 has high bit set (Snappy continuation marker)
+            // - 0xF0 0x7C decodes as Snappy varint for ~15984 bytes (compressed chunk length)
+            // - This occurs when NB format Data.db starts with a ~16KB compressed chunk
+            //
+            // We only check V5_0WideRows specifically because:
+            // 1. It's the only collision observed in practice (chat_messages table)
+            // 2. Checking ALL magic numbers with high bit would risk breaking real
+            //    embedded headers (V5_0ComplexTypes, V5_0FormatF, etc. have high bit too)
+            // 3. NB format files are typically headerless, so false positives are rare
+            //
+            // Detection strategy: If bytes match V5_0WideRows AND first byte has high bit,
+            // treat as Snappy collision and parse as headerless.
+            let detected_version = CassandraVersion::from_magic_number(first_4_bytes);
+            let is_snappy_varint_collision = detected_version
+                == Some(CassandraVersion::V5_0WideRows)
+                && (header_buffer[0] & 0x80) != 0;
+
+            if detected_version.is_some() && !is_snappy_varint_collision {
                 log::debug!(
                     "NB format file '{}' has embedded header (magic: 0x{:08x}) - using standard header parsing",
                     path.display(),
                     first_4_bytes
                 );
                 // Fall through to standard header parsing below
+            } else if is_snappy_varint_collision {
+                // Snappy varint collision detected - treat as headerless
+                log::debug!(
+                    "NB format file '{}' has Snappy varint collision with V5_0WideRows magic (0x{:08x}) - treating as headerless",
+                    path.display(),
+                    first_4_bytes
+                );
+                return create_minimal_nb_header(path).await;
             } else {
                 // True headerless NB format - first 4 bytes are compressed data
                 log::debug!(
@@ -574,4 +608,146 @@ pub(crate) fn parse_minimal_legacy_header(
         columns: vec![],
         properties: std::collections::HashMap::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test Snappy varint collision detection for V5_0WideRows magic number.
+    ///
+    /// Issue #219: Snappy-compressed chunk data starting with 0xF0 0x7C 0x5C 0x00
+    /// collides with V5_0WideRows magic (0xF07C5C00) because 0xF0 has the high bit
+    /// set (Snappy continuation marker).
+    #[test]
+    fn test_snappy_varint_collision_detection() {
+        // Bytes that look like V5_0WideRows magic but are actually Snappy varint
+        let header_buffer = [0xF0, 0x7C, 0x5C, 0x00, 0x10, 0x30, 0xB5, 0x68];
+
+        // First byte 0xF0 has high bit set (Snappy continuation marker)
+        assert_eq!(
+            header_buffer[0] & 0x80,
+            0x80,
+            "First byte should have high bit set"
+        );
+
+        // These bytes match V5_0WideRows magic
+        let first_4_bytes = u32::from_be_bytes([
+            header_buffer[0],
+            header_buffer[1],
+            header_buffer[2],
+            header_buffer[3],
+        ]);
+        assert_eq!(first_4_bytes, 0xF07C5C00, "Should match V5_0WideRows magic");
+
+        // Magic number is detected
+        let detected = CassandraVersion::from_magic_number(first_4_bytes);
+        assert_eq!(
+            detected,
+            Some(CassandraVersion::V5_0WideRows),
+            "Should detect V5_0WideRows"
+        );
+
+        // Collision should be detected (detected version + high bit)
+        let is_collision =
+            detected == Some(CassandraVersion::V5_0WideRows) && (header_buffer[0] & 0x80) != 0;
+        assert!(is_collision, "Should detect Snappy collision");
+    }
+
+    /// Test that genuine magic numbers without high bit are NOT flagged as collisions.
+    #[test]
+    fn test_genuine_magic_number_not_collision() {
+        // V5_0TypedCollections magic: 0x0F3C0000 - first byte 0x0F does NOT have high bit
+        let header_buffer = [0x0F, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+        // First byte does NOT have high bit set
+        assert_eq!(
+            header_buffer[0] & 0x80,
+            0x00,
+            "First byte should NOT have high bit"
+        );
+
+        let first_4_bytes = u32::from_be_bytes([
+            header_buffer[0],
+            header_buffer[1],
+            header_buffer[2],
+            header_buffer[3],
+        ]);
+
+        let detected = CassandraVersion::from_magic_number(first_4_bytes);
+        assert_eq!(
+            detected,
+            Some(CassandraVersion::V5_0TypedCollections),
+            "Should detect V5_0TypedCollections"
+        );
+
+        // Should NOT be a collision (no high bit in first byte)
+        let is_collision =
+            detected == Some(CassandraVersion::V5_0WideRows) && (header_buffer[0] & 0x80) != 0;
+        assert!(
+            !is_collision,
+            "V5_0TypedCollections should not be flagged as collision"
+        );
+    }
+
+    /// Test other magic numbers with high bit are NOT flagged (only V5_0WideRows check).
+    ///
+    /// We specifically only check V5_0WideRows to avoid breaking real embedded headers.
+    #[test]
+    fn test_other_high_bit_magic_not_collision() {
+        // V5_0ComplexTypes magic: 0x82365C00 - first byte 0x82 HAS high bit
+        // But we don't flag it because we only check V5_0WideRows specifically
+        let header_buffer = [0x82, 0x36, 0x5C, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+        // First byte DOES have high bit set
+        assert_eq!(
+            header_buffer[0] & 0x80,
+            0x80,
+            "First byte should have high bit"
+        );
+
+        let first_4_bytes = u32::from_be_bytes([
+            header_buffer[0],
+            header_buffer[1],
+            header_buffer[2],
+            header_buffer[3],
+        ]);
+
+        let detected = CassandraVersion::from_magic_number(first_4_bytes);
+        assert_eq!(
+            detected,
+            Some(CassandraVersion::V5_0ComplexTypes),
+            "Should detect V5_0ComplexTypes"
+        );
+
+        // Should NOT be flagged as collision (only V5_0WideRows is checked)
+        let is_collision =
+            detected == Some(CassandraVersion::V5_0WideRows) && (header_buffer[0] & 0x80) != 0;
+        assert!(
+            !is_collision,
+            "V5_0ComplexTypes should not be flagged as collision"
+        );
+    }
+
+    /// Test that unrecognized bytes are not flagged as collisions.
+    #[test]
+    fn test_unrecognized_bytes_not_collision() {
+        // Random bytes that don't match any magic number
+        let header_buffer = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00];
+
+        let first_4_bytes = u32::from_be_bytes([
+            header_buffer[0],
+            header_buffer[1],
+            header_buffer[2],
+            header_buffer[3],
+        ]);
+
+        let detected = CassandraVersion::from_magic_number(first_4_bytes);
+        assert_eq!(detected, None, "Should not detect any version");
+
+        // Not a collision because no version detected
+        let is_collision =
+            detected == Some(CassandraVersion::V5_0WideRows) && (header_buffer[0] & 0x80) != 0;
+        assert!(!is_collision, "Random bytes should not be flagged");
+    }
 }

@@ -2,9 +2,9 @@
 
 **Comprehensive validation tracking for all test tables across the CQLite test suite**
 
-**Last Updated**: 2025-12-17 (After Issue #221 fix - Complex Cell Flags)
+**Last Updated**: 2025-12-18 (After Issue #219 fix - V5_0WideRows chunk reader + Snappy varint collision)
 **Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) - Validate all 33 test tables can be loaded successfully
-**Current Status**: 31/33 PASS (93.9% pass rate) - **Excellent Progress!**
+**Current Status**: 32/33 PASS (97.0% pass rate) - **Near Complete!**
 
 ---
 
@@ -14,10 +14,10 @@
 |--------|-------|-------|
 | **Total Tables** | 33 | Across 4 keyspaces (test_basic, test_collections, test_timeseries, test_wide_rows) |
 | **Tables with JSONL** | 33 | 100% coverage - all tables have sstabledump reference files |
-| **Smoke Test Pass** | 31/33 | 93.9% pass rate (major improvement from Dec 2025 fixes + Issue #221) |
-| **Smoke Test Fail** | 2/33 | 6.1% failure rate - blocked on UDTs (Issue #220), nested frozen (Issue #219) |
+| **Smoke Test Pass** | 32/33 | 97.0% pass rate (major improvement from Dec 2025 fixes + Issue #219) |
+| **Smoke Test Fail** | 1/33 | 3.0% failure rate - blocked on UDTs only (Issue #220) |
 | **Exit Code 3 Failures** | 1 | UDT schema parsing (collections_with_udts) |
-| **Exit Code 5 Failures** | 1 | Nested frozen collections (chat_messages) |
+| **Exit Code 5 Failures** | 0 | None remaining |
 
 ### Pass Rate by Keyspace
 
@@ -26,9 +26,9 @@
 | **test_basic** | 8 | 0 | 8 | 100% ✅ |
 | **test_collections** | 7 | 1 | 8 | 87.5% |
 | **test_timeseries** | 9 | 0 | 9 | 100% ✅ |
-| **test_wide_rows** | 7 | 1 | 8 | 87.5% |
+| **test_wide_rows** | 8 | 0 | 8 | 100% ✅ |
 
-**Note**: Pass rate improved to 31/33 after Issue #221 fix + code review bounds checking fixes. Tables now passing: typed_collections_table, frozen_collections_table, empty_collections_table, large_collections_table.
+**Note**: Pass rate improved to 32/33 after Issue #219 fix (V5_0WideRows chunk reader + Snappy varint collision detection). Only remaining failure is `collections_with_udts` (Issue #220 - UDT support).
 
 ### Recent Fixes (Dec 2025)
 
@@ -42,7 +42,7 @@
 | #216 | TOC-based SerializationHeader parsing | Collection-heavy tables |
 | #217 | Statistics.db parser hardening | Malformed input handling |
 | #218 | Summary.db parser rewrite (correct C5 format) | nested_collections_table |
-| #219 | Frozen type parsing (parse_raw_type_value) | ✅ Implemented - target tables also need #221 |
+| #219 | V5_0WideRows chunk reader + Snappy varint collision detection | **chat_messages**, frozen_collections_table |
 | #221 | Complex cell flag handling (non-frozen collections) | **typed_collections_table**, **frozen_collections_table** |
 
 ---
@@ -62,7 +62,7 @@
 | static_columns_table | 99 | ✅ | ✅ | ✅ | ⚠️ (1 test) | **PASS** | Fixed by Issue #210 |
 | uncompressed_table | 99 | ✅ | ✅ | ✅ | ✅ (5 tests) | **PASS** | Fixed by Issue #213 |
 
-### test_collections (8 tables - 5 PASS / 3 FAIL) 62.5%
+### test_collections (8 tables - 7 PASS / 1 FAIL) 87.5%
 
 | Table | Rows | Load | Parse | Count | Int Test | Status | Notes |
 |-------|------|------|-------|-------|----------|--------|-------|
@@ -89,12 +89,12 @@
 | time_bucketed_counters | 0 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 | user_activity | 199 | ✅ | ✅ | ✅ | ✅ (3 tests) | **PASS** | Fixed by Issue #213 |
 
-### test_wide_rows (8 tables - 7 PASS / 1 FAIL) 87.5%
+### test_wide_rows (8 tables - 8 PASS / 0 FAIL) ✅ 100%
 
 | Table | Rows | Load | Parse | Count | Int Test | Status | Notes |
 |-------|------|------|-------|-------|----------|--------|-------|
 | wide_partition_table | 99 | ✅ | ✅ | ✅ | ✅ (14 tests) | **PASS** | Fixed by Issue #213 |
-| chat_messages | 49 | ❌ | ❌ | ❌ | ❌ (0 tests) | **FAIL** | Non-frozen collections (metadata, attachments) need complex cell flags (Issue #221) |
+| chat_messages | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #219 (V5_0WideRows chunk reader + Snappy varint collision) |
 | document_versions | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 | large_blob_table | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 | many_columns_table | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
@@ -146,26 +146,18 @@ The following critical blockers have been **resolved**:
 - ✅ **Issue #216**: TOC-based SerializationHeader parsing - FIXED
 - ✅ **Issue #217**: Statistics.db parser hardening - FIXED
 - ✅ **Issue #218**: Summary.db parser format - FIXED (nested_collections_table now passes)
+- ✅ **Issue #219**: V5_0WideRows chunk reader + Snappy varint collision - FIXED (chat_messages now passes)
+- ✅ **Issue #221**: Complex cell flag handling - FIXED (typed_collections_table, frozen_collections_table now pass)
 
-### Remaining Feature Gaps (4 tables)
+### Remaining Feature Gaps (1 table)
 
-#### 1. Frozen Collection Type Support - Issue #219
-**Impact**: 2 tables (`frozen_collections_table`, `chat_messages`)
-**Status**: Feature gap - Frozen type serialization not implemented
-**Exit Code**: Invalid JSON / 5
-**Tracking**: https://github.com/pmcfadin/cqlite/issues/219
-
-#### 2. UDT (User-Defined Type) Support - Issue #220
+#### UDT (User-Defined Type) Support - Issue #220
 **Impact**: 1 table (`collections_with_udts`)
 **Status**: Feature gap - UDT schema parsing incomplete
 **Exit Code**: 3 (schema extraction error)
 **Tracking**: https://github.com/pmcfadin/cqlite/issues/220
 
-#### 3. Complex Cell Flag Handling - Issue #221
-**Impact**: 1 table (`typed_collections_table`)
-**Status**: Feature gap - Complex cell flags (0xc1-0xcf) not implemented
-**Exit Code**: 5
-**Tracking**: https://github.com/pmcfadin/cqlite/issues/221
+**Note**: Issues #219 and #221 have been resolved. Only UDT support remains as a blocking feature gap.
 
 ### Entry Count Mismatches (Informational - P2)
 **Impact**: Several passing tables show entry count != row count in reference
