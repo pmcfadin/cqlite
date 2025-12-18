@@ -15,10 +15,10 @@
 | **Total Tables** | 33 | Across 4 keyspaces (test_basic, test_collections, test_timeseries, test_wide_rows) |
 | **Tables with JSONL** | 33 | 100% coverage - all tables have sstabledump reference files |
 | **Smoke Test Pass** | 29/33 | 87.9% pass rate (major improvement from Dec 2025 fixes) |
-| **Smoke Test Fail** | 4/33 | 12.1% failure rate - blocked on complex types (UDTs, frozen collections) |
+| **Smoke Test Fail** | 4/33 | 12.1% failure rate - blocked on complex cell flags (Issue #221), UDTs (Issue #220) |
 | **Exit Code 3 Failures** | 1 | UDT schema parsing (collections_with_udts) |
-| **Exit Code 5 Failures** | 2 | Complex type handling (typed_collections_table, chat_messages) |
-| **Other Failures** | 1 | frozen_collections_table (invalid JSON output) |
+| **Exit Code 5 Failures** | 2 | Non-frozen collections (typed_collections_table, chat_messages) |
+| **Other Failures** | 1 | frozen_collections_table (has both frozen AND non-frozen collections) |
 
 ### Pass Rate by Keyspace
 
@@ -41,6 +41,7 @@
 | #216 | TOC-based SerializationHeader parsing | Collection-heavy tables |
 | #217 | Statistics.db parser hardening | Malformed input handling |
 | #218 | Summary.db parser rewrite (correct C5 format) | nested_collections_table |
+| #219 | Frozen type parsing (parse_raw_type_value) | ✅ Implemented - target tables also need #221 |
 
 ---
 
@@ -67,10 +68,10 @@
 | collection_clustering_table | 49 | ✅ | ✅ | ✅ | ⚠️ (3 tests) | **PASS** | Fixed by Issue #213 |
 | collections_with_udts | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Exit code 3 - UDT schema parsing |
 | empty_collections_table | 49 | ✅ | ✅ | ✅ | ✅ (1 test) | **PASS** | Fixed by Issue #213 |
-| frozen_collections_table | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Invalid JSON output - Frozen type support |
+| frozen_collections_table | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Frozen parsing works (Issue #219), blocked by non-frozen `regular_tags` (Issue #221) |
 | large_collections_table | 49 | ✅ | ✅ | ✅ | ⚠️ (2 tests) | **PASS** | Fixed by Issue #213 |
 | nested_collections_table | 49 | ✅ | ✅ | ✅ | ⚠️ (4 tests) | **PASS** | Fixed by Issue #218 (Summary.db rewrite) |
-| typed_collections_table | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Exit code 5 - Complex types |
+| typed_collections_table | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Non-frozen collections need complex cell flags (Issue #221) |
 
 ### test_timeseries (9 tables - 9 PASS / 0 FAIL) ✅ 100%
 
@@ -91,7 +92,7 @@
 | Table | Rows | Load | Parse | Count | Int Test | Status | Notes |
 |-------|------|------|-------|-------|----------|--------|-------|
 | wide_partition_table | 99 | ✅ | ✅ | ✅ | ✅ (14 tests) | **PASS** | Fixed by Issue #213 |
-| chat_messages | 49 | ❌ | ❌ | ❌ | ❌ (0 tests) | **FAIL** | Issue #215 - Contains frozen types |
+| chat_messages | 49 | ❌ | ❌ | ❌ | ❌ (0 tests) | **FAIL** | Non-frozen collections (metadata, attachments) need complex cell flags (Issue #221) |
 | document_versions | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 | large_blob_table | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 | many_columns_table | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
@@ -146,20 +147,23 @@ The following critical blockers have been **resolved**:
 
 ### Remaining Feature Gaps (4 tables)
 
-#### 1. UDT (User-Defined Type) Support - P1
-**Impact**: 1 table (`collections_with_udts`)
-**Status**: Feature gap - UDT schema parsing incomplete
-**Exit Code**: 3 (schema extraction error)
-
-#### 2. Frozen Collection Type Support - P1
+#### 1. Frozen Collection Type Support - Issue #219
 **Impact**: 2 tables (`frozen_collections_table`, `chat_messages`)
 **Status**: Feature gap - Frozen type serialization not implemented
 **Exit Code**: Invalid JSON / 5
+**Tracking**: https://github.com/pmcfadin/cqlite/issues/219
 
-#### 3. Complex Type Handling - P1
+#### 2. UDT (User-Defined Type) Support - Issue #220
+**Impact**: 1 table (`collections_with_udts`)
+**Status**: Feature gap - UDT schema parsing incomplete
+**Exit Code**: 3 (schema extraction error)
+**Tracking**: https://github.com/pmcfadin/cqlite/issues/220
+
+#### 3. Complex Cell Flag Handling - Issue #221
 **Impact**: 1 table (`typed_collections_table`)
-**Status**: Feature gap - Advanced collection type handling
+**Status**: Feature gap - Complex cell flags (0xc1-0xcf) not implemented
 **Exit Code**: 5
+**Tracking**: https://github.com/pmcfadin/cqlite/issues/221
 
 ### Entry Count Mismatches (Informational - P2)
 **Impact**: Several passing tables show entry count != row count in reference
@@ -366,9 +370,9 @@ The following priorities have been **completed** as of December 2025:
 ---
 
 **Next Steps**:
-1. Implement UDT (User-Defined Type) parsing for `collections_with_udts`
-2. Implement frozen collection type support for `frozen_collections_table`, `chat_messages`
-3. Fix complex type handling for `typed_collections_table`
+1. **Issue #219**: Implement frozen collection type support for `frozen_collections_table`, `chat_messages` (2 tables)
+2. **Issue #220**: Implement UDT (User-Defined Type) parsing for `collections_with_udts` (1 table)
+3. **Issue #221**: Fix complex cell flag handling for `typed_collections_table` (1 table)
 
 **Owner**: CQLite Core Team
 **Tracking**: Issue #200

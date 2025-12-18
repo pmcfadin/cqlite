@@ -46,6 +46,12 @@ use crate::{
     Error, Result, RowKey, Value,
 };
 
+/// Maximum reasonable size for frozen collections to prevent DoS from corrupted data.
+/// Cassandra collections are limited by max_collection_size_in_mb (default 64MB) and
+/// column_value_size_warn_threshold (default 64KB warning), but we use a conservative
+/// element count limit to prevent memory exhaustion from malicious/corrupted data.
+const MAX_FROZEN_COLLECTION_SIZE: u64 = 100_000;
+
 /// Row header data extracted from V5CompressedLegacy row
 #[derive(Debug, Clone)]
 struct RowHeader {
@@ -2070,16 +2076,39 @@ impl V5CompressedLegacyParser {
 
             // Complex types: frozen, tuple, UDT
             type_str if type_str.starts_with("frozen<") => {
-                // Frozen types: unwrap inner type and parse
+                // Frozen types: unwrap inner type and route to appropriate parser
                 let inner_type = self.extract_frozen_inner_type(type_str)?;
 
-                // Create temporary column with unwrapped type
-                let mut inner_column = column.clone();
-                inner_column.data_type = inner_type.clone();
+                log::debug!(
+                    "V5CompressedLegacy: Parsing frozen type '{}' -> inner type '{}'",
+                    type_str,
+                    inner_type
+                );
 
-                // Recursively parse the inner type
-                let (inner_value, new_offset) =
-                    self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?;
+                // Route to appropriate frozen collection parser
+                let (inner_value, new_offset) = if inner_type.starts_with("list<") {
+                    let element_type = self.extract_collection_element_type(&inner_type, "list")?;
+                    self.parse_frozen_list_value(data, offset, &element_type, column, _reader)?
+                } else if inner_type.starts_with("set<") {
+                    let element_type = self.extract_collection_element_type(&inner_type, "set")?;
+                    self.parse_frozen_set_value(data, offset, &element_type, column, _reader)?
+                } else if inner_type.starts_with("map<") {
+                    let (key_type, value_type) = self.extract_map_types(&inner_type)?;
+                    self.parse_frozen_map_value(
+                        data,
+                        offset,
+                        &key_type,
+                        &value_type,
+                        column,
+                        _reader,
+                    )?
+                } else {
+                    // Non-collection frozen type (e.g., frozen<tuple<...>>, frozen<udt>)
+                    let mut inner_column = column.clone();
+                    inner_column.data_type = inner_type.clone();
+                    self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?
+                };
+
                 offset = new_offset;
 
                 // Wrap in Frozen
@@ -2199,6 +2228,978 @@ impl V5CompressedLegacyParser {
         }
 
         Ok(inner.to_string())
+    }
+
+    /// Extract element type from list<T> or set<T> type string
+    fn extract_collection_element_type(&self, type_str: &str, collection: &str) -> Result<String> {
+        let prefix = format!("{}<", collection);
+        if !type_str.starts_with(&prefix) || !type_str.ends_with('>') {
+            return Err(Error::schema(format!(
+                "Invalid {} type format: {}",
+                collection, type_str
+            )));
+        }
+
+        let inner = &type_str[prefix.len()..type_str.len() - 1];
+        if inner.is_empty() {
+            return Err(Error::schema(format!(
+                "Empty {} element type: {}",
+                collection, type_str
+            )));
+        }
+
+        Ok(inner.to_string())
+    }
+
+    /// Extract key and value types from map<K,V> type string
+    fn extract_map_types(&self, type_str: &str) -> Result<(String, String)> {
+        if !type_str.starts_with("map<") || !type_str.ends_with('>') {
+            return Err(Error::schema(format!(
+                "Invalid map type format: {}",
+                type_str
+            )));
+        }
+
+        let inner = &type_str[4..type_str.len() - 1];
+        if inner.is_empty() {
+            return Err(Error::schema(format!("Empty map types: {}", type_str)));
+        }
+
+        // Split by comma, handling nested angle brackets
+        let mut depth = 0;
+        let mut split_pos = None;
+
+        for (i, ch) in inner.chars().enumerate() {
+            match ch {
+                '<' => depth += 1,
+                '>' => depth -= 1,
+                ',' if depth == 0 => {
+                    split_pos = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let split_pos = split_pos.ok_or_else(|| {
+            Error::schema(format!(
+                "Invalid map type format (no comma separator): {}",
+                type_str
+            ))
+        })?;
+
+        let key_type = inner[..split_pos].trim().to_string();
+        let value_type = inner[split_pos + 1..].trim().to_string();
+
+        if key_type.is_empty() || value_type.is_empty() {
+            return Err(Error::schema(format!(
+                "Empty key or value type in map: {}",
+                type_str
+            )));
+        }
+
+        Ok((key_type, value_type))
+    }
+
+    /// Parse a raw type value WITHOUT cell flags (for frozen collection elements)
+    ///
+    /// Unlike `parse_cell_value_schema_order`, this function does NOT expect cell flags
+    /// or timestamps at the start of the data. Frozen collection elements are stored
+    /// as raw type values directly:
+    /// - Fixed-width types (int, uuid, bigint, float, double): direct bytes, no length prefix
+    /// - Variable-width types (text, blob): VInt length prefix + bytes
+    ///
+    /// This is the correct format for elements inside frozen collections:
+    /// frozen<list<int>> -> [VInt count][int1][int2]...  (each int is 4 bytes, no flags)
+    /// frozen<map<text, text>> -> [VInt count][VInt key_len][key][VInt val_len][val]...
+    fn parse_raw_type_value(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        type_str: &str,
+        column_name: &str,
+    ) -> Result<(Value, usize)> {
+        // Normalize type name for case-insensitive matching
+        let normalized_type = type_str.to_lowercase();
+
+        let value = match normalized_type.as_str() {
+            "boolean" => {
+                // Boolean: 1 byte
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': unexpected end at boolean value",
+                        column_name
+                    )));
+                }
+                let bool_byte = data[offset];
+                offset += 1;
+                Value::Boolean(bool_byte != 0)
+            }
+
+            "int" => {
+                // Integer (i32): fixed-width 4 bytes
+                if offset + 4 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 4 bytes for int, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+                let int_val = i32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                offset += 4;
+                Value::Integer(int_val)
+            }
+
+            "text" | "varchar" | "ascii" => {
+                // Text: [VInt len][text bytes]
+                let (remaining, text_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse text length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let text_len = text_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if offset + text_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need {} bytes for text, only {} available",
+                        column_name,
+                        text_len,
+                        data.len() - offset
+                    )));
+                }
+
+                let text_bytes = &data[offset..offset + text_len];
+                let text = String::from_utf8(text_bytes.to_vec()).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': invalid UTF-8 in text value: {}",
+                        column_name, e
+                    ))
+                })?;
+
+                offset += text_len;
+                Value::Text(text)
+            }
+
+            "uuid" | "timeuuid" => {
+                // UUID/TimeUUID: fixed-width 16 bytes
+                if offset + 16 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 16 bytes for UUID, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+
+                let uuid_bytes: [u8; 16] = data[offset..offset + 16]
+                    .try_into()
+                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+
+                offset += 16;
+                Value::Uuid(uuid_bytes)
+            }
+
+            "bigint" | "counter" => {
+                // BigInt/Counter: fixed-width 8 bytes
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 8 bytes for bigint, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+                let val = i64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                Value::BigInt(val)
+            }
+
+            "float" => {
+                // Float: 4 bytes
+                if offset + 4 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 4 bytes for float, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+
+                let val = f32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                offset += 4;
+                Value::Float(val as f64)
+            }
+
+            "double" => {
+                // Double: 8 bytes
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 8 bytes for double, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+                let val = f64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                Value::Float(val) // Note: Value::Float holds f64 for both float and double
+            }
+
+            "timestamp" => {
+                // Timestamp: 8 bytes (milliseconds since epoch)
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 8 bytes for timestamp, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+                let ts = i64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                Value::Timestamp(ts)
+            }
+
+            "date" => {
+                // Date: [VInt len=4][u32 BE days since epoch]
+                let (remaining, date_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse date length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let date_len = date_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if date_len != 4 {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': expected date length 4, got {}",
+                        column_name, date_len
+                    )));
+                }
+
+                if offset + 4 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 4 bytes for date, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+
+                let days = u32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                offset += 4;
+                // Cassandra stores as unsigned offset, adjust by Integer.MIN_VALUE
+                let adjusted = days.wrapping_sub(i32::MIN as u32) as i32;
+                Value::Date(adjusted)
+            }
+
+            "time" => {
+                // Time: [VInt len=8][i64 BE nanoseconds since midnight]
+                let (remaining, time_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse time length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let time_len = time_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if time_len != 8 {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': expected time length 8, got {}",
+                        column_name, time_len
+                    )));
+                }
+
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 8 bytes for time, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+
+                let nanos = i64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                Value::Time(nanos)
+            }
+
+            "duration" => {
+                // Duration: [VInt len][months VInt][days VInt][nanos VInt]
+                let (remaining, duration_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let duration_len = duration_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if offset + duration_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need {} bytes for duration, only {} available",
+                        column_name,
+                        duration_len,
+                        data.len() - offset
+                    )));
+                }
+
+                // Parse three VInt components from the duration_len bytes
+                let duration_bytes = &data[offset..offset + duration_len];
+
+                // Parse months (signed VInt)
+                let (remaining, months) = parse_vint(duration_bytes).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration months: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let pos = duration_bytes.len() - remaining.len();
+
+                // Parse days (signed VInt)
+                let (remaining, days) = parse_vint(&duration_bytes[pos..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration days: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let pos = duration_bytes.len() - remaining.len();
+
+                // Parse nanoseconds (signed VInt)
+                let (_remaining, nanos) = parse_vint(&duration_bytes[pos..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration nanos: {:?}",
+                        column_name, e
+                    ))
+                })?;
+
+                offset += duration_len;
+                Value::Duration {
+                    months: months as i32,
+                    days: days as i32,
+                    nanos,
+                }
+            }
+
+            "inet" => {
+                // Inet: [VInt len][address bytes] (len is 4 for IPv4, 16 for IPv6)
+                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse inet length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let len = len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if len != 4 && len != 16 {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': invalid inet length {}, expected 4 or 16",
+                        column_name, len
+                    )));
+                }
+
+                if offset + len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need {} bytes for inet, only {} available",
+                        column_name,
+                        len,
+                        data.len() - offset
+                    )));
+                }
+
+                let bytes = data[offset..offset + len].to_vec();
+                offset += len;
+                Value::Inet(bytes)
+            }
+
+            "blob" | "bytes" => {
+                // Blob: [VInt len][bytes]
+                let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse blob length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let blob_len = blob_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if offset + blob_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need {} bytes for blob, only {} available",
+                        column_name,
+                        blob_len,
+                        data.len() - offset
+                    )));
+                }
+
+                let blob_bytes = data[offset..offset + blob_len].to_vec();
+                offset += blob_len;
+                Value::Blob(blob_bytes)
+            }
+
+            "smallint" | "short" => {
+                // SmallInt: 2 bytes
+                if offset + 2 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 2 bytes for smallint, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+                let val = i16::from_be_bytes([data[offset], data[offset + 1]]);
+                offset += 2;
+                Value::SmallInt(val)
+            }
+
+            "tinyint" | "byte" => {
+                // TinyInt: 1 byte
+                if offset >= data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need 1 byte for tinyint, only {} available",
+                        column_name,
+                        data.len() - offset
+                    )));
+                }
+                let val = data[offset] as i8;
+                offset += 1;
+                Value::TinyInt(val)
+            }
+
+            "varint" => {
+                // VarInt: [VInt len][bytes]
+                let (remaining, varint_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse varint length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let varint_len = varint_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if offset + varint_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need {} bytes for varint, only {} available",
+                        column_name,
+                        varint_len,
+                        data.len() - offset
+                    )));
+                }
+
+                let varint_bytes = data[offset..offset + varint_len].to_vec();
+                offset += varint_len;
+                Value::Varint(varint_bytes)
+            }
+
+            "decimal" => {
+                // Decimal: [VInt total_len][i32 scale][unscaled bytes]
+                let (remaining, total_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse decimal length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let total_len = total_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if offset + total_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need {} bytes for decimal, only {} available",
+                        column_name,
+                        total_len,
+                        data.len() - offset
+                    )));
+                }
+
+                if total_len < 4 {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': decimal length {} too small for scale",
+                        column_name, total_len
+                    )));
+                }
+
+                let scale = i32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                let unscaled = data[offset + 4..offset + total_len].to_vec();
+                offset += total_len;
+
+                Value::Decimal { scale, unscaled }
+            }
+
+            // Handle nested frozen types
+            type_str if type_str.starts_with("frozen<") => {
+                let inner_type = self.extract_frozen_inner_type(type_str)?;
+                let (inner_value, new_offset) =
+                    self.parse_raw_type_value(data, offset, &inner_type, column_name)?;
+                offset = new_offset;
+                Value::Frozen(Box::new(inner_value))
+            }
+
+            // Handle nested collections inside frozen context
+            type_str if type_str.starts_with("list<") => {
+                let element_type = self.extract_collection_element_type(type_str, "list")?;
+                let (list_value, new_offset) =
+                    self.parse_frozen_list_value_raw(data, offset, &element_type, column_name)?;
+                offset = new_offset;
+                list_value
+            }
+
+            type_str if type_str.starts_with("set<") => {
+                let element_type = self.extract_collection_element_type(type_str, "set")?;
+                let (set_value, new_offset) =
+                    self.parse_frozen_set_value_raw(data, offset, &element_type, column_name)?;
+                offset = new_offset;
+                set_value
+            }
+
+            type_str if type_str.starts_with("map<") => {
+                let (key_type, value_type) = self.extract_map_types(type_str)?;
+                let (map_value, new_offset) = self.parse_frozen_map_value_raw(
+                    data,
+                    offset,
+                    &key_type,
+                    &value_type,
+                    column_name,
+                )?;
+                offset = new_offset;
+                map_value
+            }
+
+            // Default: treat as VInt-length-prefixed blob
+            _ => {
+                log::debug!(
+                    "Frozen element '{}': unknown type '{}', parsing as blob",
+                    column_name,
+                    type_str
+                );
+
+                let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse unknown type length as VInt: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let blob_len = blob_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if offset + blob_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen element '{}': need {} bytes for unknown type, only {} available",
+                        column_name,
+                        blob_len,
+                        data.len() - offset
+                    )));
+                }
+
+                let blob_bytes = data[offset..offset + blob_len].to_vec();
+                offset += blob_len;
+                Value::Blob(blob_bytes)
+            }
+        };
+
+        Ok((value, offset))
+    }
+
+    /// Parse frozen list value (raw version without Column parameter)
+    fn parse_frozen_list_value_raw(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        element_type: &str,
+        column_name: &str,
+    ) -> Result<(Value, usize)> {
+        // Read element count as VInt
+        let (remaining, count) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen list '{}': failed to parse element count: {:?}",
+                column_name, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing frozen list '{}' with {} elements (raw)",
+            column_name,
+            count
+        );
+
+        // Bounds check to prevent DoS from corrupted data
+        if count > MAX_FROZEN_COLLECTION_SIZE {
+            return Err(Error::corruption(format!(
+                "Frozen list '{}': element count {} exceeds maximum {}",
+                column_name, count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
+
+        let mut elements = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let elem_name = format!("{}[{}]", column_name, i);
+            let (elem_value, new_offset) =
+                self.parse_raw_type_value(data, offset, element_type, &elem_name)?;
+            elements.push(elem_value);
+            offset = new_offset;
+        }
+
+        Ok((Value::List(elements), offset))
+    }
+
+    /// Parse frozen set value (raw version without Column parameter)
+    fn parse_frozen_set_value_raw(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        element_type: &str,
+        column_name: &str,
+    ) -> Result<(Value, usize)> {
+        // Read element count as VInt
+        let (remaining, count) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen set '{}': failed to parse element count: {:?}",
+                column_name, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing frozen set '{}' with {} elements (raw)",
+            column_name,
+            count
+        );
+
+        // Bounds check to prevent DoS from corrupted data
+        if count > MAX_FROZEN_COLLECTION_SIZE {
+            return Err(Error::corruption(format!(
+                "Frozen set '{}': element count {} exceeds maximum {}",
+                column_name, count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
+
+        let mut elements = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let elem_name = format!("{}[{}]", column_name, i);
+            let (elem_value, new_offset) =
+                self.parse_raw_type_value(data, offset, element_type, &elem_name)?;
+            elements.push(elem_value);
+            offset = new_offset;
+        }
+
+        Ok((Value::Set(elements), offset))
+    }
+
+    /// Parse frozen map value (raw version without Column parameter)
+    fn parse_frozen_map_value_raw(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        key_type: &str,
+        value_type: &str,
+        column_name: &str,
+    ) -> Result<(Value, usize)> {
+        // Read entry count as VInt
+        let (remaining, count) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen map '{}': failed to parse entry count: {:?}",
+                column_name, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing frozen map '{}' with {} entries (raw)",
+            column_name,
+            count
+        );
+
+        // Bounds check to prevent DoS from corrupted data
+        if count > MAX_FROZEN_COLLECTION_SIZE {
+            return Err(Error::corruption(format!(
+                "Frozen map '{}': entry count {} exceeds maximum {}",
+                column_name, count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
+
+        let mut entries = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let key_name = format!("{}[{}].key", column_name, i);
+            let (key_value, new_offset) =
+                self.parse_raw_type_value(data, offset, key_type, &key_name)?;
+            offset = new_offset;
+
+            let val_name = format!("{}[{}].value", column_name, i);
+            let (val_value, new_offset) =
+                self.parse_raw_type_value(data, offset, value_type, &val_name)?;
+            offset = new_offset;
+
+            entries.push((key_value, val_value));
+        }
+
+        Ok((Value::Map(entries), offset))
+    }
+
+    /// Parse frozen list value: VInt count + elements
+    ///
+    /// Frozen lists are stored as a single cell with format:
+    /// [VInt element_count][element_1][element_2]...
+    ///
+    /// For variable-length element types (text, blob), each element has:
+    /// [VInt length][bytes]
+    ///
+    /// For fixed-length types (int, uuid, etc.), elements are stored directly.
+    fn parse_frozen_list_value(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        element_type: &str,
+        column: &crate::schema::Column,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        // Read element count as VInt
+        let (remaining, count) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen list '{}': failed to parse element count: {:?}",
+                column.name, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing frozen list '{}' with {} elements, element_type='{}'",
+            column.name,
+            count,
+            element_type
+        );
+
+        // Bounds check to prevent DoS from corrupted data
+        if count > MAX_FROZEN_COLLECTION_SIZE {
+            return Err(Error::corruption(format!(
+                "Frozen list '{}': element count {} exceeds maximum {}",
+                column.name, count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
+
+        let mut elements = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            // Parse element value using raw type parser (no cell flags)
+            let elem_name = format!("{}[{}]", column.name, i);
+            let (elem_value, new_offset) =
+                self.parse_raw_type_value(data, offset, element_type, &elem_name)?;
+
+            log::debug!(
+                "V5CompressedLegacy: Frozen list element {}: {:?}",
+                i,
+                elem_value
+            );
+
+            elements.push(elem_value);
+            offset = new_offset;
+        }
+
+        // Suppress unused variable warnings - reader is kept for API consistency
+        let _ = reader;
+
+        Ok((Value::List(elements), offset))
+    }
+
+    /// Parse frozen set value: VInt count + elements (sorted, unique)
+    ///
+    /// Frozen sets have the same binary format as frozen lists.
+    /// The difference is semantic (sets are sorted/unique at CQL level).
+    fn parse_frozen_set_value(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        element_type: &str,
+        column: &crate::schema::Column,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        // Read element count as VInt
+        let (remaining, count) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen set '{}': failed to parse element count: {:?}",
+                column.name, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing frozen set '{}' with {} elements, element_type='{}'",
+            column.name,
+            count,
+            element_type
+        );
+
+        // Bounds check to prevent DoS from corrupted data
+        if count > MAX_FROZEN_COLLECTION_SIZE {
+            return Err(Error::corruption(format!(
+                "Frozen set '{}': element count {} exceeds maximum {}",
+                column.name, count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
+
+        let mut elements = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            // Parse element value using raw type parser (no cell flags)
+            let elem_name = format!("{}[{}]", column.name, i);
+            let (elem_value, new_offset) =
+                self.parse_raw_type_value(data, offset, element_type, &elem_name)?;
+
+            log::debug!(
+                "V5CompressedLegacy: Frozen set element {}: {:?}",
+                i,
+                elem_value
+            );
+
+            elements.push(elem_value);
+            offset = new_offset;
+        }
+
+        // Suppress unused variable warnings - reader is kept for API consistency
+        let _ = reader;
+
+        Ok((Value::Set(elements), offset))
+    }
+
+    /// Parse frozen map value: VInt count + key/value pairs
+    ///
+    /// Frozen maps are stored as:
+    /// [VInt entry_count][key_1][value_1][key_2][value_2]...
+    ///
+    /// Each key and value is serialized according to its type.
+    fn parse_frozen_map_value(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        key_type: &str,
+        value_type: &str,
+        column: &crate::schema::Column,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        // Read entry count as VInt
+        let (remaining, count) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen map '{}': failed to parse entry count: {:?}",
+                column.name, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing frozen map '{}' with {} entries, key_type='{}', value_type='{}'",
+            column.name,
+            count,
+            key_type,
+            value_type
+        );
+
+        // Bounds check to prevent DoS from corrupted data
+        if count > MAX_FROZEN_COLLECTION_SIZE {
+            return Err(Error::corruption(format!(
+                "Frozen map '{}': entry count {} exceeds maximum {}",
+                column.name, count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
+
+        let mut entries = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            // Parse key using raw type parser (no cell flags)
+            let key_name = format!("{}[{}].key", column.name, i);
+            let (key_value, new_offset) =
+                self.parse_raw_type_value(data, offset, key_type, &key_name)?;
+            offset = new_offset;
+
+            // Parse value using raw type parser (no cell flags)
+            let val_name = format!("{}[{}].value", column.name, i);
+            let (val_value, new_offset) =
+                self.parse_raw_type_value(data, offset, value_type, &val_name)?;
+            offset = new_offset;
+
+            log::debug!(
+                "V5CompressedLegacy: Frozen map entry {}: {:?} -> {:?}",
+                i,
+                key_value,
+                val_value
+            );
+
+            entries.push((key_value, val_value));
+        }
+
+        // Suppress unused variable warnings - reader is kept for API consistency
+        let _ = reader;
+
+        Ok((Value::Map(entries), offset))
     }
 
     /// Parse tuple value from binary data
@@ -2564,5 +3565,159 @@ mod tests {
 
         // Note: Clustering key parsing would happen during row data parsing,
         // which is tested separately in integration tests
+    }
+
+    #[test]
+    fn test_extract_collection_element_type() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Test list element type extraction
+        assert_eq!(
+            parser
+                .extract_collection_element_type("list<int>", "list")
+                .unwrap(),
+            "int"
+        );
+
+        // Test set element type extraction
+        assert_eq!(
+            parser
+                .extract_collection_element_type("set<text>", "set")
+                .unwrap(),
+            "text"
+        );
+
+        // Test nested type
+        assert_eq!(
+            parser
+                .extract_collection_element_type("list<frozen<map<text,int>>>", "list")
+                .unwrap(),
+            "frozen<map<text,int>>"
+        );
+
+        // Test error cases
+        assert!(parser
+            .extract_collection_element_type("list<>", "list")
+            .is_err());
+        assert!(parser
+            .extract_collection_element_type("set<int>", "list")
+            .is_err());
+        assert!(parser
+            .extract_collection_element_type("int", "list")
+            .is_err());
+    }
+
+    #[test]
+    fn test_extract_map_types() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Test simple map
+        let (key, value) = parser.extract_map_types("map<text,int>").unwrap();
+        assert_eq!(key, "text");
+        assert_eq!(value, "int");
+
+        // Test map with spaces
+        let (key, value) = parser.extract_map_types("map<text, int>").unwrap();
+        assert_eq!(key, "text");
+        assert_eq!(value, "int");
+
+        // Test nested value type
+        let (key, value) = parser
+            .extract_map_types("map<text,frozen<set<uuid>>>")
+            .unwrap();
+        assert_eq!(key, "text");
+        assert_eq!(value, "frozen<set<uuid>>");
+
+        // Test nested key and value types
+        let (key, value) = parser
+            .extract_map_types("map<frozen<list<int>>,frozen<set<text>>>")
+            .unwrap();
+        assert_eq!(key, "frozen<list<int>>");
+        assert_eq!(value, "frozen<set<text>>");
+
+        // Test error cases
+        assert!(parser.extract_map_types("map<>").is_err());
+        assert!(parser.extract_map_types("map<text>").is_err());
+        assert!(parser.extract_map_types("int").is_err());
+    }
+
+    #[test]
+    fn test_frozen_list_int_parsing() {
+        // Test type extraction for frozen<list<int>>
+        // Note: Full parsing tests require a reader, done via integration tests.
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Verify element type extraction works
+        let inner_type = parser
+            .extract_frozen_inner_type("frozen<list<int>>")
+            .unwrap();
+        assert_eq!(inner_type, "list<int>");
+
+        let element_type = parser
+            .extract_collection_element_type(&inner_type, "list")
+            .unwrap();
+        assert_eq!(element_type, "int");
+    }
+
+    #[test]
+    fn test_frozen_set_text_parsing() {
+        // Test type extraction for frozen<set<text>>
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let inner_type = parser
+            .extract_frozen_inner_type("frozen<set<text>>")
+            .unwrap();
+        assert_eq!(inner_type, "set<text>");
+
+        let element_type = parser
+            .extract_collection_element_type(&inner_type, "set")
+            .unwrap();
+        assert_eq!(element_type, "text");
+    }
+
+    #[test]
+    fn test_frozen_map_text_text_parsing() {
+        // Test type extraction for frozen<map<text,text>>
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let inner_type = parser
+            .extract_frozen_inner_type("frozen<map<text,text>>")
+            .unwrap();
+        assert_eq!(inner_type, "map<text,text>");
+
+        let (key_type, value_type) = parser.extract_map_types(&inner_type).unwrap();
+        assert_eq!(key_type, "text");
+        assert_eq!(value_type, "text");
+    }
+
+    #[test]
+    fn test_nested_frozen_map_parsing() {
+        // Test type extraction for nested frozen: frozen<map<text, frozen<set<uuid>>>>
+        // This is the structure used in chat_messages.reactions
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let inner_type = parser
+            .extract_frozen_inner_type("frozen<map<text,frozen<set<uuid>>>>")
+            .unwrap();
+        assert_eq!(inner_type, "map<text,frozen<set<uuid>>>");
+
+        let (key_type, value_type) = parser.extract_map_types(&inner_type).unwrap();
+        assert_eq!(key_type, "text");
+        assert_eq!(value_type, "frozen<set<uuid>>");
+
+        // Further extraction of the nested frozen type
+        let inner_set = parser.extract_frozen_inner_type(&value_type).unwrap();
+        assert_eq!(inner_set, "set<uuid>");
+
+        let element_type = parser
+            .extract_collection_element_type(&inner_set, "set")
+            .unwrap();
+        assert_eq!(element_type, "uuid");
     }
 }

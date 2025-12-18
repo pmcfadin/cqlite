@@ -200,11 +200,11 @@ V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
 
 ## Validation Status
 
-### Overall Pass Rate: 84.8% (28/33 tables)
+### Overall Pass Rate: 87.9% (29/33 tables)
 
-As of Issue #216 fix (Updated: 2025-12-17)
+As of Issue #218 fix (Updated: 2025-12-17)
 
-**Note**: Statistics.db/SerializationHeader parsing now works for all 33 tables (Issue #216 fixed). The remaining 5 failures are Data.db parsing issues with complex cell flags (0xc1-0xcf) for collections. These require V5CompressedLegacy parser updates (separate issue).
+**Note**: All core SSTable component parsers (Data.db, Index.db, Summary.db, Statistics.db) are now working correctly. The remaining 4 failures are Data.db cell type parsing issues requiring new features for advanced collection types.
 
 ### Pass Rate by Keyspace
 
@@ -214,6 +214,8 @@ As of Issue #216 fix (Updated: 2025-12-17)
 | **test_collections** | 5 | 3 | 8 | 62.5% |
 | **test_timeseries** | 9 | 0 | 9 | 100% |
 | **test_wide_rows** | 7 | 1 | 8 | 87.5% |
+
+**Note**: `nested_collections_table` now passes after Issue #218 fix.
 
 ### Passing Tables (Production-Ready)
 
@@ -234,6 +236,7 @@ These tables are validated against Apache Cassandra's `sstabledump` output:
 - `collection_clustering_table` - Collections with clustering keys (Issue #213 fix)
 - `empty_collections_table` - Empty collection handling
 - `large_collections_table` - Large collection support
+- `nested_collections_table` - Nested collections (Issue #218 fix)
 
 **test_timeseries** (9/9 passing - 100%):
 - `sensor_data` - Timestamp clustering (Issue #213 fix, was key test case)
@@ -246,17 +249,21 @@ These tables are validated against Apache Cassandra's `sstabledump` output:
 - `document_versions`, `large_blob_table`, `many_columns_table`
 - `multi_metric_timeseries`, `product_catalog`, `sparse_data_table`
 
-### Remaining Failures (5 tables)
+### Remaining Failures (4 tables)
 
-| Table | Exit Code | Root Cause |
-|-------|-----------|------------|
-| `collections_with_udts` | 3 | UDT schema parsing incomplete |
-| `frozen_collections_table` | - | Frozen type serialization not implemented |
-| `nested_collections_table` | 3 | Recursive collection parsing needed |
-| `typed_collections_table` | 5 | Complex type handling issues |
-| `chat_messages` | 5 | Contains frozen types |
+| Table | Exit Code | Root Cause | Tracking |
+|-------|-----------|------------|----------|
+| `frozen_collections_table` | 134 | Has both frozen and non-frozen collections | Issue #219 (frozen: ✅ done), Issue #221 (non-frozen: pending) |
+| `chat_messages` | 5 | Has non-frozen collections with frozen values | Issue #221 (complex cell flags 0xc1-0xcf) |
+| `collections_with_udts` | 3 | UDT schema parsing incomplete | Issue #220 |
+| `typed_collections_table` | 5 | Non-frozen collections use multi-cell format | Issue #221 |
 
-**Note**: These 5 remaining failures are all related to advanced collection and type features: UDTs, frozen collections, and nested collections. Basic SSTable parsing for all standard table types now works correctly.
+**Note**: These 4 remaining failures require:
+- **Issue #221**: Complex cell flag handling (0xc1-0xcf) for non-frozen collections (3 tables - highest impact)
+- **Issue #219**: ✅ Frozen type support implemented - but target tables also need Issue #221
+- **Issue #220**: UDT support (1 table)
+
+All core SSTable component parsers are working correctly. Frozen type parsing is now implemented. The remaining blockers are non-frozen collections (complex cell flags with paths) and UDT support.
 
 ---
 
@@ -414,9 +421,11 @@ cargo build --no-default-features --features all-compression
 
 ## Issue References
 
-### Active Issues (P0/P1 - Blocking M1 Completion)
+### Active Issues (P1 - Blocking 100% Pass Rate)
 
-*No active P0/P1 issues* - All blocking issues have been resolved!
+- **Issue #219**: Frozen Type Support - Blocks 2 tables (frozen_collections_table, chat_messages)
+- **Issue #220**: UDT Support - Blocks 1 table (collections_with_udts)
+- **Issue #221**: Complex Cell Flag Handling - Blocks 1 table (typed_collections_table)
 
 ### Completed Issues (Fixed - Dec 2025)
 
@@ -494,12 +503,14 @@ cargo build --no-default-features --features all-compression
 
 ## Key Takeaways
 
-- **Summary.db parser** is FIXED (Issue #218) - Complete rewrite with correct Cassandra 5.0 format
-- **Statistics.db/SerializationHeader** is FIXED - Issues #215/#216 completed
+- **Pass rate: 87.9% (29/33 tables)** - Up from 84.8% after Issue #218 fix
 - All SSTable component parsers (Data.db, Index.db, Summary.db, Statistics.db) now use correct formats
-- **No P0 blocking issues remain** - M1 core reading infrastructure is complete
+- **4 tables blocked by cell type parsing** - requires Issues #219, #220, #221
 - CQLite is **read-only** - write operations permanently removed (Issues #175, #176)
-- Remaining work is Data.db cell type handling for advanced collection types (UDTs, frozen, nested)
+- Remaining work is Data.db cell type handling for:
+  - Frozen collections (Issue #219) - 2 tables
+  - UDTs (Issue #220) - 1 table
+  - Complex cell flags (Issue #221) - 1 table
 
 ---
 

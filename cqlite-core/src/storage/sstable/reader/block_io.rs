@@ -110,7 +110,9 @@ async fn read_next_block_impl(
         | crate::parser::header::CassandraVersion::V5_0FormatE
         | crate::parser::header::CassandraVersion::V5_0FormatF
         | crate::parser::header::CassandraVersion::V5_0FormatG
-        | crate::parser::header::CassandraVersion::V5_0StaticColumns => {
+        | crate::parser::header::CassandraVersion::V5_0StaticColumns
+        | crate::parser::header::CassandraVersion::V5_0ComplexTypes => {
+            // Issue #219: V5_0ComplexTypes (0x82365C00) uses NB format chunk reader
             log::debug!("block_io::read_next_block_impl: Using NB format chunk reader");
 
             // Get file size for chunk size calculation
