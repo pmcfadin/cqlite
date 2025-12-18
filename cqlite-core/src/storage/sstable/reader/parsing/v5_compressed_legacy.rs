@@ -70,6 +70,7 @@ const ROW_HAS_TIMESTAMP: u8 = 0x04;
 const ROW_HAS_TTL: u8 = 0x08;
 const ROW_HAS_DELETION: u8 = 0x10;
 const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
+const ROW_HAS_COMPLEX_DELETION: u8 = 0x40; // Issue #221: Row contains complex column with deletion info
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 
 /// Size of the trailing field after each row's cell data in V5CompressedLegacy format.
@@ -1286,6 +1287,12 @@ impl V5CompressedLegacyParser {
             hex::encode(&data[offset..std::cmp::min(offset + 64, data.len())])
         );
 
+        // Issue #221: Check if row has complex deletion info for non-frozen collections
+        let has_complex_deletion = (row_flags & ROW_HAS_COMPLEX_DELETION) != 0;
+        if has_complex_deletion {
+            log::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
+        }
+
         for (col_idx, &column) in columns_in_order.iter().enumerate() {
             if offset >= data.len() {
                 log::debug!(
@@ -1298,7 +1305,18 @@ impl V5CompressedLegacyParser {
                 break;
             }
 
-            match self.parse_cell_value_schema_order(data, offset, column, reader) {
+            // Issue #221: Branch based on column type - complex columns need special parsing
+            let parse_result = if Self::is_complex_column(&column.data_type) {
+                log::debug!(
+                    "V5CompressedLegacy: Column '{}' is complex (non-frozen collection), using parse_complex_column",
+                    column.name
+                );
+                self.parse_complex_column(data, offset, column, has_complex_deletion)
+            } else {
+                self.parse_cell_value_schema_order(data, offset, column, reader)
+            };
+
+            match parse_result {
                 Ok((value, new_offset)) => {
                     log::debug!(
                         "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
@@ -2228,6 +2246,293 @@ impl V5CompressedLegacyParser {
         }
 
         Ok(inner.to_string())
+    }
+
+    /// Returns true if the column type is a complex column (non-frozen collection).
+    /// Complex columns are stored as multiple cells with cell paths, unlike
+    /// frozen collections which are stored as a single cell with blob value.
+    ///
+    /// Issue #221: This is critical for proper parsing - complex columns have
+    /// a different format: [complex_deletion_time?] [cell_count] [cells...]
+    fn is_complex_column(data_type: &str) -> bool {
+        let dt = data_type.to_lowercase();
+        // Non-frozen collections start directly with list/set/map
+        // Frozen collections start with "frozen<list<..." etc.
+        // Frozen types are serialized as single cells with blob value.
+        (dt.starts_with("list<") || dt.starts_with("set<") || dt.starts_with("map<"))
+            && !dt.contains("frozen")
+    }
+
+    /// Parse a complex column (non-frozen collection).
+    /// Complex columns have multiple cells with cell paths.
+    ///
+    /// Format when HAS_COMPLEX_DELETION is set:
+    ///   [complex_deletion_time: 2 VInts]  // DeletionTime
+    ///   [cell_count: VInt]
+    ///   [cell_1..cell_n: each with cell_path]
+    ///
+    /// Format when HAS_COMPLEX_DELETION is NOT set:
+    ///   [cell_count: VInt]
+    ///   [cell_1..cell_n: each with cell_path]
+    ///
+    /// Issue #221: This enables parsing of typed_collections_table and other
+    /// tables with non-frozen collections.
+    fn parse_complex_column(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        column: &crate::schema::Column,
+        has_complex_deletion: bool,
+    ) -> Result<(Value, usize)> {
+        log::debug!(
+            "V5CompressedLegacy: Parsing complex column '{}' type='{}' has_complex_deletion={} at offset {}",
+            column.name, column.data_type, has_complex_deletion, offset
+        );
+
+        // Step 1: Parse complex deletion time if flag is set
+        if has_complex_deletion {
+            // DeletionTime = markedForDeleteAt (VInt) + localDeletionTime (VInt)
+            let (remaining, _marked_for_delete) = parse_vint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex column '{}': failed to parse markedForDeleteAt at offset {}: {:?}",
+                    column.name, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+            let (remaining, _local_deletion) = parse_vint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex column '{}': failed to parse localDeletionTime at offset {}: {:?}",
+                    column.name, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+            log::debug!(
+                "V5CompressedLegacy: Complex column '{}' deletion time parsed, now at offset {}",
+                column.name,
+                offset
+            );
+        }
+
+        // Step 2: Parse cell count
+        let (remaining, cell_count) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Complex column '{}': failed to parse cell count at offset {}: {:?}",
+                column.name, offset, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Complex column '{}' has {} cells, now at offset {}",
+            column.name,
+            cell_count,
+            offset
+        );
+
+        // Step 3: Skip all cells (parse but don't aggregate values yet)
+        // Future work can add proper value aggregation here
+        // Convert cell_count to usize safely to prevent overflow on 32-bit systems
+        let cell_count_usize: usize = cell_count.try_into().map_err(|_| {
+            Error::corruption(format!(
+                "Complex column '{}': cell count {} exceeds platform limit",
+                column.name, cell_count
+            ))
+        })?;
+
+        for i in 0..cell_count_usize {
+            offset = self.skip_complex_cell(data, offset, &column.name, i as u64)?;
+        }
+
+        // Step 4: Return placeholder value based on collection type
+        let dt = column.data_type.to_lowercase();
+        let value = if dt.starts_with("list<") {
+            Value::List(Vec::new())
+        } else if dt.starts_with("set<") {
+            Value::Set(Vec::new())
+        } else if dt.starts_with("map<") {
+            Value::Map(Vec::new())
+        } else {
+            Value::Null
+        };
+
+        log::debug!(
+            "V5CompressedLegacy: Complex column '{}' parsed, final offset {}",
+            column.name,
+            offset
+        );
+
+        Ok((value, offset))
+    }
+
+    /// Skip over a single complex cell without fully parsing its value.
+    /// Complex cells have: [flags] [timestamp?] [deletion?] [ttl?] [cell_path] [value?]
+    ///
+    /// Issue #221: This is used to advance past complex cell data while returning
+    /// placeholder values. Future work can add full cell value parsing here.
+    fn skip_complex_cell(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        column_name: &str,
+        cell_index: u64,
+    ) -> Result<usize> {
+        log::debug!(
+            "V5CompressedLegacy: skip_complex_cell '{}' cell {} starting at offset {}, bytes: {:02x?}",
+            column_name,
+            cell_index,
+            offset,
+            &data[offset..std::cmp::min(offset + 20, data.len())]
+        );
+
+        // Complex cell format per Cassandra source (UnfilteredSerializer.java):
+        // [flags: u8]
+        // [timestamp: VInt if not USE_ROW_TIMESTAMP_MASK]
+        // [local_deletion_time: VInt if (deleted || expiring) && not USE_ROW_TTL_MASK]
+        // [ttl: VInt if expiring && not USE_ROW_TTL_MASK]
+        // [cell_path: VInt length + bytes] <-- AFTER flags/timestamp/etc, NOT before!
+        // [value: VInt length + bytes if not HAS_EMPTY_VALUE_MASK]
+
+        // Step 1: Cell flags (standard 0x00-0x1F range)
+        if offset >= data.len() {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: unexpected end at flags (offset {})",
+                column_name, cell_index, offset
+            )));
+        }
+        let flags = data[offset];
+        offset += 1;
+
+        // Validate flags are in valid range
+        if flags > 0x1F {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: invalid flags 0x{:02x} at offset {} (expected 0x00-0x1F)",
+                column_name,
+                cell_index,
+                flags,
+                offset - 1
+            )));
+        }
+
+        let is_deleted = (flags & 0x01) != 0;
+        let is_expiring = (flags & 0x02) != 0;
+        let has_empty_value = (flags & 0x04) != 0;
+        let use_row_timestamp = (flags & 0x08) != 0;
+        let use_row_ttl = (flags & 0x10) != 0;
+
+        log::debug!(
+            "V5CompressedLegacy: skip_complex_cell '{}' cell {} flags=0x{:02x} (deleted={}, expiring={}, empty_value={}, use_row_ts={}, use_row_ttl={})",
+            column_name,
+            cell_index,
+            flags,
+            is_deleted,
+            is_expiring,
+            has_empty_value,
+            use_row_timestamp,
+            use_row_ttl
+        );
+
+        // Step 2: Timestamp (if not using row timestamp)
+        if !use_row_timestamp {
+            let (remaining, _ts) = parse_vint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse timestamp at offset {}: {:?}",
+                    column_name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 3: Local deletion time (if deleted/expiring and not using row TTL)
+        if !use_row_ttl && (is_deleted || is_expiring) {
+            let (remaining, _ldt) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse localDeletionTime at offset {}: {:?}",
+                    column_name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 4: TTL (if expiring and not using row TTL)
+        if !use_row_ttl && is_expiring {
+            let (remaining, _ttl) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse TTL at offset {}: {:?}",
+                    column_name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 5: Cell path (VInt length + bytes) - comes AFTER flags/timestamp/ttl
+        let (remaining, path_len) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Complex cell {}.{}: failed to parse path length at offset {}: {:?}",
+                column_name, cell_index, offset, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        log::debug!(
+            "V5CompressedLegacy: skip_complex_cell '{}' cell {} path_len={} at offset {}",
+            column_name,
+            cell_index,
+            path_len,
+            offset
+        );
+        offset += bytes_consumed;
+        // Bounds check before advancing by path_len
+        if offset + path_len as usize > data.len() {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: cell path requires {} bytes but only {} available at offset {}",
+                column_name,
+                cell_index,
+                path_len,
+                data.len().saturating_sub(offset),
+                offset
+            )));
+        }
+        offset += path_len as usize;
+
+        // Step 6: Value (if not empty)
+        if !has_empty_value {
+            let (remaining, value_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse value length at offset {}: {:?}",
+                    column_name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+            // Bounds check before advancing by value_len
+            if offset + value_len as usize > data.len() {
+                return Err(Error::corruption(format!(
+                    "Complex cell {}.{}: value requires {} bytes but only {} available at offset {}",
+                    column_name,
+                    cell_index,
+                    value_len,
+                    data.len().saturating_sub(offset),
+                    offset
+                )));
+            }
+            offset += value_len as usize;
+        }
+
+        log::debug!(
+            "V5CompressedLegacy: skip_complex_cell '{}' cell {} complete, final offset {}",
+            column_name,
+            cell_index,
+            offset
+        );
+
+        Ok(offset)
     }
 
     /// Extract element type from list<T> or set<T> type string

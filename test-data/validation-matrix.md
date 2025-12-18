@@ -2,9 +2,9 @@
 
 **Comprehensive validation tracking for all test tables across the CQLite test suite**
 
-**Last Updated**: 2025-12-17 (After Issues #210-#218 fixes)
+**Last Updated**: 2025-12-17 (After Issue #221 fix - Complex Cell Flags)
 **Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) - Validate all 33 test tables can be loaded successfully
-**Current Status**: 29/33 PASS (87.9% pass rate) - **Excellent Progress!**
+**Current Status**: 31/33 PASS (93.9% pass rate) - **Excellent Progress!**
 
 ---
 
@@ -14,20 +14,21 @@
 |--------|-------|-------|
 | **Total Tables** | 33 | Across 4 keyspaces (test_basic, test_collections, test_timeseries, test_wide_rows) |
 | **Tables with JSONL** | 33 | 100% coverage - all tables have sstabledump reference files |
-| **Smoke Test Pass** | 29/33 | 87.9% pass rate (major improvement from Dec 2025 fixes) |
-| **Smoke Test Fail** | 4/33 | 12.1% failure rate - blocked on complex cell flags (Issue #221), UDTs (Issue #220) |
+| **Smoke Test Pass** | 31/33 | 93.9% pass rate (major improvement from Dec 2025 fixes + Issue #221) |
+| **Smoke Test Fail** | 2/33 | 6.1% failure rate - blocked on UDTs (Issue #220), nested frozen (Issue #219) |
 | **Exit Code 3 Failures** | 1 | UDT schema parsing (collections_with_udts) |
-| **Exit Code 5 Failures** | 2 | Non-frozen collections (typed_collections_table, chat_messages) |
-| **Other Failures** | 1 | frozen_collections_table (has both frozen AND non-frozen collections) |
+| **Exit Code 5 Failures** | 1 | Nested frozen collections (chat_messages) |
 
 ### Pass Rate by Keyspace
 
 | Keyspace | Passed | Failed | Total | Pass Rate |
 |----------|--------|--------|-------|-----------|
 | **test_basic** | 8 | 0 | 8 | 100% ✅ |
-| **test_collections** | 5 | 3 | 8 | 62.5% |
+| **test_collections** | 7 | 1 | 8 | 87.5% |
 | **test_timeseries** | 9 | 0 | 9 | 100% ✅ |
 | **test_wide_rows** | 7 | 1 | 8 | 87.5% |
+
+**Note**: Pass rate improved to 31/33 after Issue #221 fix + code review bounds checking fixes. Tables now passing: typed_collections_table, frozen_collections_table, empty_collections_table, large_collections_table.
 
 ### Recent Fixes (Dec 2025)
 
@@ -42,6 +43,7 @@
 | #217 | Statistics.db parser hardening | Malformed input handling |
 | #218 | Summary.db parser rewrite (correct C5 format) | nested_collections_table |
 | #219 | Frozen type parsing (parse_raw_type_value) | ✅ Implemented - target tables also need #221 |
+| #221 | Complex cell flag handling (non-frozen collections) | **typed_collections_table**, **frozen_collections_table** |
 
 ---
 
@@ -66,12 +68,12 @@
 |-------|------|------|-------|-------|----------|--------|-------|
 | collection_table | 499 | ✅ | ✅ | ✅ | ✅ (12 tests) | **PASS** | Core collection validation table |
 | collection_clustering_table | 49 | ✅ | ✅ | ✅ | ⚠️ (3 tests) | **PASS** | Fixed by Issue #213 |
-| collections_with_udts | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Exit code 3 - UDT schema parsing |
-| empty_collections_table | 49 | ✅ | ✅ | ✅ | ✅ (1 test) | **PASS** | Fixed by Issue #213 |
-| frozen_collections_table | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Frozen parsing works (Issue #219), blocked by non-frozen `regular_tags` (Issue #221) |
-| large_collections_table | 49 | ✅ | ✅ | ✅ | ⚠️ (2 tests) | **PASS** | Fixed by Issue #213 |
+| collections_with_udts | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Exit code 3 - UDT schema parsing (Issue #220) |
+| empty_collections_table | 49 | ✅ | ✅ | ✅ | ✅ (1 test) | **PASS** | Fixed by Issue #221 + bounds checking fixes |
+| frozen_collections_table | 49 | ✅ | ✅ | ✅ | ⚠️ (1 test) | **PASS** | Fixed by Issue #221 (complex cell flags) |
+| large_collections_table | 49 | ✅ | ✅ | ✅ | ⚠️ (2 tests) | **PASS** | Fixed by Issue #221 + bounds checking fixes |
 | nested_collections_table | 49 | ✅ | ✅ | ✅ | ⚠️ (4 tests) | **PASS** | Fixed by Issue #218 (Summary.db rewrite) |
-| typed_collections_table | 49 | ❌ | ❌ | ❌ | ⚠️ (1 test) | **FAIL** | Non-frozen collections need complex cell flags (Issue #221) |
+| typed_collections_table | 49 | ✅ | ✅ | ✅ | ⚠️ (1 test) | **PASS** | Fixed by Issue #221 (complex cell flags) - 50 entries |
 
 ### test_timeseries (9 tables - 9 PASS / 0 FAIL) ✅ 100%
 

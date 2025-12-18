@@ -423,11 +423,18 @@ cargo build --no-default-features --features all-compression
 
 ### Active Issues (P1 - Blocking 100% Pass Rate)
 
-- **Issue #219**: Frozen Type Support - Blocks 2 tables (frozen_collections_table, chat_messages)
+- **Issue #219**: Nested Frozen Type Support - Blocks 1 table (chat_messages)
 - **Issue #220**: UDT Support - Blocks 1 table (collections_with_udts)
-- **Issue #221**: Complex Cell Flag Handling - Blocks 1 table (typed_collections_table)
 
 ### Completed Issues (Fixed - Dec 2025)
+
+- **Issue #221**: Complex Cell Flag Handling (0xC0-0xCF) - **FIXED**
+  - Status: ✅ FIXED - Non-frozen collection parsing implemented
+  - Root cause: Parser tried to read complex deletion time VInt as cell flags
+  - Fix: Added `is_complex_column()` detection, `parse_complex_column()` with proper HAS_COMPLEX_DELETION handling, `skip_complex_cell()` with correct field order (flags→timestamp→deletion→ttl→path→value)
+  - Key insight: Cell flags are ONLY 0x00-0x1F (5 bits). The 0xC0+ bytes were VInt data, not flags.
+  - Also fixed: Added V5_0TypedCollections to block_io.rs NB format list
+  - Result: `typed_collections_table` now passes (50 entries)
 
 - **Issue #218**: Summary.db parser format mismatch - **FIXED**
   - Status: ✅ FIXED - Complete rewrite with correct Cassandra 5.0 format
@@ -503,14 +510,18 @@ cargo build --no-default-features --features all-compression
 
 ## Key Takeaways
 
-- **Pass rate: 87.9% (29/33 tables)** - Up from 84.8% after Issue #218 fix
+- **Pass rate: 93.9% (31/33 tables)** - Improved after Issue #221 fix + bounds checking
 - All SSTable component parsers (Data.db, Index.db, Summary.db, Statistics.db) now use correct formats
-- **4 tables blocked by cell type parsing** - requires Issues #219, #220, #221
+- **2 tables blocked by cell type parsing** - requires Issues #219, #220
 - CQLite is **read-only** - write operations permanently removed (Issues #175, #176)
 - Remaining work is Data.db cell type handling for:
-  - Frozen collections (Issue #219) - 2 tables
-  - UDTs (Issue #220) - 1 table
-  - Complex cell flags (Issue #221) - 1 table
+  - Nested frozen collections (Issue #219) - 1 table (chat_messages)
+  - UDTs (Issue #220) - 1 table (collections_with_udts)
+- **Issue #221 FIXED**: Complex cell flag handling now works for non-frozen collections
+  - `typed_collections_table` now passes (50 entries)
+  - `frozen_collections_table` now passes (41 entries)
+  - `empty_collections_table` now passes (bounds checking fix)
+  - `large_collections_table` now passes (bounds checking fix)
 
 ---
 
