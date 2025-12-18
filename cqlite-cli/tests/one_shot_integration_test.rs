@@ -286,3 +286,321 @@ fn test_one_shot_select_csv_format() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.is_empty(), "CSV format should produce output");
 }
+
+// ============================================================================
+// Issue #223: --query parameter tests (alias for --execute)
+// ============================================================================
+
+#[test]
+#[cfg(feature = "state_machine")]
+fn test_query_parameter_alias_for_execute() {
+    // Issue #223: --query should work identically to --execute
+    let data_dir = get_test_data_root().join("sstables");
+    let schema_file = get_schemas_dir().join("basic-types.cql");
+
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
+
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--query", // Using --query alias instead of -e
+        "SELECT * FROM test_basic.simple_table LIMIT 5",
+        "--format",
+        "json",
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+    eprintln!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    // Should succeed (exit code 0)
+    assert!(
+        output.status.success(),
+        "--query alias should succeed. Exit code: {:?}",
+        output.status.code()
+    );
+
+    // Should produce non-empty output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.is_empty(),
+        "--query should produce output identical to -e"
+    );
+}
+
+#[test]
+#[cfg(feature = "state_machine")]
+fn test_out_parameter_json_format() {
+    // Issue #223: --out should control output format
+    let data_dir = get_test_data_root().join("sstables");
+    let schema_file = get_schemas_dir().join("basic-types.cql");
+
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
+
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--query",
+        "SELECT * FROM test_basic.simple_table LIMIT 5",
+        "--out", // Using --out instead of --format
+        "json",
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+
+    // Should succeed
+    assert!(
+        output.status.success(),
+        "--out json should succeed. Exit code: {:?}",
+        output.status.code()
+    );
+
+    // Output should be valid JSON (starts with { or [)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.starts_with('{') || trimmed.starts_with('['),
+        "--out json should produce JSON output, got: {}",
+        &trimmed[..trimmed.len().min(100)]
+    );
+}
+
+#[test]
+#[cfg(feature = "state_machine")]
+fn test_out_parameter_csv_format() {
+    // Issue #223: --out csv should produce CSV output
+    let data_dir = get_test_data_root().join("sstables");
+    let schema_file = get_schemas_dir().join("basic-types.cql");
+
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
+
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--query",
+        "SELECT * FROM test_basic.simple_table LIMIT 5",
+        "--out",
+        "csv",
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+
+    // Should succeed
+    assert!(
+        output.status.success(),
+        "--out csv should succeed. Exit code: {:?}",
+        output.status.code()
+    );
+
+    // CSV output should contain commas (header line at minimum)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(',') || stdout.lines().count() > 0,
+        "--out csv should produce CSV-like output"
+    );
+}
+
+#[test]
+#[cfg(feature = "state_machine")]
+fn test_out_parameter_table_format() {
+    // Issue #223: --out table should produce table output
+    let data_dir = get_test_data_root().join("sstables");
+    let schema_file = get_schemas_dir().join("basic-types.cql");
+
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
+
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--query",
+        "SELECT * FROM test_basic.simple_table LIMIT 5",
+        "--out",
+        "table",
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+
+    // Should succeed
+    assert!(
+        output.status.success(),
+        "--out table should succeed. Exit code: {:?}",
+        output.status.code()
+    );
+
+    // Table output should contain some output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "--out table should produce output");
+}
+
+#[test]
+#[cfg(feature = "state_machine")]
+fn test_query_and_out_combined_prd_example() {
+    // Issue #223: Test the exact PRD example usage pattern
+    // cqlite --schema schema.json --data-dir /path/to/sstables \
+    //   --query "SELECT * FROM users WHERE id = 'abc'" \
+    //   --out json
+    let data_dir = get_test_data_root().join("sstables");
+    let schema_file = get_schemas_dir().join("basic-types.cql");
+
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
+
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--query",
+        "SELECT * FROM test_basic.simple_table LIMIT 3",
+        "--out",
+        "json",
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+    eprintln!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    // Should succeed - this is the PRD-specified usage
+    assert!(
+        output.status.success(),
+        "PRD example (--query + --out json) should succeed. Exit code: {:?}",
+        output.status.code()
+    );
+
+    // Should produce JSON output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.starts_with('{') || trimmed.starts_with('['),
+        "PRD example should produce JSON output"
+    );
+}
+
+#[test]
+#[cfg(feature = "state_machine")]
+fn test_out_takes_precedence_over_format() {
+    // Issue #223: --out should override --format when both are specified
+    let data_dir = get_test_data_root().join("sstables");
+    let schema_file = get_schemas_dir().join("basic-types.cql");
+
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
+
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--query",
+        "SELECT id, name FROM test_basic.simple_table LIMIT 1",
+        "--format",
+        "table", // This should be overridden
+        "--out",
+        "json", // This should win
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+
+    // Should succeed
+    assert!(
+        output.status.success(),
+        "--out should take precedence over --format. Exit code: {:?}",
+        output.status.code()
+    );
+
+    // Output should be JSON (not table format)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.starts_with('{') || trimmed.starts_with('['),
+        "--out json should override --format table, but got: {}",
+        &trimmed[..trimmed.len().min(100)]
+    );
+}
+
+#[test]
+#[cfg(feature = "state_machine")]
+fn test_out_yaml_format() {
+    // Issue #223: --out yaml should produce YAML output
+    let data_dir = get_test_data_root().join("sstables");
+    let schema_file = get_schemas_dir().join("basic-types.cql");
+
+    // Assert test data is available
+    assert!(
+        data_dir.exists() && schema_file.exists(),
+        "Test requires full SSTable dataset: test data not found. data_dir={:?}, schema_file={:?}",
+        data_dir,
+        schema_file
+    );
+
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--query",
+        "SELECT id, name FROM test_basic.simple_table LIMIT 1",
+        "--out",
+        "yaml",
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+
+    // Should succeed
+    assert!(
+        output.status.success(),
+        "--out yaml should succeed. Exit code: {:?}",
+        output.status.code()
+    );
+
+    // YAML output typically starts with '---' or has colon-separated key-value pairs
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "--out yaml should produce output");
+}

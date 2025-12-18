@@ -28,9 +28,40 @@ cqlite [GLOBAL_OPTIONS] <COMMAND> [COMMAND_OPTIONS]
 -v, --verbose                Verbose output (-v, -vv, -vvv)
 -q, --quiet                  Quiet mode (suppress output)
 --format <FORMAT>            Output format [table|json|csv|yaml]
+--out <FORMAT>               Query output format [table|json|csv|yaml] (takes precedence over --format)
+-e, --execute <CQL>          Execute single CQL statement (one-shot mode)
+--query <CQL>                Alias for --execute (PRD-specified usage)
+-f, --file <FILE>            Execute CQL statements from file
+--schema <PATH>              Schema file (.cql or .json) for ingestion
+--data-dir <DIR>             SSTable data directory for ingestion
+--dataset <NAME>             Test dataset name (alternative to --data-dir)
 --log-level <LEVEL>          Log level [error|warn|info|debug|trace]
 --no-color                   Disable colored output
 --progress                   Show progress bars for long operations
+```
+
+#### Output Format Precedence
+
+When both `--format` and `--out` are specified, `--out` takes precedence. This allows:
+- `--format` for global default across all commands
+- `--out` for query-specific output format override
+
+Environment variable `CQLITE_OUT` can also set the output format.
+
+#### One-Shot Query Mode (Issue #223)
+
+Execute queries directly from the command line without entering REPL:
+
+```bash
+# PRD-specified usage pattern
+cqlite --schema schema.cql --data-dir /path/to/sstables \
+  --query "SELECT * FROM users WHERE id = 'abc'" \
+  --out json
+
+# Equivalent using --execute
+cqlite --schema schema.cql --data-dir /path/to/sstables \
+  -e "SELECT * FROM users LIMIT 10" \
+  --out csv
 ```
 
 ## Core Commands

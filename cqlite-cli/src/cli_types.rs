@@ -9,20 +9,24 @@ use std::path::PathBuf;
 use crate::cli::{ExportFormat, ImportFormat, InfoOutputFormat, OutputFormat};
 
 /// Output mode for query results (distinct from display format)
+/// Mirrors OutputFormat variants for consistency with --format flag.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputMode {
     Table,
     Json,
     Csv,
+    Yaml,
 }
 
 impl OutputMode {
     /// Convert OutputMode to its string representation
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             OutputMode::Table => "table",
             OutputMode::Json => "json",
             OutputMode::Csv => "csv",
+            OutputMode::Yaml => "yaml",
         }
     }
 }
@@ -86,15 +90,17 @@ pub struct Cli {
     )]
     pub data_dir: Option<PathBuf>,
 
-    /// Execute a single CQL statement in one-shot mode
-    #[arg(short = 'e', long, value_name = "CQL")]
+    /// Execute a single CQL statement in one-shot mode (alias: --query)
+    #[arg(short = 'e', long, visible_alias = "query", value_name = "CQL")]
     pub execute: Option<String>,
 
     /// Execute statements from a file (semicolon-terminated)
     #[arg(short = 'f', long, value_name = "CQL_FILE")]
     pub file: Option<PathBuf>,
 
-    /// Output format for query results (table = cqlsh-compatible)
+    /// Output format for query results. Takes precedence over --format when specified.
+    /// Applies to: --execute/-e, --query, --file, and query subcommand.
+    /// (table = cqlsh-compatible format)
     #[arg(long, value_enum, env = "CQLITE_OUT")]
     pub out: Option<OutputMode>,
 

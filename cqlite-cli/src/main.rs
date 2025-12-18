@@ -19,7 +19,7 @@ mod formatter;
 mod output;
 mod script_executor;
 
-use cli_types::{AdminCommands, Cli, Commands};
+use cli_types::{AdminCommands, Cli, Commands, OutputMode};
 use commands::info::execute_info_command;
 // mod data_parser;
 // mod formatter; // New cqlsh-compatible formatter
@@ -199,13 +199,27 @@ async fn run_main() -> Result<()> {
     let output_config =
         config::OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
 
+    // Issue #223: Determine effective output format
+    // Precedence: --out (query-specific) > --format (global)
+    // PRD usage example: cqlite --query "SELECT ..." --out json
+    let effective_format = if let Some(out_mode) = cli.out {
+        match out_mode {
+            OutputMode::Table => cli::OutputFormat::Table,
+            OutputMode::Json => cli::OutputFormat::Json,
+            OutputMode::Csv => cli::OutputFormat::Csv,
+            OutputMode::Yaml => cli::OutputFormat::Yaml,
+        }
+    } else {
+        cli.format
+    };
+
     // Handle --file flag (script execution) - takes precedence over subcommands
     if let Some(file_path) = cli.file {
         return script_executor::execute_script_file(
             &file_path,
             &database,
             &output_config,
-            cli.format,
+            effective_format,
         )
         .await;
     }
@@ -293,7 +307,7 @@ async fn run_main() -> Result<()> {
                     // Call read-sstable command with extracted path
                     return commands::read_sstable::execute_read_sstable_command(
                         &table_path,
-                        cli.format,
+                        effective_format,
                         cli.limit,
                         0,     // skip
                         false, // keys_only
@@ -317,7 +331,7 @@ async fn run_main() -> Result<()> {
             &query,
             false, // explain
             false, // timing
-            cli.format,
+            effective_format,
             &output_config,
         )
         .await;
@@ -421,14 +435,12 @@ async fn run_main() -> Result<()> {
             explain,
             timing,
         }) => {
-            let output_config =
-                config::OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
             commands::execute_query(
                 &database,
                 &query,
                 explain,
                 timing,
-                cli.format,
+                effective_format,
                 &output_config,
             )
             .await

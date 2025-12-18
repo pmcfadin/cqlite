@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
 use std::path::PathBuf;
 
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
 pub enum OutputFormat {
     Table,
     Json,
