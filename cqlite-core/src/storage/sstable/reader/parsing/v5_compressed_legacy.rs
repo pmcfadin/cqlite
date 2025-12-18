@@ -41,8 +41,8 @@ use log::{debug, warn};
 
 use crate::{
     parser::vint::{parse_vint, parse_vuint},
-    schema::TableSchema,
-    types::TableId,
+    schema::{CqlType, TableSchema},
+    types::{TableId, UdtField, UdtTypeDef, UdtValue},
     Error, Result, RowKey, Value,
 };
 
@@ -2120,8 +2120,47 @@ impl V5CompressedLegacyParser {
                         column,
                         _reader,
                     )?
+                } else if Self::is_udt_type(&column.data_type) {
+                    // Frozen UDT - parse using UDT parser
+                    // The column.data_type contains the full Cassandra type string including UserType
+                    log::debug!(
+                        "V5CompressedLegacy: Parsing frozen UDT column '{}' type='{}'",
+                        column.name,
+                        column.data_type
+                    );
+
+                    // Parse UDT definition from the type string
+                    let udt_def = Self::parse_udt_type_definition(&column.data_type)?;
+
+                    // First read the VInt-prefixed blob length
+                    let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                        Error::corruption(format!(
+                            "Frozen UDT '{}': failed to parse blob length: {:?}",
+                            column.name, e
+                        ))
+                    })?;
+                    let blob_len = blob_len as usize;
+                    let bytes_consumed = data[offset..].len() - remaining.len();
+                    offset += bytes_consumed;
+
+                    if offset + blob_len > data.len() {
+                        return Err(Error::corruption(format!(
+                            "Frozen UDT '{}': need {} bytes but only {} available",
+                            column.name,
+                            blob_len,
+                            data.len() - offset
+                        )));
+                    }
+
+                    // Parse UDT value from the blob
+                    let udt_data = &data[offset..offset + blob_len];
+                    let (udt_value, _) =
+                        self.parse_udt_value(udt_data, 0, &udt_def, column, _reader)?;
+                    offset += blob_len;
+
+                    (udt_value, offset)
                 } else {
-                    // Non-collection frozen type (e.g., frozen<tuple<...>>, frozen<udt>)
+                    // Non-collection frozen type (e.g., frozen<tuple<...>>)
                     let mut inner_column = column.clone();
                     inner_column.data_type = inner_type.clone();
                     self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?
@@ -2246,6 +2285,610 @@ impl V5CompressedLegacyParser {
         }
 
         Ok(inner.to_string())
+    }
+
+    /// Check if a type string represents a UDT (User-Defined Type).
+    /// Detects Cassandra's internal format: org.apache.cassandra.db.marshal.UserType(...)
+    fn is_udt_type(type_str: &str) -> bool {
+        type_str.contains("org.apache.cassandra.db.marshal.UserType")
+    }
+
+    /// Parse a UDT type string to extract the UDT definition.
+    /// Cassandra encodes UDTs as:
+    /// `UserType(keyspace,hex_name,field1_hex:type1,field2_hex:type2,...)`
+    ///
+    /// Example:
+    /// ```text
+    /// org.apache.cassandra.db.marshal.UserType(
+    ///   test_collections,
+    ///   616464726573735f74797065,    // hex("address_type")
+    ///   737472656574:UTF8Type,        // street:UTF8Type
+    ///   63697479:UTF8Type,            // city:UTF8Type
+    ///   ...
+    /// )
+    /// ```
+    fn parse_udt_type_definition(type_str: &str) -> Result<UdtTypeDef> {
+        // Find the UserType(...) portion
+        let start_marker = "org.apache.cassandra.db.marshal.UserType(";
+        let start_idx = type_str
+            .find(start_marker)
+            .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
+
+        // Find the matching close paren (handling nested types)
+        let inner_start = start_idx + start_marker.len();
+        let mut depth = 1;
+        let mut end_idx = inner_start;
+        let chars: Vec<char> = type_str[inner_start..].chars().collect();
+
+        for (i, c) in chars.iter().enumerate() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_idx = inner_start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if depth != 0 {
+            return Err(Error::schema(format!(
+                "Unbalanced parentheses in UserType: {}",
+                type_str
+            )));
+        }
+
+        let inner = &type_str[inner_start..end_idx];
+
+        // Split by comma, but respect nested parentheses
+        let parts = Self::split_type_args(inner)?;
+        if parts.len() < 2 {
+            return Err(Error::schema(format!(
+                "UserType requires at least keyspace and name: {}",
+                inner
+            )));
+        }
+
+        // First part is keyspace
+        let keyspace = parts[0].trim().to_string();
+
+        // Second part is hex-encoded type name
+        let udt_name = Self::decode_hex_name(parts[1].trim())?;
+
+        // Remaining parts are field definitions: hex_name:type
+        let mut udt_def = UdtTypeDef::new(keyspace, udt_name);
+        for field_def in parts.iter().skip(2) {
+            let field_def = field_def.trim();
+            if field_def.is_empty() {
+                continue;
+            }
+
+            // Split on first colon (field name is before, type is after)
+            if let Some(colon_idx) = field_def.find(':') {
+                let field_name_hex = &field_def[..colon_idx];
+                let field_type_str = &field_def[colon_idx + 1..];
+
+                let field_name = Self::decode_hex_name(field_name_hex)?;
+                let field_type = Self::parse_cassandra_type(field_type_str)?;
+
+                udt_def = udt_def.with_field(field_name, field_type, true);
+            } else {
+                return Err(Error::schema(format!(
+                    "Invalid UDT field definition (missing colon): {}",
+                    field_def
+                )));
+            }
+        }
+
+        Ok(udt_def)
+    }
+
+    /// Split type arguments by comma, respecting nested parentheses.
+    fn split_type_args(s: &str) -> Result<Vec<String>> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut depth = 0;
+
+        for c in s.chars() {
+            match c {
+                '(' => {
+                    depth += 1;
+                    current.push(c);
+                }
+                ')' => {
+                    depth -= 1;
+                    current.push(c);
+                }
+                ',' if depth == 0 => {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+                _ => current.push(c),
+            }
+        }
+
+        if !current.is_empty() {
+            parts.push(current);
+        }
+
+        Ok(parts)
+    }
+
+    /// Decode a hex-encoded name (e.g., "616464726573735f74797065" -> "address_type")
+    fn decode_hex_name(hex: &str) -> Result<String> {
+        let bytes = hex::decode(hex).map_err(|e| {
+            Error::schema(format!("Invalid hex-encoded UDT name '{}': {}", hex, e))
+        })?;
+        String::from_utf8(bytes)
+            .map_err(|e| Error::schema(format!("Invalid UTF-8 in UDT name '{}': {}", hex, e)))
+    }
+
+    /// Parse a Cassandra type string into a CqlType.
+    /// Handles: UTF8Type, Int32Type, ListType(...), SetType(...), MapType(...), UserType(...), FrozenType(...)
+    fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
+        let type_str = type_str.trim();
+
+        // Handle FrozenType wrapper
+        if type_str.starts_with("org.apache.cassandra.db.marshal.FrozenType(") {
+            let inner_start = "org.apache.cassandra.db.marshal.FrozenType(".len();
+            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+            let inner_type = Self::parse_cassandra_type(&inner)?;
+            return Ok(CqlType::Frozen(Box::new(inner_type)));
+        }
+
+        // Handle UserType (nested UDT)
+        if type_str.starts_with("org.apache.cassandra.db.marshal.UserType(") {
+            let udt_def = Self::parse_udt_type_definition(type_str)?;
+            let fields: Vec<(String, CqlType)> = udt_def
+                .fields
+                .into_iter()
+                .map(|f| (f.name, f.field_type))
+                .collect();
+            return Ok(CqlType::Udt(udt_def.name, fields));
+        }
+
+        // Handle collection types
+        if type_str.starts_with("org.apache.cassandra.db.marshal.ListType(") {
+            let inner_start = "org.apache.cassandra.db.marshal.ListType(".len();
+            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+            let elem_type = Self::parse_cassandra_type(&inner)?;
+            return Ok(CqlType::List(Box::new(elem_type)));
+        }
+
+        if type_str.starts_with("org.apache.cassandra.db.marshal.SetType(") {
+            let inner_start = "org.apache.cassandra.db.marshal.SetType(".len();
+            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+            let elem_type = Self::parse_cassandra_type(&inner)?;
+            return Ok(CqlType::Set(Box::new(elem_type)));
+        }
+
+        if type_str.starts_with("org.apache.cassandra.db.marshal.MapType(") {
+            let inner_start = "org.apache.cassandra.db.marshal.MapType(".len();
+            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+            let parts = Self::split_type_args(&inner)?;
+            if parts.len() != 2 {
+                return Err(Error::schema(format!(
+                    "MapType requires exactly 2 type arguments: {}",
+                    type_str
+                )));
+            }
+            let key_type = Self::parse_cassandra_type(&parts[0])?;
+            let val_type = Self::parse_cassandra_type(&parts[1])?;
+            return Ok(CqlType::Map(Box::new(key_type), Box::new(val_type)));
+        }
+
+        // Handle primitive types
+        Ok(match type_str {
+            s if s.ends_with("UTF8Type") => CqlType::Text,
+            s if s.ends_with("AsciiType") => CqlType::Ascii,
+            s if s.ends_with("Int32Type") => CqlType::Int,
+            s if s.ends_with("LongType") => CqlType::BigInt,
+            s if s.ends_with("FloatType") => CqlType::Float,
+            s if s.ends_with("DoubleType") => CqlType::Double,
+            s if s.ends_with("BooleanType") => CqlType::Boolean,
+            s if s.ends_with("UUIDType") || s.ends_with("TimeUUIDType") => CqlType::Uuid,
+            s if s.ends_with("TimestampType") => CqlType::Timestamp,
+            s if s.ends_with("DateType") || s.ends_with("SimpleDateType") => CqlType::Date,
+            s if s.ends_with("TimeType") => CqlType::Time,
+            s if s.ends_with("DecimalType") => CqlType::Decimal,
+            s if s.ends_with("IntegerType") => CqlType::Varint,
+            s if s.ends_with("BytesType") => CqlType::Blob,
+            s if s.ends_with("InetAddressType") => CqlType::Inet,
+            _ => CqlType::Custom(type_str.to_string()),
+        })
+    }
+
+    /// Extract the contents inside parentheses, respecting nesting.
+    fn extract_inner_parens(s: &str) -> Result<String> {
+        let mut depth = 1;
+        let mut end_idx = 0;
+        let chars: Vec<char> = s.chars().collect();
+
+        for (i, c) in chars.iter().enumerate() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_idx = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if depth != 0 {
+            return Err(Error::schema(format!(
+                "Unbalanced parentheses in type: {}",
+                s
+            )));
+        }
+
+        Ok(s[..end_idx].to_string())
+    }
+
+    /// Parse a UDT value from binary data using the given UDT definition.
+    /// UDT binary format (frozen):
+    /// - For each field in schema order:
+    ///   - [4 bytes BE i32]: field length (-1 = null, 0 = empty, >0 = data length)
+    ///   - [N bytes]: field data (if length > 0)
+    fn parse_udt_value(
+        &self,
+        data: &[u8],
+        offset: usize,
+        udt_def: &UdtTypeDef,
+        _column: &crate::schema::Column,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        let mut current_offset = offset;
+        let mut fields = Vec::with_capacity(udt_def.fields.len());
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing UDT '{}' with {} fields at offset {}",
+            udt_def.name,
+            udt_def.fields.len(),
+            offset
+        );
+
+        for field_def in &udt_def.fields {
+            // Check bounds for field length (4 bytes)
+            if current_offset + 4 > data.len() {
+                // Trailing fields can be omitted (implicit null)
+                log::debug!(
+                    "V5CompressedLegacy: UDT field '{}' omitted (implicit null), remaining fields omitted",
+                    field_def.name
+                );
+                // Fill remaining fields with null
+                while fields.len() < udt_def.fields.len() {
+                    let remaining_field = &udt_def.fields[fields.len()];
+                    fields.push(UdtField {
+                        name: remaining_field.name.clone(),
+                        value: None,
+                    });
+                }
+                break;
+            }
+
+            // Read field length (4 bytes big-endian i32)
+            let field_len = i32::from_be_bytes([
+                data[current_offset],
+                data[current_offset + 1],
+                data[current_offset + 2],
+                data[current_offset + 3],
+            ]);
+            current_offset += 4;
+
+            let field_value = if field_len == -1 {
+                // Null field
+                log::debug!(
+                    "V5CompressedLegacy: UDT field '{}' is null",
+                    field_def.name
+                );
+                None
+            } else if field_len == 0 {
+                // Empty field - create empty value based on type
+                log::debug!(
+                    "V5CompressedLegacy: UDT field '{}' is empty",
+                    field_def.name
+                );
+                Some(Self::create_empty_value_for_type(&field_def.field_type))
+            } else if field_len < 0 {
+                // Validation: reject other negative values
+                return Err(Error::corruption(format!(
+                    "UDT field '{}': invalid negative field length {}",
+                    field_def.name,
+                    field_len
+                )));
+            } else {
+                // Field with data
+                let field_len = field_len as usize;
+                if current_offset + field_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "UDT field '{}': need {} bytes but only {} available at offset {}",
+                        field_def.name,
+                        field_len,
+                        data.len() - current_offset,
+                        current_offset
+                    )));
+                }
+
+                let field_data = &data[current_offset..current_offset + field_len];
+                current_offset += field_len;
+
+                log::debug!(
+                    "V5CompressedLegacy: UDT field '{}' has {} bytes of data",
+                    field_def.name,
+                    field_len
+                );
+
+                // Parse field value based on its type
+                let value = self.parse_udt_field_value(field_data, &field_def.field_type, reader)?;
+                Some(value)
+            };
+
+            fields.push(UdtField {
+                name: field_def.name.clone(),
+                value: field_value,
+            });
+        }
+
+        let udt_value = UdtValue {
+            type_name: udt_def.name.clone(),
+            keyspace: udt_def.keyspace.clone(),
+            fields,
+        };
+
+        Ok((Value::Udt(udt_value), current_offset))
+    }
+
+    /// Parse a UDT field value based on its CqlType.
+    fn parse_udt_field_value(
+        &self,
+        data: &[u8],
+        field_type: &CqlType,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<Value> {
+        match field_type {
+            CqlType::Text | CqlType::Ascii => {
+                let s = String::from_utf8(data.to_vec())
+                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
+                Ok(Value::Text(s))
+            }
+            CqlType::Int => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Int field requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Integer(v))
+            }
+            CqlType::BigInt => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "BigInt field requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::BigInt(v))
+            }
+            CqlType::Float => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Float field requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Float32(f32::from_bits(bits)))
+            }
+            CqlType::Double => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "Double field requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let bits = u64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::Float(f64::from_bits(bits)))
+            }
+            CqlType::Boolean => {
+                if data.is_empty() {
+                    return Err(Error::corruption("Boolean field is empty"));
+                }
+                Ok(Value::Boolean(data[0] != 0))
+            }
+            CqlType::Uuid => {
+                if data.len() != 16 {
+                    return Err(Error::corruption(format!(
+                        "UUID field requires 16 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let uuid_bytes: [u8; 16] = data[0..16]
+                    .try_into()
+                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+                Ok(Value::Uuid(uuid_bytes))
+            }
+            CqlType::Timestamp => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "Timestamp field requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let millis = i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::Timestamp(millis))
+            }
+            CqlType::Date => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Date field requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let days = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Date(days as i32))
+            }
+            CqlType::Blob => Ok(Value::Blob(data.to_vec())),
+            CqlType::Inet => Ok(Value::Inet(data.to_vec())),
+            CqlType::Frozen(inner) => {
+                // Parse the inner type and wrap in Frozen
+                let inner_value = self.parse_udt_field_value(data, inner, reader)?;
+                Ok(Value::Frozen(Box::new(inner_value)))
+            }
+            CqlType::Udt(name, field_defs) => {
+                // Nested UDT - recursively parse
+                let mut nested_def = UdtTypeDef::new("".to_string(), name.clone());
+                for (field_name, field_type) in field_defs {
+                    nested_def = nested_def.with_field(field_name.clone(), field_type.clone(), true);
+                }
+                let dummy_column = crate::schema::Column {
+                    name: name.clone(),
+                    data_type: "udt".to_string(),
+                    nullable: true,
+                    default: None,
+                };
+                let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column, reader)?;
+                Ok(value)
+            }
+            _ => {
+                // For other types, return as blob
+                log::debug!(
+                    "V5CompressedLegacy: UDT field type {:?} parsed as blob ({} bytes)",
+                    field_type,
+                    data.len()
+                );
+                Ok(Value::Blob(data.to_vec()))
+            }
+        }
+    }
+
+    /// Create an empty value for a given CQL type.
+    fn create_empty_value_for_type(cql_type: &CqlType) -> Value {
+        match cql_type {
+            CqlType::Text | CqlType::Ascii => Value::Text(String::new()),
+            CqlType::Blob => Value::Blob(Vec::new()),
+            CqlType::List(_) => Value::List(Vec::new()),
+            CqlType::Set(_) => Value::Set(Vec::new()),
+            CqlType::Map(_, _) => Value::Map(Vec::new()),
+            _ => Value::Blob(Vec::new()),
+        }
+    }
+
+    /// Parse a UDT field value without requiring SSTableReader.
+    /// This is a simplified version of parse_udt_field_value for use in frozen collection contexts.
+    ///
+    /// Limitation: Complex nested types (nested UDTs, nested collections) are returned as blobs.
+    /// For full UDT support with nested types, use parse_udt_field_value with a reader.
+    fn parse_simple_udt_field_value(data: &[u8], field_type: &CqlType) -> Result<Value> {
+        match field_type {
+            CqlType::Text | CqlType::Ascii => {
+                let s = String::from_utf8(data.to_vec())
+                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
+                Ok(Value::Text(s))
+            }
+            CqlType::Int => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Int field requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Integer(v))
+            }
+            CqlType::BigInt => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "BigInt field requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::BigInt(v))
+            }
+            CqlType::Boolean => {
+                if data.len() != 1 {
+                    return Err(Error::corruption(format!(
+                        "Boolean field requires 1 byte, got {}",
+                        data.len()
+                    )));
+                }
+                Ok(Value::Boolean(data[0] != 0))
+            }
+            CqlType::Float => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Float field requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Float32(f32::from_bits(bits)))
+            }
+            CqlType::Double => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "Double field requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let bits = u64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::Float(f64::from_bits(bits)))
+            }
+            CqlType::Uuid | CqlType::TimeUuid => {
+                if data.len() != 16 {
+                    return Err(Error::corruption(format!(
+                        "UUID field requires 16 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let uuid_bytes: [u8; 16] = data[0..16]
+                    .try_into()
+                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+                Ok(Value::Uuid(uuid_bytes))
+            }
+            CqlType::Timestamp => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "Timestamp field requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let millis = i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::Timestamp(millis))
+            }
+            CqlType::Blob => Ok(Value::Blob(data.to_vec())),
+            _ => {
+                // For complex types (nested UDTs, collections, etc.), return as blob
+                // These require SSTableReader for full parsing
+                log::debug!(
+                    "UDT field type {:?} in frozen context parsed as blob ({} bytes)",
+                    field_type,
+                    data.len()
+                );
+                Ok(Value::Blob(data.to_vec()))
+            }
+        }
     }
 
     /// Returns true if the column type is a complex column (non-frozen collection).
@@ -3128,6 +3771,134 @@ impl V5CompressedLegacyParser {
                 )?;
                 offset = new_offset;
                 map_value
+            }
+
+            // Handle UDT (User-Defined Type) inside frozen collections
+            type_str if Self::is_udt_type(type_str) => {
+                log::debug!(
+                    "Frozen element '{}': parsing UDT type '{}'",
+                    column_name,
+                    type_str
+                );
+
+                // Parse UDT definition from the type string
+                let udt_def = Self::parse_udt_type_definition(type_str)?;
+
+                // UDTs inside frozen collections have VInt length prefix
+                let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen UDT '{}': failed to parse blob length: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let blob_len = blob_len as usize;
+                let bytes_consumed = data[offset..].len() - remaining.len();
+                offset += bytes_consumed;
+
+                if offset + blob_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Frozen UDT '{}': need {} bytes but only {} available",
+                        column_name,
+                        blob_len,
+                        data.len() - offset
+                    )));
+                }
+
+                // Extract UDT data blob
+                let udt_data = &data[offset..offset + blob_len];
+                offset += blob_len;
+
+                // TODO(Issue #220): Full UDT parsing requires SSTableReader for nested types.
+                // parse_raw_type_value is called in frozen collection contexts where we don't
+                // have access to reader. For now, parse simple fields and return blob for
+                // complex nested types.
+                //
+                // Temporary solution: Parse UDT with limited nested type support
+                let mut current_offset = 0;
+                let mut fields = Vec::with_capacity(udt_def.fields.len());
+
+                for field_def in &udt_def.fields {
+                    // Check bounds for field length (4 bytes BE i32)
+                    if current_offset + 4 > udt_data.len() {
+                        // Trailing fields can be omitted (implicit null)
+                        log::debug!(
+                            "Frozen UDT field '{}' omitted (implicit null)",
+                            field_def.name
+                        );
+                        while fields.len() < udt_def.fields.len() {
+                            let remaining_field = &udt_def.fields[fields.len()];
+                            fields.push(UdtField {
+                                name: remaining_field.name.clone(),
+                                value: None,
+                            });
+                        }
+                        break;
+                    }
+
+                    // Read field length (4 bytes big-endian i32)
+                    let field_len = i32::from_be_bytes([
+                        udt_data[current_offset],
+                        udt_data[current_offset + 1],
+                        udt_data[current_offset + 2],
+                        udt_data[current_offset + 3],
+                    ]);
+                    current_offset += 4;
+
+                    let field_value = if field_len == -1 {
+                        // Null field
+                        log::debug!("Frozen UDT field '{}' is null", field_def.name);
+                        None
+                    } else if field_len == 0 {
+                        // Empty field
+                        log::debug!("Frozen UDT field '{}' is empty", field_def.name);
+                        Some(Self::create_empty_value_for_type(&field_def.field_type))
+                    } else if field_len < 0 {
+                        // Validation: reject other negative values
+                        return Err(Error::corruption(format!(
+                            "Frozen UDT field '{}': invalid negative field length {}",
+                            field_def.name,
+                            field_len
+                        )));
+                    } else {
+                        // Field with data
+                        let field_len = field_len as usize;
+                        if current_offset + field_len > udt_data.len() {
+                            return Err(Error::corruption(format!(
+                                "Frozen UDT field '{}': need {} bytes but only {} available",
+                                field_def.name,
+                                field_len,
+                                udt_data.len() - current_offset
+                            )));
+                        }
+
+                        let field_data = &udt_data[current_offset..current_offset + field_len];
+                        current_offset += field_len;
+
+                        log::debug!(
+                            "Frozen UDT field '{}' has {} bytes of data, type: {:?}",
+                            field_def.name,
+                            field_len,
+                            field_def.field_type
+                        );
+
+                        // Parse simple field types directly, complex types as blob
+                        let value = Self::parse_simple_udt_field_value(field_data, &field_def.field_type)?;
+                        Some(value)
+                    };
+
+                    fields.push(UdtField {
+                        name: field_def.name.clone(),
+                        value: field_value,
+                    });
+                }
+
+                let udt_value = UdtValue {
+                    type_name: udt_def.name.clone(),
+                    keyspace: udt_def.keyspace.clone(),
+                    fields,
+                };
+
+                Value::Udt(udt_value)
             }
 
             // Default: treat as VInt-length-prefixed blob
