@@ -14,13 +14,14 @@
 //! use cqlite_core::query::QueryResult;
 //!
 //! let result: QueryResult = // ... query execution
-//! let csv_output = CSVWriter::write(&result)?;
+//! let csv_output = CSVWriter::write(&result, &config)?;
 //! println!("{}", csv_output);
 //! ```
 
 // CSV writer requires query module (M2+ feature)
 #![cfg(feature = "state_machine")]
 
+use crate::config::OutputConfig;
 use cqlite_core::query::QueryResult;
 use csv::WriterBuilder;
 
@@ -35,6 +36,7 @@ impl CSVWriter {
     ///
     /// # Arguments
     /// * `result` - The query result to format as CSV
+    /// * `config` - Output configuration for row limits
     ///
     /// # Returns
     /// * `Ok(String)` - CSV-formatted string with headers and data
@@ -45,8 +47,12 @@ impl CSVWriter {
     /// - Column order is stable across all rows
     /// - Null values render as empty strings
     /// - Special CSV characters are properly escaped by the csv crate
+    /// - Respects row limit from config
     #[allow(dead_code)]
-    pub fn write(result: &QueryResult) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn write(
+        result: &QueryResult,
+        config: &OutputConfig,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         // Create an in-memory CSV writer
         let mut wtr = WriterBuilder::new().from_writer(Vec::new());
 
@@ -59,8 +65,15 @@ impl CSVWriter {
             .collect();
         wtr.write_record(&headers)?;
 
+        // Apply row limit if specified in config
+        let rows_to_display = if let Some(limit) = config.limit {
+            &result.rows[..result.rows.len().min(limit)]
+        } else {
+            &result.rows
+        };
+
         // Write data rows in stable column order
-        for row in &result.rows {
+        for row in rows_to_display {
             let record: Vec<String> = result
                 .metadata
                 .columns
@@ -96,6 +109,10 @@ mod tests {
     use cqlite_core::types::DataType;
     use cqlite_core::{RowKey, Value};
     use std::collections::HashMap;
+
+    fn default_config() -> OutputConfig {
+        OutputConfig::default()
+    }
 
     /// Helper to create a test QueryResult
     fn create_test_result(
@@ -150,7 +167,7 @@ mod tests {
             vec![],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         assert_eq!(lines.len(), 1); // Only header, no data rows
@@ -173,7 +190,7 @@ mod tests {
             ],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         assert_eq!(lines.len(), 3); // Header + 2 data rows
@@ -195,7 +212,7 @@ mod tests {
             ],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         assert_eq!(lines.len(), 3);
@@ -226,7 +243,7 @@ mod tests {
             ],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         assert_eq!(lines.len(), 3);
@@ -255,7 +272,7 @@ mod tests {
             ],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
 
         // CSV crate should properly escape these
         assert!(csv.contains("\"Contains, comma\"") || csv.contains("Contains, comma"));
@@ -279,12 +296,45 @@ mod tests {
             ]],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         // Column order should be z, a, m (as defined in metadata), not alphabetical
         assert_eq!(lines[0], "z_field,a_field,m_field");
         assert_eq!(lines[1], "zzz,aaa,mmm");
+    }
+
+    #[test]
+    fn test_csv_config_limit() {
+        let result = create_test_result(
+            vec![("id", DataType::Integer)],
+            vec![
+                vec![("id", Value::Integer(1))],
+                vec![("id", Value::Integer(2))],
+                vec![("id", Value::Integer(3))],
+                vec![("id", Value::Integer(4))],
+                vec![("id", Value::Integer(5))],
+            ],
+        );
+
+        // Apply limit of 2 rows
+        let config = OutputConfig {
+            color_enabled: true,
+            limit: Some(2),
+            page_size: None,
+        };
+        let csv = CSVWriter::write(&result, &config).expect("CSV write failed");
+        let lines: Vec<&str> = csv.lines().collect();
+
+        // Should have header + 2 data rows (not 5)
+        assert_eq!(
+            lines.len(),
+            3,
+            "Limit should restrict output to 2 data rows"
+        );
+        assert_eq!(lines[0], "id");
+        assert_eq!(lines[1], "1");
+        assert_eq!(lines[2], "2");
     }
 
     #[test]
@@ -294,7 +344,7 @@ mod tests {
             vec![],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         // Should have header but no data rows
@@ -319,7 +369,7 @@ mod tests {
             ]],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         assert_eq!(lines.len(), 2);
@@ -351,7 +401,7 @@ mod tests {
             ]],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         assert_eq!(lines.len(), 2);
@@ -372,7 +422,7 @@ mod tests {
             vec![vec![("id", Value::Uuid(uuid_bytes))]],
         );
 
-        let csv = CSVWriter::write(&result).expect("CSV write failed");
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();
 
         assert_eq!(lines.len(), 2);

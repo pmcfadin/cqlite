@@ -4,6 +4,7 @@
 //! This ensures that JSON object keys appear in the same order as columns, NOT in
 //! arbitrary HashMap iteration order.
 
+use crate::config::OutputConfig;
 use cqlite_core::query::QueryResult;
 use cqlite_core::Value;
 use serde_json::{json, Map, Value as JsonValue};
@@ -37,15 +38,23 @@ impl JSONWriter {
     /// # Arguments
     ///
     /// * `result` - The query result to convert to JSON
+    /// * `config` - Output configuration for row limits
     ///
     /// # Returns
     ///
     /// Pretty-printed JSON string or error
     #[allow(dead_code)]
-    pub fn write(result: &QueryResult) -> Result<String, Box<dyn StdError>> {
+    pub fn write(result: &QueryResult, config: &OutputConfig) -> Result<String, Box<dyn StdError>> {
         let mut rows_json = Vec::new();
 
-        for row in &result.rows {
+        // Apply row limit if specified in config
+        let rows_to_display = if let Some(limit) = config.limit {
+            &result.rows[..result.rows.len().min(limit)]
+        } else {
+            &result.rows
+        };
+
+        for row in rows_to_display {
             // CRITICAL: Use LinkedHashMap-like pattern by iterating columns in order
             let mut row_obj = Map::new();
 
@@ -198,6 +207,10 @@ mod tests {
     use cqlite_core::{RowKey, Value};
     use std::collections::HashMap;
 
+    fn default_config() -> OutputConfig {
+        OutputConfig::default()
+    }
+
     #[test]
     fn test_deterministic_key_ordering() {
         // Create QueryResult with columns in reverse alphabetical order: [c, b, a]
@@ -235,7 +248,7 @@ mod tests {
         result.rows.push(row);
 
         // Write to JSON
-        let json_str = JSONWriter::write(&result).unwrap();
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
 
         // Parse to verify structure
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
@@ -273,7 +286,7 @@ mod tests {
         let row = QueryRow::with_values(RowKey::new(vec![1]), values);
         result.rows.push(row);
 
-        let json_str = JSONWriter::write(&result).unwrap();
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
         assert!(
             json_str.contains("null"),
             "Missing values should be JSON null"
@@ -312,7 +325,7 @@ mod tests {
         let row = QueryRow::with_values(RowKey::new(vec![1]), values);
         result.rows.push(row);
 
-        let json_str = JSONWriter::write(&result).unwrap();
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
 
         // Verify values are correctly represented
         assert!(json_str.contains("42"));
@@ -323,7 +336,7 @@ mod tests {
     #[test]
     fn test_empty_result() {
         let result = QueryResult::new();
-        let json_str = JSONWriter::write(&result).unwrap();
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
 
         // Empty result should be empty array
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
@@ -348,9 +361,40 @@ mod tests {
             result.rows.push(row);
         }
 
-        let json_str = JSONWriter::write(&result).unwrap();
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
         assert_eq!(parsed.len(), 3);
+    }
+
+    #[test]
+    fn test_config_limit() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![ColumnInfo::new(
+            "id".to_string(),
+            cqlite_core::types::DataType::Integer,
+            false,
+            0,
+        )];
+
+        // Add 10 rows
+        for i in 1..=10 {
+            let mut values = HashMap::new();
+            values.insert("id".to_string(), Value::Integer(i));
+            let row = QueryRow::with_values(RowKey::new(vec![i as u8]), values);
+            result.rows.push(row);
+        }
+
+        // Apply limit of 3 rows
+        let config = OutputConfig {
+            color_enabled: true,
+            limit: Some(3),
+            page_size: None,
+        };
+        let json_str = JSONWriter::write(&result, &config).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+
+        // Should only have 3 rows, not 10
+        assert_eq!(parsed.len(), 3, "Limit should restrict output to 3 rows");
     }
 
     #[test]

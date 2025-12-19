@@ -252,12 +252,12 @@ pub async fn execute_query(
             // Use JSONWriter for deterministic field ordering (Issue #129)
             // JSONWriter iterates metadata.columns in order, NOT HashMap iteration
             use crate::output::json::JSONWriter;
-            let json_output = JSONWriter::write(&result)
+            let json_output = JSONWriter::write(&result, config)
                 .map_err(|e| anyhow::anyhow!("Failed to format JSON output: {}", e))?;
             println!("{}", json_output);
         }
         OutputFormat::Csv => {
-            print_csv_format(&result)?;
+            print_csv_format(&result, config)?;
         }
         OutputFormat::Yaml => {
             let json_result = result.to_json();
@@ -325,31 +325,17 @@ pub async fn execute_query(
 
 /// Print results in CSV format
 #[cfg(feature = "state_machine")]
-fn print_csv_format(result: &cqlite_core::query::result::QueryResult) -> Result<()> {
-    use std::io::{self};
+fn print_csv_format(
+    result: &cqlite_core::query::result::QueryResult,
+    config: &crate::config::OutputConfig,
+) -> Result<()> {
+    use crate::output::CSVWriter;
 
-    let mut writer = csv::Writer::from_writer(io::stdout());
+    // CSVWriter handles limit internally via config
+    let csv_output = CSVWriter::write(result, config)
+        .map_err(|e| anyhow::anyhow!("Failed to format CSV output: {}", e))?;
 
-    // Write header if we have columns
-    let column_names = result.column_names();
-    if !column_names.is_empty() {
-        writer.write_record(&column_names)?;
-    }
-
-    // Write data rows
-    for row in result.iter() {
-        let mut record = Vec::new();
-        for column_name in &column_names {
-            let value = row
-                .get(column_name)
-                .map(|v| format!("{v}"))
-                .unwrap_or_else(|| "NULL".to_string());
-            record.push(value);
-        }
-        writer.write_record(&record)?;
-    }
-
-    writer.flush()?;
+    print!("{}", csv_output);
     Ok(())
 }
 

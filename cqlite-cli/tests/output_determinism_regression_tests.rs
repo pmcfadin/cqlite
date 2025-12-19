@@ -33,11 +33,19 @@ use cqlite_core::{RowKey, Value};
 use std::collections::HashMap;
 
 #[cfg(feature = "state_machine")]
+use cqlite_cli::config::OutputConfig;
+#[cfg(feature = "state_machine")]
 use cqlite_cli::output::{CSVWriter, JSONWriter};
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Default output config for tests (no limit)
+#[cfg(feature = "state_machine")]
+fn default_config() -> OutputConfig {
+    OutputConfig::default()
+}
 
 /// Create a QueryResult with specified column order and row data
 ///
@@ -135,7 +143,8 @@ fn test_json_preserves_non_alphabetical_column_order() {
         ]],
     );
 
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
 
     // Parse to verify structure
     let parsed: Vec<serde_json::Value> =
@@ -171,7 +180,8 @@ fn test_json_key_position_in_string_matches_column_order() {
         ]],
     );
 
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
 
     // Use string position assertions to verify ordering
     assert_string_order(
@@ -225,7 +235,8 @@ fn test_json_ordering_with_complex_types() {
         ]],
     );
 
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
 
     // Verify key order in string representation
     assert_string_order(
@@ -269,7 +280,8 @@ fn test_json_ordering_independent_of_hashmap_insertion() {
         ],
     );
 
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json_str).expect("JSON should parse");
 
@@ -316,7 +328,8 @@ fn test_json_multiple_rows_maintain_consistent_ordering() {
         ],
     );
 
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json_str).expect("JSON should parse");
 
@@ -358,7 +371,8 @@ fn test_json_ordering_with_null_and_missing_values() {
         ],
     );
 
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json_str).expect("JSON should parse");
 
@@ -398,7 +412,7 @@ fn test_json_regression_detection_wrong_order() {
         ]],
     );
 
-    let json_str = JSONWriter::write(&result).unwrap();
+    let json_str = JSONWriter::write(&result, &default_config()).unwrap();
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
     let row_obj = parsed[0].as_object().unwrap();
     let keys: Vec<&String> = row_obj.keys().collect();
@@ -425,7 +439,7 @@ fn test_csv_header_order_matches_metadata_columns() {
         vec![],
     );
 
-    let csv = CSVWriter::write(&result).expect("CSV write should succeed");
+    let csv = CSVWriter::write(&result, &default_config()).expect("CSV write should succeed");
     let lines: Vec<&str> = csv.lines().collect();
 
     assert_eq!(lines.len(), 1, "Should have header only");
@@ -466,7 +480,7 @@ fn test_csv_data_order_independent_of_hashmap_insertion() {
         ],
     );
 
-    let csv = CSVWriter::write(&result).expect("CSV write should succeed");
+    let csv = CSVWriter::write(&result, &default_config()).expect("CSV write should succeed");
     let lines: Vec<&str> = csv.lines().collect();
 
     assert_eq!(lines.len(), 4, "Should have header + 3 data rows");
@@ -508,7 +522,7 @@ fn test_csv_ordering_with_null_and_missing_values() {
         ],
     );
 
-    let csv = CSVWriter::write(&result).expect("CSV write should succeed");
+    let csv = CSVWriter::write(&result, &default_config()).expect("CSV write should succeed");
     let lines: Vec<&str> = csv.lines().collect();
 
     assert_eq!(lines.len(), 4, "Should have header + 3 data rows");
@@ -551,8 +565,8 @@ fn test_csv_ordering_remains_stable_across_result_sets() {
         ]],
     );
 
-    let csv1 = CSVWriter::write(&result1).expect("CSV write 1 should succeed");
-    let csv2 = CSVWriter::write(&result2).expect("CSV write 2 should succeed");
+    let csv1 = CSVWriter::write(&result1, &default_config()).expect("CSV write 1 should succeed");
+    let csv2 = CSVWriter::write(&result2, &default_config()).expect("CSV write 2 should succeed");
 
     let lines1: Vec<&str> = csv1.lines().collect();
     let lines2: Vec<&str> = csv2.lines().collect();
@@ -592,7 +606,7 @@ fn test_csv_ordering_with_complex_types() {
         ]],
     );
 
-    let csv = CSVWriter::write(&result).expect("CSV write should succeed");
+    let csv = CSVWriter::write(&result, &default_config()).expect("CSV write should succeed");
     let lines: Vec<&str> = csv.lines().collect();
 
     assert_eq!(lines[0], "z_list,a_int,m_set");
@@ -615,7 +629,7 @@ fn test_csv_regression_detection_wrong_header_order() {
         vec![],
     );
 
-    let csv = CSVWriter::write(&result).unwrap();
+    let csv = CSVWriter::write(&result, &default_config()).unwrap();
     let lines: Vec<&str> = csv.lines().collect();
 
     // This should panic because we're asserting the WRONG order
@@ -651,7 +665,7 @@ fn test_csv_multiple_rows_consistent_column_positions() {
         ],
     );
 
-    let csv = CSVWriter::write(&result).expect("CSV write should succeed");
+    let csv = CSVWriter::write(&result, &default_config()).expect("CSV write should succeed");
     let lines: Vec<&str> = csv.lines().collect();
 
     assert_eq!(lines.len(), 4);
@@ -689,13 +703,14 @@ fn test_json_and_csv_have_consistent_column_order() {
     );
 
     // Get JSON order
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json_str).expect("JSON should parse");
     let json_keys: Vec<&String> = parsed[0].as_object().unwrap().keys().collect();
 
     // Get CSV order
-    let csv = CSVWriter::write(&result).expect("CSV write should succeed");
+    let csv = CSVWriter::write(&result, &default_config()).expect("CSV write should succeed");
     let csv_header = csv.lines().next().unwrap();
     let csv_columns: Vec<&str> = csv_header.split(',').collect();
 
@@ -723,14 +738,15 @@ fn test_ordering_with_single_column() {
     );
 
     // JSON
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json_str).expect("JSON should parse");
     let keys: Vec<&String> = parsed[0].as_object().unwrap().keys().collect();
     assert_eq!(keys, vec!["only_col"]);
 
     // CSV
-    let csv = CSVWriter::write(&result).expect("CSV write should succeed");
+    let csv = CSVWriter::write(&result, &default_config()).expect("CSV write should succeed");
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines[0], "only_col");
     assert_eq!(lines[1], "42");
@@ -762,7 +778,8 @@ fn test_ordering_with_many_columns() {
     let result = create_result_with_column_order(columns, vec![row_data]);
 
     // JSON ordering
-    let json_str = JSONWriter::write(&result).expect("JSON write should succeed");
+    let json_str =
+        JSONWriter::write(&result, &default_config()).expect("JSON write should succeed");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json_str).expect("JSON should parse");
     let json_keys: Vec<&String> = parsed[0].as_object().unwrap().keys().collect();
@@ -774,7 +791,7 @@ fn test_ordering_with_many_columns() {
     assert_eq!(json_keys, expected_order);
 
     // CSV ordering
-    let csv = CSVWriter::write(&result).expect("CSV write should succeed");
+    let csv = CSVWriter::write(&result, &default_config()).expect("CSV write should succeed");
     let header = csv.lines().next().unwrap();
     assert_eq!(header, expected_order.join(","));
 }

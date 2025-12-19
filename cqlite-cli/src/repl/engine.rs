@@ -752,9 +752,17 @@ impl ReplEngine {
 
     /// Display result in CSV format
     fn display_csv_result(&self, result: &QueryResult) -> ReplResult<()> {
+        use crate::config::OutputConfig;
         use crate::output::CSVWriter;
 
-        let formatted = CSVWriter::write(result)
+        // Build output config from REPL config
+        let output_config = OutputConfig {
+            color_enabled: self.config.enable_colors,
+            limit: None, // REPL doesn't use CLI limit
+            page_size: None,
+        };
+
+        let formatted = CSVWriter::write(result, &output_config)
             .map_err(|e| ReplError::Session(format!("Failed to format CSV output: {}", e)))?;
 
         println!("{}", formatted);
@@ -764,9 +772,17 @@ impl ReplEngine {
 
     /// Display result in JSON format
     fn display_json_result(&self, result: &QueryResult) -> ReplResult<()> {
+        use crate::config::OutputConfig;
         use crate::output::JSONWriter;
 
-        let formatted = JSONWriter::write(result)
+        // Build output config from REPL config
+        let output_config = OutputConfig {
+            color_enabled: self.config.enable_colors,
+            limit: None, // REPL doesn't use CLI limit
+            page_size: None,
+        };
+
+        let formatted = JSONWriter::write(result, &output_config)
             .map_err(|e| ReplError::Session(format!("Failed to format JSON output: {}", e)))?;
 
         println!("{}", formatted);
