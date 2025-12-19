@@ -157,6 +157,27 @@ Type-specific encoding:
 - **Fixed-width types** (timestamp, int, bigint, UUID): Raw bytes, no length prefix
 - **Variable-width types** (text, varchar, blob): VInt length prefix + bytes
 
+### Unfiltered Markers (Issue #229 Fix)
+
+Between rows in a partition, or at the end of a partition, the parser may encounter special markers:
+
+| Marker | Hex | Meaning |
+|--------|-----|---------|
+| END_OF_PARTITION | 0x01 | Signals end of partition - nothing follows this byte |
+| IS_MARKER | 0x02 | Range tombstone marker (boundary or bound) |
+
+**END_OF_PARTITION (0x01)**:
+- Written by `UnfilteredSerializer.writeEndOfPartition()` as exactly `0x01`
+- When detected, the partition is complete; move to next partition
+- Critical for tables with clustering keys to avoid misinterpreting marker as row data
+
+**IS_MARKER (0x02)**:
+- Indicates a range tombstone boundary
+- Followed by clustering bound/boundary data and deletion time(s)
+- Must be skipped when parsing row data
+
+**Implementation Note**: CQLite uses exact byte match (not bitmask) to detect these markers to avoid false positives with row flags that incidentally have bits 0 or 1 set.
+
 ### Row Flags
 
 | Flag | Hex  | Meaning            | Details |
