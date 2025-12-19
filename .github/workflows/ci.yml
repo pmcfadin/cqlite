@@ -82,17 +82,24 @@ jobs:
           fi
           echo "::endgroup::"
 
-      - name: Run tests
+      - name: Run core tests
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           RUST_LOG: debug
           RUST_BACKTRACE: full
         run: |
-          echo "🧪 Running tests..."
+          echo "🧪 Running core tests..."
           echo "CQLITE_DATASETS_ROOT=$CQLITE_DATASETS_ROOT"
           echo "Checking dataset files:"
           ls -la "$CQLITE_DATASETS_ROOT/sstables/test_basic/" || echo "test_basic directory not found"
           cargo test --package cqlite-core -- --skip test_legacy_format_allows_blob_fallback_with_feature
+
+      - name: Run CLI unit tests
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        run: |
+          echo "🧪 Running CLI unit tests (Issue #20)..."
+          cargo test --package cqlite-cli --test unit_tests
 
       - name: Build CLI for one-shot smoke tests
         run: |
