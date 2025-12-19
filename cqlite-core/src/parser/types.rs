@@ -2218,4 +2218,398 @@ mod tests {
             Value::List(vec![Value::Text("alpha".to_string()), Value::Integer(7)])
         );
     }
+
+    // =============================================
+    // Issue #203: Additional tests for 75% coverage
+    // =============================================
+
+    #[test]
+    fn test_parse_timestamp() {
+        // Timestamp is stored as milliseconds since epoch (i64 big-endian)
+        // parse_timestamp converts ms to μs by multiplying by 1000
+        let ts_ms: i64 = 1702900000000; // 2023-12-18 in milliseconds
+        let data = ts_ms.to_be_bytes();
+        let (remaining, value) = parse_timestamp(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Timestamp(ts_ms * 1000)); // Output is in μs
+    }
+
+    #[test]
+    fn test_parse_timestamp_negative() {
+        // Test negative timestamp (before epoch)
+        let ts_ms: i64 = -86400000; // -1 day in milliseconds
+        let data = ts_ms.to_be_bytes();
+        let (remaining, value) = parse_timestamp(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Timestamp(ts_ms * 1000));
+    }
+
+    #[test]
+    fn test_parse_varint_single_byte() {
+        // Varint with 1-byte value
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(1)); // length = 1
+        data.push(0x2A); // value 42
+        let (remaining, value) = parse_varint(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Varint(vec![0x2A]));
+    }
+
+    #[test]
+    fn test_parse_varint_multi_byte() {
+        // Varint with multi-byte value (big number)
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(4)); // length = 4
+        data.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+        let (remaining, value) = parse_varint(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Varint(vec![0x01, 0x02, 0x03, 0x04]));
+    }
+
+    #[test]
+    fn test_parse_decimal() {
+        // Decimal is: scale (i32) + unscaled value (vint)
+        // e.g., 123.45 = scale 2, unscaled 12345
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&2i32.to_be_bytes()); // scale = 2
+        data.extend_from_slice(&encode_vint(12345)); // unscaled = 12345
+        let (remaining, value) = parse_decimal(&data).unwrap();
+        assert!(remaining.is_empty());
+        if let Value::Float(f) = value {
+            assert!((f - 123.45).abs() < 0.001, "Expected ~123.45, got {}", f);
+        } else {
+            panic!("Expected Float value, got {:?}", value);
+        }
+    }
+
+    #[test]
+    fn test_parse_decimal_negative_scale() {
+        // Negative scale means multiply by 10^|scale|
+        // e.g., scale -2, unscaled 5 = 500
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&(-2i32).to_be_bytes()); // scale = -2
+        data.extend_from_slice(&encode_vint(5)); // unscaled = 5
+        let (remaining, value) = parse_decimal(&data).unwrap();
+        assert!(remaining.is_empty());
+        if let Value::Float(f) = value {
+            assert!((f - 500.0).abs() < 0.001, "Expected ~500, got {}", f);
+        } else {
+            panic!("Expected Float value, got {:?}", value);
+        }
+    }
+
+    #[test]
+    fn test_parse_inet_ipv4() {
+        // IPv4 address (4 bytes)
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(4)); // length = 4
+        data.extend_from_slice(&[192, 168, 1, 1]); // 192.168.1.1
+        let (remaining, value) = parse_inet(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Inet(vec![192, 168, 1, 1]));
+    }
+
+    #[test]
+    fn test_parse_inet_ipv6() {
+        // IPv6 address (16 bytes)
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(16)); // length = 16
+        let ipv6_bytes: [u8; 16] = [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01,
+        ];
+        data.extend_from_slice(&ipv6_bytes); // 2001:db8::1
+        let (remaining, value) = parse_inet(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Inet(ipv6_bytes.to_vec()));
+    }
+
+    #[test]
+    fn test_parse_duration() {
+        // Duration: months (vint) + days (vint) + nanos (vint)
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(1)); // 1 month
+        data.extend_from_slice(&encode_vint(15)); // 15 days
+        data.extend_from_slice(&encode_vint(3600_000_000_000i64)); // 1 hour in nanos
+        let (remaining, value) = parse_duration(&data).unwrap();
+        assert!(remaining.is_empty());
+        // Result is total microseconds
+        if let Value::BigInt(micros) = value {
+            // 1 month ≈ 30 days, 15 days, 1 hour
+            // = (30*24*60*60 + 15*24*60*60 + 3600) * 1_000_000 μs
+            let expected = (1 * 30 * 24 * 60 * 60 * 1_000_000i64)
+                + (15 * 24 * 60 * 60 * 1_000_000i64)
+                + (3600_000_000_000i64 / 1000);
+            assert_eq!(micros, expected);
+        } else {
+            panic!("Expected BigInt value, got {:?}", value);
+        }
+    }
+
+    #[test]
+    fn test_parse_map_empty() {
+        // Empty map: count = 0
+        use super::super::vint::encode_vint;
+        let data = encode_vint(0); // count = 0
+        let (remaining, value) = parse_map(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Map(vec![]));
+    }
+
+    #[test]
+    fn test_parse_map_with_entries() {
+        // Map with 2 entries: int -> text
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(2)); // count = 2
+        data.push(CqlTypeId::Int as u8); // key type
+        data.push(CqlTypeId::Varchar as u8); // value type
+
+        // Entry 1: key=1, value="one"
+        data.extend_from_slice(&encode_vint(4)); // key length
+        data.extend_from_slice(&1i32.to_be_bytes()); // key = 1
+        data.extend_from_slice(&encode_vint(3)); // value length
+        data.extend_from_slice(b"one"); // value = "one"
+
+        // Entry 2: key=2, value="two"
+        data.extend_from_slice(&encode_vint(4)); // key length
+        data.extend_from_slice(&2i32.to_be_bytes()); // key = 2
+        data.extend_from_slice(&encode_vint(3)); // value length
+        data.extend_from_slice(b"two"); // value = "two"
+
+        let (remaining, value) = parse_map(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(
+            value,
+            Value::Map(vec![
+                (Value::Integer(1), Value::Text("one".to_string())),
+                (Value::Integer(2), Value::Text("two".to_string())),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_set_empty() {
+        // Empty set: count = 0
+        use super::super::vint::encode_vint;
+        let data = encode_vint(0); // count = 0
+        let (remaining, value) = parse_set(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Set(vec![]));
+    }
+
+    #[test]
+    fn test_parse_set_with_entries() {
+        // Set with 3 integer elements
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(3)); // count = 3
+        data.push(CqlTypeId::Int as u8); // element type
+
+        // Element 1: 10
+        data.extend_from_slice(&encode_vint(4)); // length
+        data.extend_from_slice(&10i32.to_be_bytes());
+
+        // Element 2: 20
+        data.extend_from_slice(&encode_vint(4)); // length
+        data.extend_from_slice(&20i32.to_be_bytes());
+
+        // Element 3: 30
+        data.extend_from_slice(&encode_vint(4)); // length
+        data.extend_from_slice(&30i32.to_be_bytes());
+
+        let (remaining, value) = parse_set(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(
+            value,
+            Value::Set(vec![
+                Value::Integer(10),
+                Value::Integer(20),
+                Value::Integer(30)
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_date() {
+        // Date: days since epoch (u32)
+        let days: u32 = 19710; // 2023-12-18
+        let data = days.to_be_bytes();
+        let (remaining, value) = parse_date(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Date(days as i32));
+    }
+
+    #[test]
+    fn test_parse_time() {
+        // Time: nanoseconds since midnight (i64)
+        let nanos: i64 = 43200_000_000_000; // 12:00:00 in nanoseconds
+        let data = nanos.to_be_bytes();
+        let (remaining, value) = parse_time(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Time(nanos));
+    }
+
+    #[test]
+    fn test_parse_cql_type_id_all_types() {
+        // Test all known type IDs
+        let type_ids = vec![
+            (0x00, CqlTypeId::Custom),
+            (0x01, CqlTypeId::Ascii),
+            (0x02, CqlTypeId::BigInt),
+            (0x03, CqlTypeId::Blob),
+            (0x04, CqlTypeId::Boolean),
+            (0x05, CqlTypeId::Counter),
+            (0x06, CqlTypeId::Decimal),
+            (0x07, CqlTypeId::Double),
+            (0x08, CqlTypeId::Float),
+            (0x09, CqlTypeId::Int),
+            (0x0B, CqlTypeId::Timestamp),
+            (0x0C, CqlTypeId::Uuid),
+            (0x0D, CqlTypeId::Varchar),
+            (0x0E, CqlTypeId::Varint),
+            (0x0F, CqlTypeId::Timeuuid),
+            (0x10, CqlTypeId::Inet),
+            (0x11, CqlTypeId::Date),
+            (0x12, CqlTypeId::Time),
+            (0x13, CqlTypeId::Smallint),
+            (0x14, CqlTypeId::Tinyint),
+            (0x15, CqlTypeId::Duration),
+            (0x20, CqlTypeId::List),
+            (0x21, CqlTypeId::Map),
+            (0x22, CqlTypeId::Set),
+            (0x30, CqlTypeId::Udt),
+            (0x31, CqlTypeId::Tuple),
+            (0xFF, CqlTypeId::Tombstone),
+        ];
+        for (byte, expected) in type_ids {
+            let data = [byte];
+            let (_, type_id) = parse_cql_type_id(&data).unwrap();
+            assert_eq!(type_id, expected, "Failed for byte 0x{:02X}", byte);
+        }
+    }
+
+    #[test]
+    fn test_parse_cql_type_id_invalid() {
+        // Test invalid type ID
+        let data = [0x0A]; // Not a valid type ID
+        let result = parse_cql_type_id(&data);
+        assert!(result.is_err(), "Should fail for invalid type ID 0x0A");
+    }
+
+    #[test]
+    fn test_parse_tinyint() {
+        let data = [0x7F]; // 127
+        let (remaining, value) = parse_tinyint(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Integer(127));
+
+        let data = [0x80]; // -128 (signed)
+        let (remaining, value) = parse_tinyint(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Integer(-128));
+    }
+
+    #[test]
+    fn test_parse_smallint() {
+        let data = 0x7FFFi16.to_be_bytes(); // 32767
+        let (remaining, value) = parse_smallint(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Integer(32767));
+
+        let data = (-32768i16).to_be_bytes(); // -32768
+        let (remaining, value) = parse_smallint(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Integer(-32768));
+    }
+
+    #[test]
+    fn test_parse_bigint() {
+        let data = 0x7FFF_FFFF_FFFF_FFFFi64.to_be_bytes(); // i64::MAX
+        let (remaining, value) = parse_bigint(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::BigInt(i64::MAX));
+    }
+
+    #[test]
+    fn test_parse_counter() {
+        // Counter is stored as i64 big-endian
+        let counter_value: i64 = 42;
+        let data = counter_value.to_be_bytes();
+        let (remaining, value) = parse_counter(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Counter(42));
+    }
+
+    #[test]
+    fn test_parse_float() {
+        let float_value: f32 = 3.14159;
+        let data = float_value.to_be_bytes();
+        let (remaining, value) = parse_float(&data).unwrap();
+        assert!(remaining.is_empty());
+        if let Value::Float32(f) = value {
+            assert!((f - 3.14159f32).abs() < 0.0001);
+        } else {
+            panic!("Expected Float32, got {:?}", value);
+        }
+    }
+
+    #[test]
+    fn test_parse_double() {
+        let double_value: f64 = std::f64::consts::E;
+        let data = double_value.to_be_bytes();
+        let (remaining, value) = parse_double(&data).unwrap();
+        assert!(remaining.is_empty());
+        if let Value::Float(f) = value {
+            assert!((f - std::f64::consts::E).abs() < 0.0001);
+        } else {
+            panic!("Expected Float");
+        }
+    }
+
+    #[test]
+    fn test_parse_map_with_null_value() {
+        // Map with null value (length = -1)
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(1)); // count = 1
+        data.push(CqlTypeId::Int as u8); // key type
+        data.push(CqlTypeId::Varchar as u8); // value type
+
+        // Entry: key=1, value=null
+        data.extend_from_slice(&encode_vint(4)); // key length
+        data.extend_from_slice(&1i32.to_be_bytes()); // key = 1
+        data.extend_from_slice(&encode_vint(-1)); // value = null
+
+        let (remaining, value) = parse_map(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::Map(vec![(Value::Integer(1), Value::Null)]));
+    }
+
+    #[test]
+    fn test_parse_list_with_null_element() {
+        // List with null element (length = -1)
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(2)); // count = 2
+        data.push(CqlTypeId::Int as u8); // element type
+
+        // Element 1: 42
+        data.extend_from_slice(&encode_vint(4)); // length
+        data.extend_from_slice(&42i32.to_be_bytes());
+
+        // Element 2: null
+        data.extend_from_slice(&encode_vint(-1)); // null marker
+
+        let (remaining, value) = parse_list(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(value, Value::List(vec![Value::Integer(42), Value::Null]));
+    }
 }

@@ -875,6 +875,543 @@ mod tests {
         assert!(summary.live_data_percentage >= 0.0 && summary.live_data_percentage <= 100.0);
     }
 
+    #[test]
+    fn test_parse_row_statistics() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        // total_rows: VInt
+        data.extend_from_slice(&encode_vint(1000));
+        // live_rows: VInt
+        data.extend_from_slice(&encode_vint(900));
+        // tombstone_count: VInt
+        data.extend_from_slice(&encode_vint(100));
+        // partition_count: VInt
+        data.extend_from_slice(&encode_vint(50));
+        // avg_rows_per_partition: f64
+        data.extend_from_slice(&20.0f64.to_be_bytes());
+        // histogram_count: u32
+        data.extend_from_slice(&0u32.to_be_bytes());
+
+        let result = parse_row_statistics(&data);
+        assert!(result.is_ok());
+
+        let (remaining, row_stats) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(row_stats.total_rows, 1000);
+        assert_eq!(row_stats.live_rows, 900);
+        assert_eq!(row_stats.tombstone_count, 100);
+        assert_eq!(row_stats.partition_count, 50);
+        assert_eq!(row_stats.avg_rows_per_partition, 20.0);
+        assert_eq!(row_stats.row_size_histogram.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_row_statistics_with_histogram() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(1000));
+        data.extend_from_slice(&encode_vint(900));
+        data.extend_from_slice(&encode_vint(100));
+        data.extend_from_slice(&encode_vint(50));
+        data.extend_from_slice(&20.0f64.to_be_bytes());
+        // histogram_count: 2 buckets
+        data.extend_from_slice(&2u32.to_be_bytes());
+        // Bucket 1
+        data.extend_from_slice(&encode_vint(0)); // size_start
+        data.extend_from_slice(&encode_vint(1024)); // size_end
+        data.extend_from_slice(&encode_vint(500)); // count
+        data.extend_from_slice(&50.0f64.to_be_bytes()); // percentage
+                                                        // Bucket 2
+        data.extend_from_slice(&encode_vint(1024)); // size_start
+        data.extend_from_slice(&encode_vint(10240)); // size_end
+        data.extend_from_slice(&encode_vint(500)); // count
+        data.extend_from_slice(&50.0f64.to_be_bytes()); // percentage
+
+        let result = parse_row_statistics(&data);
+        assert!(result.is_ok());
+
+        let (_, row_stats) = result.unwrap();
+        assert_eq!(row_stats.row_size_histogram.len(), 2);
+        assert_eq!(row_stats.row_size_histogram[0].size_start, 0);
+        assert_eq!(row_stats.row_size_histogram[0].size_end, 1024);
+        assert_eq!(row_stats.row_size_histogram[0].count, 500);
+        assert_eq!(row_stats.row_size_histogram[0].percentage, 50.0);
+    }
+
+    #[test]
+    fn test_parse_timestamp_statistics_no_ttl() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1000000i64.to_be_bytes()); // min_timestamp
+        data.extend_from_slice(&2000000i64.to_be_bytes()); // max_timestamp
+        data.extend_from_slice(&0i64.to_be_bytes()); // min_deletion_time
+        data.extend_from_slice(&0i64.to_be_bytes()); // max_deletion_time
+        data.push(0); // has_ttl = false
+
+        let result = parse_timestamp_statistics(&data);
+        assert!(result.is_ok());
+
+        let (remaining, ts_stats) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(ts_stats.min_timestamp, 1000000);
+        assert_eq!(ts_stats.max_timestamp, 2000000);
+        assert_eq!(ts_stats.min_deletion_time, 0);
+        assert_eq!(ts_stats.max_deletion_time, 0);
+        assert!(ts_stats.min_ttl.is_none());
+        assert!(ts_stats.max_ttl.is_none());
+        assert_eq!(ts_stats.rows_with_ttl, 0);
+    }
+
+    #[test]
+    fn test_parse_timestamp_statistics_with_ttl() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&1000000i64.to_be_bytes());
+        data.extend_from_slice(&2000000i64.to_be_bytes());
+        data.extend_from_slice(&0i64.to_be_bytes());
+        data.extend_from_slice(&0i64.to_be_bytes());
+        data.push(1); // has_ttl = true
+        data.extend_from_slice(&3600i64.to_be_bytes()); // min_ttl
+        data.extend_from_slice(&86400i64.to_be_bytes()); // max_ttl
+        data.extend_from_slice(&encode_vint(250)); // rows_with_ttl
+
+        let result = parse_timestamp_statistics(&data);
+        assert!(result.is_ok());
+
+        let (_, ts_stats) = result.unwrap();
+        assert_eq!(ts_stats.min_ttl, Some(3600));
+        assert_eq!(ts_stats.max_ttl, Some(86400));
+        assert_eq!(ts_stats.rows_with_ttl, 250);
+    }
+
+    #[test]
+    fn test_parse_column_statistics_empty() {
+        let data = Vec::new();
+        let result = parse_column_statistics(&data, 0);
+        assert!(result.is_ok());
+
+        let (remaining, col_stats) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(col_stats.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_column_statistics_single_column() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        // Column name
+        let name = b"user_id";
+        data.extend_from_slice(&encode_vint(name.len() as i64));
+        data.extend_from_slice(name);
+        // Column type
+        let col_type = b"int";
+        data.extend_from_slice(&encode_vint(col_type.len() as i64));
+        data.extend_from_slice(col_type);
+        // value_count
+        data.extend_from_slice(&encode_vint(1000));
+        // null_count
+        data.extend_from_slice(&encode_vint(0));
+        // has_min_max = false
+        data.push(0);
+        // avg_size
+        data.extend_from_slice(&4.0f64.to_be_bytes());
+        // cardinality
+        data.extend_from_slice(&encode_vint(500));
+        // histogram_count
+        data.extend_from_slice(&0u32.to_be_bytes());
+        // has_index
+        data.push(1);
+
+        let result = parse_column_statistics(&data, 1);
+        assert!(result.is_ok());
+
+        let (_, col_stats) = result.unwrap();
+        assert_eq!(col_stats.len(), 1);
+        assert_eq!(col_stats[0].name, "user_id");
+        assert_eq!(col_stats[0].column_type, "int");
+        assert_eq!(col_stats[0].value_count, 1000);
+        assert_eq!(col_stats[0].null_count, 0);
+        assert!(col_stats[0].min_value.is_none());
+        assert!(col_stats[0].max_value.is_none());
+        assert_eq!(col_stats[0].avg_size, 4.0);
+        assert_eq!(col_stats[0].cardinality, 500);
+        assert_eq!(col_stats[0].value_histogram.len(), 0);
+        assert!(col_stats[0].has_index);
+    }
+
+    #[test]
+    fn test_parse_column_statistics_with_min_max() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        let name = b"score";
+        data.extend_from_slice(&encode_vint(name.len() as i64));
+        data.extend_from_slice(name);
+        let col_type = b"int";
+        data.extend_from_slice(&encode_vint(col_type.len() as i64));
+        data.extend_from_slice(col_type);
+        data.extend_from_slice(&encode_vint(500));
+        data.extend_from_slice(&encode_vint(10));
+        // has_min_max = true
+        data.push(1);
+        // min_value
+        let min_val = vec![0x00, 0x00, 0x00, 0x01];
+        data.extend_from_slice(&encode_vint(min_val.len() as i64));
+        data.extend_from_slice(&min_val);
+        // max_value
+        let max_val = vec![0x00, 0x00, 0x03, 0xE8];
+        data.extend_from_slice(&encode_vint(max_val.len() as i64));
+        data.extend_from_slice(&max_val);
+        data.extend_from_slice(&4.0f64.to_be_bytes());
+        data.extend_from_slice(&encode_vint(400));
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.push(0);
+
+        let result = parse_column_statistics(&data, 1);
+        assert!(result.is_ok());
+
+        let (_, col_stats) = result.unwrap();
+        assert_eq!(col_stats.len(), 1);
+        assert!(col_stats[0].min_value.is_some());
+        assert!(col_stats[0].max_value.is_some());
+        assert_eq!(col_stats[0].min_value.as_ref().unwrap(), &min_val);
+        assert_eq!(col_stats[0].max_value.as_ref().unwrap(), &max_val);
+    }
+
+    #[test]
+    fn test_parse_table_statistics() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&(1024 * 1024u64).to_be_bytes()); // disk_size
+        data.extend_from_slice(&(2048 * 1024u64).to_be_bytes()); // uncompressed_size
+        data.extend_from_slice(&0.5f64.to_be_bytes()); // compression_ratio
+        data.extend_from_slice(&encode_vint(100)); // block_count
+        data.extend_from_slice(&1024.0f64.to_be_bytes()); // avg_block_size
+        data.extend_from_slice(&1024u64.to_be_bytes()); // index_size
+        data.extend_from_slice(&512u64.to_be_bytes()); // bloom_filter_size
+        data.extend_from_slice(&1u32.to_be_bytes()); // level_count
+
+        let result = parse_table_statistics(&data);
+        assert!(result.is_ok());
+
+        let (remaining, table_stats) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(table_stats.disk_size, 1024 * 1024);
+        assert_eq!(table_stats.uncompressed_size, 2048 * 1024);
+        assert_eq!(table_stats.compression_ratio, 0.5);
+        assert_eq!(table_stats.block_count, 100);
+        assert_eq!(table_stats.avg_block_size, 1024.0);
+        assert_eq!(table_stats.index_size, 1024);
+        assert_eq!(table_stats.bloom_filter_size, 512);
+        assert_eq!(table_stats.level_count, 1);
+    }
+
+    #[test]
+    fn test_parse_partition_statistics() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&20480.0f64.to_be_bytes()); // avg_partition_size
+        data.extend_from_slice(&1024u64.to_be_bytes()); // min_partition_size
+        data.extend_from_slice(&1048576u64.to_be_bytes()); // max_partition_size
+        data.extend_from_slice(&5.0f64.to_be_bytes()); // large_partition_percentage
+        data.extend_from_slice(&0u32.to_be_bytes()); // histogram_count
+
+        let result = parse_partition_statistics(&data);
+        assert!(result.is_ok());
+
+        let (remaining, part_stats) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(part_stats.avg_partition_size, 20480.0);
+        assert_eq!(part_stats.min_partition_size, 1024);
+        assert_eq!(part_stats.max_partition_size, 1048576);
+        assert_eq!(part_stats.large_partition_percentage, 5.0);
+        assert_eq!(part_stats.size_histogram.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_partition_statistics_with_histogram() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&20480.0f64.to_be_bytes());
+        data.extend_from_slice(&1024u64.to_be_bytes());
+        data.extend_from_slice(&1048576u64.to_be_bytes());
+        data.extend_from_slice(&5.0f64.to_be_bytes());
+        // histogram_count: 2 buckets
+        data.extend_from_slice(&2u32.to_be_bytes());
+        // Bucket 1
+        data.extend_from_slice(&encode_vint(0));
+        data.extend_from_slice(&encode_vint(10240));
+        data.extend_from_slice(&encode_vint(30));
+        data.extend_from_slice(&60.0f64.to_be_bytes()); // cumulative_percentage
+                                                        // Bucket 2
+        data.extend_from_slice(&encode_vint(10240));
+        data.extend_from_slice(&encode_vint(1048576));
+        data.extend_from_slice(&encode_vint(20));
+        data.extend_from_slice(&100.0f64.to_be_bytes());
+
+        let result = parse_partition_statistics(&data);
+        assert!(result.is_ok());
+
+        let (_, part_stats) = result.unwrap();
+        assert_eq!(part_stats.size_histogram.len(), 2);
+        assert_eq!(part_stats.size_histogram[0].size_start, 0);
+        assert_eq!(part_stats.size_histogram[0].cumulative_percentage, 60.0);
+        assert_eq!(part_stats.size_histogram[1].cumulative_percentage, 100.0);
+    }
+
+    #[test]
+    fn test_parse_compression_statistics() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        // algorithm
+        let algo = b"LZ4";
+        data.extend_from_slice(&encode_vint(algo.len() as i64));
+        data.extend_from_slice(algo);
+        // original_size
+        data.extend_from_slice(&(2048 * 1024u64).to_be_bytes());
+        // compressed_size
+        data.extend_from_slice(&(1024 * 1024u64).to_be_bytes());
+        // ratio
+        data.extend_from_slice(&0.5f64.to_be_bytes());
+        // compression_speed
+        data.extend_from_slice(&100.0f64.to_be_bytes());
+        // decompression_speed
+        data.extend_from_slice(&200.0f64.to_be_bytes());
+        // compressed_blocks
+        data.extend_from_slice(&encode_vint(100));
+
+        let result = parse_compression_statistics(&data);
+        assert!(result.is_ok());
+
+        let (remaining, comp_stats) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(comp_stats.algorithm, "LZ4");
+        assert_eq!(comp_stats.original_size, 2048 * 1024);
+        assert_eq!(comp_stats.compressed_size, 1024 * 1024);
+        assert_eq!(comp_stats.ratio, 0.5);
+        assert_eq!(comp_stats.compression_speed, 100.0);
+        assert_eq!(comp_stats.decompression_speed, 200.0);
+        assert_eq!(comp_stats.compressed_blocks, 100);
+    }
+
+    #[test]
+    fn test_parse_compression_statistics_different_algorithms() {
+        use super::super::vint::encode_vint;
+
+        for algorithm in &["LZ4", "Snappy", "Deflate", "Zstd"] {
+            let mut data = Vec::new();
+            data.extend_from_slice(&encode_vint(algorithm.len() as i64));
+            data.extend_from_slice(algorithm.as_bytes());
+            data.extend_from_slice(&(1000000u64).to_be_bytes());
+            data.extend_from_slice(&(500000u64).to_be_bytes());
+            data.extend_from_slice(&0.5f64.to_be_bytes());
+            data.extend_from_slice(&100.0f64.to_be_bytes());
+            data.extend_from_slice(&200.0f64.to_be_bytes());
+            data.extend_from_slice(&encode_vint(50));
+
+            let result = parse_compression_statistics(&data);
+            assert!(result.is_ok());
+            let (_, comp_stats) = result.unwrap();
+            assert_eq!(comp_stats.algorithm, *algorithm);
+        }
+    }
+
+    #[test]
+    fn test_parse_metadata_section_empty() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u32.to_be_bytes()); // metadata_count = 0
+
+        let result = parse_metadata_section(&data);
+        assert!(result.is_ok());
+
+        let (remaining, metadata) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(metadata.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_metadata_section_with_entries() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&2u32.to_be_bytes()); // metadata_count = 2
+
+        // Entry 1: "compaction_strategy" -> "LeveledCompactionStrategy"
+        let key1 = b"compaction_strategy";
+        data.extend_from_slice(&encode_vint(key1.len() as i64));
+        data.extend_from_slice(key1);
+        let val1 = b"LeveledCompactionStrategy";
+        data.extend_from_slice(&encode_vint(val1.len() as i64));
+        data.extend_from_slice(val1);
+
+        // Entry 2: "sstable_format" -> "nb"
+        let key2 = b"sstable_format";
+        data.extend_from_slice(&encode_vint(key2.len() as i64));
+        data.extend_from_slice(key2);
+        let val2 = b"nb";
+        data.extend_from_slice(&encode_vint(val2.len() as i64));
+        data.extend_from_slice(val2);
+
+        let result = parse_metadata_section(&data);
+        assert!(result.is_ok());
+
+        let (remaining, metadata) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(
+            metadata.get("compaction_strategy"),
+            Some(&"LeveledCompactionStrategy".to_string())
+        );
+        assert_eq!(metadata.get("sstable_format"), Some(&"nb".to_string()));
+    }
+
+    #[test]
+    fn test_parse_statistics_file() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+
+        // Header (legacy format)
+        data.extend_from_slice(&1u32.to_be_bytes()); // version
+        data.extend_from_slice(&[1u8; 16]); // table_id
+        data.extend_from_slice(&0u32.to_be_bytes()); // section_count
+        data.extend_from_slice(&4096u64.to_be_bytes()); // file_size
+        data.extend_from_slice(&0x12345678u32.to_be_bytes()); // checksum
+
+        // Row statistics
+        data.extend_from_slice(&encode_vint(1000));
+        data.extend_from_slice(&encode_vint(900));
+        data.extend_from_slice(&encode_vint(100));
+        data.extend_from_slice(&encode_vint(50));
+        data.extend_from_slice(&20.0f64.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); // histogram_count
+
+        // Timestamp statistics
+        data.extend_from_slice(&1000000i64.to_be_bytes());
+        data.extend_from_slice(&2000000i64.to_be_bytes());
+        data.extend_from_slice(&0i64.to_be_bytes());
+        data.extend_from_slice(&0i64.to_be_bytes());
+        data.push(0); // has_ttl = false
+
+        // Column statistics (0 columns)
+        // (no data needed since column_count from header.data_length is 0)
+
+        // Table statistics
+        data.extend_from_slice(&(1024 * 1024u64).to_be_bytes());
+        data.extend_from_slice(&(2048 * 1024u64).to_be_bytes());
+        data.extend_from_slice(&0.5f64.to_be_bytes());
+        data.extend_from_slice(&encode_vint(100));
+        data.extend_from_slice(&1024.0f64.to_be_bytes());
+        data.extend_from_slice(&1024u64.to_be_bytes());
+        data.extend_from_slice(&512u64.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+
+        // Partition statistics
+        data.extend_from_slice(&20480.0f64.to_be_bytes());
+        data.extend_from_slice(&1024u64.to_be_bytes());
+        data.extend_from_slice(&1048576u64.to_be_bytes());
+        data.extend_from_slice(&5.0f64.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); // histogram_count
+
+        // Compression statistics
+        let algo = b"LZ4";
+        data.extend_from_slice(&encode_vint(algo.len() as i64));
+        data.extend_from_slice(algo);
+        data.extend_from_slice(&(2048 * 1024u64).to_be_bytes());
+        data.extend_from_slice(&(1024 * 1024u64).to_be_bytes());
+        data.extend_from_slice(&0.5f64.to_be_bytes());
+        data.extend_from_slice(&100.0f64.to_be_bytes());
+        data.extend_from_slice(&200.0f64.to_be_bytes());
+        data.extend_from_slice(&encode_vint(100));
+
+        // Metadata section
+        data.extend_from_slice(&0u32.to_be_bytes()); // metadata_count
+
+        let result = parse_statistics_file(&data);
+        assert!(result.is_ok());
+
+        let (remaining, stats) = result.unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(stats.header.version, 1);
+        assert_eq!(stats.row_stats.total_rows, 1000);
+        assert_eq!(stats.timestamp_stats.min_timestamp, 1000000);
+        assert_eq!(stats.table_stats.disk_size, 1024 * 1024);
+        assert_eq!(stats.partition_stats.avg_partition_size, 20480.0);
+        assert_eq!(stats.compression_stats.algorithm, "LZ4");
+        assert_eq!(stats.metadata.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_statistics_file_with_extra_data() {
+        use super::super::vint::encode_vint;
+
+        let mut data = Vec::new();
+
+        // Header
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&[1u8; 16]);
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&4096u64.to_be_bytes());
+        data.extend_from_slice(&0x12345678u32.to_be_bytes());
+
+        // Minimal required sections
+        data.extend_from_slice(&encode_vint(100));
+        data.extend_from_slice(&encode_vint(90));
+        data.extend_from_slice(&encode_vint(10));
+        data.extend_from_slice(&encode_vint(10));
+        data.extend_from_slice(&10.0f64.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+
+        data.extend_from_slice(&0i64.to_be_bytes());
+        data.extend_from_slice(&1000000i64.to_be_bytes());
+        data.extend_from_slice(&0i64.to_be_bytes());
+        data.extend_from_slice(&0i64.to_be_bytes());
+        data.push(0);
+
+        data.extend_from_slice(&1024u64.to_be_bytes());
+        data.extend_from_slice(&2048u64.to_be_bytes());
+        data.extend_from_slice(&0.5f64.to_be_bytes());
+        data.extend_from_slice(&encode_vint(10));
+        data.extend_from_slice(&100.0f64.to_be_bytes());
+        data.extend_from_slice(&100u64.to_be_bytes());
+        data.extend_from_slice(&50u64.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+
+        data.extend_from_slice(&1000.0f64.to_be_bytes());
+        data.extend_from_slice(&100u64.to_be_bytes());
+        data.extend_from_slice(&10000u64.to_be_bytes());
+        data.extend_from_slice(&1.0f64.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+
+        let algo = b"Snappy";
+        data.extend_from_slice(&encode_vint(algo.len() as i64));
+        data.extend_from_slice(algo);
+        data.extend_from_slice(&2048u64.to_be_bytes());
+        data.extend_from_slice(&1024u64.to_be_bytes());
+        data.extend_from_slice(&0.5f64.to_be_bytes());
+        data.extend_from_slice(&100.0f64.to_be_bytes());
+        data.extend_from_slice(&200.0f64.to_be_bytes());
+        data.extend_from_slice(&encode_vint(10));
+
+        data.extend_from_slice(&0u32.to_be_bytes());
+
+        // Extra trailing data
+        data.extend_from_slice(b"extra_data");
+
+        let result = parse_statistics_file(&data);
+        assert!(result.is_ok());
+
+        let (remaining, stats) = result.unwrap();
+        // Should have consumed all except the extra trailing data
+        assert_eq!(remaining, b"extra_data");
+        assert_eq!(stats.compression_stats.algorithm, "Snappy");
+    }
+
     fn create_test_statistics() -> SSTableStatistics {
         SSTableStatistics {
             header: StatisticsHeader {
