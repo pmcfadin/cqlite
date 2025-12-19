@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use clap::Parser;
+use rstest::rstest;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -349,6 +350,41 @@ mod cli_parsing_tests {
 
         Ok(())
     }
+
+    /// Parameterized test for invalid CLI arguments (Issue #20 - rstest adoption)
+    #[rstest]
+    #[case(&["cqlite", "invalid-command"], "invalid subcommand")]
+    #[case(&["cqlite", "admin", "backup"], "missing backup path")]
+    #[case(&["cqlite", "--format", "invalid-format", "query", "SELECT 1"], "invalid format")]
+    #[case(&["cqlite", "--unknown-flag"], "unknown flag")]
+    fn test_invalid_arguments_rejected(#[case] args: &[&str], #[case] description: &str) {
+        let result = Cli::try_parse_from(args.to_vec());
+        assert!(result.is_err(), "Should reject {}", description);
+    }
+
+    /// Parameterized test for valid Cassandra versions (Issue #20 - rstest adoption)
+    #[rstest]
+    #[case("3.11")]
+    #[case("4.0")]
+    #[case("5.0")]
+    fn test_valid_cassandra_versions(#[case] version: &str) {
+        let args = vec![
+            "cqlite",
+            "--cassandra-version",
+            version,
+            "query",
+            "SELECT 1",
+        ];
+        let result = Cli::try_parse_from(args);
+        assert!(
+            result.is_ok(),
+            "Should accept Cassandra version {}",
+            version
+        );
+
+        let cli = result.unwrap();
+        assert_eq!(cli.cassandra_version, Some(version.to_string()));
+    }
 }
 
 #[cfg(test)]
@@ -356,6 +392,49 @@ mod output_format_tests {
     use super::*;
     use cqlite_cli::cli::OutputFormat;
 
+    /// Parameterized test for output format parsing (Issue #20 - rstest adoption)
+    #[rstest]
+    #[case("table", OutputFormat::Table)]
+    #[case("json", OutputFormat::Json)]
+    #[case("csv", OutputFormat::Csv)]
+    #[case("yaml", OutputFormat::Yaml)]
+    #[case("TABLE", OutputFormat::Table)] // Case insensitivity
+    #[case("Json", OutputFormat::Json)] // Mixed case
+    #[case("CSV", OutputFormat::Csv)] // All caps
+    fn test_output_format_parsing_parameterized(
+        #[case] input: &str,
+        #[case] expected: OutputFormat,
+    ) {
+        let result = input.parse::<OutputFormat>();
+        assert!(result.is_ok(), "Failed to parse format: {}", input);
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    /// Parameterized test for invalid format rejection
+    #[rstest]
+    #[case("invalid")]
+    #[case("xml")]
+    #[case("")]
+    #[case("jsonl")]
+    fn test_invalid_format_rejected(#[case] input: &str) {
+        let result = input.parse::<OutputFormat>();
+        assert!(result.is_err(), "Should reject invalid format: '{}'", input);
+    }
+
+    /// Parameterized test for output format display (Issue #20 - rstest adoption)
+    #[rstest]
+    #[case(OutputFormat::Table, "table")]
+    #[case(OutputFormat::Json, "json")]
+    #[case(OutputFormat::Csv, "csv")]
+    #[case(OutputFormat::Yaml, "yaml")]
+    fn test_output_format_display_parameterized(
+        #[case] format: OutputFormat,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(format!("{}", format), expected);
+    }
+
+    // Keep original tests for backwards compatibility
     #[test]
     fn test_output_format_parsing() -> Result<()> {
         // Test valid formats

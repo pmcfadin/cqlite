@@ -224,6 +224,83 @@ Modify the generator or schema set to focus on specific areas:
 # (Legacy) generate-all-test-data.sh is for 3.x/4.x flows and not required for 5.0
 ```
 
+## 🧪 Testing Patterns (Issue #20)
+
+This section documents the testing patterns used across CQLite, including parameterized tests and property-based testing.
+
+### Environment Variables for Testing
+
+```bash
+# Required for integration tests
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+
+# Run CLI tests
+cargo test --package cqlite-cli
+
+# Run core tests
+cargo test --package cqlite-core
+```
+
+### Parameterized Testing with rstest
+
+CQLite uses `rstest` for parameterized tests. Example pattern:
+
+```rust
+use rstest::rstest;
+
+#[rstest]
+#[case("table", OutputFormat::Table)]
+#[case("json", OutputFormat::Json)]
+#[case("csv", OutputFormat::Csv)]
+fn test_output_format_parsing(
+    #[case] input: &str,
+    #[case] expected: OutputFormat,
+) {
+    let result = input.parse::<OutputFormat>();
+    assert_eq!(result.unwrap(), expected);
+}
+```
+
+Key files using rstest:
+- `cqlite-cli/tests/unit_tests.rs` - CLI argument parsing and output format tests
+- `cqlite-core/tests/schema_parser_property_tests.rs` - Schema parsing tests
+
+### Property-Based Testing with proptest
+
+For testing invariants across many inputs:
+
+```rust
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn test_vint_roundtrip(value in 0i64..i64::MAX) {
+        let encoded = encode_vint(value);
+        let decoded = decode_vint(&encoded);
+        prop_assert_eq!(value, decoded);
+    }
+}
+```
+
+### Test Data Requirements
+
+- All integration tests use **real Cassandra 5.0 SSTables** from `test-data/datasets/`
+- No synthetic or mock SSTable data in integration tests (Issue #79 provenance gate)
+- JSONL reference files for sstabledump parity validation
+
+### Running Specific Test Suites
+
+```bash
+# Unit tests only (fast, no dataset required)
+cargo test --package cqlite-cli --test unit_tests
+
+# Smoke test all 33 tables
+bash test-data/scripts/smoke-test-all-tables.sh
+
+# Full test suite with datasets
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test
+```
+
 ## 📋 Validation & Quality Assurance
 
 ### Automated Validation
