@@ -52,6 +52,11 @@ use crate::{
 /// element count limit to prevent memory exhaustion from malicious/corrupted data.
 const MAX_FROZEN_COLLECTION_SIZE: u64 = 100_000;
 
+/// Maximum cell path/value length in bytes to prevent overflow on corrupted data.
+/// Issue #225: Linux CI fails with SIGABRT due to unsafe `as usize` casts on large values.
+/// Cassandra's column_value_size_warn_threshold defaults to 64KB; we use 64MB as generous limit.
+const MAX_CELL_VALUE_LENGTH: u64 = 64 * 1024 * 1024;
+
 /// Maximum number of fields allowed in a UDT to prevent memory exhaustion.
 /// This is a safety limit; real-world UDTs rarely exceed 100 fields.
 const MAX_UDT_FIELD_COUNT: usize = 1000;
@@ -3065,6 +3070,13 @@ impl V5CompressedLegacyParser {
         );
 
         // Step 3: Parse all cells and aggregate values
+        // Issue #225: Bounds check to prevent DoS from corrupted data (match frozen collection pattern)
+        if cell_count > MAX_FROZEN_COLLECTION_SIZE {
+            return Err(Error::corruption(format!(
+                "Complex column '{}': cell count {} exceeds maximum {}",
+                column.name, cell_count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
         // Convert cell_count to usize safely to prevent overflow on 32-bit systems
         let cell_count_usize: usize = cell_count.try_into().map_err(|_| {
             Error::corruption(format!(
@@ -3293,8 +3305,22 @@ impl V5CompressedLegacyParser {
         let bytes_consumed = data[offset..].len() - remaining.len();
         offset += bytes_consumed;
 
+        // Issue #225: Safe conversion to prevent overflow on large values
+        let path_len_usize: usize = path_len.try_into().map_err(|_| {
+            Error::corruption(format!(
+                "Complex cell {}.{}: path length {} exceeds platform limit",
+                column.name, cell_index, path_len
+            ))
+        })?;
+        if path_len > MAX_CELL_VALUE_LENGTH {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: path length {} exceeds maximum {}",
+                column.name, cell_index, path_len, MAX_CELL_VALUE_LENGTH
+            )));
+        }
+
         // Bounds check before reading path
-        if offset + path_len as usize > data.len() {
+        if offset + path_len_usize > data.len() {
             return Err(Error::corruption(format!(
                 "Complex cell {}.{}: cell path requires {} bytes but only {} available at offset {}",
                 column.name,
@@ -3305,8 +3331,8 @@ impl V5CompressedLegacyParser {
             )));
         }
 
-        let path_bytes = data[offset..offset + path_len as usize].to_vec();
-        offset += path_len as usize;
+        let path_bytes = data[offset..offset + path_len_usize].to_vec();
+        offset += path_len_usize;
 
         // Step 6: Value (if not empty and not deleted)
         let value = if is_deleted || has_empty_value {
@@ -3326,8 +3352,22 @@ impl V5CompressedLegacyParser {
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
 
+            // Issue #225: Safe conversion to prevent overflow on large values
+            let value_len_usize: usize = value_len.try_into().map_err(|_| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: value length {} exceeds platform limit",
+                    column.name, cell_index, value_len
+                ))
+            })?;
+            if value_len > MAX_CELL_VALUE_LENGTH {
+                return Err(Error::corruption(format!(
+                    "Complex cell {}.{}: value length {} exceeds maximum {}",
+                    column.name, cell_index, value_len, MAX_CELL_VALUE_LENGTH
+                )));
+            }
+
             // Bounds check before reading value
-            if offset + value_len as usize > data.len() {
+            if offset + value_len_usize > data.len() {
                 return Err(Error::corruption(format!(
                     "Complex cell {}.{}: value requires {} bytes but only {} available at offset {}",
                     column.name,
@@ -3338,8 +3378,8 @@ impl V5CompressedLegacyParser {
                 )));
             }
 
-            let value_data = &data[offset..offset + value_len as usize];
-            offset += value_len as usize;
+            let value_data = &data[offset..offset + value_len_usize];
+            offset += value_len_usize;
 
             // Parse the value based on element type
             // For complex cell values (inside collections), the value is stored as raw bytes
@@ -3480,8 +3520,23 @@ impl V5CompressedLegacyParser {
             offset
         );
         offset += bytes_consumed;
+
+        // Issue #225: Safe conversion to prevent overflow on large values
+        let path_len_usize: usize = path_len.try_into().map_err(|_| {
+            Error::corruption(format!(
+                "Complex cell {}.{}: path length {} exceeds platform limit",
+                column_name, cell_index, path_len
+            ))
+        })?;
+        if path_len > MAX_CELL_VALUE_LENGTH {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: path length {} exceeds maximum {}",
+                column_name, cell_index, path_len, MAX_CELL_VALUE_LENGTH
+            )));
+        }
+
         // Bounds check before advancing by path_len
-        if offset + path_len as usize > data.len() {
+        if offset + path_len_usize > data.len() {
             return Err(Error::corruption(format!(
                 "Complex cell {}.{}: cell path requires {} bytes but only {} available at offset {}",
                 column_name,
@@ -3491,7 +3546,7 @@ impl V5CompressedLegacyParser {
                 offset
             )));
         }
-        offset += path_len as usize;
+        offset += path_len_usize;
 
         // Step 6: Value (if not empty)
         if !has_empty_value {
@@ -3503,8 +3558,23 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+
+            // Issue #225: Safe conversion to prevent overflow on large values
+            let value_len_usize: usize = value_len.try_into().map_err(|_| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: value length {} exceeds platform limit",
+                    column_name, cell_index, value_len
+                ))
+            })?;
+            if value_len > MAX_CELL_VALUE_LENGTH {
+                return Err(Error::corruption(format!(
+                    "Complex cell {}.{}: value length {} exceeds maximum {}",
+                    column_name, cell_index, value_len, MAX_CELL_VALUE_LENGTH
+                )));
+            }
+
             // Bounds check before advancing by value_len
-            if offset + value_len as usize > data.len() {
+            if offset + value_len_usize > data.len() {
                 return Err(Error::corruption(format!(
                     "Complex cell {}.{}: value requires {} bytes but only {} available at offset {}",
                     column_name,
@@ -3514,7 +3584,7 @@ impl V5CompressedLegacyParser {
                     offset
                 )));
             }
-            offset += value_len as usize;
+            offset += value_len_usize;
         }
 
         log::debug!(

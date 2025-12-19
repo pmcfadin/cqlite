@@ -206,22 +206,25 @@ As of Issue #220 fix (Updated: 2025-12-18)
 
 **Note**: All SSTable component parsers and cell type handling are now complete. All 33 test tables pass validation on macOS!
 
-### CI Environment Issue (Issue #225)
+### ~~CI Environment Issue (Issue #225)~~ - FIXED
 
-**Status**: 🔶 **INVESTIGATING** - Linux CI fails for 2 tables
+**Status**: ✅ **FIXED** (Issue #225)
+**Impact**: Was 2 tables failing on Linux CI - now 0
+**Resolution**: Added bounds checks and safe type conversions for complex collection parsing
 
-| Environment | Tables Passing | Status |
-|-------------|----------------|--------|
-| macOS (local) | 33/33 | ✅ All pass |
-| Linux (CI) | 31/33 | ❌ 2 fail with SIGABRT |
+**Root Cause Found**: Non-frozen complex column parsing lacked the bounds check present in frozen collection parsing. The `parse_complex_column` function used `Vec::with_capacity(cell_count_usize)` without first checking against `MAX_FROZEN_COLLECTION_SIZE`. Additionally, `parse_complex_cell_value` and `skip_complex_cell` used unsafe `as usize` casts on `path_len` and `value_len` (u64 values) which could overflow on large/corrupted values.
 
-**Affected Tables on Linux CI**:
-- `test_collections.large_collections_table` - Exit code 134
-- `test_timeseries.app_metrics` - Exit code 134
+**Fix Applied**:
+1. Added `MAX_CELL_VALUE_LENGTH` constant (64 MB limit) for path/value length validation
+2. Added bounds check in `parse_complex_column` matching frozen collection pattern
+3. Replaced `as usize` casts with `try_into()` + limit checks in `parse_complex_cell_value`
+4. Applied same safe conversion pattern in `skip_complex_cell`
 
-**Root Cause**: Unknown - same binary data (verified by MD5), but panics only on Linux release builds with `panic = "abort"`. Likely platform-specific behavior in complex collection parsing.
+**Previously Affected Tables** (now parsing correctly on all platforms):
+- `test_collections.large_collections_table` ✅
+- `test_timeseries.app_metrics` ✅
 
-**Tracking**: Issue #225 (OPEN)
+**Tracking**: Issue #225 (CLOSED)
 
 ### Pass Rate by Keyspace
 

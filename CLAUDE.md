@@ -65,8 +65,21 @@ cargo fmt
 bash test-data/scripts/smoke-test-all-tables.sh
 
 # Run CLI
-cargo run --bin cqlite -- <command>
+cargo run --package cqlite-cli -- <command>
+
+# One-shot query mode (Issue #223)
+cargo run --package cqlite-cli -- \
+  --schema test-data/schemas/basic-types.cql \
+  --data-dir test-data/datasets/sstables \
+  --query "SELECT * FROM test_basic.simple_table LIMIT 5" \
+  --out json
 ```
+
+### CLI Output Format Precedence
+
+- `--out` takes precedence over `--format` when both specified
+- `--query` is an alias for `--execute` (`-e`)
+- Environment variable: `CQLITE_OUT` sets default output format
 
 ## Workspace Structure
 
