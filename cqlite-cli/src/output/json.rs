@@ -9,6 +9,8 @@ use cqlite_core::Value;
 use serde_json::{json, Map, Value as JsonValue};
 use std::error::Error as StdError;
 
+use super::value_fmt::ValueFormatter;
+
 /// JSON writer for QueryResult
 #[allow(dead_code)]
 pub struct JSONWriter;
@@ -84,14 +86,14 @@ impl JSONWriter {
                 .map(JsonValue::Number)
                 .unwrap_or(JsonValue::Null),
             Value::Text(s) => JsonValue::String(s.clone()),
-            Value::Blob(b) => {
-                use base64::Engine;
-                let engine = base64::engine::general_purpose::STANDARD;
-                JsonValue::String(engine.encode(b))
-            }
-            Value::Timestamp(ts) => JsonValue::Number((*ts).into()),
-            Value::Date(d) => JsonValue::Number((*d).into()),
-            Value::Time(t) => JsonValue::Number((*t).into()),
+            // Use ValueFormatter for human-readable Blob formatting (0x... hex)
+            Value::Blob(_) => JsonValue::String(ValueFormatter::format_value(value)),
+            // Use ValueFormatter for human-readable Timestamp (YYYY-MM-DD HH:MM:SS.fff+0000)
+            Value::Timestamp(_) => JsonValue::String(ValueFormatter::format_value(value)),
+            // Use ValueFormatter for human-readable Date (YYYY-MM-DD)
+            Value::Date(_) => JsonValue::String(ValueFormatter::format_value(value)),
+            // Use ValueFormatter for human-readable Time (HH:MM:SS.nnnnnnnnn)
+            Value::Time(_) => JsonValue::String(ValueFormatter::format_value(value)),
             Value::Uuid(uuid) => {
                 // Format UUID as standard hyphenated string
                 let uuid_str = format!(
@@ -104,30 +106,12 @@ impl JSONWriter {
                 );
                 JsonValue::String(uuid_str)
             }
-            Value::Varint(data) => {
-                use base64::Engine;
-                let engine = base64::engine::general_purpose::STANDARD;
-                JsonValue::String(engine.encode(data))
-            }
-            Value::Decimal { scale, unscaled } => {
-                use base64::Engine;
-                let engine = base64::engine::general_purpose::STANDARD;
-                json!({
-                    "scale": scale,
-                    "unscaled": engine.encode(unscaled)
-                })
-            }
-            Value::Duration {
-                months,
-                days,
-                nanos,
-            } => {
-                json!({
-                    "months": months,
-                    "days": days,
-                    "nanos": nanos
-                })
-            }
+            // Use ValueFormatter for human-readable Varint (decimal string)
+            Value::Varint(_) => JsonValue::String(ValueFormatter::format_value(value)),
+            // Use ValueFormatter for human-readable Decimal (e.g., "69799.73")
+            Value::Decimal { .. } => JsonValue::String(ValueFormatter::format_value(value)),
+            // Use ValueFormatter for human-readable Duration (XmoYdZns format)
+            Value::Duration { .. } => JsonValue::String(ValueFormatter::format_value(value)),
             Value::Json(j) => j.clone(),
             Value::List(list) => {
                 let json_list: Vec<JsonValue> = list.iter().map(Self::value_to_json).collect();
@@ -418,5 +402,80 @@ mod tests {
         let entry1 = array[0].as_object().unwrap();
         assert_eq!(entry1.get("key").unwrap().as_str().unwrap(), "key1");
         assert_eq!(entry1.get("value").unwrap().as_i64().unwrap(), 1);
+    }
+
+    // Issue #227: Tests for human-readable formatting of complex types
+
+    #[test]
+    fn test_blob_formatting() {
+        let blob = Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let json_val = JSONWriter::value_to_json(&blob);
+        // Should be 0x hex format, not base64
+        assert_eq!(json_val.as_str().unwrap(), "0xdeadbeef");
+    }
+
+    #[test]
+    fn test_timestamp_formatting() {
+        // 2023-01-15 10:30:45.123 UTC = 1673778645123 milliseconds
+        let timestamp = Value::Timestamp(1673778645123);
+        let json_val = JSONWriter::value_to_json(&timestamp);
+        let formatted = json_val.as_str().unwrap();
+        // Should be human-readable format, not raw milliseconds
+        assert!(formatted.starts_with("2023-01-15"));
+        assert!(formatted.contains("10:30:45"));
+        assert!(formatted.ends_with("+0000"));
+    }
+
+    #[test]
+    fn test_date_formatting() {
+        // 2023-01-01 = 19358 days since 1970-01-01
+        let date = Value::Date(19358);
+        let json_val = JSONWriter::value_to_json(&date);
+        // Should be YYYY-MM-DD format, not raw days number
+        assert_eq!(json_val.as_str().unwrap(), "2023-01-01");
+    }
+
+    #[test]
+    fn test_time_formatting() {
+        // 14:30:45.123456789 in nanoseconds
+        let nanos =
+            14 * 3600 * 1_000_000_000 + 30 * 60 * 1_000_000_000 + 45 * 1_000_000_000 + 123_456_789;
+        let time = Value::Time(nanos);
+        let json_val = JSONWriter::value_to_json(&time);
+        // Should be HH:MM:SS.nnnnnnnnn format, not raw nanoseconds
+        assert_eq!(json_val.as_str().unwrap(), "14:30:45.123456789");
+    }
+
+    #[test]
+    fn test_varint_formatting() {
+        let varint = Value::Varint(vec![0x01, 0x00]); // 256
+        let json_val = JSONWriter::value_to_json(&varint);
+        // Should be decimal string, not base64
+        assert_eq!(json_val.as_str().unwrap(), "256");
+    }
+
+    #[test]
+    fn test_decimal_formatting() {
+        // 123.45 with scale=2, unscaled=12345 (big-endian: 0x30, 0x39)
+        let decimal = Value::Decimal {
+            scale: 2,
+            unscaled: vec![0x30, 0x39],
+        };
+        let json_val = JSONWriter::value_to_json(&decimal);
+        // Should be human-readable decimal string, not {scale, unscaled} object
+        let formatted = json_val.as_str().unwrap();
+        assert!(formatted.contains('.'));
+    }
+
+    #[test]
+    fn test_duration_formatting() {
+        let duration = Value::Duration {
+            months: 2,
+            days: 15,
+            nanos: 123456789,
+        };
+        let json_val = JSONWriter::value_to_json(&duration);
+        // Should be "XmoYdZns" format, not {months, days, nanos} object
+        assert_eq!(json_val.as_str().unwrap(), "2mo15d123456789ns");
     }
 }
