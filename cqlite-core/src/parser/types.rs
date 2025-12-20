@@ -2337,16 +2337,16 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(1)); // 1 month
         data.extend_from_slice(&encode_vint(15)); // 15 days
-        data.extend_from_slice(&encode_vint(3600_000_000_000i64)); // 1 hour in nanos
+        data.extend_from_slice(&encode_vint(3_600_000_000_000_i64)); // 1 hour in nanos
         let (remaining, value) = parse_duration(&data).unwrap();
         assert!(remaining.is_empty());
         // Result is total microseconds
         if let Value::BigInt(micros) = value {
             // 1 month ≈ 30 days, 15 days, 1 hour
             // = (30*24*60*60 + 15*24*60*60 + 3600) * 1_000_000 μs
-            let expected = (1 * 30 * 24 * 60 * 60 * 1_000_000i64)
-                + (15 * 24 * 60 * 60 * 1_000_000i64)
-                + (3600_000_000_000i64 / 1000);
+            let expected = (30 * 24 * 60 * 60 * 1_000_000_i64)
+                + (15 * 24 * 60 * 60 * 1_000_000_i64)
+                + (3_600_000_000_000_i64 / 1000);
             assert_eq!(micros, expected);
         } else {
             panic!("Expected BigInt value, got {:?}", value);
@@ -2450,7 +2450,7 @@ mod tests {
     #[test]
     fn test_parse_time() {
         // Time: nanoseconds since midnight (i64)
-        let nanos: i64 = 43200_000_000_000; // 12:00:00 in nanoseconds
+        let nanos: i64 = 43_200_000_000_000; // 12:00:00 in nanoseconds
         let data = nanos.to_be_bytes();
         let (remaining, value) = parse_time(&data).unwrap();
         assert!(remaining.is_empty());
@@ -2550,12 +2550,12 @@ mod tests {
 
     #[test]
     fn test_parse_float() {
-        let float_value: f32 = 3.14159;
+        let float_value: f32 = 42.5; // Use a non-constant value
         let data = float_value.to_be_bytes();
         let (remaining, value) = parse_float(&data).unwrap();
         assert!(remaining.is_empty());
         if let Value::Float32(f) = value {
-            assert!((f - 3.14159f32).abs() < 0.0001);
+            assert!((f - 42.5_f32).abs() < 0.0001);
         } else {
             panic!("Expected Float32, got {:?}", value);
         }

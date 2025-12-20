@@ -1315,6 +1315,9 @@ impl V5CompressedLegacyParser {
         // The previous code parsed row_size BEFORE clustering, which caused
         // clustering key bytes to be misinterpreted as row_size (often 0).
 
+        // Save the initial offset pointing to row flags - row_size is measured from here
+        let input_offset = offset;
+
         // Step 1: Parse row flags (1-2 bytes)
         let (row_flags, extended_flags, flags_size) = self.parse_row_flags(data, offset)?;
         offset += flags_size;
@@ -1343,9 +1346,8 @@ impl V5CompressedLegacyParser {
 
         // Step 3: Parse row metadata (row_size, prev_size, timestamps, etc.)
         //
-        // IMPORTANT: row_size is measured from THIS offset (after clustering prefix), NOT from
-        // the start of the row. This is critical for calculating the correct next partition offset.
-        let row_size_start_offset = offset;
+        // NOTE: row_size is measured from the row start (input_offset at flags), NOT from this
+        // offset. The clustering prefix bytes are INCLUDED in row_size.
         let (row_header, row_size) =
             self.parse_row_metadata(data, offset, row_flags, extended_flags)?;
 
@@ -1396,8 +1398,8 @@ impl V5CompressedLegacyParser {
             );
 
             // Calculate offset after row data (based on row_size from header)
-            // Note: row_size is measured from AFTER clustering, so we add offset (after clustering)
-            let after_row_offset = offset + row_size as usize;
+            // Note: row_size is measured from row start (flags), so we add input_offset
+            let after_row_offset = input_offset + row_size as usize;
 
             // Skip the trailing field to reach the next partition
             if after_row_offset + ROW_TRAILING_FIELD_SIZE > data.len() {
@@ -1618,10 +1620,10 @@ impl V5CompressedLegacyParser {
 
         // Calculate offset after cell data (based on row_size from header)
         //
-        // Issue #229 FIX: row_size is measured from AFTER the clustering prefix, NOT from the
-        // start of the row. Previously we used input_offset (row start), which caused incorrect
-        // partition boundary calculation for tables with clustering keys.
-        let after_cells_offset = row_size_start_offset + row_size as usize;
+        // row_size is measured from the row start (input_offset, pointing at flags), NOT from
+        // after the clustering prefix. The row_size includes: flags, clustering, row_size VInt,
+        // prev_size VInt, timestamps, ttl, deletion, bitmap, and cells.
+        let after_cells_offset = input_offset + row_size as usize;
 
         // Skip the trailing field to reach the next partition
         if after_cells_offset + ROW_TRAILING_FIELD_SIZE > data.len() {
@@ -1648,8 +1650,8 @@ impl V5CompressedLegacyParser {
         let next_offset = after_cells_offset + ROW_TRAILING_FIELD_SIZE;
 
         debug!(
-            "V5CompressedLegacy: Calculated next partition offset: {} (row_size_start={}, row_size={}, +4 trailing)",
-            next_offset, row_size_start_offset, row_size
+            "V5CompressedLegacy: Calculated next partition offset: {} (row_start={}, row_size={}, +4 trailing)",
+            next_offset, input_offset, row_size
         );
 
         Ok((cells, Some(row_header), next_offset))
