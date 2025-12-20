@@ -20,7 +20,7 @@ pub async fn execute_read_sstable_command(
     raw: bool,
     verbose: bool,
 ) -> Result<()> {
-    println!("📖 Reading SSTable: {}", file_path.display());
+    eprintln!("📖 Reading SSTable: {}", file_path.display());
 
     // Validate file exists
     if !file_path.exists() {
@@ -68,18 +68,18 @@ pub async fn execute_read_sstable_command(
     // Show basic stats if verbose
     if verbose {
         let stats = reader.stats().await?;
-        println!("\n📊 SSTable Statistics:");
-        println!("  Total entries: {}", stats.entry_count);
-        println!("  Table count: {}", stats.table_count);
-        println!("  Block count: {}", stats.block_count);
-        println!("  Index size: {} bytes", stats.index_size);
-        println!("  Bloom filter size: {} bytes", stats.bloom_filter_size);
-        println!(
+        eprintln!("\n📊 SSTable Statistics:");
+        eprintln!("  Total entries: {}", stats.entry_count);
+        eprintln!("  Table count: {}", stats.table_count);
+        eprintln!("  Block count: {}", stats.block_count);
+        eprintln!("  Index size: {} bytes", stats.index_size);
+        eprintln!("  Bloom filter size: {} bytes", stats.bloom_filter_size);
+        eprintln!(
             "  Compression ratio: {:.2}%",
             stats.compression_ratio * 100.0
         );
-        println!("  Cache hit rate: {:.2}%", stats.cache_hit_rate * 100.0);
-        println!();
+        eprintln!("  Cache hit rate: {:.2}%", stats.cache_hit_rate * 100.0);
+        eprintln!();
     }
 
     // Apply skip and limit pagination
@@ -92,14 +92,14 @@ pub async fn execute_read_sstable_command(
     let displayed_count = display_entries.len();
 
     if displayed_count == 0 {
-        println!(
+        eprintln!(
             "No entries to display (total: {}, skip: {})",
             total_entries, skip
         );
         return Ok(());
     }
 
-    println!(
+    eprintln!(
         "Displaying {} of {} entries (skip: {})\n",
         displayed_count, total_entries, skip
     );
@@ -120,7 +120,7 @@ pub async fn execute_read_sstable_command(
         }
     }
 
-    println!(
+    eprintln!(
         "\n✅ Displayed {} entries (total: {}, skipped: {})",
         displayed_count, total_entries, skip
     );

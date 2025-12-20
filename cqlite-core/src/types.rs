@@ -983,13 +983,17 @@ impl Value {
     /// Format a UDT
     fn fmt_udt(f: &mut fmt::Formatter<'_>, udt: &UdtValue) -> fmt::Result {
         write!(f, "{}{{", udt.type_name)?;
-        for (i, field) in udt.fields.iter().enumerate() {
+        // Sort fields by name for deterministic output
+        let mut sorted_fields: Vec<_> = udt.fields.iter().collect();
+        sorted_fields.sort_by_key(|field| &field.name);
+
+        for (i, field) in sorted_fields.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
             match &field.value {
-                Some(value) => write!(f, "{}: {}", field.name, value)?,
-                None => write!(f, "{}: NULL", field.name)?,
+                Some(value) => write!(f, "'{}': {}", field.name, value)?,
+                None => write!(f, "'{}': NULL", field.name)?,
             }
         }
         write!(f, "}}")
