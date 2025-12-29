@@ -23,14 +23,21 @@ use std::path::PathBuf;
 
 /// Helper to get test data directory
 fn test_data_dir() -> PathBuf {
-    std::env::var("CQLITE_DATASETS_ROOT")
+    let root = std::env::var("CQLITE_DATASETS_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .expect("Failed to get parent directory")
-                .join("test-data/datasets/sstables")
-        })
+                .join("test-data/datasets")
+        });
+    // Check if sstables subdirectory exists (CI convention)
+    let sstables_path = root.join("sstables");
+    if sstables_path.exists() {
+        sstables_path
+    } else {
+        root
+    }
 }
 
 /// Helper to get schema file

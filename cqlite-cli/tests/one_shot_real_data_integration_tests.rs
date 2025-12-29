@@ -170,10 +170,11 @@ fn test_one_shot_select_json_format() -> Result<()> {
         stdout
     );
 
-    // Output should contain JSON structure (may have debug output before it)
+    // Output should be a valid JSON array (raw array format, not wrapped in object)
+    let trimmed = stdout.trim();
     assert!(
-        stdout.contains("\"rows\"") || stdout.contains("rows"),
-        "Expected JSON output to contain 'rows' field. Output: {}",
+        trimmed.starts_with('[') && trimmed.ends_with(']'),
+        "Expected JSON array output. Output: {}",
         stdout
     );
 

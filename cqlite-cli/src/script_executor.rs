@@ -45,7 +45,7 @@ use crate::error::{print_error, CliExitCode};
 /// use cqlite_cli::script_executor::execute_script_file;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let db = Database::open("test.db", Default::default()).await?;
+/// let db = Database::open(Path::new("test.db"), Default::default()).await?;
 /// let config = OutputConfig::default();
 ///
 /// execute_script_file(

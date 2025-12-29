@@ -270,7 +270,14 @@ impl TestContext {
     ///
     /// Table directories follow the pattern: {table_name}-{uuid}/
     fn find_table_directory(&self) -> Result<PathBuf, String> {
-        let keyspace_dir = self.data_root.join(&self.keyspace);
+        // Try with sstables subdirectory first (matches CI CQLITE_DATASETS_ROOT convention)
+        let sstables_path = self.data_root.join("sstables").join(&self.keyspace);
+        let keyspace_dir = if sstables_path.exists() {
+            sstables_path
+        } else {
+            // Fallback to direct path (for when CQLITE_DATASETS_ROOT already includes sstables)
+            self.data_root.join(&self.keyspace)
+        };
 
         if !keyspace_dir.exists() {
             return Err(format!(

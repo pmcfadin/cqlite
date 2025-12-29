@@ -26,15 +26,22 @@ use std::path::PathBuf;
 
 /// Get test data root directory for fallback tests
 fn get_test_data_root() -> PathBuf {
-    std::env::var("CQLITE_DATASETS_ROOT")
+    let root = std::env::var("CQLITE_DATASETS_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let manifest_dir = env!("CARGO_MANIFEST_DIR");
             PathBuf::from(manifest_dir)
                 .parent()
                 .expect("Failed to get parent directory")
-                .join("test-data/datasets/sstables")
-        })
+                .join("test-data/datasets")
+        });
+    // Check if sstables subdirectory exists (CI convention)
+    let sstables_path = root.join("sstables");
+    if sstables_path.exists() {
+        sstables_path
+    } else {
+        root
+    }
 }
 
 /// Get path to simple_table test data
@@ -46,6 +53,15 @@ fn get_simple_table_path() -> PathBuf {
 
     // Return the Data.db file path
     table_dir.join("nb-1-big-Data.db")
+}
+
+/// Get path to schemas directory
+fn get_schemas_dir() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir)
+        .parent()
+        .expect("Failed to get parent directory")
+        .join("test-data/schemas")
 }
 
 // ============================================================================
@@ -178,9 +194,8 @@ fn test_fallback_requires_ingestion_unavailable() {
         table_path.display()
     );
 
-    // Create a dummy schema file
-    let schema_dir = get_test_data_root().join("test_basic");
-    let schema_file = schema_dir.join("schema.cql");
+    // Use the correct schema file path
+    let schema_file = get_schemas_dir().join("basic-types.cql");
 
     assert!(
         schema_file.exists(),
