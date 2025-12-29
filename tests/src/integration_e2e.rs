@@ -8,7 +8,10 @@
 //! - Real-world dataset processing
 //! - Performance validation against production targets
 //! - Memory efficiency under load
+//!
+//! NOTE: These tests require the `experimental` feature flag.
 
+#![cfg(feature = "experimental")]
 #![allow(clippy::all)] // Allow all clippy warnings for M1 milestone
 //! - Concurrent operation safety
 
