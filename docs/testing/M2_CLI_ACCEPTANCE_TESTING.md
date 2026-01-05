@@ -21,7 +21,7 @@ This document tracks acceptance testing for the CQLite CLI (Milestone 2).
 | G | Env vs flag precedence | :white_check_mark: Passed | |
 | H | REPL session commands | :x: Failed | #230 |
 | I | REPL query execution | :x: Failed | #230 |
-| K | Error handling and exit codes | :construction: Partial | #231 |
+| K | Error handling and exit codes | :white_check_mark: Passed | #231 (Fixed) |
 | L | Info command | :x: Failed | #232 |
 
 **Legend**: :white_check_mark: Passed | :x: Failed | :hourglass: Pending | :construction: In Progress
@@ -266,12 +266,12 @@ echo "Exit code: $?"
 
 **Acceptance Criteria**:
 - [x] Exit code 3 for schema file errors
-- [ ] Exit code 4 for data directory errors
+- [x] Exit code 4 for data directory errors
 - [x] Exit code 5 for query execution errors
 - [x] Error messages are descriptive
 
-**Status**: :construction: Partial Pass
-**Notes**: Exit codes 3 and 5 work correctly. Missing `--data-dir` returns exit code 3 instead of 4 with confusing "schema not found" message. ORDER BY is actually implemented and works (not an error case).
+**Status**: :white_check_mark: Passed
+**Notes**: All exit codes work correctly. Fixed in Issue #231: missing `--data-dir` now returns exit code 4 with clear error message "Missing required flag: --data-dir".
 
 ---
 
@@ -301,7 +301,7 @@ cargo run --package cqlite-cli -- info test-data/datasets/sstables/test_basic
 | #228 | --limit flag ignored when using JSON output format | **Fixed** |
 | #229 | Script execution (-f) shows wrong columns due to schema lookup failure | **Fixed** |
 | #230 | REPL fails to start when schema directory contains UDT-only JSON files | **Fixed** |
-| #231 | Missing --data-dir returns exit code 3 instead of 4 with confusing error message | Open |
+| #231 | Missing --data-dir returns exit code 3 instead of 4 with confusing error message | **Fixed** |
 | #232 | Info command fails on SSTable directories containing extra files (.jsonl, .txt) | Open |
 
 ---

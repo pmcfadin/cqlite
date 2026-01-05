@@ -107,6 +107,12 @@ pub fn classify_error(err: &anyhow::Error) -> CliExitCode {
 
     // Check for specific error patterns (order matters - most specific first)
 
+    // Issue #231: Missing --data-dir flag check (MUST be before schema check)
+    // This specific error message contains "--schema" but is really about missing --data-dir
+    if err_lower.contains("missing required flag: --data-dir") {
+        return CliExitCode::DataDirError;
+    }
+
     // CLI argument parsing errors (from clap or manual validation)
     if err_lower.contains("invalid argument")
         || err_lower.contains("unexpected argument")
@@ -257,6 +263,17 @@ mod tests {
 
         let err = anyhow!("Failed to open SSTable");
         assert_eq!(classify_error(&err), CliExitCode::DataDirError);
+    }
+
+    #[test]
+    fn test_classify_missing_data_dir_flag() {
+        // Issue #231: Missing --data-dir flag should return exit code 4
+        let err = anyhow!(
+            "Missing required flag: --data-dir\n\n\
+             One-shot query execution requires both --schema and --data-dir."
+        );
+        assert_eq!(classify_error(&err), CliExitCode::DataDirError);
+        assert_eq!(classify_error(&err).as_i32(), 4);
     }
 
     #[test]

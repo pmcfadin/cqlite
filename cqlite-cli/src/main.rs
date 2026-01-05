@@ -64,6 +64,20 @@ async fn run_main() -> Result<()> {
     // Load configuration
     let config = config::Config::load(cli.config.clone(), &cli)?;
 
+    // Issue #231: Validate required flags for one-shot query mode
+    // When --execute and --schema are provided, --data-dir (or --dataset) is required
+    #[cfg(feature = "state_machine")]
+    if cli.execute.is_some() && cli.schema.is_some() {
+        if cli.data_dir.is_none() && cli.dataset.is_none() {
+            return Err(anyhow::anyhow!(
+                "Missing required flag: --data-dir\n\n\
+                 One-shot query execution requires both --schema and --data-dir.\n\n\
+                 Example:\n\
+                 cqlite --schema schema.cql --data-dir /path/to/sstables -e 'SELECT * FROM table'"
+            ));
+        }
+    }
+
     // Initialize database connection
     let db_path = cli
         .database
