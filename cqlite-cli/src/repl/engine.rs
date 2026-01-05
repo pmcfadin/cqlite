@@ -88,7 +88,30 @@ impl ReplEngine {
         app_config: Config,
         database: Database,
     ) -> ReplResult<Self> {
-        let session = ReplSession::new(db_path, app_config, database)?;
+        Self::with_schema_registry(config, db_path, app_config, database, None)
+    }
+
+    /// Create a new REPL engine with an optional pre-loaded SchemaRegistry
+    ///
+    /// This is used when the CLI performs ingestion at startup, allowing
+    /// the REPL to have immediate access to schema information for commands
+    /// like `:describe` without needing to run `:schema refresh` first.
+    pub fn with_schema_registry(
+        config: ReplConfig,
+        db_path: &Path,
+        app_config: Config,
+        database: Database,
+        schema_registry: Option<
+            std::sync::Arc<tokio::sync::RwLock<cqlite_core::schema::registry::SchemaRegistry>>,
+        >,
+    ) -> ReplResult<Self> {
+        let mut session = ReplSession::new(db_path, app_config, database)?;
+
+        // If schema registry was provided from startup ingestion, set it
+        if let Some(registry) = schema_registry {
+            session.set_schema_registry(Some(registry));
+        }
+
         let parser = CommandParser::new();
 
         let history = if config.enable_history {
@@ -576,6 +599,9 @@ impl ReplEngine {
     }
 
     /// Execute describe command
+    ///
+    /// Uses SchemaRegistry to look up table schema information,
+    /// consistent with how other REPL commands access schema data.
     async fn execute_describe_command(&mut self, object_name: &str) -> ReplResult<()> {
         println!(
             "{} {}",
@@ -583,22 +609,140 @@ impl ReplEngine {
             object_name.yellow()
         );
 
-        match self.session.describe_object(object_name).await {
-            Ok(description) => {
-                println!("{}", description);
-            }
-            Err(e) => {
+        #[cfg(not(feature = "state_machine"))]
+        {
+            return Err(ReplError::UnsupportedFeature(
+                "Describe command requires state_machine feature".to_string(),
+            ));
+        }
+
+        #[cfg(feature = "state_machine")]
+        {
+            // Parse object_name into keyspace.table
+            let (keyspace, table) = if object_name.contains('.') {
+                let parts: Vec<&str> = object_name.split('.').collect();
+                if parts.len() == 2 {
+                    (Some(parts[0].to_string()), parts[1])
+                } else if parts.len() > 2 {
+                    eprintln!(
+                        "{} Invalid object name format: '{}'. Use keyspace.table or table",
+                        "Error:".red().bold(),
+                        object_name
+                    );
+                    return Ok(());
+                } else {
+                    (self.session.current_keyspace().cloned(), object_name)
+                }
+            } else {
+                (self.session.current_keyspace().cloned(), object_name)
+            };
+
+            let Some(ks) = keyspace else {
                 eprintln!(
-                    "{} Failed to describe {}: {}",
-                    "Error:".red().bold(),
-                    object_name,
-                    e
+                    "{} No keyspace specified and no current keyspace set",
+                    "Error:".red().bold()
                 );
-                println!("💡 Try :tables to list available objects");
+                println!("💡 Try :use <keyspace> first, or use keyspace.table format");
+                return Ok(());
+            };
+
+            // Try to get schema from registry
+            if let Some(registry) = self.session.schema_registry() {
+                let registry_guard = registry.read().await;
+                match registry_guard.get_schema(&ks, table).await {
+                    Ok(schema) => {
+                        let description = self.format_table_description(&schema);
+                        println!("{}", description);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} Table '{}.{}' not found: {}",
+                            "Error:".red().bold(),
+                            ks,
+                            table,
+                            e
+                        );
+                        println!("💡 Try :tables to list available tables");
+                    }
+                }
+            } else {
+                eprintln!("{} Schema registry not available", "Error:".red().bold());
+                println!("💡 Ensure schema was loaded with --schema flag");
+            }
+
+            Ok(())
+        }
+    }
+
+    /// Format a TableSchema as human-readable description
+    #[cfg(feature = "state_machine")]
+    fn format_table_description(&self, schema: &cqlite_core::schema::TableSchema) -> String {
+        use std::fmt::Write;
+        let mut output = String::new();
+
+        // Note: writeln! to String cannot fail, but we use let _ = for lint compliance
+        let _ = writeln!(output, "Table: {}.{}\n", schema.keyspace, schema.table);
+        let _ = writeln!(output, "Columns:");
+
+        // Collect all columns with their roles
+        let mut all_columns: Vec<(String, String, String)> = Vec::new();
+
+        // Partition keys
+        for pk in schema.ordered_partition_keys() {
+            all_columns.push((
+                pk.name.clone(),
+                pk.data_type.clone(),
+                "PARTITION KEY".to_string(),
+            ));
+        }
+
+        // Clustering keys
+        for ck in schema.ordered_clustering_keys() {
+            let order_str = match ck.order {
+                cqlite_core::schema::ClusteringOrder::Asc => "CLUSTERING KEY".to_string(),
+                cqlite_core::schema::ClusteringOrder::Desc => "CLUSTERING KEY DESC".to_string(),
+            };
+            all_columns.push((ck.name.clone(), ck.data_type.clone(), order_str));
+        }
+
+        // Regular columns
+        for col in &schema.columns {
+            // Skip if already listed as key
+            let is_key = schema.partition_keys.iter().any(|k| k.name == col.name)
+                || schema.clustering_keys.iter().any(|k| k.name == col.name);
+            if !is_key {
+                all_columns.push((col.name.clone(), col.data_type.clone(), String::new()));
             }
         }
 
-        Ok(())
+        // Calculate column widths for alignment
+        let name_width = all_columns
+            .iter()
+            .map(|(n, _, _)| n.len())
+            .max()
+            .unwrap_or(10)
+            .max(10);
+        let type_width = all_columns
+            .iter()
+            .map(|(_, t, _)| t.len())
+            .max()
+            .unwrap_or(10)
+            .max(10);
+
+        // Print aligned columns
+        for (name, dtype, role) in all_columns {
+            if role.is_empty() {
+                let _ = writeln!(output, "  {:<name_width$}  {:<type_width$}", name, dtype);
+            } else {
+                let _ = writeln!(
+                    output,
+                    "  {:<name_width$}  {:<type_width$}  ({})",
+                    name, dtype, role
+                );
+            }
+        }
+
+        output
     }
 
     /// Execute use command

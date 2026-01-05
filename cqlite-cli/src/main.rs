@@ -85,8 +85,11 @@ async fn run_main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("cqlite.db"));
 
     // Initialize the database engine - check for ingestion path first
+    // Returns (Database, Option<SchemaRegistry>) to preserve schema info for REPL
     #[cfg(feature = "state_machine")]
-    let database = if cli.schema.is_some() && (cli.data_dir.is_some() || cli.dataset.is_some()) {
+    let (database, startup_schema_registry) = if cli.schema.is_some()
+        && (cli.data_dir.is_some() || cli.dataset.is_some())
+    {
         // One-shot ingestion path: load schema and discover SSTables
         info!("Using one-shot ingestion mode");
 
@@ -170,7 +173,7 @@ async fn run_main() -> Result<()> {
                         result.discovery_summary.table_directories.len(),
                         dataset_name
                     );
-                    result.database
+                    (result.database, Some(result.schema_registry))
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!("Dataset ingestion failed: {}", e));
@@ -193,7 +196,7 @@ async fn run_main() -> Result<()> {
                         result.schema_load_result.schemas_loaded,
                         result.discovery_summary.sstables_found
                     );
-                    result.database
+                    (result.database, Some(result.schema_registry))
                 }
                 Err(e) => {
                     // Error will be classified by error.rs for proper exit codes
@@ -203,11 +206,14 @@ async fn run_main() -> Result<()> {
         }
     } else {
         // Original Database::open() path for backward compatibility
-        initialize_database(&db_path, &config).await?
+        (initialize_database(&db_path, &config).await?, None)
     };
 
     #[cfg(not(feature = "state_machine"))]
-    let database = initialize_database(&db_path, &config).await?;
+    let (database, startup_schema_registry): (
+        _,
+        Option<std::sync::Arc<tokio::sync::RwLock<cqlite_core::schema::registry::SchemaRegistry>>>,
+    ) = (initialize_database(&db_path, &config).await?, None);
 
     // Create output config for query execution
     let output_config =
@@ -354,8 +360,11 @@ async fn run_main() -> Result<()> {
     match cli.command {
         Some(Commands::Repl { tui }) => {
             // Check if we need to run ingestion from config file
+            // Returns (Database, Option<SchemaRegistry>) to preserve schema info
             #[cfg(feature = "state_machine")]
-            let database = if !config.schema_paths.is_empty() && config.data_directory.is_some() {
+            let (database, repl_schema_registry) = if !config.schema_paths.is_empty()
+                && config.data_directory.is_some()
+            {
                 info!("REPL: Running ingestion from config file");
                 info!(
                     "REPL: Loading {} schema file(s) from config",
@@ -382,7 +391,7 @@ async fn run_main() -> Result<()> {
                             result.discovery_summary.sstables_found,
                             result.discovery_summary.keyspaces.len()
                         );
-                        result.database
+                        (result.database, Some(result.schema_registry))
                     }
                     Err(e) => {
                         return Err(anyhow::anyhow!(
@@ -392,12 +401,12 @@ async fn run_main() -> Result<()> {
                     }
                 }
             } else {
-                // No config-based ingestion, use existing database
-                database
+                // No config-based ingestion, use existing database and startup schema registry
+                (database, startup_schema_registry)
             };
 
             #[cfg(not(feature = "state_machine"))]
-            let database = database; // Just use existing database if state_machine feature disabled
+            let (database, repl_schema_registry) = (database, startup_schema_registry);
 
             // Create REPL configuration from loaded config (not hardcoded!)
             let repl_config = repl::ReplConfig {
@@ -423,9 +432,15 @@ async fn run_main() -> Result<()> {
                 prompt_continuation: config.repl.prompt_continuation.clone(),
             };
 
-            // Initialize and run REPL engine
-            let mut engine = repl::ReplEngine::new(repl_config, &db_path, config, database)
-                .map_err(|e| anyhow::anyhow!("Failed to initialize REPL: {}", e))?;
+            // Initialize and run REPL engine with schema registry from startup ingestion
+            let mut engine = repl::ReplEngine::with_schema_registry(
+                repl_config,
+                &db_path,
+                config,
+                database,
+                repl_schema_registry,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to initialize REPL: {}", e))?;
 
             // Run REPL and convert ReplError to proper exit codes
             engine.run().await.map_err(|e| {
