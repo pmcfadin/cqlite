@@ -519,26 +519,60 @@ impl ReplEngine {
     }
 
     /// Execute tables command
+    ///
+    /// Uses DiscoveryService to scan the data directory for tables,
+    /// consistent with the :status command behavior.
     async fn execute_tables_command(&mut self) -> ReplResult<()> {
-        println!("{}", "📋 Listing tables...".cyan().bold());
+        println!("{}", "Listing tables...".cyan().bold());
 
-        match self.session.list_tables().await {
-            Ok(tables) => {
-                if tables.is_empty() {
-                    println!("📭 No tables found");
-                    println!("💡 Use CREATE TABLE or configure data directory");
-                } else {
-                    for table in tables {
-                        println!("  📄 {}", table.green());
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("{} Failed to list tables: {}", "Error:".red().bold(), e);
-            }
+        #[cfg(not(feature = "state_machine"))]
+        {
+            return Err(ReplError::UnsupportedFeature(
+                "Tables command requires state_machine feature".to_string(),
+            ));
         }
 
-        Ok(())
+        #[cfg(feature = "state_machine")]
+        {
+            use cqlite_core::discovery::DiscoveryService;
+
+            let Some(data_dir) = self.session.data_dir() else {
+                println!("No tables found");
+                println!("Configure data directory with :config data-dir <PATH>");
+                return Ok(());
+            };
+
+            let discovery_service = DiscoveryService::new(data_dir.to_path_buf(), None);
+
+            let summary = discovery_service.scan().await.map_err(|e| {
+                ReplError::DataDirectoryError(format!("Failed to scan for tables: {}", e))
+            })?;
+
+            // Filter by current keyspace if set
+            let tables: Vec<&String> = if let Some(keyspace) = self.session.current_keyspace() {
+                let prefix = format!("{}.", keyspace);
+                summary
+                    .tables
+                    .iter()
+                    .filter(|t| t.starts_with(&prefix))
+                    .collect()
+            } else {
+                summary.tables.iter().collect()
+            };
+
+            if tables.is_empty() {
+                println!("No tables found");
+                if self.session.current_keyspace().is_some() {
+                    println!("Try :use to switch keyspaces or run :tables without USE");
+                }
+            } else {
+                for table in tables {
+                    println!("  {}", table.green());
+                }
+            }
+
+            Ok(())
+        }
     }
 
     /// Execute describe command
