@@ -198,6 +198,45 @@ V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
 
 ---
 
+### BTI Metadata Offset Extraction (Performance Optimization - M3+ Scope)
+
+**Status**: 🔄 **DEFERRED** (Issue #226)
+**Impact**: Performance - sequential scan fallback instead of direct partition lookup
+**Current Behavior**: Fully functional with sequential read mode
+
+**Background**: BTI format Index.db entries contain variable-length metadata after the partition key. This metadata encodes the Data.db offset for direct partition seeks, but the exact format was not previously documented.
+
+**Research Findings** (Issue #226):
+- BTI payload uses **SizedInts encoding** (not VInt)
+- Format: `[hash_byte: 1 byte][position: size bytes]`
+- Size determined by `payloadBits` field in trie node header
+- Formula: `size = payloadBits - 7`
+
+**Example from stock_prices Index.db**:
+```text
+00 00 04 80 00 4f 88 00
+^  ^-----------^
+│  └─ Position bytes (Data.db offset)
+└─── Hash byte (filter hash lower 8 bits)
+```
+
+**Current Workaround**: Sequential scan with raw_key matching (Issue #212 fix) - functionally correct but O(n) performance.
+
+**Future Optimization** (M3+ scope):
+1. Extract `payloadBits` from BTI trie node headers
+2. Decode SizedInts to get Data.db offset
+3. Enable O(log n) direct partition seeks
+
+**Implementation Status**:
+- ✅ SizedInts decoder implemented (`cqlite-core/src/storage/sstable/bti/sized_ints.rs`)
+- ✅ Research documented (`docs/research/BTI_PAYLOAD_*.md`)
+- ⏳ Trie node header parsing (pending)
+- ⏳ Direct offset extraction (pending)
+
+**Tracking**: Issue #226 (log noise fix - CLOSED), Issue #208 C3 (offset extraction - deferred)
+
+---
+
 ## Validation Status
 
 ### Overall Pass Rate: 100% (33/33 tables) ✅ COMPLETE (macOS)

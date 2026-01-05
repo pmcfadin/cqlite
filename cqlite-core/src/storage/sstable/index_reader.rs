@@ -490,10 +490,7 @@ fn detect_index_format(input: &[u8]) -> IndexFormat {
         IndexFormat::DigestFormat
     } else {
         // BTI format starts with entry length (typically 0x000e = 14 bytes for simple text keys)
-        log::debug!(
-            "Detected BtiFormat (first word {:#06x} is not marker 0x0010)",
-            first_word
-        );
+        log::info!("BTI format detected, using sequential read mode for partition lookups");
         IndexFormat::BtiFormat
     }
 }
@@ -611,7 +608,7 @@ fn parse_bti_partition_entry(
     let raw_key = Arc::from(key_bytes);
 
     if data_offset == 0 {
-        log::warn!(
+        log::debug!(
             "BTI entry has no reliable offset, sequential read mode will be used. \
              Entry: {:?}, metadata_len: {}",
             String::from_utf8_lossy(key_bytes),
