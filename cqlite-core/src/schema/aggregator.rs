@@ -139,11 +139,13 @@ struct MinimalTableSchema {
 }
 
 /// Full JSON schema format (multiple tables + UDTs)
+/// Note: Both `udts` and `tables` are optional to support UDT-only or table-only files
 #[derive(Debug, serde::Deserialize)]
 struct FullSchema {
     keyspace: String,
     #[serde(default)]
     udts: Vec<JsonUdt>,
+    #[serde(default)]
     tables: Vec<JsonTable>,
 }
 
@@ -1117,6 +1119,99 @@ mod tests {
         // Verify UDT was registered
         let udt_registry = aggregator.udt_registry.read().await;
         assert!(udt_registry.contains_udt("ks", "address"));
+    }
+
+    /// Test for Issue #230: REPL fails when schema directory contains UDT-only JSON files
+    /// UDT-only files (without "tables" array) should parse successfully
+    #[tokio::test]
+    async fn test_udt_only_json_schema_issue_230() {
+        let (mut aggregator, temp_dir) = setup_test_aggregator().await;
+
+        // This JSON has "udts" but no "tables" - should work after fix
+        let udt_only_json = r#"
+        {
+            "keyspace": "test_keyspace",
+            "udts": [
+                {
+                    "name": "address_type",
+                    "fields": [
+                        { "name": "street", "type": "text" },
+                        { "name": "city", "type": "text" },
+                        { "name": "zip", "type": "int" }
+                    ]
+                }
+            ]
+        }
+        "#;
+
+        let path = write_file(temp_dir.path(), "address.json", udt_only_json);
+        let result = aggregator.load_from_paths(&[path]).await.unwrap();
+
+        // Should load successfully with no errors
+        assert!(
+            result.errors.is_empty(),
+            "Expected no errors but got: {:?}",
+            result.errors
+        );
+        assert_eq!(result.udts_loaded, 1, "Expected 1 UDT to be loaded");
+        assert_eq!(
+            result.schemas_loaded, 0,
+            "Expected 0 tables (UDT-only file)"
+        );
+
+        // Verify UDT was registered
+        let udt_registry = aggregator.udt_registry.read().await;
+        assert!(
+            udt_registry.contains_udt("test_keyspace", "address_type"),
+            "UDT address_type should be registered in test_keyspace"
+        );
+    }
+
+    /// Test symmetric case: table-only JSON files (tables without UDTs)
+    /// This validates that #[serde(default)] works for both fields
+    #[tokio::test]
+    async fn test_table_only_json_schema_symmetry() {
+        let (mut aggregator, temp_dir) = setup_test_aggregator().await;
+
+        // This JSON has "tables" but no "udts" - symmetric to Issue #230 fix
+        let table_only_json = r#"
+        {
+            "keyspace": "test_keyspace",
+            "tables": [
+                {
+                    "name": "simple_table",
+                    "columns": [
+                        { "name": "id", "type": "uuid" },
+                        { "name": "data", "type": "text" }
+                    ],
+                    "partition_keys": ["id"],
+                    "clustering_keys": []
+                }
+            ]
+        }
+        "#;
+
+        let path = write_file(temp_dir.path(), "table_only.json", table_only_json);
+        let result = aggregator.load_from_paths(&[path]).await.unwrap();
+
+        // Should load successfully with no errors
+        assert!(
+            result.errors.is_empty(),
+            "Expected no errors but got: {:?}",
+            result.errors
+        );
+        assert_eq!(result.udts_loaded, 0, "Expected 0 UDTs (table-only file)");
+        assert_eq!(result.schemas_loaded, 1, "Expected 1 table to be loaded");
+
+        // Verify table was registered
+        let registry = aggregator.registry.read().await;
+        assert!(
+            registry
+                .get_schema("test_keyspace", "simple_table")
+                .await
+                .is_ok(),
+            "Table simple_table should be registered in test_keyspace"
+        );
     }
 
     #[tokio::test]

@@ -16,8 +16,8 @@ This document tracks acceptance testing for the CQLite CLI (Milestone 2).
 | B | One-shot table output | :white_check_mark: Passed | |
 | C | One-shot JSON output | :white_check_mark: Passed | #227 (Fixed) |
 | D | One-shot CSV output | :white_check_mark: Passed | Fixed in-session |
-| E | Script execution (`-f` flag) | :x: Failed | #229 |
-| F | Limits and pagination | :x: Failed | #228 |
+| E | Script execution (`-f` flag) | :white_check_mark: Passed | #229 (Fixed) |
+| F | Limits and pagination | :white_check_mark: Passed | #228 (Fixed) |
 | G | Env vs flag precedence | :white_check_mark: Passed | |
 | H | REPL session commands | :x: Failed | #230 |
 | I | REPL query execution | :x: Failed | #230 |
@@ -140,11 +140,12 @@ cargo run --package cqlite-cli -- \
 ```
 
 **Acceptance Criteria**:
-- [ ] Multiple statements execute in sequence
-- [ ] Results displayed for each statement
-- [ ] Errors in one statement don't block others (or do they? TBD)
+- [x] Multiple statements execute in sequence
+- [x] Results displayed for each statement
+- [ ] Errors in one statement don't block others (TBD)
 
-**Status**: :hourglass: Pending
+**Status**: :white_check_mark: Passed
+**Notes**: Fixed in Issue #229. Script execution now correctly maintains schema context across multiple statements.
 
 ---
 
@@ -170,11 +171,12 @@ cargo run --package cqlite-cli -- \
 ```
 
 **Acceptance Criteria**:
-- [ ] `--limit 10` returns at most 10 rows
+- [x] `--limit 10` returns at most 10 rows
 - [ ] `--page-size` affects pagination behavior
-- [ ] Query LIMIT and CLI --limit interact correctly
+- [x] Query LIMIT and CLI --limit interact correctly
 
-**Status**: :hourglass: Pending
+**Status**: :white_check_mark: Passed
+**Notes**: Fixed in Issue #228. `--limit` flag now correctly limits output for all formats including JSON.
 
 ---
 
@@ -296,9 +298,9 @@ cargo run --package cqlite-cli -- info test-data/datasets/sstables/test_basic
 |---------|-------------|--------|
 | #226 | BTI Index warnings too noisy (downgrade to debug) | Open |
 | #227 | JSON output uses raw values instead of human-readable formatting | **Fixed** |
-| #228 | --limit flag ignored when using JSON output format | Open |
-| #229 | Script execution (-f) shows wrong columns due to schema lookup failure | Open |
-| #230 | REPL fails to start when schema directory contains UDT-only JSON files | Open |
+| #228 | --limit flag ignored when using JSON output format | **Fixed** |
+| #229 | Script execution (-f) shows wrong columns due to schema lookup failure | **Fixed** |
+| #230 | REPL fails to start when schema directory contains UDT-only JSON files | **Fixed** |
 | #231 | Missing --data-dir returns exit code 3 instead of 4 with confusing error message | Open |
 | #232 | Info command fails on SSTable directories containing extra files (.jsonl, .txt) | Open |
 

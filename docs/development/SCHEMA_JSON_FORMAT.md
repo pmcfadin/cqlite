@@ -122,6 +122,28 @@ Example: If `users` is defined in `base/users.json` and again in `overrides/user
 - Minimal format: one table per file.
 - Full format: multiple tables allowed via `tables` array.
 
+### UDT-Only Files
+
+UDT-only files (containing `udts` but no `tables`) are supported. This is useful for sharing type definitions across multiple schema files:
+
+```json
+{
+  "keyspace": "ks",
+  "udts": [
+    {
+      "name": "address_type",
+      "fields": [
+        { "name": "street", "type": "text" },
+        { "name": "city", "type": "text" },
+        { "name": "zip", "type": "int" }
+      ]
+    }
+  ]
+}
+```
+
+UDT-only files are loaded before tables, making the types available for use in table definitions in other files.
+
 ---
 
 ### Examples
