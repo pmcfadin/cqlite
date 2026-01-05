@@ -129,7 +129,19 @@ pub(crate) fn parse_sstable_filename(
 
     // Extract component (everything after third hyphen)
     let component_str = parts[3..].join("-");
-    let component = SSTableComponent::from_str(&component_str)?;
+
+    // Return None for unrecognized components instead of propagating error
+    // This follows the same pattern as TOC parsing (toc.rs:53-73)
+    let component = match SSTableComponent::from_str(&component_str) {
+        Ok(c) => c,
+        Err(_) => {
+            log::debug!(
+                "Ignoring file with unrecognized component extension: {}",
+                filename
+            );
+            return Ok(None);
+        }
+    };
 
     Ok(Some((generation, format, component)))
 }

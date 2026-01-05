@@ -42,6 +42,64 @@ mod tests {
             .is_none());
     }
 
+    /// Test for Issue #232: parse_sstable_filename should ignore auxiliary files
+    /// (.jsonl, .db.txt) that exist alongside valid SSTable components
+    #[test]
+    fn test_parse_sstable_filename_ignores_auxiliary_files() {
+        // Should return None for JSONL validation files
+        assert!(scan::parse_sstable_filename("nb-1-big-Data.db.jsonl")
+            .unwrap()
+            .is_none());
+
+        // Should return None for human-readable stats dumps
+        assert!(scan::parse_sstable_filename("nb-1-big-Statistics.db.txt")
+            .unwrap()
+            .is_none());
+
+        // Should return None for other auxiliary extensions
+        assert!(scan::parse_sstable_filename("nb-1-big-Data.db.json")
+            .unwrap()
+            .is_none());
+
+        // Should still parse valid SSTable files correctly
+        let (generation, fmt, comp) = scan::parse_sstable_filename("nb-1-big-Data.db")
+            .unwrap()
+            .unwrap();
+        assert_eq!(generation, 1);
+        assert_eq!(fmt, "big");
+        assert_eq!(comp, types::SSTableComponent::Data);
+    }
+
+    /// Test for Issue #232: Directory scan should succeed with auxiliary files present
+    #[test]
+    fn test_directory_scan_with_auxiliary_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let table_dir = temp_dir.path().join("test_table-abc123");
+        fs::create_dir(&table_dir).unwrap();
+
+        // Create valid SSTable files
+        let files = [
+            "nb-1-big-Data.db",
+            "nb-1-big-Statistics.db",
+            "nb-1-big-TOC.txt",
+        ];
+        for file in &files {
+            fs::write(table_dir.join(file), "mock content").unwrap();
+        }
+
+        // Create auxiliary files (should be ignored, not cause errors)
+        let aux_files = ["nb-1-big-Data.db.jsonl", "nb-1-big-Statistics.db.txt"];
+        for file in &aux_files {
+            fs::write(table_dir.join(file), "auxiliary content").unwrap();
+        }
+
+        // Should successfully scan and find 1 generation, ignoring auxiliary files
+        let directory = SSTableDirectory::scan(&table_dir).unwrap();
+        assert_eq!(directory.table_name, "test_table");
+        assert_eq!(directory.generations.len(), 1);
+        assert_eq!(directory.generations[0].components.len(), 3); // Data, Statistics, TOC
+    }
+
     #[test]
     fn test_component_properties() {
         assert!(types::SSTableComponent::Data.is_required());
