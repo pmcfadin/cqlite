@@ -17,7 +17,7 @@
 # Cassandra data directory root (where SSTables are stored)
 # This is typically /var/lib/cassandra/data for production Cassandra installations
 # For testing, point to your local test data directory
-data_directory = "./test-data/datasets"
+data_directory = "./test-data/datasets/sstables"
 
 # Schema file paths (can be .cql or .json files, or directories)
 # Multiple paths are supported - list them as an array

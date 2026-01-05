@@ -19,10 +19,10 @@ This document tracks acceptance testing for the CQLite CLI (Milestone 2).
 | E | Script execution (`-f` flag) | :white_check_mark: Passed | #229 (Fixed) |
 | F | Limits and pagination | :white_check_mark: Passed | #228 (Fixed) |
 | G | Env vs flag precedence | :white_check_mark: Passed | |
-| H | REPL session commands | :x: Failed | #230 |
-| I | REPL query execution | :x: Failed | #230 |
+| H | REPL session commands | :white_check_mark: Passed | #235 (Fixed) |
+| I | REPL query execution | :white_check_mark: Passed | #236 (Fixed) |
 | K | Error handling and exit codes | :white_check_mark: Passed | #231 (Fixed) |
-| L | Info command | :x: Failed | #232 |
+| L | Info command | :white_check_mark: Passed | #232 (Fixed) |
 
 **Legend**: :white_check_mark: Passed | :x: Failed | :hourglass: Pending | :construction: In Progress
 
@@ -211,31 +211,31 @@ CQLITE_OUT=json cargo run --package cqlite-cli -- \
 ```
 
 **Acceptance Criteria**:
-- [ ] `:status` shows connection/ingestion status
-- [ ] `:keyspaces` lists available keyspaces
-- [ ] `:tables` lists tables in current keyspace
-- [ ] `:health` shows system health
-- [ ] `:help` displays available commands
+- [x] `:status` shows connection/ingestion status
+- [x] `:keyspaces` lists available keyspaces
+- [x] `:tables` lists tables in current keyspace
+- [x] `:health` shows system health
+- [x] `:help` displays available commands
 
-**Status**: :hourglass: Pending
+**Status**: :white_check_mark: Pass
+**Notes**: All REPL session commands work correctly. Issue #235 (`:tables` showing keyspaces when wrong `--data-dir` specified) resolved with directory structure validation that warns users when table directories lack expected Cassandra `name-uuid` format.
 
 ---
 
 ### I. REPL Query Execution
 
-**Commands** (interactive or via script):
+**Commands** (per CLI spec - uses fully-qualified names, not USE):
 ```sql
-USE test_basic;
-DESCRIBE simple_table;
-SELECT id, name FROM simple_table LIMIT 5;
+:describe test_basic.simple_table
+SELECT id, name FROM test_basic.simple_table LIMIT 5;
 ```
 
 **Acceptance Criteria**:
-- [ ] `USE keyspace` switches context
-- [ ] `DESCRIBE table` shows schema
-- [ ] `SELECT` queries execute and display results
+- [x] `SELECT` queries with fully-qualified table names execute and display results
+- [x] `:describe keyspace.table` shows schema
 
-**Status**: :hourglass: Pending
+**Status**: :white_check_mark: Passed
+**Notes**: All REPL query features work. Issue #235 fix also resolved #236 - SELECT queries now return data correctly.
 
 ---
 
@@ -283,12 +283,12 @@ cargo run --package cqlite-cli -- info test-data/datasets/sstables/test_basic
 ```
 
 **Acceptance Criteria**:
-- [ ] Displays SSTable information
-- [ ] Shows file sizes, formats, compression
-- [ ] Works with directory path
+- [x] Displays SSTable information
+- [x] Shows file sizes, formats, compression
+- [x] Works with directory path
 
-**Status**: :x: Failed
-**Notes**: Info command fails with "Unknown SSTable component: Statistics.db.txt" when directory contains auxiliary test files (`.jsonl`, `.txt`). The scanner should ignore unrecognized file extensions instead of failing.
+**Status**: :white_check_mark: Passed
+**Notes**: Fixed in Issue #232. Info command now ignores unrecognized file extensions and displays SSTable details including format, compression, generation info, and component breakdown.
 
 ---
 
@@ -296,13 +296,17 @@ cargo run --package cqlite-cli -- info test-data/datasets/sstables/test_basic
 
 | Issue # | Description | Status |
 |---------|-------------|--------|
-| #226 | BTI Index warnings too noisy (downgrade to debug) | Open |
+| #226 | BTI Index warnings too noisy (downgrade to debug) | **Fixed** |
 | #227 | JSON output uses raw values instead of human-readable formatting | **Fixed** |
 | #228 | --limit flag ignored when using JSON output format | **Fixed** |
 | #229 | Script execution (-f) shows wrong columns due to schema lookup failure | **Fixed** |
 | #230 | REPL fails to start when schema directory contains UDT-only JSON files | **Fixed** |
 | #231 | Missing --data-dir returns exit code 3 instead of 4 with confusing error message | **Fixed** |
-| #232 | Info command fails on SSTable directories containing extra files (.jsonl, .txt) | Open |
+| #232 | Info command fails on SSTable directories containing extra files (.jsonl, .txt) | **Fixed** |
+| #233 | REPL :tables command shows 'No tables found' while :status shows 33 tables | **Fixed** |
+| #234 | REPL :describe command fails with 'Table not found' for discovered tables | **Fixed** |
+| #235 | REPL :tables command lists keyspaces instead of tables | **Fixed** |
+| #236 | REPL SELECT queries return 0 rows despite table having data | **Fixed** |
 
 ---
 

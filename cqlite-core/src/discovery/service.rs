@@ -117,6 +117,7 @@ impl DiscoveryService {
             resolved_version,
             coverage,
             badge,
+            warnings: scan_result.warnings,
         })
     }
 }
@@ -146,6 +147,8 @@ pub struct DiscoverySummary {
     pub coverage: Option<CoverageInfo>,
     /// Coverage badge indicating overall status
     pub badge: CoverageBadge,
+    /// Warnings about potential issues with the directory structure
+    pub warnings: Vec<String>,
 }
 
 impl DiscoverySummary {

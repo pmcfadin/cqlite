@@ -42,6 +42,28 @@ pub struct ScanResult {
     pub sstable_count: usize,
     /// Detailed keyspace information
     pub keyspace_info: Vec<KeyspaceInfo>,
+    /// Warnings about potential issues with the directory structure
+    pub warnings: Vec<String>,
+}
+
+/// Check if a directory name has the expected Cassandra table format (name-uuid)
+///
+/// Cassandra table directories follow the pattern: `table_name-table_id`
+/// where table_id is a 32-character hexadecimal UUID.
+///
+/// # Examples
+/// - `simple_table-6aa08200a25111f0a3fef1a551383fb9` -> true
+/// - `users-abc123def456789012345678901234567890` -> true (if 32 hex chars)
+/// - `test_basic` -> false (no hyphen/uuid)
+/// - `my-table` -> false (suffix too short)
+fn has_cassandra_table_uuid_suffix(dir_name: &str) -> bool {
+    if let Some(pos) = dir_name.rfind('-') {
+        let suffix = &dir_name[pos + 1..];
+        // Cassandra table UUIDs are 32 hex characters (no hyphens in directory name)
+        suffix.len() == 32 && suffix.chars().all(|c| c.is_ascii_hexdigit())
+    } else {
+        false
+    }
 }
 
 /// Scanner for discovering SSTables in a data directory
@@ -151,11 +173,40 @@ impl Scanner {
             }
         }
 
+        // Validate directory structure: check if table directories have expected UUID format
+        let mut warnings = Vec::new();
+        if !tables.is_empty() {
+            let valid_table_dir_count = keyspace_info
+                .iter()
+                .flat_map(|k| &k.tables)
+                .filter(|t| {
+                    t.path
+                        .file_name()
+                        .map(|n| has_cassandra_table_uuid_suffix(&n.to_string_lossy()))
+                        .unwrap_or(false)
+                })
+                .count();
+
+            if valid_table_dir_count == 0 {
+                warnings.push(format!(
+                    "Warning: No table directories with expected 'name-uuid' format found.\n\
+                     The --data-dir may be pointing to the wrong directory level.\n\
+                     Current path: {}\n\
+                     Expected structure: <data-dir>/<keyspace>/<table>-<uuid>/\n\
+                     Hint: Try using a subdirectory like: {}/sstables or {}/data",
+                    self.data_dir.display(),
+                    self.data_dir.display(),
+                    self.data_dir.display()
+                ));
+            }
+        }
+
         Ok(ScanResult {
             keyspaces,
             tables,
             sstable_count,
             keyspace_info,
+            warnings,
         })
     }
 
@@ -228,7 +279,8 @@ mod tests {
         let keyspace_dir = temp_dir.path().join("test_ks");
         fs::create_dir(&keyspace_dir).unwrap();
 
-        let table_dir = keyspace_dir.join("users-abc123");
+        // Use valid 32-char hex UUID suffix (Cassandra table directory format)
+        let table_dir = keyspace_dir.join("users-6aa08200a25111f0a3fef1a551383fb9");
         fs::create_dir(&table_dir).unwrap();
 
         // Create mock SSTable files
@@ -247,6 +299,8 @@ mod tests {
         assert_eq!(result.keyspace_info[0].name, "test_ks");
         assert_eq!(result.keyspace_info[0].tables.len(), 1);
         assert_eq!(result.keyspace_info[0].tables[0].sstable_count, 2);
+        // No warnings for valid structure
+        assert!(result.warnings.is_empty());
     }
 
     #[test]
@@ -256,14 +310,14 @@ mod tests {
         // Create system keyspace
         let system_dir = temp_dir.path().join("system");
         fs::create_dir(&system_dir).unwrap();
-        let system_table_dir = system_dir.join("local-123");
+        let system_table_dir = system_dir.join("local-6aa08200a25111f0a3fef1a551383fb9");
         fs::create_dir(&system_table_dir).unwrap();
         fs::write(system_table_dir.join("Data.db"), b"mock").unwrap();
 
-        // Create user keyspace
+        // Create user keyspace with valid UUID suffix
         let user_dir = temp_dir.path().join("user_ks");
         fs::create_dir(&user_dir).unwrap();
-        let user_table_dir = user_dir.join("table-456");
+        let user_table_dir = user_dir.join("table-7bb09311b36222f1b4fef2b662494fc0");
         fs::create_dir(&user_table_dir).unwrap();
         fs::write(user_table_dir.join("na-1-big-Data.db"), b"mock").unwrap();
 
@@ -275,6 +329,8 @@ mod tests {
         assert!(result.keyspaces.contains(&"user_ks".to_string()));
         assert!(!result.keyspaces.iter().any(|k| k.starts_with("system")));
         assert_eq!(result.sstable_count, 1);
+        // No warnings for valid structure
+        assert!(result.warnings.is_empty());
     }
 
     #[test]
@@ -314,12 +370,19 @@ mod tests {
     fn test_scanner_multiple_keyspaces() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create multiple keyspaces
-        for ks_name in &["keyspace1", "keyspace2", "keyspace3"] {
+        // Use different valid UUIDs for each keyspace
+        let uuids = [
+            "6aa08200a25111f0a3fef1a551383fb9",
+            "7bb09311b36222f1b4fef2b662494fc0",
+            "8cc0a422c47333f2c5fef3c773505fd1",
+        ];
+
+        // Create multiple keyspaces with valid UUID table directories
+        for (i, ks_name) in ["keyspace1", "keyspace2", "keyspace3"].iter().enumerate() {
             let ks_dir = temp_dir.path().join(ks_name);
             fs::create_dir(&ks_dir).unwrap();
 
-            let table_dir = ks_dir.join(format!("{}-table-123", ks_name));
+            let table_dir = ks_dir.join(format!("{}_table-{}", ks_name, uuids[i]));
             fs::create_dir(&table_dir).unwrap();
             fs::write(table_dir.join("na-1-big-Data.db"), b"mock").unwrap();
         }
@@ -330,6 +393,37 @@ mod tests {
         assert_eq!(result.keyspaces.len(), 3);
         assert_eq!(result.tables.len(), 3);
         assert_eq!(result.sstable_count, 3);
+        // No warnings for valid structure
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_scanner_warns_on_invalid_table_directory_format() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create directory structure that LOOKS like Cassandra data but has wrong format
+        // This simulates user pointing to parent directory instead of data directory
+        let sstables_dir = temp_dir.path().join("sstables");
+        fs::create_dir(&sstables_dir).unwrap();
+
+        // Create directories that look like keyspaces but are actually tables
+        // (missing UUID suffix - this is what happens when pointing to wrong level)
+        for ks_name in &["test_basic", "test_collections"] {
+            let dir = sstables_dir.join(ks_name);
+            fs::create_dir(&dir).unwrap();
+            // Create a file so it counts as having sstables
+            fs::write(dir.join("na-1-big-Data.db"), b"mock").unwrap();
+        }
+
+        let scanner = Scanner::new(temp_dir.path(), None);
+        let result = scanner.scan().unwrap();
+
+        // Should find tables (even though structure is wrong)
+        assert!(!result.tables.is_empty());
+        // But should have a warning about the structure
+        assert!(!result.warnings.is_empty());
+        assert!(result.warnings[0].contains("name-uuid"));
+        assert!(result.warnings[0].contains("wrong directory level"));
     }
 
     #[test]
@@ -343,5 +437,37 @@ mod tests {
         } else {
             panic!("Expected Io error");
         }
+    }
+
+    #[test]
+    fn test_has_cassandra_table_uuid_suffix() {
+        // Valid Cassandra table directory names (32 hex chars after hyphen)
+        assert!(has_cassandra_table_uuid_suffix(
+            "simple_table-6aa08200a25111f0a3fef1a551383fb9"
+        ));
+        assert!(has_cassandra_table_uuid_suffix(
+            "users-0123456789abcdef0123456789abcdef"
+        ));
+        assert!(has_cassandra_table_uuid_suffix(
+            "my_table-ABCDEF0123456789ABCDEF0123456789"
+        )); // uppercase hex
+
+        // Invalid - no hyphen
+        assert!(!has_cassandra_table_uuid_suffix("test_basic"));
+        assert!(!has_cassandra_table_uuid_suffix("users"));
+
+        // Invalid - suffix too short
+        assert!(!has_cassandra_table_uuid_suffix("users-abc123"));
+        assert!(!has_cassandra_table_uuid_suffix("table-456"));
+
+        // Invalid - suffix too long
+        assert!(!has_cassandra_table_uuid_suffix(
+            "table-6aa08200a25111f0a3fef1a551383fb9extra"
+        ));
+
+        // Invalid - suffix contains non-hex characters
+        assert!(!has_cassandra_table_uuid_suffix(
+            "table-6aa08200a25111f0a3fef1a551383fgz"
+        )); // 'g' and 'z' not hex
     }
 }

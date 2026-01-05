@@ -583,6 +583,12 @@ impl ReplEngine {
                 summary.tables.iter().collect()
             };
 
+            // Display any warnings about directory structure
+            for warning in &summary.warnings {
+                println!("{}", warning.yellow());
+                println!();
+            }
+
             if tables.is_empty() {
                 println!("No tables found");
                 if self.session.current_keyspace().is_some() {
