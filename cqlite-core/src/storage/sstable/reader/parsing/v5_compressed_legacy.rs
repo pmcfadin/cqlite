@@ -41,7 +41,7 @@ use log::{debug, warn};
 
 use crate::{
     parser::vint::{parse_vint, parse_vuint},
-    schema::{CqlType, TableSchema},
+    schema::{CqlType, TableSchema, UdtRegistry},
     types::{TableId, UdtField, UdtTypeDef, UdtValue},
     Error, Result, RowKey, Value,
 };
@@ -108,6 +108,8 @@ pub struct V5CompressedLegacyParser {
     min_local_deletion_time: i64,
     /// Minimum TTL from Statistics.db for delta decoding
     min_ttl: Option<i64>,
+    /// Optional UDT registry for resolving short UDT type names (Issue #238)
+    udt_registry: Option<UdtRegistry>,
 }
 
 impl V5CompressedLegacyParser {
@@ -132,7 +134,14 @@ impl V5CompressedLegacyParser {
             min_timestamp,
             min_local_deletion_time,
             min_ttl,
+            udt_registry: None,
         }
+    }
+
+    /// Set the UDT registry for resolving short UDT type names in frozen collections (Issue #238)
+    pub fn with_udt_registry(mut self, registry: UdtRegistry) -> Self {
+        self.udt_registry = Some(registry);
+        self
     }
 
     /// Try to parse partition header at offset WITHOUT consuming it.
@@ -3167,6 +3176,127 @@ impl V5CompressedLegacyParser {
         }
     }
 
+    /// Parse a nested UDT from registry definition (Issue #238)
+    /// Used when parsing UDT fields that are themselves UDTs
+    fn parse_nested_udt_from_registry(
+        &self,
+        data: &[u8],
+        udt_def: &crate::types::UdtTypeDef,
+        registry: &UdtRegistry,
+    ) -> Result<Value> {
+        let mut current_offset = 0;
+        let mut fields = Vec::with_capacity(udt_def.fields.len());
+
+        for field_def in &udt_def.fields {
+            // Check bounds for field length (4 bytes BE i32)
+            if current_offset + 4 > data.len() {
+                // Trailing fields are implicit null
+                while fields.len() < udt_def.fields.len() {
+                    let remaining_field = &udt_def.fields[fields.len()];
+                    fields.push(UdtField {
+                        name: remaining_field.name.clone(),
+                        value: None,
+                    });
+                }
+                break;
+            }
+
+            // Read field length (4 bytes big-endian i32)
+            let field_len = i32::from_be_bytes([
+                data[current_offset],
+                data[current_offset + 1],
+                data[current_offset + 2],
+                data[current_offset + 3],
+            ]);
+            current_offset += 4;
+
+            let field_value = if field_len == -1 {
+                None
+            } else if field_len == 0 {
+                let value = Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
+                Some(value)
+            } else {
+                let field_len = field_len as usize;
+                if current_offset + field_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Nested UDT field '{}' extends beyond data",
+                        field_def.name
+                    )));
+                }
+
+                let field_data = &data[current_offset..current_offset + field_len];
+                current_offset += field_len;
+
+                // Handle deeply nested UDTs (including FROZEN<udt> types)
+                let value = match &field_def.field_type {
+                    CqlType::Custom(nested_type_name) => {
+                        if let Some(nested_udt) = registry.get_udt(&self.keyspace, nested_type_name)
+                        {
+                            self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
+                        } else {
+                            Value::Blob(field_data.to_vec())
+                        }
+                    }
+                    CqlType::Udt(udt_name, _udt_fields) => {
+                        // Inline UDT type - look up in registry
+                        if let Some(nested_udt) = registry.get_udt(&self.keyspace, udt_name) {
+                            self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
+                        } else {
+                            Value::Blob(field_data.to_vec())
+                        }
+                    }
+                    CqlType::Frozen(inner) => {
+                        // Handle FROZEN<udt_type> - the inner type may be a UDT
+                        match inner.as_ref() {
+                            CqlType::Custom(nested_type_name) => {
+                                if let Some(nested_udt) =
+                                    registry.get_udt(&self.keyspace, nested_type_name)
+                                {
+                                    let inner_value = self.parse_nested_udt_from_registry(
+                                        field_data, nested_udt, registry,
+                                    )?;
+                                    Value::Frozen(Box::new(inner_value))
+                                } else {
+                                    Value::Frozen(Box::new(Value::Blob(field_data.to_vec())))
+                                }
+                            }
+                            CqlType::Udt(udt_name, _udt_fields) => {
+                                if let Some(nested_udt) = registry.get_udt(&self.keyspace, udt_name)
+                                {
+                                    let inner_value = self.parse_nested_udt_from_registry(
+                                        field_data, nested_udt, registry,
+                                    )?;
+                                    Value::Frozen(Box::new(inner_value))
+                                } else {
+                                    Value::Frozen(Box::new(Value::Blob(field_data.to_vec())))
+                                }
+                            }
+                            _ => {
+                                // Other frozen types - parse as simple value
+                                let inner_value =
+                                    Self::parse_simple_udt_field_value(field_data, inner)?;
+                                Value::Frozen(Box::new(inner_value))
+                            }
+                        }
+                    }
+                    _ => Self::parse_simple_udt_field_value(field_data, &field_def.field_type)?,
+                };
+                Some(value)
+            };
+
+            fields.push(UdtField {
+                name: field_def.name.clone(),
+                value: field_value,
+            });
+        }
+
+        Ok(Value::Udt(UdtValue {
+            type_name: udt_def.name.clone(),
+            keyspace: udt_def.keyspace.clone(),
+            fields,
+        }))
+    }
+
     /// Returns true if the column type is a complex column (non-frozen collection).
     /// Complex columns are stored as multiple cells with cell paths, unlike
     /// frozen collections which are stored as a single cell with blob value.
@@ -4582,9 +4712,81 @@ impl V5CompressedLegacyParser {
                             field_def.field_type
                         );
 
-                        // Parse simple field types directly, complex types as blob
-                        let value =
-                            Self::parse_simple_udt_field_value(field_data, &field_def.field_type)?;
+                        // Parse field value - handle nested UDTs specially (Issue #238)
+                        let value = if let Some(ref registry) = self.udt_registry {
+                            match &field_def.field_type {
+                                CqlType::Custom(nested_type_name) => {
+                                    if let Some(nested_udt) =
+                                        registry.get_udt(&self.keyspace, nested_type_name)
+                                    {
+                                        self.parse_nested_udt_from_registry(
+                                            field_data, nested_udt, registry,
+                                        )?
+                                    } else {
+                                        Self::parse_simple_udt_field_value(
+                                            field_data,
+                                            &field_def.field_type,
+                                        )?
+                                    }
+                                }
+                                CqlType::Udt(udt_name, _udt_fields) => {
+                                    if let Some(nested_udt) =
+                                        registry.get_udt(&self.keyspace, udt_name)
+                                    {
+                                        self.parse_nested_udt_from_registry(
+                                            field_data, nested_udt, registry,
+                                        )?
+                                    } else {
+                                        Self::parse_simple_udt_field_value(
+                                            field_data,
+                                            &field_def.field_type,
+                                        )?
+                                    }
+                                }
+                                CqlType::Frozen(inner) => match inner.as_ref() {
+                                    CqlType::Custom(nested_type_name) => {
+                                        if let Some(nested_udt) =
+                                            registry.get_udt(&self.keyspace, nested_type_name)
+                                        {
+                                            let inner_value = self.parse_nested_udt_from_registry(
+                                                field_data, nested_udt, registry,
+                                            )?;
+                                            Value::Frozen(Box::new(inner_value))
+                                        } else {
+                                            Self::parse_simple_udt_field_value(
+                                                field_data,
+                                                &field_def.field_type,
+                                            )?
+                                        }
+                                    }
+                                    CqlType::Udt(udt_name, _udt_fields) => {
+                                        if let Some(nested_udt) =
+                                            registry.get_udt(&self.keyspace, udt_name)
+                                        {
+                                            let inner_value = self.parse_nested_udt_from_registry(
+                                                field_data, nested_udt, registry,
+                                            )?;
+                                            Value::Frozen(Box::new(inner_value))
+                                        } else {
+                                            Self::parse_simple_udt_field_value(
+                                                field_data,
+                                                &field_def.field_type,
+                                            )?
+                                        }
+                                    }
+                                    _ => Self::parse_simple_udt_field_value(
+                                        field_data,
+                                        &field_def.field_type,
+                                    )?,
+                                },
+                                _ => Self::parse_simple_udt_field_value(
+                                    field_data,
+                                    &field_def.field_type,
+                                )?,
+                            }
+                        } else {
+                            Self::parse_simple_udt_field_value(field_data, &field_def.field_type)?
+                        };
                         Some(value)
                     };
 
@@ -4606,36 +4808,230 @@ impl V5CompressedLegacyParser {
                 Value::Udt(udt_value)
             }
 
-            // Default: treat as VInt-length-prefixed blob
+            // Default: check if it's a short UDT name in the registry, otherwise treat as blob
             _ => {
-                log::debug!(
-                    "Frozen element '{}': unknown type '{}', parsing as blob",
-                    column_name,
-                    type_str
-                );
+                // Try to look up as UDT in registry by short name (Issue #238)
+                // This handles cases like "address_type" which aren't in full marshal format
+                if let Some(ref registry) = self.udt_registry {
+                    if let Some(udt_def) = registry.get_udt(&self.keyspace, type_str) {
+                        log::debug!(
+                            "Frozen element '{}': found UDT '{}' in registry, parsing {} fields",
+                            column_name,
+                            type_str,
+                            udt_def.fields.len()
+                        );
 
-                let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "Frozen element '{}': failed to parse unknown type length as VInt: {:?}",
-                        column_name, e
-                    ))
-                })?;
-                let blob_len = blob_len as usize;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-                offset += bytes_consumed;
+                        // Parse UDT fields using the registry definition
+                        // UDT data in frozen context has 4-byte big-endian i32 length prefixes for each field
+                        // (-1 means null, 0 means empty, positive means field data length)
+                        let udt_data = &data[offset..];
+                        let mut current_offset = 0;
+                        let mut fields = Vec::with_capacity(udt_def.fields.len());
 
-                if offset + blob_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for unknown type, only {} available",
+                        for field_def in &udt_def.fields {
+                            // Check bounds for field length (4 bytes BE i32)
+                            if current_offset + 4 > udt_data.len() {
+                                // Trailing fields can be omitted (implicit null)
+                                log::debug!(
+                                    "Frozen UDT field '{}' omitted (implicit null)",
+                                    field_def.name
+                                );
+                                while fields.len() < udt_def.fields.len() {
+                                    let remaining_field = &udt_def.fields[fields.len()];
+                                    fields.push(UdtField {
+                                        name: remaining_field.name.clone(),
+                                        value: None,
+                                    });
+                                }
+                                break;
+                            }
+
+                            // Read field length (4 bytes big-endian i32)
+                            let field_len = i32::from_be_bytes([
+                                udt_data[current_offset],
+                                udt_data[current_offset + 1],
+                                udt_data[current_offset + 2],
+                                udt_data[current_offset + 3],
+                            ]);
+                            current_offset += 4;
+
+                            let field_value = if field_len == -1 {
+                                // Null field
+                                None
+                            } else if field_len == 0 {
+                                // Empty field - parse with empty data
+                                let value =
+                                    Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
+                                Some(value)
+                            } else {
+                                let field_len = field_len as usize;
+                                if current_offset + field_len > udt_data.len() {
+                                    return Err(Error::corruption(format!(
+                                        "Frozen UDT field '{}' extends beyond data (need {}, have {})",
+                                        field_def.name,
+                                        field_len,
+                                        udt_data.len() - current_offset
+                                    )));
+                                }
+
+                                let field_data =
+                                    &udt_data[current_offset..current_offset + field_len];
+                                current_offset += field_len;
+
+                                // Parse field value - handle nested UDTs specially (including FROZEN<udt>)
+                                let value = match &field_def.field_type {
+                                    CqlType::Custom(nested_type_name) => {
+                                        // Check if this is a nested UDT
+                                        if let Some(nested_udt) =
+                                            registry.get_udt(&self.keyspace, nested_type_name)
+                                        {
+                                            // Recursively parse nested UDT
+                                            self.parse_nested_udt_from_registry(
+                                                field_data, nested_udt, registry,
+                                            )?
+                                        } else {
+                                            // Unknown custom type - parse as blob
+                                            Value::Blob(field_data.to_vec())
+                                        }
+                                    }
+                                    CqlType::Udt(udt_name, _udt_fields) => {
+                                        if let Some(nested_udt) =
+                                            registry.get_udt(&self.keyspace, udt_name)
+                                        {
+                                            self.parse_nested_udt_from_registry(
+                                                field_data, nested_udt, registry,
+                                            )?
+                                        } else {
+                                            Value::Blob(field_data.to_vec())
+                                        }
+                                    }
+                                    CqlType::Frozen(inner) => {
+                                        // Handle FROZEN<udt_type> - the inner type may be a UDT
+                                        match inner.as_ref() {
+                                            CqlType::Custom(nested_type_name) => {
+                                                if let Some(nested_udt) = registry
+                                                    .get_udt(&self.keyspace, nested_type_name)
+                                                {
+                                                    let inner_value = self
+                                                        .parse_nested_udt_from_registry(
+                                                            field_data, nested_udt, registry,
+                                                        )?;
+                                                    Value::Frozen(Box::new(inner_value))
+                                                } else {
+                                                    Value::Frozen(Box::new(Value::Blob(
+                                                        field_data.to_vec(),
+                                                    )))
+                                                }
+                                            }
+                                            CqlType::Udt(udt_name, _udt_fields) => {
+                                                if let Some(nested_udt) =
+                                                    registry.get_udt(&self.keyspace, udt_name)
+                                                {
+                                                    let inner_value = self
+                                                        .parse_nested_udt_from_registry(
+                                                            field_data, nested_udt, registry,
+                                                        )?;
+                                                    Value::Frozen(Box::new(inner_value))
+                                                } else {
+                                                    Value::Frozen(Box::new(Value::Blob(
+                                                        field_data.to_vec(),
+                                                    )))
+                                                }
+                                            }
+                                            _ => {
+                                                // Other frozen types - parse as simple value
+                                                let inner_value =
+                                                    Self::parse_simple_udt_field_value(
+                                                        field_data, inner,
+                                                    )?;
+                                                Value::Frozen(Box::new(inner_value))
+                                            }
+                                        }
+                                    }
+                                    _ => Self::parse_simple_udt_field_value(
+                                        field_data,
+                                        &field_def.field_type,
+                                    )?,
+                                };
+                                Some(value)
+                            };
+
+                            fields.push(UdtField {
+                                name: field_def.name.clone(),
+                                value: field_value,
+                            });
+                        }
+
+                        let udt_value = UdtValue {
+                            type_name: udt_def.name.clone(),
+                            keyspace: udt_def.keyspace.clone(),
+                            fields,
+                        };
+
+                        offset += current_offset;
+                        Value::Udt(udt_value)
+                    } else {
+                        // Not found in registry - parse as blob
+                        log::debug!(
+                            "Frozen element '{}': unknown type '{}', parsing as blob",
+                            column_name,
+                            type_str
+                        );
+
+                        let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                            Error::corruption(format!(
+                                "Frozen element '{}': failed to parse unknown type length as VInt: {:?}",
+                                column_name, e
+                            ))
+                        })?;
+                        let blob_len = blob_len as usize;
+                        let bytes_consumed = data[offset..].len() - remaining.len();
+                        offset += bytes_consumed;
+
+                        if offset + blob_len > data.len() {
+                            return Err(Error::corruption(format!(
+                                "Frozen element '{}': need {} bytes for unknown type, only {} available",
+                                column_name,
+                                blob_len,
+                                data.len() - offset
+                            )));
+                        }
+
+                        let blob_bytes = data[offset..offset + blob_len].to_vec();
+                        offset += blob_len;
+                        Value::Blob(blob_bytes)
+                    }
+                } else {
+                    // No registry available - parse as blob
+                    log::debug!(
+                        "Frozen element '{}': unknown type '{}', no UDT registry available, parsing as blob",
                         column_name,
-                        blob_len,
-                        data.len() - offset
-                    )));
-                }
+                        type_str
+                    );
 
-                let blob_bytes = data[offset..offset + blob_len].to_vec();
-                offset += blob_len;
-                Value::Blob(blob_bytes)
+                    let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                        Error::corruption(format!(
+                            "Frozen element '{}': failed to parse unknown type length as VInt: {:?}",
+                            column_name, e
+                        ))
+                    })?;
+                    let blob_len = blob_len as usize;
+                    let bytes_consumed = data[offset..].len() - remaining.len();
+                    offset += bytes_consumed;
+
+                    if offset + blob_len > data.len() {
+                        return Err(Error::corruption(format!(
+                            "Frozen element '{}': need {} bytes for unknown type, only {} available",
+                            column_name,
+                            blob_len,
+                            data.len() - offset
+                        )));
+                    }
+
+                    let blob_bytes = data[offset..offset + blob_len].to_vec();
+                    offset += blob_len;
+                    Value::Blob(blob_bytes)
+                }
             }
         };
 

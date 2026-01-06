@@ -5,7 +5,7 @@
 //! system ensures proper ordering and equality comparison that matches Cassandra's
 //! comparison semantics.
 
-use crate::schema::CqlType;
+use crate::schema::{CqlType, UdtRegistry};
 use crate::types::Value;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -143,6 +143,131 @@ impl ComparatorType {
     /// Create a ComparatorType from a data type string (alias for from_type_string)
     pub fn from_data_type(data_type: &str) -> Result<Self> {
         Self::from_type_string(data_type)
+    }
+
+    /// Create a ComparatorType from a data type string with UDT registry resolution
+    ///
+    /// This method resolves UDT type references (e.g., "address_type") to their full
+    /// field definitions using the provided UDT registry. This is essential for
+    /// properly parsing UDTs inside collections like `list<frozen<address_type>>`.
+    ///
+    /// # Arguments
+    /// * `data_type` - The data type string (e.g., "list<frozen<address_type>>")
+    /// * `registry` - The UDT registry containing type definitions
+    /// * `keyspace` - The keyspace to use for UDT lookup
+    pub fn from_data_type_with_registry(
+        data_type: &str,
+        registry: &UdtRegistry,
+        keyspace: &str,
+    ) -> Result<Self> {
+        let cql_type = CqlType::parse(data_type)?;
+        Self::from_cql_type_with_registry(&cql_type, registry, keyspace)
+    }
+
+    /// Create a ComparatorType from a CqlType with UDT registry resolution
+    fn from_cql_type_with_registry(
+        cql_type: &CqlType,
+        registry: &UdtRegistry,
+        keyspace: &str,
+    ) -> Result<Self> {
+        let comparator = match cql_type {
+            CqlType::Boolean => ComparatorType::Boolean,
+            CqlType::TinyInt => ComparatorType::TinyInt,
+            CqlType::SmallInt => ComparatorType::SmallInt,
+            CqlType::Int => ComparatorType::Int,
+            CqlType::BigInt => ComparatorType::BigInt,
+            CqlType::Counter => ComparatorType::Counter,
+            CqlType::Float => ComparatorType::Float32,
+            CqlType::Double => ComparatorType::Float,
+            CqlType::Text | CqlType::Varchar => ComparatorType::Text,
+            CqlType::Ascii => ComparatorType::Text,
+            CqlType::Blob => ComparatorType::Blob,
+            CqlType::Timestamp => ComparatorType::Timestamp,
+            CqlType::Uuid => ComparatorType::Uuid,
+            CqlType::TimeUuid => ComparatorType::Uuid,
+            CqlType::Varint => ComparatorType::Varint,
+            CqlType::Decimal => ComparatorType::Decimal,
+            CqlType::Duration => ComparatorType::Duration,
+            CqlType::Date => ComparatorType::Custom("date".to_string()),
+            CqlType::Time => ComparatorType::Custom("time".to_string()),
+            CqlType::Inet => ComparatorType::Custom("inet".to_string()),
+            CqlType::List(element_type) => {
+                let element_comparator =
+                    Self::from_cql_type_with_registry(element_type, registry, keyspace)?;
+                ComparatorType::List(Box::new(element_comparator))
+            }
+            CqlType::Set(element_type) => {
+                let element_comparator =
+                    Self::from_cql_type_with_registry(element_type, registry, keyspace)?;
+                ComparatorType::Set(Box::new(element_comparator))
+            }
+            CqlType::Map(key_type, value_type) => {
+                let key_comparator =
+                    Self::from_cql_type_with_registry(key_type, registry, keyspace)?;
+                let value_comparator =
+                    Self::from_cql_type_with_registry(value_type, registry, keyspace)?;
+                ComparatorType::Map(Box::new(key_comparator), Box::new(value_comparator))
+            }
+            CqlType::Tuple(field_types) => {
+                let mut field_comparators = Vec::new();
+                for field_type in field_types {
+                    field_comparators.push(Self::from_cql_type_with_registry(
+                        field_type, registry, keyspace,
+                    )?);
+                }
+                ComparatorType::Tuple(field_comparators)
+            }
+            CqlType::Udt(type_name, fields) => {
+                let mut field_comparators = Vec::new();
+                for (field_name, field_type) in fields {
+                    let field_comparator =
+                        Self::from_cql_type_with_registry(field_type, registry, keyspace)?;
+                    field_comparators.push((field_name.clone(), field_comparator));
+                }
+                ComparatorType::Udt {
+                    type_name: type_name.clone(),
+                    keyspace: Some(keyspace.to_string()),
+                    field_comparators,
+                }
+            }
+            CqlType::Frozen(inner_type) => {
+                let inner_comparator =
+                    Self::from_cql_type_with_registry(inner_type, registry, keyspace)?;
+                ComparatorType::Frozen(Box::new(inner_comparator))
+            }
+            CqlType::Custom(type_name) => {
+                // Check if this is a UDT reference (format: "udt:type_name" or just "type_name")
+                let udt_name = type_name.strip_prefix("udt:").unwrap_or(type_name);
+
+                // Look up UDT in registry - try with and without keyspace
+                let udt_def = registry
+                    .get_udt(keyspace, udt_name)
+                    .or_else(|| registry.get_udt(keyspace, type_name));
+
+                if let Some(udt_def) = udt_def {
+                    let mut field_comparators = Vec::new();
+                    for field in &udt_def.fields {
+                        // Recursively resolve field types (field_type is already CqlType)
+                        let field_comparator = Self::from_cql_type_with_registry(
+                            &field.field_type,
+                            registry,
+                            keyspace,
+                        )?;
+                        field_comparators.push((field.name.clone(), field_comparator));
+                    }
+                    ComparatorType::Udt {
+                        type_name: udt_def.name.clone(),
+                        keyspace: Some(keyspace.to_string()),
+                        field_comparators,
+                    }
+                } else {
+                    // UDT not found in registry - return as custom
+                    ComparatorType::Custom(type_name.clone())
+                }
+            }
+        };
+
+        Ok(comparator)
     }
 
     /// Compare two values using this comparator

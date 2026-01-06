@@ -252,6 +252,7 @@ impl SSTableReader {
             statistics_reader,
             schema_registry: None, // Will be set by set_schema_registry() after construction
             schema,
+            udt_registry: None, // Will be set when available for UDT-aware parsing
             compression_info: compression_info.map(Arc::new),
             current_chunk_index: AtomicUsize::new(0),
         })
@@ -324,6 +325,19 @@ impl SSTableReader {
         self.schema_registry = Some(schema_registry);
         log::debug!(
             "Schema registry set for {}.{} - enabling schema-driven digest computation",
+            self.header.keyspace,
+            self.header.table_name
+        );
+    }
+
+    /// Set the UDT registry for UDT-aware parsing in collections
+    ///
+    /// This enables proper parsing of UDTs inside collections (List, Set, Map)
+    /// by providing the UDT field definitions needed for nested type resolution.
+    pub fn set_udt_registry(&mut self, registry: crate::schema::UdtRegistry) {
+        self.udt_registry = Some(registry);
+        log::debug!(
+            "UDT registry set for {}.{} - enabling UDT-aware collection parsing",
             self.header.keyspace,
             self.header.table_name
         );

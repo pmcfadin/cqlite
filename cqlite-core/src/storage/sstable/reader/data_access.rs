@@ -312,6 +312,12 @@ impl SSTableReader {
             min_local_deletion_time,
             min_ttl,
         );
+        // Add UDT registry if available for UDT-aware collection parsing (Issue #238)
+        let parser = if let Some(ref registry) = self.udt_registry {
+            parser.with_udt_registry(registry.clone())
+        } else {
+            parser
+        };
 
         // Get schema (use provided schema or reader's schema)
         let reader_schema;

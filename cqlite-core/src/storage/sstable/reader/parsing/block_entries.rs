@@ -200,6 +200,12 @@ impl SSTableReader {
                 min_local_deletion_time,
                 min_ttl,
             );
+            // Add UDT registry if available for UDT-aware collection parsing (Issue #238)
+            let parser = if let Some(ref registry) = self.udt_registry {
+                parser.with_udt_registry(registry.clone())
+            } else {
+                parser
+            };
 
             // Get schema using four-tier lookup (provided -> header -> registry -> fallback)
             let table_schema = self.get_table_schema(schema);
@@ -420,6 +426,11 @@ impl SSTableReader {
                       if state_machine_result.is_ok() { "OK" } else { "ERROR" });
 
             let mut _state_machine: RowCellStateMachine = state_machine_result?;
+
+            // Set UDT registry for UDT-aware parsing in collections (Issue #238)
+            if let Some(ref registry) = self.udt_registry {
+                _state_machine.set_udt_registry(registry.clone());
+            }
 
             // Process data starting from current offset
             let remaining_data = &data[offset..];

@@ -15,7 +15,8 @@ use crate::{
         types::{parse_cql_value_raw, CqlTypeId},
         vint::parse_vint_length,
     },
-    schema::TableSchema,
+    schema::{TableSchema, UdtRegistry},
+    storage::sstable::reader::parsing::comparator_value_parsing,
     types::{ComparatorType, TombstoneType, Value},
 };
 
@@ -150,6 +151,8 @@ pub struct RowCellStateMachine {
     comparator: Option<ComparatorType>,
     /// Cassandra version for format-specific parsing
     version: CassandraVersion,
+    /// UDT registry for resolving user-defined types in collections
+    udt_registry: Option<UdtRegistry>,
 }
 
 impl RowCellStateMachine {
@@ -163,6 +166,7 @@ impl RowCellStateMachine {
             schema: None,
             comparator: None,
             version: CassandraVersion::Legacy, // Default to legacy for backward compatibility
+            udt_registry: None,
         }
     }
 
@@ -175,6 +179,7 @@ impl RowCellStateMachine {
             error_message: None,
             schema: Some(schema),
             comparator: Some(comparator),
+            udt_registry: None,
             version: CassandraVersion::Legacy, // Default to legacy for backward compatibility
         }
     }
@@ -189,6 +194,7 @@ impl RowCellStateMachine {
             schema: None,
             comparator: None,
             version,
+            udt_registry: None,
         }
     }
 
@@ -206,7 +212,16 @@ impl RowCellStateMachine {
             schema: Some(schema),
             comparator: Some(comparator),
             version,
+            udt_registry: None,
         }
+    }
+
+    /// Set the UDT registry for resolving user-defined types in collections
+    ///
+    /// This is required for properly parsing UDTs inside collections like
+    /// `list<frozen<address_type>>` where `address_type` is a UDT.
+    pub fn set_udt_registry(&mut self, registry: UdtRegistry) {
+        self.udt_registry = Some(registry);
     }
 
     /// Get current state
@@ -806,23 +821,27 @@ impl RowCellStateMachine {
             if let Some(ref schema) = self.schema {
                 // Look up column type in schema
                 if let Some(column) = schema.columns.iter().find(|c| c.name == column_name) {
-                    // Parse using the column's data type
-                    if let Ok(type_id) = self.data_type_to_cql_type_id(&column.data_type) {
-                        if let Ok((_, parsed_value)) = parse_cql_value_raw(value_data, type_id) {
-                            parsed_value
-                        } else {
-                            // For complex types that fail parsing, fall back to blob
-                            // This handles incomplete implementations of complex type parsers
-                            match type_id {
-                                CqlTypeId::Map
-                                | CqlTypeId::List
-                                | CqlTypeId::Set
-                                | CqlTypeId::Tuple
-                                | CqlTypeId::Udt => {
-                                    // Complex types that may not be fully implemented - use blob fallback
-                                    Value::Blob(value_data.to_vec())
-                                }
-                                _ => {
+                    // Parse using the column's full data type string with ComparatorType
+                    // This properly handles UDTs inside collections by preserving type structure
+                    // Use UDT registry if available for proper UDT resolution
+                    let comparator_result = if let Some(ref registry) = self.udt_registry {
+                        ComparatorType::from_data_type_with_registry(
+                            &column.data_type,
+                            registry,
+                            &schema.keyspace,
+                        )
+                    } else {
+                        ComparatorType::from_data_type(&column.data_type)
+                    };
+                    match comparator_result {
+                        Ok(comparator) => {
+                            match comparator_value_parsing::parse_value_with_comparator(
+                                value_data,
+                                &comparator,
+                            ) {
+                                Ok(parsed_value) => parsed_value,
+                                Err(e) => {
+                                    // For modern formats, parsing failures are errors, not blob fallbacks
                                     if matches!(
                                         self.version,
                                         CassandraVersion::V5_0NewBig
@@ -835,71 +854,75 @@ impl RowCellStateMachine {
                                             | CassandraVersion::V5_0FormatG
                                     ) {
                                         return Err(Error::Schema(format!(
-                                            "Failed to parse column '{}' with data type '{}' in modern format {:?}. Blob fallback is disabled for modern formats.",
-                                            column_name, column.data_type, self.version
+                                            "Failed to parse column '{}' with data type '{}' in modern format {:?}: {}",
+                                            column_name, column.data_type, self.version, e
                                         )));
                                     }
-
+                                    // Legacy formats can use blob fallback
                                     Value::Blob(value_data.to_vec())
                                 }
                             }
                         }
-                    } else {
-                        // For modern formats, unknown types are not allowed
-                        match self.version {
-                            CassandraVersion::V5_0NewBig
+                        Err(_) => {
+                            // For modern formats, unknown types are not allowed
+                            if matches!(
+                                self.version,
+                                CassandraVersion::V5_0NewBig
+                                    | CassandraVersion::V5_0Bti
+                                    | CassandraVersion::V5_0NewBigFormat
+                                    | CassandraVersion::V5_0Uncompressed
+                                    | CassandraVersion::V5_0ComplexTypes
+                                    | CassandraVersion::V5_0TypedCollections
+                                    | CassandraVersion::V5_0WideRows
+                                    | CassandraVersion::V5_0FormatG
+                            ) {
+                                return Err(Error::Schema(format!(
+                                    "Unknown data type '{}' for column '{}' in modern format {:?}. All types must be explicitly supported.",
+                                    column.data_type, column_name, self.version
+                                )));
+                            }
+                            Value::Blob(value_data.to_vec())
+                        }
+                    }
+                } else {
+                    // For modern formats, all columns must be in schema
+                    if matches!(
+                        self.version,
+                        CassandraVersion::V5_0NewBig
                             | CassandraVersion::V5_0Bti
                             | CassandraVersion::V5_0NewBigFormat
                             | CassandraVersion::V5_0Uncompressed
                             | CassandraVersion::V5_0ComplexTypes
                             | CassandraVersion::V5_0TypedCollections
                             | CassandraVersion::V5_0WideRows
-                            | CassandraVersion::V5_0FormatG => {
-                                return Err(Error::Schema(format!(
-                                    "Unknown data type '{}' for column '{}' in modern format {:?}. All types must be explicitly supported.",
-                                    column.data_type, column_name, self.version
-                                )));
-                            }
-                            _ => Value::Blob(value_data.to_vec()),
-                        }
+                            | CassandraVersion::V5_0FormatG
+                    ) {
+                        return Err(Error::Schema(format!(
+                            "Column '{}' not found in schema for modern format {:?}. All columns must be declared in schema.",
+                            column_name, self.version
+                        )));
                     }
-                } else {
-                    // For modern formats, all columns must be in schema
-                    match self.version {
-                        CassandraVersion::V5_0NewBig
+                    Value::Blob(value_data.to_vec())
+                }
+            } else {
+                // For modern formats, schema is required
+                if matches!(
+                    self.version,
+                    CassandraVersion::V5_0NewBig
                         | CassandraVersion::V5_0Bti
                         | CassandraVersion::V5_0NewBigFormat
                         | CassandraVersion::V5_0Uncompressed
                         | CassandraVersion::V5_0ComplexTypes
                         | CassandraVersion::V5_0TypedCollections
                         | CassandraVersion::V5_0WideRows
-                        | CassandraVersion::V5_0FormatG => {
-                            return Err(Error::Schema(format!(
-                                "Column '{}' not found in schema for modern format {:?}. All columns must be declared in schema.",
-                                column_name, self.version
-                            )));
-                        }
-                        _ => Value::Blob(value_data.to_vec()),
-                    }
+                        | CassandraVersion::V5_0FormatG
+                ) {
+                    return Err(Error::Schema(format!(
+                        "Schema is required for parsing modern format {:?}. Blob fallback is disabled.",
+                        self.version
+                    )));
                 }
-            } else {
-                // For modern formats, schema is required
-                match self.version {
-                    CassandraVersion::V5_0NewBig
-                    | CassandraVersion::V5_0Bti
-                    | CassandraVersion::V5_0NewBigFormat
-                    | CassandraVersion::V5_0Uncompressed
-                    | CassandraVersion::V5_0ComplexTypes
-                    | CassandraVersion::V5_0TypedCollections
-                    | CassandraVersion::V5_0WideRows
-                    | CassandraVersion::V5_0FormatG => {
-                        return Err(Error::Schema(format!(
-                            "Schema is required for parsing modern format {:?}. Blob fallback is disabled.",
-                            self.version
-                        )));
-                    }
-                    _ => Value::Blob(value_data.to_vec()),
-                }
+                Value::Blob(value_data.to_vec())
             }
         };
 

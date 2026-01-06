@@ -12,7 +12,6 @@ use crate::error::{Error, Result};
 use crate::schema::{
     aggregator::{AggregatorConfig, LoadResult, SchemaAggregator},
     registry::{SchemaRegistry, SchemaRegistryConfig},
-    UdtRegistry,
 };
 use crate::Config;
 use crate::Database;
@@ -118,7 +117,9 @@ pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
         .map_err(|e| Error::Schema(format!("Failed to create schema registry: {}", e)))?,
     ));
 
-    let udt_registry = Arc::new(RwLock::new(UdtRegistry::new()));
+    // Use the SchemaRegistry's internal UDT registry so UDTs are available for query execution
+    // This ensures UDTs loaded from CQL files are available when parsing SSTable data (Issue #238)
+    let udt_registry = schema_registry.read().await.get_udt_registry();
 
     let aggregator_config = AggregatorConfig {
         graceful_degradation: false, // Fail fast for one-shot execution

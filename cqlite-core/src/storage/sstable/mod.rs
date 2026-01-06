@@ -328,6 +328,12 @@ impl SSTableManager {
                                             sstable_id.0
                                         );
                                         reader.set_schema_registry(Arc::clone(registry_rwlock));
+
+                                        // Also set UDT registry for UDT-aware collection parsing (Issue #238)
+                                        let schema_registry = registry_rwlock.read().await;
+                                        let udt_registry_lock = schema_registry.get_udt_registry();
+                                        let udt_registry = udt_registry_lock.read().await.clone();
+                                        reader.set_udt_registry(udt_registry);
                                     }
                                 }
 
@@ -412,6 +418,12 @@ impl SSTableManager {
                                 let schema_reg_guard = self.schema_registry.read().await;
                                 if let Some(ref registry_rwlock) = *schema_reg_guard {
                                     reader.set_schema_registry(Arc::clone(registry_rwlock));
+
+                                    // Also set UDT registry for UDT-aware collection parsing (Issue #238)
+                                    let schema_registry = registry_rwlock.read().await;
+                                    let udt_registry_lock = schema_registry.get_udt_registry();
+                                    let udt_registry = udt_registry_lock.read().await.clone();
+                                    reader.set_udt_registry(udt_registry);
                                 }
                             }
 

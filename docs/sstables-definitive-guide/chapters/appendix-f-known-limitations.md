@@ -544,6 +544,15 @@ cargo build --no-default-features --features all-compression
 
 ## Issue References
 
+### Completed Issues (Fixed - Jan 2026)
+
+- **Issue #238**: UDTs Inside Collections Not Parsed - **FIXED**
+  - Status: ✅ FIXED - Extended `parse_value_with_comparator` for recursive type parsing
+  - Root cause: `parse_value_with_comparator` had minimal implementation (only Boolean, Text, Blob) - all other types fell back to Blob, including UDTs nested in List/Set/Map
+  - Fix: Added complete type handlers for TinyInt, SmallInt, Int, BigInt, Uuid, List, Set, Map, Tuple, UDT, and Frozen types
+  - Result: UDTs inside collections now show actual field values instead of `0x` blobs
+  - File: `cqlite-core/src/storage/sstable/reader/parsing/value_parsing.rs` (lines 172-324)
+
 ### Completed Issues (Fixed - Dec 2025)
 
 - **Issue #220**: UDT (User-Defined Type) Support - **FIXED**

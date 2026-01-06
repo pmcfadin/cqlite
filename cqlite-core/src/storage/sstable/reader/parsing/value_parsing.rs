@@ -169,13 +169,18 @@ impl SSTableReader {
         }
     }
 
-    /// Parse value directly using ComparatorType (helper method)
+    /// Parse value directly using ComparatorType (helper method for nested collection elements)
+    ///
+    /// This function provides complete recursive type parsing for collection elements,
+    /// including UDTs, tuples, nested collections, and frozen types.
     pub(in crate::storage::sstable::reader) fn parse_value_with_comparator(
         &self,
         value_data: &[u8],
         comparator: &ComparatorType,
     ) -> Result<Value> {
-        // Use the same logic as parse_value_with_schema_type but with direct comparator
+        use crate::parser::vint::parse_vint_length;
+        use crate::types::{UdtField, UdtValue};
+
         match comparator {
             ComparatorType::Boolean => {
                 if value_data.len() == 1 {
@@ -184,14 +189,135 @@ impl SSTableReader {
                     Err(Error::corruption("Invalid boolean value length"))
                 }
             }
+            ComparatorType::TinyInt => {
+                if value_data.len() == 1 {
+                    Ok(Value::TinyInt(value_data[0] as i8))
+                } else {
+                    Err(Error::corruption("Invalid tinyint value length"))
+                }
+            }
+            ComparatorType::SmallInt => {
+                if value_data.len() == 2 {
+                    let val = i16::from_be_bytes([value_data[0], value_data[1]]);
+                    Ok(Value::SmallInt(val))
+                } else {
+                    Err(Error::corruption("Invalid smallint value length"))
+                }
+            }
+            ComparatorType::Int => {
+                if value_data.len() == 4 {
+                    let val = i32::from_be_bytes([
+                        value_data[0],
+                        value_data[1],
+                        value_data[2],
+                        value_data[3],
+                    ]);
+                    Ok(Value::Integer(val))
+                } else {
+                    Err(Error::corruption("Invalid int value length"))
+                }
+            }
+            ComparatorType::BigInt => {
+                if value_data.len() == 8 {
+                    let val = i64::from_be_bytes([
+                        value_data[0],
+                        value_data[1],
+                        value_data[2],
+                        value_data[3],
+                        value_data[4],
+                        value_data[5],
+                        value_data[6],
+                        value_data[7],
+                    ]);
+                    Ok(Value::BigInt(val))
+                } else {
+                    Err(Error::corruption("Invalid bigint value length"))
+                }
+            }
             ComparatorType::Text => {
                 let text = String::from_utf8(value_data.to_vec())
                     .map_err(|_| Error::corruption("Invalid UTF-8 in text value"))?;
                 Ok(Value::Text(text))
             }
             ComparatorType::Blob => Ok(Value::Blob(value_data.to_vec())),
+            ComparatorType::Uuid => {
+                if value_data.len() == 16 {
+                    let uuid_bytes: [u8; 16] = value_data
+                        .try_into()
+                        .map_err(|_| Error::corruption("Invalid UUID byte array"))?;
+                    Ok(Value::Uuid(uuid_bytes))
+                } else {
+                    Err(Error::corruption("Invalid UUID value length"))
+                }
+            }
+            ComparatorType::List(element_comparator) => {
+                self.parse_list_value(value_data, element_comparator)
+            }
+            ComparatorType::Set(element_comparator) => {
+                self.parse_set_value(value_data, element_comparator)
+            }
+            ComparatorType::Map(key_comparator, value_comparator) => {
+                self.parse_map_value(value_data, key_comparator, value_comparator)
+            }
+            ComparatorType::Tuple(field_comparators) => {
+                self.parse_tuple_value(value_data, field_comparators)
+            }
+            ComparatorType::Udt {
+                keyspace,
+                type_name,
+                field_comparators,
+            } => {
+                // Parse UDT fields inline with full type info (Issue #238 fix)
+                // This avoids the V5 format check in parse_udt_value() which incorrectly
+                // returns an error even when we have complete schema information.
+                let mut offset = 0;
+                let mut fields = Vec::new();
+
+                for (field_name, field_comparator) in field_comparators.iter() {
+                    if offset >= value_data.len() {
+                        break;
+                    }
+                    let (remaining, field_len) =
+                        parse_vint_length(&value_data[offset..]).map_err(|_| {
+                            Error::corruption(format!(
+                                "Failed to parse UDT field {} length",
+                                field_name
+                            ))
+                        })?;
+                    offset = value_data.len() - remaining.len();
+
+                    if field_len > remaining.len() {
+                        return Err(Error::corruption(format!(
+                            "UDT field {} length exceeds available data",
+                            field_name
+                        )));
+                    }
+
+                    let field_data = &remaining[..field_len];
+                    let field_value =
+                        self.parse_value_with_comparator(field_data, field_comparator)?;
+
+                    fields.push(UdtField {
+                        name: field_name.clone(),
+                        value: Some(field_value),
+                    });
+                    offset += field_len;
+                }
+
+                Ok(Value::Udt(UdtValue {
+                    keyspace: keyspace.clone().unwrap_or_else(|| "unknown".to_string()),
+                    type_name: type_name.clone(),
+                    fields,
+                }))
+            }
+            ComparatorType::Frozen(inner_comparator) => {
+                let inner_value = self.parse_value_with_comparator(value_data, inner_comparator)?;
+                Ok(Value::Frozen(Box::new(inner_value)))
+            }
             _ => {
-                // For complex types, implement as needed
+                // For other unsupported types (Custom, Counter, Timestamp, etc.),
+                // preserve as blob. These types are handled at the top-level
+                // by parse_value_with_schema_type but may appear in collections.
                 Ok(Value::Blob(value_data.to_vec()))
             }
         }
