@@ -19,7 +19,7 @@ Annotated example (BIG, one entry):
 ```
 - `0010` → marker (partition key digest follows)
 - `6b88…3fb9` → 16-byte digest
-- `00` → start of length/offset field (variable-length; see reader)
+- `00` → unsigned VInt offset (value 0, single byte for values 0-127)
 
 Annotated example (length-prefixed variant — BIG, one entry):
 ```
@@ -57,6 +57,38 @@ u16 marker = 0x0010
 u128 partition_key_digest
 varint data_offset
 [optional promoted-index payload]
+```
+
+**Critical: VInt Offset Encoding (NB Format)**
+
+For NB format SSTables (Cassandra 5.0+), the `data_offset` uses **Cassandra VInt encoding**, NOT a length-prefixed byte array:
+
+```
+// NB format (Cassandra 5.0+) - DigestFormat
+u16 marker = 0x0010
+u128 partition_key_digest
+vint data_offset          // VInt encoded, 1-9 bytes based on value magnitude
+vint promoted_size        // VInt encoded size of following promoted index data
+byte promoted_data[promoted_size]  // Promoted index (only if size > 0)
+```
+
+VInt encoding (from `DataInputPlus.java`):
+- First byte's leading 1-bits indicate total byte count
+- `0x00-0x7F`: 1 byte, value = byte itself
+- `0x80-0xBF`: 2 bytes
+- `0xC0-0xDF`: 3 bytes
+- etc.
+
+Example from `sensor_data` Index.db:
+```
+0x00       -> 1 byte  -> value = 0
+0xb0 0x5d  -> 2 bytes -> value = 12381
+0xc0 0x5f 0x11 -> 3 bytes -> value = 24337
+```
+
+**Important**: NB format offsets are **relative to the Data.db data section** (excluding the compression header, typically 30 bytes). Add the header size when seeking:
+```
+file_offset = index_offset + header_size
 ```
 
 Gate detection is handled by the BIG reader; consult `org.apache.cassandra.io.sstable.format.big.BigTableReader` and `RowIndexEntry` for exact parsing. Implementations must handle both variants by detecting an initial length field that precedes the `0x0010` marker.

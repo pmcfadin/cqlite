@@ -58,10 +58,32 @@ org.apache.cassandra.db.marshal.UserType(keyspace,hex_name,field:type,...)
 - Names are hex-encoded: `616464726573735f74797065` = "address_type"
 - Can exceed 500 bytes for complex nested UDTs (up to 5000 bytes supported)
 
+## Row Size Measurement (Issue #237)
+
+**Critical detail for V5CompressedLegacy format**:
+
+The `row_size` VInt field indicates the byte count of row data, but this count is measured from AFTER the VInt itself is consumed, not from where it starts.
+
+**Offset calculation**:
+```
+next_row_offset = (row_size_vint_start_offset + row_size_vint_byte_length) + row_size_value
+```
+
+**Example**:
+- Row metadata starts at offset 100
+- `row_size` VInt is 2 bytes (value: 150)
+- Row data starts at offset 102 (100 + 2)
+- Next row starts at offset 252 (102 + 150)
+
+**Important**: There is NO trailing field after row data - the next partition/row starts immediately after `row_size` bytes.
+
+This matches Cassandra's `getFilePointer()` semantics where the file position after reading the VInt is used as the base for measuring `row_size`.
+
 ## Key Takeaways
 - Expect VInt before variable-sized payloads; decode, then slice the value.
 - **Exception**: UDT fields use fixed 4-byte BE i32 lengths, not VInt.
 - Signed fields that use ZigZag appear primarily in legacy contexts; length fields are non-negative.
+- **Row size measurement**: VInt values like `row_size` are measured from AFTER the VInt is consumed (Issue #237).
 
 ## References
 - Cassandra 5.0: `SerializationHeader` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/SerializationHeader.java`

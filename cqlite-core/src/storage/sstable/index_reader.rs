@@ -6,15 +6,12 @@
 
 use crate::{
     error::{Error, Result},
+    parser::vint::parse_vuint,
     platform::Platform,
 };
 
 use super::header_spec::get_global_registry;
-use nom::{
-    bytes::complete::take,
-    number::complete::{be_u16, u8 as nom_u8},
-    IResult,
-};
+use nom::{bytes::complete::take, number::complete::be_u16, IResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -399,22 +396,24 @@ fn parse_simple_partition_key_with_offset<'a>(
     // Read partition key digest (16 bytes)
     let (input, key_digest) = take(16_u8)(input)?;
 
-    // Read variable-length offset field
-    // Format: length byte (1 byte) + big-endian offset bytes (1-9 bytes)
-    let (input, offset_len) = nom_u8(input)?;
-    let (input, offset_bytes) = take(offset_len)(input)?;
-
-    // Decode big-endian offset (relative to data section start, not file start)
+    // Read unsigned VInt offset (Cassandra 5.0 NB format)
+    // Offset is relative to data section start, not file start
     // SSTableReader will add actual_header_size when seeking
-    let data_offset = decode_be_offset(offset_bytes);
+    let (input, data_offset) = parse_vuint(input)?;
+
+    // Read promoted index serialized size (VInt)
+    // If size > 0, there's promoted index data following
+    // For now, we skip the promoted index data since partition lookup works without it
+    let (input, promoted_size) = parse_vuint(input)?;
+    let (input, _promoted_data) = take(promoted_size as usize)(input)?;
 
     // Debug logging to verify parsing
     log::debug!(
-        "IndexReader Entry {}: marker={:#06x}, offset_len={}, data_offset={}",
+        "IndexReader Entry {}: marker={:#06x}, data_offset={}, promoted_size={}",
         entry_index,
         marker,
-        offset_len,
-        data_offset
+        data_offset,
+        promoted_size
     );
 
     // Size not stored in Index.db - will be determined during data read
@@ -435,15 +434,6 @@ fn parse_simple_partition_key_with_offset<'a>(
 // REMOVED: try_parse_enhanced_partition_entry
 // The "enhanced format" with inline offsets was causing false positives
 // Issue #92 mandates using Summary.db for offset correlation, not inline heuristics
-
-/// Decode variable-length big-endian offset
-fn decode_be_offset(bytes: &[u8]) -> u64 {
-    let mut offset: u64 = 0;
-    for &byte in bytes {
-        offset = (offset << 8) | (byte as u64);
-    }
-    offset
-}
 
 /// Index.db format variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -638,8 +628,8 @@ fn parse_bti_partition_entry(
 // - interpolate_data_offset_from_summary_position: Used arbitrary estimates
 // - estimate_data_offset_from_index_position: Used hardcoded partition size guesses
 //
-// Modern Cassandra 5+ Index.db format includes variable-length offsets inline,
-// eliminating the need for Summary.db correlation. See decode_be_offset() above.
+// Modern Cassandra 5+ Index.db format includes unsigned VInt offsets inline,
+// eliminating the need for Summary.db correlation. See parse_vuint() in parser/vint.rs.
 
 /// Parse Index.db file data - Legacy API for backward compatibility
 #[allow(dead_code)]
@@ -875,12 +865,14 @@ mod tests {
 
     #[test]
     fn test_simple_partition_key_parsing() {
-        // Variable-length format: marker(2) + key_digest(16) + offset_len(1) + offset(variable)
+        // NB format: marker(2) + key_digest(16) + vint_offset(1-9) + vint_promoted_size(1-9)
+        // VInt encoding for 256: 0x81, 0x00 (2 bytes, 10xxxxxx format)
         let data = vec![
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x02, // offset_len = 2 bytes
-            0x01, 0x00, // offset = 256 (big-endian)
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
+            0x81, 0x00, // VInt offset = 256
+            0x00, // VInt promoted_size = 0 (no promoted index)
         ];
 
         let (_, entry) = parse_simple_partition_key(&data).unwrap();
@@ -898,12 +890,16 @@ mod tests {
 
     #[test]
     fn test_partition_key_parsing_without_summary() {
-        // Variable-length format with 3-byte offset
+        // NB format: marker(2) + key_digest(16) + vint_offset(1-9) + vint_promoted_size(1-9)
+        // VInt encoding for 4096 (0x1000): 0x90, 0x00 (2 bytes, 10xxxxxx format)
+        // byte0 = 0x80 | ((4096 >> 8) & 0x3F) = 0x80 | 0x10 = 0x90
+        // byte1 = 4096 & 0xFF = 0x00
         let data = vec![
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x03, // offset_len = 3 bytes
-            0x00, 0x10, 0x00, // offset = 4096 (big-endian)
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
+            0x90, 0x00, // VInt offset = 4096
+            0x00, // VInt promoted_size = 0
         ];
 
         // Test with different entry indices - should all parse the same data
@@ -931,18 +927,25 @@ mod tests {
 
     #[test]
     fn test_multiple_partition_keys_parsing() {
-        // Two partition entries with variable-length offsets
+        // Two partition entries with VInt offsets (NB format)
+        // Format: marker(2) + digest(16) + vint_offset + vint_promoted_size
+        // VInt encoding for 100 (0x64): 0x64 (1 byte, value < 128)
+        // VInt encoding for 500 (0x1F4): 0x81, 0xF4 (2 bytes, 10xxxxxx format)
+        //   byte0 = 0x80 | ((500 >> 8) & 0x3F) = 0x80 | 1 = 0x81
+        //   byte1 = 500 & 0xFF = 0xF4
         let data = vec![
             // Entry 1
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1 (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x01, // offset_len = 1 byte
-            0x64, // offset = 100
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
+            0x64, // VInt offset = 100
+            0x00, // VInt promoted_size = 0
             // Entry 2
             0x00, 0x10, // marker = 0x0010
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2 (16 bytes)
-            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x02, // offset_len = 2 bytes
-            0x01, 0xF4, // offset = 500 (big-endian)
+            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, // key_digest cont.
+            0x81, 0xF4, // VInt offset = 500
+            0x00, // VInt promoted_size = 0
         ];
 
         let (_, entries) = parse_all_partition_keys(&data).unwrap();
@@ -980,18 +983,23 @@ mod tests {
         // Test Issue #107 fix: Verify that lookup_partition uses Borrow trait
         // to avoid heap allocation on every lookup
 
-        // Create index data with two partition entries (variable-length format)
+        // Create index data with two partition entries (NB format with VInt offsets)
+        // Format: marker(2) + digest(16) + vint_offset + vint_promoted_size
+        // VInt for 100: 0x64 (single byte, value < 128)
+        // VInt for 500: 0x81, 0xF4 (2 bytes)
         let data = vec![
             // Entry 1
             0x00, 0x10, // marker = 0x0010
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x01, // offset_len = 1 byte
-            0x64, // offset = 100
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
+            0x64, // VInt offset = 100
+            0x00, // VInt promoted_size = 0
             // Entry 2
             0x00, 0x10, // marker = 0x0010
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2
-            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x02, // offset_len = 2 bytes
-            0x01, 0xF4, // offset = 500 (big-endian)
+            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, // key_digest cont.
+            0x81, 0xF4, // VInt offset = 500
+            0x00, // VInt promoted_size = 0
         ];
 
         let (_, index_data) = parse_index_data(&data).unwrap();

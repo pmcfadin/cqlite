@@ -93,9 +93,13 @@ impl SSTableReader {
                         .lookup_partition_with_index(partition_key_bytes)
                         .await?
                     {
+                        // Convert Index.db relative offset to absolute file offset
+                        // Index.db offsets are relative to data section start (after compression header)
+                        let absolute_offset = data_offset + self.actual_header_size as u64;
+
                         // Read and parse the actual partition data from Data.db
                         match self
-                            .parse_partition_at_offset(data_offset, data_size)
+                            .parse_partition_at_offset(absolute_offset, data_size)
                             .await?
                         {
                             Some(partition_entries) => {
@@ -104,7 +108,7 @@ impl SSTableReader {
                                 }
                             }
                             None => {
-                                debug!("Failed to parse partition at offset {}", data_offset);
+                                debug!("Failed to parse partition at offset {}", absolute_offset);
                             }
                         }
                     }

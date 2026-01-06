@@ -117,7 +117,7 @@ For implementation details, see Appendix C.
 
 The V5CompressedLegacy format (BigFormat with compression, "nb" file prefix) uses a structured row header with delta-encoded metadata fields. This format is used by Cassandra 5.0 SSTables with the legacy "big" format and compression enabled.
 
-### Row Structure (Corrected - Issue #213)
+### Row Structure (Corrected - Issue #213, Issue #237)
 
 The complete row format, confirmed via Cassandra's `UnfilteredSerializer.java`:
 
@@ -125,7 +125,7 @@ The complete row format, confirmed via Cassandra's `UnfilteredSerializer.java`:
 [row_flags: u8]
 [extended_flags: u8 if 0x80 set]
 [clustering_prefix: variable]          ← For tables with clustering keys
-[row_size: VInt]
+[row_size: VInt]                       ← Size measured from AFTER this VInt (Issue #237)
 [prev_size: VInt]
 [timestamp: VInt if 0x04 set]          ← Delta from min_timestamp
 [ttl: VInt if 0x08 set]                ← Delta from min_ttl
@@ -134,7 +134,16 @@ The complete row format, confirmed via Cassandra's `UnfilteredSerializer.java`:
 [cell_data...]
 ```
 
-**Critical Note**: For tables WITH clustering keys, the clustering prefix comes IMMEDIATELY after flags and BEFORE `row_size`. This differs from initial documentation which placed `row_size` immediately after flags.
+**Critical Notes**:
+
+1. **Clustering Prefix Ordering (Issue #213)**: For tables WITH clustering keys, the clustering prefix comes IMMEDIATELY after flags and BEFORE `row_size`. This differs from initial documentation which placed `row_size` immediately after flags.
+
+2. **`row_size` Measurement (Issue #237)**: The `row_size` value is measured from the position AFTER the `row_size` VInt is consumed, NOT from where the VInt starts. This matches Cassandra's `getFilePointer()` semantics:
+   ```
+   next_row_offset = position_after_row_size_vint + row_size_value
+   ```
+
+3. **No Trailing Field (Issue #237)**: There is NO trailing field after row data in V5CompressedLegacy format. The next partition or row starts immediately after `row_size` bytes from the position after the VInt.
 
 ### Clustering Prefix Format
 

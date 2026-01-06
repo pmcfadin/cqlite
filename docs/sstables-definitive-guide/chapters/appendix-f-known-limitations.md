@@ -237,6 +237,71 @@ V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
 
 ---
 
+### Index.db VInt Offset Parsing (DigestFormat - NB Tables)
+
+**Status**: 🐛 **OPEN** (Issue #237)
+**Impact**: 83% of partitions skipped in 7 test_timeseries tables (~827 partitions)
+**Current Behavior**: Falls back to sequential Data.db scan with "malformed partition" warnings
+
+**Root Cause**: The Index.db parser incorrectly reads VInt offsets as length-prefixed bytes. The current implementation treats the first byte after the digest as an `offset_len` field, then reads that many bytes. This matches older MC/MD SSTable formats, but NB format (Cassandra 5.0) uses VInt encoding directly.
+
+**Affected Format** (DigestFormat with VInt Offsets):
+```
+Entry: marker(2) + digest(16) + vint_offset(1-9 bytes)
+
+Where:
+- marker: 0x0010 (fixed)
+- digest: 16-byte MD5 hash of partition key
+- vint_offset: Cassandra VInt encoding (NOT length-prefixed)
+```
+
+**Bug Location**: `cqlite-core/src/storage/sstable/index_reader.rs`
+- Function: `parse_simple_partition_key_with_offset()` (lines ~375-430)
+
+**Current (Wrong)**:
+```rust
+let (input, offset_len) = nom_u8(input)?;      // Treats VInt byte as length!
+let (input, offset_bytes) = take(offset_len)(input)?;
+let data_offset = decode_be_offset(offset_bytes);
+```
+
+**Evidence from sensor_data Index.db**:
+```
+0x0000  00 10 02 84 a7 18 be 7b 49 e6 b6 b9 8e 82 f5 ff  .......{I.......
+0x0010  16 60 [00] 00 00 10 7d 39 42 8c aa a8 45 1d 84 7f  .`....}9B...E...
+        ^^^^^^ Entry 0 VInt (0x00 = 0)
+                   ^^^^^ Entry 1 marker
+```
+
+Parser reads `0x00` as `offset_len=0`, takes 0 bytes, advances by 19 bytes instead of 20. Next entry parse fails.
+
+**Affected Tables**:
+| Table | Partitions | Currently Parsed | Success Rate |
+|-------|-----------|------------------|--------------|
+| sensor_data | 9 | 1 | 11% |
+| app_metrics | 199 | 1 | <1% |
+| user_activity | 199 | 1 | <1% |
+| log_entries | 199 | 1 | <1% |
+| event_store | 199 | 1 | <1% |
+| user_sessions | 199 | 1 | <1% |
+| tick_data | 23 | 1 | 4% |
+
+**Proposed Fix**:
+```rust
+// Replace offset parsing with VInt decoding:
+let (input, vint_offset) = parse_vint(input)?;
+let data_offset = vint_offset;  // SSTableReader adds header_size later
+```
+
+**Additional Notes**:
+- Index.db offsets are relative to Data.db data section (exclude 30-byte header)
+- VInt decoding already exists in `cqlite-core/src/parser/vint.rs`
+- Format detection needed to distinguish NB VInt from legacy length-prefixed
+
+**Tracking**: Issue #237
+
+---
+
 ## Validation Status
 
 ### Overall Pass Rate: 100% (33/33 tables) ✅ COMPLETE (macOS)

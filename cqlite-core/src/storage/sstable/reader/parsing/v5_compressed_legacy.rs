@@ -76,6 +76,9 @@ struct RowHeader {
     local_deletion_time: Option<i32>,
     /// Number of bytes consumed by the header
     header_size: usize,
+    /// Length of the row_size VInt in bytes (needed for offset calculation)
+    /// row_size is measured from AFTER this VInt is consumed
+    row_size_vint_len: usize,
 }
 
 // Row header flag constants
@@ -91,9 +94,9 @@ const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 const END_OF_PARTITION: u8 = 0x01; // Signal end of partition - nothing follows this flag byte
 const IS_MARKER: u8 = 0x02; // Range tombstone marker (not a data row)
 
-/// Size of the trailing field after each row's cell data in V5CompressedLegacy format.
-/// This field is NOT included in the row_size value from the row header.
-const ROW_TRAILING_FIELD_SIZE: usize = 4;
+// NOTE: V5CompressedLegacy format has NO trailing field after row data.
+// The next partition/row starts immediately after row_size bytes.
+// (Previous ROW_TRAILING_FIELD_SIZE constant was removed as part of Issue #237 fix)
 
 /// Parser for V5CompressedLegacy format decompressed blocks
 pub struct V5CompressedLegacyParser {
@@ -715,15 +718,15 @@ impl V5CompressedLegacyParser {
                 pos, e
             ))
         })?;
-        let bytes_consumed = data[pos..].len() - remaining.len();
+        let row_size_vint_len = data[pos..].len() - remaining.len();
         debug!(
             "V5CompressedLegacy: row_size={}, consumed {} bytes, pos before={}, pos after={}",
             row_size,
-            bytes_consumed,
+            row_size_vint_len,
             pos,
-            pos + bytes_consumed
+            pos + row_size_vint_len
         );
-        pos += bytes_consumed;
+        pos += row_size_vint_len;
 
         // Read prev size (VInt)
         debug!(
@@ -874,6 +877,7 @@ impl V5CompressedLegacyParser {
                 ttl,
                 local_deletion_time,
                 header_size,
+                row_size_vint_len,
             },
             row_size,
         ))
@@ -1315,9 +1319,6 @@ impl V5CompressedLegacyParser {
         // The previous code parsed row_size BEFORE clustering, which caused
         // clustering key bytes to be misinterpreted as row_size (often 0).
 
-        // Save the initial offset pointing to row flags - row_size is measured from here
-        let input_offset = offset;
-
         // Step 1: Parse row flags (1-2 bytes)
         let (row_flags, extended_flags, flags_size) = self.parse_row_flags(data, offset)?;
         offset += flags_size;
@@ -1346,8 +1347,11 @@ impl V5CompressedLegacyParser {
 
         // Step 3: Parse row metadata (row_size, prev_size, timestamps, etc.)
         //
-        // NOTE: row_size is measured from the row start (input_offset at flags), NOT from this
-        // offset. The clustering prefix bytes are INCLUDED in row_size.
+        // CRITICAL (Issue #237): Save offset where row_size VInt STARTS.
+        // The row_size value is measured from AFTER this VInt is consumed.
+        // Formula: next_offset = (row_metadata_offset + row_size_vint_len) + row_size
+        // This offset is right after the clustering prefix (which was already parsed).
+        let row_metadata_offset = offset;
         let (row_header, row_size) =
             self.parse_row_metadata(data, offset, row_flags, extended_flags)?;
 
@@ -1398,22 +1402,30 @@ impl V5CompressedLegacyParser {
             );
 
             // Calculate offset after row data (based on row_size from header)
-            // Note: row_size is measured from row start (flags), so we add input_offset
-            let after_row_offset = input_offset + row_size as usize;
+            //
+            // CRITICAL FIX (Issue #237): row_size is measured from AFTER the row_size VInt,
+            // not from where it starts. This matches Cassandra's getFilePointer() semantics:
+            //   next_position = row_size_value + position_after_reading_row_size_vint
+            //
+            // There is NO trailing field in V5CompressedLegacy format - the next partition/row
+            // starts immediately after row_size bytes from this position.
+            let after_row_offset =
+                (row_metadata_offset + row_header.row_size_vint_len) + row_size as usize;
 
-            // Skip the trailing field to reach the next partition
-            if after_row_offset + ROW_TRAILING_FIELD_SIZE > data.len() {
-                let remaining = data.len().saturating_sub(after_row_offset);
+            // Validate we have enough data
+            if after_row_offset > data.len() {
+                let remaining = data
+                    .len()
+                    .saturating_sub(row_metadata_offset + row_header.row_size_vint_len);
                 return Err(Error::corruption(format!(
-                    "V5CompressedLegacy: Not enough bytes for {}-byte trailing field at offset {} (need {}, have {})",
-                    ROW_TRAILING_FIELD_SIZE,
-                    after_row_offset,
-                    ROW_TRAILING_FIELD_SIZE,
+                    "V5CompressedLegacy: Not enough bytes for row data at offset {} (need {}, have {})",
+                    row_metadata_offset + row_header.row_size_vint_len,
+                    row_size,
                     remaining
                 )));
             }
 
-            let next_offset = after_row_offset + ROW_TRAILING_FIELD_SIZE;
+            let next_offset = after_row_offset;
             log::debug!(
                 "V5CompressedLegacy: Skipped tombstoned row, next offset = {}",
                 next_offset
@@ -1595,63 +1607,34 @@ impl V5CompressedLegacyParser {
 
         debug!("V5CompressedLegacy: Parsed total of {} cells", cells.len());
 
-        // CRITICAL FINDING (Issue #164): V5CompressedLegacy format partition boundary calculation
-        //
-        // Analysis from JSONL reference data revealed that partitions are NOT contiguous based
-        // solely on row_size. There is a 4-byte trailing field after each row that is NOT
-        // included in the row_size value.
-        //
-        // Format structure (validated against real Cassandra 5.0 SSTables):
-        //   [Partition Header: 30 bytes]
-        //   [Row Header: variable, reported in header_size]
-        //   [Row Cells: variable, row_size includes header + cells]
-        //   [Trailing 4-byte field: NOT included in row_size]
-        //   [Next Partition starts here]
-        //
-        // Example from simple_table:
-        //   - Partition 1 at offset 30
-        //   - Row size: 603 bytes
-        //   - Trailing field: 4 bytes (offsets 633-637)
-        //   - Partition 2 at offset 637 (not 633!)
-        //
-        // The 4-byte trailing field appears to be a partition/row boundary marker or metadata.
-        // Its exact semantics are unclear from Cassandra source, but it's consistently present
-        // and must be skipped to find the next partition.
-
         // Calculate offset after cell data (based on row_size from header)
         //
-        // row_size is measured from the row start (input_offset, pointing at flags), NOT from
-        // after the clustering prefix. The row_size includes: flags, clustering, row_size VInt,
-        // prev_size VInt, timestamps, ttl, deletion, bitmap, and cells.
-        let after_cells_offset = input_offset + row_size as usize;
+        // CRITICAL (Issue #237): row_size is measured from AFTER the row_size VInt,
+        // not from where it starts. This matches Cassandra's getFilePointer() semantics:
+        //   next_position = row_size_value + position_after_reading_row_size_vint
+        //
+        // Formula: (row_metadata_offset + row_size_vint_len) + row_size
+        //
+        // There is NO trailing field in V5CompressedLegacy format - the next partition/row
+        // starts immediately after row_size bytes from this position.
+        let row_size_counted_from = row_metadata_offset + row_header.row_size_vint_len;
+        let after_cells_offset = row_size_counted_from + row_size as usize;
 
-        // Skip the trailing field to reach the next partition
-        if after_cells_offset + ROW_TRAILING_FIELD_SIZE > data.len() {
-            let remaining = data.len().saturating_sub(after_cells_offset);
+        // Validate we have enough data
+        if after_cells_offset > data.len() {
+            let remaining = data.len().saturating_sub(row_size_counted_from);
             return Err(Error::corruption(format!(
-                "V5CompressedLegacy: Not enough bytes for {}-byte trailing field at offset {} (need {}, have {})",
-                ROW_TRAILING_FIELD_SIZE,
-                after_cells_offset,
-                ROW_TRAILING_FIELD_SIZE,
-                remaining
+                "V5CompressedLegacy: Not enough bytes for row data at offset {} (need {}, have {})",
+                row_size_counted_from, row_size, remaining
             )));
         }
 
-        // Read the trailing field for debugging/validation purposes
-        let trailing_bytes =
-            &data[after_cells_offset..after_cells_offset + ROW_TRAILING_FIELD_SIZE];
+        // No trailing field - next partition/row starts immediately
+        let next_offset = after_cells_offset;
 
         debug!(
-            "V5CompressedLegacy: Row complete - row_size={} bytes, trailing field at offset {} = {:02x?}",
-            row_size, after_cells_offset, trailing_bytes
-        );
-
-        // Calculate next offset AFTER the trailing field
-        let next_offset = after_cells_offset + ROW_TRAILING_FIELD_SIZE;
-
-        debug!(
-            "V5CompressedLegacy: Calculated next partition offset: {} (row_start={}, row_size={}, +4 trailing)",
-            next_offset, input_offset, row_size
+            "V5CompressedLegacy: Row complete - row_size={} bytes, next offset = {} (counted from {})",
+            row_size, next_offset, row_size_counted_from
         );
 
         Ok((cells, Some(row_header), next_offset))

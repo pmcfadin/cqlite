@@ -31,7 +31,8 @@ The row header follows this exact structure (validated through implementation an
 ```
 [row_flags: u8]
 [extended_flags: u8 if 0x80 set]
-[row_size: VInt]
+[clustering_prefix: variable]          ← For tables with clustering keys (Issue #213)
+[row_size: VInt]                       ← Measured from AFTER this VInt (Issue #237)
 [prev_size: VInt]
 [timestamp: VInt if 0x04 set] ← Delta from min_timestamp
 [ttl: VInt if 0x08 set] ← Delta from min_ttl
@@ -39,8 +40,13 @@ The row header follows this exact structure (validated through implementation an
 [column_bitmap: VInt + bytes if NOT 0x20]
 ```
 
+**Critical: `row_size` Measurement (Issue #237)**:
+- The `row_size` value is measured from AFTER the VInt is consumed, not from where it starts
+- Formula: `next_row_offset = (row_size_vint_offset + row_size_vint_length) + row_size_value`
+- There is NO trailing field after row data - next row/partition starts immediately
+
 **Evidence**:
-- Implementation: `v5_compressed_legacy.rs` lines 269-445
+- Implementation: `v5_compressed_legacy.rs` lines 269-445, 1620-1650
 - Tests: All integration tests pass with real SSTable data
 - Validation: Parsed timestamps/TTLs match sstabledump JSON output
 
