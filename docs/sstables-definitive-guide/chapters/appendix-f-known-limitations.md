@@ -553,6 +553,18 @@ cargo build --no-default-features --features all-compression
   - Result: UDTs inside collections now show actual field values instead of `0x` blobs
   - File: `cqlite-core/src/storage/sstable/reader/parsing/value_parsing.rs` (lines 172-324)
 
+- **Issue #239**: Nested UDTs Inside Collections Display as Hex Blobs - **FIXED**
+  - Status: ✅ FIXED - Nested UDTs in collections now parse correctly
+  - Root cause: Two issues:
+    1. When parsing UDT field types from schema, nested UDT names were stored as `CqlType::Custom("udt:typename")` with a "udt:" prefix, but registry lookups used plain names without the prefix
+    2. Inline `CqlType::Udt(name, fields)` definitions were ignored (the `fields` parameter was prefixed with `_`) and code fell back to Blob when registry lookup failed
+  - Fix:
+    1. Added `strip_prefix("udt:")` normalization at 6 registry lookup sites in `parse_nested_udt_from_registry()` and `parse_raw_type_value()`
+    2. Added `parse_inline_udt_value()` function to parse UDTs using inline field definitions when registry lookup fails
+    3. Modified all `CqlType::Udt(udt_name, inline_fields)` pattern matches to use `inline_fields` as fallback
+  - Result: Nested UDTs like `contact_info.address` now show parsed field values (`{street, city, state, zip_code, country}`) instead of `0x...` blobs
+  - File: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+
 ### Completed Issues (Fixed - Dec 2025)
 
 - **Issue #220**: UDT (User-Defined Type) Support - **FIXED**
