@@ -1949,8 +1949,8 @@ impl V5CompressedLegacyParser {
                 Value::Decimal { scale, unscaled }
             }
 
-            "bigint" | "counter" => {
-                // BigInt/Counter: fixed-width 8 bytes (no length prefix in Cassandra 5.0)
+            "bigint" => {
+                // BigInt: fixed-width 8 bytes (no length prefix in Cassandra 5.0)
                 if offset + 8 > data.len() {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 8 bytes for bigint, only {} available",
@@ -1969,11 +1969,66 @@ impl V5CompressedLegacyParser {
                     data[offset + 7],
                 ]);
                 offset += 8;
-                if normalized_type == "counter" {
-                    Value::Counter(val)
-                } else {
-                    Value::BigInt(val)
+                Value::BigInt(val)
+            }
+
+            "counter" => {
+                // Counter cells contain a CounterContext structure, NOT a raw i64.
+                // Format: [VInt length prefix][CounterContext bytes]
+                //
+                // CounterContext format (from Cassandra's CounterContext.java):
+                //   [header_size: 2-byte BE signed short] - number of shards
+                //   [indices: 2 bytes * |header_size|] - shard type indicators
+                //   [shards: 32 bytes each] - counter_id (16) + clock (8) + count (8)
+                //
+                // The counter value is the sum of all shard counts (total() function).
+
+                // First, read the VInt length prefix (like other variable-length types)
+                let (remaining, context_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Cell '{}': failed to parse counter context length as VInt: {:?}",
+                        column.name, e
+                    ))
+                })?;
+                let context_len = context_len as usize;
+                let len_bytes_consumed = data[offset..].len() - remaining.len();
+                offset += len_bytes_consumed;
+
+                log::debug!(
+                    "V5CompressedLegacy: Counter '{}' context_len={} (len prefix: {} bytes)",
+                    column.name,
+                    context_len,
+                    len_bytes_consumed
+                );
+
+                if offset + context_len > data.len() {
+                    return Err(Error::corruption(format!(
+                        "Cell '{}': need {} bytes for counter context, only {} available",
+                        column.name,
+                        context_len,
+                        data.len() - offset
+                    )));
                 }
+
+                // Parse the CounterContext structure
+                let (total, consumed) = Self::parse_counter_context(data, offset, &column.name)?;
+
+                // Verify we consumed the expected number of bytes (strict validation)
+                if consumed != context_len {
+                    return Err(Error::corruption(format!(
+                        "Counter '{}': VInt length ({}) doesn't match parsed context size ({})",
+                        column.name, context_len, consumed
+                    )));
+                }
+
+                offset += consumed;
+                log::debug!(
+                    "V5CompressedLegacy: Counter '{}' value={}, total consumed {} bytes",
+                    column.name,
+                    total,
+                    len_bytes_consumed + context_len
+                );
+                Value::Counter(total)
             }
 
             "double" => {
@@ -3071,6 +3126,142 @@ impl V5CompressedLegacyParser {
             CqlType::Map(_, _) => Value::Map(Vec::new()),
             _ => Value::Blob(Vec::new()),
         }
+    }
+
+    /// Parse a CounterContext structure and return the total counter value.
+    ///
+    /// Counter cells in Cassandra store a CounterContext, not a raw i64 value.
+    /// The CounterContext tracks counter updates across multiple replicas (shards).
+    ///
+    /// Format (from Cassandra's CounterContext.java):
+    /// ```text
+    /// [header_size: 2-byte BE signed short]    <- Number of shards (negative if cleanup needed)
+    /// [indices: 2 bytes * |header_size|]       <- Shard type indicators (negative = global)
+    /// [shards: 32 bytes each]:
+    ///     [counter_id: 16 bytes UUID]          <- Replica's CounterId
+    ///     [clock: 8-byte BE unsigned long]     <- Logical clock
+    ///     [count: 8-byte BE signed long]       <- The actual counter value for this shard
+    /// ```
+    ///
+    /// The counter value is the sum of all shard counts, matching Cassandra's `total()` function.
+    ///
+    /// Returns (total_value, bytes_consumed)
+    fn parse_counter_context(
+        data: &[u8],
+        offset: usize,
+        column_name: &str,
+    ) -> Result<(i64, usize)> {
+        // Constants from CounterContext.java
+        const HEADER_SIZE_LENGTH: usize = 2;
+        const HEADER_ELT_LENGTH: usize = 2;
+        const COUNTER_ID_LENGTH: usize = 16;
+        const CLOCK_LENGTH: usize = 8;
+        const COUNT_LENGTH: usize = 8;
+        const STEP_LENGTH: usize = COUNTER_ID_LENGTH + CLOCK_LENGTH + COUNT_LENGTH; // 32
+
+        // Maximum reasonable shard count to prevent DoS from corrupted data
+        // A typical Cassandra cluster has at most 100-500 nodes, so 1024 is generous
+        const MAX_COUNTER_SHARDS: usize = 1024;
+
+        let mut pos = offset;
+
+        // Read header_size (2-byte BE signed short)
+        if pos + HEADER_SIZE_LENGTH > data.len() {
+            return Err(Error::corruption(format!(
+                "Counter '{}': need {} bytes for header_size at offset {}, only {} available",
+                column_name,
+                HEADER_SIZE_LENGTH,
+                pos,
+                data.len() - pos
+            )));
+        }
+        let header_size_raw = i16::from_be_bytes([data[pos], data[pos + 1]]);
+        // Negative header_size indicates local shards need cleanup (CASSANDRA-1938).
+        // The absolute value gives the actual shard count.
+        let shard_count = header_size_raw.unsigned_abs() as usize;
+        pos += HEADER_SIZE_LENGTH;
+
+        // Validate shard count to prevent DoS from corrupted data
+        if shard_count > MAX_COUNTER_SHARDS {
+            return Err(Error::corruption(format!(
+                "Counter '{}': unreasonable shard count {} (max {})",
+                column_name, shard_count, MAX_COUNTER_SHARDS
+            )));
+        }
+
+        log::debug!(
+            "V5CompressedLegacy: Counter '{}' header_size={}, shard_count={}",
+            column_name,
+            header_size_raw,
+            shard_count
+        );
+
+        // Handle empty counter context (0 shards = counter value of 0)
+        if shard_count == 0 {
+            return Ok((0, HEADER_SIZE_LENGTH));
+        }
+
+        // Skip header indices (2 bytes per shard)
+        let indices_size = HEADER_ELT_LENGTH * shard_count;
+        if pos + indices_size > data.len() {
+            return Err(Error::corruption(format!(
+                "Counter '{}': need {} bytes for indices at offset {}, only {} available",
+                column_name,
+                indices_size,
+                pos,
+                data.len() - pos
+            )));
+        }
+        pos += indices_size;
+
+        // Calculate expected body size
+        let body_size = STEP_LENGTH * shard_count;
+        if pos + body_size > data.len() {
+            return Err(Error::corruption(format!(
+                "Counter '{}': need {} bytes for {} shards at offset {}, only {} available",
+                column_name,
+                body_size,
+                shard_count,
+                pos,
+                data.len() - pos
+            )));
+        }
+
+        // Sum count values from all shards (matching Cassandra's total() function)
+        let mut total: i64 = 0;
+        for shard_idx in 0..shard_count {
+            // Skip counter_id (16 bytes) and clock (8 bytes), read count (8 bytes)
+            let count_offset = pos + (shard_idx * STEP_LENGTH) + COUNTER_ID_LENGTH + CLOCK_LENGTH;
+            let count = i64::from_be_bytes([
+                data[count_offset],
+                data[count_offset + 1],
+                data[count_offset + 2],
+                data[count_offset + 3],
+                data[count_offset + 4],
+                data[count_offset + 5],
+                data[count_offset + 6],
+                data[count_offset + 7],
+            ]);
+            // Use checked_add to detect overflow (unlike Java which silently wraps)
+            total = total.checked_add(count).ok_or_else(|| {
+                Error::corruption(format!(
+                    "Counter '{}': integer overflow when summing shard {} (total={}, count={})",
+                    column_name, shard_idx, total, count
+                ))
+            })?;
+
+            log::trace!(
+                "V5CompressedLegacy: Counter '{}' shard {} count={}",
+                column_name,
+                shard_idx,
+                count
+            );
+        }
+
+        // Total bytes consumed
+        let consumed = HEADER_SIZE_LENGTH + indices_size + body_size;
+
+        Ok((total, consumed))
     }
 
     /// Parse a UDT field value without requiring SSTableReader.

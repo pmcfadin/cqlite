@@ -97,6 +97,45 @@ Endianness:
 
 See `tables/type-mapping-complex.md` for detailed format specifications.
 
+### Counter Cells (Issue #241)
+
+Counter columns store a `CounterContext` structure, not a raw i64 value. The CounterContext tracks counter updates across multiple replicas (shards).
+
+**Cell format**:
+```
+[VInt length]           ← Length of CounterContext bytes
+[CounterContext]        ← Variable-length structure below
+```
+
+**CounterContext format** (from `CounterContext.java`):
+
+| Field | Size | Description |
+|-------|------|-------------|
+| header_size | 2 bytes | BE signed short - number of shards |
+| indices | 2 * \|header_size\| bytes | Shard type indicators (negative = global) |
+| shards | 32 * \|header_size\| bytes | Each shard: counter_id (16) + clock (8) + count (8) |
+
+**Shard structure** (32 bytes each):
+```
+[counter_id: 16 bytes]    ← Replica's CounterId (UUID)
+[clock: 8 bytes]          ← Logical clock (BE unsigned long)
+[count: 8 bytes]          ← Counter value for this shard (BE signed long)
+```
+
+The counter value is the **sum of all shard counts**, matching Cassandra's `total()` function.
+
+**Example** (single-shard counter):
+```
+24                         ← VInt length (36 bytes)
+0001                       ← header_size = 1
+8000                       ← header index (0x8000 = global shard at index 0)
+f35cf98a220c40fb8b04f4ff7ffcf681  ← counter_id (16 bytes)
+00064073 23d1d210          ← clock (8 bytes)
+00000000 00000029          ← count = 41 (8 bytes)
+```
+
+Reference: `org.apache.cassandra.db.context.CounterContext` in Cassandra 5.0 source.
+
 ### Key Takeaways
 - `Data.db` is schema-driven and encodes partitions as unfiltered row streams.
 - VInts and bit flags compactly encode sizes, timestamps, and cell metadata.
