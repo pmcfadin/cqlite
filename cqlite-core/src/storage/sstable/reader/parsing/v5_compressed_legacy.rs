@@ -2056,16 +2056,16 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                let days = u32::from_be_bytes([
+                let stored = u32::from_be_bytes([
                     data[offset],
                     data[offset + 1],
                     data[offset + 2],
                     data[offset + 3],
                 ]);
                 offset += 4;
-                // Cassandra stores as unsigned offset, adjust by Integer.MIN_VALUE
-                let adjusted = days.wrapping_sub(i32::MIN as u32) as i32;
-                Value::Date(adjusted)
+                // Cassandra DATE: 4-byte unsigned int with Integer.MIN_VALUE offset
+                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
+                Value::Date(days_since_epoch)
             }
 
             "duration" => {
@@ -4417,16 +4417,16 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                let days = u32::from_be_bytes([
+                let stored = u32::from_be_bytes([
                     data[offset],
                     data[offset + 1],
                     data[offset + 2],
                     data[offset + 3],
                 ]);
                 offset += 4;
-                // Cassandra stores as unsigned offset, adjust by Integer.MIN_VALUE
-                let adjusted = days.wrapping_sub(i32::MIN as u32) as i32;
-                Value::Date(adjusted)
+                // Cassandra DATE: 4-byte unsigned int with Integer.MIN_VALUE offset
+                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
+                Value::Date(days_since_epoch)
             }
 
             "time" => {
@@ -5314,7 +5314,7 @@ impl V5CompressedLegacyParser {
                 Ok(Value::BigInt(v))
             }
 
-            // Date types: 4 bytes (days since epoch as i32)
+            // Date types: 4 bytes (days since epoch with Integer.MIN_VALUE offset)
             "org.apache.cassandra.db.marshal.simpledatetype" | "date" => {
                 if data.len() != 4 {
                     return Err(Error::corruption(format!(
@@ -5322,8 +5322,10 @@ impl V5CompressedLegacyParser {
                         data.len()
                     )));
                 }
-                let days = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Date(days))
+                // Cassandra DATE: 4-byte unsigned int with Integer.MIN_VALUE offset
+                let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
+                Ok(Value::Date(days_since_epoch))
             }
 
             // Timestamp types: 8 bytes (milliseconds since epoch)

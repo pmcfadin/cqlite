@@ -546,6 +546,19 @@ cargo build --no-default-features --features all-compression
 
 ### Completed Issues (Fixed - Jan 2026)
 
+- **Issue #240**: DATE Type Values Display as `<invalid-date:...>` - **FIXED**
+  - Status: ✅ FIXED - DATE type now parses correctly in all contexts including map keys
+  - Root cause: `CqlType::Date` was mapped to `ComparatorType::Custom("date")` in `comparator.rs`, causing DATE values to fall through to blob parsing. Also, multiple parsing paths (parser/types.rs, v5_compressed_legacy.rs) read DATE as raw i32 without Cassandra's Integer.MIN_VALUE offset decoding.
+  - Fix:
+    1. Added `ComparatorType::Date` variant to comparator.rs with proper comparison support
+    2. Updated `from_cql_type()` and `from_cql_type_with_registry()` to map `CqlType::Date` → `ComparatorType::Date`
+    3. Added DATE parsing arm to `parse_value_with_schema_type()` and `parse_value_with_comparator()` in value_parsing.rs
+    4. Fixed `parse_date()` in parser/types.rs to apply Cassandra DATE encoding: `stored.wrapping_add(i32::MIN as u32) as i32`
+    5. Fixed map key DATE parsing in v5_compressed_legacy.rs line 5327
+  - Cassandra DATE encoding: 4-byte big-endian unsigned int shifted by Integer.MIN_VALUE (2^31) for byte-order comparability. Decoding adds i32::MIN back.
+  - Result: DATE columns and DATE keys in maps now display as `YYYY-MM-DD` format (e.g., `2025-10-05`) instead of `<invalid-date:...>`
+  - Files: `comparator.rs`, `value_parsing.rs`, `comparator_value_parsing.rs`, `key_digest.rs`, `parser/types.rs`, `v5_compressed_legacy.rs`
+
 - **Issue #238**: UDTs Inside Collections Not Parsed - **FIXED**
   - Status: ✅ FIXED - Extended `parse_value_with_comparator` for recursive type parsing
   - Root cause: `parse_value_with_comparator` had minimal implementation (only Boolean, Text, Blob) - all other types fell back to Blob, including UDTs nested in List/Set/Map

@@ -527,6 +527,7 @@ impl SchemaParser {
             ComparatorType::Varint => Ok(CqlType::Custom("varint".to_string())),
             ComparatorType::Decimal => Ok(CqlType::Decimal),
             ComparatorType::Duration => Ok(CqlType::Duration),
+            ComparatorType::Date => Ok(CqlType::Date),
             ComparatorType::Json => Ok(CqlType::Custom("json".to_string())),
             ComparatorType::List(elem_comparator) => {
                 let elem_type = self.comparator_to_cql_type(elem_comparator)?;

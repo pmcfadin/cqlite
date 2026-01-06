@@ -165,6 +165,22 @@ pub fn parse_value_with_comparator(
                 Err(Error::corruption("Invalid UUID value length"))
             }
         }
+        ComparatorType::Date => {
+            if value_data.len() == 4 {
+                // Cassandra DATE: 4-byte big-endian unsigned int with Integer.MIN_VALUE offset
+                // for byte-order comparability. Decode by adding i32::MIN back.
+                let stored = u32::from_be_bytes([
+                    value_data[0],
+                    value_data[1],
+                    value_data[2],
+                    value_data[3],
+                ]);
+                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
+                Ok(Value::Date(days_since_epoch))
+            } else {
+                Err(Error::corruption("Invalid DATE value length"))
+            }
+        }
         ComparatorType::Varint => Ok(Value::Varint(value_data.to_vec())),
         ComparatorType::Decimal => {
             // Decimal format: 4-byte scale + variable-length unscaled value

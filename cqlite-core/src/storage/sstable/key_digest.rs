@@ -210,6 +210,15 @@ impl KeyDigestComputer {
                     .map_err(|_| Error::invalid_format("Invalid UUID byte length"))?;
                 Ok(Value::Uuid(uuid_bytes))
             }
+            ComparatorType::Date => {
+                if bytes.len() != 4 {
+                    return Err(Error::corruption("Invalid date bytes".to_string()));
+                }
+                // Cassandra DATE: 4-byte big-endian unsigned int with Integer.MIN_VALUE offset
+                let stored = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
+                Ok(Value::Date(days_since_epoch))
+            }
             // For complex types, we need more sophisticated parsing
             // For now, treat them as blobs to avoid breaking existing functionality
             ComparatorType::List(_)

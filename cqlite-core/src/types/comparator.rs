@@ -44,6 +44,8 @@ pub enum ComparatorType {
     Decimal,
     /// Duration type comparator
     Duration,
+    /// Date type comparator (days since epoch)
+    Date,
     /// JSON document comparator
     Json,
     /// List comparator with element comparator
@@ -125,8 +127,8 @@ impl ComparatorType {
             // Map newly supported types
             CqlType::Decimal => ComparatorType::Decimal,
             CqlType::Duration => ComparatorType::Duration,
+            CqlType::Date => ComparatorType::Date,
             // Map remaining unsupported types to custom for now
-            CqlType::Date => ComparatorType::Custom("date".to_string()),
             CqlType::Time => ComparatorType::Custom("time".to_string()),
             CqlType::Inet => ComparatorType::Custom("inet".to_string()),
         };
@@ -188,7 +190,7 @@ impl ComparatorType {
             CqlType::Varint => ComparatorType::Varint,
             CqlType::Decimal => ComparatorType::Decimal,
             CqlType::Duration => ComparatorType::Duration,
-            CqlType::Date => ComparatorType::Custom("date".to_string()),
+            CqlType::Date => ComparatorType::Date,
             CqlType::Time => ComparatorType::Custom("time".to_string()),
             CqlType::Inet => ComparatorType::Custom("inet".to_string()),
             CqlType::List(element_type) => {
@@ -296,6 +298,7 @@ impl ComparatorType {
             ComparatorType::Varint => self.compare_varint(left, right),
             ComparatorType::Decimal => self.compare_decimal(left, right),
             ComparatorType::Duration => self.compare_duration(left, right),
+            ComparatorType::Date => self.compare_date(left, right),
             ComparatorType::Json => self.compare_json(left, right),
             ComparatorType::List(element_comparator) => {
                 self.compare_list(left, right, element_comparator)
@@ -364,6 +367,7 @@ impl ComparatorType {
             ComparatorType::Varint => "varint",
             ComparatorType::Decimal => "decimal",
             ComparatorType::Duration => "duration",
+            ComparatorType::Date => "date",
             ComparatorType::Json => "json",
             ComparatorType::List(_) => "list",
             ComparatorType::Set(_) => "set",
@@ -393,6 +397,7 @@ impl ComparatorType {
             | ComparatorType::Varint
             | ComparatorType::Decimal
             | ComparatorType::Duration
+            | ComparatorType::Date
             | ComparatorType::Json => true,
             ComparatorType::List(element_comparator) => element_comparator.supports_ordering(),
             ComparatorType::Set(_) => false, // Sets only support equality
@@ -512,6 +517,15 @@ impl ComparatorType {
             (Value::Timestamp(l), Value::Timestamp(r)) => Ok(l.cmp(r)),
             _ => Err(Error::Schema(
                 "Type mismatch: expected timestamp values".to_string(),
+            )),
+        }
+    }
+
+    fn compare_date(&self, left: &Value, right: &Value) -> Result<Ordering> {
+        match (left, right) {
+            (Value::Date(l), Value::Date(r)) => Ok(l.cmp(r)),
+            _ => Err(Error::Schema(
+                "Type mismatch: expected date values".to_string(),
             )),
         }
     }

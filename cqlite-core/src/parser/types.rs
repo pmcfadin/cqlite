@@ -289,9 +289,16 @@ pub fn parse_timestamp(input: &[u8]) -> IResult<&[u8], Value> {
     map(be_i64, |ts_ms| Value::Timestamp(ts_ms * 1000))(input) // Convert ms to μs (statistics format)
 }
 
-/// Parse date (32-bit days since epoch)
+/// Parse date (32-bit days since epoch with Integer.MIN_VALUE offset)
+///
+/// Cassandra encodes DATE as an unsigned 32-bit integer shifted by Integer.MIN_VALUE
+/// (2^31 = 2,147,483,648) for byte-order comparability. To decode, we add i32::MIN back.
 pub fn parse_date(input: &[u8]) -> IResult<&[u8], Value> {
-    map(be_u32, |days| Value::Date(days as i32))(input)
+    map(be_u32, |stored| {
+        // Cassandra DATE: decode by adding i32::MIN back
+        let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
+        Value::Date(days_since_epoch)
+    })(input)
 }
 
 /// Parse time (64-bit nanoseconds since midnight)
@@ -2439,12 +2446,15 @@ mod tests {
 
     #[test]
     fn test_parse_date() {
-        // Date: days since epoch (u32)
-        let days: u32 = 19710; // 2023-12-18
-        let data = days.to_be_bytes();
+        // Cassandra DATE format: stored as u32 with Integer.MIN_VALUE offset
+        // For example, 2023-12-18 is 19710 days since epoch
+        // Cassandra stores it as: 19710 - i32::MIN = 19710 + 2147483648 = 2147503358
+        let days_since_epoch: i32 = 19710; // 2023-12-18
+        let stored = (days_since_epoch as u32).wrapping_sub(i32::MIN as u32);
+        let data = stored.to_be_bytes();
         let (remaining, value) = parse_date(&data).unwrap();
         assert!(remaining.is_empty());
-        assert_eq!(value, Value::Date(days as i32));
+        assert_eq!(value, Value::Date(days_since_epoch));
     }
 
     #[test]
