@@ -1,9 +1,10 @@
-//! Integration test validating spec-accurate Index.db offset extraction (Issue #92)
+//! Integration test validating spec-accurate Index.db offset extraction (Issue #92, #237)
 //!
-//! This test validates the no-heuristics mandate:
-//! - Index.db parsed WITHOUT Summary.db must return 0 offsets (no guessing)
-//! - Index.db parsed WITH Summary.db must use correlation for actual offsets
-//! - This ensures compliance with Issue #28 no-heuristics requirement
+//! This test validates correct Index.db parsing:
+//! - Index.db in NB format (Cassandra 5.0+) contains VInt-encoded offsets
+//! - Offsets are parsed directly from Index.db using proper VInt decoding (Issue #237)
+//! - Summary.db is used for sampling/optimization, not required for basic offset discovery
+//! - This ensures compliance with Issue #28 no-heuristics requirement (we read actual data)
 
 use cqlite_core::{
     config::Config,
@@ -33,8 +34,9 @@ fn find_table_dir(datasets_root: &str, table_name: &str) -> Option<PathBuf> {
 }
 
 #[tokio::test]
-async fn test_index_without_summary_returns_zero() {
-    // Test that parsing Index.db without Summary.db returns 0 offsets (no heuristics)
+async fn test_index_parses_vint_offsets() {
+    // Test that Index.db correctly parses VInt-encoded offsets (Issue #237 fix)
+    // NB format (Cassandra 5.0+) stores offsets as unsigned VInts directly in Index.db
     let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
         .expect("CQLITE_DATASETS_ROOT must be set for this test");
 
@@ -56,22 +58,54 @@ async fn test_index_without_summary_returns_zero() {
             .expect("Failed to create Platform"),
     );
 
-    // Parse Index.db WITHOUT Summary.db
+    // Parse Index.db - should get real VInt-decoded offsets
     let index_reader = IndexReader::open(&index_path, Arc::clone(&platform))
         .await
         .expect("Failed to open Index.db");
 
     let entries = index_reader.get_partition_entries();
 
-    // All offsets should be 0 (Issue #92 - no heuristics mandate)
-    for entry in entries {
-        assert_eq!(
-            entry.data_offset, 0,
-            "Without Summary.db, offsets must be 0 (no heuristics)"
-        );
+    // Should have entries with actual offsets (not zeros)
+    assert!(
+        !entries.is_empty(),
+        "Index.db should contain partition entries"
+    );
+
+    // First entry should have offset 0 (first partition starts at beginning of data section)
+    // Subsequent entries should have increasing offsets
+    let mut prev_offset = 0u64;
+    for (idx, entry) in entries.iter().enumerate() {
+        if idx == 0 {
+            // First partition typically starts at offset 0
+            assert_eq!(
+                entry.data_offset, 0,
+                "First partition should start at offset 0"
+            );
+        } else {
+            // Subsequent partitions should have increasing offsets
+            assert!(
+                entry.data_offset >= prev_offset,
+                "Partition {} offset ({}) should be >= previous offset ({})",
+                idx,
+                entry.data_offset,
+                prev_offset
+            );
+        }
+        prev_offset = entry.data_offset;
     }
 
-    println!("✅ Verified: Index.db without Summary.db returns zero offsets (no heuristics)");
+    // Verify we have multiple partitions with non-zero offsets
+    let non_zero_count = entries.iter().filter(|e| e.data_offset > 0).count();
+    assert!(
+        non_zero_count > 0,
+        "Should have partitions with non-zero offsets (Issue #237 VInt parsing)"
+    );
+
+    println!(
+        "✅ Verified: Index.db VInt parsing works - {} entries, {} with non-zero offsets",
+        entries.len(),
+        non_zero_count
+    );
 }
 
 #[tokio::test]
