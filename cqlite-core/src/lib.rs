@@ -32,12 +32,8 @@ pub mod discovery;
 #[doc(hidden)]
 pub mod testing;
 
-// Memory safety testing modules
-#[cfg(test)]
-pub mod memory_safety_runner;
+// NOTE: memory_safety_runner moved to tools/memory-safety-runner (Issue #245)
 // NOTE: memory_safety_tests disabled - MemTable removed in Issue #175
-// #[cfg(test)]
-// pub mod memory_safety_tests;
 
 // Re-export main types for convenience
 pub use crate::{

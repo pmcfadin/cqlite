@@ -28,8 +28,6 @@ pub mod result;
 #[cfg(feature = "state_machine")]
 pub mod select_ast;
 #[cfg(feature = "state_machine")]
-pub mod select_demo;
-#[cfg(feature = "state_machine")]
 pub mod select_executor;
 #[cfg(feature = "state_machine")]
 pub mod select_integration_tests;

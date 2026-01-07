@@ -1,0 +1,11 @@
+[package]
+name = "memory-safety-runner"
+version.workspace = true
+edition.workspace = true
+description = "Memory safety testing tools for CQLite (Miri, Valgrind, AddressSanitizer)"
+
+[dependencies]
+# No external dependencies - uses only std library
+
+[dev-dependencies]
+# None needed

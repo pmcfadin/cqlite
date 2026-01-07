@@ -6,3 +6,9 @@ edition.workspace = true
 [dependencies]
 cqlite-core = { path = "../cqlite-core" }
 tokio = { workspace = true, features = ["full"] }
+log = { workspace = true }
+env_logger = { workspace = true }
+
+[[bin]]
+name = "select_demo"
+path = "src/select_demo.rs"
