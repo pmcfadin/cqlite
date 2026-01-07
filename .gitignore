@@ -142,3 +142,25 @@ performance.json
 .claude-flow/
 .swarm/
 memory.db
+
+# Development artifacts (added for OSS cleanup)
+.cqlite.toml
+cobertura.xml
+
+# Generated test outputs
+parity_test_results.txt
+performance_benchmarks.json
+property_test_results.json
+ci-validation-results/
+validation_artifacts/
+
+# Binaries in root  
+check_vuint
+test_issue_*
+
+# Development directories
+config/
+
+# Test data archives (fetched via scripts)
+cassandra5-small.tar.gz
+cassandra5-small.tar.gz.sha256

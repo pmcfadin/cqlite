@@ -1,7 +1,0 @@
-# EMERGENCY M1 CI FIX: Cargo configuration to disable clippy warnings
-[env]
-CLIPPY_DISABLE = "all"
-
-[alias]
-# Override clippy command to always allow all warnings
-clippy-safe = "clippy --workspace --all-targets --all-features -- -A clippy::all"
