@@ -42,7 +42,7 @@ pub trait CqlParser: Debug + Send + Sync {
     /// # Arguments
     /// * `input` - The expression text (e.g., "id = ? AND name LIKE 'test%'")
     ///
-    /// # Returns  
+    /// # Returns
     /// * `Ok(CqlExpression)` - Successfully parsed expression
     /// * `Err(ParserError)` - Parse error with details
     async fn parse_expression(&self, input: &str) -> Result<CqlExpression>;
@@ -153,7 +153,7 @@ pub trait CqlVisitor<T>: Debug {
     /// Visit a SELECT statement
     fn visit_select(&mut self, select: &CqlSelect) -> Result<T>;
 
-    /// Visit an INSERT statement  
+    /// Visit an INSERT statement
     fn visit_insert(&mut self, insert: &CqlInsert) -> Result<T>;
 
     /// Visit an UPDATE statement
@@ -369,7 +369,7 @@ pub trait StreamingParser: CqlParser {
 pub struct SourcePosition {
     /// Line number (1-based)
     pub line: u32,
-    /// Column number (1-based)  
+    /// Column number (1-based)
     pub column: u32,
     /// Byte offset in input
     pub offset: u32,

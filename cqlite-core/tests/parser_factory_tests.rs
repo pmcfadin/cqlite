@@ -1,6 +1,6 @@
-use cqlite_core::parser::config::{ParserBackend, ParserConfig, ParserFeature};
-use cqlite_core::parser::factory::{ParserFactory, ParserRegistry, UseCase};
-use cqlite_core::parser::traits::CqlParserFactory;
+use cqlite_core::cql::config::{ParserBackend, ParserConfig, ParserFeature};
+use cqlite_core::cql::factory::{ParserFactory, ParserRegistry, UseCase};
+use cqlite_core::cql::traits::CqlParserFactory;
 use std::time::Duration;
 
 #[test]
@@ -265,7 +265,7 @@ fn test_complex_configuration_scenarios() {
 
 #[tokio::test]
 async fn test_benchmark_functionality() {
-    use cqlite_core::parser::factory::benchmarks::{benchmark_parsers, BenchmarkConfig};
+    use cqlite_core::cql::factory::benchmarks::{benchmark_parsers, BenchmarkConfig};
 
     // Test benchmark configuration
     let mut config = BenchmarkConfig::default();

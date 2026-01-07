@@ -85,7 +85,7 @@ impl SSTableReader {
             header_buffer.truncate(bytes_read);
         }
 
-        let config = crate::parser::config::ParserConfig::default();
+        let config = crate::cql::config::ParserConfig::default();
         let parser = SSTableParser::new(config)?;
         // Parse the header using enhanced version detection - strict error propagation
         let header = parse_header_with_version_detection(&header_buffer, path)

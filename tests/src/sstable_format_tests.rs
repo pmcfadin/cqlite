@@ -21,8 +21,7 @@ pub struct SSTableFormatTests {
 impl SSTableFormatTests {
     pub fn new() -> Self {
         Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
-                .unwrap(),
+            parser: SSTableParser::new(cqlite_core::cql::ParserConfig::default()).unwrap(),
         }
     }
 

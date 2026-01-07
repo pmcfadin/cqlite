@@ -89,8 +89,7 @@ impl ParserValidationSuite {
         let test_data_path = current_dir.join(TEST_ENV_PATH);
 
         Self {
-            parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
-                .unwrap(),
+            parser: SSTableParser::new(cqlite_core::cql::ParserConfig::default()).unwrap(),
             test_data_path,
             temp_dir: None,
         }

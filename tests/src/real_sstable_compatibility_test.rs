@@ -81,7 +81,7 @@ pub struct RealSSTableCompatibilityTester {
 impl RealSSTableCompatibilityTester {
     /// Create new tester instance
     pub fn new(config: RealCompatibilityConfig) -> Result<Self> {
-        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+        let parser = SSTableParser::new(cqlite_core::cql::ParserConfig::default())?;
         Ok(Self {
             config,
             _parser: parser,

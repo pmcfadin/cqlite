@@ -1,5 +1,5 @@
-use cqlite_core::parser::error::{ErrorCategory, ErrorContext, ErrorSeverity, ParserError};
-use cqlite_core::parser::traits::SourcePosition;
+use cqlite_core::cql::error::{ErrorCategory, ErrorContext, ErrorSeverity, ParserError};
+use cqlite_core::cql::traits::SourcePosition;
 
 #[test]
 fn test_parser_error_creation_all_types() {
@@ -322,7 +322,7 @@ fn test_error_conversion_to_core_error() {
 
 #[test]
 fn test_error_utils_nom_conversion() {
-    use cqlite_core::parser::error::utils::from_nom_error;
+    use cqlite_core::cql::error::utils::from_nom_error;
     use nom::error::Error as NomError;
 
     // Test nom error conversion
@@ -346,7 +346,7 @@ fn test_error_utils_nom_conversion() {
 
 #[test]
 fn test_error_utils_contextual_error_creation() {
-    use cqlite_core::parser::error::utils::create_contextual_error;
+    use cqlite_core::cql::error::utils::create_contextual_error;
 
     let input = "SELECT * FROM users\nWHERE id = ?".to_string();
     let context =
@@ -368,7 +368,7 @@ fn test_error_utils_contextual_error_creation() {
 
 #[test]
 fn test_error_utils_error_chaining() {
-    use cqlite_core::parser::error::utils::chain_errors;
+    use cqlite_core::cql::error::utils::chain_errors;
 
     // Test empty error list
     let empty_errors = vec![];
@@ -397,7 +397,7 @@ fn test_error_utils_error_chaining() {
 
 #[test]
 fn test_parser_warning_creation() {
-    use cqlite_core::parser::error::ParserWarning;
+    use cqlite_core::cql::error::ParserWarning;
 
     // Test basic warning creation
     let warning = ParserWarning::new("Deprecated syntax".to_string(), ErrorCategory::Syntax);
@@ -461,10 +461,17 @@ fn test_complex_error_scenarios() {
         ],
     );
 
-    assert!(matches!(complex_syntax, ParserError::SyntaxError {
+    // Check that the error has 4 expected tokens
+    let has_four_tokens = if let ParserError::SyntaxError {
         expected: Some(ref tokens),
         ..
-    } if tokens.len() == 4));
+    } = complex_syntax
+    {
+        tokens.len() == 4
+    } else {
+        false
+    };
+    assert!(has_four_tokens);
 
     // Test type mismatch with detailed information
     let detailed_type_error =

@@ -65,7 +65,7 @@ pub struct SSTableTestFixtureGenerator {
 
 impl SSTableTestFixtureGenerator {
     pub fn new(config: SSTableTestFixtureConfig, output_dir: PathBuf) -> Result<Self> {
-        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?; // Using default config
+        let parser = SSTableParser::new(cqlite_core::cql::ParserConfig::default())?; // Using default config
         Ok(Self {
             config,
             output_dir,
@@ -883,7 +883,7 @@ pub struct SSTableTestFixtureValidator {
 impl SSTableTestFixtureValidator {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            _parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?,
+            _parser: SSTableParser::new(cqlite_core::cql::ParserConfig::default())?,
         })
     }
 

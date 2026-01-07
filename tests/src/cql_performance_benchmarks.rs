@@ -68,8 +68,7 @@ impl CqlPerformanceBenchmarkSuite {
     /// Create new benchmark suite
     pub fn new() -> Self {
         Self {
-            _parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
-                .unwrap(),
+            _parser: SSTableParser::new(cqlite_core::cql::ParserConfig::default()).unwrap(),
             results: HashMap::new(),
             memory_tracker: MemoryTracker::new(),
         }

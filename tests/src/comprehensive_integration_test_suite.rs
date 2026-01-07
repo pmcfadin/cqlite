@@ -116,7 +116,7 @@ pub struct ComprehensiveIntegrationTestSuite {
 impl ComprehensiveIntegrationTestSuite {
     /// Create new test suite instance
     pub fn new(config: IntegrationTestConfig) -> Result<Self> {
-        let parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+        let parser = SSTableParser::new(cqlite_core::cql::ParserConfig::default())?;
         Ok(Self {
             config,
             _parser: parser,

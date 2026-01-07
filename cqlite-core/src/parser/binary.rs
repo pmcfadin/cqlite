@@ -4,8 +4,9 @@
 //! used in SSTable parsing, maintaining backward compatibility while
 //! transitioning to the new parser abstraction layer.
 
-use super::ast::*;
-use super::traits::{CqlParser, ParserBackendInfo, ParserFeature, PerformanceCharacteristics};
+use crate::cql::ast::*;
+use crate::cql::config::ParserConfig;
+use crate::cql::traits::{CqlParser, ParserBackendInfo, ParserFeature, PerformanceCharacteristics};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 
@@ -15,7 +16,7 @@ pub struct SSTableParser {}
 
 impl SSTableParser {
     /// Create a new binary parser
-    pub fn new(_config: super::config::ParserConfig) -> Result<Self> {
+    pub fn new(_config: ParserConfig) -> Result<Self> {
         Ok(Self {})
     }
 
@@ -145,7 +146,6 @@ pub fn parse_vint_binary(data: &[u8]) -> ParseResult<(u64, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::config::ParserConfig;
 
     #[test]
     fn test_binary_parser_creation() {

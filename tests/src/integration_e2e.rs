@@ -374,7 +374,7 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
     let _config = Config::default();
 
     // Create SSTable parser with strict Cassandra 5 compatibility
-    let _parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?; // Using default config
+    let _parser = SSTableParser::new(cqlite_core::cql::ParserConfig::default())?; // Using default config
 
     // Test 1: Parse mock Cassandra 5+ SSTable header
     let mock_header = create_mock_cassandra5_header();

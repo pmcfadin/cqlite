@@ -230,7 +230,7 @@ pub enum CqlIndexColumn {
     Column(CqlIdentifier),
     /// KEYS() function for map columns
     Keys(CqlIdentifier),
-    /// VALUES() function for map columns  
+    /// VALUES() function for map columns
     Values(CqlIdentifier),
     /// ENTRIES() function for map columns
     Entries(CqlIdentifier),
@@ -604,7 +604,7 @@ pub enum CqlSortDirection {
 pub struct CqlUsing {
     /// TTL specification
     pub ttl: Option<CqlExpression>,
-    /// TIMESTAMP specification  
+    /// TIMESTAMP specification
     pub timestamp: Option<CqlExpression>,
 }
 

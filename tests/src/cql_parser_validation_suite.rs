@@ -49,8 +49,7 @@ impl CqlParserValidationSuite {
     /// Create a new validation suite
     pub fn new() -> Self {
         Self {
-            _parser: SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())
-                .unwrap(),
+            _parser: SSTableParser::new(cqlite_core::cql::ParserConfig::default()).unwrap(),
             _udt_registry: UdtRegistry::new(),
             results: HashMap::new(),
             performance_metrics: Vec::new(),

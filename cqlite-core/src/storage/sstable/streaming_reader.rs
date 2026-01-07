@@ -271,7 +271,7 @@ impl StreamingSSTableReader {
             buffer
         };
 
-        let config = crate::parser::config::ParserConfig::default();
+        let config = crate::cql::config::ParserConfig::default();
         let parser = SSTableParser::new(config)?;
         // TODO: Implement parse_header method for SSTableParser - using placeholder header for now
         let header = crate::parser::header::SSTableHeader {

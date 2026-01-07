@@ -92,7 +92,7 @@ impl SchemaParserConfig {
 /// # Example
 /// ```rust,no_run
 /// # tokio_test::block_on(async {
-/// use cqlite_core::parser::schema_integration::parse_cql_schema_enhanced;
+/// use cqlite_core::cql::schema_integration::parse_cql_schema_enhanced;
 ///
 /// let cql = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, age INT)";
 /// let schema = parse_cql_schema_enhanced(cql, None).await.unwrap();
@@ -246,20 +246,34 @@ pub async fn extract_table_name_enhanced(cql: &str) -> Result<String> {
 
 /// Compatibility wrapper for the existing parse_cql_schema function
 ///
+/// **DEPRECATED**: This function exists only for backward compatibility.
+/// For new code, prefer using `cqlite_core::schema::parse_cql_schema()` which is
+/// synchronous and doesn't require tokio runtime creation.
+///
 /// This function maintains backward compatibility with the existing API
-/// while using the new parser abstraction internally.
+/// by delegating to the synchronous nom-based parser directly, avoiding
+/// the overhead of creating a tokio runtime on every call.
 ///
 /// # Arguments
 /// * `cql` - The CQL CREATE TABLE statement to parse
 ///
 /// # Returns
 /// * `nom::IResult<&str, TableSchema>` - Result in original format for compatibility
+#[deprecated(
+    since = "0.2.0",
+    note = "Use cqlite_core::schema::parse_cql_schema() instead - it's synchronous and more efficient"
+)]
 pub fn parse_cql_schema_compat(cql: &str) -> nom::IResult<&str, TableSchema> {
-    // Use tokio runtime to run the async function
-    let rt = tokio::runtime::Runtime::new()
+    use super::config::ParserConfig;
+    use super::nom_backend::NomParser;
+
+    // Create nom parser directly (synchronous, no runtime overhead)
+    let parser_config = ParserConfig::minimal();
+    let parser = NomParser::new(parser_config)
         .map_err(|_e| nom::Err::Error(nom::error::Error::new(cql, nom::error::ErrorKind::Fail)))?;
 
-    match rt.block_on(parse_cql_schema_simple(cql)) {
+    // Use synchronous parsing (nom parser doesn't actually need async)
+    match parser.parse_create_table_to_schema(cql) {
         Ok(schema) => Ok(("", schema)),
         Err(_) => Err(nom::Err::Error(nom::error::Error::new(
             cql,

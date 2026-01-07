@@ -4,9 +4,9 @@
 //! to extract table schema information including table names, column definitions,
 //! partition keys, clustering keys, and type information.
 
+use crate::cql::{CqlCreateTable, CqlDataType};
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;
-use crate::parser::{CqlCreateTable, CqlDataType};
 use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use nom::{
     branch::alt,
@@ -778,9 +778,9 @@ pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
     //
     // For now, this uses the existing nom parser for demonstration purposes.
 
-    use crate::parser::traits::CqlVisitor;
-    use crate::parser::visitor::SchemaBuilderVisitor;
-    use crate::parser::CqlStatement;
+    use crate::cql::traits::CqlVisitor;
+    use crate::cql::visitor::SchemaBuilderVisitor;
+    use crate::cql::CqlStatement;
 
     // Parse using the existing nom parser to get the TableSchema
     let schema = parse_cql_schema(cql)?;
@@ -798,7 +798,7 @@ pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
 /// Helper function to convert TableSchema to AST for demonstration
 /// (In real usage, the AST would come directly from a parser)
 fn table_schema_to_ast(schema: &TableSchema) -> Result<CqlCreateTable> {
-    use crate::parser::{
+    use crate::cql::{
         CqlColumnDef, CqlCreateTable, CqlIdentifier, CqlPrimaryKey, CqlTable, CqlTableOptions,
     };
 
@@ -853,7 +853,7 @@ fn table_schema_to_ast(schema: &TableSchema) -> Result<CqlCreateTable> {
 
 /// Convert string type to CqlDataType (simplified version)
 fn string_to_cql_data_type(type_str: &str) -> Result<CqlDataType> {
-    use crate::parser::{CqlDataType, CqlIdentifier};
+    use crate::cql::{CqlDataType, CqlIdentifier};
 
     let type_lower = type_str.trim().to_lowercase();
 

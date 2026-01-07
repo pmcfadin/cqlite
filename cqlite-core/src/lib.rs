@@ -4,6 +4,7 @@
 //! supporting both native and WASM deployments.
 
 pub mod config;
+pub mod cql;
 pub mod error;
 pub mod parser;
 // DISABLED FOR M1: Security and performance modules causing compilation errors

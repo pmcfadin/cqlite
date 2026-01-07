@@ -120,7 +120,7 @@ impl PerformanceBenchmarks {
         let mut successful_parses = 0;
 
         for _ in 0..iterations {
-            let _parser = SSTableParser::new(cqlite_core::parser::config::ParserConfig::default())?;
+            let _parser = SSTableParser::new(cqlite_core::cql::ParserConfig::default())?;
             match parse_sstable_header(&serialized) {
                 Ok(_) => successful_parses += 1,
                 Err(_) => {}
