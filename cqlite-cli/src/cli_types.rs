@@ -126,15 +126,16 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start interactive REPL mode with cqlsh-compatible commands
+    /// Start interactive REPL mode (basic text interface)
     #[command(
-        long_about = "Interactive REPL supporting meta-commands (:config, :schema, :status, :health) and CQL queries (SELECT, DESCRIBE, USE). Launch with 'cqlite repl' or default 'cqlite'."
+        long_about = "Interactive REPL supporting meta-commands (:config, :schema, :status, :health) and CQL queries (SELECT, DESCRIBE, USE). This is a basic text-based REPL with status line. For the full terminal UI, use 'cqlite tui'."
     )]
-    Repl {
-        /// Enable TUI mode
-        #[arg(long)]
-        tui: bool,
-    },
+    Repl,
+    /// Start Terminal UI mode (full-screen interface)
+    #[command(
+        long_about = "Full-screen terminal UI with panels for tables, query results, and history. Navigate with Tab, toggle panels with F2-F4, reset layout with F5. Exit with Ctrl+C or Esc. For basic REPL mode, use 'cqlite repl'."
+    )]
+    Tui,
     /// Execute CQL queries against local SSTable data
     #[command(
         long_about = "Friendly wrapper for one-shot query execution. Example: cqlite query --schema schemas/ --data-dir ./test-data -e \"SELECT * FROM ks.users LIMIT 5\" --out json"

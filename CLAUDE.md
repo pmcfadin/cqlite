@@ -81,6 +81,25 @@ cargo run --package cqlite-cli -- \
 - `--query` is an alias for `--execute` (`-e`)
 - Environment variable: `CQLITE_OUT` sets default output format
 
+### CLI Modes (Issue #242)
+
+The CLI supports three modes with enhanced status display:
+
+**TUI Mode** (`cqlite tui`): Full terminal UI with status bar showing:
+```
+Health: OK | Mem: 24.5 MB | Data: 1.2 GB | Status: Ready | Mode: EDIT
+```
+
+**REPL Mode** (`cqlite repl`): Interactive shell with status line:
+```
+[OK] Mem: 24.5 MB | Data: 1.2 GB
+cqlite>
+```
+
+**One-shot Mode**: Direct query execution with `--execute` or `--query` flags.
+
+Status metrics refresh every 5 seconds. Status line disabled for piped output.
+
 ## Workspace Structure
 
 ```

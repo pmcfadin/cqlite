@@ -12,6 +12,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod status_metrics;
 
 // CLI types module - re-exports from main
 pub mod cli_types;
@@ -27,6 +28,9 @@ pub mod script_executor;
 
 // REPL engine module (Issue #16)
 pub mod repl;
+
+// TUI mode implementation (Issue #251)
+pub mod tui;
 
 #[cfg(all(test, feature = "state_machine"))]
 pub mod test_infrastructure;

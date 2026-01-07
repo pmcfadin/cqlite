@@ -144,6 +144,11 @@ impl ReplSession {
         &self.db_path
     }
 
+    /// Get reference to the database (for status metrics collection)
+    pub fn database(&self) -> Option<&Database> {
+        Some(&self.database)
+    }
+
     /// Get data directory
     pub fn data_dir(&self) -> Option<&Path> {
         self.data_dir.as_deref()

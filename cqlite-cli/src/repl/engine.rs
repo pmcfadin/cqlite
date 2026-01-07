@@ -8,9 +8,10 @@ use super::{
     OutputFormat, ParsedCommand, ReplError, ReplMode, ReplResult, ReplSession,
 };
 use crate::config::Config;
+use crate::status_metrics::{HealthIndicator, StatusMetrics, METRICS_REFRESH_INTERVAL};
 use colored::Colorize;
 use cqlite_core::{Database, QueryResult};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 /// Core REPL engine configuration
@@ -38,6 +39,8 @@ pub struct ReplConfig {
     pub prompt: String,
     /// Secondary prompt for multi-line commands
     pub prompt_continuation: String,
+    /// Show status line before prompt (Issue #242)
+    pub show_status_line: bool,
 }
 
 impl Default for ReplConfig {
@@ -54,6 +57,7 @@ impl Default for ReplConfig {
             enable_paging: true,
             prompt: "cqlite> ".to_string(),
             prompt_continuation: "    -> ".to_string(),
+            show_status_line: true,
         }
     }
 }
@@ -78,6 +82,8 @@ pub struct ReplEngine {
     schema_paths: Vec<std::path::PathBuf>,
     /// Cassandra version hint
     version_hint: Option<String>,
+    /// Cached status metrics for status line (Issue #242)
+    cached_metrics: Option<StatusMetrics>,
 }
 
 impl ReplEngine {
@@ -136,6 +142,7 @@ impl ReplEngine {
             in_multiline: false,
             schema_paths: Vec::new(),
             version_hint: None,
+            cached_metrics: None,
         })
     }
 
@@ -159,8 +166,8 @@ impl ReplEngine {
         let mut input = String::new();
 
         loop {
-            // Display prompt
-            self.display_prompt()?;
+            // Display prompt (with status line)
+            self.display_prompt().await?;
 
             // Read input
             input.clear();
@@ -217,10 +224,151 @@ impl ReplEngine {
 
     /// Run interactive REPL mode (with enhanced features)
     async fn run_interactive_repl(&mut self) -> ReplResult<()> {
-        // For now, fall back to basic REPL
-        // In the future, this would integrate with rustyline or similar
-        // for advanced line editing, history, and completion
-        self.run_basic_repl().await
+        use rustyline::error::ReadlineError;
+        use rustyline::DefaultEditor;
+
+        // Create rustyline editor
+        let mut rl: DefaultEditor = DefaultEditor::new()
+            .map_err(|e| ReplError::Session(format!("Failed to initialize line editor: {}", e)))?;
+
+        // Load history from file if persistent history is enabled
+        if self.history.is_some() {
+            // Try to get history file path from config
+            let history_file = self.session.config().repl.history_file.clone().or_else(|| {
+                // Fallback to default location in user's home directory
+                dirs::home_dir().map(|home| home.join(".cqlite_history"))
+            });
+
+            if let Some(ref path) = history_file {
+                // Load history from file (ignore errors if file doesn't exist)
+                let _ = rl.load_history(path);
+            }
+        }
+
+        // Display startup banner
+        self.display_startup_banner().await?;
+
+        loop {
+            // Display status line before prompt (not during multiline)
+            if !self.in_multiline {
+                self.display_status_line().await?;
+            }
+
+            // Get the appropriate prompt
+            let prompt = if self.in_multiline {
+                self.config.prompt_continuation.clone()
+            } else {
+                self.format_prompt()
+            };
+
+            // Read line with rustyline (supports arrow keys, history, etc.)
+            let readline = rl.readline(&prompt);
+
+            match readline {
+                Ok(line) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    // Add to rustyline history
+                    let _ = rl.add_history_entry(&line);
+
+                    match self.process_input(trimmed).await {
+                        Ok(ExecutionResult::Continue) => continue,
+                        Ok(ExecutionResult::Exit) => break,
+                        Ok(ExecutionResult::ExitWithCode(code)) => {
+                            // Save history before exiting
+                            if let Some(history_file) =
+                                self.session.config().repl.history_file.clone().or_else(|| {
+                                    dirs::home_dir().map(|home| home.join(".cqlite_history"))
+                                })
+                            {
+                                let _ = rl.save_history(&history_file);
+                            }
+
+                            // Convert exit code to appropriate ReplError
+                            return Err(match code {
+                                3 => ReplError::SchemaError("Schema error occurred".to_string()),
+                                4 => ReplError::DataDirectoryError(
+                                    "Data directory error occurred".to_string(),
+                                ),
+                                5 => {
+                                    ReplError::UnsupportedFeature("Unsupported feature".to_string())
+                                }
+                                _ => ReplError::Session(format!("Exit with code {}", code)),
+                            });
+                        }
+                        Err(e) => {
+                            // Print error but continue REPL (non-fatal errors)
+                            eprintln!("{} {}", "Error:".red().bold(), e);
+                            // For certain errors, we should exit instead of continuing
+                            if matches!(
+                                e,
+                                ReplError::SchemaError(_)
+                                    | ReplError::DataDirectoryError(_)
+                                    | ReplError::UnsupportedFeature(_)
+                            ) {
+                                // Save history before exiting on fatal error
+                                if let Some(history_file) =
+                                    self.session.config().repl.history_file.clone().or_else(|| {
+                                        dirs::home_dir().map(|home| home.join(".cqlite_history"))
+                                    })
+                                {
+                                    let _ = rl.save_history(&history_file);
+                                }
+                                return Err(e);
+                            }
+                            continue;
+                        }
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    // Ctrl-C pressed
+                    if self.in_multiline {
+                        // Cancel multi-line input
+                        self.reset_command_buffer();
+                        println!("^C");
+                        continue;
+                    } else {
+                        // Exit on Ctrl-C at regular prompt
+                        println!("^C");
+                        break;
+                    }
+                }
+                Err(ReadlineError::Eof) => {
+                    // Ctrl-D pressed (EOF)
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("{} Readline error: {}", "Error:".red().bold(), err);
+                    break;
+                }
+            }
+        }
+
+        // Save history to file when exiting
+        if let Some(history_file) = self
+            .session
+            .config()
+            .repl
+            .history_file
+            .clone()
+            .or_else(|| dirs::home_dir().map(|home| home.join(".cqlite_history")))
+        {
+            // Ensure parent directory exists
+            if let Some(parent) = history_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            // Save history
+            if let Err(e) = rl.save_history(&history_file) {
+                eprintln!("{} Failed to save history: {}", "Warning:".yellow(), e);
+            }
+        }
+
+        self.display_goodbye().await?;
+        Ok(())
     }
 
     /// Run TUI REPL mode
@@ -411,8 +559,13 @@ impl ReplEngine {
         self.in_multiline = false;
     }
 
-    /// Display REPL prompt
-    fn display_prompt(&self) -> ReplResult<()> {
+    /// Display REPL prompt with optional status line (Issue #242)
+    async fn display_prompt(&mut self) -> ReplResult<()> {
+        // Display status line before prompt (not during multiline)
+        if !self.in_multiline {
+            self.display_status_line().await?;
+        }
+
         let prompt = if self.in_multiline {
             self.config.prompt_continuation.clone()
         } else {
@@ -421,6 +574,50 @@ impl ReplEngine {
 
         print!("{}", prompt);
         io::stdout().flush().map_err(ReplError::Io)?;
+        Ok(())
+    }
+
+    /// Display status line with health, memory, and data metrics (Issue #242)
+    async fn display_status_line(&mut self) -> ReplResult<()> {
+        // Skip if disabled or colors are off or not a TTY
+        if !self.config.show_status_line || !self.config.enable_colors {
+            return Ok(());
+        }
+
+        // Check if stdout is a TTY (skip for piped output)
+        if !io::stdout().is_terminal() {
+            return Ok(());
+        }
+
+        // Refresh metrics if stale (METRICS_REFRESH_INTERVAL cache)
+        let needs_refresh = self
+            .cached_metrics
+            .as_ref()
+            .map(|m: &StatusMetrics| m.is_stale(METRICS_REFRESH_INTERVAL))
+            .unwrap_or(true);
+
+        if needs_refresh {
+            self.cached_metrics = Some(
+                StatusMetrics::collect(self.session.data_dir(), self.session.database()).await,
+            );
+        }
+
+        // Format and display status line
+        if let Some(ref metrics) = self.cached_metrics {
+            let health_str = match metrics.health {
+                HealthIndicator::Ok => "OK".green().to_string(),
+                HealthIndicator::Warning => "WARN".yellow().to_string(),
+                HealthIndicator::Error => "ERR".red().to_string(),
+            };
+
+            println!(
+                "[{}] Mem: {} | Data: {}",
+                health_str,
+                metrics.format_memory().cyan(),
+                metrics.format_data().cyan()
+            );
+        }
+
         Ok(())
     }
 

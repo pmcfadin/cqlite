@@ -18,6 +18,7 @@ mod error;
 mod formatter;
 mod output;
 mod script_executor;
+mod status_metrics;
 
 use cli_types::{AdminCommands, Cli, Commands, OutputMode};
 use commands::info::execute_info_command;
@@ -27,9 +28,7 @@ use commands::info::execute_info_command;
 // mod pagination;
 // mod query_executor;
 mod repl; // Core REPL engine
-          // mod repl_data_integration; // REPL data integration
-          // mod table_scanner;
-          // mod tui;
+mod tui; // TUI mode implementation (ratatui)
 
 #[tokio::main]
 async fn main() {
@@ -358,7 +357,7 @@ async fn run_main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Repl { tui }) => {
+        Some(Commands::Repl) => {
             // Check if we need to run ingestion from config file
             // Returns (Database, Option<SchemaRegistry>) to preserve schema info
             #[cfg(feature = "state_machine")]
@@ -408,13 +407,10 @@ async fn run_main() -> Result<()> {
             #[cfg(not(feature = "state_machine"))]
             let (database, repl_schema_registry) = (database, startup_schema_registry);
 
+            // REPL mode (interactive with line editing and history)
             // Create REPL configuration from loaded config (not hardcoded!)
             let repl_config = repl::ReplConfig {
-                mode: if tui {
-                    repl::ReplMode::Tui
-                } else {
-                    repl::ReplMode::Basic
-                },
+                mode: repl::ReplMode::Interactive,
                 // Use config.repl settings with CLI flag overrides
                 enable_history: config.repl.enable_history,
                 enable_completion: config.repl.enable_completion,
@@ -430,6 +426,7 @@ async fn run_main() -> Result<()> {
                 enable_paging: config.repl.enable_paging,
                 prompt: config.repl.prompt.clone(),
                 prompt_continuation: config.repl.prompt_continuation.clone(),
+                show_status_line: true, // Issue #242: Enable status line by default
             };
 
             // Initialize and run REPL engine with schema registry from startup ingestion
@@ -458,6 +455,61 @@ async fn run_main() -> Result<()> {
                     _ => anyhow::anyhow!("REPL error: {}", e),
                 }
             })
+        }
+        Some(Commands::Tui) => {
+            // Check if we need to run ingestion from config file
+            // Returns (Database, Option<SchemaRegistry>) to preserve schema info
+            #[cfg(feature = "state_machine")]
+            let (database, _tui_schema_registry) = if !config.schema_paths.is_empty()
+                && config.data_directory.is_some()
+            {
+                info!("TUI: Running ingestion from config file");
+                info!(
+                    "TUI: Loading {} schema file(s) from config",
+                    config.schema_paths.len()
+                );
+                info!(
+                    "TUI: Discovering SSTables in: {}",
+                    config.data_directory.as_ref().unwrap().display()
+                );
+
+                let ingestion_config = IngestionConfig {
+                    schema_paths: config.schema_paths.clone(),
+                    data_dir: config.data_directory.clone().unwrap(),
+                    version_hint: config.cassandra_version.clone(),
+                    core_config: create_core_config(&config)?,
+                    table_directory_filter: None, // TUI doesn't filter tables
+                };
+
+                match ingest(ingestion_config).await {
+                    Ok(result) => {
+                        info!(
+                            "TUI ingestion complete: {} schema(s) loaded, {} SSTable(s) discovered, {} keyspace(s) found",
+                            result.schema_load_result.schemas_loaded,
+                            result.discovery_summary.sstables_found,
+                            result.discovery_summary.keyspaces.len()
+                        );
+                        (result.database, Some(result.schema_registry))
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "TUI ingestion failed: {}. Check schema paths and data directory in config file.",
+                            e
+                        ));
+                    }
+                }
+            } else {
+                // No config-based ingestion, use existing database and startup schema registry
+                (database, startup_schema_registry)
+            };
+
+            #[cfg(not(feature = "state_machine"))]
+            let database = database;
+
+            // TUI mode (full-screen terminal UI)
+            tui::start_tui_mode(&db_path, &config, database)
+                .await
+                .map_err(|e| anyhow::anyhow!("TUI error: {}", e))
         }
         Some(Commands::Query {
             query,

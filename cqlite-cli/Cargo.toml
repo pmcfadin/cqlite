@@ -70,6 +70,12 @@ regex = "1.10"
 # Base64 encoding for binary data display
 base64 = "0.21"
 
+# System memory monitoring (cross-platform)
+sysinfo = "0.30"
+
+# Line editing for REPL
+rustyline = "14.0"
+
 # Development dependencies
 [dev-dependencies]
 tempfile = { workspace = true }
