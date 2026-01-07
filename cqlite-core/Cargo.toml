@@ -40,7 +40,7 @@ crc32fast = { workspace = true }
 crossbeam = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
-lru = "0.12"
+lru = "0.16"
 
 # Memory management
 bytes = { workspace = true }
