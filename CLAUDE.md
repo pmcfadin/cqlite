@@ -158,11 +158,22 @@ Location: `test-data/datasets/sstables/`
 
 ## Feature Flags
 
-Default: `all-compression`, `metrics`, `experimental`, `state_machine`
+Default (cqlite-core): `all-compression`, `state_machine`
+
+| Feature | Description | In Defaults? |
+|---------|-------------|--------------|
+| `all-compression` | LZ4, Snappy, Deflate, Zstd support | Yes |
+| `state_machine` | Query engine and discovery | Yes |
+| `cli-helpers` | CLI-specific ingestion/REPL API (Issue #249) | No |
+| `metrics` | Performance metrics collection | No |
+| `experimental` | Experimental features | No |
 
 ```bash
-# Minimal build (no query engine)
-cargo build --no-default-features --features all-compression,metrics
+# Minimal build (pure library, no query engine)
+cargo build --package cqlite-core --no-default-features --features all-compression
+
+# Build with CLI helpers for integration testing
+cargo build --package cqlite-core --features cli-helpers
 ```
 
 ## Troubleshooting

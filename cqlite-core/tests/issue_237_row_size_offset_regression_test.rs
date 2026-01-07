@@ -13,7 +13,7 @@
 //! 2. simple_table (no clustering keys) still works as a baseline
 //! 3. static_columns_table (another clustering key table) works
 
-#![cfg(feature = "state_machine")]
+#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
 use std::path::PathBuf;
 

@@ -2,8 +2,8 @@
 
 pub mod sstable;
 
-// REPL data access components
-#[cfg(feature = "state_machine")]
+// REPL data access components (Issue #249: CLI-specific)
+#[cfg(feature = "cli-helpers")]
 pub mod repl_data_api;
 pub mod schema_discovery;
 pub mod sstable_data_manager;

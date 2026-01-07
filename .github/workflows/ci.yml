@@ -92,7 +92,7 @@ jobs:
           echo "CQLITE_DATASETS_ROOT=$CQLITE_DATASETS_ROOT"
           echo "Checking dataset files:"
           ls -la "$CQLITE_DATASETS_ROOT/sstables/test_basic/" || echo "test_basic directory not found"
-          cargo test --package cqlite-core -- --skip test_legacy_format_allows_blob_fallback_with_feature
+          cargo test --package cqlite-core --features cli-helpers -- --skip test_legacy_format_allows_blob_fallback_with_feature
 
       - name: Run CLI unit tests
         env:

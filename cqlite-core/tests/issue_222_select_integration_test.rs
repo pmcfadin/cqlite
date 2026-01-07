@@ -17,7 +17,7 @@
 //! - Column projection
 //! - WHERE clause filtering
 
-#![cfg(feature = "state_machine")]
+#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
 use std::path::{Path, PathBuf};
 

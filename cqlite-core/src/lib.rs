@@ -21,8 +21,8 @@ pub mod query;
 pub mod schema;
 pub mod storage;
 
-// Ingestion module for one-shot schema & SSTable discovery
-#[cfg(feature = "state_machine")]
+// Ingestion module for one-shot schema & SSTable discovery (Issue #249: CLI-specific)
+#[cfg(feature = "cli-helpers")]
 pub mod ingestion;
 
 // Discovery module for SSTable scanning and coverage analysis

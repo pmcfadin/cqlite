@@ -117,6 +117,10 @@ deflate = ["dep:flate2"]
 zstd = ["dep:zstd"]
 all-compression = ["lz4", "snappy", "deflate", "zstd"]
 
+# CLI-specific helpers (Issue #249) - NOT in defaults for pure library mode
+# Requires state_machine for query engine and discovery dependencies
+cli-helpers = ["state_machine"]
+
 # Other features
 metrics = []
 pest = []
