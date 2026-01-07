@@ -1,8 +1,61 @@
-//! CQL query parser for CQLite
+//! # Query Statement Parser
 //!
-//! This module provides parsing capabilities for CQL (Cassandra Query Language)
-//! queries. It converts CQL text into structured query representations that can
-//! be executed by the query engine.
+//! Lightweight keyword-based parser for CQL DML statements in the query engine.
+//!
+//! ## Purpose
+//!
+//! This module parses SELECT, INSERT, UPDATE, and DELETE statements for execution
+//! by the M2+ query engine. It uses keyword extraction rather than full AST parsing
+//! to provide fast, lightweight query handling.
+//!
+//! ## Architecture Context
+//!
+//! This is one of four parsing subsystems in cqlite-core:
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | `cql/` | Full CQL text → AST parsing |
+//! | `parser/` | SSTable binary format parsing |
+//! | `schema/cql_parser.rs` | CREATE TABLE → TableSchema |
+//! | **`query/parser.rs`** | DML → ParsedQuery (this module) |
+//!
+//! See `docs/architecture/parser-overview.md` for the complete architecture overview.
+//!
+//! ## Key Components
+//!
+//! - [`QueryParser`] - Main parser struct with `parse()` method
+//! - [`M2SelectValidator`](super::m2_select_validator::M2SelectValidator) - Validates
+//!   SELECT queries against M2 supported subset
+//! - [`ParsedQuery`](super::ParsedQuery) - Structured query representation
+//!
+//! ## Supported Statements
+//!
+//! - **SELECT** - With WHERE (equality only for M2), ORDER BY, LIMIT
+//! - **INSERT** - Explicit or implicit column syntax
+//! - **UPDATE** - SET clause with WHERE
+//! - **DELETE** - FROM with WHERE
+//! - **CREATE TABLE** / **DROP TABLE** - Table name extraction
+//! - **DESCRIBE** / **USE** - Basic keyword parsing
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use cqlite_core::query::QueryParser;
+//!
+//! let parser = QueryParser::new(&config);
+//! let query = parser.parse("SELECT * FROM users WHERE id = 1 LIMIT 10")?;
+//! assert_eq!(query.query_type, QueryType::Select);
+//! ```
+//!
+//! ## M2 Limitations
+//!
+//! The M2 milestone supports a subset of CQL SELECT:
+//! - Partition key equality filters only (`=`)
+//! - No range operators (`>`, `<`, `>=`, `<=`)
+//! - No aggregates (COUNT, SUM, etc.)
+//! - No ALLOW FILTERING
+//!
+//! For advanced CQL parsing with full AST support, use the [`crate::cql`] module.
 
 // CQL (Cassandra Query Language) Reference:
 // https://cassandra.apache.org/doc/latest/cassandra/developing/cql/cql_singlefile.html

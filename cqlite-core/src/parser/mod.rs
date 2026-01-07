@@ -4,6 +4,19 @@
 //! It handles deserialization of binary data structures from SSTable files (Data.db,
 //! Index.db, Statistics.db, etc.) produced by Cassandra 5.0+.
 //!
+//! ## Architecture Overview
+//!
+//! This is one of four parsing subsystems in cqlite-core:
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | `cql/` | Full CQL text → AST parsing |
+//! | **`parser/`** | SSTable binary format parsing (this module) |
+//! | `schema/cql_parser.rs` | CREATE TABLE → TableSchema |
+//! | `query/parser.rs` | Lightweight DML → ParsedQuery |
+//!
+//! See `docs/architecture/parser-overview.md` for the complete architecture overview.
+//!
 //! ## Module Architecture
 //!
 //! ```text

@@ -1,7 +1,20 @@
-//! CQL Text Parsing Module
+//! # CQL Text Parsing Module
 //!
 //! This module provides CQL (Cassandra Query Language) text parsing functionality.
 //! It parses CQL query strings into Abstract Syntax Trees (AST) for further processing.
+//!
+//! ## Architecture Overview
+//!
+//! This is one of four parsing subsystems in cqlite-core:
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | **`cql/`** | Full CQL text → AST parsing (this module) |
+//! | `parser/` | SSTable binary format parsing |
+//! | `schema/cql_parser.rs` | CREATE TABLE → TableSchema |
+//! | `query/parser.rs` | Lightweight DML → ParsedQuery |
+//!
+//! See `docs/architecture/parser-overview.md` for the complete architecture overview.
 //!
 //! ## Key Distinction
 //!

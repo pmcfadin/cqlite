@@ -120,7 +120,8 @@ cqlite-core/src/
 │   │   └── v5_compressed_legacy.rs  # Main V5 parser
 │   ├── bti/                   # BTI index support
 │   └── row_cell_state_machine.rs    # OA format parser
-├── parser/                    # CQL parsing
+├── parser/                    # SSTable binary format parsing
+├── cql/                       # CQL text parsing (query strings → AST)
 ├── query/                     # Query engine (M2+)
 └── schema/                    # Schema management
 ```
