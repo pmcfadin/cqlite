@@ -109,13 +109,13 @@ impl QueryEngine {
     }
 
     /// Execute a CQL query
-    pub async fn execute(&self, sql: &str) -> Result<QueryResult> {
-        self.advanced_engine.execute(sql).await
+    pub async fn execute(&self, cql: &str) -> Result<QueryResult> {
+        self.advanced_engine.execute(cql).await
     }
 
     /// Prepare a query for repeated execution
-    pub async fn prepare(&self, sql: &str) -> Result<Arc<PreparedQuery>> {
-        self.advanced_engine.prepare(sql).await
+    pub async fn prepare(&self, cql: &str) -> Result<Arc<PreparedQuery>> {
+        self.advanced_engine.prepare(cql).await
     }
 
     /// Get query statistics
@@ -129,13 +129,13 @@ impl QueryEngine {
     }
 
     /// Explain a query
-    pub async fn explain(&self, sql: &str) -> Result<ExplainResult> {
-        self.advanced_engine.explain(sql).await
+    pub async fn explain(&self, cql: &str) -> Result<ExplainResult> {
+        self.advanced_engine.explain(cql).await
     }
 
     /// Analyze query performance
-    pub async fn analyze(&self, sql: &str) -> Result<AnalyzeResult> {
-        self.advanced_engine.analyze(sql).await
+    pub async fn analyze(&self, cql: &str) -> Result<AnalyzeResult> {
+        self.advanced_engine.analyze(cql).await
     }
 
     /// Get cache statistics
@@ -199,7 +199,7 @@ pub struct ParsedQuery {
     /// LIMIT clause
     pub limit: Option<usize>,
     /// Original CQL text
-    pub sql: String,
+    pub cql: String,
 }
 
 /// WHERE clause representation

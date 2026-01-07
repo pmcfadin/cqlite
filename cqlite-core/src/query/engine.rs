@@ -117,7 +117,7 @@ impl QueryEngine {
     }
 
     /// Execute a CQL query
-    pub async fn execute(&self, sql: &str) -> Result<QueryResult> {
+    pub async fn execute(&self, cql: &str) -> Result<QueryResult> {
         let start_time = Instant::now();
 
         // Update total queries counter
@@ -127,23 +127,23 @@ impl QueryEngine {
         }
 
         // Check if this is a SELECT statement - use advanced parser
-        let trimmed_sql = sql.trim().to_uppercase();
-        if trimmed_sql.starts_with("SELECT") {
+        let trimmed_cql = cql.trim().to_uppercase();
+        if trimmed_cql.starts_with("SELECT") {
             // For simple WHERE id = <value> queries, use normal executor for consistent key handling
             // This ensures INSERT and SELECT use the same key generation logic
-            if sql.contains("WHERE id =") && sql.split_whitespace().count() <= 8 {
+            if cql.contains("WHERE id =") && cql.split_whitespace().count() <= 8 {
                 #[cfg(debug_assertions)]
                 log::debug!(
                     "Routing simple SELECT through normal executor for consistent key handling"
                 );
                 // Fall through to normal execution path for simple point lookups
             } else {
-                return self.execute_select_query(sql, start_time).await;
+                return self.execute_select_query(cql, start_time).await;
             }
         }
 
         // Check plan cache first for non-SELECT queries
-        if let Some(mut cached_entry) = self.plan_cache.get_mut(sql) {
+        if let Some(mut cached_entry) = self.plan_cache.get_mut(cql) {
             // Update cache hit statistics
             {
                 let mut stats = self.stats.write();
@@ -162,7 +162,7 @@ impl QueryEngine {
         }
 
         // Parse the query (non-SELECT)
-        let parsed_query = self.parser.parse(sql).inspect_err(|_e| {
+        let parsed_query = self.parser.parse(cql).inspect_err(|_e| {
             // Update error statistics
             let mut stats = self.stats.write();
             stats.error_queries += 1;
@@ -173,7 +173,7 @@ impl QueryEngine {
 
         // Cache the plan if enabled
         if self.config.query.query_cache_size.unwrap_or(0) > 0 {
-            self.cache_query_plan(sql, parsed_query, plan.clone());
+            self.cache_query_plan(cql, parsed_query, plan.clone());
         }
 
         // Execute the query
@@ -186,9 +186,9 @@ impl QueryEngine {
     }
 
     /// Execute a SELECT query using the advanced parser and optimizer
-    async fn execute_select_query(&self, sql: &str, start_time: Instant) -> Result<QueryResult> {
+    async fn execute_select_query(&self, cql: &str, start_time: Instant) -> Result<QueryResult> {
         // Check plan cache first for SELECT queries too
-        if let Some(mut cached_entry) = self.plan_cache.get_mut(sql) {
+        if let Some(mut cached_entry) = self.plan_cache.get_mut(cql) {
             if cached_entry.plan.table.is_some() {
                 // Update cache hit statistics
                 {
@@ -209,12 +209,12 @@ impl QueryEngine {
 
             // Placeholder plans without table information are not reusable; drop them.
             drop(cached_entry);
-            self.plan_cache.remove(sql);
+            self.plan_cache.remove(cql);
         }
 
         // Parse SELECT statement using advanced parser
         #[cfg(feature = "state_machine")]
-        let select_statement = select_parser::parse_select(sql).inspect_err(|_e| {
+        let select_statement = select_parser::parse_select(cql).inspect_err(|_e| {
             // Update error statistics
             let mut stats = self.stats.write();
             stats.error_queries += 1;
@@ -240,21 +240,21 @@ impl QueryEngine {
     }
 
     /// Execute a query with parameters
-    pub async fn execute_with_params(&self, sql: &str, _params: &[Value]) -> Result<QueryResult> {
+    pub async fn execute_with_params(&self, cql: &str, _params: &[Value]) -> Result<QueryResult> {
         // In a real implementation, this would substitute parameters into the query
         // For now, we'll just execute the query as-is
-        self.execute(sql).await
+        self.execute(cql).await
     }
 
     /// Prepare a query for repeated execution
-    pub async fn prepare(&self, sql: &str) -> Result<Arc<PreparedQuery>> {
+    pub async fn prepare(&self, cql: &str) -> Result<Arc<PreparedQuery>> {
         // Check cache first
-        if let Some(cached) = self.prepared_cache.get(sql) {
+        if let Some(cached) = self.prepared_cache.get(cql) {
             return Ok(cached.clone());
         }
 
         // Parse and prepare the query
-        let parsed_query = self.parser.parse(sql)?;
+        let parsed_query = self.parser.parse(cql)?;
         let plan = self.planner.plan(&parsed_query).await?;
 
         let prepared = Arc::new(PreparedQuery::new(
@@ -265,7 +265,7 @@ impl QueryEngine {
 
         // Cache the prepared statement
         self.prepared_cache
-            .insert(sql.to_string(), prepared.clone());
+            .insert(cql.to_string(), prepared.clone());
 
         Ok(prepared)
     }
@@ -325,9 +325,9 @@ impl QueryEngine {
     }
 
     /// Optimize a query (return execution plan without executing)
-    pub async fn explain(&self, sql: &str) -> Result<ExplainResult> {
+    pub async fn explain(&self, cql: &str) -> Result<ExplainResult> {
         // Parse the query
-        let parsed_query = self.parser.parse(sql)?;
+        let parsed_query = self.parser.parse(cql)?;
 
         // Plan the query
         let plan = self.planner.plan(&parsed_query).await?;
@@ -369,7 +369,7 @@ impl QueryEngine {
     }
 
     /// Analyze query performance
-    pub async fn analyze(&self, sql: &str) -> Result<AnalyzeResult> {
+    pub async fn analyze(&self, cql: &str) -> Result<AnalyzeResult> {
         let start_time = Instant::now();
 
         // Execute the query multiple times to get average performance
@@ -378,7 +378,7 @@ impl QueryEngine {
 
         for _ in 0..self.config.query.analyze_iterations.unwrap_or(5) {
             let iter_start = Instant::now();
-            let result = self.execute(sql).await?;
+            let result = self.execute(cql).await?;
             execution_times.push(iter_start.elapsed());
             results.push(result);
         }
@@ -419,7 +419,7 @@ impl QueryEngine {
     /// Cache a query plan
     fn cache_query_plan(
         &self,
-        sql: &str,
+        cql: &str,
         parsed_query: super::ParsedQuery,
         plan: super::planner::QueryPlan,
     ) {
@@ -442,7 +442,7 @@ impl QueryEngine {
 
             // Add new entry
             self.plan_cache.insert(
-                sql.to_string(),
+                cql.to_string(),
                 QueryCacheEntry {
                     parsed_query,
                     plan,
@@ -626,9 +626,9 @@ mod tests {
         let query_engine = QueryEngine::new(storage, schema, memory, &config).unwrap();
 
         // Execute a query twice
-        let sql = "SELECT * FROM users WHERE id = 1";
-        let _ = query_engine.execute(sql).await;
-        let _ = query_engine.execute(sql).await;
+        let cql = "SELECT * FROM users WHERE id = 1";
+        let _ = query_engine.execute(cql).await;
+        let _ = query_engine.execute(cql).await;
 
         // Check that plan was cached
         assert_eq!(query_engine.cache_stats().plan_cache_size, 1);
@@ -666,8 +666,8 @@ mod tests {
         let query_engine = QueryEngine::new(storage, schema, memory, &config).unwrap();
 
         // Prepare a statement
-        let sql = "SELECT * FROM users WHERE id = ?";
-        let prepared = query_engine.prepare(sql).await.unwrap();
+        let cql = "SELECT * FROM users WHERE id = ?";
+        let prepared = query_engine.prepare(cql).await.unwrap();
 
         // Execute it with parameters
         let params = vec![Value::Integer(1)];
@@ -710,8 +710,8 @@ mod tests {
         let query_engine = QueryEngine::new(storage, schema, memory, &config).unwrap();
 
         // Explain a query
-        let sql = "SELECT * FROM users WHERE id = 1";
-        let explain_result = query_engine.explain(sql).await.unwrap();
+        let cql = "SELECT * FROM users WHERE id = 1";
+        let explain_result = query_engine.explain(cql).await.unwrap();
 
         assert_eq!(explain_result.query_type, "Select");
         assert!(explain_result.estimated_cost > 0.0);

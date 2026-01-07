@@ -4,7 +4,7 @@
 //! Prepared statements offer several benefits:
 //!
 //! - Performance: Query parsing and planning is done once
-//! - Security: Parameters are safely bound preventing SQL injection
+//! - Security: Parameters are safely bound preventing query injection
 //! - Reusability: Same query can be executed with different parameters
 
 // CQL (Cassandra Query Language) Reference:
@@ -26,7 +26,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct PreparedQuery {
     /// Original CQL text
-    pub sql: String,
+    pub cql: String,
     /// Parsed query
     pub parsed_query: ParsedQuery,
     /// Query execution plan
@@ -77,11 +77,11 @@ pub struct ExecutionHints {
 impl PreparedQuery {
     /// Create a new prepared query
     pub fn new(parsed_query: ParsedQuery, plan: QueryPlan, executor: Arc<QueryExecutor>) -> Self {
-        let sql = parsed_query.sql.clone();
+        let cql = parsed_query.cql.clone();
         let parameters = Self::extract_parameters(&parsed_query);
 
         Self {
-            sql,
+            cql,
             parsed_query,
             plan,
             parameters,
@@ -187,8 +187,8 @@ impl PreparedQuery {
     }
 
     /// Get CQL text
-    pub fn sql(&self) -> &str {
-        &self.sql
+    pub fn cql(&self) -> &str {
+        &self.cql
     }
 
     /// Get query plan
@@ -274,7 +274,7 @@ pub struct PreparedQueryStats {
 /// Prepared statement builder
 pub struct PreparedQueryBuilder {
     /// CQL text
-    sql: String,
+    cql: String,
     /// Parameter metadata
     parameters: Vec<ParameterMetadata>,
     /// Execution hints
@@ -283,9 +283,9 @@ pub struct PreparedQueryBuilder {
 
 impl PreparedQueryBuilder {
     /// Create a new builder
-    pub fn new(sql: &str) -> Self {
+    pub fn new(cql: &str) -> Self {
         Self {
-            sql: sql.to_string(),
+            cql: cql.to_string(),
             parameters: Vec::new(),
             hints: ExecutionHints::default(),
         }
@@ -372,7 +372,7 @@ impl PreparedQueryBuilder {
         executor: Arc<QueryExecutor>,
     ) -> PreparedQuery {
         PreparedQuery {
-            sql: self.sql,
+            cql: self.cql,
             parsed_query,
             plan,
             parameters: self.parameters,
@@ -423,7 +423,7 @@ mod tests {
             set_clause: std::collections::HashMap::new(),
             order_by: vec![],
             limit: None,
-            sql: "SELECT * FROM users".to_string(),
+            cql: "SELECT * FROM users".to_string(),
         };
 
         let plan = crate::query::planner::QueryPlan {
@@ -438,7 +438,7 @@ mod tests {
 
         let prepared = PreparedQuery::new(parsed_query, plan, executor);
 
-        assert_eq!(prepared.sql(), "SELECT * FROM users");
+        assert_eq!(prepared.cql(), "SELECT * FROM users");
         assert_eq!(prepared.parameters().len(), 0);
         assert!(prepared.is_cache_friendly()); // TableScan is not cache-friendly, but our implementation is simplified
     }
@@ -451,7 +451,7 @@ mod tests {
             .timeout(5000)
             .parallelism(4);
 
-        assert_eq!(builder.sql, "SELECT * FROM users WHERE id = ? AND name = ?");
+        assert_eq!(builder.cql, "SELECT * FROM users WHERE id = ? AND name = ?");
         assert_eq!(builder.parameters.len(), 2);
         assert_eq!(builder.hints.timeout_ms, Some(5000));
         assert_eq!(builder.hints.parallelism, Some(4));
@@ -520,7 +520,7 @@ mod tests {
             set_clause: std::collections::HashMap::new(),
             order_by: vec![],
             limit: None,
-            sql: "SELECT * FROM users".to_string(),
+            cql: "SELECT * FROM users".to_string(),
         };
 
         let plan = crate::query::planner::QueryPlan {

@@ -3,7 +3,7 @@
 This directory contains historical issue investigation files, code reviews, and research documents that were previously stored at the project root. These documents provide valuable context on how various features were implemented and bugs were resolved during the development of CQLite.
 
 **Archive Created**: 2025-12-15
-**Total Documents**: 100+ files spanning Issues #119 through #198
+**Total Documents**: 100+ files spanning Issues #119 through #253
 
 ---
 
@@ -26,6 +26,7 @@ This directory contains historical issue investigation files, code reviews, and 
   - [Issue #195: Cassandra Expert Handoff](#issue-195-cassandra-expert-handoff)
   - [Issue #196: Fix Summary](#issue-196-fix-summary)
   - [Issue #198: Test Coverage Audit](#issue-198-test-coverage-audit)
+  - [Issue #253: Execution Path Divergence Investigation + SQL→CQL Terminology](#issue-253-execution-path-divergence-investigation--sqlcql-terminology)
 - [Format Research & Reverse Engineering](#format-research--reverse-engineering)
   - [Cassandra 5.0 Format Specifications](#cassandra-50-format-specifications)
   - [Magic Number Analysis](#magic-number-analysis)
@@ -337,6 +338,76 @@ let path = find_file(...).unwrap_or_else(|| {
 
 ---
 
+### Issue #253: Execution Path Divergence Investigation + SQL→CQL Terminology
+
+**Files**:
+- `docs/research/issue-253-advanced-execution-path-research.md` - ADVANCED path research
+- `cqlite-core/tests/execution_path_parity_tests.rs` - Parity test suite with root cause validation
+
+**Topic**: Root cause analysis for query execution path divergence and SQL→CQL terminology fix
+**Status**: ✅ INVESTIGATION COMPLETE
+**Date**: 2026-01-07
+
+**Root Cause Analysis**:
+
+The two execution paths serve fundamentally different purposes:
+
+| Aspect | LEGACY Path | ADVANCED Path |
+|--------|-------------|---------------|
+| **Purpose** | Synthetic INSERT/SELECT testing | Real SSTable reading |
+| **Location** | `executor.rs:794-805` | `select_executor.rs:1095-1189` |
+| **Key format** | `format!("user_key_{}", id)` | Schema-aware binary decoding |
+| **Limitation** | Only "id" column + Integer type | Supports all CQL key types |
+| **Correct for** | In-memory testing only | Production SSTable data |
+
+**The Bug**: LEGACY key generation violates the No-Heuristics Mandate (Issue #28) by:
+1. Hardcoding column name "id" instead of using schema metadata
+2. Using synthetic text keys that don't match Cassandra partition key format
+3. Only supporting Integer type, ignoring uuid/text/composite keys
+
+**Why the 8-Token Heuristic Exists** (`engine.rs:132-142`):
+
+`SELECT * FROM ks.table WHERE id = 1` = exactly 8 whitespace-separated tokens.
+
+The routing hack sends ≤8 token queries with "WHERE id =" to LEGACY path to maintain
+compatibility with the synthetic INSERT feature (also uses `user_key_{}` format).
+This is a workaround for the INSERT bug, not a feature.
+
+**Deliverables Completed**:
+- ✅ Root cause identified: LEGACY uses synthetic keys, ADVANCED uses real Cassandra keys
+- ✅ 8-token heuristic explained: maintains INSERT compatibility
+- ✅ Parity test suite validates divergence exists in codebase
+- ✅ SQL→CQL terminology fixed (262 occurrences across 8 files)
+
+**Unification Strategy Design Proposal**:
+
+**Phase 1: Fix LEGACY INSERT** (Recommended first step)
+- Update `executor.rs` INSERT to use schema-aware key generation
+- Match the `decode_partition_key_value()` approach from ADVANCED path
+- Code location: `executor.rs:857-863` (INSERT key generation)
+
+**Phase 2: Remove Routing Hack**
+- Once INSERT generates correct keys, remove `engine.rs:132-142` routing logic
+- All SELECT queries go through ADVANCED path
+- Test: Verify INSERT → SELECT roundtrip with real key formats
+
+**Phase 3: Deprecate LEGACY Path**
+- Move LEGACY executor behind feature flag `legacy_executor`
+- Default to ADVANCED-only execution
+- Eventually remove LEGACY code entirely
+
+**Alternative: Deprecate INSERT Feature**
+- The INSERT feature is behind `experimental` flag and primarily for testing
+- Could remove entirely rather than fix, simplifying architecture
+- SSTable files are read-only in production anyway
+
+**Future Work** (separate issues):
+- [ ] Fix LEGACY INSERT key generation (Phase 1)
+- [ ] Remove routing hack after INSERT fix (Phase 2)
+- [ ] Rename `state_machine` feature flag (see Issue #252)
+
+---
+
 ## Format Research & Reverse Engineering
 
 ### Cassandra 5.0 Format Specifications
@@ -553,6 +624,6 @@ These documents provide invaluable context for understanding design decisions, b
 
 ---
 
-**Last Updated**: 2025-12-15
+**Last Updated**: 2026-01-07
 **Maintainer**: CQLite Development Team
 **Archive Location**: `/docs/archive/issues/`

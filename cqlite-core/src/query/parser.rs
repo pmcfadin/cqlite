@@ -28,25 +28,25 @@ impl QueryParser {
     }
 
     /// Parse a CQL query string
-    pub fn parse(&self, sql: &str) -> Result<ParsedQuery> {
-        let sql = sql.trim();
+    pub fn parse(&self, cql: &str) -> Result<ParsedQuery> {
+        let cql = cql.trim();
 
         // Basic keyword-based parsing
-        let first_word = sql
+        let first_word = cql
             .split_whitespace()
             .next()
             .ok_or_else(|| Error::query_execution("Empty query".to_string()))?
             .to_uppercase();
 
         match first_word.as_str() {
-            "SELECT" => self.parse_select(sql),
-            "INSERT" => self.parse_insert(sql),
-            "UPDATE" => self.parse_update(sql),
-            "DELETE" => self.parse_delete(sql),
-            "CREATE" => self.parse_create(sql),
-            "DROP" => self.parse_drop(sql),
-            "DESCRIBE" | "DESC" => self.parse_describe(sql),
-            "USE" => self.parse_use(sql),
+            "SELECT" => self.parse_select(cql),
+            "INSERT" => self.parse_insert(cql),
+            "UPDATE" => self.parse_update(cql),
+            "DELETE" => self.parse_delete(cql),
+            "CREATE" => self.parse_create(cql),
+            "DROP" => self.parse_drop(cql),
+            "DESCRIBE" | "DESC" => self.parse_describe(cql),
+            "USE" => self.parse_use(cql),
             _ => Err(Error::query_execution(format!(
                 "Unsupported query type: {}",
                 first_word
@@ -55,10 +55,10 @@ impl QueryParser {
     }
 
     /// Parse SELECT statement
-    fn parse_select(&self, sql: &str) -> Result<ParsedQuery> {
+    fn parse_select(&self, cql: &str) -> Result<ParsedQuery> {
         // M2: Validate SELECT query against supported subset
         let validator = M2SelectValidator;
-        validator.validate_select(sql)?;
+        validator.validate_select(cql)?;
 
         let mut columns = Vec::new();
         let mut table = None;
@@ -70,7 +70,7 @@ impl QueryParser {
         // In a real implementation, this would use a proper parser like nom or pest
 
         // Extract SELECT columns
-        if let Some(select_part) = self.extract_between(sql, "SELECT", "FROM") {
+        if let Some(select_part) = self.extract_between(cql, "SELECT", "FROM") {
             let select_part = select_part.trim();
             if select_part == "*" {
                 columns.push("*".to_string());
@@ -83,7 +83,7 @@ impl QueryParser {
         }
 
         // Extract table name (handle qualified names like keyspace.table)
-        if let Some(from_part) = self.extract_after(sql, "FROM") {
+        if let Some(from_part) = self.extract_after(cql, "FROM") {
             let qualified_name = from_part.split_whitespace().next().ok_or_else(|| {
                 Error::query_execution("Missing table name after FROM".to_string())
             })?;
@@ -100,23 +100,23 @@ impl QueryParser {
         }
 
         // Extract WHERE clause
-        if let Some(where_part) = self.extract_between(sql, "WHERE", "ORDER BY") {
+        if let Some(where_part) = self.extract_between(cql, "WHERE", "ORDER BY") {
             where_clause = Some(self.parse_where_clause(where_part)?);
-        } else if let Some(where_part) = self.extract_between(sql, "WHERE", "LIMIT") {
+        } else if let Some(where_part) = self.extract_between(cql, "WHERE", "LIMIT") {
             where_clause = Some(self.parse_where_clause(where_part)?);
-        } else if let Some(where_part) = self.extract_after(sql, "WHERE") {
+        } else if let Some(where_part) = self.extract_after(cql, "WHERE") {
             where_clause = Some(self.parse_where_clause(where_part)?);
         }
 
         // Extract ORDER BY clause
-        if let Some(order_part) = self.extract_between(sql, "ORDER BY", "LIMIT") {
+        if let Some(order_part) = self.extract_between(cql, "ORDER BY", "LIMIT") {
             order_by = self.parse_order_by(order_part)?;
-        } else if let Some(order_part) = self.extract_after(sql, "ORDER BY") {
+        } else if let Some(order_part) = self.extract_after(cql, "ORDER BY") {
             order_by = self.parse_order_by(order_part)?;
         }
 
         // Extract LIMIT clause
-        if let Some(limit_part) = self.extract_after(sql, "LIMIT") {
+        if let Some(limit_part) = self.extract_after(cql, "LIMIT") {
             let limit_str = limit_part
                 .split_whitespace()
                 .next()
@@ -137,30 +137,30 @@ impl QueryParser {
             set_clause: HashMap::new(),
             order_by,
             limit,
-            sql: sql.to_string(),
+            cql: cql.to_string(),
         })
     }
 
     /// Parse INSERT statement
-    fn parse_insert(&self, sql: &str) -> Result<ParsedQuery> {
+    fn parse_insert(&self, cql: &str) -> Result<ParsedQuery> {
         let mut table = None;
         let mut columns = Vec::new();
         let mut values = Vec::new();
 
         // Check if this is explicit column syntax: INSERT INTO table (columns) VALUES (...)
-        let paren_pos = sql.find("(");
-        let values_pos = sql.find("VALUES").unwrap_or(sql.len());
+        let paren_pos = cql.find("(");
+        let values_pos = cql.find("VALUES").unwrap_or(cql.len());
         if let Some(pos) = paren_pos {
             if pos < values_pos {
                 // Explicit column syntax
                 // Extract table name
-                if let Some(table_part) = self.extract_between(sql, "INTO", "(") {
+                if let Some(table_part) = self.extract_between(cql, "INTO", "(") {
                     let table_name = table_part.trim();
                     table = Some(TableId::new(table_name));
                 }
 
                 // Extract columns
-                if let Some(columns_part) = self.extract_between(sql, "(", ")") {
+                if let Some(columns_part) = self.extract_between(cql, "(", ")") {
                     columns = columns_part
                         .split(',')
                         .map(|col| col.trim().to_string())
@@ -169,7 +169,7 @@ impl QueryParser {
             } else {
                 // Implicit column syntax: INSERT INTO table VALUES (...)
                 // Extract table name (between INTO and VALUES)
-                if let Some(table_part) = self.extract_between(sql, "INTO", "VALUES") {
+                if let Some(table_part) = self.extract_between(cql, "INTO", "VALUES") {
                     let table_name = table_part.trim();
                     table = Some(TableId::new(table_name));
                 }
@@ -177,14 +177,14 @@ impl QueryParser {
             }
         } else {
             // No parenthesis found - treat as implicit column syntax
-            if let Some(table_part) = self.extract_between(sql, "INTO", "VALUES") {
+            if let Some(table_part) = self.extract_between(cql, "INTO", "VALUES") {
                 let table_name = table_part.trim();
                 table = Some(TableId::new(table_name));
             }
         }
 
         // Extract values
-        if let Some(values_part) = self.extract_between(sql, "VALUES (", ")") {
+        if let Some(values_part) = self.extract_between(cql, "VALUES (", ")") {
             values = self.parse_values(values_part)?;
         }
 
@@ -197,31 +197,31 @@ impl QueryParser {
             set_clause: HashMap::new(),
             order_by: Vec::new(),
             limit: None,
-            sql: sql.to_string(),
+            cql: cql.to_string(),
         })
     }
 
     /// Parse UPDATE statement
-    fn parse_update(&self, sql: &str) -> Result<ParsedQuery> {
+    fn parse_update(&self, cql: &str) -> Result<ParsedQuery> {
         let mut table = None;
         let mut set_clause = HashMap::new();
         let mut where_clause = None;
 
         // Extract table name
-        let words: Vec<&str> = sql.split_whitespace().collect();
+        let words: Vec<&str> = cql.split_whitespace().collect();
         if words.len() >= 2 {
             table = Some(TableId::new(words[1]));
         }
 
         // Extract SET clause
-        if let Some(set_part) = self.extract_between(sql, "SET", "WHERE") {
+        if let Some(set_part) = self.extract_between(cql, "SET", "WHERE") {
             set_clause = self.parse_set_clause(set_part)?;
-        } else if let Some(set_part) = self.extract_after(sql, "SET") {
+        } else if let Some(set_part) = self.extract_after(cql, "SET") {
             set_clause = self.parse_set_clause(set_part)?;
         }
 
         // Extract WHERE clause
-        if let Some(where_part) = self.extract_after(sql, "WHERE") {
+        if let Some(where_part) = self.extract_after(cql, "WHERE") {
             where_clause = Some(self.parse_where_clause(where_part)?);
         }
 
@@ -234,26 +234,26 @@ impl QueryParser {
             set_clause,
             order_by: Vec::new(),
             limit: None,
-            sql: sql.to_string(),
+            cql: cql.to_string(),
         })
     }
 
     /// Parse DELETE statement
-    fn parse_delete(&self, sql: &str) -> Result<ParsedQuery> {
+    fn parse_delete(&self, cql: &str) -> Result<ParsedQuery> {
         let mut table = None;
         let mut where_clause = None;
 
         // Extract table name
-        if let Some(table_part) = self.extract_between(sql, "FROM", "WHERE") {
+        if let Some(table_part) = self.extract_between(cql, "FROM", "WHERE") {
             let table_name = table_part.trim();
             table = Some(TableId::new(table_name));
-        } else if let Some(table_part) = self.extract_after(sql, "FROM") {
+        } else if let Some(table_part) = self.extract_after(cql, "FROM") {
             let table_name = table_part.trim();
             table = Some(TableId::new(table_name));
         }
 
         // Extract WHERE clause
-        if let Some(where_part) = self.extract_after(sql, "WHERE") {
+        if let Some(where_part) = self.extract_after(cql, "WHERE") {
             where_clause = Some(self.parse_where_clause(where_part)?);
         }
 
@@ -266,13 +266,13 @@ impl QueryParser {
             set_clause: HashMap::new(),
             order_by: Vec::new(),
             limit: None,
-            sql: sql.to_string(),
+            cql: cql.to_string(),
         })
     }
 
     /// Parse CREATE statement
-    fn parse_create(&self, sql: &str) -> Result<ParsedQuery> {
-        let words: Vec<&str> = sql.split_whitespace().collect();
+    fn parse_create(&self, cql: &str) -> Result<ParsedQuery> {
+        let words: Vec<&str> = cql.split_whitespace().collect();
         if words.len() >= 3 && words[1].to_uppercase() == "TABLE" {
             Ok(ParsedQuery {
                 query_type: QueryType::CreateTable,
@@ -283,7 +283,7 @@ impl QueryParser {
                 set_clause: HashMap::new(),
                 order_by: Vec::new(),
                 limit: None,
-                sql: sql.to_string(),
+                cql: cql.to_string(),
             })
         } else {
             Err(Error::query_execution(
@@ -293,8 +293,8 @@ impl QueryParser {
     }
 
     /// Parse DROP statement
-    fn parse_drop(&self, sql: &str) -> Result<ParsedQuery> {
-        let words: Vec<&str> = sql.split_whitespace().collect();
+    fn parse_drop(&self, cql: &str) -> Result<ParsedQuery> {
+        let words: Vec<&str> = cql.split_whitespace().collect();
         if words.len() >= 3 && words[1].to_uppercase() == "TABLE" {
             Ok(ParsedQuery {
                 query_type: QueryType::DropTable,
@@ -305,7 +305,7 @@ impl QueryParser {
                 set_clause: HashMap::new(),
                 order_by: Vec::new(),
                 limit: None,
-                sql: sql.to_string(),
+                cql: cql.to_string(),
             })
         } else {
             Err(Error::query_execution(
@@ -315,8 +315,8 @@ impl QueryParser {
     }
 
     /// Parse DESCRIBE statement
-    fn parse_describe(&self, sql: &str) -> Result<ParsedQuery> {
-        let words: Vec<&str> = sql.split_whitespace().collect();
+    fn parse_describe(&self, cql: &str) -> Result<ParsedQuery> {
+        let words: Vec<&str> = cql.split_whitespace().collect();
         if words.len() >= 2 {
             Ok(ParsedQuery {
                 query_type: QueryType::Describe,
@@ -327,7 +327,7 @@ impl QueryParser {
                 set_clause: HashMap::new(),
                 order_by: Vec::new(),
                 limit: None,
-                sql: sql.to_string(),
+                cql: cql.to_string(),
             })
         } else {
             Err(Error::query_execution(
@@ -337,8 +337,8 @@ impl QueryParser {
     }
 
     /// Parse USE statement
-    fn parse_use(&self, sql: &str) -> Result<ParsedQuery> {
-        let words: Vec<&str> = sql.split_whitespace().collect();
+    fn parse_use(&self, cql: &str) -> Result<ParsedQuery> {
+        let words: Vec<&str> = cql.split_whitespace().collect();
         if words.len() >= 2 {
             Ok(ParsedQuery {
                 query_type: QueryType::Use,
@@ -349,7 +349,7 @@ impl QueryParser {
                 set_clause: HashMap::new(),
                 order_by: Vec::new(),
                 limit: None,
-                sql: sql.to_string(),
+                cql: cql.to_string(),
             })
         } else {
             Err(Error::query_execution(

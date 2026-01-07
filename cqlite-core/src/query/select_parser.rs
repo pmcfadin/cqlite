@@ -405,12 +405,12 @@ impl Tokenizer {
 
 impl SelectParser {
     /// Create a new SELECT parser
-    pub fn new(sql: &str) -> Result<Self> {
-        let mut tokenizer = Tokenizer::new(sql);
+    pub fn new(cql: &str) -> Result<Self> {
+        let mut tokenizer = Tokenizer::new(cql);
         let current_token = tokenizer.next_token()?;
 
         Ok(Self {
-            input: sql.to_string(),
+            input: cql.to_string(),
             position: 0,
             current_token: Some(current_token),
             tokenizer,
@@ -1028,8 +1028,8 @@ impl SelectParser {
 }
 
 /// Main parsing function for SELECT statements
-pub fn parse_select(sql: &str) -> Result<SelectStatement> {
-    let mut parser = SelectParser::new(sql)?;
+pub fn parse_select(cql: &str) -> Result<SelectStatement> {
+    let mut parser = SelectParser::new(cql)?;
     parser.parse_select_statement()
 }
 

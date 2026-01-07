@@ -40,17 +40,17 @@ fn demonstrate_basic_select() {
         "SELECT u.name, u.email FROM users u",
     ];
 
-    for sql in queries {
-        match parse_select(sql) {
+    for cql in queries {
+        match parse_select(cql) {
             Ok(statement) => {
-                log::info!("✅ {}", sql);
+                log::info!("✅ {}", cql);
                 log::info!("   → Parsed successfully!");
                 if statement.requires_aggregation() {
                     log::info!("   → Requires aggregation");
                 }
             }
             Err(e) => {
-                log::info!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", cql, e);
             }
         }
     }
@@ -71,10 +71,10 @@ fn demonstrate_complex_where() {
         "SELECT * FROM logs WHERE NOT (level = 'debug') AND message LIKE '%error%'",
     ];
 
-    for sql in queries {
-        match parse_select(sql) {
+    for cql in queries {
+        match parse_select(cql) {
             Ok(statement) => {
-                log::info!("✅ {}", sql);
+                log::info!("✅ {}", cql);
                 if let Some(where_clause) = &statement.where_clause {
                     log::info!(
                         "   → WHERE clause can be pushed to SSTable: {}",
@@ -83,7 +83,7 @@ fn demonstrate_complex_where() {
                 }
             }
             Err(e) => {
-                log::info!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", cql, e);
             }
         }
     }
@@ -103,10 +103,10 @@ fn demonstrate_aggregation() {
         "SELECT COUNT(DISTINCT customer_id) FROM orders",
     ];
 
-    for sql in queries {
-        match parse_select(sql) {
+    for cql in queries {
+        match parse_select(cql) {
             Ok(statement) => {
-                log::info!("✅ {}", sql);
+                log::info!("✅ {}", cql);
                 log::info!(
                     "   → Requires aggregation: {}",
                     statement.requires_aggregation()
@@ -123,7 +123,7 @@ fn demonstrate_aggregation() {
                 }
             }
             Err(e) => {
-                log::info!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", cql, e);
             }
         }
     }
@@ -142,15 +142,15 @@ fn demonstrate_collections() {
         "SELECT id, list_field[2] FROM collection_table WHERE map_field['key1'] = 'value1'",
     ];
 
-    for sql in queries {
-        match parse_select(sql) {
+    for cql in queries {
+        match parse_select(cql) {
             Ok(statement) => {
-                log::info!("✅ {}", sql);
+                log::info!("✅ {}", cql);
                 let column_refs = statement.get_referenced_columns();
                 log::info!("   → Referenced columns: {}", column_refs.len());
             }
             Err(e) => {
-                log::info!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", cql, e);
             }
         }
     }
@@ -169,10 +169,10 @@ fn demonstrate_advanced_features() {
         "SELECT *, (price * quantity) as total_value FROM inventory WHERE (price * quantity) > 1000",
     ];
 
-    for sql in queries {
-        match parse_select(sql) {
+    for cql in queries {
+        match parse_select(cql) {
             Ok(statement) => {
-                log::info!("✅ {}", sql);
+                log::info!("✅ {}", cql);
                 if statement.order_by.is_some() {
                     log::info!("   → ORDER BY detected");
                 }
@@ -184,7 +184,7 @@ fn demonstrate_advanced_features() {
                 }
             }
             Err(e) => {
-                log::info!("❌ {}: {}", sql, e);
+                log::info!("❌ {}: {}", cql, e);
             }
         }
     }

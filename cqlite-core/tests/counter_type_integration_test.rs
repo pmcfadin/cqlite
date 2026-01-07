@@ -25,11 +25,14 @@ use std::sync::Arc;
 /// Get the test datasets root from environment or default location
 fn get_test_datasets_root() -> PathBuf {
     env::var("CQLITE_DATASETS_ROOT")
+        .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| {
             let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             path.push("../test-data/datasets");
-            path
+            // Canonicalize to get absolute path
+            path.canonicalize().unwrap_or(path)
         })
 }
 
