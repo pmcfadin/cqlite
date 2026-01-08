@@ -34,9 +34,8 @@ mod key_digest_integration_test;
 #[cfg(test)]
 mod key_digest_test;
 #[cfg(all(test, feature = "experimental"))]
-#[cfg(feature = "experimental")]
 mod oa_format_compliance_test;
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))]
 mod row_cell_state_machine_test;
 #[cfg(test)]
 mod schema_aware_reader_test;
