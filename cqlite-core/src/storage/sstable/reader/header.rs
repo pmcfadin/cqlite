@@ -216,6 +216,48 @@ pub(crate) async fn parse_header_with_version_detection(
         header_buffer[3],
     ]);
 
+    // CRITICAL: Check for false positive with V5_0Uncompressed magic (0x0010045e)
+    //
+    // Issue: Uncompressed Data.db files don't have embedded headers - they start
+    // directly with partition data. When partition data coincidentally starts with
+    // bytes matching V5_0Uncompressed magic (0x00 0x10 0x04 0x5e), we incorrectly
+    // detect a header and consume partition data as header bytes.
+    //
+    // Example collision in test_basic.uncompressed_table:
+    // - Byte 0: 0x00 = partition flags
+    // - Byte 1: 0x10 = key length (16 bytes for UUID)
+    // - Bytes 2-3: 0x04 0x5e = first 2 bytes of UUID
+    // - Together: 0x0010045e = V5_0Uncompressed magic (false positive!)
+    //
+    // Detection: If bytes match V5_0Uncompressed AND no CompressionInfo.db exists,
+    // this is truly uncompressed with no header.
+    if let Some(CassandraVersion::V5_0Uncompressed) =
+        CassandraVersion::from_magic_number(first_4_bytes)
+    {
+        // Check if CompressionInfo.db exists to differentiate real header from collision
+        let parent_dir = path.parent().unwrap_or(Path::new("."));
+        let compression_info_exists = check_compression_info_exists(path, parent_dir);
+
+        if !compression_info_exists {
+            log::debug!(
+                "Detected V5_0Uncompressed magic (0x{:08x}) but no CompressionInfo.db file exists - \
+                 treating as headerless uncompressed format (partition data collision). File: '{}'",
+                first_4_bytes,
+                path.display()
+            );
+            // Create minimal header with V5_0Uncompressed version (not V5_0NewBig)
+            // This ensures block_io.rs uses the uncompressed read path
+            return create_minimal_uncompressed_header(path).await;
+        } else {
+            log::debug!(
+                "Detected V5_0Uncompressed magic (0x{:08x}) with CompressionInfo.db present - \
+                 parsing as standard header. File: '{}'",
+                first_4_bytes,
+                path.display()
+            );
+        }
+    }
+
     // Detect CRC32 prefix (Cassandra 5.0+ feature)
     // If first 4 bytes don't match any known magic number, treat as CRC32 checksum
     let actual_header = if CassandraVersion::from_magic_number(first_4_bytes).is_none() {
@@ -453,6 +495,59 @@ pub(crate) fn convert_parsed_header_to_sstable_header(
         stats,
         columns,
         properties,
+    })
+}
+
+/// Check if CompressionInfo.db exists for this SSTable
+fn check_compression_info_exists(data_db_path: &Path, parent_dir: &Path) -> bool {
+    use super::compression::extract_sstable_base_name;
+
+    // Extract base name (e.g., "nb-1-big-Data.db" -> "nb-1-big")
+    if let Some(base_name) = extract_sstable_base_name(data_db_path) {
+        let compression_info_path = parent_dir.join(format!("{}-CompressionInfo.db", base_name));
+        if compression_info_path.exists() {
+            return true;
+        }
+    }
+
+    // Fallback: check for generic CompressionInfo.db
+    let generic_path = parent_dir.join("CompressionInfo.db");
+    generic_path.exists()
+}
+
+/// Create minimal header for truly uncompressed tables (no CompressionInfo.db)
+///
+/// This is used when partition data coincidentally matches V5_0Uncompressed magic
+/// but no CompressionInfo.db file exists, indicating a headerless uncompressed table.
+async fn create_minimal_uncompressed_header(path: &Path) -> Result<SSTableHeader> {
+    log::info!(
+        "Creating minimal uncompressed header for headerless file: {}",
+        path.display()
+    );
+
+    // Use V5_0Uncompressed version so block_io.rs reads data directly without compression
+    Ok(SSTableHeader {
+        cassandra_version: CassandraVersion::V5_0Uncompressed,
+        version: 0, // Sentinel value indicating headerless format
+        table_id: [0; 16],
+        keyspace: extract_keyspace_from_path(path),
+        table_name: extract_table_name_from_path(path),
+        generation: extract_generation_from_path(path),
+        compression: CompressionInfo {
+            algorithm: "NONE".to_string(),
+            chunk_size: 0,
+            parameters: std::collections::HashMap::new(),
+        },
+        stats: SSTableStats {
+            row_count: 0,
+            min_timestamp: 0,
+            max_timestamp: 0,
+            max_deletion_time: 0,
+            compression_ratio: 1.0,
+            row_size_histogram: vec![],
+        },
+        columns: vec![],
+        properties: std::collections::HashMap::new(),
     })
 }
 
@@ -749,5 +844,47 @@ mod tests {
         let is_collision =
             detected == Some(CassandraVersion::V5_0WideRows) && (header_buffer[0] & 0x80) != 0;
         assert!(!is_collision, "Random bytes should not be flagged");
+    }
+
+    /// Test V5_0Uncompressed magic collision detection with partition data.
+    ///
+    /// Issue: Uncompressed Data.db files start with partition data that can
+    /// coincidentally match V5_0Uncompressed magic (0x0010045e).
+    ///
+    /// Example from test_basic.uncompressed_table:
+    /// - Byte 0: 0x00 = partition flags
+    /// - Byte 1: 0x10 = key length (16 bytes for UUID)
+    /// - Bytes 2-3: 0x04 0x5e = first 2 bytes of UUID
+    /// - Together: 0x0010045e = V5_0Uncompressed magic (false positive!)
+    ///
+    /// Detection: No CompressionInfo.db exists -> truly uncompressed -> headerless
+    #[test]
+    fn test_v5_uncompressed_magic_collision() {
+        // Bytes from actual uncompressed_table Data.db file
+        let header_buffer = [0x00, 0x10, 0x04, 0x5e, 0x63, 0xfc, 0x4e, 0x93];
+
+        // These bytes match V5_0Uncompressed magic
+        let first_4_bytes = u32::from_be_bytes([
+            header_buffer[0],
+            header_buffer[1],
+            header_buffer[2],
+            header_buffer[3],
+        ]);
+        assert_eq!(
+            first_4_bytes, 0x0010045e,
+            "Should match V5_0Uncompressed magic"
+        );
+
+        // Magic number is detected
+        let detected = CassandraVersion::from_magic_number(first_4_bytes);
+        assert_eq!(
+            detected,
+            Some(CassandraVersion::V5_0Uncompressed),
+            "Should detect V5_0Uncompressed"
+        );
+
+        // In practice, check_compression_info_exists() would return false,
+        // causing create_minimal_uncompressed_header() to be called with
+        // cassandra_version = V5_0Uncompressed (not V5_0NewBig)
     }
 }

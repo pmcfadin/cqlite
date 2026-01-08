@@ -83,6 +83,15 @@ pub(crate) fn calculate_actual_header_size(
         return Ok(0);
     }
 
+    // Check for truly uncompressed format (no header)
+    // When partition data coincidentally matches V5_0Uncompressed magic but no
+    // CompressionInfo.db exists, we create a minimal header with version=0.
+    // The Data.db file starts at offset 0 with raw partition data.
+    if header.cassandra_version == CassandraVersion::V5_0Uncompressed && header.version == 0 {
+        debug!("Headerless uncompressed format detected (version=0) - Data.db starts at offset 0");
+        return Ok(0);
+    }
+
     // Use proper structured parsing to find the end of the header
     match header.cassandra_version {
         CassandraVersion::V5_0NewBig => {
