@@ -24,7 +24,7 @@ See [validation-checklist.md](validation-checklist.md) for complete steps.
 
 ```bash
 # Run all pre-push checks
-./scripts/validate-cleanup.sh
+./scripts/ci/validate-cleanup.sh
 ```
 
 ### Manual Step-by-Step
@@ -434,7 +434,7 @@ set -e
 echo "Running pre-push validation..."
 
 # Full validation
-./scripts/validate-cleanup.sh
+./scripts/ci/validate-cleanup.sh
 
 echo "Pre-push validation passed!"
 ```
@@ -515,5 +515,5 @@ After validation passes:
 - [validation-checklist.md](validation-checklist.md) - Complete checklist
 - [merge-process.md](merge-process.md) - Detailed merge workflow
 - `.github/workflows/rust.yml` - CI configuration
-- `scripts/validate-cleanup.sh` - Validation script
+- `scripts/ci/validate-cleanup.sh` - Validation script
 

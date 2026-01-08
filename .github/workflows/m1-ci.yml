@@ -396,14 +396,14 @@ jobs:
         echo "🔍 Running hard M1 gate for dataset provenance..."
 
         # Ensure the provenance script exists
-        if [ ! -f ci/scripts/ensure_real_dataset.sh ]; then
+        if [ ! -f scripts/ci/ensure_real_dataset.sh ]; then
           echo "❌ CRITICAL: Dataset provenance script not found"
           echo "This is a hard M1 gate - synthetic/mock datasets are not allowed"
           exit 1
         fi
 
         # Check for synthetic dataset usage in M1 CI context
-        ci/scripts/ensure_real_dataset.sh "${{ github.workspace }}/test-data/datasets m1-cassandra-parity validator sstabledump"
+        scripts/ci/ensure_real_dataset.sh "${{ github.workspace }}/test-data/datasets m1-cassandra-parity validator sstabledump"
 
         echo "✅ Dataset provenance gate passed - M1 CI using real datasets only"
         echo "::endgroup::"

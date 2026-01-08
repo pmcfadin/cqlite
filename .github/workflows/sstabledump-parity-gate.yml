@@ -47,15 +47,15 @@ jobs:
           echo "🔍 Running dataset provenance gate (Issue #79)..."
 
           # Create the provenance script if it doesn't exist
-          mkdir -p ci/scripts
-          if [ ! -f ci/scripts/ensure_real_dataset.sh ]; then
+          mkdir -p scripts/ci
+          if [ ! -f scripts/ci/ensure_real_dataset.sh ]; then
             echo "❌ CRITICAL: Dataset provenance script not found"
             echo "This is a hard M1 gate - synthetic/mock datasets are not allowed"
             exit 1
           fi
 
           # Check workflow for synthetic dataset usage
-          ci/scripts/ensure_real_dataset.sh "${{ github.workspace }}/test-data/datasets cassandra5-small-refs-only-v2 parity validation"
+          scripts/ci/ensure_real_dataset.sh "${{ github.workspace }}/test-data/datasets cassandra5-small-refs-only-v2 parity validation"
 
           echo "✅ Dataset provenance gate passed - no synthetic/mock datasets detected"
           echo "::endgroup::"
@@ -334,7 +334,7 @@ jobs:
             ### Debugging Steps:
             \`\`\`bash
             # Install sstabledump locally
-            ./scripts/install-sstabledump.sh
+            ./scripts/ci/install-sstabledump.sh
             
             # Run parity validation  
             cargo test --test sstabledump_parity_statistics -- --nocapture

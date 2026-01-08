@@ -37,7 +37,7 @@ unit-tests-only = ["cqlite-core/unit-tests-only"]
 
 ### Provenance Gate Integration
 
-**Script**: `ci/scripts/ensure_real_dataset.sh`
+**Script**: `scripts/ci/ensure_real_dataset.sh`
 - Enforces real-only datasets in CI
 - Detects and blocks `unit-tests-only` feature usage
 - Enhanced error messages with remediation steps
@@ -67,7 +67,7 @@ cargo test test_mock_sstable_generation --features unit-tests-only
 cargo test --test integration_tests
 
 # CI automatically rejects unit-tests-only feature
-FEATURES="unit-tests-only" ci/scripts/ensure_real_dataset.sh "test args"
+FEATURES="unit-tests-only" scripts/ci/ensure_real_dataset.sh "test args"
 ```
 
 ### ✅ Required: Integration Testing with Real Data

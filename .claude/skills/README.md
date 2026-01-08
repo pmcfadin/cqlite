@@ -98,7 +98,7 @@ This directory contains 5 specialized skills to accelerate M1-M6 development of 
 cargo fmt --all
 cargo clippy --package cqlite-core --lib --all-features -- -D warnings
 cargo test --package cqlite-core --lib --all-features
-./scripts/validate-cleanup.sh
+./scripts/ci/validate-cleanup.sh
 ```
 
 ---

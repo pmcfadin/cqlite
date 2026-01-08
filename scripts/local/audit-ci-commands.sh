@@ -64,5 +64,5 @@ done
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}Audit complete.${NC}"
 echo ""
-echo "Review the cargo commands above and ensure scripts/test-all-ci-locally.sh"
+echo "Review the cargo commands above and ensure scripts/local/test-all-ci-locally.sh"
 echo "covers all of them for complete local CI parity."

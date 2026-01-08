@@ -7,7 +7,7 @@ Complete step-by-step validation before pushing code.
 ```bash
 # Run automated validation
 cd /Users/patrick/local_projects/cqlite
-./scripts/validate-cleanup.sh
+./scripts/ci/validate-cleanup.sh
 ```
 
 ## Manual Validation (Step-by-Step)
@@ -224,7 +224,7 @@ open coverage/index.html
 
 ## Automated Script
 
-The `scripts/validate-cleanup.sh` script runs steps 1-6 automatically:
+The `scripts/ci/validate-cleanup.sh` script runs steps 1-6 automatically:
 
 ```bash
 #!/bin/bash
@@ -310,13 +310,13 @@ echo "✅ All feature combinations validated"
 ### Linux
 ```bash
 # Standard validation
-./scripts/validate-cleanup.sh
+./scripts/ci/validate-cleanup.sh
 ```
 
 ### macOS
 ```bash
 # Same as Linux
-./scripts/validate-cleanup.sh
+./scripts/ci/validate-cleanup.sh
 ```
 
 ### Windows
@@ -408,7 +408,7 @@ rustup install 1.70.0
 rustup default 1.70.0
 
 # Run validation
-./scripts/validate-cleanup.sh
+./scripts/ci/validate-cleanup.sh
 ```
 
 ---

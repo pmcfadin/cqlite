@@ -142,6 +142,6 @@ jobs:
       - name: Run validation script
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-        run: ./scripts/validate-cleanup.sh
+        run: ./scripts/ci/validate-cleanup.sh
 
 

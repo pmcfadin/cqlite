@@ -207,7 +207,7 @@ cargo run -p cqlite-cli -- --help
 ### **Weekly Structure Audit**
 ```bash
 # Run structure validation
-./scripts/validate-structure.sh
+./scripts/ci/validate-structure.sh
 
 # Clean up any violations
 find . -maxdepth 1 -name "*.rs" -delete

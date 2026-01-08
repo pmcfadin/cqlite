@@ -3,7 +3,7 @@
 ## Quick Pre-Push Check
 ```bash
 # Run the comprehensive local CI validation script
-./scripts/test-all-ci-locally.sh
+./scripts/local/test-all-ci-locally.sh
 ```
 
 This script validates all 3 active workflows:
@@ -88,7 +88,7 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 
 ## Before Every Push
 ```bash
-./scripts/test-all-ci-locally.sh && git push
+./scripts/local/test-all-ci-locally.sh && git push
 ```
 
 This ensures CI will pass! 🎯
@@ -143,7 +143,7 @@ find test-data/datasets/sstables -type d -name "*-*" | sort
 
 | Task | Command |
 |------|---------|
-| **Full CI validation** | `./scripts/test-all-ci-locally.sh` |
+| **Full CI validation** | `./scripts/local/test-all-ci-locally.sh` |
 | **Clippy (strict)** | `env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features` |
 | **Format** | `cargo fmt` |
 | **Format check** | `cargo fmt --check` |
