@@ -142,6 +142,7 @@ cargo run --bin cqlite parse test-data/users-*.db
 - 33/33 test tables passing (100% validation)
 - All 21 CQL primitive types + collections + UDTs + frozen types
 - All compression algorithms working
+- Tiered test coverage targets (see [PRD Section 5.1](docs/development/PRD.md#51--tiered-coverage-targets))
 
 ### ✅ M2 Complete (Jan 2026)
 - CLI with one-shot and REPL modes

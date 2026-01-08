@@ -440,6 +440,96 @@ mod tests {
     use crate::parser::*;
     use std::path::PathBuf;
 
+    /// Helper for floating point comparison with epsilon tolerance
+    fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
+        (a - b).abs() <= eps.max(1e-12)
+    }
+
+    #[test]
+    fn test_mixed_sections_status_priority() {
+        // Test priority: Failed > Incompatible > Compatible > Perfect
+        // Scenario: 1 matching cell out of 3 total cells = 33.333...%
+        let comparison_result = ComparisonResult {
+            summary: ComparisonSummary {
+                total_cells_compared: 3,
+                matching_cells: 1,
+                different_cells: 2,
+                missing_in_cassandra: 0,
+                missing_in_cqlite: 0,
+                compatibility_score: 1.0 / 3.0, // 0.3333...
+            },
+            differences: vec![
+                // One critical issue -> should trigger Failed status
+                CellDifference {
+                    location: CellLocation {
+                        partition_key: "pk1".to_string(),
+                        clustering_key: None,
+                        column_name: "col1".to_string(),
+                        row_index: 0,
+                        cell_index: 0,
+                    },
+                    difference_type: DifferenceType::ValueMismatch,
+                    cassandra_value: Some(CellValue::Text("a".to_string())),
+                    cqlite_value: Some(CellValue::Text("b".to_string())),
+                    severity: DifferenceSeverity::Critical,
+                },
+                // One high issue (should not override Critical)
+                CellDifference {
+                    location: CellLocation {
+                        partition_key: "pk1".to_string(),
+                        clustering_key: None,
+                        column_name: "col2".to_string(),
+                        row_index: 0,
+                        cell_index: 1,
+                    },
+                    difference_type: DifferenceType::TtlMismatch,
+                    cassandra_value: Some(CellValue::Integer(100)),
+                    cqlite_value: Some(CellValue::Integer(200)),
+                    severity: DifferenceSeverity::High,
+                },
+            ],
+            statistics: ComparisonStatistics {
+                cassandra_partitions: 1,
+                cqlite_partitions: 1,
+                cassandra_rows: 1,
+                cqlite_rows: 1,
+                cassandra_cells: 3,
+                cqlite_cells: 3,
+                comparison_duration_ms: 100,
+            },
+        };
+
+        let report = ValidationReport::new(
+            PathBuf::from("/test/sstable.db"),
+            comparison_result,
+            true,  // detailed
+            false, // fail_on_diff
+        );
+
+        // Verify status priority: Critical issues -> Failed
+        assert_eq!(report.summary.overall_status, ValidationStatus::Failed);
+
+        // Verify issue counts
+        assert_eq!(report.summary.critical_issues, 1);
+        assert_eq!(report.summary.high_issues, 1);
+        assert_eq!(report.summary.medium_issues, 0);
+        assert_eq!(report.summary.low_issues, 0);
+
+        // Verify compatibility percentage using approx_eq
+        // 1/3 * 100 = 33.333333333333336 (IEEE 754)
+        let expected_percentage = 100.0 / 3.0; // 33.333...
+        assert!(
+            approx_eq(
+                report.summary.compatibility_percentage,
+                expected_percentage,
+                1e-9
+            ),
+            "Expected compatibility_percentage ~{}, got {}",
+            expected_percentage,
+            report.summary.compatibility_percentage
+        );
+    }
+
     #[test]
     fn test_validation_report_creation() {
         let comparison_result = ComparisonResult {

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Enhanced TestContext Framework is designed to achieve 95% test coverage for CQLite M1 by providing:
+The Enhanced TestContext Framework is designed to achieve tiered test coverage for CQLite (see [PRD Section 5.1](development/PRD.md#51--tiered-coverage-targets)) by providing:
 
 1. **Enhanced TestContext**: Schema validation, coverage tracking, quality gates
 2. **Test Categorization**: Systematic organization for comprehensive coverage
@@ -24,11 +24,13 @@ pub enum TestCategory {
 ```
 
 **Coverage Targets by Category:**
-- Unit Tests: 95% line coverage, 85% branch coverage
-- Integration Tests: 90% path coverage
+- Unit Tests: Tiered by module criticality (Critical 90%+, Important 80%+, Supporting 70%+, Utilities 50%+)
+- Integration Tests: 80% path coverage for cross-module interactions
 - Performance Tests: Baseline + regression detection
 - Property Tests: 1000+ generated test cases
 - End-to-End Tests: Critical user scenarios
+
+See [PRD Section 5.1](development/PRD.md#51--tiered-coverage-targets) for authoritative tier definitions.
 
 ### 2. Enhanced TestContext
 
@@ -56,11 +58,11 @@ Quality gates enforce minimum standards:
 
 ```rust
 pub struct QualityGate {
-    pub min_coverage: f64,           // 95% for M1
-    pub min_branch_coverage: f64,    // 85% for M1
+    pub min_coverage: f64,           // 75% overall, tiered by module
+    pub min_branch_coverage: f64,    // 60-80% depending on tier
     pub max_execution_time: Duration, // Performance limits
     pub max_memory_usage: usize,     // Memory limits
-    pub component_targets: HashMap<String, f64>, // Per-component targets
+    pub component_targets: HashMap<String, f64>, // Per-component tiered targets
 }
 ```
 
@@ -83,12 +85,11 @@ pub struct CoverageTracker {
 }
 ```
 
-**Component Coverage Targets:**
-- `storage::sstable`: 95% (core functionality)
-- `parser`: 90% (stable interface)
-- `validation`: 98% (critical for correctness)
-- `memory`: 85% (platform-dependent)
-- `platform`: 80% (OS-specific code)
+**Component Coverage Targets (aligned with PRD tiered approach):**
+- `parser`, `storage::sstable::reader`, `storage::sstable::reader::parsing`: 90% (Critical tier)
+- `query`, `schema`, `types`, `cql`, `discovery`: 80% (Important tier)
+- `memory`, `platform`, `storage::sstable::directory`, `storage::sstable::bti`: 70% (Supporting tier)
+- `benchmarks`, `testing`: 50% (Utilities tier)
 
 ## Test Organization Strategy
 
@@ -215,8 +216,8 @@ test-infrastructure = [
 
 ### Phase 2 Targets
 
-- **Overall Coverage**: 95% line coverage, 85% branch coverage
-- **Component Coverage**: All core components > 90%
+- **Overall Coverage**: 75% aggregate (weighted by module size)
+- **Tiered Coverage**: Critical 90%+, Important 80%+, Supporting 70%+, Utilities 50%+
 - **Test Enablement**: All 43 ignored tests converted and passing
 - **Quality Gates**: Zero tolerance for coverage regressions
 - **Performance**: No regressions > 5% from baseline
