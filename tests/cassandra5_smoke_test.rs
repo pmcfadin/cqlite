@@ -8,7 +8,16 @@ use std::path::PathBuf;
 
 /// Path to minimal Cassandra 5 fixtures
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/cassandra5/minimal")
+    // Handle both workspace contexts:
+    // - cqlite-integration-tests: CARGO_MANIFEST_DIR = .../cqlite/tests
+    // - cqlite (root): CARGO_MANIFEST_DIR = .../cqlite
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixtures = manifest_dir.join("fixtures/cassandra5/minimal");
+    if fixtures.exists() {
+        fixtures
+    } else {
+        manifest_dir.join("tests/fixtures/cassandra5/minimal")
+    }
 }
 
 /// Simple row data extracted from SSTable

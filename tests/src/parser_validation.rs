@@ -564,25 +564,26 @@ mod type_validation_tests {
 
     #[test]
     fn test_timestamp_and_date_parsing() {
-        // Timestamp (milliseconds since epoch)
+        // Timestamp (stored as milliseconds since epoch in Value::Timestamp)
         let timestamp_ms = 1642781400000i64; // 2022-01-21 12:10:00 UTC
         let timestamp_data = timestamp_ms.to_be_bytes();
         let (_, value) = parse_timestamp(&timestamp_data).expect("Failed to parse timestamp");
         if let Value::Timestamp(ts) = value {
-            assert_eq!(ts, timestamp_ms * 1000); // Should be converted to microseconds
+            assert_eq!(ts, timestamp_ms); // Stored as milliseconds
         } else {
             panic!("Expected Timestamp value");
         }
 
-        // Date (days since epoch)
-        let days_since_epoch = 19013u32; // 2022-01-21
-        let date_data = days_since_epoch.to_be_bytes();
+        // Date (Cassandra encodes dates with Integer.MIN_VALUE offset for byte-order comparability)
+        // The input is the raw stored value (shifted by 2^31)
+        let days_since_epoch: i32 = 19013; // 2022-01-21
+        let stored_value = (days_since_epoch as u32).wrapping_sub(i32::MIN as u32);
+        let date_data = stored_value.to_be_bytes();
         let (_, value) = parse_date(&date_data).expect("Failed to parse date");
-        if let Value::Timestamp(ts) = value {
-            let expected_microseconds = (days_since_epoch as i64) * 24 * 60 * 60 * 1_000_000;
-            assert_eq!(ts, expected_microseconds);
+        if let Value::Date(date_days) = value {
+            assert_eq!(date_days, days_since_epoch);
         } else {
-            panic!("Expected Timestamp value");
+            panic!("Expected Date value, got {:?}", value);
         }
     }
 

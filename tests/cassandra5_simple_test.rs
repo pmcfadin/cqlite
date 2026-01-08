@@ -4,11 +4,21 @@
 use std::fs;
 use std::path::PathBuf;
 
+/// Get path to fixtures, handling both workspace contexts
+fn fixture_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixtures = manifest_dir.join("fixtures/cassandra5/minimal/simple_table");
+    if fixtures.exists() {
+        fixtures
+    } else {
+        manifest_dir.join("tests/fixtures/cassandra5/minimal/simple_table")
+    }
+}
+
 #[test]
 fn test_cassandra5_fixture_integrity() {
     // Get path to fixtures
-    let fixture_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/cassandra5/minimal/simple_table");
+    let fixture_path = fixture_path();
 
     println!("Looking for fixtures at: {fixture_path:?}");
 
@@ -89,8 +99,7 @@ fn test_cassandra5_fixture_integrity() {
 
 #[test]
 fn test_data_db_content_parsing() {
-    let fixture_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/cassandra5/minimal/simple_table");
+    let fixture_path = fixture_path();
 
     let data_path = fixture_path.join("Data.db");
     let data = fs::read(&data_path).unwrap();

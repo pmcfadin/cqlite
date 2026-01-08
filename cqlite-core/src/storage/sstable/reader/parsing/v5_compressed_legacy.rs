@@ -604,9 +604,10 @@ impl V5CompressedLegacyParser {
     /// Previously used exact match (flags == 0x02) which missed markers like 0x52.
     #[inline]
     fn is_range_tombstone_marker(flags: u8) -> bool {
-        // Check if IS_MARKER bit is set, but NOT END_OF_PARTITION (0x01)
+        // Check if IS_MARKER bit is set, but END_OF_PARTITION bit is NOT set
         // IS_MARKER = 0x02, END_OF_PARTITION = 0x01
-        (flags & IS_MARKER) != 0 && !Self::is_end_of_partition(flags)
+        // If END_OF_PARTITION bit is set (even with other bits), it's end of partition, not a marker
+        (flags & IS_MARKER) != 0 && (flags & END_OF_PARTITION) == 0
     }
 
     /// Skip a range tombstone marker body (Issue #229 fix)
@@ -6570,25 +6571,27 @@ mod tests {
 
     #[test]
     fn test_range_tombstone_marker_detection() {
-        // IS_MARKER is exactly 0x02
-        assert!(V5CompressedLegacyParser::is_range_tombstone_marker(0x02));
+        // IS_MARKER (0x02) uses bitwise detection - any flags with IS_MARKER bit set
+        // and END_OF_PARTITION bit NOT set should be detected as marker
+        assert!(V5CompressedLegacyParser::is_range_tombstone_marker(0x02)); // IS_MARKER alone
+        assert!(V5CompressedLegacyParser::is_range_tombstone_marker(0x06)); // IS_MARKER | HAS_TIMESTAMP
+        assert!(V5CompressedLegacyParser::is_range_tombstone_marker(0x52)); // IS_MARKER | other flags (real data)
 
-        // Any other value should NOT be detected as range tombstone marker
-        // (using exact match to avoid false positives)
-        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x00));
+        // Should NOT be detected as marker:
+        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x00)); // No flags
         assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x01)); // END_OF_PARTITION
-        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x03)); // Not exact 0x02
-        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x04)); // HAS_TIMESTAMP
-        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x06)); // 0x02 | 0x04, but not exact
+        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x03)); // END_OF_PARTITION | IS_MARKER (EOP takes precedence)
+        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x04)); // HAS_TIMESTAMP (no IS_MARKER)
         assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x24)); // HAS_TIMESTAMP | HAS_ALL_COLUMNS
-        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x80)); // EXTENDED_FLAGS
+        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(0x80)); // EXTENDED_FLAGS (no IS_MARKER)
     }
 
     #[test]
     fn test_marker_detection_mutually_exclusive() {
-        // With exact matching, 0x03 is neither END_OF_PARTITION nor IS_MARKER
+        // When both END_OF_PARTITION (0x01) and IS_MARKER (0x02) bits are set,
+        // END_OF_PARTITION takes precedence (0x03 is treated as end of partition)
         let flags = 0x03;
-        assert!(!V5CompressedLegacyParser::is_end_of_partition(flags));
-        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(flags));
+        assert!(!V5CompressedLegacyParser::is_end_of_partition(flags)); // Exact match check fails
+        assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(flags)); // END_OF_PARTITION bit excludes marker
     }
 }
