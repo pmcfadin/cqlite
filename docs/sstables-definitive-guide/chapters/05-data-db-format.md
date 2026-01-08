@@ -224,7 +224,7 @@ Between rows in a partition, or at the end of a partition, the parser may encoun
 - Followed by clustering bound/boundary data and deletion time(s)
 - Must be skipped when parsing row data
 
-**Implementation Note**: CQLite uses exact byte match (not bitmask) to detect these markers to avoid false positives with row flags that incidentally have bits 0 or 1 set.
+**Implementation Note**: CQLite uses bitwise AND (`flags & IS_MARKER != 0`) to detect IS_MARKER because markers can have additional flag bits set (e.g., 0x52 = IS_MARKER | HAS_DELETION | HAS_COMPLEX_DELETION). END_OF_PARTITION still uses exact match (0x01) as it is always written alone without other flags.
 
 ### Row Flags
 

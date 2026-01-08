@@ -593,15 +593,16 @@ impl V5CompressedLegacyParser {
     /// Check if row flags indicate a range tombstone marker (not a data row)
     ///
     /// Per Cassandra's UnfilteredSerializer.java, IS_MARKER (0x02) indicates a range
-    /// tombstone boundary. However, similar to END_OF_PARTITION, we use an exact match
-    /// to 0x02 to avoid false positives with row data that incidentally has bit 1 set.
+    /// tombstone boundary. The marker flag can be combined with other metadata flags
+    /// (e.g., 0x52 = IS_MARKER | deletion metadata, 0x7a, 0x36, etc.).
     ///
-    /// Range tombstone markers are written with flags = 0x02 (or sometimes 0x06/0x0A/etc
-    /// with additional metadata flags). For now, we only match exact 0x02 since our test
-    /// data doesn't include complex range tombstones.
+    /// Issue #258 fix: Use bitwise AND to detect markers with additional flags.
+    /// Previously used exact match (flags == 0x02) which missed markers like 0x52.
     #[inline]
     fn is_range_tombstone_marker(flags: u8) -> bool {
-        flags == IS_MARKER // Exact match for now, expand if needed
+        // Check if IS_MARKER bit is set, but NOT END_OF_PARTITION (0x01)
+        // IS_MARKER = 0x02, END_OF_PARTITION = 0x01
+        (flags & IS_MARKER) != 0 && !Self::is_end_of_partition(flags)
     }
 
     /// Skip a range tombstone marker body (Issue #229 fix)
@@ -658,13 +659,15 @@ impl V5CompressedLegacyParser {
         // Each deletion time is: [localDeletionTime: VInt] [markedForDeleteAt: VInt]
         //
         // We skip 2 VInts for the first deletion time
+        // Issue #258 fix: Calculate bytes consumed correctly by incrementing pos
         let (remaining, _local_del_time) = parse_vint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
                 "V5CompressedLegacy: Failed to parse marker deletion time at offset {}: {:?}",
                 pos, e
             ))
         })?;
-        pos = data.len() - remaining.len();
+        let bytes_consumed = data[pos..].len() - remaining.len();
+        pos += bytes_consumed;
 
         let (remaining, _del_timestamp) = parse_vint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
@@ -672,7 +675,8 @@ impl V5CompressedLegacyParser {
                 pos, e
             ))
         })?;
-        pos = data.len() - remaining.len();
+        let bytes_consumed = data[pos..].len() - remaining.len();
+        pos += bytes_consumed;
 
         // For boundaries, there would be a second deletion time, but we can check the next byte
         // to see if it looks like another deletion time or the next unfiltered entry.
@@ -929,6 +933,17 @@ impl V5CompressedLegacyParser {
         }
         let key_len = data[offset] as usize;
         offset += 1;
+
+        // Issue #258 FIX: Partition key length must be non-zero
+        // A key_len of 0 indicates this is NOT a valid partition header (likely row data).
+        // This validation is critical for peek_is_partition_header() to correctly
+        // distinguish partition headers from row data in the row loop.
+        if key_len == 0 {
+            return Err(Error::corruption(format!(
+                "V5CompressedLegacy: Invalid partition key length 0 at offset {} (not a partition header)",
+                start_offset
+            )));
+        }
 
         debug!(
             "V5CompressedLegacy: Partition key length = {} bytes",
@@ -1187,71 +1202,65 @@ impl V5CompressedLegacyParser {
             }
 
             "int" => {
-                // VInt length + i32 big-endian
-                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': failed to parse int length: {:?}",
-                        col.name, e
-                    ))
-                })?;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-                let len_offset = offset + bytes_consumed;
-
-                if len != 4 {
-                    return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': expected int length 4, got {}",
-                        col.name, len
-                    )));
-                }
-
-                if len_offset + 4 > data.len() {
+                // Issue #258 fix: Fixed 4-byte int (big-endian i32) - NO length prefix
+                // Per Cassandra format, fixed-width clustering types have no VInt length prefix
+                if offset + 4 > data.len() {
                     return Err(Error::corruption(format!(
                         "V5CompressedLegacy: Clustering '{}': need 4 bytes for int, only {} available",
                         col.name,
-                        data.len() - len_offset
+                        data.len() - offset
                     )));
                 }
 
                 let val = i32::from_be_bytes([
-                    data[len_offset],
-                    data[len_offset + 1],
-                    data[len_offset + 2],
-                    data[len_offset + 3],
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
                 ]);
-                Ok((Value::Integer(val), len_offset + 4))
+                Ok((Value::Integer(val), offset + 4))
             }
 
             "uuid" | "timeuuid" => {
-                // VInt length + 16 UUID bytes
-                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': failed to parse UUID length: {:?}",
-                        col.name, e
-                    ))
-                })?;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-                let len_offset = offset + bytes_consumed;
-
-                if len != 16 {
-                    return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': expected UUID length 16, got {}",
-                        col.name, len
-                    )));
-                }
-
-                if len_offset + 16 > data.len() {
+                // Issue #258 fix: Fixed 16-byte UUID - NO length prefix
+                // Per Cassandra format, fixed-width clustering types have no VInt length prefix
+                if offset + 16 > data.len() {
                     return Err(Error::corruption(format!(
                         "V5CompressedLegacy: Clustering '{}': need 16 bytes for UUID, only {} available",
                         col.name,
-                        data.len() - len_offset
+                        data.len() - offset
                     )));
                 }
 
-                let uuid_bytes: [u8; 16] = data[len_offset..len_offset + 16]
+                let uuid_bytes: [u8; 16] = data[offset..offset + 16]
                     .try_into()
                     .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
 
-                Ok((Value::Uuid(uuid_bytes), len_offset + 16))
+                Ok((Value::Uuid(uuid_bytes), offset + 16))
+            }
+
+            "bigint" | "counter" => {
+                // Issue #258 fix: Fixed 8-byte bigint (big-endian i64) - NO length prefix
+                // Per Cassandra format, fixed-width clustering types have no VInt length prefix
+                if offset + 8 > data.len() {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Clustering '{}': need 8 bytes for bigint, only {} available",
+                        col.name,
+                        data.len() - offset
+                    )));
+                }
+
+                let val = i64::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                Ok((Value::BigInt(val), offset + 8))
             }
 
             _ => {
