@@ -234,6 +234,75 @@ if entries.is_empty() {
 
 ---
 
+### BTI End-to-End Validation (Issue #36 - Deferred to Post-M2)
+
+**Status**: 🔄 **DEFERRED** (Issue #36)
+**Impact**: No full BTI parity testing against sstabledump
+**Decision**: BTI validation deferred to future milestone per team agreement
+
+**Background**: Issue #36 requested comprehensive BTI validation including:
+- TDD tests for trie traversal lookups and iteration
+- Rows.db decoding tests with range tombstones and complex types
+- Round-trip byte-comparable invariants
+- Zero-diff vs sstabledump on BTI datasets
+
+**Key Findings**:
+1. **BIG format is Cassandra 5.0 default** - BTI requires explicit opt-in via `selected_format: bti` in cassandra.yaml
+2. **All test data uses BIG format** - 100% of 354 SSTable files use `nb-` prefix (BIG format)
+3. **0% BTI test data exists** - No Partitions.db/Rows.db trie files in test datasets
+4. **BTI is experimental** - Cassandra 5.0 marks BTI as opt-in, expected <5% production adoption
+
+**Current Implementation** (~3,200 LOC in `cqlite-core/src/storage/sstable/bti/`):
+- ✅ Format detection (magic number `0x6461`)
+- ✅ Byte-comparable encoding (CEP-25 compliant)
+- ✅ Trie node structures (all 4 types)
+- ✅ SizedInts encoding
+- ⚠️ Trie traversal (stub implementation)
+- ❌ Range queries (not implemented)
+- ❌ Full partition iteration (not implemented)
+
+**Decision Rationale**:
+- No BTI test data available for validation
+- BTI is opt-in/experimental in Cassandra 5.0
+- BIG format covers 100% of current test scenarios
+- Production BTI code preserved for future validation
+
+**Future Work** (new issue when BTI demand emerges):
+1. Configure test cluster with `selected_format: bti`
+2. Generate real BTI SSTables (Partitions.db, Rows.db)
+3. Validate CQLite BTI parser vs sstabledump output
+4. Complete trie traversal implementation
+
+**Reference**: Full status documented in `docs/sstables-definitive-guide/references/bti-v1-status.md`
+
+**Tracking**: Issue #36 (DEFERRED - see issue comments for full discussion)
+
+---
+
+### Table ID Matching in scan_for_key() (Issue #36 Follow-up - FIXED)
+
+**Status**: ✅ **FIXED** (Issue #36 regression fix)
+**Impact**: Was causing zero-row results when table names had qualified vs unqualified mismatch
+**Resolution**: Updated `scan_for_key()` to use `table_ids_match()` function
+
+**Root Cause Found**: The `scan_for_key()` function in `data_access.rs` used direct equality (`==`) to compare table IDs, which failed when:
+- Query used qualified name (e.g., `test_basic.simple_table`)
+- SSTable stored unqualified name (e.g., `simple_table`)
+- Or vice versa
+
+**Symptom**: CLI queries returned zero rows with debug log showing `table_id mismatch ('test_basic.simple_table' != 'simple_table')`.
+
+**Fix Details**:
+- File: `cqlite-core/src/storage/sstable/reader/data_access.rs:504`
+- Changed: `entry_table_id == *table_id` → `table_ids_match(&entry_table_id, table_id)`
+- The `table_ids_match()` function (lines 26-50) handles qualified/unqualified name comparison correctly
+
+**Note**: The `sequential_scan()` function (line 648) already used `table_ids_match()` correctly. This fix aligns `scan_for_key()` with the same matching logic.
+
+**Tracking**: Issue #36 (comment thread, Jan 2026)
+
+---
+
 ### BTI Metadata Offset Extraction (Performance Optimization - M3+ Scope)
 
 **Status**: 🔄 **DEFERRED** (Issue #226)

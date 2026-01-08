@@ -501,7 +501,7 @@ impl SSTableReader {
             let entries = self.parse_block_entries(&block, None)?;
 
             for (entry_table_id, entry_key, entry_value) in entries {
-                if entry_table_id == *table_id && entry_key == *key {
+                if table_ids_match(&entry_table_id, table_id) && entry_key == *key {
                     // Extract write time from entry metadata
                     let _write_time = self.extract_write_time_from_entry(&entry_key, &entry_value);
 
