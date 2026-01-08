@@ -139,7 +139,7 @@ impl NomParser {
             columns.push(CqlColumnDef {
                 name: CqlIdentifier::new(&column.name),
                 data_type,
-                is_static: false, // TODO: detect static columns
+                is_static: column.is_static,
             });
         }
 
@@ -329,6 +329,7 @@ impl NomParser {
                 data_type: self.convert_ast_type_to_string(&col.data_type),
                 nullable: true,
                 default: None,
+                is_static: col.is_static,
             })
             .collect();
 

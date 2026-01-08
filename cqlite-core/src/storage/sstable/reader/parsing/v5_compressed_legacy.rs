@@ -3099,6 +3099,7 @@ impl V5CompressedLegacyParser {
                     data_type: "udt".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 };
                 let (value, _) =
                     self.parse_udt_value(data, 0, &nested_def, &dummy_column, reader)?;

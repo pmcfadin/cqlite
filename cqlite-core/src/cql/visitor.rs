@@ -1180,6 +1180,7 @@ impl CqlVisitor<TableSchema> for SchemaBuilderVisitor {
                     data_type: self.convert_cql_data_type_to_string(&col_def.data_type),
                     nullable: true, // Default to nullable
                     default: None,
+                    is_static: col_def.is_static,
                 }
             })
             .collect();

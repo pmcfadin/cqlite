@@ -995,6 +995,7 @@ impl SchemaRegistry {
                 data_type: col.data_type.clone(),
                 nullable: col.nullable,
                 default: None, // ColumnDefinition doesn't have default_value
+                is_static: false,
             });
         }
 
@@ -1005,6 +1006,7 @@ impl SchemaRegistry {
                 data_type: col.data_type.clone(),
                 nullable: col.nullable,
                 default: None, // ColumnDefinition doesn't have default_value
+                is_static: true,
             });
         }
 
@@ -1450,6 +1452,7 @@ mod tests {
                 data_type: "uuid".to_string(),
                 nullable: false,
                 default: None,
+                is_static: false,
             }],
             comments: HashMap::new(),
         }
@@ -1509,6 +1512,7 @@ mod tests {
             data_type: "text".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         });
 
         registry

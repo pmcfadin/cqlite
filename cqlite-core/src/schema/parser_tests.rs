@@ -33,30 +33,35 @@ mod parser_tests {
                     data_type: "int".to_string(),
                     nullable: false,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "timestamp".to_string(),
                     data_type: "bigint".to_string(),
                     nullable: false,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "name".to_string(),
                     data_type: "text".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "data".to_string(),
                     data_type: "blob".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "tags".to_string(),
                     data_type: "list<text>".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
             ],
             comments: HashMap::new(),
@@ -223,6 +228,7 @@ mod parser_tests {
             data_type: "uuid".to_string(),
             nullable: false,
             default: None,
+            is_static: false,
         });
 
         let mut column_comparators = HashMap::new();
@@ -257,6 +263,7 @@ mod parser_tests {
             data_type: "map<text,list<int>>".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         });
 
         let map_comparator = ComparatorType::Map(
@@ -301,6 +308,7 @@ mod parser_tests {
             data_type: "frozen<set<int>>".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         });
 
         let frozen_comparator =
@@ -420,30 +428,35 @@ mod parser_tests {
                     data_type: "text".to_string(),
                     nullable: false,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "bucket".to_string(),
                     data_type: "int".to_string(),
                     nullable: false,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "timestamp".to_string(),
                     data_type: "timestamp".to_string(),
                     nullable: false,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "sequence".to_string(),
                     data_type: "bigint".to_string(),
                     nullable: false,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "value".to_string(),
                     data_type: "double".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
             ],
             comments: HashMap::new(),
@@ -498,6 +511,7 @@ mod parser_tests {
             data_type: "frozen<list<frozen<user_profile>>>".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         });
 
         // Create comparator for frozen<list<frozen<user_profile>>>

@@ -1016,6 +1016,7 @@ impl CqlParserValidationSuite {
                 data_type: "uuid".to_string(),
                 nullable: false,
                 default: None,
+                is_static: false,
             }],
             comments: HashMap::new(),
         })

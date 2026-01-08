@@ -117,12 +117,18 @@ fn cql_type(input: &str) -> IResult<&str, String> {
     Ok((input, type_name))
 }
 
-/// Parse column definition (with optional inline PRIMARY KEY)
-fn column_definition(input: &str) -> IResult<&str, (String, String)> {
+/// Parse column definition (with optional STATIC modifier and inline PRIMARY KEY)
+/// Returns (name, data_type, is_static)
+fn column_definition(input: &str) -> IResult<&str, (String, String, bool)> {
     let (input, _) = ws(input)?;
     let (input, name) = identifier(input)?;
     let (input, _) = ws1(input)?;
     let (input, data_type) = cql_type(input)?;
+    let (input, _) = ws(input)?;
+
+    // Check for STATIC modifier (Issue #255)
+    let (input, is_static) = opt(keyword("static"))(input)?;
+    let is_static = is_static.is_some();
     let (input, _) = ws(input)?;
 
     // Check for inline PRIMARY KEY (parse it but don't modify data_type)
@@ -131,7 +137,7 @@ fn column_definition(input: &str) -> IResult<&str, (String, String)> {
 
     // Return the data_type as-is (e.g., "uuid", not "uuid PRIMARY KEY")
     // Issue #192: data_type must be a pure CQL type name for proper type matching
-    Ok((input, (name, data_type)))
+    Ok((input, (name, data_type, is_static)))
 }
 
 /// Parse PRIMARY KEY specification
@@ -494,7 +500,8 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
     let (input, _) = ws(input)?;
 
     // Parse column definitions and constraints
-    let mut columns = Vec::new();
+    // Columns are stored as (name, data_type, is_static)
+    let mut columns: Vec<(String, String, bool)> = Vec::new();
     let mut partition_keys = Vec::new();
     let mut clustering_keys = Vec::new();
     let mut primary_key_found = false;
@@ -502,20 +509,21 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
     let (input, items) = separated_list1(
         tuple((ws, char(','), ws)),
         alt((
-            // Primary key constraint
+            // Primary key constraint - returns 3-tuple with is_static=false (unused)
             map(primary_key_spec, |keys| {
                 (
                     "PRIMARY_KEY".to_string(),
                     serde_json::to_string(&keys).unwrap_or_default(),
+                    false, // is_static not applicable for PRIMARY KEY constraint
                 )
             }),
-            // Column definition
+            // Column definition - returns (name, data_type, is_static)
             column_definition,
         )),
     )(input)?;
 
     // Process parsed items
-    for (name, value) in items {
+    for (name, value, is_static) in items {
         if name == "PRIMARY_KEY" {
             // Parse the JSON-encoded key specification
             if let Ok(keys_tuple) = serde_json::from_str::<(Vec<String>, Vec<String>)>(&value) {
@@ -525,7 +533,7 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
             }
             continue;
         }
-        columns.push((name, value));
+        columns.push((name, value, is_static));
     }
 
     let (input, _) = ws(input)?;
@@ -538,7 +546,7 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
     if !primary_key_found && !columns.is_empty() {
         // Check if any column has "PRIMARY KEY" in its type (inline definition)
         let mut found_inline = false;
-        for (col_name, col_type) in &columns {
+        for (col_name, col_type, _is_static) in &columns {
             if col_type.to_lowercase().contains("primary key") {
                 partition_keys.push(col_name.clone());
                 found_inline = true;
@@ -562,8 +570,8 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
             .map(|(pos, name)| {
                 let data_type = columns
                     .iter()
-                    .find(|(col_name, _)| col_name == &name)
-                    .map(|(_, dt)| dt.clone())
+                    .find(|(col_name, _, _)| col_name == &name)
+                    .map(|(_, dt, _)| dt.clone())
                     .unwrap_or_else(|| "text".to_string());
 
                 KeyColumn {
@@ -579,8 +587,8 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
             .map(|(pos, name)| {
                 let data_type = columns
                     .iter()
-                    .find(|(col_name, _)| col_name == &name)
-                    .map(|(_, dt)| dt.clone())
+                    .find(|(col_name, _, _)| col_name == &name)
+                    .map(|(_, dt, _)| dt.clone())
                     .unwrap_or_else(|| "text".to_string());
 
                 ClusteringColumn {
@@ -593,7 +601,7 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
             .collect(),
         columns: columns
             .into_iter()
-            .map(|(name, data_type_with_constraints)| {
+            .map(|(name, data_type_with_constraints, is_static)| {
                 // Remove PRIMARY KEY constraint from data type
                 let data_type = if data_type_with_constraints
                     .to_lowercase()
@@ -613,6 +621,7 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
                     data_type,
                     nullable: true,
                     default: None,
+                    is_static,
                 }
             })
             .collect(),
@@ -817,7 +826,7 @@ fn table_schema_to_ast(schema: &TableSchema) -> Result<CqlCreateTable> {
             Ok(CqlColumnDef {
                 name: CqlIdentifier::new(&col.name),
                 data_type: string_to_cql_data_type(&col.data_type)?,
-                is_static: false,
+                is_static: col.is_static,
             })
         })
         .collect();

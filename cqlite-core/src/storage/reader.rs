@@ -1085,12 +1085,14 @@ mod tests {
                     data_type: "bigint".to_string(),
                     nullable: false,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "name".to_string(),
                     data_type: "text".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 }
             ],
             comments: HashMap::new(),

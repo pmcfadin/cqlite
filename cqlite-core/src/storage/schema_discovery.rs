@@ -358,6 +358,7 @@ impl SchemaDiscovery {
                 data_type: data_type.to_string(),
                 nullable: true,
                 default: None,
+                is_static: false,
             };
             columns.push(column);
         }

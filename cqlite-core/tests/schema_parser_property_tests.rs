@@ -54,6 +54,7 @@ fn test_primitive_types_consumed_bytes() {
             data_type: type_name.to_string(),
             nullable: false,
             default: None,
+            is_static: false,
         }];
 
         let mut context = create_test_context(columns);
@@ -100,6 +101,7 @@ fn test_variable_length_types_consumed_bytes() {
         data_type: "text".to_string(),
         nullable: false,
         default: None,
+        is_static: false,
     }];
 
     let mut context = create_test_context(columns);
@@ -143,6 +145,7 @@ fn test_list_consumed_bytes() {
         data_type: "list<int>".to_string(),
         nullable: false,
         default: None,
+        is_static: false,
     }];
 
     let mut context = create_test_context(columns);
@@ -190,6 +193,7 @@ fn test_map_consumed_bytes() {
         data_type: "map<int, int>".to_string(),
         nullable: false,
         default: None,
+        is_static: false,
     }];
 
     let mut context = create_test_context(columns);
@@ -241,6 +245,7 @@ fn test_nested_list_consumed_bytes() {
         data_type: "list<list<int>>".to_string(),
         nullable: false,
         default: None,
+        is_static: false,
     }];
 
     let mut context = create_test_context(columns);
@@ -286,12 +291,14 @@ fn test_null_handling_in_row() {
             data_type: "int".to_string(),
             nullable: false,
             default: None,
+            is_static: false,
         },
         Column {
             name: "nullable_col".to_string(),
             data_type: "text".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         },
     ];
 
@@ -352,6 +359,7 @@ fn test_tuple_consumed_bytes() {
         data_type: "tuple<int, text>".to_string(),
         nullable: false,
         default: None,
+        is_static: false,
     }];
 
     let mut context = create_test_context(columns);

@@ -898,6 +898,7 @@ impl CqlIntegrationTestSuite {
             data_type: "uuid".to_string(),
             nullable: false,
             default: None,
+            is_static: false,
         }];
 
         // Add additional columns based on CQL content
@@ -907,6 +908,7 @@ impl CqlIntegrationTestSuite {
                 data_type: "text".to_string(),
                 nullable: true,
                 default: None,
+                is_static: false,
             });
         }
 
@@ -916,6 +918,7 @@ impl CqlIntegrationTestSuite {
                 data_type: "set<text>".to_string(),
                 nullable: true,
                 default: None,
+                is_static: false,
             });
         }
 
@@ -925,6 +928,7 @@ impl CqlIntegrationTestSuite {
                 data_type: "map<text, text>".to_string(),
                 nullable: true,
                 default: None,
+                is_static: false,
             });
         }
 

@@ -162,6 +162,10 @@ pub struct Column {
     /// Default value (if any)
     #[serde(default)]
     pub default: Option<serde_json::Value>,
+
+    /// Whether this is a STATIC column
+    #[serde(default)]
+    pub is_static: bool,
 }
 
 /// Parsed CQL data type
@@ -621,6 +625,7 @@ impl TableSchema {
                 data_type: col.column_type.clone(),
                 nullable: !col.is_primary_key, // Primary keys are non-nullable
                 default: None,
+                is_static: false, // TODO: Header format doesn't track static columns yet
             })
             .collect();
 
@@ -925,6 +930,7 @@ impl TableSchema {
                 data_type: "int".to_string(),
                 nullable: false,
                 default: None,
+                is_static: false,
             }],
             comments: HashMap::new(),
         }
@@ -1295,6 +1301,7 @@ impl SchemaManager {
                 data_type: "uuid".to_string(),
                 nullable: false,
                 default: None,
+                is_static: false,
             }],
             comments: HashMap::new(),
         }

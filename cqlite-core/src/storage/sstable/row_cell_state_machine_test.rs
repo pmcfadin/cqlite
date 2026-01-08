@@ -21,24 +21,28 @@ mod tests {
                     data_type: "uuid".to_string(),
                     nullable: false,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "name".to_string(),
                     data_type: "text".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "age".to_string(),
                     data_type: "int".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "tags".to_string(),
                     data_type: "list<text>".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 // Additional columns for failing tests
                 Column {
@@ -46,36 +50,42 @@ mod tests {
                     data_type: "text".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "col1".to_string(),
                     data_type: "text".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "col2".to_string(),
                     data_type: "text".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "coordinates".to_string(),
                     data_type: "tuple<double, double, text>".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "metadata".to_string(),
                     data_type: "map<text, list<int>>".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
                 Column {
                     name: "nested_data".to_string(),
                     data_type: "blob".to_string(),
                     nullable: true,
                     default: None,
+                    is_static: false,
                 },
             ],
             comments: HashMap::new(),
@@ -572,6 +582,7 @@ mod tests {
             data_type: "list<set<text>>".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         });
 
         let comparator = ComparatorType::Blob;
@@ -627,6 +638,7 @@ mod tests {
             data_type: "frozen<address_type>".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         });
 
         let comparator = ComparatorType::Blob;
@@ -699,6 +711,7 @@ mod tests {
             data_type: "tuple<double, double, text>".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         });
 
         let comparator = ComparatorType::Blob;
@@ -828,12 +841,14 @@ mod tests {
                 data_type: "frozen<list<text>>".to_string(),
                 nullable: true,
                 default: None,
+                is_static: false,
             },
             Column {
                 name: "regular_list".to_string(),
                 data_type: "list<text>".to_string(),
                 nullable: true,
                 default: None,
+                is_static: false,
             },
         ]);
 
@@ -928,6 +943,7 @@ mod tests {
             data_type: "map<text, frozen<list<int>>>".to_string(),
             nullable: true,
             default: None,
+            is_static: false,
         });
 
         let comparator = ComparatorType::Blob;

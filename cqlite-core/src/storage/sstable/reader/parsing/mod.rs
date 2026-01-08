@@ -225,6 +225,7 @@ impl SSTableReader {
                 data_type: col_info.column_type.clone(), // Use column_type field
                 nullable: true,
                 default: None,
+                is_static: false, // TODO: Header doesn't track static columns yet
             };
 
             // Check if this is a key column based on primary key and clustering status

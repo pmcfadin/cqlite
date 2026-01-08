@@ -499,6 +499,7 @@ fn parse_column_definitions(
                 data_type: column_type.clone(),
                 nullable: !is_primary_key, // Primary key columns are not nullable
                 default: None,
+                is_static: false, // Quick schema creation doesn't support STATIC yet
             };
 
             columns.push(column);

@@ -1334,8 +1334,9 @@ fn parse_json_schema(json: &serde_json::Value) -> Result<TableSchema> {
         let column = Column {
             name: col_name.clone(),
             data_type: col_type.to_string(),
-            nullable: true, // Default to nullable
-            default: None,  // No default value
+            nullable: true,   // Default to nullable
+            default: None,    // No default value
+            is_static: false, // SSTable metadata doesn't track static columns
         };
 
         match col_kind {

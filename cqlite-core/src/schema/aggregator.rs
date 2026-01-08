@@ -686,6 +686,7 @@ impl SchemaAggregator {
                 data_type: col.r#type.clone(),
                 nullable: col.nullable,
                 default: None,
+                is_static: false, // TODO: minimal schema doesn't track static columns yet
             })
             .collect();
 
@@ -761,6 +762,7 @@ impl SchemaAggregator {
                 data_type: col.r#type.clone(),
                 nullable: col.nullable,
                 default: None,
+                is_static: false, // TODO: JSON schema doesn't track static columns yet
             })
             .collect();
 
