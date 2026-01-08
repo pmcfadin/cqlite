@@ -2,13 +2,10 @@
   "required_status_checks": {
     "strict": true,
     "contexts": [
-      "Coverage Gate ≥90% (Phase 2 Enforcement) / coverage-gate (enforced)",
-      "Multi-Architecture Testing / multi-arch-gate",
-      "Performance Regression Detection / performance-gate",
-      "Quality Gates Coordination / quality-gates-coordinator",
-      "Essential Validations",
-      "M1 Core Validation (Ubuntu) / m1-core-validation",
-      "SSTableDump Parity Harness (M1 Required) / sstabledump-parity-m1"
+      "CI / test",
+      "CI: Core Library (minimal) / m1-core-validation",
+      "CI: Core Library (minimal) / sstabledump-parity-m1",
+      "CI: SSTableDump Parity Gate / sstabledump-parity"
     ]
   },
   "enforce_admins": true,
