@@ -8,13 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Query engine development (M2 milestone)
-- CLI enhancements: TUI mode, REPL mode, one-shot query execution
+- M3: Parquet output format (Issue #21) - in progress
+
+## [0.2.0] - 2026-01-08 (M2 Complete)
+
+### Added
+- CLI one-shot query mode with `--schema`, `--data-dir`, `--query`, `--out` flags
+- REPL mode with history, completion, and status display
+- TUI mode (experimental)
+- SELECT query support with WHERE clause (partition/clustering key equality)
+- Output formats: Table, JSON, CSV, YAML
+- M2SelectValidator for query validation
 
 ### Changed
-- Ongoing SSTable parsing improvements
+- Query engine enabled by default (`state_machine` feature)
+- Documentation updated for M2 completion
 
-## [0.1.0] - 2024-XX-XX
+## [0.1.0] - 2025-12-18 (M1 Complete)
 
 ### Added
 - Initial release of CQLite core library
@@ -37,11 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Frozen types
 - Schema-aware decoding
 - CLI tool with basic parsing commands
-- Workspace structure with multiple crates:
+- Workspace structure:
   - `cqlite-core`: Core parsing library
   - `cqlite-cli`: Command-line interface
-  - `cqlite-ffi`: C/C++ bindings (experimental)
-  - `cqlite-wasm`: WebAssembly bindings (experimental)
+- 33/33 test tables passing (100% validation)
 
 ### Technical Details
 - Zero-copy parsing where possible
@@ -49,5 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No external cluster dependencies required
 - Real Cassandra SSTable test data validation
 
-[Unreleased]: https://github.com/pmcfadin/cqlite/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/pmcfadin/cqlite/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/pmcfadin/cqlite/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/pmcfadin/cqlite/releases/tag/v0.1.0

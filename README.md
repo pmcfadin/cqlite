@@ -6,9 +6,9 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org)
 [![Cassandra](https://img.shields.io/badge/cassandra-5.0+-green.svg)](https://cassandra.apache.org)
 
-> 🚧 **Status**: Early Development - Not ready for production use
+> **Status**: M2 Complete - Core reading and CLI are production-ready
 
-CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read and write Cassandra data files without cluster dependencies. Built in Rust for performance and safety, with bindings for Python, NodeJS, and WASM deployment.
+CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
 ## Vision
 
@@ -28,8 +28,12 @@ cd cqlite
 # Build the project
 cargo build --release
 
-# Run the CLI tool (coming soon)
-./target/release/cqlite parse my-table-data.db
+# Run the CLI tool
+cargo run --package cqlite-cli -- \
+  --schema test-data/schemas/basic-types.cql \
+  --data-dir test-data/datasets/sstables \
+  --query "SELECT * FROM test_basic.simple_table LIMIT 5" \
+  --out json
 ```
 
 ## Feature Flags
@@ -41,7 +45,6 @@ CQLite uses Cargo feature flags to control optional functionality:
 - `state_machine` - Query engine (M2 CLI)
 
 ### Optional Features
-- `experimental` - Write support (M5, unstable)
 - `benchmarks` - Performance benchmarks
 - `tombstones` - Tombstone merging (M3+)
 - `metrics` - Performance monitoring and telemetry
@@ -49,11 +52,8 @@ CQLite uses Cargo feature flags to control optional functionality:
 ### Building with Custom Features
 
 ```bash
-# Default build (M1/M2 features only)
+# Default build (M1/M2 features)
 cargo build
-
-# Build with experimental write support
-cargo build --features experimental
 
 # Build with metrics enabled
 cargo build --features metrics
@@ -62,20 +62,21 @@ cargo build --features metrics
 cargo build --no-default-features
 ```
 
-## Features (Planned)
+## Features
 
-### ✅ Current (Alpha)
-- [ ] Cassandra 5+ SSTable format parsing
-- [ ] CQL type system support
-- [ ] Basic CLI tool for testing
+### ✅ Complete (M1/M2)
+- [x] Cassandra 5+ SSTable format parsing (100% of test tables)
+- [x] All CQL types including collections and UDTs
+- [x] All compression codecs (LZ4, Snappy, Deflate, Zstd)
+- [x] CLI tool with REPL and one-shot query modes
+- [x] SELECT with WHERE clause (partition/clustering key equality)
+- [x] Output formats: Table, JSON, CSV, YAML
 
-### 🚧 In Development  
-- [ ] Complete CQL data type support
-- [ ] Read operations with indexing
-- [ ] Schema validation and evolution
+### 🚧 In Development (M3)
+- [ ] Parquet output format
+- [ ] Enhanced query operators
 
-### 📋 Roadmap
-- [ ] Write operations with Cassandra 5 compatibility
+### 📋 Roadmap (M4+)
 - [ ] Python and NodeJS bindings
 - [ ] WASM support for browser deployment
 - [ ] Advanced query capabilities
@@ -136,23 +137,22 @@ cargo run --bin cqlite parse test-data/users-*.db
 
 ## Current Status
 
-### ✅ Completed
-- Project architecture and design
-- Test data generation strategy
-- Development infrastructure setup
+### ✅ M1 Complete (Dec 2025)
+- All SSTable components parsed (Data.db, Index.db, Summary.db, Statistics.db, TOC)
+- 33/33 test tables passing (100% validation)
+- All 21 CQL primitive types + collections + UDTs + frozen types
+- All compression algorithms working
 
-### 🔄 In Progress
-- Core SSTable parsing engine
-- CQL grammar integration
-- CLI tool development
+### ✅ M2 Complete (Jan 2026)
+- CLI with one-shot and REPL modes
+- SELECT queries with WHERE clause support
+- Multiple output formats (Table, JSON, CSV, YAML)
 
-### 📅 Next Milestones
-- **Week 4**: Basic parsing engine
-- **Week 8**: CLI tool for user testing
-- **Week 12**: Complete type system support
-- **Week 16**: Read operations
+### 🔄 M3 In Progress
+- Parquet output format (Issue #21)
+- Enhanced export functionality
 
-See [MILESTONE_TRACKER.md](MILESTONE_TRACKER.md) for detailed progress.
+See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
 ## Technical Details
 
@@ -195,4 +195,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: This project is in early development. APIs and features are subject to change. We appreciate early feedback but recommend waiting for v0.1.0 for production evaluation.
+**Note**: M1 and M2 milestones are complete. The read-only SSTable access is production-ready. M3 (Parquet export) is in progress.

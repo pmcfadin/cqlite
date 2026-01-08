@@ -6,7 +6,7 @@ Guidance for Claude Code when working with CQLite.
 
 CQLite is a Rust library for local Apache Cassandra SSTable access. It reads Cassandra 5.0 data files without cluster dependencies.
 
-**Status**: M2+ (Query Engine) - M1 (Core Reading) is complete.
+**Status**: M2 Complete (Jan 2026) - Core reading (M1) and CLI (M2) are production-ready. Next: M3 (Output Writers).
 
 ## Documentation
 
@@ -105,11 +105,11 @@ Status metrics refresh every 5 seconds. Status line disabled for piped output.
 ```
 cqlite-core/     # Core library (SSTable parsing, query engine)
 cqlite-cli/      # Command-line interface
-cqlite-ffi/      # C/C++ bindings
-cqlite-wasm/     # WebAssembly bindings
 test-data/       # Real Cassandra 5.0 SSTables for testing
 tools/           # sstabledump-validator, format-validator
 ```
+
+**Planned (M4+)**: `cqlite-ffi/` (C/C++ bindings), `cqlite-wasm/` (WebAssembly)
 
 ### Key Source Paths
 
@@ -155,7 +155,7 @@ Location: `test-data/datasets/sstables/`
 | test_timeseries | 9 | Time-series patterns |
 | test_wide_rows | 8 | Wide partitions |
 
-**Current pass rate**: ~27% (see Appendix F for details)
+**Current pass rate**: 100% (33/33 tables passing as of Dec 2025)
 
 ## Feature Flags
 

@@ -1,4 +1,5 @@
-// EMERGENCY M1 FIX: Allow clippy warnings
+// TODO(M3): Address 105 clippy warnings in cqlite-cli
+// See Issue #204 for tracking
 #![allow(clippy::all)]
 
 use anyhow::Result;
