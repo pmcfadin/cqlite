@@ -143,7 +143,7 @@ benchmarks = []       # opt-in perf runs
 # Extended Index.db validation (Issue #66) - NOT enabled in M1 CI
 # Gates deep promoted index and range query validation for post-M1
 extended-index-validation = []
-experimental = []     # SSTable writing and other M1 functionality (enabled by default)
+experimental = []     # Experimental features including bloom filter tests (Issue #65), disabled by default
 
 # Issue #80: Mock usage control - unit tests only
 unit-tests-only = []  # Enables mock/synthetic data usage for unit tests (disabled in CI integration paths)

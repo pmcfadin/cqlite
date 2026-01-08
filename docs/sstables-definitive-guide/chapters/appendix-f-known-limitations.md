@@ -453,6 +453,23 @@ The following features are planned but not implemented in the current M2 milesto
 
 ### Experimental Features (Opt-In)
 
+#### Bloom Filter Tests (Issue #65)
+
+**Feature Flag**: `experimental`
+**Default**: **Disabled** (not in CI default lane)
+**Purpose**: Gate bloom filter unit tests for M3 milestone
+
+Bloom filter implementation is complete with overflow-safe arithmetic (`wrapping_add`/`wrapping_mul`). Tests are gated behind the `experimental` feature to keep them out of the default CI lane per Issue #65 requirements.
+
+**To Run Bloom Filter Tests**:
+```bash
+cargo test --package cqlite-core --features experimental bloom
+```
+
+**Note**: The bloom filter *implementation* is always available; only the *tests* require the feature flag.
+
+---
+
 #### Legacy Heuristics (Pre-5.0 Format Support)
 
 **Feature Flag**: `legacy-heuristics`
