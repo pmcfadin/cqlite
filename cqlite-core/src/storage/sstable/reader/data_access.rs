@@ -126,6 +126,26 @@ impl SSTableReader {
                 entries.len()
             );
 
+            // Issue #256 FIX: Fall back to sequential scan when index returns no entries
+            //
+            // This handles BTI (Big Trie Index) format where parsing may be incomplete or
+            // where the index format is not yet fully supported. Without this check, tables
+            // using BTI format return 0 rows because:
+            // 1. The index exists (so we take the index-based path)
+            // 2. But get_range() returns 0 entries (BTI parsing incomplete)
+            // 3. The has_zero_size check never triggers (no entries to check)
+            // 4. The for loop iterates 0 times, returning empty results
+            //
+            // Sequential scan correctly parses Data.db directly, bypassing index issues.
+            if entries.is_empty() {
+                log::debug!(
+                    "SSTableReader::scan - Index returned 0 entries (BTI format or incomplete parsing), falling back to sequential scan"
+                );
+                return self
+                    .sequential_scan(table_id, start_key, end_key, limit, schema)
+                    .await;
+            }
+
             // Check if any entry has size=0 (Cassandra 5.0 format)
             let has_zero_size = entries.iter().any(|e| e.size == 0);
             if has_zero_size {

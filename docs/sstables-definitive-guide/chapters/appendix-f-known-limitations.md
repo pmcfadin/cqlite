@@ -198,6 +198,42 @@ V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
 
 ---
 
+### ~~BTI Empty Index Fallback (Query Returns 0 Rows)~~ - FIXED
+
+**Status**: ✅ **FIXED** (Issue #256)
+**Impact**: Was 1 table - now 0 (time_bucketed_counters returns 41 rows correctly)
+**Resolution**: Added empty index entries check to trigger sequential scan fallback
+
+**Root Cause Found**: When BTI Index.db parsing is incomplete (returns 0 partition entries), the scan path in `data_access.rs` would:
+1. Take the index-based path (since `self.index.is_some()`)
+2. Get 0 entries from `get_range()`
+3. Check `has_zero_size` which is `false` (no entries to check)
+4. Return empty results without falling back to sequential scan
+
+**Symptom**: `SELECT * FROM test_timeseries.time_bucketed_counters` returned 0 rows despite containing 41 rows.
+
+**Fix Details**:
+- File: `cqlite-core/src/storage/sstable/reader/data_access.rs`
+- Added check for empty entries BEFORE the `has_zero_size` check
+- When `entries.is_empty()`, triggers sequential scan fallback
+- Sequential scan correctly parses Data.db directly, bypassing index issues
+
+**Code Change**:
+```rust
+// Issue #256 FIX: Fall back to sequential scan when index returns no entries
+if entries.is_empty() {
+    return self.sequential_scan(table_id, start_key, end_key, limit, schema).await;
+}
+```
+
+**Results**:
+- `time_bucketed_counters` now returns 41 rows via sequential scan fallback
+- No regression on tables using DigestFormat index
+
+**Tracking**: Issue #256 (CLOSED)
+
+---
+
 ### BTI Metadata Offset Extraction (Performance Optimization - M3+ Scope)
 
 **Status**: 🔄 **DEFERRED** (Issue #226)
