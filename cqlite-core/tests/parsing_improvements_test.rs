@@ -86,29 +86,29 @@ mod parsing_improvements_tests {
 
     #[test]
     fn test_timestamp_detection_improvements() {
-        // Test case 1: Valid timestamp in milliseconds (will be converted to microseconds)
-        let timestamp_micros = 1640995200000i64; // 2022-01-01 00:00:00 UTC in milliseconds
-        let timestamp_bytes = timestamp_micros.to_be_bytes();
+        // Test case 1: Valid timestamp in milliseconds (stored as milliseconds per Value::Timestamp definition)
+        // Issue #258 fix: parse_timestamp stores milliseconds directly, no conversion to microseconds
+        let timestamp_millis = 1640995200000i64; // 2022-01-01 00:00:00 UTC in milliseconds
+        let timestamp_bytes = timestamp_millis.to_be_bytes();
 
         let (_, value) = parse_cql_value(&timestamp_bytes, CqlTypeId::Timestamp).unwrap();
         match value {
             Value::Timestamp(ts) => {
-                // Should be in the reasonable timestamp range (microseconds since epoch)
-                assert!(ts > 1_000_000_000_000_000 && ts < 2_000_000_000_000_000);
+                // Should be stored as milliseconds (no conversion)
+                assert_eq!(ts, timestamp_millis);
             }
             _ => panic!("Expected timestamp value"),
         }
 
-        // Test case 2: Timestamp in milliseconds (should be converted)
-        let timestamp_millis = 1640995200000i64; // 2022-01-01 00:00:00 UTC in milliseconds
-        let timestamp_bytes = timestamp_millis.to_be_bytes();
+        // Test case 2: Another timestamp value
+        let timestamp_millis2 = 1702900000000i64; // 2023-12-18 in milliseconds
+        let timestamp_bytes2 = timestamp_millis2.to_be_bytes();
 
-        // The parser should detect this as milliseconds and convert to microseconds
-        let (_, value) = parse_cql_value(&timestamp_bytes, CqlTypeId::Timestamp).unwrap();
+        let (_, value) = parse_cql_value(&timestamp_bytes2, CqlTypeId::Timestamp).unwrap();
         match value {
             Value::Timestamp(ts) => {
-                // Should be converted to microseconds
-                assert_eq!(ts, timestamp_millis * 1000);
+                // Should be stored as milliseconds (no conversion)
+                assert_eq!(ts, timestamp_millis2);
             }
             _ => panic!("Expected timestamp value"),
         }

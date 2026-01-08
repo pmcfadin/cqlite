@@ -284,13 +284,12 @@ impl V5CompressedLegacyParser {
             let key_len = data[offset + 1] as usize;
 
             // Validate partition header:
-            // - Flags should be 0x00 or have partition-level flags (typically < 0x20)
             // - Key length must be non-zero and within format's limit (u8 max = 255 bytes)
             //   Note: Cassandra spec allows 64KB keys, but V5CompressedLegacy format uses u8 length
             // - Must have enough bytes for: flags(1) + len(1) + key(len) + del_time(4) + unknown(8)
+            // NOTE: No heuristic validation of flags (Issue #258, #28 no-heuristics mandate)
             let header_min_size = 1 + 1 + key_len + 4 + 8;
-            if flags > 0x20
-                || key_len == 0
+            if key_len == 0
                 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
                 || offset + header_min_size > data.len()
             {
@@ -344,11 +343,12 @@ impl V5CompressedLegacyParser {
                     // Parse ALL rows in this partition (Issue #166 fix: multi-row partition support)
                     //
                     // V5CompressedLegacy partitions can contain multiple rows with different clustering keys.
-                    // Each row starts with a row header (flags > 0x20), while partition headers have flags <= 0x20.
+                    // We use structural parsing (peek_is_partition_header) to detect partition boundaries,
+                    // not flag value heuristics (Issue #258, #28 no-heuristics mandate).
                     // We parse rows in a loop until we encounter:
                     // - End of block (offset >= data.len())
-                    // - END_OF_PARTITION marker (flags & 0x01, Issue #229 fix)
-                    // - Next partition header (flags <= 0x20)
+                    // - END_OF_PARTITION marker (flags == 0x01, Issue #229 fix)
+                    // - Next partition header (detected via peek_is_partition_header)
                     // - Parse error (invalid row data)
                     let mut row_count = 0;
                     loop {

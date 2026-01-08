@@ -283,10 +283,9 @@ pub fn parse_uuid(input: &[u8]) -> IResult<&[u8], Value> {
     Ok((input, Value::Uuid(uuid)))
 }
 
-/// Parse timestamp from binary format (reads milliseconds, converts to microseconds for internal storage)
-/// NOTE: This is used for statistics/metadata parsing. Data row parsing uses V5CompressedLegacyParser which stores milliseconds directly.
+/// Parse timestamp from binary format (milliseconds since Unix epoch)
 pub fn parse_timestamp(input: &[u8]) -> IResult<&[u8], Value> {
-    map(be_i64, |ts_ms| Value::Timestamp(ts_ms * 1000))(input) // Convert ms to μs (statistics format)
+    map(be_i64, Value::Timestamp)(input)
 }
 
 /// Parse date (32-bit days since epoch with Integer.MIN_VALUE offset)
@@ -2233,12 +2232,11 @@ mod tests {
     #[test]
     fn test_parse_timestamp() {
         // Timestamp is stored as milliseconds since epoch (i64 big-endian)
-        // parse_timestamp converts ms to μs by multiplying by 1000
         let ts_ms: i64 = 1702900000000; // 2023-12-18 in milliseconds
         let data = ts_ms.to_be_bytes();
         let (remaining, value) = parse_timestamp(&data).unwrap();
         assert!(remaining.is_empty());
-        assert_eq!(value, Value::Timestamp(ts_ms * 1000)); // Output is in μs
+        assert_eq!(value, Value::Timestamp(ts_ms));
     }
 
     #[test]
@@ -2248,7 +2246,7 @@ mod tests {
         let data = ts_ms.to_be_bytes();
         let (remaining, value) = parse_timestamp(&data).unwrap();
         assert!(remaining.is_empty());
-        assert_eq!(value, Value::Timestamp(ts_ms * 1000));
+        assert_eq!(value, Value::Timestamp(ts_ms));
     }
 
     #[test]

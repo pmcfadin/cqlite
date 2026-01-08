@@ -582,6 +582,15 @@ cargo build --no-default-features --features all-compression
 
 ### Completed Issues (Fixed - Jan 2026)
 
+- **Issue #258**: V5CompressedLegacy Parser Errors for 15/33 Tables - **FIXED**
+  - Status: ✅ FIXED - Two root causes identified and resolved
+  - Root cause 1: Timestamp units mismatch in `parser/types.rs` - `parse_timestamp()` multiplied milliseconds by 1000 (converting to microseconds) but `Value::Timestamp(i64)` stores milliseconds. This caused overflow → negative values → `<invalid-timestamp:...>` markers.
+  - Root cause 2: Partition header flags heuristic in `v5_compressed_legacy.rs` - `flags > 0x20` check rejected valid partition headers with higher flag values, causing single-byte offset skip and cascading misalignment errors. Violated Issue #28 no-heuristics mandate.
+  - Fix 1: Removed `* 1000` multiplication in `parser/types.rs:289` - now stores milliseconds directly
+  - Fix 2: Removed `flags > 0x20` heuristic check in `v5_compressed_legacy.rs:292` - validation now format-based only
+  - Result: All 33 test tables pass comprehensive SELECT tests with no ERROR messages or invalid data markers
+  - Files: `cqlite-core/src/parser/types.rs`, `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+
 - **Issue #240**: DATE Type Values Display as `<invalid-date:...>` - **FIXED**
   - Status: ✅ FIXED - DATE type now parses correctly in all contexts including map keys
   - Root cause: `CqlType::Date` was mapped to `ComparatorType::Custom("date")` in `comparator.rs`, causing DATE values to fall through to blob parsing. Also, multiple parsing paths (parser/types.rs, v5_compressed_legacy.rs) read DATE as raw i32 without Cassandra's Integer.MIN_VALUE offset decoding.
