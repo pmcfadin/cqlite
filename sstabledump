@@ -1,3 +1,0 @@
-#!/bin/bash
-# Wrapper script for sstabledump using Docker
-docker run --rm -v "$(pwd):/data" -w /data cassandra:5.0 sstabledump "$@"
