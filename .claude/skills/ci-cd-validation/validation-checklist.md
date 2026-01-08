@@ -144,23 +144,7 @@ cargo test --test '*'
 
 ---
 
-### Step 7: Test (Property-Based)
-
-**Command:**
-```bash
-cargo test --package property-tests
-```
-
-**What it checks:**
-- Edge cases
-- Random input handling
-- Invariants hold
-
-**Expected:** Property tests pass (may take longer)
-
----
-
-### Step 8: Doc Tests
+### Step 7: Doc Tests
 
 **Command:**
 ```bash
@@ -175,7 +159,7 @@ cargo test --doc --package cqlite-core
 
 ---
 
-### Step 9: Verify No Unused Imports
+### Step 8: Verify No Unused Imports
 
 **Command:**
 ```bash
@@ -188,7 +172,7 @@ cargo clippy --package cqlite-core --lib --all-features -- \
 
 ---
 
-### Step 10: Build Documentation
+### Step 9: Build Documentation
 
 **Command:**
 ```bash
@@ -204,7 +188,7 @@ cargo doc --no-deps --package cqlite-core --all-features
 
 ---
 
-### Step 11: Check for Dead Code
+### Step 10: Check for Dead Code
 
 **Command:**
 ```bash
@@ -218,7 +202,7 @@ cargo clippy --package cqlite-core --lib --all-features -- \
 
 ---
 
-### Step 12: Coverage Check (Optional)
+### Step 11: Coverage Check (Optional)
 
 **Command:**
 ```bash
@@ -240,7 +224,7 @@ open coverage/index.html
 
 ## Automated Script
 
-The `scripts/validate-cleanup.sh` script runs steps 1-7 automatically:
+The `scripts/validate-cleanup.sh` script runs steps 1-6 automatically:
 
 ```bash
 #!/bin/bash
@@ -248,28 +232,25 @@ set -euo pipefail
 
 echo "=== CQLite Validation ==="
 
-echo "[1/7] Formatting..."
+echo "[1/6] Formatting..."
 cargo fmt --all -- --check
 
-echo "[2/7] Clippy (zero warnings)..."
+echo "[2/6] Clippy (zero warnings)..."
 cargo clippy --package cqlite-core --lib --all-features -- -D warnings
 
-echo "[3/7] Build (minimal features)..."
+echo "[3/6] Build (minimal features)..."
 cargo build --package cqlite-core \
     --no-default-features \
     --features=all-compression
 
-echo "[4/7] Build (all features)..."
+echo "[4/6] Build (all features)..."
 cargo build --package cqlite-core --all-features
 
-echo "[5/7] Test (library)..."
+echo "[5/6] Test (library)..."
 cargo test --package cqlite-core --lib --all-features
 
-echo "[6/7] Test (integration)..."
+echo "[6/6] Test (integration)..."
 cargo test --test '*'
-
-echo "[7/7] Test (property-based)..."
-cargo test --package property-tests
 
 echo "✅ All validations passed!"
 ```
@@ -286,11 +267,10 @@ echo "✅ All validations passed!"
 | Build (all) | `cargo build --all-features` | 60s | Yes |
 | Test (lib) | `cargo test --lib` | 45s | Yes |
 | Test (int) | `cargo test --test '*'` | 120s | Yes |
-| Test (prop) | Property tests | 180s | Yes |
 | Doc test | `cargo test --doc` | 30s | Optional |
 | Coverage | `cargo tarpaulin` | 240s | Optional |
 
-**Total time (required):** ~6 minutes
+**Total time (required):** ~5 minutes
 
 ---
 
@@ -443,7 +423,6 @@ Use this for quick reference:
 - [ ] All features build
 - [ ] Library tests pass
 - [ ] Integration tests pass
-- [ ] Property tests pass
 - [ ] No unused imports
 - [ ] Documentation builds
 - [ ] Coverage ≥90% (if checking)

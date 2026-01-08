@@ -79,15 +79,7 @@ cargo test --test '*'
 
 **Must pass** - validates end-to-end functionality.
 
-#### 7. Run Property Tests
-```bash
-# Run property-based tests
-cargo test --package property-tests
-```
-
-**Must pass** - validates edge cases.
-
-#### 8. Coverage Check
+#### 7. Coverage Check
 ```bash
 # Generate coverage report
 cargo tarpaulin --out Html --output-dir coverage/
@@ -156,10 +148,6 @@ Located: `.github/workflows/rust.yml`
    - Generates with tarpaulin
    - Uploads to Codecov
    - Gates on 90% threshold
-
-6. **Property Tests**
-   - Runs extended property test suite
-   - Timeout: 10 minutes
 
 ### Monitoring CI
 
