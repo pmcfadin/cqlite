@@ -217,8 +217,15 @@ impl SSTableReader {
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Check if this is V5CompressedLegacy format which requires chunk stitching
+        // IMPORTANT: Only stitch if BOTH conditions are true:
+        // 1. Data format is V5CompressedLegacy (row payloads can span chunk boundaries)
+        // 2. Compression is enabled (chunks exist in CompressionInfo.db)
+        // V5_0Uncompressed uses V5CompressedLegacy row format but has no compression,
+        // so it should NOT be stitched (it's a single contiguous uncompressed block)
         let data_format = self.header.cassandra_version.data_format();
-        let requires_stitching = matches!(data_format, DataFormat::V5CompressedLegacy);
+        let is_compressed = self.compression_reader.is_some() || self.compression_info.is_some();
+        let requires_stitching =
+            matches!(data_format, DataFormat::V5CompressedLegacy) && is_compressed;
 
         if requires_stitching {
             // V5CompressedLegacy: Row payloads can span multiple compressed chunks
@@ -549,8 +556,15 @@ impl SSTableReader {
 
         // CRITICAL FIX: V5CompressedLegacy partitions can span chunk boundaries
         // We must stitch all chunks together before parsing to avoid dropping partitions
+        // IMPORTANT: Only stitch if BOTH conditions are true:
+        // 1. Data format is V5CompressedLegacy (row payloads can span chunk boundaries)
+        // 2. Compression is enabled (chunks exist in CompressionInfo.db)
+        // V5_0Uncompressed uses V5CompressedLegacy row format but has no compression,
+        // so it should NOT be stitched (it's a single contiguous uncompressed block)
         let data_format = self.header.cassandra_version.data_format();
-        let requires_stitching = matches!(data_format, DataFormat::V5CompressedLegacy);
+        let is_compressed = self.compression_reader.is_some() || self.compression_info.is_some();
+        let requires_stitching =
+            matches!(data_format, DataFormat::V5CompressedLegacy) && is_compressed;
 
         if requires_stitching {
             log::debug!(

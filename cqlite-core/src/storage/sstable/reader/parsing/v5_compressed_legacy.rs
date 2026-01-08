@@ -94,6 +94,10 @@ const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 const END_OF_PARTITION: u8 = 0x01; // Signal end of partition - nothing follows this flag byte
 const IS_MARKER: u8 = 0x02; // Range tombstone marker (not a data row)
 
+// Extended flags constants (from Cassandra UnfilteredSerializer.java lines 114-122)
+// These are in the SECOND byte when ROW_HAS_EXTENDED_FLAGS (0x80) is set
+const EXTENDED_IS_STATIC: u8 = 0x01; // Static row - has NO clustering prefix
+
 // NOTE: V5CompressedLegacy format has NO trailing field after row data.
 // The next partition/row starts immediately after row_size bytes.
 // (Previous ROW_TRAILING_FIELD_SIZE constant was removed as part of Issue #237 fix)
@@ -1341,14 +1345,32 @@ impl V5CompressedLegacyParser {
         let (row_flags, extended_flags, flags_size) = self.parse_row_flags(data, offset)?;
         offset += flags_size;
 
+        // Issue #258 fix: Check if this is a static row (no clustering prefix)
+        // Per Cassandra UnfilteredSerializer.java lines 114-122, 190-191:
+        // Static rows have the IS_STATIC bit (0x01) set in extended flags and
+        // do NOT have a clustering prefix - skip directly to row_size.
+        let is_static = extended_flags
+            .map(|ef| (ef & EXTENDED_IS_STATIC) != 0)
+            .unwrap_or(false);
+
         // Step 2: Parse clustering prefix BEFORE row_size (Issue #213 fix)
         // This is the critical change - clustering comes AFTER flags but BEFORE row_size
-        let (clustering_values, offset) = self.parse_clustering_prefix(data, offset, schema)?;
+        // EXCEPT for static rows which have no clustering prefix at all.
+        let (clustering_values, offset) = if !is_static {
+            self.parse_clustering_prefix(data, offset, schema)?
+        } else {
+            log::debug!(
+                "V5CompressedLegacy: Static row detected (extended_flags=0x{:02x}), skipping clustering prefix",
+                extended_flags.unwrap_or(0)
+            );
+            (vec![], offset)
+        };
 
         log::debug!(
-            "V5CompressedLegacy: Parsed {} clustering values after flags, now at offset {}",
+            "V5CompressedLegacy: Parsed {} clustering values after flags, now at offset {} (is_static={})",
             clustering_values.len(),
-            offset
+            offset,
+            is_static
         );
 
         // Issue #229 FIX: Add clustering key values to cells HashMap
