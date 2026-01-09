@@ -79,11 +79,24 @@ next_row_offset = (row_size_vint_start_offset + row_size_vint_byte_length) + row
 
 This matches Cassandra's `getFilePointer()` semantics where the file position after reading the VInt is used as the base for measuring `row_size`.
 
+## VInt Safety Limits (Issue #264)
+
+For security and memory safety, CQLite's `parse_vint_length()` enforces a maximum of **1GB** (`MAX_VINT_LENGTH = 1,073,741,824 bytes`) for any length field. This prevents:
+
+- **Overflow on 32-bit platforms**: Where `usize` is only 4 bytes, values > 4GB would wrap
+- **Memory exhaustion attacks**: Malicious input claiming huge lengths could cause OOM
+- **Allocation attacks**: Preventing attempts to allocate unreasonable buffer sizes
+
+The 1GB limit is generous for real Cassandra data (where individual values rarely exceed 16MB) while providing robust protection against malformed or malicious input.
+
+**Error handling**: Values exceeding `MAX_VINT_LENGTH` return `nom::error::ErrorKind::TooLarge`.
+
 ## Key Takeaways
 - Expect VInt before variable-sized payloads; decode, then slice the value.
 - **Exception**: UDT fields use fixed 4-byte BE i32 lengths, not VInt.
 - Signed fields that use ZigZag appear primarily in legacy contexts; length fields are non-negative.
 - **Row size measurement**: VInt values like `row_size` are measured from AFTER the VInt is consumed (Issue #237).
+- **Safety limit**: Length VInts are capped at 1GB to prevent overflow and allocation attacks (Issue #264).
 
 ## References
 - Cassandra 5.0: `SerializationHeader` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/SerializationHeader.java`

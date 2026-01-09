@@ -6594,4 +6594,87 @@ mod tests {
         assert!(!V5CompressedLegacyParser::is_end_of_partition(flags)); // Exact match check fails
         assert!(!V5CompressedLegacyParser::is_range_tombstone_marker(flags)); // END_OF_PARTITION bit excludes marker
     }
+
+    // Issue #264: END_OF_PARTITION marker handling test
+    #[test]
+    fn test_partition_header_end_of_partition_marker() {
+        // Test that END_OF_PARTITION marker (0x01) is correctly handled
+        // at partition boundaries - not mistaken for valid row data
+
+        // Single byte 0x01 should be recognized as end marker
+        let marker_byte = 0x01u8;
+        assert!(
+            V5CompressedLegacyParser::is_end_of_partition(marker_byte),
+            "0x01 should be END_OF_PARTITION marker"
+        );
+
+        // Verify marker is NOT a range tombstone
+        assert!(
+            !V5CompressedLegacyParser::is_range_tombstone_marker(marker_byte),
+            "END_OF_PARTITION should not be mistaken for range tombstone"
+        );
+
+        // Test the marker byte in context - ensure detection works at any offset
+        let data_with_marker = [0x24, 0x00, 0x01, 0x10]; // marker at offset 2
+        assert!(
+            V5CompressedLegacyParser::is_end_of_partition(data_with_marker[2]),
+            "Should detect END_OF_PARTITION at offset 2"
+        );
+
+        // Verify non-marker bytes are not detected as END_OF_PARTITION
+        for byte in [0x00u8, 0x02, 0x04, 0x24, 0x80, 0xb7] {
+            assert!(
+                !V5CompressedLegacyParser::is_end_of_partition(byte),
+                "Byte 0x{:02x} should NOT be detected as END_OF_PARTITION",
+                byte
+            );
+        }
+    }
+
+    // Issue #264: Range tombstone marker handling test
+    #[test]
+    fn test_range_tombstone_marker_handling() {
+        // Test that IS_MARKER (0x02) is correctly identified for range tombstones
+        // Range tombstone markers indicate deletion boundaries, not data rows
+
+        // Basic IS_MARKER flag
+        assert!(
+            V5CompressedLegacyParser::is_range_tombstone_marker(0x02),
+            "0x02 should be detected as range tombstone marker"
+        );
+
+        // IS_MARKER with additional flags (common in real data)
+        assert!(
+            V5CompressedLegacyParser::is_range_tombstone_marker(0x52),
+            "0x52 (IS_MARKER|HAS_TIMESTAMP|HAS_ALL_COLUMNS) should be range tombstone"
+        );
+        assert!(
+            V5CompressedLegacyParser::is_range_tombstone_marker(0x7a),
+            "0x7a should be detected as range tombstone marker"
+        );
+        assert!(
+            V5CompressedLegacyParser::is_range_tombstone_marker(0x06),
+            "0x06 (IS_MARKER|HAS_TIMESTAMP) should be range tombstone"
+        );
+
+        // Verify marker handling doesn't interfere with normal row flags
+        assert!(
+            !V5CompressedLegacyParser::is_range_tombstone_marker(0x24),
+            "0x24 (HAS_TIMESTAMP|HAS_ALL_COLUMNS) is NOT a marker - it's a normal row"
+        );
+        assert!(
+            !V5CompressedLegacyParser::is_range_tombstone_marker(0x00),
+            "0x00 is NOT a marker"
+        );
+        assert!(
+            !V5CompressedLegacyParser::is_range_tombstone_marker(0x80),
+            "0x80 (EXTENDED_FLAGS only) is NOT a marker"
+        );
+
+        // Verify END_OF_PARTITION takes precedence over IS_MARKER bit
+        assert!(
+            !V5CompressedLegacyParser::is_range_tombstone_marker(0x03),
+            "0x03 has END_OF_PARTITION bit set, should NOT be range tombstone"
+        );
+    }
 }

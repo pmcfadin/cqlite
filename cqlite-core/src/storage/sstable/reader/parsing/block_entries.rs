@@ -792,7 +792,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_value_length_exceeds_16mb() {
-        let reader = match create_test_reader("test_basic", "simple_table").await {
+        // Use counters table which has TEXT primary key (compatible with "key1" test data)
+        let reader = match create_test_reader("test_basic", "counters").await {
             Some(r) => r,
             None => {
                 eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
@@ -845,7 +846,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_truncated_data_value() {
-        let reader = match create_test_reader("test_basic", "simple_table").await {
+        // Use counters table which has TEXT primary key (compatible with "key1" test data)
+        let reader = match create_test_reader("test_basic", "counters").await {
             Some(r) => r,
             None => {
                 eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
@@ -1055,7 +1057,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_format_dispatch_legacy_vint() {
-        let reader = match create_test_reader("test_basic", "simple_table").await {
+        // Use counters table which has TEXT primary key (compatible with "key1" test data)
+        let reader = match create_test_reader("test_basic", "counters").await {
             Some(r) => r,
             None => {
                 eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
@@ -1145,7 +1148,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_binary_table_id_hex_encoding() {
-        let reader = match create_test_reader("test_basic", "simple_table").await {
+        // Use counters table which has TEXT primary key (compatible with "key1" test data)
+        let reader = match create_test_reader("test_basic", "counters").await {
             Some(r) => r,
             None => {
                 eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");

@@ -853,4 +853,41 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Not legacy"));
     }
+
+    // Issue #264: Schema-required error path test
+    #[test]
+    fn test_key_parsing_schema_required_error() {
+        // Test that modern formats correctly validate schema requirements
+        // UUID type requires exactly 16 bytes - empty data should fail with schema error
+
+        let schema = create_test_schema("uuid");
+        let empty_data: &[u8] = &[];
+
+        // Empty key with UUID schema should fail
+        let result = parse_key_with_schema_impl(empty_data, &schema, CassandraVersion::V5_0NewBig);
+        assert!(result.is_err(), "Empty key with UUID schema should fail");
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Invalid") || err_msg.contains("UUID") || err_msg.contains("length"),
+            "Error should be descriptive about UUID validation, got: {}",
+            err_msg
+        );
+
+        // Also test with wrong-sized data (15 bytes instead of 16)
+        let short_uuid = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77,
+        ];
+        let result = parse_key_with_schema_impl(&short_uuid, &schema, CassandraVersion::V5_0NewBig);
+        assert!(result.is_err(), "Short UUID should fail validation");
+
+        // Test with int type requiring exactly 4 bytes but given 2
+        let int_schema = create_test_schema("int");
+        let short_int = [0x00, 0x42];
+        let result =
+            parse_key_with_schema_impl(&short_int, &int_schema, CassandraVersion::V5_0NewBig);
+        assert!(result.is_err(), "Short int should fail validation");
+    }
 }

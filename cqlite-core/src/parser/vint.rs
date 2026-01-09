@@ -61,6 +61,11 @@ fn detect_ascii_corruption(input: &[u8]) -> bool {
 /// Maximum bytes a VInt can occupy (Cassandra supports up to 9 bytes total)
 pub const MAX_VINT_SIZE: usize = 9;
 
+/// Maximum length value accepted by parse_vint_length to prevent overflow attacks.
+/// Set to 1GB as a generous limit that won't cause allocation issues on any platform.
+/// This prevents memory exhaustion attacks via malicious input claiming huge lengths.
+pub const MAX_VINT_LENGTH: i64 = 1024 * 1024 * 1024; // 1GB safety limit
+
 /// Decode a variable-length signed integer from bytes with backward compatibility
 ///
 /// This function supports both:
@@ -790,12 +795,24 @@ pub fn encode_vuint(value: u64) -> Vec<u8> {
 }
 
 /// Parse a VInt and convert to usize for length fields
+///
+/// # Safety
+/// This function enforces a maximum length of 1GB (MAX_VINT_LENGTH) to prevent:
+/// - Overflow on 32-bit platforms where usize is 4 bytes
+/// - Memory exhaustion attacks via malicious input claiming huge lengths
 pub fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {
     let (remaining, value) = parse_vint(input)?;
     if value < 0 {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Verify,
+        )));
+    }
+    // Safety: Prevent overflow on usize conversion and allocation attacks
+    if value > MAX_VINT_LENGTH {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
         )));
     }
     Ok((remaining, value as usize))
@@ -1130,5 +1147,46 @@ mod tests {
         // 0xFF extended format should also succeed
         let bytes = [0xFF, 0x00, 0x00, 0x00, 0x05];
         let _ = parse_vint(&bytes).expect("fallback parse");
+    }
+
+    // Issue #264: VInt overflow protection tests
+    #[test]
+    fn test_vint_overflow_protection() {
+        // Test 1: Value exceeding 1GB limit should fail
+        let large_value = encode_vint(2_000_000_000i64); // 2GB - exceeds MAX_VINT_LENGTH
+        let result = parse_vint_length(&large_value);
+        assert!(
+            result.is_err(),
+            "Should reject values > 1GB for length fields"
+        );
+
+        // Test 2: Value just under limit should succeed
+        let safe_value = encode_vint(MAX_VINT_LENGTH - 1);
+        let result = parse_vint_length(&safe_value);
+        assert!(result.is_ok(), "Should accept values < 1GB");
+        let (_, length) = result.unwrap();
+        assert_eq!(length, (MAX_VINT_LENGTH - 1) as usize);
+
+        // Test 3: Exact limit should fail (> not >=)
+        let limit_value = encode_vint(MAX_VINT_LENGTH + 1);
+        let result = parse_vint_length(&limit_value);
+        assert!(result.is_err(), "Should reject values > MAX_VINT_LENGTH");
+
+        // Test 4: Negative values should still be rejected
+        let negative_value = encode_vint(-1i64);
+        let result = parse_vint_length(&negative_value);
+        assert!(result.is_err(), "Should reject negative values");
+
+        // Test 5: Zero should be valid
+        let zero_value = encode_vint(0i64);
+        let result = parse_vint_length(&zero_value);
+        assert!(result.is_ok(), "Should accept zero");
+        let (_, length) = result.unwrap();
+        assert_eq!(length, 0);
+
+        // Test 6: Reasonable values (16MB - existing limit in block_entries)
+        let sixteen_mb = encode_vint(16 * 1024 * 1024i64);
+        let result = parse_vint_length(&sixteen_mb);
+        assert!(result.is_ok(), "Should accept 16MB (common limit)");
     }
 }
