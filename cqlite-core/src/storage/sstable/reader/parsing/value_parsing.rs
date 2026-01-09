@@ -1247,4 +1247,29 @@ mod tests {
         let result = parse_date_value(&data);
         assert!(result.is_err());
     }
+
+    // Issue #264: Blob fallback disabled test - type-specific parsers enforce strict validation
+    #[test]
+    fn test_value_parsing_blob_fallback_disabled() {
+        // Test that type-specific parsers reject invalid data lengths
+        // This validates strict type checking - no silent blob fallback
+
+        // Smallint requires exactly 2 bytes
+        let wrong_size_smallint = [0x00]; // 1 byte
+        let result = parse_smallint_value(&wrong_size_smallint);
+        assert!(result.is_err(), "Smallint should reject 1-byte input");
+
+        // Bigint requires exactly 8 bytes
+        let wrong_size_bigint = [0x00, 0x00, 0x00, 0x00]; // 4 bytes
+        let result = parse_bigint_value(&wrong_size_bigint);
+        assert!(result.is_err(), "Bigint should reject 4-byte input");
+
+        // Tinyint requires exactly 1 byte
+        let wrong_size_tinyint = [0x00, 0x01]; // 2 bytes
+        let result = parse_tinyint_value(&wrong_size_tinyint);
+        assert!(result.is_err(), "Tinyint should reject 2-byte input");
+
+        // Note: Float and Double parsing is handled by the main parser (parse_value_by_type)
+        // rather than standalone functions, so they are not tested here.
+    }
 }
