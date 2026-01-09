@@ -1,0 +1,8 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 159
+expression: "Value::Boolean(true)"
+---
+{
+  "Boolean": true
+}

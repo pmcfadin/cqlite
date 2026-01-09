@@ -1,0 +1,10 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 391
+expression: metadata
+---
+{
+  "version": null,
+  "ttl": null,
+  "tags": {}
+}

@@ -1,0 +1,12 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 134
+expression: col
+---
+{
+  "name": "user_id",
+  "data_type": "Integer",
+  "nullable": false,
+  "position": 0,
+  "table_name": null
+}

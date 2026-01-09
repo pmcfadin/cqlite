@@ -1,0 +1,14 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 316
+expression: "Value::row_tombstone(1704067200000)"
+---
+{
+  "Tombstone": {
+    "deletion_time": 1704067200000,
+    "tombstone_type": "RowTombstone",
+    "ttl": null,
+    "range_start": null,
+    "range_end": null
+  }
+}

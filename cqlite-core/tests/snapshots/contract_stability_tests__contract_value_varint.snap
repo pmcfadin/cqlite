@@ -1,0 +1,11 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 221
+expression: "Value::Varint(vec![0x01, 0x00])"
+---
+{
+  "Varint": [
+    1,
+    0
+  ]
+}

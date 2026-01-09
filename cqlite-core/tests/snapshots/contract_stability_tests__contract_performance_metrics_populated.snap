@@ -1,0 +1,15 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 381
+expression: metrics
+---
+{
+  "parse_time_us": 100,
+  "planning_time_us": 200,
+  "execution_time_us": 1000,
+  "total_time_us": 1300,
+  "memory_usage_bytes": 1048576,
+  "io_operations": 5,
+  "cache_hits": 8,
+  "cache_misses": 2
+}

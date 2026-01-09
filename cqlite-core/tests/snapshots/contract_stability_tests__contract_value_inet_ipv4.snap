@@ -1,0 +1,13 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 321
+expression: "Value::Inet(vec![192, 168, 1, 1])"
+---
+{
+  "Inet": [
+    192,
+    168,
+    1,
+    1
+  ]
+}

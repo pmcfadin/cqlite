@@ -1,0 +1,21 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 98
+expression: metadata
+---
+{
+  "columns": [],
+  "total_rows": null,
+  "plan_info": null,
+  "performance": {
+    "parse_time_us": 0,
+    "planning_time_us": 0,
+    "execution_time_us": 0,
+    "total_time_us": 0,
+    "memory_usage_bytes": 0,
+    "io_operations": 0,
+    "cache_hits": 0,
+    "cache_misses": 0
+  },
+  "warnings": []
+}

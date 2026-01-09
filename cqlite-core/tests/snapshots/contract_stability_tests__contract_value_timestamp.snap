@@ -1,0 +1,8 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 195
+expression: "Value::Timestamp(1704067200000)"
+---
+{
+  "Timestamp": 1704067200000
+}

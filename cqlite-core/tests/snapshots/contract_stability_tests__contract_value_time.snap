@@ -1,0 +1,8 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 207
+expression: "Value::Time(43200000000000i64)"
+---
+{
+  "Time": 43200000000000
+}

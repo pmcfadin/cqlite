@@ -1,0 +1,12 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 234
+expression: "Value::Duration { months: 1, days: 15, nanos: 3600000000000i64, }"
+---
+{
+  "Duration": {
+    "months": 1,
+    "days": 15,
+    "nanos": 3600000000000
+  }
+}

@@ -1,0 +1,17 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 73
+expression: row
+---
+{
+  "values": {},
+  "key": [
+    255,
+    0
+  ],
+  "metadata": {
+    "version": null,
+    "ttl": null,
+    "tags": {}
+  }
+}

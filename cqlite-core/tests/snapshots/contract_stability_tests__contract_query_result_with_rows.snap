@@ -1,0 +1,62 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 55
+expression: result
+---
+{
+  "rows": [
+    {
+      "values": {
+        "id": {
+          "Integer": 42
+        },
+        "name": {
+          "Text": "test"
+        }
+      },
+      "key": [
+        1,
+        2,
+        3
+      ],
+      "metadata": {
+        "version": null,
+        "ttl": null,
+        "tags": {}
+      }
+    }
+  ],
+  "rows_affected": 0,
+  "execution_time_ms": 0,
+  "metadata": {
+    "columns": [
+      {
+        "name": "id",
+        "data_type": "Integer",
+        "nullable": false,
+        "position": 0,
+        "table_name": null
+      },
+      {
+        "name": "name",
+        "data_type": "Text",
+        "nullable": true,
+        "position": 1,
+        "table_name": null
+      }
+    ],
+    "total_rows": null,
+    "plan_info": null,
+    "performance": {
+      "parse_time_us": 0,
+      "planning_time_us": 0,
+      "execution_time_us": 0,
+      "total_time_us": 0,
+      "memory_usage_bytes": 0,
+      "io_operations": 0,
+      "cache_hits": 0,
+      "cache_misses": 0
+    },
+    "warnings": []
+  }
+}

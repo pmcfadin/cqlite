@@ -1,0 +1,11 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 243
+expression: "Value::Json(serde_json::json!({ \"key\": \"value\", \"number\": 42 }))"
+---
+{
+  "Json": {
+    "key": "value",
+    "number": 42
+  }
+}

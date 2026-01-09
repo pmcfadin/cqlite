@@ -1,0 +1,17 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 308
+expression: "Value::Frozen(Box::new(Value::List(vec![Value::Integer(1),\nValue::Integer(2),])))"
+---
+{
+  "Frozen": {
+    "List": [
+      {
+        "Integer": 1
+      },
+      {
+        "Integer": 2
+      }
+    ]
+  }
+}

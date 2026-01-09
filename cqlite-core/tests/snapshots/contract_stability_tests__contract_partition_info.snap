@@ -1,0 +1,10 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 404
+expression: info
+---
+{
+  "id": 0,
+  "rows_processed": 5000,
+  "processing_time_ms": 250
+}
