@@ -64,6 +64,21 @@ pub(crate) fn parse_bigint_value(data: &[u8]) -> Result<Value> {
     }
 }
 
+/// Parse counter value from raw bytes
+///
+/// Counter values at this stage are already extracted i64 values (8 bytes big-endian).
+/// The CounterContext parsing happens earlier in V5CompressedLegacyParser.
+pub(crate) fn parse_counter_value(data: &[u8]) -> Result<Value> {
+    if data.len() == 8 {
+        let val = i64::from_be_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]);
+        Ok(Value::Counter(val))
+    } else {
+        Err(Error::corruption("Invalid counter value length"))
+    }
+}
+
 /// Parse text value from raw bytes
 pub(crate) fn parse_text_value(data: &[u8]) -> Result<Value> {
     String::from_utf8(data.to_vec())
@@ -387,6 +402,7 @@ impl SSTableReader {
             ComparatorType::SmallInt => parse_smallint_value(value_data),
             ComparatorType::Int => parse_int_value(value_data),
             ComparatorType::BigInt => parse_bigint_value(value_data),
+            ComparatorType::Counter => parse_counter_value(value_data),
             ComparatorType::Text => parse_text_value(value_data),
             ComparatorType::Blob => parse_blob_value(value_data),
             ComparatorType::Uuid => parse_uuid_value(value_data),
@@ -435,6 +451,7 @@ impl SSTableReader {
             ComparatorType::SmallInt => parse_smallint_value(value_data),
             ComparatorType::Int => parse_int_value(value_data),
             ComparatorType::BigInt => parse_bigint_value(value_data),
+            ComparatorType::Counter => parse_counter_value(value_data),
             ComparatorType::Text => parse_text_value(value_data),
             ComparatorType::Blob => parse_blob_value(value_data),
             ComparatorType::Uuid => parse_uuid_value(value_data),
@@ -739,6 +756,29 @@ mod tests {
         let data = (-9223372036854775807i64).to_be_bytes();
         let result = parse_bigint_value(&data).unwrap();
         assert_eq!(result, Value::BigInt(-9223372036854775807));
+    }
+
+    #[test]
+    fn test_parse_counter() {
+        // Test with actual counter value from test data (Issue #272)
+        let test_value: i64 = 422216548022666;
+        let data = test_value.to_be_bytes();
+        let result = parse_counter_value(&data).unwrap();
+        assert_eq!(result, Value::Counter(test_value));
+    }
+
+    #[test]
+    fn test_parse_counter_negative() {
+        let data = (-1234567890i64).to_be_bytes();
+        let result = parse_counter_value(&data).unwrap();
+        assert_eq!(result, Value::Counter(-1234567890));
+    }
+
+    #[test]
+    fn test_parse_counter_wrong_length() {
+        let data = [0x00, 0x00, 0x00, 0x00]; // Only 4 bytes instead of 8
+        let result = parse_counter_value(&data);
+        assert!(result.is_err(), "Counter should reject 4-byte input");
     }
 
     #[test]

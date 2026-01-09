@@ -1419,7 +1419,7 @@ fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
         "TimeUUID" => "timeuuid".to_string(),
         "Duration" => "duration".to_string(),
         "Time" => "time".to_string(),
-        "Counter" => "counter".to_string(),
+        "Counter" | "CounterColumn" => "counter".to_string(),
         other => other.to_lowercase(),
     }
 }
