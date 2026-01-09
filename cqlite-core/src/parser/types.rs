@@ -2620,4 +2620,63 @@ mod tests {
         assert!(remaining.is_empty());
         assert_eq!(value, Value::List(vec![Value::Integer(42), Value::Null]));
     }
+
+    // Issue #264: Collection max elements limit test
+    #[test]
+    fn test_collection_max_elements_limit() {
+        use super::super::vint::encode_vint;
+
+        // Build list data claiming 1,000,001 elements (exceeds MAX_COLLECTION_SIZE)
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(1_000_001i64)); // Count > 1,000,000 limit
+        data.push(CqlTypeId::Int as u8); // Element type
+
+        let result = parse_list(&data);
+        assert!(
+            result.is_err(),
+            "Should reject list with > 1,000,000 elements"
+        );
+
+        // nom error - check it's TooLarge
+        if let Err(nom::Err::Error(e)) = result {
+            assert_eq!(
+                e.code,
+                nom::error::ErrorKind::TooLarge,
+                "Error should be TooLarge, got: {:?}",
+                e.code
+            );
+        } else {
+            panic!("Expected nom::Err::Error, got something else");
+        }
+    }
+
+    // Issue #264: Map max elements limit test
+    #[test]
+    fn test_map_max_elements_limit() {
+        use super::super::vint::encode_vint;
+
+        // Build map data claiming 1,000,001 entries
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(1_000_001i64)); // Count > 1,000,000 limit
+        data.push(CqlTypeId::Int as u8); // Key type
+        data.push(CqlTypeId::Varchar as u8); // Value type
+
+        let result = parse_map(&data);
+        assert!(
+            result.is_err(),
+            "Should reject map with > 1,000,000 entries"
+        );
+
+        // nom error - check it's TooLarge (consistent with list test)
+        if let Err(nom::Err::Error(e)) = result {
+            assert_eq!(
+                e.code,
+                nom::error::ErrorKind::TooLarge,
+                "Error should be TooLarge, got: {:?}",
+                e.code
+            );
+        } else {
+            panic!("Expected nom::Err::Error, got something else");
+        }
+    }
 }
