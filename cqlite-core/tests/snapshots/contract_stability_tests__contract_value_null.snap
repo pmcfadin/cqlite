@@ -1,0 +1,6 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 154
+expression: "Value::Null"
+---
+"Null"

@@ -1,0 +1,8 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 192
+expression: "Value::Float(1.23456)"
+---
+{
+  "Float": 1.23456
+}

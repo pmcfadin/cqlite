@@ -1,0 +1,25 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 213
+expression: "Value::Uuid([0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44,\n0x66, 0x55, 0x44, 0x00, 0x00])"
+---
+{
+  "Uuid": [
+    85,
+    14,
+    132,
+    0,
+    226,
+    155,
+    65,
+    212,
+    167,
+    22,
+    68,
+    102,
+    85,
+    68,
+    0,
+    0
+  ]
+}

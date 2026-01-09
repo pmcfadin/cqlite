@@ -1,0 +1,25 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 303
+expression: "Value::Udt(udt)"
+---
+{
+  "Udt": {
+    "type_name": "Person",
+    "keyspace": "test_keyspace",
+    "fields": [
+      {
+        "name": "name",
+        "value": {
+          "Text": "John"
+        }
+      },
+      {
+        "name": "age",
+        "value": {
+          "Integer": 30
+        }
+      }
+    ]
+  }
+}

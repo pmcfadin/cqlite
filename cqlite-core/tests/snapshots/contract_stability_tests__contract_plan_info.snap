@@ -1,0 +1,18 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 389
+expression: plan
+---
+{
+  "plan_type": "IndexScan",
+  "estimated_cost": 1.5,
+  "actual_cost": 1.2,
+  "indexes_used": [
+    "idx_primary"
+  ],
+  "steps": [
+    "scan",
+    "filter"
+  ],
+  "parallelization": null
+}

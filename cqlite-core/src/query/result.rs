@@ -4,11 +4,12 @@
 //! It includes result set management, row iteration, and result metadata.
 
 use crate::{RowKey, Value};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
 /// Query result containing rows and metadata
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     /// Result rows
     pub rows: Vec<QueryRow>,
@@ -21,7 +22,7 @@ pub struct QueryResult {
 }
 
 /// Individual row in query result
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRow {
     /// Column values mapped by column name
     pub values: HashMap<String, Value>,
@@ -32,7 +33,7 @@ pub struct QueryRow {
 }
 
 /// Metadata for query results
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryMetadata {
     /// Column information
     pub columns: Vec<ColumnInfo>,
@@ -47,7 +48,7 @@ pub struct QueryMetadata {
 }
 
 /// Information about a column in the result set
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnInfo {
     /// Column name
     pub name: String,
@@ -62,7 +63,7 @@ pub struct ColumnInfo {
 }
 
 /// Row metadata
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RowMetadata {
     /// Row version/timestamp
     pub version: Option<u64>,
@@ -73,7 +74,7 @@ pub struct RowMetadata {
 }
 
 /// Query execution plan information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanInfo {
     /// Plan type used
     pub plan_type: String,
@@ -90,7 +91,7 @@ pub struct PlanInfo {
 }
 
 /// Parallelization information for query execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParallelizationInfo {
     /// Number of threads used
     pub threads_used: usize,
@@ -101,7 +102,7 @@ pub struct ParallelizationInfo {
 }
 
 /// Information about a partition processed in parallel
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionInfo {
     /// Partition ID
     pub id: usize,
@@ -112,7 +113,7 @@ pub struct PartitionInfo {
 }
 
 /// Performance metrics for query execution
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
     /// Parse time in microseconds
     pub parse_time_us: u64,

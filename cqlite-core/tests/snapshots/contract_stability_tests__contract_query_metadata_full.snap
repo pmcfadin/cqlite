@@ -1,0 +1,43 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 123
+expression: metadata
+---
+{
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "Integer",
+      "nullable": false,
+      "position": 0,
+      "table_name": null
+    }
+  ],
+  "total_rows": 100,
+  "plan_info": {
+    "plan_type": "IndexScan",
+    "estimated_cost": 1.5,
+    "actual_cost": 1.2,
+    "indexes_used": [
+      "idx_id"
+    ],
+    "steps": [
+      "scan",
+      "filter"
+    ],
+    "parallelization": null
+  },
+  "performance": {
+    "parse_time_us": 0,
+    "planning_time_us": 0,
+    "execution_time_us": 0,
+    "total_time_us": 0,
+    "memory_usage_bytes": 0,
+    "io_operations": 0,
+    "cache_hits": 0,
+    "cache_misses": 0
+  },
+  "warnings": [
+    "test warning"
+  ]
+}

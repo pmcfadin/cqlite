@@ -1,0 +1,21 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 426
+expression: info
+---
+{
+  "threads_used": 4,
+  "effective": true,
+  "partitions": [
+    {
+      "id": 0,
+      "rows_processed": 1000,
+      "processing_time_ms": 50
+    },
+    {
+      "id": 1,
+      "rows_processed": 1200,
+      "processing_time_ms": 60
+    }
+  ]
+}

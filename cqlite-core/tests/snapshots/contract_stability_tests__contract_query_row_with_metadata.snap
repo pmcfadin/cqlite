@@ -1,0 +1,22 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 87
+expression: row
+---
+{
+  "values": {
+    "col1": {
+      "Integer": 1
+    }
+  },
+  "key": [
+    1
+  ],
+  "metadata": {
+    "version": 12345,
+    "ttl": 3600,
+    "tags": {
+      "source": "import"
+    }
+  }
+}

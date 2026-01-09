@@ -1,0 +1,8 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 261
+expression: "Value::Float32(2.5)"
+---
+{
+  "Float32": 2.5
+}

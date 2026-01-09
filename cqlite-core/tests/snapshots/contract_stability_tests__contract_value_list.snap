@@ -1,0 +1,18 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 266
+expression: "Value::List(vec![Value::Integer(1), Value::Integer(2), Value::Integer(3),])"
+---
+{
+  "List": [
+    {
+      "Integer": 1
+    },
+    {
+      "Integer": 2
+    },
+    {
+      "Integer": 3
+    }
+  ]
+}

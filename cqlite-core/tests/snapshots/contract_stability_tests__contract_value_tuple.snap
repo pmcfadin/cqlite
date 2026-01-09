@@ -1,0 +1,18 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 291
+expression: "Value::Tuple(vec![Value::Integer(1), Value::Text(\"test\".to_string()),\nValue::Boolean(true),])"
+---
+{
+  "Tuple": [
+    {
+      "Integer": 1
+    },
+    {
+      "Text": "test"
+    },
+    {
+      "Boolean": true
+    }
+  ]
+}

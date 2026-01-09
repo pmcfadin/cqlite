@@ -1,0 +1,13 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 418
+expression: metadata
+---
+{
+  "version": 123456789,
+  "ttl": 86400,
+  "tags": {
+    "batch": "001",
+    "source": "migration"
+  }
+}

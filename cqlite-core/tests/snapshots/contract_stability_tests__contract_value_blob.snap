@@ -1,0 +1,13 @@
+---
+source: cqlite-core/tests/contract_stability_tests.rs
+assertion_line: 189
+expression: "Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF])"
+---
+{
+  "Blob": [
+    222,
+    173,
+    190,
+    239
+  ]
+}
