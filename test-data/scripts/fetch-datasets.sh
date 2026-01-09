@@ -6,7 +6,7 @@ set -euo pipefail
 
 TAG="${DATASET_TAG:-datasets-v2}"
 ASSET="${DATASET_ASSET:-cassandra5-small-full.tar.gz}"
-SHA256_EXPECTED="${DATASET_SHA256:-4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b}"
+SHA256_EXPECTED="${DATASET_SHA256:-5be43811bbee320a412aaf79aa63134ec1e2ec5434c03815a082b4a31bd86c55}"
 
 echo "Fetching dataset ${ASSET} (tag ${TAG})"
 mkdir -p test-data/datasets

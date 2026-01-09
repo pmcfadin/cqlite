@@ -157,6 +157,17 @@ Location: `test-data/datasets/sstables/`
 
 **Current pass rate**: 100% (33/33 tables passing as of Dec 2025)
 
+### Fetching Test Data
+
+The git repository contains only JSONL reference files (for validation).
+To run integration tests with real SSTable data, fetch the binary files:
+
+```bash
+bash test-data/scripts/fetch-datasets.sh
+```
+
+Without Data.db files, query tests will pass but return 0 rows.
+
 ## Feature Flags
 
 Default (cqlite-core): `all-compression`, `state_machine`
@@ -180,6 +191,8 @@ cargo build --package cqlite-core --features cli-helpers
 ## Troubleshooting
 
 **Missing test data**: Set `CQLITE_DATASETS_ROOT=$PWD/test-data/datasets`
+
+**Query tests return 0 rows**: Fetch SSTable Data.db files with `bash test-data/scripts/fetch-datasets.sh`
 
 **Clippy failures**: Run with `RUSTFLAGS="-D warnings"` to match CI
 
