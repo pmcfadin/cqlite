@@ -1793,4 +1793,120 @@ mod tests {
         let ttl_tombstone = Value::ttl_tombstone(3000, 1000);
         assert_eq!(ttl_tombstone.to_string(), "TOMBSTONE(TTL@3000+1000)");
     }
+
+    // =========================================================================
+    // Type Invariant Tests (Issue #267)
+    // =========================================================================
+
+    /// Test: Empty list data_type() returns List<Text> (documents current behavior)
+    ///
+    /// Issue #267: This test documents that empty lists default to Text element type
+    /// because value-driven type inference cannot determine the actual type.
+    #[test]
+    fn test_data_type_empty_list_defaults_to_text() {
+        use crate::schema::CqlType;
+
+        let empty_list = Value::List(vec![]);
+        let data_type = empty_list.data_type();
+
+        // Documented behavior: empty lists return List<Text>
+        assert_eq!(
+            data_type,
+            CqlType::List(Box::new(CqlType::Text)),
+            "Empty list should return List<Text> (value-driven inference limitation)"
+        );
+    }
+
+    /// Test: Null UDT field data_type() returns Text (documents current behavior)
+    ///
+    /// Issue #267: This test documents that null UDT fields default to Text type
+    /// because value-driven type inference cannot determine the schema type.
+    #[test]
+    fn test_data_type_null_udt_field_defaults_to_text() {
+        use crate::schema::CqlType;
+
+        let udt = UdtValue {
+            type_name: "test_type".to_string(),
+            keyspace: "test_keyspace".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "present_field".to_string(),
+                    value: Some(Value::Integer(42)),
+                },
+                UdtField {
+                    name: "null_field".to_string(),
+                    value: None, // Null value
+                },
+            ],
+        };
+
+        let data_type = Value::Udt(udt).data_type();
+
+        match data_type {
+            CqlType::Udt(name, fields) => {
+                assert_eq!(name, "test_type");
+
+                let null_field = fields.iter().find(|(n, _)| n == "null_field");
+                assert!(null_field.is_some());
+
+                // Documented behavior: null fields return Text
+                assert_eq!(
+                    null_field.unwrap().1,
+                    CqlType::Text,
+                    "Null UDT field should return Text (value-driven inference limitation)"
+                );
+
+                let present_field = fields.iter().find(|(n, _)| n == "present_field");
+                assert_eq!(
+                    present_field.unwrap().1,
+                    CqlType::Int,
+                    "Present field should preserve actual type"
+                );
+            }
+            _ => panic!("Expected CqlType::Udt"),
+        }
+    }
+
+    /// Test: Frozen data_type() preserves inner collection type
+    ///
+    /// Issue #267: Validates that Frozen wrapper correctly delegates to inner type.
+    #[test]
+    fn test_frozen_data_type_preserves_inner() {
+        use crate::schema::CqlType;
+
+        // Non-empty frozen list should preserve element type
+        let list = Value::List(vec![Value::BigInt(100)]);
+        let frozen = Value::Frozen(Box::new(list));
+        let data_type = frozen.data_type();
+
+        match data_type {
+            CqlType::Frozen(inner) => match *inner {
+                CqlType::List(element) => {
+                    assert_eq!(
+                        *element,
+                        CqlType::BigInt,
+                        "Should preserve BigInt element type"
+                    );
+                }
+                other => panic!("Expected List, got {:?}", other),
+            },
+            other => panic!("Expected Frozen, got {:?}", other),
+        }
+
+        // Empty frozen list still defaults to Text (documented limitation)
+        let empty_frozen = Value::Frozen(Box::new(Value::List(vec![])));
+        match empty_frozen.data_type() {
+            CqlType::Frozen(inner) => match *inner {
+                CqlType::List(element) => {
+                    assert_eq!(
+                        *element,
+                        CqlType::Text,
+                        "Empty frozen list defaults to Text"
+                    );
+                }
+                other => panic!("Expected List, got {:?}", other),
+            },
+            other => panic!("Expected Frozen, got {:?}", other),
+        }
+    }
 }
