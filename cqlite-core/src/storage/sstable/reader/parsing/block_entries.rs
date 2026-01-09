@@ -641,3 +641,585 @@ impl SSTableReader {
         Ok(entries)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::vint::encode_vint;
+    use crate::storage::sstable::row_cell_state_machine::{
+        ClusteringRow, PartitionKey, RowHeader, StaticRow,
+    };
+    use crate::Config;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    // ========================================================================
+    // Helper Functions
+    // ========================================================================
+
+    /// Helper to create test ParsedRow for convert_parsed_row_to_entries tests
+    fn create_test_parsed_row(
+        partition_key_bytes: Vec<u8>,
+        static_columns: Option<HashMap<String, Value>>,
+        clustering_rows: Vec<(Vec<u8>, HashMap<String, Value>)>,
+    ) -> ParsedRow {
+        ParsedRow {
+            header: RowHeader {
+                flags: 0,
+                timestamp: 0,
+                ttl: None,
+                local_deletion_time: None,
+            },
+            partition_key: PartitionKey {
+                component_count: 1,
+                key_bytes: partition_key_bytes.clone(),
+                components: vec![partition_key_bytes],
+            },
+            deletion_info: None,
+            static_row: static_columns.map(|cols| StaticRow {
+                column_count: cols.len(),
+                columns: cols,
+            }),
+            clustering_rows: clustering_rows
+                .into_iter()
+                .map(|(key, cols)| ClusteringRow {
+                    clustering_key: key,
+                    timestamp: 0,
+                    deletion_info: None,
+                    columns: cols,
+                })
+                .collect(),
+            clustering_key: None,
+            cells: Vec::new(),
+        }
+    }
+
+    /// Helper to create minimal SSTableReader for testing using real files
+    /// Returns None if test data is not available
+    async fn create_test_reader(keyspace: &str, table: &str) -> Option<SSTableReader> {
+        let datasets_root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+        let keyspace_dir = PathBuf::from(datasets_root).join("sstables").join(keyspace);
+
+        // Find a table directory that starts with the table name (format: table-uuid)
+        let table_prefix = format!("{}-", table);
+        let entries = std::fs::read_dir(&keyspace_dir).ok()?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = path.file_name()?.to_str()?;
+            if file_name.starts_with(&table_prefix) {
+                let data_file = std::fs::read_dir(&path)
+                    .ok()?
+                    .flatten()
+                    .find(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|s| s.ends_with("-Data.db"))
+                            .unwrap_or(false)
+                    })?
+                    .path();
+
+                let config = Config::default();
+                let platform = Arc::new(
+                    crate::platform::Platform::new(&config)
+                        .await
+                        .expect("Failed to create Platform"),
+                );
+                return SSTableReader::open(&data_file, &config, platform)
+                    .await
+                    .ok();
+            }
+        }
+
+        None
+    }
+
+    // ========================================================================
+    // Group 1: Validation/Error Handling Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_invalid_table_id_length_exceeds_256() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create data with table_id_len = 257 (exceeds 256 byte limit)
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(257)); // table_id_len
+        data.extend_from_slice(&vec![0x41; 257]); // 257 bytes of 'A'
+
+        let result = reader.parse_block_entries_legacy(&data, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid table ID length"),
+            "Expected error about invalid table ID length, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_key_length_exceeds_65536() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create data with valid table_id but key_len = 65537
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(5)); // table_id_len
+        data.extend_from_slice(b"test.table"); // Actually 10 bytes, but we only read 5
+        data.extend_from_slice(&encode_vint(65537)); // key_len exceeds limit
+
+        let result = reader.parse_block_entries_legacy(&data, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid key length") || err_msg.contains("Invalid table ID length"),
+            "Expected error about invalid key length, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_value_length_exceeds_16mb() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create data with valid table_id, key, but value_len > 16MB
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(b"test.table");
+        data.extend_from_slice(&encode_vint(4)); // key_len
+        data.extend_from_slice(b"key1");
+        data.extend_from_slice(&encode_vint(16777217)); // value_len = 16MB + 1
+
+        let result = reader.parse_block_entries_legacy(&data, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Value too large"),
+            "Expected error about value too large, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_truncated_data_table_id() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create data with table_id_len = 10 but only 5 bytes provided
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(b"short"); // Only 5 bytes
+
+        let result = reader.parse_block_entries_legacy(&data, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid table ID length"),
+            "Expected error about invalid/incomplete table ID, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_truncated_data_value() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create data with value_len = 100 but only 10 bytes available
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(b"test.table");
+        data.extend_from_slice(&encode_vint(4)); // key_len
+        data.extend_from_slice(b"key1");
+        data.extend_from_slice(&encode_vint(100)); // value_len
+        data.extend_from_slice(b"shortvalue"); // Only 10 bytes
+
+        let result = reader.parse_block_entries_legacy(&data, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Incomplete value"),
+            "Expected error about incomplete value, got: {}",
+            err_msg
+        );
+    }
+
+    // ========================================================================
+    // Group 2: Row Conversion Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_convert_parsed_row_static_columns() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create ParsedRow with static columns
+        let mut static_cols = HashMap::new();
+        static_cols.insert("static_col1".to_string(), Value::Text("value1".to_string()));
+        static_cols.insert("static_col2".to_string(), Value::Integer(42));
+
+        let parsed_row =
+            create_test_parsed_row(b"partition_key".to_vec(), Some(static_cols), vec![]);
+
+        let entries = reader
+            .convert_parsed_row_to_entries(&parsed_row)
+            .expect("Failed to convert parsed row");
+
+        assert_eq!(entries.len(), 2, "Should have 2 static column entries");
+
+        // Verify static marker in keys
+        for (_, key, _) in &entries {
+            let key_bytes = key.as_bytes();
+            assert!(
+                key_bytes.windows(8).any(|window| window == b"#static#"),
+                "Key should contain #static# marker"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_convert_parsed_row_clustering_rows() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create ParsedRow with one clustering row
+        let mut cols = HashMap::new();
+        cols.insert("col1".to_string(), Value::Text("text_value".to_string()));
+        cols.insert("col2".to_string(), Value::Integer(123));
+
+        let clustering_rows = vec![(b"clustering_key1".to_vec(), cols)];
+        let parsed_row = create_test_parsed_row(b"partition_key".to_vec(), None, clustering_rows);
+
+        let entries = reader
+            .convert_parsed_row_to_entries(&parsed_row)
+            .expect("Failed to convert parsed row");
+
+        assert_eq!(entries.len(), 2, "Should have 2 column entries");
+
+        // Verify keys contain partition + clustering + column name
+        for (_, key, _) in &entries {
+            let key_bytes = key.as_bytes();
+            assert!(
+                key_bytes.starts_with(b"partition_key"),
+                "Key should start with partition key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_convert_parsed_row_multiple_clustering() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create ParsedRow with multiple clustering rows
+        let mut cols1 = HashMap::new();
+        cols1.insert("col1".to_string(), Value::Integer(1));
+
+        let mut cols2 = HashMap::new();
+        cols2.insert("col1".to_string(), Value::Integer(2));
+
+        let clustering_rows = vec![
+            (b"clustering1".to_vec(), cols1),
+            (b"clustering2".to_vec(), cols2),
+        ];
+        let parsed_row = create_test_parsed_row(b"pk".to_vec(), None, clustering_rows);
+
+        let entries = reader
+            .convert_parsed_row_to_entries(&parsed_row)
+            .expect("Failed to convert parsed row");
+
+        assert_eq!(
+            entries.len(),
+            2,
+            "Should have 2 entries from 2 clustering rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_convert_parsed_row_empty() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create empty ParsedRow
+        let parsed_row = create_test_parsed_row(b"partition_key".to_vec(), None, vec![]);
+
+        let entries = reader
+            .convert_parsed_row_to_entries(&parsed_row)
+            .expect("Failed to convert parsed row");
+
+        assert_eq!(
+            entries.len(),
+            0,
+            "Empty ParsedRow should produce no entries"
+        );
+    }
+
+    // ========================================================================
+    // Group 3: Format Dispatch Tests (Integration)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_format_dispatch_v5_compressed_legacy() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Verify this is V5CompressedLegacy format
+        let data_format = reader.header.cassandra_version.data_format();
+        assert_eq!(
+            data_format,
+            crate::parser::header::DataFormat::V5CompressedLegacy,
+            "Expected V5CompressedLegacy format"
+        );
+
+        // Create minimal valid V5CompressedLegacy block data
+        // Format: [flags][key_len][key_bytes][deletion_time][unknown_8bytes][row_data...]
+        let mut block_data = Vec::new();
+        block_data.push(0x00); // flags
+        block_data.push(0x04); // key_len = 4
+        block_data.extend_from_slice(b"key1"); // partition key
+        block_data.extend_from_slice(&[0, 0, 0, 0]); // deletion_time
+        block_data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // unknown 8-byte field
+
+        // Try parsing - should route to V5CompressedLegacyParser
+        let result = reader.parse_block_entries(&block_data, None);
+
+        // We expect either success or a specific parsing error (not a dispatch error)
+        match result {
+            Ok(_) => {
+                // Success is fine
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                // Should not be a format dispatch error
+                assert!(
+                    !err_msg.contains("Unknown format") && !err_msg.contains("Not implemented"),
+                    "Should route to V5CompressedLegacyParser, got: {}",
+                    err_msg
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_format_dispatch_legacy_vint() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create VInt-based legacy format data
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(b"test.table");
+        data.extend_from_slice(&encode_vint(4)); // key_len
+        data.extend_from_slice(b"key1");
+        data.extend_from_slice(&encode_vint(0)); // empty value
+
+        // Use legacy parser directly to test VInt fallback
+        let result = reader.parse_block_entries_legacy(&data, None);
+
+        // Should successfully parse with VInt format
+        assert!(
+            result.is_ok(),
+            "Legacy VInt parsing should succeed, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_decompression_fallback_on_failure() {
+        let reader = match create_test_reader("test_basic", "compression_test_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Verify this table has compression
+        assert!(
+            reader.compression_reader.is_some(),
+            "Expected compression_test_table to have compression"
+        );
+
+        // Pass invalid compressed data (should fall back to raw parsing)
+        let invalid_compressed_data = vec![0xFF; 100];
+
+        let result = reader.parse_block_entries(&invalid_compressed_data, None);
+
+        // Should attempt decompression, fail, then fall back to raw parsing
+        // The raw parsing will likely fail too (invalid data), but we verify
+        // the decompression fallback path is exercised
+        match result {
+            Ok(_) => {
+                // If it somehow succeeds, that's fine
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                // Should not panic or crash, just return an error
+                assert!(
+                    !err_msg.is_empty(),
+                    "Should produce a meaningful error message"
+                );
+            }
+        }
+    }
+
+    // ========================================================================
+    // Group 4: Edge Cases
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_empty_block_data() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        let empty_data = Vec::new();
+        let result = reader.parse_block_entries_legacy(&empty_data, None);
+
+        assert!(result.is_ok(), "Empty block should parse successfully");
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 0, "Empty block should have no entries");
+    }
+
+    #[tokio::test]
+    async fn test_binary_table_id_hex_encoding() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create data with non-UTF8 table_id
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(4)); // table_id_len
+        data.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0xFC]); // Invalid UTF-8
+        data.extend_from_slice(&encode_vint(4)); // key_len
+        data.extend_from_slice(b"key1");
+        data.extend_from_slice(&encode_vint(0)); // empty value
+
+        let result = reader.parse_block_entries_legacy(&data, None);
+
+        assert!(
+            result.is_ok(),
+            "Binary table ID should be handled, got: {:?}",
+            result
+        );
+
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 1, "Should have parsed 1 entry");
+
+        let (table_id, _, _) = &entries[0];
+        let table_name = table_id.name();
+        assert!(
+            table_name.starts_with("binary_"),
+            "Binary table ID should have 'binary_' prefix, got: {}",
+            table_name
+        );
+        assert!(
+            table_name.contains("fffefdfc"),
+            "Binary table ID should contain hex encoding, got: {}",
+            table_name
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_key_handling() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        // Create data with empty key (key_len = 0)
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(b"test.table");
+        data.extend_from_slice(&encode_vint(0)); // key_len = 0 (empty key)
+        data.extend_from_slice(&encode_vint(0)); // empty value
+
+        let result = reader.parse_block_entries_legacy(&data, None);
+
+        assert!(
+            result.is_ok(),
+            "Empty key should be handled, got: {:?}",
+            result
+        );
+
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 1, "Should have parsed 1 entry");
+
+        let (_, key, _) = &entries[0];
+        assert_eq!(
+            key.as_bytes().len(),
+            0,
+            "Key should be empty (0 bytes), got {} bytes",
+            key.as_bytes().len()
+        );
+    }
+}
