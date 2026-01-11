@@ -70,6 +70,10 @@ regex = "1.10"
 # Base64 encoding for binary data display
 base64 = "0.21"
 
+# Arrow and Parquet support (M3 output writers)
+arrow = { workspace = true }
+parquet = { workspace = true }
+
 # System memory monitoring (cross-platform)
 sysinfo = "0.30"
 
@@ -78,6 +82,7 @@ rustyline = "14.0"
 
 # Development dependencies
 [dev-dependencies]
+bytes = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }

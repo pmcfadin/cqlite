@@ -15,6 +15,8 @@ pub mod csv;
 #[cfg(feature = "state_machine")]
 pub mod json;
 #[cfg(feature = "state_machine")]
+pub mod parquet;
+#[cfg(feature = "state_machine")]
 pub mod table;
 pub mod value_fmt;
 
@@ -24,6 +26,9 @@ pub use csv::CSVWriter;
 #[cfg(feature = "state_machine")]
 #[allow(unused_imports)]
 pub use json::JSONWriter;
+#[cfg(feature = "state_machine")]
+#[allow(unused_imports)]
+pub use parquet::ParquetWriter;
 #[cfg(feature = "state_machine")]
 #[allow(unused_imports)]
 pub use table::TableWriter;
