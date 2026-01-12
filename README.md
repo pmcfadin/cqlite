@@ -6,7 +6,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org)
 [![Cassandra](https://img.shields.io/badge/cassandra-5.0+-green.svg)](https://cassandra.apache.org)
 
-> **Status**: M2 Complete - Core reading and CLI are production-ready
+> **Status**: M3 Complete - Core reading, CLI, and Output Writers are production-ready
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
@@ -72,9 +72,11 @@ cargo build --no-default-features
 - [x] SELECT with WHERE clause (partition/clustering key equality)
 - [x] Output formats: Table, JSON, CSV
 
-### 🚧 In Development (M3)
-- [ ] Parquet output format
-- [ ] Enhanced query operators
+### ✅ M3 Complete (Jan 2026)
+- [x] Parquet output format with Snappy compression
+- [x] Export command (`cqlite export`)
+- [x] Streaming export for large datasets
+- [x] Output formats: CSV, JSON, Parquet, CQL
 
 ### 📋 Roadmap (M4+)
 - [ ] Python and NodeJS bindings
@@ -149,9 +151,11 @@ cargo run --bin cqlite parse test-data/users-*.db
 - SELECT queries with WHERE clause support
 - Multiple output formats (Table, JSON, CSV)
 
-### 🔄 M3 In Progress
-- Parquet output format (Issue #21)
-- Enhanced export functionality
+### ✅ M3 Complete (Jan 2026)
+- Parquet output format with Snappy compression
+- Export command with CSV, JSON, Parquet, CQL formats
+- Streaming export for memory-efficient large dataset handling
+- Progress bar and statistics for exports
 
 See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
@@ -196,4 +200,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: M1 and M2 milestones are complete. The read-only SSTable access is production-ready. M3 (Parquet export) is in progress.
+**Note**: M1, M2, and M3 milestones are complete. The read-only SSTable access and output writers are production-ready. Next: M4 (Language Bindings).

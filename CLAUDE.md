@@ -6,7 +6,7 @@ Guidance for Claude Code when working with CQLite.
 
 CQLite is a Rust library for local Apache Cassandra SSTable access. It reads Cassandra 5.0 data files without cluster dependencies.
 
-**Status**: M2 Complete (Jan 2026) - Core reading (M1) and CLI (M2) are production-ready. Next: M3 (Output Writers).
+**Status**: M3 Complete (Jan 2026) - Core reading (M1), CLI (M2), and Output Writers (M3) are production-ready. Next: M4 (Language Bindings).
 
 ## Documentation
 

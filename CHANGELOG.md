@@ -8,7 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- M3: Parquet output format (Issue #21) - in progress
+- Parquet output format with Snappy compression (Issue #277)
+- `cqlite export` command for file-based data export (Issue #278)
+- Streaming export infrastructure for memory-efficient large dataset handling (Issue #280)
+- Export formats: CSV, JSON, Parquet, CQL (INSERT statements)
+- Progress bar with statistics for exports
+- Atomic file writes to prevent partial output files (Issue #279)
+
+### Changed
+- Removed YAML from output format options (Issue #283)
 
 ## [0.2.0] - 2026-01-08 (M2 Complete)
 
@@ -17,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - REPL mode with history, completion, and status display
 - TUI mode (experimental)
 - SELECT query support with WHERE clause (partition/clustering key equality)
-- Output formats: Table, JSON, CSV, YAML
+- Output formats: Table, JSON, CSV
 - M2SelectValidator for query validation
 
 ### Changed

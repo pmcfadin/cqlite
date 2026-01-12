@@ -1,4 +1,4 @@
-# CQLite CLI Usage Examples (M2)
+# CQLite CLI Usage Examples (M2/M3)
 
 This document provides comprehensive usage examples for the CQLite CLI in M2 milestone, featuring interactive REPL and one-shot modes for reading Cassandra 5 SSTables with cqlsh-compatible syntax.
 
@@ -9,6 +9,7 @@ This document provides comprehensive usage examples for the CQLite CLI in M2 mil
 - [One-Shot Mode Examples](#one-shot-mode-examples)
 - [REPL Mode Examples](#repl-mode-examples)
 - [Output Formats](#output-formats)
+- [Exporting Data (M3)](#exporting-data-m3)
 - [Command Reference](#command-reference)
 
 ---
@@ -19,7 +20,8 @@ CQLite M2 delivers a cqlsh-compatible experience for querying local Cassandra 5 
 
 - **One-shot mode**: Execute queries or scripts from the command line
 - **Interactive REPL**: Explore data with familiar cqlsh-style commands
-- **Multiple output formats**: table (cqlsh-compatible), JSON, and CSV
+- **Multiple output formats**: table (cqlsh-compatible), JSON, CSV, and Parquet
+- **File export**: Export data to CSV, JSON, Parquet, or CQL INSERT statements
 - **Schema-aware reading**: Load CQL or JSON schema definitions
 - **Status & health commands**: Monitor schema-data synchronization
 - **Ingestion model**: Provide `--schema` and `--data-dir` together to trigger schema loading + dataset discovery for query execution
@@ -453,7 +455,7 @@ cqlite> SELECT * FROM users WHERE id = 8b6c8a96-5f5a-4f7e-a6a8-2b5a3a3f1c01;
 
 ## Output Formats
 
-CQLite supports three output formats in M2 (Parquet planned for M3):
+CQLite supports multiple output formats:
 
 ### UTC Timestamp Behavior (M2)
 
@@ -537,6 +539,103 @@ id,name,email
 8b6c8a96-5f5a-4f7e-a6a8-2b5a3a3f1c01,Alice Wong,alice@example.com
 2a1dc9b7-2f1f-4db2-8d1f-7c0a4d4f9b12,Bob Smith,bob@example.com
 4c7e2f90-1b33-4a6a-9e1c-9d4e8a2f3c45,Carol Chen,carol@example.com
+```
+
+---
+
+## Exporting Data (M3)
+
+CQLite M3 adds file-based export functionality for extracting data to various formats.
+
+### Export Command Syntax
+
+```bash
+cqlite export <OUTPUT_FILE> --format <FORMAT> --table <KEYSPACE.TABLE> [--query <WHERE_CLAUSE>]
+```
+
+### Supported Export Formats
+
+| Format | Extension | Description | Use Case |
+|--------|-----------|-------------|----------|
+| `csv` | .csv | RFC 4180 CSV | Spreadsheets, data warehouses |
+| `json` | .json | JSON array of objects | APIs, web applications |
+| `parquet` | .parquet | Apache Parquet (Snappy) | Analytics, big data tools |
+| `cql` | .cql | CQL INSERT statements | Cassandra migration, backups |
+
+### Export Examples
+
+#### Export to CSV
+
+```bash
+cqlite --schema test-data/schemas/basic-types.cql \
+       --data-dir test-data/datasets/sstables \
+       export users.csv --format csv --table test_basic.simple_table
+```
+
+#### Export to JSON
+
+```bash
+cqlite --schema test-data/schemas/basic-types.cql \
+       --data-dir test-data/datasets/sstables \
+       export users.json --format json --table test_basic.simple_table
+```
+
+#### Export to Parquet
+
+```bash
+cqlite --schema test-data/schemas/basic-types.cql \
+       --data-dir test-data/datasets/sstables \
+       export users.parquet --format parquet --table test_basic.simple_table
+```
+
+#### Export with WHERE Filter
+
+```bash
+cqlite --schema test-data/schemas/basic-types.cql \
+       --data-dir test-data/datasets/sstables \
+       export active_users.csv --format csv \
+       --table test_basic.simple_table --query "active = true"
+```
+
+#### Export to CQL INSERT Statements
+
+```bash
+cqlite --schema test-data/schemas/basic-types.cql \
+       --data-dir test-data/datasets/sstables \
+       export backup.cql --format cql --table test_basic.simple_table
+```
+
+### CQL-to-Parquet Type Mapping
+
+When exporting to Parquet format, CQL types are mapped to Apache Arrow types:
+
+| CQL Type | Arrow Type | Notes |
+|----------|------------|-------|
+| `int` | Int32 | 32-bit signed integer |
+| `smallint` | Int16 | 16-bit signed integer |
+| `tinyint` | Int8 | 8-bit signed integer |
+| `bigint`, `counter` | Int64 | 64-bit signed integer |
+| `float` | Float32 | Single precision |
+| `double` | Float64 | Double precision |
+| `text`, `varchar`, `ascii` | Utf8 | UTF-8 strings |
+| `blob` | Binary | Raw bytes |
+| `boolean` | Boolean | True/false |
+| `timestamp` | Timestamp(ms, UTC) | Millisecond precision, UTC timezone |
+| `uuid`, `timeuuid` | FixedSizeBinary(16) | 16-byte binary |
+| `list<T>` | List(Utf8) | List of UTF-8 strings |
+| `set<T>` | List(Utf8) | List of UTF-8 strings |
+| `map<K,V>` | Map(Utf8, Utf8) | Map with string keys/values |
+| `tuple`, `UDT`, `frozen` | Utf8 | JSON serialization |
+
+### Export Progress and Statistics
+
+Exports display progress and statistics (unless `--quiet` is specified):
+
+```
+[████████████████████████████████] 100% (10000/10000 rows) ETA: 0s
+Export complete: 10000 rows written to users.parquet
+File size: 245.3 KB
+Duration: 1.2s (8333 rows/sec)
 ```
 
 ---
@@ -705,11 +804,21 @@ cqlite> :help
 
 ---
 
-## M2 Milestone Notes
+## Milestone Notes
 
-- **Read-only operations**: M2 supports SELECT, DESCRIBE, USE (no DML/DDL mutations)
-- **Parquet output**: Planned for M3
-- **TUI mode**: Future enhancement
-- **Remote cluster connectivity**: Out of scope for M2
+### M2 Features
+- **Read-only operations**: SELECT, DESCRIBE, USE (no DML/DDL mutations)
+- **Output formats**: Table, JSON, CSV
+- **TUI mode**: Experimental
 
-For complete specification details, see `/Users/patrick/local_projects/cqlite/docs/development/M2_CLI_SPEC.md`.
+### M3 Features
+- **Export command**: `cqlite export` for file-based data export
+- **Parquet output**: Apache Parquet with Snappy compression
+- **Streaming export**: Memory-efficient export for large datasets
+- **Additional formats**: CQL INSERT statement generation
+
+### Future Enhancements
+- **Remote cluster connectivity**: Out of scope
+- **Write operations**: CQLite is read-only by design
+
+For complete specification details, see `docs/development/M2_CLI_SPEC.md`.
