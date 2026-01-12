@@ -22,8 +22,10 @@
 #![cfg(feature = "state_machine")]
 
 use crate::config::OutputConfig;
-use cqlite_core::query::QueryResult;
+use crate::output::{OutputError, StreamingWriter};
+use cqlite_core::query::{QueryMetadata, QueryResult, QueryRow};
 use csv::WriterBuilder;
+use std::io::Write;
 
 use super::value_fmt::ValueFormatter;
 
@@ -99,6 +101,116 @@ impl CSVWriter {
         // Extract the CSV data as string
         let data = wtr.into_inner()?;
         String::from_utf8(data).map_err(|e| e.into())
+    }
+}
+
+// ============================================================================
+// Streaming CSV Writer (Issue #280)
+// ============================================================================
+
+/// Streaming CSV writer for memory-efficient export of large datasets
+///
+/// Unlike the batch `CSVWriter`, this writer processes data incrementally,
+/// allowing export of arbitrarily large result sets within memory constraints.
+///
+/// # Example
+///
+/// ```ignore
+/// let file = File::create("output.csv")?;
+/// let mut writer = StreamingCSVWriter::new(file);
+///
+/// writer.write_header(&metadata)?;
+///
+/// for chunk in result_iterator.chunks(10_000) {
+///     writer.write_chunk(&chunk)?;
+/// }
+///
+/// writer.finalize()?;
+/// ```
+#[allow(dead_code)]
+pub struct StreamingCSVWriter<W: Write> {
+    /// Inner CSV writer
+    writer: csv::Writer<W>,
+    /// Column names in order
+    columns: Vec<String>,
+    /// Count of rows written
+    rows_written: u64,
+}
+
+impl<W: Write> StreamingCSVWriter<W> {
+    /// Create a new streaming CSV writer
+    #[allow(dead_code)]
+    pub fn new(output: W) -> Self {
+        Self {
+            writer: WriterBuilder::new().from_writer(output),
+            columns: Vec::new(),
+            rows_written: 0,
+        }
+    }
+
+    /// Create with custom CSV options
+    #[allow(dead_code)]
+    pub fn with_options(output: W, delimiter: u8, quote_style: csv::QuoteStyle) -> Self {
+        Self {
+            writer: WriterBuilder::new()
+                .delimiter(delimiter)
+                .quote_style(quote_style)
+                .from_writer(output),
+            columns: Vec::new(),
+            rows_written: 0,
+        }
+    }
+}
+
+impl<W: Write + Send> StreamingWriter for StreamingCSVWriter<W> {
+    fn write_header(&mut self, metadata: &QueryMetadata) -> Result<(), OutputError> {
+        // Store column names for row writing
+        self.columns = metadata.columns.iter().map(|c| c.name.clone()).collect();
+
+        // Write header row
+        self.writer
+            .write_record(&self.columns)
+            .map_err(|e| OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        Ok(())
+    }
+
+    fn write_chunk(&mut self, rows: &[QueryRow]) -> Result<usize, OutputError> {
+        for row in rows {
+            let record: Vec<String> = self
+                .columns
+                .iter()
+                .map(|col| {
+                    row.values
+                        .get(col)
+                        .map(|v| {
+                            let formatted = ValueFormatter::format_value(v);
+                            // For CSV, convert "null" to empty string
+                            if formatted == "null" {
+                                String::new()
+                            } else {
+                                formatted
+                            }
+                        })
+                        .unwrap_or_default()
+                })
+                .collect();
+
+            self.writer
+                .write_record(&record)
+                .map_err(|e| OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        }
+
+        self.rows_written += rows.len() as u64;
+        Ok(rows.len())
+    }
+
+    fn finalize(&mut self) -> Result<(), OutputError> {
+        self.writer.flush().map_err(OutputError::Io)
+    }
+
+    fn rows_written(&self) -> u64 {
+        self.rows_written
     }
 }
 

@@ -5,10 +5,12 @@
 //! arbitrary HashMap iteration order.
 
 use crate::config::OutputConfig;
-use cqlite_core::query::QueryResult;
+use crate::output::{OutputError, StreamingWriter};
+use cqlite_core::query::{QueryMetadata, QueryResult, QueryRow};
 use cqlite_core::Value;
 use serde_json::{json, Map, Value as JsonValue};
 use std::error::Error as StdError;
+use std::io::Write;
 
 use super::value_fmt::ValueFormatter;
 
@@ -200,10 +202,169 @@ impl JSONWriter {
     }
 }
 
+// ============================================================================
+// Streaming JSON Writer (Issue #280)
+// ============================================================================
+
+/// Streaming JSON writer for memory-efficient export of large datasets
+///
+/// Outputs a JSON array with one object per row. Unlike the batch `JSONWriter`,
+/// this writer processes data incrementally, allowing export of arbitrarily
+/// large result sets within memory constraints.
+///
+/// # Output Format
+///
+/// ```json
+/// [
+///   {"col1": "value1", "col2": 123},
+///   {"col1": "value2", "col2": 456}
+/// ]
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// let file = File::create("output.json")?;
+/// let mut writer = StreamingJSONWriter::new(file);
+///
+/// writer.write_header(&metadata)?;
+///
+/// for chunk in result_iterator.chunks(10_000) {
+///     writer.write_chunk(&chunk)?;
+/// }
+///
+/// writer.finalize()?;
+/// ```
+#[allow(dead_code)]
+pub struct StreamingJSONWriter<W: Write> {
+    /// Inner writer
+    writer: W,
+    /// Column names in order
+    columns: Vec<String>,
+    /// Count of rows written
+    rows_written: u64,
+    /// Whether we've written any rows (for comma handling)
+    first_row: bool,
+    /// Whether to pretty-print
+    pretty: bool,
+}
+
+impl<W: Write> StreamingJSONWriter<W> {
+    /// Create a new streaming JSON writer with pretty-printing
+    #[allow(dead_code)]
+    pub fn new(output: W) -> Self {
+        Self {
+            writer: output,
+            columns: Vec::new(),
+            rows_written: 0,
+            first_row: true,
+            pretty: true,
+        }
+    }
+
+    /// Create with compact (non-pretty) output
+    #[allow(dead_code)]
+    pub fn compact(output: W) -> Self {
+        Self {
+            writer: output,
+            columns: Vec::new(),
+            rows_written: 0,
+            first_row: true,
+            pretty: false,
+        }
+    }
+
+    /// Convert a single row to JSON object with deterministic key ordering
+    #[allow(dead_code)]
+    fn row_to_json(&self, row: &QueryRow) -> JsonValue {
+        let mut row_obj = Map::new();
+
+        // Iterate columns in metadata order, NOT HashMap order
+        for col in &self.columns {
+            let value_opt = row.values.get(col);
+            let json_value = match value_opt {
+                Some(value) => JSONWriter::value_to_json(value),
+                None => JsonValue::Null,
+            };
+            row_obj.insert(col.clone(), json_value);
+        }
+
+        JsonValue::Object(row_obj)
+    }
+}
+
+impl<W: Write + Send> StreamingWriter for StreamingJSONWriter<W> {
+    fn write_header(&mut self, metadata: &QueryMetadata) -> Result<(), OutputError> {
+        // Store column names for row writing
+        self.columns = metadata.columns.iter().map(|c| c.name.clone()).collect();
+
+        // Write opening bracket
+        if self.pretty {
+            writeln!(self.writer, "[").map_err(OutputError::Io)?;
+        } else {
+            write!(self.writer, "[").map_err(OutputError::Io)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_chunk(&mut self, rows: &[QueryRow]) -> Result<usize, OutputError> {
+        for row in rows {
+            let json_obj = self.row_to_json(row);
+
+            // Handle comma separator between rows
+            if !self.first_row {
+                if self.pretty {
+                    writeln!(self.writer, ",").map_err(OutputError::Io)?;
+                } else {
+                    write!(self.writer, ",").map_err(OutputError::Io)?;
+                }
+            }
+            self.first_row = false;
+
+            // Write JSON object
+            if self.pretty {
+                let json_str = serde_json::to_string_pretty(&json_obj).map_err(|e| {
+                    OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                })?;
+                // Indent each line
+                for line in json_str.lines() {
+                    write!(self.writer, "  {}", line).map_err(OutputError::Io)?;
+                    writeln!(self.writer).map_err(OutputError::Io)?;
+                }
+            } else {
+                let json_str = serde_json::to_string(&json_obj).map_err(|e| {
+                    OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                })?;
+                write!(self.writer, "{}", json_str).map_err(OutputError::Io)?;
+            }
+
+            self.rows_written += 1;
+        }
+
+        Ok(rows.len())
+    }
+
+    fn finalize(&mut self) -> Result<(), OutputError> {
+        // Write closing bracket
+        if self.pretty {
+            writeln!(self.writer, "]").map_err(OutputError::Io)?;
+        } else {
+            write!(self.writer, "]").map_err(OutputError::Io)?;
+        }
+
+        self.writer.flush().map_err(OutputError::Io)
+    }
+
+    fn rows_written(&self) -> u64 {
+        self.rows_written
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqlite_core::query::{ColumnInfo, QueryRow};
+    use cqlite_core::query::ColumnInfo;
     use cqlite_core::{RowKey, Value};
     use std::collections::HashMap;
 

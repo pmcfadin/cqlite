@@ -26,13 +26,13 @@ pub mod value_fmt;
 
 #[cfg(feature = "state_machine")]
 #[allow(unused_imports)]
-pub use csv::CSVWriter;
+pub use csv::{CSVWriter, StreamingCSVWriter};
 #[cfg(feature = "state_machine")]
 #[allow(unused_imports)]
-pub use json::JSONWriter;
+pub use json::{JSONWriter, StreamingJSONWriter};
 #[cfg(feature = "state_machine")]
 #[allow(unused_imports)]
-pub use parquet::ParquetWriter;
+pub use parquet::{create_streaming_parquet_writer, ParquetWriter, StreamingParquetWriter};
 #[cfg(feature = "state_machine")]
 #[allow(unused_imports)]
 pub use table::TableWriter;
@@ -113,6 +113,120 @@ impl std::error::Error for OutputError {
         match self {
             OutputError::Io(e) => Some(e),
             _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Streaming Writer Interface (Issue #280)
+// ============================================================================
+
+#[cfg(feature = "state_machine")]
+use cqlite_core::query::{QueryMetadata, QueryRow};
+
+/// Trait for writers that support streaming/chunked output
+///
+/// Unlike batch writers that receive a complete `QueryResult`, streaming writers
+/// process data incrementally via `write_header()`, `write_chunk()`, and `finalize()`.
+/// This enables processing of arbitrarily large result sets within the 128MB memory budget.
+///
+/// # Memory Budget
+///
+/// To stay within the 128MB target:
+/// - Chunk sizes should typically be 5,000-10,000 rows
+/// - For large blob/text columns, use smaller chunks (1,000-5,000)
+/// - Parquet writers buffer rows for row groups; default is 10,000 rows
+///
+/// # Contract
+///
+/// 1. `write_header()` MUST be called exactly once before any `write_chunk()` calls
+/// 2. `write_chunk()` MAY be called zero or more times
+/// 3. `finalize()` MUST be called exactly once to complete the output
+/// 4. After `finalize()`, no further calls are allowed
+/// 5. Implementors SHOULD return errors rather than panic on contract violations
+///
+/// # Troubleshooting
+///
+/// If you encounter OOM errors:
+/// 1. Reduce chunk sizes when calling `write_chunk()` (max: 10,000 rows)
+/// 2. For Parquet, reduce `row_group_size` (default: 10,000 rows)
+/// 3. Check for large blob/text columns that inflate row size
+///
+/// # Example
+///
+/// ```ignore
+/// let mut writer = StreamingCSVWriter::new(file);
+/// writer.write_header(&metadata)?;
+///
+/// for chunk in result_stream.chunks(10_000) {
+///     writer.write_chunk(&chunk)?;
+/// }
+///
+/// writer.finalize()?;
+/// ```
+#[cfg(feature = "state_machine")]
+#[allow(dead_code)]
+pub trait StreamingWriter: Send {
+    /// Initialize writer with column metadata (write header if applicable)
+    ///
+    /// Called once before any data is written. For CSV, this writes the header row.
+    /// For Parquet, this initializes the Arrow schema.
+    fn write_header(&mut self, metadata: &QueryMetadata) -> Result<(), OutputError>;
+
+    /// Write a chunk of rows (called multiple times during streaming)
+    ///
+    /// Returns the number of rows actually written (may differ from input if
+    /// the writer buffers internally, e.g., Parquet row groups).
+    fn write_chunk(&mut self, rows: &[QueryRow]) -> Result<usize, OutputError>;
+
+    /// Finalize output (flush buffers, write footer, close resources)
+    ///
+    /// Called once after all data has been written. For Parquet, this writes
+    /// the final row group and file footer.
+    fn finalize(&mut self) -> Result<(), OutputError>;
+
+    /// Get count of rows written so far
+    fn rows_written(&self) -> u64;
+
+    /// Get bytes written so far (if trackable)
+    fn bytes_written(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// Progress information for streaming operations
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct StreamingProgress {
+    /// Total rows written so far
+    pub rows_written: u64,
+    /// Total bytes written so far (if known)
+    pub bytes_written: Option<u64>,
+    /// Elapsed time in milliseconds
+    pub elapsed_ms: u64,
+    /// Estimated total rows (if known)
+    pub total_rows_hint: Option<u64>,
+}
+
+#[allow(dead_code)]
+impl StreamingProgress {
+    /// Calculate progress percentage (if total is known)
+    pub fn percent(&self) -> Option<f64> {
+        self.total_rows_hint.map(|total| {
+            if total == 0 {
+                100.0
+            } else {
+                (self.rows_written as f64 / total as f64) * 100.0
+            }
+        })
+    }
+
+    /// Calculate rows per second throughput
+    pub fn rows_per_second(&self) -> f64 {
+        if self.elapsed_ms == 0 {
+            0.0
+        } else {
+            (self.rows_written as f64) / (self.elapsed_ms as f64 / 1000.0)
         }
     }
 }

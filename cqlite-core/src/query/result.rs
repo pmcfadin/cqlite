@@ -7,6 +7,7 @@ use crate::{RowKey, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use tokio::sync::mpsc;
 
 /// Query result containing rows and metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +132,205 @@ pub struct PerformanceMetrics {
     pub cache_hits: u64,
     /// Cache misses
     pub cache_misses: u64,
+}
+
+// ============================================================================
+// Streaming Query Results (Issue #280)
+// ============================================================================
+
+/// Configuration for streaming query results
+///
+/// Controls buffer sizes and chunk sizes for memory-efficient processing
+/// of large result sets.
+#[derive(Debug, Clone)]
+pub struct StreamingConfig {
+    /// Channel buffer size (controls backpressure)
+    /// Default: 1024 rows in flight
+    pub buffer_size: usize,
+    /// Chunk size hint for writers (rows per chunk)
+    /// Default: 10,000 rows (matches Parquet row group size)
+    pub chunk_size: usize,
+}
+
+impl Default for StreamingConfig {
+    fn default() -> Self {
+        Self {
+            buffer_size: 1024,  // 1K rows in flight
+            chunk_size: 10_000, // 10K rows per chunk (matches Parquet row group)
+        }
+    }
+}
+
+impl StreamingConfig {
+    /// Create a new streaming config with custom settings
+    pub fn new(buffer_size: usize, chunk_size: usize) -> Self {
+        Self {
+            buffer_size,
+            chunk_size,
+        }
+    }
+
+    /// Create a config optimized for Parquet output
+    pub fn for_parquet() -> Self {
+        Self {
+            buffer_size: 1024,
+            chunk_size: 10_000, // Row group size
+        }
+    }
+
+    /// Create a config optimized for CSV/JSON output
+    pub fn for_text_formats() -> Self {
+        Self {
+            buffer_size: 512,
+            chunk_size: 5_000, // Smaller chunks for text formats
+        }
+    }
+}
+
+/// Streaming query result iterator for memory-efficient processing
+///
+/// Instead of materializing all rows into a `Vec`, this iterator yields rows
+/// lazily via a channel, allowing processing of arbitrarily large result sets
+/// within the 128MB memory budget.
+///
+/// # Memory Budget
+///
+/// To stay within the 128MB target, callers MUST create a bounded channel
+/// with capacity from `StreamingConfig::buffer_size`. Assuming average row
+/// size of 1KB:
+/// - `buffer_size: 1024` = ~1MB in flight
+/// - `chunk_size: 10_000` = ~10MB per chunk
+/// - Total peak usage: ~11MB (well within 128MB budget)
+///
+/// For rows with large blobs/text, reduce buffer sizes proportionally.
+///
+/// # Contract
+///
+/// 1. The caller MUST create a bounded channel with `mpsc::channel(config.buffer_size)`
+/// 2. The iterator does NOT own the sender; the caller must spawn a task to send rows
+/// 3. The iterator is consumed once; create a new one for subsequent queries
+///
+/// # Example
+///
+/// ```ignore
+/// let config = StreamingConfig::default();
+/// let (tx, rx) = tokio::sync::mpsc::channel(config.buffer_size);
+///
+/// // Spawn producer
+/// tokio::spawn(async move {
+///     for row in rows {
+///         if tx.send(Ok(row)).await.is_err() {
+///             break; // Consumer dropped
+///         }
+///     }
+/// });
+///
+/// // Create iterator from receiver
+/// let mut iterator = QueryResultIterator::new(rx, metadata);
+///
+/// while let Some(row_result) = iterator.next_async().await {
+///     let row = row_result?;
+///     writer.write_row(&row)?;
+/// }
+/// ```
+pub struct QueryResultIterator {
+    /// Channel receiver for rows
+    receiver: mpsc::Receiver<Result<QueryRow, crate::Error>>,
+    /// Query metadata (columns, etc.)
+    pub metadata: QueryMetadata,
+    /// Total rows hint (if known from query planning)
+    pub total_rows_hint: Option<u64>,
+    /// Count of rows received so far
+    rows_received: u64,
+}
+
+impl QueryResultIterator {
+    /// Create a new streaming result iterator
+    pub fn new(
+        receiver: mpsc::Receiver<Result<QueryRow, crate::Error>>,
+        metadata: QueryMetadata,
+    ) -> Self {
+        Self {
+            receiver,
+            metadata,
+            total_rows_hint: None,
+            rows_received: 0,
+        }
+    }
+
+    /// Create with a known total row count hint
+    pub fn with_total_hint(mut self, total: u64) -> Self {
+        self.total_rows_hint = Some(total);
+        self
+    }
+
+    /// Receive next row (async)
+    ///
+    /// Returns `None` when all rows have been received.
+    pub async fn next_async(&mut self) -> Option<Result<QueryRow, crate::Error>> {
+        match self.receiver.recv().await {
+            Some(result) => {
+                if result.is_ok() {
+                    self.rows_received += 1;
+                }
+                Some(result)
+            }
+            None => None,
+        }
+    }
+
+    /// Maximum allowed chunk size to prevent OOM
+    const MAX_CHUNK_SIZE: usize = 100_000;
+
+    /// Collect into chunks of specified size
+    ///
+    /// Returns a chunk of rows up to `size`. May return fewer rows if the
+    /// stream ends or an error occurs.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Maximum number of rows to collect. Limited to MAX_CHUNK_SIZE
+    ///   (100,000) to prevent unbounded memory allocation.
+    ///
+    /// # Returns
+    ///
+    /// A vector of rows, which may be smaller than `size` if the stream ends
+    /// or an error occurs.
+    pub async fn collect_chunk(&mut self, size: usize) -> Result<Vec<QueryRow>, crate::Error> {
+        // Clamp size to prevent OOM from bad input
+        let safe_size = size.min(Self::MAX_CHUNK_SIZE);
+
+        // Use new() instead of with_capacity() to avoid large upfront allocations
+        // Vec will grow efficiently as needed
+        let mut chunk = Vec::new();
+        while chunk.len() < safe_size {
+            match self.receiver.recv().await {
+                Some(Ok(row)) => {
+                    self.rows_received += 1;
+                    chunk.push(row);
+                }
+                Some(Err(e)) => return Err(e),
+                None => break,
+            }
+        }
+        Ok(chunk)
+    }
+
+    /// Get count of rows received so far
+    pub fn rows_received(&self) -> u64 {
+        self.rows_received
+    }
+
+    /// Get progress as a percentage (if total is known)
+    pub fn progress_percent(&self) -> Option<f64> {
+        self.total_rows_hint.map(|total| {
+            if total == 0 {
+                100.0
+            } else {
+                (self.rows_received as f64 / total as f64) * 100.0
+            }
+        })
+    }
 }
 
 impl QueryResult {
