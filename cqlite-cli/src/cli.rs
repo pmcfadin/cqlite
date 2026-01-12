@@ -22,7 +22,7 @@ pub enum ExportFormat {
     Csv,
     Json,
     Parquet,
-    Sql,
+    Cql,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -59,7 +59,7 @@ impl std::fmt::Display for ExportFormat {
             ExportFormat::Csv => write!(f, "csv"),
             ExportFormat::Json => write!(f, "json"),
             ExportFormat::Parquet => write!(f, "parquet"),
-            ExportFormat::Sql => write!(f, "sql"),
+            ExportFormat::Cql => write!(f, "cql"),
         }
     }
 }

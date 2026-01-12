@@ -1239,7 +1239,7 @@ impl ReplEngine {
         println!("  :health          Show health diagnostics");
         println!();
         println!("File Commands:");
-        println!("  :source <file>   Execute SQL file");
+        println!("  :source <file>   Execute CQL file");
         println!();
         println!("Configuration:");
         println!("  :config          Show merged effective configuration (read-only)");

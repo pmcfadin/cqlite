@@ -667,6 +667,7 @@ pub async fn export_data(
     source: &str,
     file: &Path,
     format: ExportFormat,
+    query_filter: Option<&str>,
 ) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
 
@@ -683,8 +684,11 @@ pub async fn export_data(
     let query = if source.to_uppercase().trim().starts_with("SELECT") {
         source.to_string()
     } else {
-        // Assume it's a table name
-        format!("SELECT * FROM {source}")
+        // Source is a table name - build SELECT with optional WHERE
+        match query_filter {
+            Some(filter) => format!("SELECT * FROM {} WHERE {}", source, filter),
+            None => format!("SELECT * FROM {}", source),
+        }
     };
 
     println!(
@@ -737,12 +741,8 @@ pub async fn export_data(
     match format {
         ExportFormat::Csv => export_to_csv(&result, file, &column_names, &pb).await?,
         ExportFormat::Json => export_to_json(&result, file, &column_names, &pb).await?,
-        ExportFormat::Sql => export_to_sql(&result, file, source, &column_names, &pb).await?,
-        ExportFormat::Parquet => {
-            return Err(anyhow::anyhow!(
-                "Parquet export not yet implemented. Please use CSV or JSON format."
-            ));
-        }
+        ExportFormat::Cql => export_to_cql(&result, file, source, &column_names, &pb).await?,
+        ExportFormat::Parquet => export_to_parquet(&result, file, &column_names, &pb).await?,
     }
 
     pb.finish_with_message("Export completed");
@@ -762,6 +762,7 @@ pub async fn export_data(
     _source: &str,
     _file: &Path,
     _format: crate::cli::ExportFormat,
+    _query_filter: Option<&str>,
 ) -> Result<()> {
     Err(anyhow::anyhow!(
         "Data export is not available in M1.\n\
@@ -873,9 +874,9 @@ async fn export_to_json(
     Ok(())
 }
 
-/// Export query result to SQL INSERT statements
+/// Export query result to CQL INSERT statements
 #[cfg(feature = "state_machine")]
-async fn export_to_sql(
+async fn export_to_cql(
     result: &cqlite_core::query::result::QueryResult,
     file: &Path,
     source: &str,
@@ -883,7 +884,7 @@ async fn export_to_sql(
     pb: &ProgressBar,
 ) -> Result<()> {
     let output_file = File::create(file)
-        .with_context(|| format!("Failed to create SQL file: {}", file.display()))?;
+        .with_context(|| format!("Failed to create CQL file: {}", file.display()))?;
     let mut writer = BufWriter::new(output_file);
 
     // Extract table name from source
@@ -899,7 +900,7 @@ async fn export_to_sql(
     };
 
     // Write header comment
-    writeln!(writer, "-- SQL Export from CQLite")?;
+    writeln!(writer, "-- CQL Export from CQLite")?;
     writeln!(writer, "-- Source: {source}")?;
     writeln!(writer, "-- Generated: {}", chrono::Utc::now().to_rfc3339())?;
     writeln!(writer, "-- Rows: {}", result.rows.len())?;
@@ -933,8 +934,34 @@ async fn export_to_sql(
 
     writer
         .flush()
-        .with_context(|| "Failed to flush SQL writer")?;
+        .with_context(|| "Failed to flush CQL writer")?;
 
+    Ok(())
+}
+
+/// Export query result to Parquet format
+#[cfg(feature = "state_machine")]
+async fn export_to_parquet(
+    result: &cqlite_core::query::result::QueryResult,
+    file: &Path,
+    _column_names: &[String],
+    pb: &ProgressBar,
+) -> Result<()> {
+    use crate::config::OutputConfig;
+    use crate::output::ParquetWriter;
+
+    pb.set_message("Converting to Parquet format...");
+
+    // ParquetWriter uses column info from result.metadata.columns
+    let config = OutputConfig::default();
+    let parquet_bytes = ParquetWriter::write(result, &config)
+        .map_err(|e| anyhow::anyhow!("Failed to generate Parquet: {}", e))?;
+
+    pb.set_message("Writing Parquet file...");
+    std::fs::write(file, &parquet_bytes)
+        .with_context(|| format!("Failed to write Parquet file: {}", file.display()))?;
+
+    pb.set_position(result.rows.len() as u64);
     Ok(())
 }
 
@@ -1486,7 +1513,7 @@ pub async fn export_sstable(
         ExportFormat::Parquet => {
             anyhow::bail!("Parquet export not yet implemented");
         }
-        ExportFormat::Sql => export_as_sql(&reader, &schema, &mut output_file, &pb).await,
+        ExportFormat::Cql => export_as_cql(&reader, &schema, &mut output_file, &pb).await,
     }
 }
 
@@ -1571,9 +1598,9 @@ async fn export_as_csv(
     Ok(())
 }
 
-/// Export SSTable data as SQL INSERT statements
+/// Export SSTable data as CQL INSERT statements
 #[cfg(feature = "state_machine")]
-async fn export_as_sql(
+async fn export_as_cql(
     reader: &SSTableReader,
     schema: &TableSchema,
     output_file: &mut File,
@@ -1586,7 +1613,7 @@ async fn export_as_sql(
     let column_names = parser.get_column_names();
 
     // Write header
-    writeln!(output_file, "-- SQL Export from CQLite")?;
+    writeln!(output_file, "-- CQL Export from CQLite")?;
     writeln!(
         output_file,
         "-- Table: {}.{}",
@@ -1632,7 +1659,7 @@ async fn export_as_sql(
         }
     }
 
-    pb.finish_with_message(format!("Exported {exported_count} rows to SQL"));
+    pb.finish_with_message(format!("Exported {exported_count} rows to CQL"));
     Ok(())
 }
 

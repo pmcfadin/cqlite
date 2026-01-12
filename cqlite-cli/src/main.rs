@@ -538,8 +538,8 @@ async fn run_main() -> Result<()> {
             file,
             format,
             table,
-            query: _,
-        }) => commands::export_data(&database, &table, &file, format).await,
+            query,
+        }) => commands::export_data(&database, &table, &file, format, query.as_deref()).await,
         Some(Commands::Admin { command }) => {
             commands::admin::handle_admin_command(&database, command).await
         }
