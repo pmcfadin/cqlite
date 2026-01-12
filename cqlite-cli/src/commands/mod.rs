@@ -179,11 +179,12 @@ pub async fn execute_query(
     format: OutputFormat,
     config: &crate::config::OutputConfig,
 ) -> Result<()> {
+    use crate::output::{write_to_target, OutputTarget};
     use std::time::Instant;
 
     let start_time = Instant::now();
 
-    // Handle explain queries
+    // Handle explain queries (always to stdout, not affected by --output)
     if explain {
         let explain_result = database
             .explain(query)
@@ -232,62 +233,79 @@ pub async fn execute_query(
         .await
         .with_context(|| "Failed to execute query")?;
 
-    // Display results based on format
-    match format {
+    // Generate output bytes based on format (Issue #279)
+    let output_bytes: Vec<u8> = match format {
         OutputFormat::Table => {
-            // Use TableWriter for cqlsh-compatible formatting
-            #[cfg(feature = "state_machine")]
-            {
-                use crate::output::table::TableWriter;
-                let table_output = TableWriter::write(&result, config)
-                    .map_err(|e| anyhow::anyhow!("Failed to format table output: {}", e))?;
-                println!("{}", table_output);
-            }
-            #[cfg(not(feature = "state_machine"))]
-            {
-                println!("{result}");
-            }
+            use crate::output::table::TableWriter;
+            let table_output = TableWriter::write(&result, config)
+                .map_err(|e| anyhow::anyhow!("Failed to format table output: {}", e))?;
+            table_output.into_bytes()
         }
         OutputFormat::Json => {
-            // Use JSONWriter for deterministic field ordering (Issue #129)
-            // JSONWriter iterates metadata.columns in order, NOT HashMap iteration
             use crate::output::json::JSONWriter;
             let json_output = JSONWriter::write(&result, config)
                 .map_err(|e| anyhow::anyhow!("Failed to format JSON output: {}", e))?;
-            println!("{}", json_output);
+            json_output.into_bytes()
         }
         OutputFormat::Csv => {
-            print_csv_format(&result, config)?;
+            use crate::output::CSVWriter;
+            let csv_output = CSVWriter::write(&result, config)
+                .map_err(|e| anyhow::anyhow!("Failed to format CSV output: {}", e))?;
+            csv_output.into_bytes()
         }
         OutputFormat::Yaml => {
             let json_result = result.to_json();
-            println!("{}", serde_yaml::to_string(&json_result)?);
+            let yaml_output = serde_yaml::to_string(&json_result)?;
+            yaml_output.into_bytes()
+        }
+        OutputFormat::Parquet => {
+            use crate::output::ParquetWriter;
+            ParquetWriter::write(&result, config)
+                .map_err(|e| anyhow::anyhow!("Failed to format Parquet output: {}", e))?
+        }
+    };
+
+    // Write to target (stdout or file)
+    write_to_target(&output_bytes, &config.target, config.overwrite)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Add newline for text formats written to stdout (not for binary/file output)
+    if matches!(config.target, OutputTarget::Stdout) && !matches!(format, OutputFormat::Parquet) {
+        // Text writers don't include trailing newline, so add one for stdout
+        // (CSV already ends with newline from csv crate)
+        if !matches!(format, OutputFormat::Csv) {
+            println!();
         }
     }
 
-    // Show timing information if requested
+    // Show success message for file output (to stderr so it doesn't mix with output)
+    if let OutputTarget::File(path) = &config.target {
+        eprintln!("Output written to: {}", path.display());
+    }
+
+    // Show timing information if requested (to stderr when writing to file)
     if timing {
         let elapsed = start_time.elapsed();
-        println!("\nQuery executed in {:.2}ms", elapsed.as_millis());
+        eprintln!("\nQuery executed in {:.2}ms", elapsed.as_millis());
 
         let performance = result.performance();
         if performance.total_time_us > 0 {
-            println!(
+            eprintln!(
                 "Parse time: {:.2}ms",
                 performance.parse_time_us as f64 / 1000.0
             );
-            println!(
+            eprintln!(
                 "Planning time: {:.2}ms",
                 performance.planning_time_us as f64 / 1000.0
             );
-            println!(
+            eprintln!(
                 "Execution time: {:.2}ms",
                 performance.execution_time_us as f64 / 1000.0
             );
-            println!("Memory usage: {} bytes", performance.memory_usage_bytes);
-            println!("I/O operations: {}", performance.io_operations);
+            eprintln!("Memory usage: {} bytes", performance.memory_usage_bytes);
+            eprintln!("I/O operations: {}", performance.io_operations);
             if performance.cache_hits + performance.cache_misses > 0 {
-                println!(
+                eprintln!(
                     "Cache hit ratio: {:.1}%",
                     performance.cache_hit_ratio() * 100.0
                 );
@@ -295,12 +313,12 @@ pub async fn execute_query(
         }
     }
 
-    // Show warnings if any
+    // Show warnings if any (to stderr)
     let warnings = result.warnings();
     if !warnings.is_empty() {
-        println!("\nWarnings:");
+        eprintln!("\nWarnings:");
         for warning in warnings {
-            println!("  ⚠️  {warning}");
+            eprintln!("  ⚠️  {warning}");
         }
     }
 
@@ -1070,6 +1088,9 @@ pub async fn read_sstable(
                 OutputFormat::Json => display_json_format(&parsed_rows)?,
                 OutputFormat::Csv => display_csv_format(&parser.get_column_names(), &parsed_rows)?,
                 OutputFormat::Yaml => display_yaml_format(&parsed_rows)?,
+                OutputFormat::Parquet => {
+                    return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
+                }
             }
 
             println!(
@@ -1168,6 +1189,9 @@ pub async fn read_sstable(
         OutputFormat::Json => display_json_format(&parsed_rows)?,
         OutputFormat::Csv => display_csv_format(&parser.get_column_names(), &parsed_rows)?,
         OutputFormat::Yaml => display_yaml_format(&parsed_rows)?,
+        OutputFormat::Parquet => {
+            return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
+        }
     }
 
     println!("\n✅ Processed {processed} entries, displayed {displayed} rows");
@@ -1218,6 +1242,9 @@ pub async fn execute_select_query(
                 result.rows.len(),
                 result.execution_time_ms
             );
+        }
+        OutputFormat::Parquet => {
+            return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
         }
     }
 

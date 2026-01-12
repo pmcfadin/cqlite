@@ -118,6 +118,9 @@ pub async fn execute_read_sstable_command(
         OutputFormat::Yaml => {
             display_yaml_format(&display_entries, keys_only, raw)?;
         }
+        OutputFormat::Parquet => {
+            return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
+        }
     }
 
     eprintln!(

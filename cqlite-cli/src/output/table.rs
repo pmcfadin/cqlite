@@ -247,6 +247,8 @@ mod tests {
             color_enabled: true,
             limit: Some(3),
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
         let output = TableWriter::write(&result, &config).unwrap();
 
@@ -285,6 +287,8 @@ mod tests {
             color_enabled: true,
             limit: None,
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
         let output = TableWriter::write(&result, &config).unwrap();
 
@@ -315,6 +319,8 @@ mod tests {
             color_enabled: false,
             limit: None,
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
         let output = TableWriter::write(&result, &config).unwrap();
 

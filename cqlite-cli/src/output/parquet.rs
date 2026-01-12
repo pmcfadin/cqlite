@@ -826,6 +826,8 @@ mod tests {
             color_enabled: true,
             limit: Some(3),
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
         let bytes = ParquetWriter::write(&result, &config).unwrap();
         let batch = read_parquet_back(&bytes).unwrap();

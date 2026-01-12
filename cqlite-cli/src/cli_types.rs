@@ -16,6 +16,8 @@ pub enum OutputMode {
     Json,
     Csv,
     Yaml,
+    /// Parquet binary format (requires --output flag)
+    Parquet,
 }
 
 impl OutputMode {
@@ -27,6 +29,7 @@ impl OutputMode {
             OutputMode::Json => "json",
             OutputMode::Csv => "csv",
             OutputMode::Yaml => "yaml",
+            OutputMode::Parquet => "parquet",
         }
     }
 }
@@ -103,6 +106,15 @@ pub struct Cli {
     /// (table = cqlsh-compatible format)
     #[arg(long, value_enum, env = "CQLITE_OUT")]
     pub out: Option<OutputMode>,
+
+    /// Output file path for query results. If not specified, output goes to stdout.
+    /// Required when format is 'parquet' (binary format cannot be written to stdout).
+    #[arg(short = 'o', long, value_name = "FILE", env = "CQLITE_OUTPUT")]
+    pub output: Option<PathBuf>,
+
+    /// Overwrite output file if it exists (default: error if file exists)
+    #[arg(long, requires = "output")]
+    pub overwrite: bool,
 
     /// Cap rows
     #[arg(long, value_name = "N", env = "CQLITE_LIMIT")]

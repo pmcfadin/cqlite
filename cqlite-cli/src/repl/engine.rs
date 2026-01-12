@@ -1120,6 +1120,8 @@ impl ReplEngine {
             color_enabled: self.config.enable_colors,
             limit: None,
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
 
         // Format using TableWriter
@@ -1141,6 +1143,8 @@ impl ReplEngine {
             color_enabled: self.config.enable_colors,
             limit: None, // REPL doesn't use CLI limit
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
 
         let formatted = CSVWriter::write(result, &output_config)
@@ -1161,6 +1165,8 @@ impl ReplEngine {
             color_enabled: self.config.enable_colors,
             limit: None, // REPL doesn't use CLI limit
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
 
         let formatted = JSONWriter::write(result, &output_config)

@@ -322,6 +322,8 @@ mod tests {
             color_enabled: true,
             limit: Some(2),
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
         let csv = CSVWriter::write(&result, &config).expect("CSV write failed");
         let lines: Vec<&str> = csv.lines().collect();

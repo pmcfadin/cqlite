@@ -8,6 +8,8 @@ pub enum OutputFormat {
     Json,
     Csv,
     Yaml,
+    /// Parquet binary format (requires --output flag for file destination)
+    Parquet,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -39,6 +41,7 @@ impl std::fmt::Display for OutputFormat {
             OutputFormat::Json => write!(f, "json"),
             OutputFormat::Csv => write!(f, "csv"),
             OutputFormat::Yaml => write!(f, "yaml"),
+            OutputFormat::Parquet => write!(f, "parquet"),
         }
     }
 }

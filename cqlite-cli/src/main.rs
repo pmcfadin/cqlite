@@ -216,8 +216,14 @@ async fn run_main() -> Result<()> {
     ) = (initialize_database(&db_path, &config).await?, None);
 
     // Create output config for query execution
-    let output_config =
-        config::OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
+    let output_config = config::OutputConfig::from_cli(
+        &config,
+        cli.no_color,
+        cli.limit,
+        cli.page_size,
+        cli.output.clone(),
+        cli.overwrite,
+    );
 
     // Issue #223: Determine effective output format
     // Precedence: --out (query-specific) > --format (global)
@@ -228,10 +234,20 @@ async fn run_main() -> Result<()> {
             OutputMode::Json => cli::OutputFormat::Json,
             OutputMode::Csv => cli::OutputFormat::Csv,
             OutputMode::Yaml => cli::OutputFormat::Yaml,
+            OutputMode::Parquet => cli::OutputFormat::Parquet,
         }
     } else {
         cli.format
     };
+
+    // Issue #279: Validate Parquet format requires file output
+    // Parquet is a binary format that cannot be meaningfully written to stdout
+    if matches!(effective_format, cli::OutputFormat::Parquet) && !output_config.target.is_file() {
+        return Err(anyhow::anyhow!(
+            "{}",
+            crate::output::OutputError::ParquetRequiresFile
+        ));
+    }
 
     // Handle --file flag (script execution) - takes precedence over subcommands
     if let Some(file_path) = cli.file {

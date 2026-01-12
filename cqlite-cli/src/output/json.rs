@@ -389,6 +389,8 @@ mod tests {
             color_enabled: true,
             limit: Some(3),
             page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         };
         let json_str = JSONWriter::write(&result, &config).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();

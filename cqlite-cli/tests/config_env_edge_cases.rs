@@ -36,6 +36,8 @@ fn create_cli_with_flags(
         execute,
         file,
         out,
+        output: None,
+        overwrite: false,
         limit,
         page_size,
         no_color,

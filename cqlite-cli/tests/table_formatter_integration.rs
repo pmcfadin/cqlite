@@ -83,6 +83,8 @@ fn test_table_format_with_limit() {
         color_enabled: true,
         limit: Some(3),
         page_size: None,
+        target: cqlite_cli::output::OutputTarget::Stdout,
+        overwrite: false,
     };
     let output = TableWriter::write(&result, &config).unwrap();
 
@@ -125,6 +127,8 @@ fn test_table_format_no_color() {
         color_enabled: false,
         limit: None,
         page_size: None,
+        target: cqlite_cli::output::OutputTarget::Stdout,
+        overwrite: false,
     };
     let output = TableWriter::write(&result, &config).unwrap();
 
@@ -244,6 +248,8 @@ fn test_cqlsh_compatibility() {
         color_enabled: false, // Disable colors for exact comparison
         limit: None,
         page_size: None,
+        target: cqlite_cli::output::OutputTarget::Stdout,
+        overwrite: false,
     };
     let output = TableWriter::write(&result, &config).unwrap();
 
@@ -501,6 +507,8 @@ fn test_table_format_limit_zero() {
         color_enabled: true,
         limit: Some(0),
         page_size: None,
+        target: cqlite_cli::output::OutputTarget::Stdout,
+        overwrite: false,
     };
     let output = TableWriter::write(&result, &config).unwrap();
 
@@ -572,6 +580,8 @@ fn test_cqlsh_format_snapshot() {
         color_enabled: false, // Disable colors for exact comparison
         limit: None,
         page_size: None,
+        target: cqlite_cli::output::OutputTarget::Stdout,
+        overwrite: false,
     };
     let output = TableWriter::write(&result, &config).unwrap();
 
@@ -628,6 +638,8 @@ fn test_table_format_color_enabled() {
         color_enabled: true,
         limit: None,
         page_size: None,
+        target: cqlite_cli::output::OutputTarget::Stdout,
+        overwrite: false,
     };
     let output = TableWriter::write(&result, &config).unwrap();
 

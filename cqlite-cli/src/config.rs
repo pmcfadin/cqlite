@@ -379,7 +379,7 @@ impl Default for ReplConfig {
 /// Configuration for table formatter output behavior
 ///
 /// This struct controls how query results are formatted and displayed,
-/// including color support, row limits, and pagination settings.
+/// including color support, row limits, pagination settings, and output destination.
 #[derive(Debug, Clone)]
 pub struct OutputConfig {
     /// Whether to enable colored output in table formatting.
@@ -397,6 +397,15 @@ pub struct OutputConfig {
     /// Default is 50 rows per page, matching cqlsh behavior.
     #[allow(dead_code)]
     pub page_size: Option<usize>,
+
+    /// Output target (stdout or file path).
+    /// When `Stdout`, output is written to standard output.
+    /// When `File(path)`, output is written atomically to the specified file.
+    pub target: crate::output::OutputTarget,
+
+    /// Whether to overwrite existing files when writing to a file target.
+    /// Only relevant when `target` is `File`.
+    pub overwrite: bool,
 }
 
 impl OutputConfig {
@@ -411,12 +420,16 @@ impl OutputConfig {
     /// * `no_color_flag` - The `--no-color` CLI flag (if present, overrides config)
     /// * `limit_flag` - The `--limit` CLI flag (if present, overrides config)
     /// * `page_size_flag` - The `--page-size` CLI flag (if present, overrides config)
+    /// * `output_flag` - The `--output` CLI flag for file destination
+    /// * `overwrite_flag` - The `--overwrite` CLI flag for overwriting existing files
     ///
     /// # Precedence
     ///
     /// - `color_enabled`: --no-color flag > CQLITE_NO_COLOR env > config.output.colors > default (true)
     /// - `limit`: --limit flag > CQLITE_LIMIT env > config.query_limit > default (None)
     /// - `page_size`: --page-size flag > CQLITE_PAGE_SIZE env > config.repl.page_size > default (50)
+    /// - `target`: --output flag > CQLITE_OUTPUT env > default (Stdout)
+    /// - `overwrite`: --overwrite flag > default (false)
     ///
     /// # Examples
     ///
@@ -428,12 +441,12 @@ impl OutputConfig {
     /// // Create config with defaults
     /// let cli = Cli::parse_from(&["cqlite"]);
     /// let config = Config::load(None, &cli).unwrap();
-    /// let output = OutputConfig::from_cli(&config, false, None, None);
+    /// let output = OutputConfig::from_cli(&config, false, None, None, None, false);
     /// assert!(output.color_enabled);
     /// assert_eq!(output.page_size, Some(50));
     ///
     /// // CLI flag overrides config
-    /// let output = OutputConfig::from_cli(&config, true, Some(100), Some(25));
+    /// let output = OutputConfig::from_cli(&config, true, Some(100), Some(25), None, false);
     /// assert!(!output.color_enabled);
     /// assert_eq!(output.limit, Some(100));
     /// assert_eq!(output.page_size, Some(25));
@@ -443,7 +456,11 @@ impl OutputConfig {
         no_color_flag: bool,
         limit_flag: Option<usize>,
         page_size_flag: Option<usize>,
+        output_flag: Option<std::path::PathBuf>,
+        overwrite_flag: bool,
     ) -> Self {
+        use crate::output::OutputTarget;
+
         Self {
             // CLI flag overrides config value
             color_enabled: if no_color_flag {
@@ -455,6 +472,12 @@ impl OutputConfig {
             limit: limit_flag.or(config.query_limit),
             // CLI flag overrides config.repl.page_size (which already has env/file/default precedence)
             page_size: page_size_flag.or(Some(config.repl.page_size)),
+            // Output target from CLI flag
+            target: output_flag
+                .map(OutputTarget::File)
+                .unwrap_or(OutputTarget::Stdout),
+            // Overwrite flag
+            overwrite: overwrite_flag,
         }
     }
 }
@@ -466,11 +489,15 @@ impl Default for OutputConfig {
     /// - `color_enabled`: `true` (colors enabled by default)
     /// - `limit`: `None` (no row limit)
     /// - `page_size`: `Some(50)` (50 rows per page, matching cqlsh)
+    /// - `target`: `Stdout` (write to standard output)
+    /// - `overwrite`: `false` (don't overwrite existing files)
     fn default() -> Self {
         Self {
             color_enabled: true,
             limit: None,
             page_size: Some(50),
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
         }
     }
 }
@@ -1114,7 +1141,7 @@ mod tests {
         let config = Config::load(None, &cli).unwrap();
 
         // Create OutputConfig with no CLI flags
-        let output = OutputConfig::from_cli(&config, false, None, None);
+        let output = OutputConfig::from_cli(&config, false, None, None, None, false);
 
         // Verify defaults
         assert!(output.color_enabled); // Default is true
@@ -1139,7 +1166,7 @@ mod tests {
         let config = Config::load(None, &cli).unwrap();
 
         // Create OutputConfig with no CLI flags
-        let output = OutputConfig::from_cli(&config, false, None, None);
+        let output = OutputConfig::from_cli(&config, false, None, None, None, false);
 
         // Verify env vars were used
         assert!(!output.color_enabled); // CQLITE_NO_COLOR=true
@@ -1176,7 +1203,14 @@ mod tests {
         let config = Config::load(None, &cli).unwrap();
 
         // Create OutputConfig with CLI flags
-        let output = OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
+        let output = OutputConfig::from_cli(
+            &config,
+            cli.no_color,
+            cli.limit,
+            cli.page_size,
+            cli.output.clone(),
+            cli.overwrite,
+        );
 
         // Verify CLI flags overrode env vars
         assert!(!output.color_enabled); // --no-color flag
@@ -1205,7 +1239,14 @@ mod tests {
         let config = Config::load(None, &cli).unwrap();
 
         // Create OutputConfig with partial CLI flags
-        let output = OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
+        let output = OutputConfig::from_cli(
+            &config,
+            cli.no_color,
+            cli.limit,
+            cli.page_size,
+            cli.output.clone(),
+            cli.overwrite,
+        );
 
         // Verify: --no-color overrides, but env vars are used for limit/page_size
         assert!(!output.color_enabled); // --no-color flag
@@ -1232,7 +1273,7 @@ mod tests {
         let config = Config::load(None, &cli).unwrap();
 
         // Create OutputConfig with no_color_flag=false (no flag provided)
-        let output = OutputConfig::from_cli(&config, false, None, None);
+        let output = OutputConfig::from_cli(&config, false, None, None, None, false);
 
         // Verify env var was respected
         assert!(!output.color_enabled); // CQLITE_NO_COLOR=true from env
@@ -1255,7 +1296,7 @@ mod tests {
 
         let cli = Cli::parse_from(&["cqlite"]);
         let config = Config::load(None, &cli).unwrap();
-        let output = OutputConfig::from_cli(&config, false, None, None);
+        let output = OutputConfig::from_cli(&config, false, None, None, None, false);
 
         assert!(output.color_enabled);
         assert_eq!(output.limit, None);
@@ -1268,7 +1309,7 @@ mod tests {
 
         let cli = Cli::parse_from(&["cqlite"]);
         let config = Config::load(None, &cli).unwrap();
-        let output = OutputConfig::from_cli(&config, false, None, None);
+        let output = OutputConfig::from_cli(&config, false, None, None, None, false);
 
         assert!(!output.color_enabled);
         assert_eq!(output.limit, Some(150));
@@ -1277,7 +1318,14 @@ mod tests {
         // Step 3: CLI flags override env vars
         let cli = Cli::parse_from(&["cqlite", "--limit", "300", "--page-size", "15"]);
         let config = Config::load(None, &cli).unwrap();
-        let output = OutputConfig::from_cli(&config, cli.no_color, cli.limit, cli.page_size);
+        let output = OutputConfig::from_cli(
+            &config,
+            cli.no_color,
+            cli.limit,
+            cli.page_size,
+            cli.output.clone(),
+            cli.overwrite,
+        );
 
         // CLI flags override env, but --no-color not provided so env var still applies
         assert!(!output.color_enabled); // Still from CQLITE_NO_COLOR env
