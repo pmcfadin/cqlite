@@ -554,7 +554,17 @@ async fn run_main() -> Result<()> {
             format,
             table,
             query,
-        }) => commands::export_data(&database, &table, &file, format, query.as_deref()).await,
+        }) => {
+            commands::export_data(
+                &database,
+                &table,
+                &file,
+                format,
+                query.as_deref(),
+                cli.quiet,
+            )
+            .await
+        }
         Some(Commands::Admin { command }) => {
             commands::admin::handle_admin_command(&database, command).await
         }

@@ -164,7 +164,7 @@ impl StatusMetrics {
 /// Format bytes as human-readable string with appropriate unit
 ///
 /// Uses binary units (KiB = 1024) but displays as KB/MB/GB for readability
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;

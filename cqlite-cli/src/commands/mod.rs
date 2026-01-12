@@ -57,6 +57,25 @@ impl RealDataParser {
     }
 }
 
+/// Format duration for export statistics display
+fn format_export_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs == 0 {
+        let millis = duration.as_millis();
+        if millis > 0 {
+            format!("{}ms", millis)
+        } else {
+            "<1ms".to_string()
+        }
+    } else if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
 // Stub for QueryExecutor
 #[derive(Debug)]
 pub struct QueryExecutor;
@@ -681,11 +700,20 @@ pub async fn export_data(
     file: &Path,
     format: ExportFormat,
     query_filter: Option<&str>,
+    quiet: bool,
 ) -> Result<()> {
-    use indicatif::{ProgressBar, ProgressStyle};
+    use std::io::IsTerminal;
+    use std::time::Instant;
 
-    println!("Exporting data from: {source}");
-    println!("Output file: {}, Format: {}", file.display(), format);
+    use crate::status_metrics::format_bytes;
+
+    // Determine if progress should be shown (not quiet, and output is a TTY)
+    let show_progress = !quiet && std::io::stdout().is_terminal();
+
+    if show_progress {
+        println!("Exporting data from: {source}");
+        println!("Output file: {}, Format: {}", file.display(), format);
+    }
 
     // Create output directory if it doesn't exist
     if let Some(parent) = file.parent() {
@@ -704,10 +732,12 @@ pub async fn export_data(
         }
     };
 
-    println!(
-        "📝 Executing query: {}",
-        query.chars().take(100).collect::<String>() + "..."
-    );
+    if show_progress {
+        println!(
+            "Executing query: {}",
+            query.chars().take(100).collect::<String>() + "..."
+        );
+    }
 
     // Execute the query
     let result = database
@@ -716,7 +746,9 @@ pub async fn export_data(
         .with_context(|| format!("Failed to execute export query: {query}"))?;
 
     if result.rows.is_empty() {
-        println!("⚠️  No data to export");
+        if show_progress {
+            println!("No data to export");
+        }
         return Ok(());
     }
 
@@ -736,19 +768,27 @@ pub async fn export_data(
         ));
     };
 
-    println!("📋 Columns: {}", column_names.join(", "));
-    println!("📊 Rows to export: {}", result.rows.len());
+    if show_progress {
+        println!("Columns: {}", column_names.join(", "));
+        println!("Rows to export: {}", result.rows.len());
+    }
 
-    // Create progress bar
-    let pb = ProgressBar::new(result.rows.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "Exporting [{elapsed_precise}] [{bar:40.green/blue}] {pos}/{len} rows ({eta})",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
-    );
+    // Track timing for statistics
+    let start_time = Instant::now();
+
+    // Create progress bar (hidden if quiet or not TTY)
+    let pb = if show_progress {
+        let pb = ProgressBar::new(result.rows.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{bar:30.green/blue}] {percent}% ({pos}/{len} rows) ETA: {eta}")
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
 
     // Export based on format
     match format {
@@ -758,13 +798,26 @@ pub async fn export_data(
         ExportFormat::Parquet => export_to_parquet(&result, file, &column_names, &pb).await?,
     }
 
-    pb.finish_with_message("Export completed");
+    pb.finish_and_clear();
 
-    let file_size = std::fs::metadata(file)?.len();
-    println!("\n✅ Export completed successfully!");
-    println!("  Output file: {}", file.display());
-    println!("  Rows exported: {}", result.rows.len());
-    println!("  File size: {:.2} KB", file_size as f64 / 1024.0);
+    // Display statistics (unless quiet)
+    if !quiet {
+        let duration = start_time.elapsed();
+        let file_size = std::fs::metadata(file)?.len();
+        let rows_exported = result.rows.len() as u64;
+
+        println!("\nExport complete:");
+        println!("  Rows: {}", rows_exported);
+        println!("  Size: {}", format_bytes(file_size));
+        println!("  Time: {}", format_export_duration(duration));
+        let secs_f64 = duration.as_secs_f64();
+        if secs_f64 > 0.0 {
+            let rate = rows_exported as f64 / secs_f64;
+            if rate.is_finite() {
+                println!("  Rate: {:.0} rows/sec", rate);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -776,6 +829,7 @@ pub async fn export_data(
     _file: &Path,
     _format: crate::cli::ExportFormat,
     _query_filter: Option<&str>,
+    _quiet: bool,
 ) -> Result<()> {
     Err(anyhow::anyhow!(
         "Data export is not available in M1.\n\
