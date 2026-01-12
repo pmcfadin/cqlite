@@ -43,6 +43,7 @@ use std::path::PathBuf;
 /// Returns error if:
 /// - File I/O operations fail
 /// - Output doesn't match expected snapshot (unless updating)
+#[allow(dead_code)] // Used by various test files, may not be used in all contexts
 pub fn assert_golden_snapshot(name: &str, actual: &str) -> Result<()> {
     let golden_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden_snapshots");
 
