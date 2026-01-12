@@ -7,7 +7,6 @@ pub enum OutputFormat {
     Table,
     Json,
     Csv,
-    Yaml,
     /// Parquet binary format (requires --output flag for file destination)
     Parquet,
 }
@@ -40,7 +39,6 @@ impl std::fmt::Display for OutputFormat {
             OutputFormat::Table => write!(f, "table"),
             OutputFormat::Json => write!(f, "json"),
             OutputFormat::Csv => write!(f, "csv"),
-            OutputFormat::Yaml => write!(f, "yaml"),
             OutputFormat::Parquet => write!(f, "parquet"),
         }
     }
@@ -85,7 +83,6 @@ impl std::str::FromStr for OutputFormat {
             "table" => Ok(OutputFormat::Table),
             "json" => Ok(OutputFormat::Json),
             "csv" => Ok(OutputFormat::Csv),
-            "yaml" => Ok(OutputFormat::Yaml),
             _ => Err(format!("Invalid output format: {}", s)),
         }
     }

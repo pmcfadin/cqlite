@@ -27,8 +27,8 @@ cqlite [GLOBAL_OPTIONS] <COMMAND> [COMMAND_OPTIONS]
 -c, --config <FILE>          Configuration file path
 -v, --verbose                Verbose output (-v, -vv, -vvv)
 -q, --quiet                  Quiet mode (suppress output)
---format <FORMAT>            Output format [table|json|csv|yaml]
---out <FORMAT>               Query output format [table|json|csv|yaml] (takes precedence over --format)
+--format <FORMAT>            Output format [table|json|csv|parquet]
+--out <FORMAT>               Query output format [table|json|csv|parquet] (takes precedence over --format)
 -e, --execute <CQL>          Execute single CQL statement (one-shot mode)
 --query <CQL>                Alias for --execute (PRD-specified usage)
 -f, --file <FILE>            Execute CQL statements from file
@@ -280,7 +280,7 @@ cqlite info <SSTABLE> [OPTIONS]
 --bloom                      Show bloom filter information
 --index                      Show index information
 --compression                Show compression statistics
---format <FORMAT>            Output format [table|json|yaml]
+--format <FORMAT>            Output format [table|json|csv]
 ```
 
 #### Examples:

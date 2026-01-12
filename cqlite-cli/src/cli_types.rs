@@ -15,7 +15,6 @@ pub enum OutputMode {
     Table,
     Json,
     Csv,
-    Yaml,
     /// Parquet binary format (requires --output flag)
     Parquet,
 }
@@ -28,7 +27,6 @@ impl OutputMode {
             OutputMode::Table => "table",
             OutputMode::Json => "json",
             OutputMode::Csv => "csv",
-            OutputMode::Yaml => "yaml",
             OutputMode::Parquet => "parquet",
         }
     }

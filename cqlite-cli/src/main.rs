@@ -233,7 +233,6 @@ async fn run_main() -> Result<()> {
             OutputMode::Table => cli::OutputFormat::Table,
             OutputMode::Json => cli::OutputFormat::Json,
             OutputMode::Csv => cli::OutputFormat::Csv,
-            OutputMode::Yaml => cli::OutputFormat::Yaml,
             OutputMode::Parquet => cli::OutputFormat::Parquet,
         }
     } else {

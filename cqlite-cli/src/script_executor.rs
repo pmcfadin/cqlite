@@ -23,7 +23,7 @@ use crate::error::{print_error, CliExitCode};
 /// * `file_path` - Path to the CQL script file
 /// * `database` - Database instance to execute statements against
 /// * `output_config` - Output configuration (color, pagination, etc.)
-/// * `format` - Output format (table, json, csv, yaml)
+/// * `format` - Output format (table, json, csv, parquet)
 ///
 /// # Returns
 ///

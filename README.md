@@ -70,7 +70,7 @@ cargo build --no-default-features
 - [x] All compression codecs (LZ4, Snappy, Deflate, Zstd)
 - [x] CLI tool with REPL and one-shot query modes
 - [x] SELECT with WHERE clause (partition/clustering key equality)
-- [x] Output formats: Table, JSON, CSV, YAML
+- [x] Output formats: Table, JSON, CSV
 
 ### 🚧 In Development (M3)
 - [ ] Parquet output format
@@ -147,7 +147,7 @@ cargo run --bin cqlite parse test-data/users-*.db
 ### ✅ M2 Complete (Jan 2026)
 - CLI with one-shot and REPL modes
 - SELECT queries with WHERE clause support
-- Multiple output formats (Table, JSON, CSV, YAML)
+- Multiple output formats (Table, JSON, CSV)
 
 ### 🔄 M3 In Progress
 - Parquet output format (Issue #21)

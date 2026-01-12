@@ -397,7 +397,6 @@ mod output_format_tests {
     #[case("table", OutputFormat::Table)]
     #[case("json", OutputFormat::Json)]
     #[case("csv", OutputFormat::Csv)]
-    #[case("yaml", OutputFormat::Yaml)]
     #[case("TABLE", OutputFormat::Table)] // Case insensitivity
     #[case("Json", OutputFormat::Json)] // Mixed case
     #[case("CSV", OutputFormat::Csv)] // All caps
@@ -426,7 +425,6 @@ mod output_format_tests {
     #[case(OutputFormat::Table, "table")]
     #[case(OutputFormat::Json, "json")]
     #[case(OutputFormat::Csv, "csv")]
-    #[case(OutputFormat::Yaml, "yaml")]
     fn test_output_format_display_parameterized(
         #[case] format: OutputFormat,
         #[case] expected: &str,
@@ -444,7 +442,6 @@ mod output_format_tests {
         );
         assert_eq!("json".parse::<OutputFormat>().unwrap(), OutputFormat::Json);
         assert_eq!("csv".parse::<OutputFormat>().unwrap(), OutputFormat::Csv);
-        assert_eq!("yaml".parse::<OutputFormat>().unwrap(), OutputFormat::Yaml);
 
         // Test case insensitivity
         assert_eq!(
@@ -465,7 +462,6 @@ mod output_format_tests {
         assert_eq!(format!("{}", OutputFormat::Table), "table");
         assert_eq!(format!("{}", OutputFormat::Json), "json");
         assert_eq!(format!("{}", OutputFormat::Csv), "csv");
-        assert_eq!(format!("{}", OutputFormat::Yaml), "yaml");
 
         Ok(())
     }
@@ -628,7 +624,6 @@ mod test_helpers {
         match format {
             "json" => output.trim_start().starts_with('{') || output.trim_start().starts_with('['),
             "csv" => output.lines().any(|line| line.contains(',')),
-            "yaml" => output.contains(':') && !output.trim_start().starts_with('{'),
             "table" => output.contains('|') || output.contains('+'),
             _ => false,
         }

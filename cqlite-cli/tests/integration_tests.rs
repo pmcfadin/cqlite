@@ -164,20 +164,9 @@ mod tests {
             "SELECT 1",
         ])?;
 
-        // Test YAML format
-        let yaml_output = run_cli_command(&[
-            "--database",
-            db_path.to_str().unwrap(),
-            "--format",
-            "yaml",
-            "query",
-            "SELECT 1",
-        ])?;
-
         println!("Table format: {:?}", table_output);
         println!("JSON format: {:?}", json_output);
         println!("CSV format: {:?}", csv_output);
-        println!("YAML format: {:?}", yaml_output);
 
         Ok(())
     }

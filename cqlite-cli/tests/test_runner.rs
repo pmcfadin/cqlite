@@ -395,7 +395,7 @@ impl TestRunner {
 
     fn test_output_formatting(&mut self) -> Result<()> {
         let env = TestEnvironment::setup()?;
-        let formats = ["table", "json", "csv", "yaml"];
+        let formats = ["table", "json", "csv"];
 
         for format in &formats {
             match run_cli(&[

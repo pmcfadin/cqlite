@@ -87,7 +87,6 @@ pub fn validate_output_format(output: &Output, format: &str) -> Result<bool> {
     match format.to_lowercase().as_str() {
         "json" => Ok(is_valid_json(&stdout)),
         "csv" => Ok(is_valid_csv(&stdout)),
-        "yaml" => Ok(is_valid_yaml(&stdout)),
         "table" => Ok(is_table_format(&stdout)),
         _ => Ok(false),
     }
@@ -103,11 +102,6 @@ fn is_valid_json(s: &str) -> bool {
 /// Check if string is valid CSV
 fn is_valid_csv(s: &str) -> bool {
     s.lines().any(|line| line.contains(',')) && !s.trim().is_empty()
-}
-
-/// Check if string looks like YAML
-fn is_valid_yaml(s: &str) -> bool {
-    s.contains(':') && !s.trim_start().starts_with('{') && !s.trim().is_empty()
 }
 
 /// Check if string is table format
@@ -497,7 +491,7 @@ pub mod scenarios {
     #[allow(dead_code)]
     pub fn test_output_formats(db_path: &Path) -> Result<()> {
         let mut validator = TestValidator::new();
-        let formats = ["table", "json", "csv", "yaml"];
+        let formats = ["table", "json", "csv"];
 
         for format in &formats {
             let output = run_cli(&[
@@ -577,7 +571,6 @@ mod tests {
         // Test output format detection
         assert!(is_valid_json(r#"{"test": "value"}"#));
         assert!(is_valid_csv("a,b,c\n1,2,3"));
-        assert!(is_valid_yaml("key: value"));
         assert!(is_table_format("+---+---+\n| a | b |\n+---+---+"));
 
         Ok(())

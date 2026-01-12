@@ -253,11 +253,6 @@ pub async fn execute_query(
                 .map_err(|e| anyhow::anyhow!("Failed to format CSV output: {}", e))?;
             csv_output.into_bytes()
         }
-        OutputFormat::Yaml => {
-            let json_result = result.to_json();
-            let yaml_output = serde_yaml::to_string(&json_result)?;
-            yaml_output.into_bytes()
-        }
         OutputFormat::Parquet => {
             use crate::output::ParquetWriter;
             ParquetWriter::write(&result, config)
@@ -1087,7 +1082,6 @@ pub async fn read_sstable(
                 }
                 OutputFormat::Json => display_json_format(&parsed_rows)?,
                 OutputFormat::Csv => display_csv_format(&parser.get_column_names(), &parsed_rows)?,
-                OutputFormat::Yaml => display_yaml_format(&parsed_rows)?,
                 OutputFormat::Parquet => {
                     return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
                 }
@@ -1188,7 +1182,6 @@ pub async fn read_sstable(
         OutputFormat::Table => display_table_format(&parser.get_column_names(), &parsed_rows),
         OutputFormat::Json => display_json_format(&parsed_rows)?,
         OutputFormat::Csv => display_csv_format(&parser.get_column_names(), &parsed_rows)?,
-        OutputFormat::Yaml => display_yaml_format(&parsed_rows)?,
         OutputFormat::Parquet => {
             return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
         }
@@ -1232,17 +1225,6 @@ pub async fn execute_select_query(
         OutputFormat::Table => result.display_table(),
         OutputFormat::Json => result.display_json()?,
         OutputFormat::Csv => result.display_csv()?,
-        OutputFormat::Yaml => {
-            // Convert to JSON first, then to YAML
-            let json_rows: Vec<serde_json::Value> =
-                result.rows.iter().map(|row| row.to_json()).collect();
-            println!("{}", serde_yaml::to_string(&json_rows)?);
-            println!(
-                "\n✅ {} rows returned in {}ms",
-                result.rows.len(),
-                result.execution_time_ms
-            );
-        }
         OutputFormat::Parquet => {
             return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
         }
@@ -1496,14 +1478,6 @@ fn display_csv_format(column_names: &[String], rows: &[ParsedRow]) -> Result<()>
     Ok(())
 }
 
-/// Display results in YAML format
-fn display_yaml_format(rows: &[ParsedRow]) -> Result<()> {
-    let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| row.to_json()).collect();
-
-    println!("{}", serde_yaml::to_string(&json_rows)?);
-    Ok(())
-}
-
 /// Export SSTable data to file
 #[cfg(feature = "state_machine")]
 pub async fn export_sstable(
@@ -1747,7 +1721,7 @@ pub async fn read_sstable_enhanced(
     if let Some(export_path) = export {
         println!("\n📤 Export functionality coming soon!");
         println!("   Target: {}", export_path.display());
-        println!("   Formats: JSON, CSV, YAML");
+        println!("   Formats: JSON, CSV, Parquet");
     }
 
     result

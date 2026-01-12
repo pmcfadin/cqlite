@@ -115,9 +115,6 @@ pub async fn execute_read_sstable_command(
         OutputFormat::Csv => {
             display_csv_format(&display_entries, keys_only, raw)?;
         }
-        OutputFormat::Yaml => {
-            display_yaml_format(&display_entries, keys_only, raw)?;
-        }
         OutputFormat::Parquet => {
             return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
         }
@@ -253,39 +250,6 @@ fn display_csv_format(
     }
 
     wtr.flush()?;
-    Ok(())
-}
-
-/// Display entries in YAML format
-fn display_yaml_format(
-    entries: &[(TableId, RowKey, Value)],
-    keys_only: bool,
-    raw: bool,
-) -> Result<()> {
-    let mut yaml_entries = Vec::new();
-
-    for (table_id, key, value) in entries {
-        let key_str = format_row_key(key, raw);
-        let table_id_str = table_id.to_string();
-
-        let entry = if keys_only {
-            serde_json::json!({
-                "table_id": table_id_str,
-                "key": key_str,
-            })
-        } else {
-            let value_str = format_value(value, raw);
-            serde_json::json!({
-                "table_id": table_id_str,
-                "key": key_str,
-                "value": value_str,
-            })
-        };
-
-        yaml_entries.push(entry);
-    }
-
-    println!("{}", serde_yaml::to_string(&yaml_entries)?);
     Ok(())
 }
 

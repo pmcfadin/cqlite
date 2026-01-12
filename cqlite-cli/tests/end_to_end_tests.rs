@@ -191,7 +191,7 @@ mod e2e_tests {
         println!("Insert data output: {insert_output:?}");
 
         // Step 4: Query data with different formats
-        for format in &["table", "json", "csv", "yaml"] {
+        for format in &["table", "json", "csv"] {
             let query_output = run_cli_with_timeout(
                 &[
                     "--database",
@@ -271,7 +271,7 @@ mod e2e_tests {
         println!("SSTable read output: {read_output:?}");
 
         // Test with different output formats
-        for format in &["json", "csv", "yaml"] {
+        for format in &["json", "csv"] {
             let format_output = run_cli_with_timeout(
                 &[
                     "--format",
