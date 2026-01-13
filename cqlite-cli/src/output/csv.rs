@@ -127,7 +127,6 @@ impl CSVWriter {
 ///
 /// writer.finalize()?;
 /// ```
-#[allow(dead_code)]
 pub struct StreamingCSVWriter<W: Write> {
     /// Inner CSV writer
     writer: csv::Writer<W>,
@@ -139,7 +138,6 @@ pub struct StreamingCSVWriter<W: Write> {
 
 impl<W: Write> StreamingCSVWriter<W> {
     /// Create a new streaming CSV writer
-    #[allow(dead_code)]
     pub fn new(output: W) -> Self {
         Self {
             writer: WriterBuilder::new().from_writer(output),

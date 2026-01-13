@@ -25,14 +25,11 @@ pub mod table;
 pub mod value_fmt;
 
 #[cfg(feature = "state_machine")]
-#[allow(unused_imports)]
 pub use csv::{CSVWriter, StreamingCSVWriter};
 #[cfg(feature = "state_machine")]
-#[allow(unused_imports)]
 pub use json::{JSONWriter, StreamingJSONWriter};
 #[cfg(feature = "state_machine")]
-#[allow(unused_imports)]
-pub use parquet::{create_streaming_parquet_writer, ParquetWriter, StreamingParquetWriter};
+pub use parquet::{create_streaming_parquet_writer, ParquetWriter};
 #[cfg(feature = "state_machine")]
 #[allow(unused_imports)]
 pub use table::TableWriter;
@@ -165,7 +162,6 @@ use cqlite_core::query::{QueryMetadata, QueryRow};
 /// writer.finalize()?;
 /// ```
 #[cfg(feature = "state_machine")]
-#[allow(dead_code)]
 pub trait StreamingWriter: Send {
     /// Initialize writer with column metadata (write header if applicable)
     ///
@@ -186,9 +182,15 @@ pub trait StreamingWriter: Send {
     fn finalize(&mut self) -> Result<(), OutputError>;
 
     /// Get count of rows written so far
+    ///
+    /// Intended for progress reporting; not yet integrated into export functions.
+    #[allow(dead_code)]
     fn rows_written(&self) -> u64;
 
     /// Get bytes written so far (if trackable)
+    ///
+    /// Intended for progress reporting; not yet integrated into export functions.
+    #[allow(dead_code)]
     fn bytes_written(&self) -> Option<u64> {
         None
     }

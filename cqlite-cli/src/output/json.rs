@@ -235,7 +235,6 @@ impl JSONWriter {
 ///
 /// writer.finalize()?;
 /// ```
-#[allow(dead_code)]
 pub struct StreamingJSONWriter<W: Write> {
     /// Inner writer
     writer: W,
@@ -251,7 +250,6 @@ pub struct StreamingJSONWriter<W: Write> {
 
 impl<W: Write> StreamingJSONWriter<W> {
     /// Create a new streaming JSON writer with pretty-printing
-    #[allow(dead_code)]
     pub fn new(output: W) -> Self {
         Self {
             writer: output,

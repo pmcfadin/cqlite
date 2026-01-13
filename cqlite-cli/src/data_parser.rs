@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use cqlite_core::{
     parser::types::{parse_cql_value, CqlTypeId},
+    query::{QueryRow, RowMetadata},
     schema::{TableSchema, Column},
     storage::sstable::bulletproof_reader::SSTableEntry,
     types::{Value, RowKey},
@@ -86,6 +87,73 @@ impl std::fmt::Display for ParsedValue {
             ParsedValue::Unparseable(err) => write!(f, "<PARSE_ERROR: {}>", err),
         }
     }
+}
+
+/// Convert ParsedValue to cqlite_core Value for Parquet export
+impl From<&ParsedValue> for Value {
+    fn from(pv: &ParsedValue) -> Self {
+        match pv {
+            ParsedValue::Text(s) => Value::Text(s.clone()),
+            ParsedValue::Integer(i) => Value::BigInt(*i),
+            ParsedValue::Float(f) => Value::Float(*f),
+            ParsedValue::Boolean(b) => Value::Boolean(*b),
+            ParsedValue::Uuid(s) => {
+                // Parse UUID string back to 16-byte array
+                parse_uuid_string_to_value(s)
+            }
+            ParsedValue::Timestamp(s) => {
+                // Parse ISO timestamp string back to milliseconds
+                parse_timestamp_string_to_value(s)
+            }
+            ParsedValue::Blob(hex_str) => {
+                // Decode hex string back to bytes
+                match hex::decode(hex_str) {
+                    Ok(bytes) => Value::Blob(bytes),
+                    Err(_) => Value::Null,
+                }
+            }
+            ParsedValue::Collection(items) => {
+                let values: Vec<Value> = items.iter().map(Value::from).collect();
+                Value::List(values)
+            }
+            ParsedValue::Map(map) => {
+                let pairs: Vec<(Value, Value)> = map
+                    .iter()
+                    .map(|(k, v)| (Value::Text(k.clone()), Value::from(v)))
+                    .collect();
+                Value::Map(pairs)
+            }
+            ParsedValue::Null => Value::Null,
+            ParsedValue::Unparseable(_) => Value::Null,
+        }
+    }
+}
+
+/// Parse UUID string (e.g., "550e8400-e29b-41d4-a716-446655440000") to Value::Uuid
+fn parse_uuid_string_to_value(s: &str) -> Value {
+    // Remove hyphens and parse as hex
+    let hex_str: String = s.chars().filter(|c| *c != '-').collect();
+    if hex_str.len() == 32 {
+        if let Ok(bytes) = hex::decode(&hex_str) {
+            if bytes.len() == 16 {
+                let mut uuid_bytes = [0u8; 16];
+                uuid_bytes.copy_from_slice(&bytes);
+                return Value::Uuid(uuid_bytes);
+            }
+        }
+    }
+    // Fallback: store as text if parsing fails
+    Value::Text(s.to_string())
+}
+
+/// Parse ISO timestamp string to Value::Timestamp (milliseconds since epoch)
+fn parse_timestamp_string_to_value(s: &str) -> Value {
+    // Try to parse RFC3339 format
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Value::Timestamp(dt.timestamp_millis());
+    }
+    // Fallback: store as text if parsing fails
+    Value::Text(s.to_string())
 }
 
 /// Real data parser that converts binary SSTable data to readable format
@@ -593,5 +661,23 @@ impl ParsedRow {
     /// Get all column names
     pub fn column_names(&self) -> Vec<String> {
         self.columns.keys().cloned().collect()
+    }
+
+    /// Convert ParsedRow to QueryRow for Parquet export
+    ///
+    /// This enables SSTable export to use the StreamingParquetWriter which
+    /// expects QueryRow format.
+    pub fn to_query_row(&self) -> QueryRow {
+        let values = self
+            .columns
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::from(v)))
+            .collect();
+
+        QueryRow {
+            values,
+            key: self.row_key.clone(),
+            metadata: RowMetadata::default(),
+        }
     }
 }

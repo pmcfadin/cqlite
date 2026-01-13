@@ -535,7 +535,6 @@ impl ParquetWriter {
 ///
 /// writer.finalize()?;
 /// ```
-#[allow(dead_code)]
 pub struct StreamingParquetWriter<W: Write + Send> {
     /// Inner Arrow/Parquet writer
     writer: Option<ArrowWriter<W>>,
@@ -758,7 +757,6 @@ impl<W: Write + Send> StreamingWriter for StreamingParquetWriter<W> {
 ///
 /// This is a convenience function that handles the file creation and
 /// ArrowWriter initialization.
-#[allow(dead_code)]
 pub fn create_streaming_parquet_writer(
     file: File,
     metadata: &QueryMetadata,

@@ -171,8 +171,6 @@ use cqlite_core::{
     schema::{parse_cql_schema, ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema},
     storage::sstable::{bulletproof_reader::BulletproofReader, reader::SSTableReader},
 };
-#[cfg(feature = "state_machine")]
-use csv::WriterBuilder;
 use std::collections::HashMap;
 #[cfg(feature = "state_machine")]
 use std::fs::File;
@@ -838,105 +836,90 @@ pub async fn export_data(
     ))
 }
 
-/// Export query result to CSV format
+/// Export query result to CSV format using streaming writer (Issue #280)
+///
+/// Uses `StreamingCSVWriter` for memory-efficient chunked export.
+/// Rows are written directly to file in chunks.
 #[cfg(feature = "state_machine")]
 async fn export_to_csv(
     result: &cqlite_core::query::result::QueryResult,
     file: &Path,
-    column_names: &[String],
+    _column_names: &[String],
     pb: &ProgressBar,
 ) -> Result<()> {
+    use crate::output::{StreamingCSVWriter, StreamingWriter};
+
+    // Chunk size for CSV streaming
+    const CHUNK_SIZE: usize = 5_000;
+
     let output_file = File::create(file)
         .with_context(|| format!("Failed to create CSV file: {}", file.display()))?;
-    let mut writer = WriterBuilder::new().from_writer(output_file);
 
-    // Write header
+    // Create streaming CSV writer with buffering for I/O efficiency
+    let buf_writer = BufWriter::new(output_file);
+    let mut writer = StreamingCSVWriter::new(buf_writer);
+
+    // Write header (column names from metadata)
     writer
-        .write_record(column_names)
-        .with_context(|| "Failed to write CSV header")?;
+        .write_header(&result.metadata)
+        .map_err(|e| anyhow::anyhow!("Failed to write CSV header: {}", e))?;
 
-    // Write data rows
-    for (index, row) in result.rows.iter().enumerate() {
-        pb.set_position(index as u64 + 1);
-
-        let record: Vec<String> = column_names
-            .iter()
-            .map(|col| {
-                row.get(col)
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(String::new)
-            })
-            .collect();
-
+    // Process rows in chunks for memory efficiency
+    for chunk in result.rows.chunks(CHUNK_SIZE) {
         writer
-            .write_record(&record)
-            .with_context(|| format!("Failed to write CSV record at row {}", index + 1))?;
+            .write_chunk(chunk)
+            .map_err(|e| anyhow::anyhow!("Failed to write CSV chunk: {}", e))?;
+        pb.inc(chunk.len() as u64);
     }
 
+    // Finalize (flush)
     writer
-        .flush()
-        .with_context(|| "Failed to flush CSV writer")?;
+        .finalize()
+        .map_err(|e| anyhow::anyhow!("Failed to finalize CSV file: {}", e))?;
 
     Ok(())
 }
 
-/// Export query result to JSON format
+/// Export query result to JSON format using streaming writer (Issue #280)
+///
+/// Uses `StreamingJSONWriter` for memory-efficient chunked export.
+/// Rows are processed in chunks to avoid building entire JSON array in memory.
 #[cfg(feature = "state_machine")]
 async fn export_to_json(
     result: &cqlite_core::query::result::QueryResult,
     file: &Path,
-    column_names: &[String],
+    _column_names: &[String],
     pb: &ProgressBar,
 ) -> Result<()> {
+    use crate::output::{StreamingJSONWriter, StreamingWriter};
+
+    // Chunk size for JSON streaming (smaller than Parquet since JSON is text-heavy)
+    const CHUNK_SIZE: usize = 5_000;
+
     let output_file = File::create(file)
         .with_context(|| format!("Failed to create JSON file: {}", file.display()))?;
-    let mut writer = BufWriter::new(output_file);
+    let buf_writer = BufWriter::new(output_file);
 
-    // Convert rows to JSON objects
-    let mut json_objects = Vec::new();
+    // Create streaming JSON writer with pretty-printing
+    let mut writer = StreamingJSONWriter::new(buf_writer);
 
-    for (index, row) in result.rows.iter().enumerate() {
-        pb.set_position(index as u64 + 1);
+    // Write header (opening bracket and store column order)
+    writer
+        .write_header(&result.metadata)
+        .map_err(|e| anyhow::anyhow!("Failed to write JSON header: {}", e))?;
 
-        let mut obj = serde_json::Map::new();
-        for col in column_names {
-            let value = row
-                .get(col)
-                .map(|v| {
-                    // Convert to string first, then to appropriate JSON value
-                    let v_str = v.to_string();
-                    if v_str == "NULL" || v_str.is_empty() {
-                        serde_json::Value::Null
-                    } else if v_str == "true" || v_str == "false" {
-                        serde_json::Value::Bool(v_str.parse::<bool>().unwrap_or(false))
-                    } else if let Ok(num) = v_str.parse::<i64>() {
-                        serde_json::Value::Number(serde_json::Number::from(num))
-                    } else if let Ok(num) = v_str.parse::<f64>() {
-                        serde_json::Value::Number(
-                            serde_json::Number::from_f64(num)
-                                .unwrap_or(serde_json::Number::from(0)),
-                        )
-                    } else {
-                        serde_json::Value::String(v_str)
-                    }
-                })
-                .unwrap_or(serde_json::Value::Null);
-
-            obj.insert(col.clone(), value);
-        }
-        json_objects.push(serde_json::Value::Object(obj));
+    // Process rows in chunks for memory efficiency
+    for chunk in result.rows.chunks(CHUNK_SIZE) {
+        writer
+            .write_chunk(chunk)
+            .map_err(|e| anyhow::anyhow!("Failed to write JSON chunk: {}", e))?;
+        pb.inc(chunk.len() as u64);
     }
 
-    // Write JSON array
-    let json_output = serde_json::to_string_pretty(&json_objects)
-        .with_context(|| "Failed to serialize data to JSON")?;
-
+    // Finalize (write closing bracket)
     writer
-        .write_all(json_output.as_bytes())
-        .with_context(|| "Failed to write JSON data")?;
-    writer
-        .flush()
-        .with_context(|| "Failed to flush JSON writer")?;
+        .finalize()
+        .map_err(|e| anyhow::anyhow!("Failed to finalize JSON file: {}", e))?;
 
     Ok(())
 }
@@ -1006,7 +989,10 @@ async fn export_to_cql(
     Ok(())
 }
 
-/// Export query result to Parquet format
+/// Export query result to Parquet format using streaming writer (Issue #280)
+///
+/// Uses `StreamingParquetWriter` for memory-efficient chunked export.
+/// Rows are processed in chunks (default 10,000) matching Parquet row group size.
 #[cfg(feature = "state_machine")]
 async fn export_to_parquet(
     result: &cqlite_core::query::result::QueryResult,
@@ -1014,21 +1000,42 @@ async fn export_to_parquet(
     _column_names: &[String],
     pb: &ProgressBar,
 ) -> Result<()> {
-    use crate::config::OutputConfig;
-    use crate::output::ParquetWriter;
+    use crate::output::{create_streaming_parquet_writer, StreamingWriter};
 
-    pb.set_message("Converting to Parquet format...");
+    // Default chunk size matches Parquet row group size
+    const CHUNK_SIZE: usize = 10_000;
 
-    // ParquetWriter uses column info from result.metadata.columns
-    let config = OutputConfig::default();
-    let parquet_bytes = ParquetWriter::write(result, &config)
-        .map_err(|e| anyhow::anyhow!("Failed to generate Parquet: {}", e))?;
+    pb.set_message("Initializing Parquet writer...");
 
-    pb.set_message("Writing Parquet file...");
-    std::fs::write(file, &parquet_bytes)
-        .with_context(|| format!("Failed to write Parquet file: {}", file.display()))?;
+    // Create file for streaming output
+    let output_file = File::create(file)
+        .with_context(|| format!("Failed to create Parquet file: {}", file.display()))?;
 
-    pb.set_position(result.rows.len() as u64);
+    // Create streaming writer with row group size = chunk size
+    let mut writer = create_streaming_parquet_writer(output_file, &result.metadata, CHUNK_SIZE)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize Parquet writer: {}", e))?;
+
+    // Write header (initializes Arrow schema)
+    writer
+        .write_header(&result.metadata)
+        .map_err(|e| anyhow::anyhow!("Failed to write Parquet header: {}", e))?;
+
+    pb.set_message("Streaming rows to Parquet...");
+
+    // Process rows in chunks for memory efficiency
+    for chunk in result.rows.chunks(CHUNK_SIZE) {
+        writer
+            .write_chunk(chunk)
+            .map_err(|e| anyhow::anyhow!("Failed to write Parquet chunk: {}", e))?;
+        pb.inc(chunk.len() as u64);
+    }
+
+    // Finalize (flush remaining rows, write footer)
+    pb.set_message("Finalizing Parquet file...");
+    writer
+        .finalize()
+        .map_err(|e| anyhow::anyhow!("Failed to finalize Parquet file: {}", e))?;
+
     Ok(())
 }
 
@@ -1566,7 +1573,9 @@ pub async fn export_sstable(
         ExportFormat::Json => export_as_json(&reader, &schema, &mut output_file, &pb).await,
         ExportFormat::Csv => export_as_csv(&reader, &schema, &mut output_file, &pb).await,
         ExportFormat::Parquet => {
-            anyhow::bail!("Parquet export not yet implemented");
+            // Parquet writer manages its own file handle, so we drop the one we created
+            drop(output_file);
+            export_as_parquet(&reader, &schema, output_path, &pb).await
         }
         ExportFormat::Cql => export_as_cql(&reader, &schema, &mut output_file, &pb).await,
     }
@@ -1716,6 +1725,224 @@ async fn export_as_cql(
 
     pb.finish_with_message(format!("Exported {exported_count} rows to CQL"));
     Ok(())
+}
+
+/// Export SSTable data as Parquet using StreamingParquetWriter
+///
+/// This function converts SSTable entries to QueryRow format and uses
+/// the StreamingParquetWriter for memory-efficient export.
+#[cfg(feature = "state_machine")]
+async fn export_as_parquet(
+    reader: &SSTableReader,
+    schema: &TableSchema,
+    output_path: &Path,
+    pb: &ProgressBar,
+) -> Result<()> {
+    use crate::output::parquet::create_streaming_parquet_writer;
+    use crate::output::StreamingWriter;
+
+    let entries = reader.get_all_entries().await?;
+
+    if entries.is_empty() {
+        pb.finish_with_message("No data to export");
+        // Create empty Parquet file
+        let output_file = File::create(output_path)
+            .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
+        let metadata = build_query_metadata_from_schema(schema);
+        let mut writer = create_streaming_parquet_writer(output_file, &metadata, 10_000)
+            .map_err(|e| anyhow::anyhow!("Failed to create Parquet writer: {}", e))?;
+        writer
+            .finalize()
+            .map_err(|e| anyhow::anyhow!("Failed to finalize Parquet: {}", e))?;
+        return Ok(());
+    }
+
+    // Build QueryMetadata from schema
+    let metadata = build_query_metadata_from_schema(schema);
+
+    // Create streaming Parquet writer
+    let output_file = File::create(output_path)
+        .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
+    let mut writer = create_streaming_parquet_writer(output_file, &metadata, 10_000)
+        .map_err(|e| anyhow::anyhow!("Failed to create Parquet writer: {}", e))?;
+
+    let mut chunk = Vec::with_capacity(1000);
+    let mut exported_count = 0;
+
+    for (index, (_table_id, row_key, value)) in entries.iter().enumerate() {
+        pb.set_position(index as u64);
+
+        // Convert SSTable entry to QueryRow
+        let query_row = convert_entry_to_query_row(row_key, value, schema);
+        chunk.push(query_row);
+
+        if chunk.len() >= 1000 {
+            writer
+                .write_chunk(&chunk)
+                .map_err(|e| anyhow::anyhow!("Failed to write Parquet chunk: {}", e))?;
+            exported_count += chunk.len();
+            chunk.clear();
+        }
+    }
+
+    // Write remaining rows
+    if !chunk.is_empty() {
+        writer
+            .write_chunk(&chunk)
+            .map_err(|e| anyhow::anyhow!("Failed to write Parquet chunk: {}", e))?;
+        exported_count += chunk.len();
+    }
+
+    writer
+        .finalize()
+        .map_err(|e| anyhow::anyhow!("Failed to finalize Parquet: {}", e))?;
+
+    pb.finish_with_message(format!("Exported {} rows to Parquet", exported_count));
+    Ok(())
+}
+
+/// Build QueryMetadata from TableSchema for Parquet export
+#[cfg(feature = "state_machine")]
+fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query::QueryMetadata {
+    use cqlite_core::query::{ColumnInfo, QueryMetadata};
+
+    let mut columns = Vec::new();
+    let mut position = 0;
+
+    // Add partition keys
+    // Mark as nullable because direct SSTable export may not extract all key values
+    // from the raw binary RowKey format
+    for pk in &schema.partition_keys {
+        columns.push(ColumnInfo {
+            name: pk.name.clone(),
+            data_type: parse_cql_type_string(&pk.data_type),
+            nullable: true,
+            position,
+            table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
+        });
+        position += 1;
+    }
+
+    // Add clustering keys
+    // Mark as nullable because direct SSTable export may not extract all key values
+    for ck in &schema.clustering_keys {
+        columns.push(ColumnInfo {
+            name: ck.name.clone(),
+            data_type: parse_cql_type_string(&ck.data_type),
+            nullable: true,
+            position,
+            table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
+        });
+        position += 1;
+    }
+
+    // Add regular columns
+    for col in &schema.columns {
+        columns.push(ColumnInfo {
+            name: col.name.clone(),
+            data_type: parse_cql_type_string(&col.data_type),
+            nullable: true,
+            position,
+            table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
+        });
+        position += 1;
+    }
+
+    QueryMetadata {
+        columns,
+        ..Default::default()
+    }
+}
+
+/// Parse CQL type string to DataType
+#[cfg(feature = "state_machine")]
+fn parse_cql_type_string(type_str: &str) -> cqlite_core::types::DataType {
+    use cqlite_core::types::DataType;
+
+    match type_str.to_lowercase().as_str() {
+        "text" | "varchar" | "ascii" => DataType::Text,
+        "int" | "integer" => DataType::Integer,
+        "bigint" => DataType::BigInt,
+        "smallint" => DataType::SmallInt,
+        "tinyint" => DataType::TinyInt,
+        "float" => DataType::Float32,
+        "double" => DataType::Float,
+        "boolean" => DataType::Boolean,
+        "timestamp" => DataType::Timestamp,
+        "date" => DataType::Timestamp, // Map date to Timestamp
+        "time" => DataType::BigInt,    // Map time to BigInt (nanoseconds)
+        "uuid" | "timeuuid" => DataType::Uuid,
+        "blob" => DataType::Blob,
+        "counter" => DataType::BigInt, // Map counter to BigInt
+        "varint" => DataType::Blob,    // Map varint to Blob
+        "decimal" => DataType::Text,   // Map decimal to Text (for now)
+        s if s.starts_with("list") => DataType::List,
+        s if s.starts_with("set") => DataType::Set,
+        s if s.starts_with("map") => DataType::Map,
+        s if s.starts_with("frozen") => DataType::Frozen,
+        s if s.starts_with("tuple") => DataType::Tuple,
+        _ => DataType::Text, // Default fallback
+    }
+}
+
+/// Convert SSTable entry to QueryRow for Parquet export
+#[cfg(feature = "state_machine")]
+fn convert_entry_to_query_row(
+    row_key: &cqlite_core::RowKey,
+    value: &cqlite_core::Value,
+    schema: &TableSchema,
+) -> cqlite_core::query::QueryRow {
+    use cqlite_core::query::{QueryRow, RowMetadata};
+    use cqlite_core::Value;
+    use std::collections::HashMap;
+
+    let mut values: HashMap<String, Value> = HashMap::new();
+
+    // Extract values from the Value (which is typically a Map for parsed rows)
+    match value {
+        Value::Map(pairs) => {
+            // Each pair is (key_value, column_value)
+            for (k, v) in pairs {
+                if let Value::Text(col_name) = k {
+                    values.insert(col_name.clone(), v.clone());
+                }
+            }
+        }
+        Value::Blob(data) => {
+            // For raw blob data, assign to first regular column if available
+            if let Some(first_col) = schema.columns.first() {
+                values.insert(first_col.name.clone(), Value::Blob(data.clone()));
+            }
+        }
+        Value::Text(s) => {
+            if let Some(first_col) = schema.columns.first() {
+                values.insert(first_col.name.clone(), Value::Text(s.clone()));
+            }
+        }
+        other => {
+            // For other value types, assign to first column
+            if let Some(first_col) = schema.columns.first() {
+                values.insert(first_col.name.clone(), other.clone());
+            }
+        }
+    }
+
+    // Ensure all schema columns have entries (use Null for missing)
+    for pk in &schema.partition_keys {
+        values.entry(pk.name.clone()).or_insert(Value::Null);
+    }
+    for ck in &schema.clustering_keys {
+        values.entry(ck.name.clone()).or_insert(Value::Null);
+    }
+    for col in &schema.columns {
+        values.entry(col.name.clone()).or_insert(Value::Null);
+    }
+
+    QueryRow {
+        values,
+        key: row_key.clone(),
+        metadata: RowMetadata::default(),
+    }
 }
 
 /// Enhanced SSTable reader with interactive features, progress tracking, and export
