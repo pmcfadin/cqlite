@@ -432,17 +432,21 @@ fn test_export_with_query_filter() {
     eprintln!("Exit status: {}", output.status);
     eprintln!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
 
-    // Note: This test may fail if the export command doesn't support --query filter yet
-    // That's OK - it documents the expected behavior
-    if output.status.success() {
-        assert!(output_file.exists(), "Filtered output should exist");
-        let csv_content = fs::read_to_string(&output_file).expect("Failed to read CSV");
-        eprintln!("Filtered CSV rows: {}", csv_content.lines().count());
-    } else {
-        eprintln!(
-            "Filter test: export command may not support --query filter yet. \n            This is expected if Issue #282 WHERE filter support is not complete."
-        );
-    }
+    // Query filter must work - strict assertion
+    assert!(
+        output.status.success(),
+        "Export with --query filter should succeed. Exit code: {:?}\nSTDERR: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(output_file.exists(), "Filtered output should exist");
+    let csv_content = fs::read_to_string(&output_file).expect("Failed to read CSV");
+    let line_count = csv_content.lines().count();
+
+    // Should have header + at least some data rows
+    assert!(line_count >= 1, "CSV should have at least a header row");
+    eprintln!("Filtered CSV rows (including header): {}", line_count);
 }
 
 #[test]
@@ -482,26 +486,84 @@ fn test_export_row_count_matches_query() {
         "json",
     ]);
 
-    if query_output.status.success() {
-        let query_stdout = String::from_utf8_lossy(&query_output.stdout);
-        let query_json: serde_json::Value =
-            serde_json::from_str(&query_stdout).unwrap_or(serde_json::Value::Array(vec![]));
-        let query_row_count = query_json.as_array().map(|a| a.len()).unwrap_or(0);
+    // Query must succeed for this test to be valid - strict assertion
+    assert!(
+        query_output.status.success(),
+        "Direct query should succeed. Exit code: {:?}\nSTDERR: {}",
+        query_output.status.code(),
+        String::from_utf8_lossy(&query_output.stderr)
+    );
 
-        // Count CSV rows (subtract 1 for header)
-        let csv_content = fs::read_to_string(&csv_file).expect("Failed to read CSV");
-        let csv_row_count = csv_content.lines().count().saturating_sub(1);
+    let query_stdout = String::from_utf8_lossy(&query_output.stdout);
+    let query_json: serde_json::Value =
+        serde_json::from_str(&query_stdout).expect("Query output should be valid JSON");
+    let query_row_count = query_json
+        .as_array()
+        .expect("Query output should be a JSON array")
+        .len();
 
-        eprintln!(
-            "Row counts - Query: {}, CSV: {}",
-            query_row_count, csv_row_count
-        );
+    // Count CSV rows (subtract 1 for header)
+    let csv_content = fs::read_to_string(&csv_file).expect("Failed to read CSV");
+    let csv_row_count = csv_content.lines().count().saturating_sub(1);
 
-        assert_eq!(
-            csv_row_count, query_row_count,
-            "CSV export row count should match query result count"
-        );
-    }
+    eprintln!(
+        "Row counts - Query: {}, CSV: {}",
+        query_row_count, csv_row_count
+    );
+
+    assert_eq!(
+        csv_row_count, query_row_count,
+        "CSV export row count should match query result count"
+    );
+}
+
+#[test]
+fn test_export_with_limit() {
+    let (data_dir, schema_file) = assert_test_data_available();
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let csv_file = temp_dir.path().join("export_limit.csv");
+
+    const LIMIT: usize = 3;
+
+    // Export with --limit
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "export",
+        csv_file.to_str().unwrap(),
+        "--format",
+        "csv",
+        "--table",
+        "test_basic.simple_table",
+        "--limit",
+        &LIMIT.to_string(),
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "Export with --limit should succeed. Exit code: {:?}\nSTDERR: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(csv_file.exists(), "Output CSV file should exist");
+    let csv_content = fs::read_to_string(&csv_file).expect("Failed to read CSV");
+    let lines: Vec<&str> = csv_content.lines().collect();
+
+    // Should have header + exactly LIMIT data rows
+    let data_row_count = lines.len().saturating_sub(1); // Subtract header
+    assert_eq!(
+        data_row_count, LIMIT,
+        "CSV should have exactly {} data rows (got {}). Full content:\n{}",
+        LIMIT, data_row_count, csv_content
+    );
+
+    eprintln!("Limit test passed: {} rows exported as expected", LIMIT);
 }
 
 // ============================================================================
@@ -612,8 +674,9 @@ fn test_export_json_deterministic() {
 
 #[test]
 fn test_export_nonexistent_table_behavior() {
-    // Note: Current behavior is to return 0 rows for nonexistent table (not an error)
-    // This test documents that behavior. A future enhancement could add strict table validation.
+    // Issue #280: With streaming export, non-existent tables now fail early
+    // with clear error message rather than silently returning empty results.
+    // This is better validation behavior.
     let (data_dir, schema_file) = assert_test_data_available();
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_file = temp_dir.path().join("empty_output.csv");
@@ -634,32 +697,27 @@ fn test_export_nonexistent_table_behavior() {
     eprintln!("Exit status: {}", output.status);
     eprintln!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
 
-    // Current behavior: command succeeds but exports 0 rows
-    // This is valid SQL-like behavior (SELECT from missing table returns empty set)
+    // With streaming export (Issue #280), non-existent tables now return an error
+    // because column metadata cannot be determined without schema.
+    // This is better behavior than silently returning empty results.
     assert!(
-        output.status.success(),
-        "Export command succeeds (returns empty result for missing table)"
+        !output.status.success(),
+        "Export command should fail for non-existent table (strict validation)"
     );
 
-    // Check stderr for indication that no rows were found
+    // Check stderr for indication of the problem
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("0 rows") || stderr.contains("Scan returned 0"),
-        "Should indicate 0 rows were found in logs"
+        stderr.contains("column") || stderr.contains("Could not determine"),
+        "Should indicate column metadata issue: {}",
+        stderr
     );
 
-    // Output file may or may not exist depending on implementation
-    // If it exists, it should be empty or have only header
-    if output_file.exists() {
-        let csv_content = fs::read_to_string(&output_file).expect("Failed to read CSV");
-        let line_count = csv_content.lines().count();
-        assert!(
-            line_count <= 1,
-            "CSV for nonexistent table should be empty or header-only, got {} lines",
-            line_count
-        );
-    }
-    // If file doesn't exist, that's also acceptable behavior for 0 rows
+    // Since the command fails, output file should not exist
+    assert!(
+        !output_file.exists(),
+        "Output file should not be created when export fails"
+    );
 }
 
 #[test]
@@ -928,5 +986,88 @@ async fn test_export_sstable_to_parquet() {
     assert!(
         !parquet_bytes.is_empty(),
         "Parquet file should have content"
+    );
+}
+
+// ============================================================================
+// Memory Efficiency Tests
+// ============================================================================
+
+/// Test that export operations stay within memory budget.
+///
+/// This test validates the <128MB memory target from CLAUDE.md.
+/// Uses sysinfo to measure process RSS before and after export.
+/// Marked as #[ignore] for CI - run manually with: cargo test test_export_memory_efficiency -- --ignored
+#[test]
+#[ignore]
+fn test_export_memory_efficiency() {
+    use sysinfo::{ProcessRefreshKind, System};
+
+    let (data_dir, schema_file) = assert_test_data_available();
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+    // Get baseline memory usage
+    let mut system = System::new();
+    let pid = sysinfo::get_current_pid().expect("Failed to get current PID");
+    system.refresh_process_specifics(pid, ProcessRefreshKind::new().with_memory());
+    let baseline_memory = system.process(pid).map(|p| p.memory()).unwrap_or(0);
+
+    eprintln!(
+        "Baseline memory: {} bytes ({:.1} MB)",
+        baseline_memory,
+        baseline_memory as f64 / (1024.0 * 1024.0)
+    );
+
+    // Export to Parquet (most memory-intensive format due to columnar buffering)
+    let output_file = temp_dir.path().join("memory_test.parquet");
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "export",
+        output_file.to_str().unwrap(),
+        "--format",
+        "parquet",
+        "--table",
+        "test_basic.simple_table",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "Export should succeed for memory test. Exit code: {:?}\nSTDERR: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Measure memory after export
+    system.refresh_process_specifics(pid, ProcessRefreshKind::new().with_memory());
+    let peak_memory = system.process(pid).map(|p| p.memory()).unwrap_or(0);
+
+    let memory_delta = peak_memory.saturating_sub(baseline_memory);
+    let memory_delta_mb = memory_delta as f64 / (1024.0 * 1024.0);
+
+    eprintln!(
+        "Peak memory: {} bytes ({:.1} MB)",
+        peak_memory,
+        peak_memory as f64 / (1024.0 * 1024.0)
+    );
+    eprintln!(
+        "Memory delta: {} bytes ({:.1} MB)",
+        memory_delta, memory_delta_mb
+    );
+
+    // Memory target from CLAUDE.md: <128MB for large files
+    const MEMORY_LIMIT_MB: f64 = 128.0;
+    assert!(
+        memory_delta_mb < MEMORY_LIMIT_MB,
+        "Export memory usage ({:.1} MB) should stay under {} MB limit",
+        memory_delta_mb,
+        MEMORY_LIMIT_MB
+    );
+
+    eprintln!(
+        "Memory efficiency test passed: {:.1} MB < {} MB limit",
+        memory_delta_mb, MEMORY_LIMIT_MB
     );
 }

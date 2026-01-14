@@ -14,6 +14,7 @@ use super::{
     parser::QueryParser,
     planner::QueryPlanner,
     prepared::PreparedQuery,
+    result::{QueryResultIterator, StreamingConfig},
     QueryStats,
 };
 
@@ -183,6 +184,62 @@ impl QueryEngine {
         self.update_execution_stats(&mut result, start_time);
 
         Ok(result)
+    }
+
+    /// Execute a CQL query with streaming results (Issue #280)
+    ///
+    /// Returns a `QueryResultIterator` that yields rows incrementally via a bounded
+    /// channel, enabling memory-efficient processing of large result sets.
+    ///
+    /// # Arguments
+    ///
+    /// * `cql` - The CQL query string to execute (must be a SELECT statement)
+    /// * `config` - Streaming configuration (buffer size, chunk hints)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Query is not a SELECT statement
+    /// - SQL syntax is invalid
+    /// - Query execution fails
+    ///
+    /// # Memory Budget
+    ///
+    /// The streaming approach stays within the 128MB target by using bounded channels
+    /// and processing rows incrementally rather than materializing all results.
+    #[cfg(feature = "state_machine")]
+    pub async fn execute_streaming(
+        &self,
+        cql: &str,
+        config: StreamingConfig,
+    ) -> Result<QueryResultIterator> {
+        // Update total queries counter
+        {
+            let mut stats = self.stats.write();
+            stats.total_queries += 1;
+        }
+
+        // Only SELECT statements can be streamed
+        let trimmed_cql = cql.trim().to_uppercase();
+        if !trimmed_cql.starts_with("SELECT") {
+            return Err(Error::query_execution(
+                "Streaming execution only supports SELECT queries".to_string(),
+            ));
+        }
+
+        // Parse SELECT statement
+        let select_statement = select_parser::parse_select(cql).inspect_err(|_e| {
+            let mut stats = self.stats.write();
+            stats.error_queries += 1;
+        })?;
+
+        // Optimize the query plan
+        let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
+
+        // Execute with streaming
+        self.select_executor
+            .execute_streaming(optimized_plan, config)
+            .await
     }
 
     /// Execute a SELECT query using the advanced parser and optimizer

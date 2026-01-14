@@ -554,6 +554,7 @@ async fn run_main() -> Result<()> {
             format,
             table,
             query,
+            limit,
         }) => {
             commands::export_data(
                 &database,
@@ -561,6 +562,7 @@ async fn run_main() -> Result<()> {
                 &file,
                 format,
                 query.as_deref(),
+                limit,
                 cli.quiet,
             )
             .await

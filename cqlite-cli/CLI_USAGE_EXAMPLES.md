@@ -605,6 +605,24 @@ cqlite --schema test-data/schemas/basic-types.cql \
        export backup.cql --format cql --table test_basic.simple_table
 ```
 
+#### Export with Row Limit
+
+Use `--limit` to restrict the number of rows exported:
+
+```bash
+# Export only the first 1000 rows
+cqlite --schema test-data/schemas/basic-types.cql \
+       --data-dir test-data/datasets/sstables \
+       export sample.csv --format csv \
+       --table test_basic.simple_table --limit 1000
+
+# Combine limit with filter
+cqlite --schema test-data/schemas/basic-types.cql \
+       --data-dir test-data/datasets/sstables \
+       export top_users.json --format json \
+       --table test_basic.simple_table --query "active = true" --limit 100
+```
+
 ### CQL-to-Parquet Type Mapping
 
 When exporting to Parquet format, CQL types are mapped to Apache Arrow types:
@@ -637,6 +655,41 @@ Export complete: 10000 rows written to users.parquet
 File size: 245.3 KB
 Duration: 1.2s (8333 rows/sec)
 ```
+
+### Streaming Export (Memory Efficiency)
+
+CQLite exports use memory-efficient streaming automatically. No special flag is needed.
+
+#### How Streaming Works
+
+- **Data Processing**: Rows are processed in chunks of 1,000 rows
+- **Parquet Row Groups**: Parquet files use 10,000-row row groups for optimal compression
+- **Memory Budget**: Designed to stay under 128MB memory usage even for large datasets
+
+#### Benefits
+
+- Export datasets larger than available RAM
+- Consistent memory footprint regardless of table size
+- Automatic chunk-based processing for all formats
+
+#### Format-Specific Behavior
+
+| Format | Streaming Strategy |
+|--------|-------------------|
+| CSV | Direct write per row (most memory-efficient) |
+| JSON | Line-by-line output with deterministic key ordering |
+| Parquet | Buffered row groups (10,000 rows) for columnar efficiency |
+| CQL | Generates INSERT statements in batches |
+
+#### Example: Large Dataset Export
+
+```bash
+# Export a multi-GB table - streaming handles memory automatically
+cqlite --schema schema.cql --data-dir ./large-dataset \
+       export all_data.parquet --format parquet --table myks.events
+```
+
+No configuration needed - CQLite automatically streams the data efficiently.
 
 ---
 

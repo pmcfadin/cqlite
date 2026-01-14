@@ -691,6 +691,10 @@ async fn get_table_columns(database: &Database, table: &str) -> Result<Vec<Strin
     }
 }
 
+/// Export data using true streaming execution (Issue #280)
+///
+/// This function uses `execute_streaming()` to process rows incrementally,
+/// avoiding the need to materialize all query results in memory at once.
 #[cfg(feature = "state_machine")]
 pub async fn export_data(
     database: &Database,
@@ -698,11 +702,16 @@ pub async fn export_data(
     file: &Path,
     format: ExportFormat,
     query_filter: Option<&str>,
+    limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
+    use cqlite_core::query::result::StreamingConfig;
     use std::io::IsTerminal;
     use std::time::Instant;
 
+    use crate::output::{
+        create_streaming_parquet_writer, StreamingCSVWriter, StreamingJSONWriter, StreamingWriter,
+    };
     use crate::status_metrics::format_bytes;
 
     // Determine if progress should be shown (not quiet, and output is a TTY)
@@ -721,13 +730,30 @@ pub async fn export_data(
 
     // Determine if source is a table name or a query
     let query = if source.to_uppercase().trim().starts_with("SELECT") {
-        source.to_string()
-    } else {
-        // Source is a table name - build SELECT with optional WHERE
-        match query_filter {
-            Some(filter) => format!("SELECT * FROM {} WHERE {}", source, filter),
-            None => format!("SELECT * FROM {}", source),
+        // If source is already a SELECT query, append LIMIT if specified
+        // but only if the query doesn't already have a LIMIT clause
+        match limit {
+            Some(n) => {
+                let upper = source.to_uppercase();
+                if upper.contains(" LIMIT ") {
+                    // Query already has LIMIT - use as-is to avoid invalid SQL
+                    source.to_string()
+                } else {
+                    format!("{} LIMIT {}", source.trim_end_matches(';'), n)
+                }
+            }
+            None => source.to_string(),
         }
+    } else {
+        // Source is a table name - build SELECT with optional WHERE and LIMIT
+        let mut q = format!("SELECT * FROM {}", source);
+        if let Some(filter) = query_filter {
+            q.push_str(&format!(" WHERE {}", filter));
+        }
+        if let Some(n) = limit {
+            q.push_str(&format!(" LIMIT {}", n));
+        }
+        q
     };
 
     if show_progress {
@@ -737,63 +763,322 @@ pub async fn export_data(
         );
     }
 
-    // Execute the query
-    let result = database
-        .execute(&query)
+    // Configure streaming based on format
+    let config = match format {
+        ExportFormat::Parquet => StreamingConfig::for_parquet(),
+        _ => StreamingConfig::for_text_formats(),
+    };
+
+    // Execute the query with streaming (Issue #280 - true end-to-end streaming)
+    let mut result_iter = database
+        .execute_streaming(&query, config.clone())
         .await
-        .with_context(|| format!("Failed to execute export query: {query}"))?;
+        .with_context(|| format!("Failed to execute streaming export query: {query}"))?;
 
-    if result.rows.is_empty() {
-        if show_progress {
-            println!("No data to export");
-        }
-        return Ok(());
-    }
+    // Get column names from metadata
+    let column_names: Vec<String> = result_iter
+        .metadata
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
 
-    // Get column names
-    let column_names = if !result.rows.is_empty() {
-        result.rows[0].column_names()
-    } else if !result.metadata.columns.is_empty() {
-        result
-            .metadata
-            .columns
-            .iter()
-            .map(|c| c.name.clone())
-            .collect()
-    } else {
+    if column_names.is_empty() {
         return Err(anyhow::anyhow!(
             "Could not determine column names for export"
         ));
-    };
+    }
 
     if show_progress {
         println!("Columns: {}", column_names.join(", "));
-        println!("Rows to export: {}", result.rows.len());
+        println!("Streaming export in progress...");
     }
 
     // Track timing for statistics
     let start_time = Instant::now();
 
-    // Create progress bar (hidden if quiet or not TTY)
+    // Create spinner progress bar (unknown total for streaming)
     let pb = if show_progress {
-        let pb = ProgressBar::new(result.rows.len() as u64);
+        let pb = ProgressBar::new_spinner();
         pb.set_style(
-            ProgressStyle::default_bar()
-                .template("[{bar:30.green/blue}] {percent}% ({pos}/{len} rows) ETA: {eta}")
-                .unwrap()
-                .progress_chars("=>-"),
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg} ({pos} rows)")
+                .unwrap(),
         );
+        pb.set_message("Exporting");
         pb
     } else {
         ProgressBar::hidden()
     };
 
-    // Export based on format
+    // Chunk size for collecting rows before writing
+    let chunk_size = config.chunk_size;
+    let mut rows_exported: u64 = 0;
+    // Track remaining rows for limit enforcement (streaming doesn't automatically enforce LIMIT)
+    let mut rows_remaining: Option<usize> = limit;
+
+    // Export based on format with true streaming
     match format {
-        ExportFormat::Csv => export_to_csv(&result, file, &column_names, &pb).await?,
-        ExportFormat::Json => export_to_json(&result, file, &column_names, &pb).await?,
-        ExportFormat::Cql => export_to_cql(&result, file, source, &column_names, &pb).await?,
-        ExportFormat::Parquet => export_to_parquet(&result, file, &column_names, &pb).await?,
+        ExportFormat::Csv => {
+            let output_file = File::create(file)
+                .with_context(|| format!("Failed to create CSV file: {}", file.display()))?;
+            let buf_writer = BufWriter::new(output_file);
+            let mut writer = StreamingCSVWriter::new(buf_writer);
+
+            writer
+                .write_header(&result_iter.metadata)
+                .map_err(|e| anyhow::anyhow!("Failed to write CSV header: {}", e))?;
+
+            // Stream rows in chunks
+            loop {
+                // Check if we've hit the limit
+                if rows_remaining == Some(0) {
+                    break;
+                }
+
+                let chunk = result_iter
+                    .collect_chunk(chunk_size)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))?;
+
+                if chunk.is_empty() {
+                    break;
+                }
+
+                // Truncate chunk if it exceeds remaining limit
+                let chunk_to_write = if let Some(remaining) = rows_remaining {
+                    if chunk.len() > remaining {
+                        chunk.into_iter().take(remaining).collect::<Vec<_>>()
+                    } else {
+                        chunk
+                    }
+                } else {
+                    chunk
+                };
+
+                let written = chunk_to_write.len();
+                writer
+                    .write_chunk(&chunk_to_write)
+                    .map_err(|e| anyhow::anyhow!("Failed to write CSV chunk: {}", e))?;
+
+                rows_exported += written as u64;
+                pb.set_position(rows_exported);
+
+                // Update remaining count
+                if let Some(ref mut remaining) = rows_remaining {
+                    *remaining = remaining.saturating_sub(written);
+                }
+            }
+
+            writer
+                .finalize()
+                .map_err(|e| anyhow::anyhow!("Failed to finalize CSV: {}", e))?;
+        }
+        ExportFormat::Json => {
+            let output_file = File::create(file)
+                .with_context(|| format!("Failed to create JSON file: {}", file.display()))?;
+            let buf_writer = BufWriter::new(output_file);
+            let mut writer = StreamingJSONWriter::new(buf_writer);
+
+            writer
+                .write_header(&result_iter.metadata)
+                .map_err(|e| anyhow::anyhow!("Failed to write JSON header: {}", e))?;
+
+            // Stream rows in chunks
+            loop {
+                // Check if we've hit the limit
+                if rows_remaining == Some(0) {
+                    break;
+                }
+
+                let chunk = result_iter
+                    .collect_chunk(chunk_size)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))?;
+
+                if chunk.is_empty() {
+                    break;
+                }
+
+                // Truncate chunk if it exceeds remaining limit
+                let chunk_to_write = if let Some(remaining) = rows_remaining {
+                    if chunk.len() > remaining {
+                        chunk.into_iter().take(remaining).collect::<Vec<_>>()
+                    } else {
+                        chunk
+                    }
+                } else {
+                    chunk
+                };
+
+                let written = chunk_to_write.len();
+                writer
+                    .write_chunk(&chunk_to_write)
+                    .map_err(|e| anyhow::anyhow!("Failed to write JSON chunk: {}", e))?;
+
+                rows_exported += written as u64;
+                pb.set_position(rows_exported);
+
+                // Update remaining count
+                if let Some(ref mut remaining) = rows_remaining {
+                    *remaining = remaining.saturating_sub(written);
+                }
+            }
+
+            writer
+                .finalize()
+                .map_err(|e| anyhow::anyhow!("Failed to finalize JSON: {}", e))?;
+        }
+        ExportFormat::Cql => {
+            // CQL format needs special handling - collect all for table name extraction
+            // For now, fall back to non-streaming for CQL
+            let output_file = File::create(file)
+                .with_context(|| format!("Failed to create CQL file: {}", file.display()))?;
+            let mut buf_writer = BufWriter::new(output_file);
+
+            // Extract table name from source
+            let table_name = if source.to_uppercase().contains("FROM") {
+                source
+                    .split_whitespace()
+                    .skip_while(|&word| word.to_uppercase() != "FROM")
+                    .nth(1)
+                    .unwrap_or("exported_table")
+            } else {
+                source
+            };
+
+            // Write header comment
+            writeln!(buf_writer, "-- CQL Export from CQLite (streaming)")?;
+            writeln!(buf_writer, "-- Source: {source}")?;
+            writeln!(
+                buf_writer,
+                "-- Generated: {}",
+                chrono::Utc::now().to_rfc3339()
+            )?;
+            writeln!(buf_writer)?;
+
+            // Stream rows
+            loop {
+                // Check if we've hit the limit
+                if rows_remaining == Some(0) {
+                    break;
+                }
+
+                let chunk = result_iter
+                    .collect_chunk(chunk_size)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))?;
+
+                if chunk.is_empty() {
+                    break;
+                }
+
+                // Truncate chunk if it exceeds remaining limit
+                let chunk_to_write: Vec<_> = if let Some(remaining) = rows_remaining {
+                    if chunk.len() > remaining {
+                        chunk.into_iter().take(remaining).collect()
+                    } else {
+                        chunk
+                    }
+                } else {
+                    chunk
+                };
+
+                for row in &chunk_to_write {
+                    let values: Vec<String> = column_names
+                        .iter()
+                        .map(|col| {
+                            row.values
+                                .get(col)
+                                .map(|v| match v {
+                                    cqlite_core::Value::Text(s) => {
+                                        format!("'{}'", s.replace("'", "''"))
+                                    }
+                                    cqlite_core::Value::Null => "NULL".to_string(),
+                                    _ => v.to_string(),
+                                })
+                                .unwrap_or_else(|| "NULL".to_string())
+                        })
+                        .collect();
+
+                    writeln!(
+                        buf_writer,
+                        "INSERT INTO {} ({}) VALUES ({});",
+                        table_name,
+                        column_names.join(", "),
+                        values.join(", ")
+                    )?;
+                }
+
+                let written = chunk_to_write.len();
+                rows_exported += written as u64;
+                pb.set_position(rows_exported);
+
+                // Update remaining count
+                if let Some(ref mut remaining) = rows_remaining {
+                    *remaining = remaining.saturating_sub(written);
+                }
+            }
+
+            buf_writer.flush()?;
+        }
+        ExportFormat::Parquet => {
+            let output_file = File::create(file)
+                .with_context(|| format!("Failed to create Parquet file: {}", file.display()))?;
+
+            let mut writer =
+                create_streaming_parquet_writer(output_file, &result_iter.metadata, chunk_size)
+                    .map_err(|e| anyhow::anyhow!("Failed to initialize Parquet writer: {}", e))?;
+
+            writer
+                .write_header(&result_iter.metadata)
+                .map_err(|e| anyhow::anyhow!("Failed to write Parquet header: {}", e))?;
+
+            // Stream rows in chunks
+            loop {
+                // Check if we've hit the limit
+                if rows_remaining == Some(0) {
+                    break;
+                }
+
+                let chunk = result_iter
+                    .collect_chunk(chunk_size)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))?;
+
+                if chunk.is_empty() {
+                    break;
+                }
+
+                // Truncate chunk if it exceeds remaining limit
+                let chunk_to_write = if let Some(remaining) = rows_remaining {
+                    if chunk.len() > remaining {
+                        chunk.into_iter().take(remaining).collect::<Vec<_>>()
+                    } else {
+                        chunk
+                    }
+                } else {
+                    chunk
+                };
+
+                let written = chunk_to_write.len();
+                writer
+                    .write_chunk(&chunk_to_write)
+                    .map_err(|e| anyhow::anyhow!("Failed to write Parquet chunk: {}", e))?;
+
+                rows_exported += written as u64;
+                pb.set_position(rows_exported);
+
+                // Update remaining count
+                if let Some(ref mut remaining) = rows_remaining {
+                    *remaining = remaining.saturating_sub(written);
+                }
+            }
+
+            writer
+                .finalize()
+                .map_err(|e| anyhow::anyhow!("Failed to finalize Parquet: {}", e))?;
+        }
     }
 
     pb.finish_and_clear();
@@ -802,7 +1087,6 @@ pub async fn export_data(
     if !quiet {
         let duration = start_time.elapsed();
         let file_size = std::fs::metadata(file)?.len();
-        let rows_exported = result.rows.len() as u64;
 
         println!("\nExport complete:");
         println!("  Rows: {}", rows_exported);
@@ -827,6 +1111,7 @@ pub async fn export_data(
     _file: &Path,
     _format: crate::cli::ExportFormat,
     _query_filter: Option<&str>,
+    _limit: Option<usize>,
     _quiet: bool,
 ) -> Result<()> {
     Err(anyhow::anyhow!(

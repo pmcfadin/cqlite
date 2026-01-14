@@ -137,6 +137,19 @@ impl QueryEngine {
         self.advanced_engine.analyze(cql).await
     }
 
+    /// Execute a CQL query with streaming results (Issue #280)
+    ///
+    /// Returns a `QueryResultIterator` that yields rows incrementally via a bounded
+    /// channel, enabling memory-efficient processing of large result sets.
+    #[cfg(feature = "state_machine")]
+    pub async fn execute_streaming(
+        &self,
+        cql: &str,
+        config: StreamingConfig,
+    ) -> Result<QueryResultIterator> {
+        self.advanced_engine.execute_streaming(cql, config).await
+    }
+
     /// Get cache statistics
     pub fn cache_stats(&self) -> CacheStats {
         self.advanced_engine.cache_stats()

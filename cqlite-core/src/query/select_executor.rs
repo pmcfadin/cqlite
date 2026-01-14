@@ -11,7 +11,9 @@
 //! - Collection operations (list[index], map['key'])
 
 use super::{
-    result::{ColumnInfo, QueryResult, QueryRow},
+    result::{
+        ColumnInfo, QueryMetadata, QueryResult, QueryResultIterator, QueryRow, StreamingConfig,
+    },
     select_ast::*,
     select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
 };
@@ -197,6 +199,411 @@ impl SelectExecutor {
                 warnings: vec![],
             },
         })
+    }
+
+    /// Execute an optimized query plan with streaming results (Issue #280)
+    ///
+    /// Instead of materializing all rows in memory, this method returns a
+    /// `QueryResultIterator` that yields rows incrementally via a bounded channel.
+    /// This enables memory-efficient processing of large result sets.
+    ///
+    /// # Memory Budget
+    ///
+    /// With default `StreamingConfig::buffer_size` of 1024 rows and ~1KB avg row size:
+    /// - Channel buffer: ~1MB in flight
+    /// - Background task: minimal overhead
+    /// - Total streaming overhead: ~1-2MB (well within 128MB target)
+    ///
+    /// # Limitations
+    ///
+    /// Currently supports:
+    /// - SSTableScan with predicates (streaming)
+    /// - Filter/Limit/Project (applied during scan)
+    ///
+    /// For ORDER BY/GROUP BY/DISTINCT, falls back to full execution then streams results.
+    pub async fn execute_streaming(
+        &self,
+        plan: OptimizedQueryPlan,
+        config: StreamingConfig,
+    ) -> Result<QueryResultIterator> {
+        // Check if query requires full materialization (ORDER BY, GROUP BY, aggregates)
+        if self.requires_materialization(&plan) {
+            log::info!("Query requires materialization (ORDER BY/GROUP BY/aggregates), using execute-then-stream");
+            return self.execute_and_stream(plan, config).await;
+        }
+
+        let table_id = if let Some(ref from_clause) = plan.statement.from_clause {
+            self.extract_table_id(from_clause)?
+        } else {
+            // For queries without FROM clause (like SELECT 1), fall back to execute
+            return self.execute_and_stream(plan, config).await;
+        };
+
+        let columns = self.get_result_columns(&plan.statement).await?;
+
+        // Create bounded channel for backpressure
+        let (tx, rx) = mpsc::channel(config.buffer_size);
+
+        // Determine execution steps
+        let execution_steps = if plan.execution_steps.is_empty() {
+            vec![ExecutionStep::SSTableScan {
+                table: table_id.clone(),
+                predicates: vec![],
+                projection: columns.iter().map(|c| c.name.clone()).collect(),
+            }]
+        } else {
+            plan.execution_steps.clone()
+        };
+
+        // Clone what we need for the background task
+        let storage = Arc::clone(&self.storage);
+        let schema_manager = Arc::clone(&self._schema);
+
+        // Spawn background task to stream rows
+        tokio::spawn(async move {
+            if let Err(e) = Self::execute_streaming_background(
+                storage,
+                schema_manager,
+                table_id,
+                execution_steps,
+                tx,
+            )
+            .await
+            {
+                log::error!("Streaming execution error: {}", e);
+                // Error is logged; channel will close and consumer will see None
+            }
+        });
+
+        // Create metadata for the iterator
+        let metadata = QueryMetadata {
+            columns,
+            total_rows: None, // Unknown for streaming
+            plan_info: None,
+            performance: Default::default(),
+            warnings: vec![],
+        };
+
+        Ok(QueryResultIterator::new(rx, metadata))
+    }
+
+    /// Check if query plan requires full materialization before streaming
+    fn requires_materialization(&self, plan: &OptimizedQueryPlan) -> bool {
+        for step in &plan.execution_steps {
+            match step {
+                ExecutionStep::Sort { .. } => return true,
+                ExecutionStep::Aggregate { .. } => return true,
+                _ => {}
+            }
+        }
+
+        // Check for DISTINCT
+        matches!(plan.statement.select_clause, SelectClause::Distinct(_))
+    }
+
+    /// Fallback: Execute query fully, then stream the results
+    async fn execute_and_stream(
+        &self,
+        plan: OptimizedQueryPlan,
+        config: StreamingConfig,
+    ) -> Result<QueryResultIterator> {
+        // Execute full query
+        let result = self.execute(plan).await?;
+
+        // Create channel to stream results
+        let (tx, rx) = mpsc::channel(config.buffer_size);
+
+        // Spawn task to send rows through channel
+        tokio::spawn(async move {
+            for row in result.rows {
+                if tx.send(Ok(row)).await.is_err() {
+                    break; // Consumer dropped
+                }
+            }
+            // Channel closes automatically when tx drops
+        });
+
+        Ok(QueryResultIterator::new(rx, result.metadata))
+    }
+
+    /// Background task: Execute streaming scan and send rows through channel
+    async fn execute_streaming_background(
+        storage: Arc<StorageEngine>,
+        schema_manager: Arc<SchemaManager>,
+        _table_id: TableId,
+        execution_steps: Vec<ExecutionStep>,
+        tx: mpsc::Sender<Result<QueryRow>>,
+    ) -> Result<()> {
+        for step in &execution_steps {
+            match step {
+                ExecutionStep::SSTableScan {
+                    table,
+                    predicates,
+                    projection,
+                    ..
+                } => {
+                    // Parse table ID
+                    let (keyspace, table_name) = Self::parse_table_id_static(table);
+
+                    // Look up schema
+                    let schema_opt = schema_manager
+                        .find_schema_by_table(&keyspace, &table_name)
+                        .await;
+
+                    // Scan SSTables
+                    let scan_results = storage
+                        .scan(table, None, None, None, schema_opt.as_ref())
+                        .await?;
+
+                    // Stream rows through channel
+                    for (key, value) in scan_results {
+                        // Skip tombstoned/null rows
+                        if matches!(value, Value::Null) {
+                            continue;
+                        }
+
+                        // Create QueryRow from scanned data
+                        let mut row_values = HashMap::new();
+
+                        if let Value::Map(map) = value {
+                            for (col_name, col_value) in map {
+                                if let Value::Text(name) = col_name {
+                                    if projection.is_empty() || projection.contains(&name) {
+                                        row_values.insert(name, col_value);
+                                    }
+                                }
+                            }
+
+                            // Synthesize partition key columns
+                            if let Some(schema) = &schema_opt {
+                                for pk in &schema.partition_keys {
+                                    if projection.is_empty() || projection.contains(&pk.name) {
+                                        if let Ok(pk_value) =
+                                            Self::decode_partition_key_static(&key, pk)
+                                        {
+                                            row_values.insert(pk.name.clone(), pk_value);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            row_values.insert("data".to_string(), value);
+                            if projection.is_empty() || projection.contains(&"id".to_string()) {
+                                row_values
+                                    .insert("id".to_string(), Value::Text(format!("{:?}", key)));
+                            }
+                        }
+
+                        let row = QueryRow {
+                            values: row_values,
+                            key: key.clone(),
+                            metadata: Default::default(),
+                        };
+
+                        // Apply predicates
+                        if !Self::evaluate_predicates_static(&row, predicates)? {
+                            continue;
+                        }
+
+                        // Send row through channel (with backpressure)
+                        if tx.send(Ok(row)).await.is_err() {
+                            // Consumer dropped, stop scanning
+                            return Ok(());
+                        }
+                    }
+                }
+                ExecutionStep::Limit { count, .. } => {
+                    // Limit is handled by consumer closing the channel early
+                    // Log for debugging
+                    log::debug!(
+                        "Streaming execution: LIMIT {} will be applied by consumer",
+                        count
+                    );
+                }
+                ExecutionStep::Project { .. } => {
+                    // Projection handled during scan via projection parameter
+                }
+                ExecutionStep::Filter { .. } => {
+                    // Filter predicates pushed down to SSTableScan
+                }
+                _ => {
+                    log::warn!("Streaming execution: skipping unsupported step {:?}", step);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Static version of parse_table_id for background task
+    fn parse_table_id_static(table_id: &TableId) -> (Option<String>, String) {
+        let table_str = table_id.name();
+        if let Some(dot_pos) = table_str.rfind('.') {
+            let keyspace = table_str[..dot_pos].to_string();
+            let table_name = table_str[dot_pos + 1..].to_string();
+            (Some(keyspace), table_name)
+        } else {
+            (None, table_str.to_string())
+        }
+    }
+
+    /// Static version of decode_partition_key_value for background task
+    fn decode_partition_key_static(
+        key: &RowKey,
+        pk_column: &crate::schema::KeyColumn,
+    ) -> Result<Value> {
+        let key_bytes = key.0.as_slice();
+        let normalized_type = pk_column.data_type.to_lowercase();
+
+        match normalized_type.as_str() {
+            "uuid" | "timeuuid" => {
+                if key_bytes.len() >= 16 {
+                    let uuid_bytes: [u8; 16] = key_bytes[..16].try_into().map_err(|_| {
+                        Error::query_execution("Invalid UUID key length".to_string())
+                    })?;
+                    Ok(Value::Uuid(uuid_bytes))
+                } else {
+                    Err(Error::query_execution(format!(
+                        "Partition key too short for UUID: {} bytes",
+                        key_bytes.len()
+                    )))
+                }
+            }
+            "text" | "varchar" | "ascii" => {
+                if key_bytes.len() >= 2 {
+                    let len = u16::from_be_bytes([key_bytes[0], key_bytes[1]]) as usize;
+                    if key_bytes.len() >= 2 + len {
+                        let text =
+                            String::from_utf8(key_bytes[2..2 + len].to_vec()).map_err(|e| {
+                                Error::query_execution(format!("Invalid UTF-8 in key: {}", e))
+                            })?;
+                        Ok(Value::Text(text))
+                    } else {
+                        Err(Error::query_execution(
+                            "Partition key text length mismatch".to_string(),
+                        ))
+                    }
+                } else {
+                    Err(Error::query_execution(
+                        "Partition key too short for text".to_string(),
+                    ))
+                }
+            }
+            "int" => {
+                if key_bytes.len() >= 4 {
+                    let int_val = i32::from_be_bytes([
+                        key_bytes[0],
+                        key_bytes[1],
+                        key_bytes[2],
+                        key_bytes[3],
+                    ]);
+                    Ok(Value::Integer(int_val))
+                } else {
+                    Err(Error::query_execution(
+                        "Partition key too short for int".to_string(),
+                    ))
+                }
+            }
+            "bigint" | "counter" => {
+                if key_bytes.len() >= 8 {
+                    let long_val = i64::from_be_bytes([
+                        key_bytes[0],
+                        key_bytes[1],
+                        key_bytes[2],
+                        key_bytes[3],
+                        key_bytes[4],
+                        key_bytes[5],
+                        key_bytes[6],
+                        key_bytes[7],
+                    ]);
+                    Ok(Value::BigInt(long_val))
+                } else {
+                    Err(Error::query_execution(
+                        "Partition key too short for bigint".to_string(),
+                    ))
+                }
+            }
+            _ => {
+                log::warn!(
+                    "Unsupported partition key type: {}, returning as debug string",
+                    pk_column.data_type
+                );
+                Ok(Value::Text(format!("{:?}", key_bytes)))
+            }
+        }
+    }
+
+    /// Static version of evaluate_sstable_predicates for background task
+    fn evaluate_predicates_static(row: &QueryRow, predicates: &[SSTablePredicate]) -> Result<bool> {
+        for predicate in predicates {
+            if let Some(column_value) = row.values.get(&predicate.column) {
+                let matches = match &predicate.operation {
+                    super::select_optimizer::SSTableFilterOp::Equal => predicate
+                        .values
+                        .first()
+                        .is_some_and(|v| Self::values_equal_static(column_value, v)),
+                    super::select_optimizer::SSTableFilterOp::In => {
+                        predicate.values.contains(column_value)
+                    }
+                    super::select_optimizer::SSTableFilterOp::Range => {
+                        if predicate.values.len() >= 2 {
+                            let min_val = &predicate.values[0];
+                            let max_val = &predicate.values[1];
+                            Self::compare_values_static(column_value, min_val) >= 0
+                                && Self::compare_values_static(column_value, max_val) <= 0
+                        } else {
+                            false
+                        }
+                    }
+                    super::select_optimizer::SSTableFilterOp::Prefix => {
+                        if let (Value::Text(col_str), Some(Value::Text(prefix))) =
+                            (column_value, predicate.values.first())
+                        {
+                            col_str.starts_with(prefix)
+                        } else {
+                            false
+                        }
+                    }
+                    super::select_optimizer::SSTableFilterOp::BloomFilter => true,
+                };
+
+                if !matches {
+                    return Ok(false);
+                }
+            } else {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Static helper: Compare two values for equality
+    fn values_equal_static(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Text(a), Value::Text(b)) => a == b,
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            (Value::Integer(a), Value::BigInt(b)) => (*a as i64) == *b,
+            (Value::BigInt(a), Value::Integer(b)) => *a == (*b as i64),
+            _ => false,
+        }
+    }
+
+    /// Static helper: Compare two values for ordering
+    fn compare_values_static(a: &Value, b: &Value) -> i32 {
+        match (a, b) {
+            (Value::Integer(a), Value::Integer(b)) => a.cmp(b) as i32,
+            (Value::BigInt(a), Value::BigInt(b)) => a.cmp(b) as i32,
+            (Value::Float(a), Value::Float(b)) => {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal) as i32
+            }
+            (Value::Text(a), Value::Text(b)) => a.cmp(b) as i32,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b) as i32,
+            _ => 0,
+        }
     }
 
     /// Execute SSTable scan with predicate pushdown
@@ -1189,13 +1596,47 @@ impl SelectExecutor {
     }
 
     async fn get_result_columns(&self, statement: &SelectStatement) -> Result<Vec<ColumnInfo>> {
-        // TODO: Implement proper column metadata extraction
         let mut columns = Vec::new();
 
         match &statement.select_clause {
             SelectClause::All => {
-                // For SELECT *, we'll handle this dynamically when processing rows
-                // Don't add any specific columns here - this will be expanded later
+                // For SELECT *, look up the schema to get column names
+                // This is needed for streaming mode where we can't wait for first row
+                if let Some(ref from_clause) = statement.from_clause {
+                    let table_id = self.extract_table_id(from_clause)?;
+                    let (keyspace_opt, table_name) = Self::parse_table_id_static(&table_id);
+
+                    // Look up schema from SchemaManager
+                    if let Some(schema) = self
+                        ._schema
+                        .find_schema_by_table(&keyspace_opt, &table_name)
+                        .await
+                    {
+                        // Collect all column names from schema (sorted alphabetically for determinism)
+                        let mut col_names: Vec<&str> =
+                            schema.columns.iter().map(|c| c.name.as_str()).collect();
+                        col_names.sort();
+
+                        let keyspace_str = keyspace_opt.as_deref().unwrap_or("");
+                        for (idx, col_name) in col_names.iter().enumerate() {
+                            columns.push(ColumnInfo {
+                                name: col_name.to_string(),
+                                data_type: crate::types::DataType::Text, // TODO: Infer proper type
+                                nullable: true,
+                                position: idx,
+                                table_name: Some(format!("{}.{}", keyspace_str, table_name)),
+                            });
+                        }
+
+                        log::debug!(
+                            "SELECT * resolved {} columns from schema for {:?}.{}",
+                            columns.len(),
+                            keyspace_opt,
+                            table_name
+                        );
+                    }
+                    // If schema not found, columns stay empty - will be populated from first row at runtime
+                }
             }
             SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
                 for (i, expr) in exprs.iter().enumerate() {

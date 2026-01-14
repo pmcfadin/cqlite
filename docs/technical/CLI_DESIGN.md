@@ -9,7 +9,7 @@ This document outlines the comprehensive command-line interface design for CQLit
 1. **Schema-First**: All operations require or can benefit from schema definitions
 2. **Streaming-First**: Large file operations use streaming for memory efficiency
 3. **Type-Safe**: Full support for all CQL data types including collections and UDTs
-4. **Format-Flexible**: Multiple input/output formats (JSON, CSV, Parquet, SQL)
+4. **Format-Flexible**: Multiple input/output formats (JSON, CSV, Parquet, CQL)
 5. **Performance-Aware**: Built-in monitoring and optimization features
 
 ## Command Structure
@@ -179,20 +179,29 @@ cqlite schema describe user_schema.json
 Export data to various formats with filtering and transformation.
 
 ```bash
-cqlite export <SOURCE> [OPTIONS]
+cqlite export <OUTPUT_FILE> --format <FORMAT> --table <KEYSPACE.TABLE> [OPTIONS]
 ```
 
-#### Options:
+#### Options (Current Implementation):
 ```bash
--s, --schema <FILE>          Schema JSON file (required for SSTable input)
--f, --format <FORMAT>        Output format [json|csv|parquet|sql]
--o, --output <FILE>          Output file path
---filter <EXPR>              Filter expression
---project <COLS>             Project specific columns
---transform <SPEC>           Transform expressions
+-f, --format <FORMAT>        Output format [json|csv|parquet|cql] (required)
+-t, --table <TABLE>          Table name as keyspace.table (required)
+-q, --query <WHERE>          WHERE clause filter (optional)
+-l, --limit <N>              Maximum rows to export (optional)
+```
+
+#### Streaming Behavior:
+Export uses memory-efficient streaming automatically:
+- Processes data in 1,000-row chunks
+- Parquet uses 10,000-row row groups
+- Designed for 128MB memory budget
+
+#### Future Options (Not Yet Implemented):
+```bash
 --compress                   Compress output
 --batch-size <N>             Batch size for processing
---streaming                  Use streaming mode
+--project <COLS>             Project specific columns
+--transform <SPEC>           Transform expressions
 --include-schema             Include schema in output
 --date-format <FMT>          Date format for CSV output
 --null-value <STR>           Null value representation
@@ -201,30 +210,25 @@ cqlite export <SOURCE> [OPTIONS]
 #### Examples:
 ```bash
 # Export to JSON
-cqlite export data.sst --schema user_schema.json \
-  --format json \
-  --output users.json \
-  --filter "age >= 18"
+cqlite --schema schema.cql --data-dir ./sstables \
+  export users.json --format json --table myks.users
 
-# Export to CSV with custom formatting
-cqlite export data.sst --schema user_schema.json \
-  --format csv \
-  --output users.csv \
-  --date-format "%Y-%m-%d" \
-  --null-value "NULL"
+# Export to CSV with row limit
+cqlite --schema schema.cql --data-dir ./sstables \
+  export users.csv --format csv --table myks.users --limit 1000
 
-# Export to Parquet with compression
-cqlite export data.sst --schema user_schema.json \
-  --format parquet \
-  --output users.parquet \
-  --compress \
-  --streaming
+# Export with WHERE filter
+cqlite --schema schema.cql --data-dir ./sstables \
+  export active_users.csv --format csv \
+  --table myks.users --query "active = true"
 
-# Export SQL INSERT statements
-cqlite export data.sst --schema user_schema.json \
-  --format sql \
-  --output users.sql \
-  --transform "table_name=migrated_users"
+# Export to Parquet (streaming is automatic)
+cqlite --schema schema.cql --data-dir ./sstables \
+  export users.parquet --format parquet --table myks.users
+
+# Export CQL INSERT statements for migration
+cqlite --schema schema.cql --data-dir ./sstables \
+  export backup.cql --format cql --table myks.users
 ```
 
 ### 4. Query Command - `cqlite query`

@@ -190,6 +190,9 @@ pub enum Commands {
         /// Query filter (WHERE clause)
         #[arg(short, long)]
         query: Option<String>,
+        /// Maximum number of rows to export
+        #[arg(short, long)]
+        limit: Option<usize>,
     },
     /// Administrative commands
     Admin {

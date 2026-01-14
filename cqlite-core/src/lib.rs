@@ -314,6 +314,56 @@ impl Database {
         result
     }
 
+    /// Execute a SQL query with streaming results (Issue #280)
+    ///
+    /// Returns a `QueryResultIterator` that yields rows incrementally via a bounded
+    /// channel, enabling memory-efficient processing of large result sets.
+    ///
+    /// This is the recommended method for exporting large tables, as it avoids
+    /// materializing all rows in memory at once.
+    ///
+    /// # Arguments
+    ///
+    /// * `sql` - The SQL query to execute (must be a SELECT statement)
+    /// * `config` - Streaming configuration (buffer size, chunk hints)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Query is not a SELECT statement
+    /// - SQL syntax is invalid
+    /// - Query execution fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use cqlite_core::{Database, Config};
+    /// # use cqlite_core::query::result::StreamingConfig;
+    /// # use std::path::Path;
+    /// # tokio_test::block_on(async {
+    /// # let db = Database::open(Path::new("./data"), Config::default()).await?;
+    /// let config = StreamingConfig::default();
+    /// let mut iter = db.execute_streaming(
+    ///     "SELECT * FROM large_table",
+    ///     config
+    /// ).await?;
+    ///
+    /// while let Some(row_result) = iter.next_async().await {
+    ///     let row = row_result?;
+    ///     // Process row incrementally
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # });
+    /// ```
+    #[cfg(feature = "state_machine")]
+    pub async fn execute_streaming(
+        &self,
+        sql: &str,
+        config: query::result::StreamingConfig,
+    ) -> Result<query::result::QueryResultIterator> {
+        self.query.execute_streaming(sql, config).await
+    }
+
     /// Prepare a SQL statement for repeated execution
     ///
     /// # Arguments
