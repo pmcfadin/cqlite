@@ -44,7 +44,7 @@
 
 use duckdb::Connection;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
@@ -100,10 +100,10 @@ fn assert_test_data_available() -> (PathBuf, PathBuf) {
 
 /// Export a table to Parquet using CQLite CLI
 fn export_to_parquet(
-    schema_file: &PathBuf,
-    data_dir: &PathBuf,
+    schema_file: &Path,
+    data_dir: &Path,
     table_name: &str,
-    output_file: &PathBuf,
+    output_file: &Path,
 ) -> Output {
     run_cli_command(&[
         "--schema",
@@ -121,10 +121,10 @@ fn export_to_parquet(
 
 /// Export a table to JSON using CQLite CLI (for row count comparison)
 fn export_to_json(
-    schema_file: &PathBuf,
-    data_dir: &PathBuf,
+    schema_file: &Path,
+    data_dir: &Path,
     table_name: &str,
-    output_file: &PathBuf,
+    output_file: &Path,
 ) -> Output {
     run_cli_command(&[
         "--schema",
@@ -141,7 +141,7 @@ fn export_to_json(
 }
 
 /// Count rows in a JSON export file
-fn count_json_rows(json_file: &PathBuf) -> usize {
+fn count_json_rows(json_file: &Path) -> usize {
     let json_content = fs::read_to_string(json_file).expect("Failed to read JSON file");
     let parsed: serde_json::Value =
         serde_json::from_str(&json_content).expect("Should be valid JSON");
@@ -159,10 +159,18 @@ fn test_duckdb_reads_parquet_basic_types() {
     let parquet_file = temp_dir.path().join("basic_types.parquet");
 
     // Export test_basic.simple_table to Parquet
-    let output = export_to_parquet(&schema_file, &data_dir, "test_basic.simple_table", &parquet_file);
+    let output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &parquet_file,
+    );
 
     eprintln!("Export exit status: {}", output.status);
-    eprintln!("Export STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "Export STDERR:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     assert!(
         output.status.success(),
@@ -180,7 +188,10 @@ fn test_duckdb_reads_parquet_basic_types() {
 
     let row_count: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}')",
+                parquet_file.display()
+            ),
             [],
             |row| row.get(0),
         )
@@ -210,8 +221,18 @@ fn test_duckdb_row_count_parity() {
     let json_file = temp_dir.path().join("parity.json");
 
     // Export to both Parquet and JSON
-    let parquet_output = export_to_parquet(&schema_file, &data_dir, "test_basic.simple_table", &parquet_file);
-    let json_output = export_to_json(&schema_file, &data_dir, "test_basic.simple_table", &json_file);
+    let parquet_output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &parquet_file,
+    );
+    let json_output = export_to_json(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &json_file,
+    );
 
     assert!(
         parquet_output.status.success(),
@@ -226,7 +247,10 @@ fn test_duckdb_row_count_parity() {
     let conn = Connection::open_in_memory().expect("Failed to open DuckDB connection");
     let duckdb_row_count: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}')",
+                parquet_file.display()
+            ),
             [],
             |row| row.get(0),
         )
@@ -260,10 +284,18 @@ fn test_duckdb_reads_parquet_with_collections() {
     let parquet_file = temp_dir.path().join("collections.parquet");
 
     // Export test_collections.collection_table to Parquet
-    let output = export_to_parquet(&schema_file, &data_dir, "test_collections.collection_table", &parquet_file);
+    let output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_collections.collection_table",
+        &parquet_file,
+    );
 
     eprintln!("Export exit status: {}", output.status);
-    eprintln!("Export STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "Export STDERR:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     assert!(
         output.status.success(),
@@ -281,7 +313,10 @@ fn test_duckdb_reads_parquet_with_collections() {
 
     let row_count: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}')",
+                parquet_file.display()
+            ),
             [],
             |row| row.get(0),
         )
@@ -292,13 +327,16 @@ fn test_duckdb_reads_parquet_with_collections() {
     // Verify we can query specific columns (basic smoke test)
     let has_columns: bool = conn
         .query_row(
-            &format!("SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_name IN (SELECT table_name FROM duckdb_tables())"),
+            "SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_name IN (SELECT table_name FROM duckdb_tables())",
             [],
             |row| row.get(0),
         )
         .unwrap_or(false);
 
-    assert!(has_columns || row_count >= 0, "DuckDB should be able to read schema or data");
+    assert!(
+        has_columns || row_count >= 0,
+        "DuckDB should be able to read schema or data"
+    );
 
     eprintln!(
         "SUCCESS: DuckDB successfully read collections Parquet with {} rows",
@@ -315,7 +353,12 @@ fn test_duckdb_type_compatibility() {
     let parquet_file = temp_dir.path().join("types.parquet");
 
     // Export test_basic.simple_table which has age (INT) and active (BOOLEAN) columns
-    let output = export_to_parquet(&schema_file, &data_dir, "test_basic.simple_table", &parquet_file);
+    let output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &parquet_file,
+    );
 
     assert!(
         output.status.success(),
@@ -328,7 +371,10 @@ fn test_duckdb_type_compatibility() {
     // Test 1: Basic COUNT aggregation
     let row_count: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}')",
+                parquet_file.display()
+            ),
             [],
             |row| row.get(0),
         )
@@ -340,7 +386,10 @@ fn test_duckdb_type_compatibility() {
     // Test 2: Try to get column names and types
     // DuckDB's read_parquet automatically infers schema
     let describe_result = conn.execute(
-        &format!("DESCRIBE SELECT * FROM read_parquet('{}')", parquet_file.display()),
+        &format!(
+            "DESCRIBE SELECT * FROM read_parquet('{}')",
+            parquet_file.display()
+        ),
         [],
     );
 
@@ -360,7 +409,10 @@ fn test_duckdb_type_compatibility() {
         Ok((min, max))
     }) {
         Ok((min_age, max_age)) => {
-            eprintln!("DuckDB aggregation - MIN(age): {}, MAX(age): {}", min_age, max_age);
+            eprintln!(
+                "DuckDB aggregation - MIN(age): {}, MAX(age): {}",
+                min_age, max_age
+            );
             assert!(
                 min_age <= max_age,
                 "MIN should be less than or equal to MAX"
@@ -393,7 +445,12 @@ fn test_duckdb_schema_inference() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let parquet_file = temp_dir.path().join("schema_test.parquet");
 
-    let output = export_to_parquet(&schema_file, &data_dir, "test_basic.simple_table", &parquet_file);
+    let output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &parquet_file,
+    );
 
     assert!(
         output.status.success(),
@@ -404,7 +461,10 @@ fn test_duckdb_schema_inference() {
 
     // Query to list all columns in the Parquet file
     let stmt = conn
-        .prepare(&format!("SELECT * FROM read_parquet('{}') LIMIT 0", parquet_file.display()))
+        .prepare(&format!(
+            "SELECT * FROM read_parquet('{}') LIMIT 0",
+            parquet_file.display()
+        ))
         .expect("Failed to prepare query");
 
     let column_count = stmt.column_count();
@@ -446,7 +506,12 @@ fn test_duckdb_handles_null_values() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let parquet_file = temp_dir.path().join("nulls.parquet");
 
-    let output = export_to_parquet(&schema_file, &data_dir, "test_basic.simple_table", &parquet_file);
+    let output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &parquet_file,
+    );
 
     assert!(
         output.status.success(),
@@ -458,7 +523,10 @@ fn test_duckdb_handles_null_values() {
     // Count total rows and rows with NULL values in any column
     let total_rows: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}')",
+                parquet_file.display()
+            ),
             [],
             |row| row.get(0),
         )
@@ -479,7 +547,10 @@ fn test_duckdb_handles_null_values() {
         }
         Err(e) => {
             // Column might not exist - log but don't fail
-            eprintln!("INFO: Could not query NULLs (column might not exist): {}", e);
+            eprintln!(
+                "INFO: Could not query NULLs (column might not exist): {}",
+                e
+            );
         }
     }
 
@@ -496,7 +567,12 @@ fn test_duckdb_parquet_metadata() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let parquet_file = temp_dir.path().join("metadata.parquet");
 
-    let output = export_to_parquet(&schema_file, &data_dir, "test_basic.simple_table", &parquet_file);
+    let output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &parquet_file,
+    );
 
     assert!(
         output.status.success(),
@@ -507,7 +583,10 @@ fn test_duckdb_parquet_metadata() {
 
     // DuckDB's parquet_metadata() function requires the parquet extension
     // which should be available by default in DuckDB 1.0+
-    let metadata_query = format!("SELECT * FROM parquet_metadata('{}')", parquet_file.display());
+    let metadata_query = format!(
+        "SELECT * FROM parquet_metadata('{}')",
+        parquet_file.display()
+    );
 
     match conn.query_row(&metadata_query, [], |_row| {
         // Try to get num_rows from metadata
@@ -529,7 +608,10 @@ fn test_duckdb_parquet_metadata() {
     // Fallback: Just verify we can read the file
     let row_count: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}')",
+                parquet_file.display()
+            ),
             [],
             |row| row.get(0),
         )
@@ -570,7 +652,10 @@ fn test_duckdb_reads_empty_parquet() {
     ]);
 
     eprintln!("Export exit status: {}", output.status);
-    eprintln!("Export STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "Export STDERR:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Export might succeed or fail depending on implementation
     // If it fails, skip the DuckDB test
@@ -588,7 +673,10 @@ fn test_duckdb_reads_empty_parquet() {
     let conn = Connection::open_in_memory().expect("Failed to open DuckDB connection");
 
     match conn.query_row(
-        &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+        &format!(
+            "SELECT COUNT(*) FROM read_parquet('{}')",
+            parquet_file.display()
+        ),
         [],
         |row| row.get::<_, i64>(0),
     ) {
@@ -614,7 +702,12 @@ fn test_duckdb_concurrent_reads() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let parquet_file = temp_dir.path().join("concurrent.parquet");
 
-    let output = export_to_parquet(&schema_file, &data_dir, "test_basic.simple_table", &parquet_file);
+    let output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &parquet_file,
+    );
 
     assert!(
         output.status.success(),
@@ -628,7 +721,10 @@ fn test_duckdb_concurrent_reads() {
     // Read from both connections concurrently
     let count1: i64 = conn1
         .query_row(
-            &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}')",
+                parquet_file.display()
+            ),
             [],
             |row| row.get(0),
         )
@@ -636,7 +732,10 @@ fn test_duckdb_concurrent_reads() {
 
     let count2: i64 = conn2
         .query_row(
-            &format!("SELECT COUNT(*) FROM read_parquet('{}')", parquet_file.display()),
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}')",
+                parquet_file.display()
+            ),
             [],
             |row| row.get(0),
         )
