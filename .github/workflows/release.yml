@@ -63,94 +63,84 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-ffi:
-    name: Build FFI Libraries
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            lib_name: libcqlite.so
-          - target: x86_64-pc-windows-msvc
-            lib_name: cqlite.dll
-          - target: x86_64-apple-darwin
-            lib_name: libcqlite.dylib
+  # NOTE: FFI and WASM builds disabled until M4 (Language Bindings)
+  # Uncomment when cqlite-ffi and cqlite-wasm packages exist
+  #
+  # build-ffi:
+  #   name: Build FFI Libraries
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     matrix:
+  #       include:
+  #         - target: x86_64-unknown-linux-gnu
+  #           lib_name: libcqlite.so
+  #         - target: x86_64-pc-windows-msvc
+  #           lib_name: cqlite.dll
+  #         - target: x86_64-apple-darwin
+  #           lib_name: libcqlite.dylib
+  #   steps:
+  #   - uses: actions/checkout@v4
+  #   - name: Install Rust
+  #     uses: dtolnay/rust-toolchain@stable
+  #     with:
+  #       targets: ${{ matrix.target }}
+  #   - name: Install cross
+  #     run: cargo install cross
+  #   - name: Build FFI library
+  #     run: |
+  #       if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+  #         cargo build --package cqlite-ffi --release --target ${{ matrix.target }}
+  #       else
+  #         cross build --package cqlite-ffi --release --target ${{ matrix.target }}
+  #       fi
+  #   - name: Generate C headers
+  #     run: cargo run --package cqlite-ffi --bin cbindgen_gen
+  #   - name: Create FFI package
+  #     shell: bash
+  #     run: |
+  #       mkdir -p ffi-package/lib ffi-package/include
+  #       cp target/${{ matrix.target }}/release/${{ matrix.lib_name }} ffi-package/lib/
+  #       cp cqlite-ffi/include/*.h ffi-package/include/
+  #       cp cqlite-ffi/README.md ffi-package/
+  #       if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
+  #         7z a cqlite-ffi-${{ matrix.target }}.zip ffi-package/*
+  #       else
+  #         tar czf cqlite-ffi-${{ matrix.target }}.tar.gz ffi-package
+  #       fi
+  #   - name: Upload FFI artifact
+  #     uses: softprops/action-gh-release@v2
+  #     with:
+  #       files: ./cqlite-ffi-${{ matrix.target }}.${{ matrix.target == 'x86_64-pc-windows-msvc' && 'zip' || 'tar.gz' }}
+  #     env:
+  #       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
-
-    - name: Install cross
-      run: cargo install cross
-
-    - name: Build FFI library
-      run: |
-        if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
-          cargo build --package cqlite-ffi --release --target ${{ matrix.target }}
-        else
-          cross build --package cqlite-ffi --release --target ${{ matrix.target }}
-        fi
-
-    - name: Generate C headers
-      run: cargo run --package cqlite-ffi --bin cbindgen_gen
-
-    - name: Create FFI package
-      shell: bash
-      run: |
-        mkdir -p ffi-package/lib ffi-package/include
-        cp target/${{ matrix.target }}/release/${{ matrix.lib_name }} ffi-package/lib/
-        cp cqlite-ffi/include/*.h ffi-package/include/
-        cp cqlite-ffi/README.md ffi-package/
-        
-        if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
-          7z a cqlite-ffi-${{ matrix.target }}.zip ffi-package/*
-        else
-          tar czf cqlite-ffi-${{ matrix.target }}.tar.gz ffi-package
-        fi
-
-    - name: Upload FFI artifact
-      uses: softprops/action-gh-release@v2
-      with:
-        files: ./cqlite-ffi-${{ matrix.target }}.${{ matrix.target == 'x86_64-pc-windows-msvc' && 'zip' || 'tar.gz' }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-wasm:
-    name: Build WASM Package
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: wasm32-unknown-unknown
-
-    - name: Install wasm-pack
-      run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-    - name: Build WASM package
-      run: wasm-pack build cqlite-wasm --target web --out-dir pkg
-
-    - name: Create WASM archive
-      run: |
-        cd cqlite-wasm/pkg
-        tar czf ../../cqlite-wasm.tar.gz .
-
-    - name: Upload WASM artifact
-      uses: softprops/action-gh-release@v2
-      with:
-        files: ./cqlite-wasm.tar.gz
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # build-wasm:
+  #   name: Build WASM Package
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #   - uses: actions/checkout@v4
+  #   - name: Install Rust
+  #     uses: dtolnay/rust-toolchain@stable
+  #     with:
+  #       targets: wasm32-unknown-unknown
+  #   - name: Install wasm-pack
+  #     run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+  #   - name: Build WASM package
+  #     run: wasm-pack build cqlite-wasm --target web --out-dir pkg
+  #   - name: Create WASM archive
+  #     run: |
+  #       cd cqlite-wasm/pkg
+  #       tar czf ../../cqlite-wasm.tar.gz .
+  #   - name: Upload WASM artifact
+  #     uses: softprops/action-gh-release@v2
+  #     with:
+  #       files: ./cqlite-wasm.tar.gz
+  #     env:
+  #       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-crate:
     name: Publish to crates.io
-    needs: [build-cli, build-ffi, build-wasm]
+    needs: [build-cli]  # FFI/WASM builds disabled until M4
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -165,11 +155,11 @@ jobs:
     - name: Wait for cqlite-core to be available
       run: sleep 30
 
-    - name: Publish cqlite-ffi
-      run: cargo publish --package cqlite-ffi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-    - name: Publish cqlite-wasm
-      run: cargo publish --package cqlite-wasm --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    # NOTE: FFI/WASM publishing disabled until M4 (Language Bindings)
+    # - name: Publish cqlite-ffi
+    #   run: cargo publish --package cqlite-ffi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    # - name: Publish cqlite-wasm
+    #   run: cargo publish --package cqlite-wasm --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
     - name: Publish cqlite-cli
       run: cargo publish --package cqlite-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
