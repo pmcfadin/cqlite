@@ -1,0 +1,165 @@
+================================================================================
+                    CQLITE-CORE TEST COVERAGE SUMMARY
+                         Generated: Jan 9, 2026
+================================================================================
+
+OVERALL COVERAGE: 30.54% (8,457 / 27,690 lines)
+
+================================================================================
+                            TIER-BASED ANALYSIS
+================================================================================
+
+CRITICAL TIER (Target: 90%+)
+├─ Status: FAIL
+├─ Coverage: 33.31% (2,046 / 7,379 lines)
+├─ Files: 30 total (0/30 meet target)
+└─ Top Issues:
+    • block_entries.rs: 0.00% - 218 lines (BTI parsing completely untested)
+    • cache.rs: 0.00% - 29 lines
+    • integrity.rs: 0.00% - 53 lines
+    • key_digest.rs: 0.00% - 40 lines
+    • partition_lookup.rs: 0.00% - 85 lines
+    • data_access.rs: 3.88% - 297 lines untested
+    • block_io.rs: 4.29% - 201 lines untested
+
+IMPORTANT TIER (Target: 80%+)
+├─ Status: FAIL
+├─ Coverage: 43.10% (2,626 / 7,588 lines)
+├─ Files: 32 total (0/32 meet target)
+└─ Top Issues:
+    • cql/mod.rs: 0.00% - CQL parser completely untested
+    • select_optimizer.rs: 0.89% - Query optimization underdeveloped
+    • select_executor.rs: 1.23% - SELECT execution barely tested
+    • schema/discovery.rs: 4.84% - Schema introspection minimal
+
+SUPPORTING TIER (Target: 70%+)
+├─ Status: FAIL
+├─ Coverage: 51.36% (671 / 1,614 lines)
+├─ Files: 17 total (0/17 meet target)
+└─ Top Issues:
+    • bti/parser.rs: 17.72% - BTI index parsing undercovered
+    • bti/nodes.rs: 21.20% - BTI node parsing undercovered
+    • directory/validation.rs: 25.53% - Directory validation sparse
+    • directory/toc.rs: 30.95% - TOC parsing sparse
+
+UTILITIES TIER (Target: 50%+)
+├─ Status: FAIL
+├─ Coverage: 14.63% (43 / 148 lines)
+├─ Files: 2 total (0/2 meet target)
+└─ Top Issues:
+    • benchmarks/zerocopy_benchmarks.rs: 0.00% - Not exercised
+    • testing/dataset_helpers.rs: 29.25% - Partial coverage
+
+================================================================================
+                          KEY PARSING FILES STATUS
+================================================================================
+
+FILE                              | COVERAGE | STATUS
+────────────────────────────────────────────────────
+key_parsing.rs                    | 44.30%   | COVERED (but needs +50%)
+value_parsing.rs                  | 33.60%   | COVERED (but needs +50%)
+block_entries.rs                  | 0.00%    | NOT COVERED ⚠️
+
+================================================================================
+                            HIGHEST COVERAGE FILES
+================================================================================
+
+1. parser/mod.rs                  100.00% ✓
+2. parser/statistics.rs            89.35% ✓
+3. parser/header.rs                80.17% ✓
+4. byte_comparable.rs              76.27%
+5. reader/types.rs                 75.00%
+
+================================================================================
+                            FAILURE ANALYSIS
+================================================================================
+
+TIER PERFORMANCE VS TARGETS:
+
+Tier                    | Current | Target | Gap    | Status
+─────────────────────────────────────────────────────────────
+Critical (90%+)         | 33.31%  | 90%    | -56.69 | FAIL
+Important (80%+)        | 43.10%  | 80%    | -36.90 | FAIL
+Supporting (70%+)       | 51.36%  | 70%    | -18.64 | FAIL
+Utilities (50%+)        | 14.63%  | 50%    | -35.37 | FAIL
+
+ALL TIERS BELOW TARGET
+
+================================================================================
+                        IMMEDIATE ACTION ITEMS
+================================================================================
+
+PRIORITY 1 - CRITICAL GAPS (Fix this week):
+├─ Block entries parsing (block_entries.rs) - 218 lines
+├─ Reader cache layer (cache.rs) - 29 lines
+├─ Integrity validation (integrity.rs) - 53 lines
+└─ Key digest computation (key_digest.rs) - 40 lines
+   Total: 340 lines need coverage
+
+PRIORITY 2 - SIGNIFICANT GAPS (Fix this sprint):
+├─ Data access layer (data_access.rs) - 297 lines untested
+├─ Block I/O (block_io.rs) - 201 lines untested
+├─ Reader parsing module (parsing/mod.rs) - 231 lines untested
+└─ Query executor (executor.rs) - 140 lines untested
+   Total: 869 lines need coverage
+
+PRIORITY 3 - EXPANSION AREAS:
+├─ Key parsing expansion (+83 lines to reach 90%)
+├─ Value parsing expansion (+166 lines to reach 90%)
+├─ BTI index coverage (from 17.72% to 50%+)
+└─ Schema discovery (from 4.84% to 50%+)
+
+================================================================================
+                            TEST STATUS
+================================================================================
+
+EXECUTED TESTS:
+✓ collection_sstable_integration_test - 6 passed
+✓ test_issue_188_select_limit_query - 7 passed
+✓ spec_driven_header_parsing_tests - 12 passed
+✓ parsing_improvements_test - 10 passed
+✓ parser_factory_tests - 10 passed
+✓ reader_compression_tests - 7 passed
+
+FEATURE-GATED TESTS (Not captured):
+⚠ issue_222_select_integration_test - 0 coverage recorded
+⚠ issue_237_row_size_offset_regression_test - 0 coverage recorded
+⚠ execution_path_parity_tests - 0 coverage recorded
+⚠ query_correctness_tests - 0 coverage recorded
+
+================================================================================
+                            RECOMMENDATIONS
+================================================================================
+
+IMMEDIATE (This Week):
+1. Run tarpaulin with --all-features to capture gated tests
+2. Add unit tests for block_entries.rs (target: 50% coverage)
+3. Add integration tests for cache.rs and integrity.rs
+
+SHORT-TERM (This Sprint):
+1. Expand key_parsing.rs to 90% coverage (need +83 lines)
+2. Expand value_parsing.rs to 90% coverage (need +166 lines)
+3. Improve data_access.rs from 3.88% to 50%+
+
+MID-TERM (Next Sprint):
+1. Query executor coverage: 14.24% → 60%+
+2. CQL parser coverage: 0.00% → 30%+
+3. BTI index coverage: 17.72% → 50%+
+
+================================================================================
+                        REPRODUCIBILITY
+================================================================================
+
+Command:
+  env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo tarpaulin \
+    --package cqlite-core --out Json --output-dir /tmp --timeout 300
+
+Output Files:
+  /tmp/tarpaulin-report.json - Machine-readable coverage data
+  /tmp/tarpaulin-report.html - Visual HTML report
+  /Users/patrick/local_projects/cqlite/docs/coverage-analysis-jan-2026.md
+
+Date: January 9, 2026
+Tool: cargo tarpaulin with LLVM instrumentation
+
+================================================================================
