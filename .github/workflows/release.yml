@@ -48,9 +48,13 @@ jobs:
       with:
         targets: ${{ matrix.target }}
 
+    # Override rust-toolchain.toml to use stable for release builds
+    - name: Override Rust toolchain
+      run: rm -f rust-toolchain.toml
+
     - name: Install cross (Linux only)
       if: matrix.use_cross
-      run: cargo install cross --git https://github.com/cross-rs/cross
+      run: cargo install cross
 
     - name: Build CLI
       shell: bash
