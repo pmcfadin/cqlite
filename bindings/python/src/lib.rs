@@ -5,8 +5,10 @@
 
 use pyo3::prelude::*;
 
+mod error;
 mod runtime;
 
+pub use error::{to_py_err, CqliteError, ParseError, QueryError, SchemaError};
 pub use runtime::{block_on, get_runtime};
 
 /// CQLite version string.
@@ -21,7 +23,12 @@ fn version() -> &'static str {
 /// Python module for CQLite.
 #[pymodule]
 fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Register version info
     m.add("__version__", VERSION)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
+
+    // Register exception types
+    error::register_exceptions(m)?;
+
     Ok(())
 }
