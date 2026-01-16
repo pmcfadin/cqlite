@@ -21,6 +21,10 @@ from cqlite._cqlite import (
     Row,
     ColumnInfo,
     StreamingIterator,
+    # Prepared statements
+    PreparedStatement,
+    # Statistics
+    DatabaseStats,
 )
 
 __all__ = [
@@ -44,4 +48,8 @@ __all__ = [
     "Row",
     "ColumnInfo",
     "StreamingIterator",
+    # Prepared statements
+    "PreparedStatement",
+    # Statistics
+    "DatabaseStats",
 ]

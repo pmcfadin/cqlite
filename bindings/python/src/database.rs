@@ -12,8 +12,10 @@ use pyo3::prelude::*;
 
 use crate::config::{config_from_py, StreamingConfig};
 use crate::error::to_py_err;
+use crate::prepared::PreparedStatement;
 use crate::result::{QueryResult, StreamingIterator};
 use crate::runtime::block_on;
+use crate::stats::DatabaseStats;
 
 /// A CQLite database handle.
 ///
@@ -238,6 +240,79 @@ impl Database {
             .map_err(to_py_err)?;
 
         Ok(StreamingIterator::new(core_iter))
+    }
+
+    /// Prepare a CQL statement for repeated execution.
+    ///
+    /// Prepares and caches a query plan for the given CQL statement.
+    /// Useful for queries that will be executed multiple times.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - CQL SELECT statement to prepare
+    ///
+    /// # Returns
+    ///
+    /// A PreparedStatement that can be inspected for statistics.
+    ///
+    /// # Raises
+    ///
+    /// * `ParseError` - If CQL syntax is invalid
+    /// * `RuntimeError` - If database is closed
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// stmt = db.prepare("SELECT * FROM users WHERE id = ?")
+    /// print(f"Parameters: {stmt.parameter_count}")
+    /// print(f"Stats: {stmt.stats()}")
+    /// ```
+    pub fn prepare(&self, py: Python<'_>, query: &str) -> PyResult<PreparedStatement> {
+        self.ensure_open()?;
+
+        let db = self.inner();
+        let query_owned = query.to_string();
+
+        // Release GIL during async execution
+        let prepared = py
+            .allow_threads(|| block_on(db.prepare(&query_owned)))
+            .map_err(to_py_err)?;
+
+        Ok(PreparedStatement::new(prepared))
+    }
+
+    /// Get database statistics.
+    ///
+    /// Returns comprehensive statistics about storage, memory usage,
+    /// and query execution.
+    ///
+    /// # Returns
+    ///
+    /// DatabaseStats with storage_stats, memory_stats, and query_stats.
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If database is closed
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// stats = db.stats()
+    /// print(f"SSTables: {stats.storage_stats['sstable_count']}")
+    /// print(f"Memory used: {stats.memory_stats['total_memory_used']}")
+    /// print(f"Full stats: {stats.to_dict()}")
+    /// ```
+    pub fn stats(&self, py: Python<'_>) -> PyResult<DatabaseStats> {
+        self.ensure_open()?;
+
+        let db = self.inner();
+
+        // Release GIL during async execution
+        let core_stats = py
+            .allow_threads(|| block_on(db.stats()))
+            .map_err(to_py_err)?;
+
+        DatabaseStats::from_core(py, core_stats)
     }
 }
 

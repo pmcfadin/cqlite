@@ -8,15 +8,19 @@ use pyo3::prelude::*;
 mod config;
 mod database;
 mod error;
+mod prepared;
 mod result;
 mod runtime;
+mod stats;
 mod value;
 
 pub use config::{config_from_py, StreamingConfig};
 pub use database::{open, Database};
 pub use error::{to_py_err, CqliteError, ParseError, QueryError, SchemaError};
+pub use prepared::PreparedStatement;
 pub use result::{ColumnInfo, QueryResult, QueryResultIter, Row, StreamingIterator};
 pub use runtime::{block_on, get_runtime};
+pub use stats::DatabaseStats;
 
 /// CQLite version string.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -45,6 +49,12 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register result types (QueryResult, Row, ColumnInfo)
     result::register_result(m)?;
+
+    // Register prepared statement types
+    prepared::register_prepared(m)?;
+
+    // Register database stats types
+    stats::register_stats(m)?;
 
     Ok(())
 }
