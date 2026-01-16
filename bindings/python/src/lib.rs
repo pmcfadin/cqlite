@@ -6,10 +6,12 @@
 use pyo3::prelude::*;
 
 mod config;
+mod database;
 mod error;
 mod runtime;
 
 pub use config::{config_from_py, StreamingConfig};
+pub use database::{open, Database};
 pub use error::{to_py_err, CqliteError, ParseError, QueryError, SchemaError};
 pub use runtime::{block_on, get_runtime};
 
@@ -34,6 +36,9 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register configuration classes and functions
     config::register_config(m)?;
+
+    // Register database class and open function
+    database::register_database(m)?;
 
     Ok(())
 }

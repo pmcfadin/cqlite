@@ -13,6 +13,9 @@ from cqlite._cqlite import (
     memory_optimized,
     performance_optimized,
     validate_config,
+    # Database
+    Database,
+    open,
 )
 
 __all__ = [
@@ -28,4 +31,7 @@ __all__ = [
     "memory_optimized",
     "performance_optimized",
     "validate_config",
+    # Database
+    "Database",
+    "open",
 ]

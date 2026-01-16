@@ -466,6 +466,16 @@ impl Database {
         self.storage.compact().await
     }
 
+    /// Shutdown the database storage engine without consuming self.
+    ///
+    /// This is useful for language bindings where the Database is wrapped
+    /// in an Arc and cannot be consumed. The shutdown operation is idempotent.
+    ///
+    /// For consuming close that also drops the Database, use `close()`.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.storage.shutdown().await
+    }
+
     /// Close the database and release all resources
     ///
     /// This method ensures all pending operations are completed and
