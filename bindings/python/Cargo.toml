@@ -1,0 +1,23 @@
+[package]
+name = "cqlite-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Python bindings for CQLite SSTable reader"
+
+[lib]
+name = "cqlite"
+crate-type = ["cdylib"]
+
+[dependencies]
+cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression"] }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py39"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

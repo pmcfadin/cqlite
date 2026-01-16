@@ -2,6 +2,7 @@
 members = [
     "cqlite-core",
     "cqlite-cli",
+    "bindings/python",
     "tests",
     "examples",
     "tools/*",
@@ -106,6 +107,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # FFI
 libc = "0.2"
 cbindgen = "0.26"
+pyo3 = { version = "0.23" }
 
 # Arrow and Parquet support (M3 output writers)
 arrow = { version = "53", default-features = false }

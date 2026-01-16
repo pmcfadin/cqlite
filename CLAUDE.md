@@ -105,11 +105,12 @@ Status metrics refresh every 5 seconds. Status line disabled for piped output.
 ```
 cqlite-core/     # Core library (SSTable parsing, query engine)
 cqlite-cli/      # Command-line interface
+bindings/python/ # Python bindings (PyO3) - M4
 test-data/       # Real Cassandra 5.0 SSTables for testing
 tools/           # sstabledump-validator, format-validator
 ```
 
-**Planned (M4+)**: `cqlite-ffi/` (C/C++ bindings), `cqlite-wasm/` (WebAssembly)
+**Planned (M4+)**: `bindings/node/` (Node.js bindings), `bindings/wasm/` (WebAssembly - M6)
 
 ### Key Source Paths
 
