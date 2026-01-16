@@ -14,7 +14,7 @@ use cqlite_core::Value;
 /// Handles all CQL types with proper Python type mapping:
 /// - Primitives: Null→None, Boolean→bool, Integer→int, Float→float, Text→str
 /// - Binary: Blob→bytes, Uuid→str (formatted), Inet→str (IP format)
-/// - Temporal: Timestamp→datetime, Date→date, Time→time
+/// - Temporal: Timestamp→datetime, Date→date, Time→time, Duration→timedelta
 /// - Collections: List→list, Set→frozenset, Map→dict, Tuple→tuple
 /// - Complex: Udt→dict, Varint→int, Decimal→decimal.Decimal
 /// - Special: Tombstone→None, Frozen→unwrap
@@ -41,7 +41,7 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
             months,
             days,
             nanos,
-        } => duration_to_dict(py, *months, *days, *nanos),
+        } => duration_to_timedelta(py, *months, *days, *nanos),
         Value::Json(j) => json_to_py(py, j),
         Value::List(l) => list_to_py(py, l),
         Value::Set(s) => set_to_py(py, s),
@@ -239,13 +239,44 @@ fn decimal_to_pydecimal(py: Python<'_>, scale: i32, unscaled: &[u8]) -> PyResult
     }
 }
 
-/// Convert duration to dict with months, days, nanos.
-fn duration_to_dict(py: Python<'_>, months: i32, days: i32, nanos: i64) -> PyResult<PyObject> {
-    let dict = PyDict::new(py);
-    dict.set_item("months", months)?;
-    dict.set_item("days", days)?;
-    dict.set_item("nanos", nanos)?;
-    Ok(dict.into_any().unbind())
+/// Convert duration to datetime.timedelta.
+///
+/// IMPORTANT: Precision limitations:
+/// - Months are approximated as 30 days (1 month = 30 days)
+///   Example: 2 months, 5 days → 65 days
+/// - Nanoseconds are truncated to microseconds (Python timedelta precision)
+///   Example: 1,234,567,890 ns → 1,234,567 μs (890 ns lost)
+///
+/// This approximation is documented in M4 spec section 5.2.
+fn duration_to_timedelta(py: Python<'_>, months: i32, days: i32, nanos: i64) -> PyResult<PyObject> {
+    let datetime = py.import("datetime")?;
+    let timedelta = datetime.getattr("timedelta")?;
+
+    // Convert months to days (approximation: 1 month = 30 days)
+    // Use checked arithmetic to prevent overflow on extreme values
+    let total_days = (months as i64)
+        .checked_mul(30)
+        .and_then(|m| m.checked_add(days as i64))
+        .ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err(
+                "Duration value too large to convert to timedelta",
+            )
+        })?;
+
+    // Convert nanoseconds to microseconds (truncate sub-microsecond precision)
+    // nanos = total nanoseconds in the duration
+    // 1 microsecond = 1000 nanoseconds
+    let total_micros = nanos / 1000;
+
+    // timedelta(days=X, microseconds=Y)
+    // Note: timedelta normalizes large microseconds to seconds/days automatically
+    // Example: timedelta(days=0, microseconds=86400000000) → timedelta(days=1)
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("days", total_days)?;
+    kwargs.set_item("microseconds", total_micros)?;
+
+    let result = timedelta.call((), Some(&kwargs))?;
+    Ok(result.into_pyobject(py)?.into_any().unbind())
 }
 
 /// Convert serde_json::Value to Python object.
