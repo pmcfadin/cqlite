@@ -16,6 +16,10 @@ from cqlite._cqlite import (
     # Database
     Database,
     open,
+    # Result types
+    QueryResult,
+    Row,
+    ColumnInfo,
 )
 
 __all__ = [
@@ -34,4 +38,8 @@ __all__ = [
     # Database
     "Database",
     "open",
+    # Result types
+    "QueryResult",
+    "Row",
+    "ColumnInfo",
 ]

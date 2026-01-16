@@ -18,6 +18,7 @@ pyo3 = { workspace = true, features = ["extension-module", "abi3-py39"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+hex = "0.4"
 
 [lints]
 workspace = true

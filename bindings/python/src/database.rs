@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 
 use crate::config::config_from_py;
 use crate::error::to_py_err;
+use crate::result::QueryResult;
 use crate::runtime::block_on;
 
 /// A CQLite database handle.
@@ -45,7 +46,6 @@ pub struct Database {
 
 impl Database {
     /// Check if database is open, raising RuntimeError if closed.
-    #[allow(dead_code)]
     fn ensure_open(&self) -> PyResult<()> {
         if self.closed.load(Ordering::SeqCst) {
             Err(PyRuntimeError::new_err("Database is closed"))
@@ -54,11 +54,10 @@ impl Database {
         }
     }
 
-    /// Get a clone of the inner database Arc (for future execute methods).
+    /// Get a clone of the inner database Arc.
     ///
     /// Returns an Arc clone to allow async operations that may outlive
     /// the borrow of self.
-    #[allow(dead_code)]
     pub(crate) fn inner(&self) -> Arc<cqlite_core::Database> {
         Arc::clone(&self.inner)
     }
@@ -138,6 +137,48 @@ impl Database {
         } else {
             "Database(open)".to_string()
         }
+    }
+
+    /// Execute a CQL query and return results.
+    ///
+    /// Executes a synchronous query against the database and returns all
+    /// matching rows. For large result sets, consider using `execute_streaming()`
+    /// (available in a future release).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - CQL SELECT statement to execute
+    ///
+    /// # Returns
+    ///
+    /// QueryResult containing rows, metadata, and timing information.
+    ///
+    /// # Raises
+    ///
+    /// * `QueryError` - If query execution fails
+    /// * `ParseError` - If CQL syntax is invalid
+    /// * `RuntimeError` - If database is closed
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// result = db.execute("SELECT * FROM users LIMIT 10")
+    /// print(f"Got {len(result)} rows in {result.execution_time_ms}ms")
+    /// for row in result:
+    ///     print(row["name"])
+    /// ```
+    pub fn execute(&self, py: Python<'_>, query: &str) -> PyResult<QueryResult> {
+        self.ensure_open()?;
+
+        let db = self.inner();
+        let query_owned = query.to_string();
+
+        // Release GIL during async execution to allow other Python threads to run
+        let core_result = py
+            .allow_threads(|| block_on(db.execute(&query_owned)))
+            .map_err(to_py_err)?;
+
+        QueryResult::from_core(py, core_result)
     }
 }
 
