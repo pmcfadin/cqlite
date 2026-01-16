@@ -8,6 +8,11 @@ from cqlite._cqlite import (
     SchemaError,
     QueryError,
     ParseError,
+    # Configuration
+    StreamingConfig,
+    memory_optimized,
+    performance_optimized,
+    validate_config,
 )
 
 __all__ = [
@@ -18,4 +23,9 @@ __all__ = [
     "SchemaError",
     "QueryError",
     "ParseError",
+    # Configuration
+    "StreamingConfig",
+    "memory_optimized",
+    "performance_optimized",
+    "validate_config",
 ]

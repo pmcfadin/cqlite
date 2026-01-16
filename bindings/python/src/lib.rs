@@ -5,9 +5,11 @@
 
 use pyo3::prelude::*;
 
+mod config;
 mod error;
 mod runtime;
 
+pub use config::{config_from_py, StreamingConfig};
 pub use error::{to_py_err, CqliteError, ParseError, QueryError, SchemaError};
 pub use runtime::{block_on, get_runtime};
 
@@ -29,6 +31,9 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register exception types
     error::register_exceptions(m)?;
+
+    // Register configuration classes and functions
+    config::register_config(m)?;
 
     Ok(())
 }
