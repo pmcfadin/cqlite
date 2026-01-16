@@ -1,0 +1,91 @@
+//! Tokio runtime management for Python bindings.
+//!
+//! Provides a global tokio runtime singleton for bridging async Rust
+//! operations to synchronous Python calls.
+
+use std::future::Future;
+use std::sync::OnceLock;
+use tokio::runtime::Runtime;
+
+/// Global tokio runtime instance.
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+/// Returns a reference to the global tokio runtime.
+///
+/// The runtime is lazily initialized on first access using a multi-threaded
+/// executor with all features enabled.
+///
+/// # Panics
+///
+/// Panics if the runtime cannot be created (e.g., system resource exhaustion).
+pub fn get_runtime() -> &'static Runtime {
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_name("cqlite-py-worker")
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime")
+    })
+}
+
+/// Executes an async future on the global runtime, blocking until completion.
+///
+/// This is the primary bridge between sync Python calls and async Rust operations.
+///
+/// # Arguments
+///
+/// * `future` - The async operation to execute
+///
+/// # Returns
+///
+/// The result of the future
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    get_runtime().block_on(future)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_runtime_initializes_once() {
+        let rt1 = get_runtime();
+        let rt2 = get_runtime();
+        assert!(std::ptr::eq(rt1, rt2));
+    }
+
+    #[test]
+    fn test_block_on_executes_async() {
+        let result = block_on(async { 42 });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_block_on_with_async_block() {
+        let result = block_on(async {
+            let a = 10;
+            let b = 20;
+            a + b
+        });
+        assert_eq!(result, 30);
+    }
+
+    #[test]
+    fn test_runtime_from_multiple_threads() {
+        use std::thread;
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                thread::spawn(|| {
+                    let rt = get_runtime();
+                    std::ptr::addr_of!(*rt) as usize
+                })
+            })
+            .collect();
+
+        let addresses: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // All threads should get the same runtime instance
+        assert!(addresses.windows(2).all(|w| w[0] == w[1]));
+    }
+}

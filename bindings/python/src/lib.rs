@@ -5,6 +5,10 @@
 
 use pyo3::prelude::*;
 
+mod runtime;
+
+pub use runtime::{block_on, get_runtime};
+
 /// CQLite version string.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
