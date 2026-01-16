@@ -10,9 +10,9 @@ use std::sync::Arc;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-use crate::config::config_from_py;
+use crate::config::{config_from_py, StreamingConfig};
 use crate::error::to_py_err;
-use crate::result::QueryResult;
+use crate::result::{QueryResult, StreamingIterator};
 use crate::runtime::block_on;
 
 /// A CQLite database handle.
@@ -142,8 +142,7 @@ impl Database {
     /// Execute a CQL query and return results.
     ///
     /// Executes a synchronous query against the database and returns all
-    /// matching rows. For large result sets, consider using `execute_streaming()`
-    /// (available in a future release).
+    /// matching rows. For large result sets, consider using `execute_streaming()`.
     ///
     /// # Arguments
     ///
@@ -179,6 +178,66 @@ impl Database {
             .map_err(to_py_err)?;
 
         QueryResult::from_core(py, core_result)
+    }
+
+    /// Execute a CQL query with streaming results.
+    ///
+    /// Returns an iterator that yields rows one at a time, keeping memory
+    /// usage bounded by the `StreamingConfig` settings. Use this for large
+    /// result sets that would not fit in memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - CQL SELECT statement to execute
+    /// * `config` - Optional StreamingConfig for buffer/chunk sizes
+    ///
+    /// # Returns
+    ///
+    /// A StreamingIterator that yields Row objects.
+    ///
+    /// # Raises
+    ///
+    /// * `QueryError` - If query execution fails
+    /// * `ParseError` - If CQL syntax is invalid
+    /// * `RuntimeError` - If database is closed
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// # Basic streaming
+    /// for row in db.execute_streaming("SELECT * FROM large_table"):
+    ///     process(row)
+    ///
+    /// # With custom config
+    /// config = cqlite.StreamingConfig(buffer_size=512, chunk_size=5000)
+    /// for row in db.execute_streaming("SELECT * FROM huge_table", config=config):
+    ///     process(row)
+    ///     # Memory stays bounded
+    ///
+    /// # Early termination is safe
+    /// for row in db.execute_streaming("SELECT * FROM large_table"):
+    ///     if row["id"] == target_id:
+    ///         break  # Resources cleaned up automatically
+    /// ```
+    #[pyo3(signature = (query, *, config=None))]
+    pub fn execute_streaming(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        config: Option<&StreamingConfig>,
+    ) -> PyResult<StreamingIterator> {
+        self.ensure_open()?;
+
+        let db = self.inner();
+        let query_owned = query.to_string();
+        let core_config = config.map(|c| c.to_core()).unwrap_or_default();
+
+        // Release GIL during async execution
+        let core_iter = py
+            .allow_threads(|| block_on(db.execute_streaming(&query_owned, core_config)))
+            .map_err(to_py_err)?;
+
+        Ok(StreamingIterator::new(core_iter))
     }
 }
 

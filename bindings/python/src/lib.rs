@@ -15,7 +15,7 @@ mod value;
 pub use config::{config_from_py, StreamingConfig};
 pub use database::{open, Database};
 pub use error::{to_py_err, CqliteError, ParseError, QueryError, SchemaError};
-pub use result::{ColumnInfo, QueryResult, QueryResultIter, Row};
+pub use result::{ColumnInfo, QueryResult, QueryResultIter, Row, StreamingIterator};
 pub use runtime::{block_on, get_runtime};
 
 /// CQLite version string.

@@ -20,6 +20,7 @@ from cqlite._cqlite import (
     QueryResult,
     Row,
     ColumnInfo,
+    StreamingIterator,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "QueryResult",
     "Row",
     "ColumnInfo",
+    "StreamingIterator",
 ]

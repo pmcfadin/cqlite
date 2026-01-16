@@ -5,11 +5,16 @@
 //! - `Row` - Individual row with dict-like access
 //! - `ColumnInfo` - Column metadata
 //! - `QueryResultIter` - Iterator for Pythonic for-loops
+//! - `StreamingIterator` - Memory-efficient streaming iterator for large result sets
 
+use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
+use std::sync::Mutex;
 
+use crate::error::to_py_err;
+use crate::runtime::block_on;
 use crate::value::{key_error, value_to_py};
 
 /// Query result from execute().
@@ -367,12 +372,130 @@ impl ColumnInfo {
     }
 }
 
+/// Streaming iterator for memory-efficient query results.
+///
+/// Yields rows one at a time from a streaming query, keeping memory usage
+/// bounded by the `StreamingConfig` settings. Use this for large result sets
+/// that would not fit in memory.
+///
+/// # Resource Cleanup
+///
+/// The iterator holds a Tokio channel receiver connected to a background
+/// producer task. Resources are cleaned up automatically when:
+///
+/// 1. The iterator is fully consumed (`StopIteration` raised)
+/// 2. The iterator is garbage collected (Python `__del__`)
+/// 3. The producer task completes (channel sender dropped)
+///
+/// Early termination via `break` is safe - the channel and any remaining
+/// buffered rows are cleaned up when the iterator is dropped.
+///
+/// # Thread Safety
+///
+/// The iterator uses internal locking and is safe to use from a single
+/// Python thread. However, sharing a `StreamingIterator` between threads
+/// is not recommended - instead, create separate iterators per thread.
+///
+/// # Example
+///
+/// ```python
+/// config = cqlite.StreamingConfig(buffer_size=512)
+/// for row in db.execute_streaming("SELECT * FROM large_table", config=config):
+///     process(row)
+///     # Memory stays bounded; only buffer_size rows in flight
+///
+/// # Early termination is safe
+/// for row in db.execute_streaming("SELECT * FROM large_table"):
+///     if row["id"] == target:
+///         break  # Resources cleaned up automatically
+/// ```
+#[pyclass(module = "cqlite")]
+pub struct StreamingIterator {
+    /// The wrapped core iterator (Mutex for interior mutability without &mut self)
+    inner: Mutex<cqlite_core::query::result::QueryResultIterator>,
+}
+
+impl StreamingIterator {
+    /// Create a new streaming iterator from a core QueryResultIterator.
+    pub fn new(iter: cqlite_core::query::result::QueryResultIterator) -> Self {
+        Self {
+            inner: Mutex::new(iter),
+        }
+    }
+}
+
+#[pymethods]
+impl StreamingIterator {
+    /// Return self for iteration.
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Get the next row from the stream.
+    ///
+    /// Raises StopIteration when no more rows are available.
+    fn __next__(&self, py: Python<'_>) -> PyResult<Py<Row>> {
+        // Lock the iterator (should never contend since Python holds GIL)
+        let mut iter = self
+            .inner
+            .lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Iterator lock poisoned"))?;
+
+        // Fetch next row - GIL held but iteration is fast per-row
+        let next_result = block_on(iter.next_async());
+
+        match next_result {
+            Some(Ok(row)) => {
+                // Convert core row to Python Row
+                let py_row = Row::from_core(py, &row)?;
+                Py::new(py, py_row)
+            }
+            Some(Err(e)) => Err(to_py_err(e)),
+            None => Err(PyStopIteration::new_err(())),
+        }
+    }
+
+    /// Get the number of rows received so far.
+    ///
+    /// Useful for progress tracking when total is known.
+    #[getter]
+    fn rows_received(&self) -> PyResult<u64> {
+        let iter = self
+            .inner
+            .lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Iterator lock poisoned"))?;
+        Ok(iter.rows_received())
+    }
+
+    /// Get the progress percentage (if total is known).
+    ///
+    /// Returns None if the total row count is not available.
+    #[getter]
+    fn progress_percent(&self) -> PyResult<Option<f64>> {
+        let iter = self
+            .inner
+            .lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Iterator lock poisoned"))?;
+        Ok(iter.progress_percent())
+    }
+
+    /// String representation.
+    fn __repr__(&self) -> String {
+        if let Ok(iter) = self.inner.lock() {
+            format!("StreamingIterator(rows_received={})", iter.rows_received())
+        } else {
+            "StreamingIterator(locked)".to_string()
+        }
+    }
+}
+
 /// Register result types with the Python module.
 pub fn register_result(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QueryResult>()?;
     m.add_class::<QueryResultIter>()?;
     m.add_class::<Row>()?;
     m.add_class::<ColumnInfo>()?;
+    m.add_class::<StreamingIterator>()?;
     Ok(())
 }
 

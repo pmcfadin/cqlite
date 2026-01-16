@@ -103,6 +103,16 @@ impl Default for StreamingConfig {
     }
 }
 
+impl StreamingConfig {
+    /// Convert to core StreamingConfig for use with cqlite_core.
+    pub fn to_core(&self) -> cqlite_core::query::result::StreamingConfig {
+        cqlite_core::query::result::StreamingConfig {
+            buffer_size: self.buffer_size,
+            chunk_size: self.chunk_size,
+        }
+    }
+}
+
 /// Returns a memory-optimized configuration preset as a Python dict.
 ///
 /// This preset minimizes memory usage at the cost of some performance:
