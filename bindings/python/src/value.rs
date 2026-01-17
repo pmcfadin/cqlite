@@ -34,7 +34,7 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
         Value::Timestamp(ts) => timestamp_to_datetime(py, *ts),
         Value::Date(d) => date_to_pydate(py, *d),
         Value::Time(t) => time_to_pytime(py, *t),
-        Value::Uuid(u) => Ok(uuid_to_string(u).into_pyobject(py)?.into_any().unbind()),
+        Value::Uuid(u) => uuid_to_py(py, u),
         Value::Varint(v) => varint_to_pyint(py, v),
         Value::Decimal { scale, unscaled } => decimal_to_pydecimal(py, *scale, unscaled),
         Value::Duration {
@@ -49,7 +49,7 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
         Value::Tuple(t) => tuple_to_py(py, t),
         Value::Udt(u) => udt_to_py(py, u),
         Value::Frozen(v) => value_to_py(py, v),
-        Value::Inet(b) => Ok(inet_to_string(b).into_pyobject(py)?.into_any().unbind()),
+        Value::Inet(b) => inet_to_py(py, b),
         Value::Tombstone(_) => Ok(py.None()), // Treat deleted data as None
     }
 }
@@ -144,7 +144,18 @@ fn time_to_pytime(py: Python<'_>, nanos: i64) -> PyResult<PyObject> {
     Ok(time.into_pyobject(py)?.into_any().unbind())
 }
 
-/// Format UUID bytes as standard string representation.
+/// Convert UUID bytes to Python uuid.UUID object.
+fn uuid_to_py(py: Python<'_>, uuid: &[u8; 16]) -> PyResult<PyObject> {
+    let uuid_mod = py.import("uuid")?;
+    let uuid_class = uuid_mod.getattr("UUID")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("bytes", PyBytes::new(py, uuid))?;
+    let result = uuid_class.call((), Some(&kwargs))?;
+    Ok(result.into_any().unbind())
+}
+
+/// Format UUID bytes as standard string representation (for tests/debug).
+#[cfg(test)]
 fn uuid_to_string(uuid: &[u8; 16]) -> String {
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -367,7 +378,33 @@ fn udt_to_py(py: Python<'_>, udt: &cqlite_core::UdtValue) -> PyResult<PyObject> 
     Ok(dict.into_any().unbind())
 }
 
-/// Convert inet bytes to IP address string.
+/// Convert inet bytes to Python ipaddress.IPv4Address or IPv6Address.
+fn inet_to_py(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
+    let ipaddress = py.import("ipaddress")?;
+    match bytes.len() {
+        4 => {
+            // IPv4: Use ipaddress.IPv4Address(packed_bytes)
+            let ipv4_class = ipaddress.getattr("IPv4Address")?;
+            let py_bytes = PyBytes::new(py, bytes);
+            let addr = ipv4_class.call1((py_bytes,))?;
+            Ok(addr.into_any().unbind())
+        }
+        16 => {
+            // IPv6: Use ipaddress.IPv6Address(packed_bytes)
+            let ipv6_class = ipaddress.getattr("IPv6Address")?;
+            let py_bytes = PyBytes::new(py, bytes);
+            let addr = ipv6_class.call1((py_bytes,))?;
+            Ok(addr.into_any().unbind())
+        }
+        _ => {
+            // Fallback: Return raw bytes for invalid/unknown length
+            Ok(PyBytes::new(py, bytes).into_any().unbind())
+        }
+    }
+}
+
+/// Convert inet bytes to IP address string (for tests/debug).
+#[cfg(test)]
 fn inet_to_string(bytes: &[u8]) -> String {
     match bytes.len() {
         4 => {
