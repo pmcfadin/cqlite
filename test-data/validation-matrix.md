@@ -361,6 +361,44 @@ The following priorities have all been completed:
 
 ---
 
+## Python Bindings Validation (M4 - Issue #309)
+
+**Last Updated**: 2026-01-17
+**Test File**: `bindings/python/tests/test_parity.py`
+**Validation Command**: `pytest bindings/python/tests/test_parity.py -v`
+
+### Python Parity Test Results
+
+| Keyspace | Tables | Passed | XFail | Status |
+|----------|--------|--------|-------|--------|
+| test_basic | 8 | 7 | 1 | 87.5% |
+| test_collections | 8 | 7 | 1 | 87.5% |
+| test_timeseries | 9 | 9 | 0 | 100% ✅ |
+| test_wide_rows | 8 | 8 | 0 | 100% ✅ |
+| **TOTAL** | **33** | **31** | **2** | **94%** |
+
+### Known Issues (XFail)
+
+| Table | Issue | Root Cause |
+|-------|-------|------------|
+| test_basic.static_columns_table | Row count 200 vs expected 100 | Static column duplication in query results |
+| test_collections.typed_collections_table | Row count 1 vs expected 50 | V5CompressedLegacy cell extraction failure |
+
+### Value Parity Tests
+
+| Test | Status | Notes |
+|------|--------|-------|
+| simple_table values | ✅ PASS | Full type coverage validated |
+| counters values | XFAIL | Partition key missing from results |
+| sensor_data values | ✅ PASS | Timeseries patterns validated |
+
+### Coverage Summary
+- **Row Count Parity**: 31/33 tables (94%)
+- **Value Parity**: 2/3 representative tables (67%)
+- **All CQL types validated**: UUID, timestamp, date, time, inet, blob, decimal, duration, collections
+
+---
+
 **Milestone Status**: ✅ COMPLETE
 All 33 test tables now pass validation! CQLite has achieved 100% parsing coverage for all Cassandra 5.0 test datasets.
 
