@@ -536,11 +536,27 @@ napi-build = "2.1"
 
 ### 5.2 Implementation Notes
 
-**Python Map Key Hashability**: CQL allows collection types (`list<int>`, `set<text>`) as map keys. Python `dict` requires keys to be hashable (mutable lists are not). When converting CQL `map<K,V>` to Python:
-- If K is `list<T>` → convert to `tuple` before using as dict key
-- If K is `set<T>` → convert to `frozenset` before using as dict key
+**Python Collection Behavior (Issue #301)**:
 
-Failure to handle this will cause `TypeError: unhashable type` at runtime.
+1. **Map Key Hashability**: CQL allows collection types (`list<int>`, `set<text>`) as map keys. Python `dict` requires keys to be hashable (mutable lists are not). When converting CQL `map<K,V>` to Python:
+   - If K is `list<T>` → convert to `tuple` before using as dict key
+   - If K is `set<T>` → convert to `frozenset` before using as dict key
+   - Failure to handle this will cause `TypeError: unhashable type` at runtime
+
+2. **Set Elements**: Sets also use hashable conversion internally, ensuring nested collections within sets are hashable (`set<frozen<list<int>>>` works correctly)
+
+3. **UDT Metadata Fields**: When converting CQL UDTs to Python `dict`, two metadata fields are added:
+   - `_type`: The UDT type name (e.g., `"address_type"`)
+   - `_keyspace`: The keyspace containing the UDT definition
+   - All UDT fields are accessible by name as dict keys
+   - Null UDT fields return Python `None`
+
+4. **Frozen Collection Unwrapping**: `FROZEN<T>` collections are transparently unwrapped to their inner type. `FROZEN<list<int>>` returns a Python `list`, not a special frozen type.
+
+5. **Nested Collections**: All nested structures are recursively converted:
+   - `MAP<TEXT, FROZEN<LIST<INT>>>` → `dict[str, list[int]]`
+   - `MAP<TEXT, FROZEN<SET<TEXT>>>` → `dict[str, frozenset[str]]`
+   - `LIST<FROZEN<udt>>` → `list[dict]` with UDT metadata
 
 **Temporal Type Precision Notes (Issue #299)**:
 
