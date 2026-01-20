@@ -135,6 +135,106 @@ Coverage targets are tiered by module criticality rather than flat percentages:
 
 ---
 
+## 6.2 · Python API Reference
+
+The Python bindings provide a synchronous API for reading Cassandra 5.0 SSTables.
+
+### Installation
+
+```bash
+pip install cqlite
+```
+
+### Quick Start
+
+```python
+import cqlite
+
+# Open database with schema
+with cqlite.open("path/to/sstables", schema="schema.cql") as db:
+    # Execute query
+    result = db.execute("SELECT * FROM keyspace.table LIMIT 10")
+
+    # Iterate over rows
+    for row in result:
+        print(row["column_name"])
+```
+
+### Core Classes
+
+| Class | Description |
+|-------|-------------|
+| `Database` | Main entry point for querying SSTables |
+| `QueryResult` | Contains all rows from a query execution |
+| `Row` | Dict-like access to column values |
+| `StreamingIterator` | Memory-efficient iteration for large datasets |
+| `PreparedStatement` | Query plan analysis |
+| `DatabaseStats` | Storage, memory, and query metrics |
+| `StreamingConfig` | Configuration for streaming queries |
+
+### Exception Hierarchy
+
+| Exception | When Raised |
+|-----------|-------------|
+| `CqliteError` | Base for all CQLite errors |
+| `SchemaError` | Schema parsing or validation fails |
+| `QueryError` | Query execution fails |
+| `ParseError` | CQL syntax error |
+
+### CQL Type Mappings
+
+| CQL Type | Python Type | Notes |
+|----------|-------------|-------|
+| `boolean` | `bool` | |
+| `int`, `bigint`, `varint` | `int` | Arbitrary precision |
+| `float`, `double` | `float` | |
+| `decimal` | `decimal.Decimal` | Precision preserved |
+| `text`, `ascii` | `str` | |
+| `blob` | `bytes` | |
+| `timestamp` | `datetime.datetime` | UTC timezone-aware |
+| `date` | `datetime.date` | |
+| `time` | `datetime.time` | Microsecond precision |
+| `duration` | `datetime.timedelta` | Month ≈ 30 days |
+| `uuid`, `timeuuid` | `uuid.UUID` | |
+| `inet` | `ipaddress.IPv4Address` / `IPv6Address` | |
+| `list<T>` | `list` | |
+| `set<T>` | `frozenset` | Hashable |
+| `map<K,V>` | `dict` | |
+| `tuple` | `tuple` | |
+| UDT | `dict` | With `_type`, `_keyspace` fields |
+
+### Type Checking
+
+CQLite ships with PEP 561 type stubs for full mypy/pyright support:
+
+```python
+# mypy will validate these types
+import cqlite
+
+db: cqlite.Database = cqlite.open("data")
+result: cqlite.QueryResult = db.execute("SELECT * FROM ks.tbl")
+row: cqlite.Row = result.rows[0]
+value: str = row["name"]  # Type narrowing works
+```
+
+### Streaming for Large Datasets
+
+```python
+# Memory-efficient streaming (< 128 MB for any size)
+config = cqlite.StreamingConfig(buffer_size=512, chunk_size=5000)
+for row in db.execute_streaming("SELECT * FROM big_table", config=config):
+    process(row)
+```
+
+### Thread Safety
+
+- Database handle is thread-safe via `Arc<Database>`
+- `close()` is idempotent and safe from any thread
+- Each thread should use its own `StreamingIterator`
+- Known: Concurrent queries may need warm-up query first (Issue #311)
+
+---
+
 ## 7 · Community & Governance (Snapshot)
 
 * Apache 2.0 license from day 1; CLA + DCO required.
