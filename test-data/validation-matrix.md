@@ -399,6 +399,41 @@ The following priorities have all been completed:
 
 ---
 
+## Python Bindings Performance Tests (M4 - Issue #310)
+
+**Last Updated**: 2026-01-20
+**Test File**: `bindings/python/tests/test_performance.py`
+**Validation Command**: `pytest bindings/python/tests/test_performance.py -v -s`
+
+### Performance Test Results
+
+| Metric | Result | Target | Status |
+|--------|--------|--------|--------|
+| Streaming peak memory | 0.03 MB | < 128 MB | ✅ VERIFIED |
+| Execute throughput | 16,317 rows/s | > 10,000 | ✅ VERIFIED |
+| Streaming throughput | 54,242 rows/s | > 5,000 | ✅ VERIFIED |
+| First row latency | 33.16 ms | < 100 ms | ✅ VERIFIED |
+| Memory leak (execute) | 1.5 MB growth | < 10 MB | ✅ VERIFIED |
+| Memory leak (streaming) | 27 KB growth | < 10 MB | ✅ VERIFIED |
+| Iterator cleanup | 22 KB growth | < 5 MB | ✅ VERIFIED |
+
+### Test Classes
+
+| Class | Tests | Purpose |
+|-------|-------|---------|
+| TestStreamingMemoryBudget | 2 | 128MB memory budget validation |
+| TestExecutePerformance | 3 | Throughput and latency benchmarks |
+| TestMemoryLeakDetection | 3 | Memory leak detection via tracemalloc |
+| TestPerformanceSummary | 1 | Comprehensive performance report |
+
+### Acceptance Criteria (Issue #310)
+
+- [x] Streaming stays under 128MB - **VERIFIED** (0.03 MB peak)
+- [x] Throughput meets baseline (>10k rows/s) - **VERIFIED** (16,317 rows/s)
+- [x] No memory leaks detected - **VERIFIED** (all tests pass)
+
+---
+
 **Milestone Status**: ✅ COMPLETE
 All 33 test tables now pass validation! CQLite has achieved 100% parsing coverage for all Cassandra 5.0 test datasets.
 
