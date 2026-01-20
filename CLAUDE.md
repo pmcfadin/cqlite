@@ -152,6 +152,12 @@ cqlite-core/src/
 - **Streaming**: Each thread can use its own `StreamingIterator`
 - **Known issue**: Concurrent queries on same database may have race condition in schema metadata access (requires warm-up query before parallel access)
 
+### Python/CLI Output Parity (Issue #319)
+- Python `db.execute()` and CLI `--out json` produce equivalent data
+- Type differences: Python uses native types (datetime, UUID, bytes), CLI uses JSON strings
+- Normalization required for comparison (see `bindings/python/tests/test_cli_parity.py`)
+- Test coverage: All 33 tables validated for CLI parity
+
 ## Test Data
 
 Location: `test-data/datasets/sstables/`
