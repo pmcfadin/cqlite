@@ -14,8 +14,8 @@
 | **Core Reading**        | • 100 % Cassandra 5 SSTable format support (data, TOC, index, stats)<br>• All CQL types incl. collections & UDTs<br>• Compression: LZ4, Snappy, Deflate<br>• Zero‑copy deserialization into **provided schema** (schema passed in, not inferred) |     |                                                                    |
 | **CLI (`cqlite`)**      | • **One‑shot mode**: `--schema`, `--data-dir`, optional `--query` & \`--out {json                                                                                                                                                                | csv | parquet}\`<br>• **REPL mode**: interactive attach / query / export |
 | **Output Formats**      | JSON, CSV, Parquet (pluggable writers)                                                                                                                                                                                                           |     |                                                                    |
-| **Language Bindings**   | Typed APIs for Python (async), Node.js (TS defs), WASM (IndexedDB)                                                                                                                                                                               |     |                                                                    |
-| ~~Writing (Post-MVP)~~  | ~~Generate Cassandra 5 SSTables~~ REMOVED - CQLite is read-only                                                                                                                                                                                                                     |     |                                                                    |
+| **Language Bindings**   | Typed APIs for Python (sync), Node.js (TS defs); WASM deferred to M6                                                                                                                                                                               |     |                                                                    |
+| **Writing**             | Generate Cassandra 5 SSTables (M5)                                                                                                                                                                                                                     |     |                                                                    |
 | **Performance Targets** | Set after functional parity; goal: *faster than native Cassandra bulk tools*                                                                                                                                                                     |     |                                                                    |
 
 ---
@@ -31,7 +31,7 @@ cqlite-core/        # Pure Rust crate
 cli/                # REPL + one-shot wrapper (uses core)
 bindings/
   ├── python/
-  ├── nodejs/
+  ├── node/
   └── wasm/
 tests/              # shared fixtures (Cassandra 5 SSTables)
 ```
@@ -48,11 +48,12 @@ tests/              # shared fixtures (Cassandra 5 SSTables)
 | **M1** | **Core Reading Library**   | Reads any Cassandra 5 SSTable; all CQL/UDT types; compression OK; tiered coverage (see Section 5.1) |
 | **M2** | **CLI (REPL + one‑shot)**  | Human can query & verify data from disk; basic `SELECT … WHERE …`                         |
 | **M3** | **Output Writers**         | JSON, CSV, Parquet export work end‑to‑end via CLI                                         |
-| **M4** | **Language Bindings**      | `pip install cqlite`, `npm i cqlite`; CI wheels & native modules                          |
-| **M5** | ~~Write Support~~          | ~~Generates valid Cassandra 5 SSTables~~ REMOVED (Issues #175, #176)                                                   |
-| **M6** | **Perf & Size Validation** | Benchmarks > native bulk tools; WASM < 2 MB; publish v1.0 release                         |
+| **M4** | **Python & Node.js Bindings** | `pip install cqlite`, `npm i @cqlite/node`; CI wheels & native modules                 |
+| **M5** | **Write Support**          | Generate valid Cassandra 5 SSTables; write API in core and bindings                       |
+| **M6** | **WASM Bindings**          | `npm i @cqlite/wasm`; IndexedDB support; browser compatibility                            |
+| **M7** | **Perf & Size Validation** | Benchmarks > native bulk tools; WASM < 2 MB; publish v1.0 release                         |
 
-> **Revision Note (Dec 2025)**: M1 coverage target revised from flat 95% to tiered targets (90%/80%/70%/50%) based on module criticality per Issue #204. M5 (Write Support) permanently removed - CQLite is a read-only library (Issues #175, #176, #23, #12).
+> **Revision Note (Jan 2026)**: M1 coverage revised to tiered targets per Issue #204. M4 now Python & Node.js only (sync Python first). Write Support restored as M5. WASM moved to M6. v1.0 release moved to M7.
 
 
 ---
@@ -91,9 +92,46 @@ Coverage targets are tiered by module criticality rather than flat percentages:
 
   * Cargo crate (`cqlite-core`)
   * PyPI wheels (`cqlite`) for macOS/Linux/Win
-  * npm (`cqlite`) pre‑builds + WASM bundle
+  * npm (`@cqlite/node`) native pre-builds; WASM (`@cqlite/wasm`) in M6
   * Homebrew & Linuxbrew taps for CLI
 * **Versioning**: SemVer; v0.x during feature development, v1.0 at M6 completion.
+
+### 6.1 · Python Release Process
+
+**Workflows**:
+- `.github/workflows/python-ci.yml` - Build and test on push/PR
+- `.github/workflows/python-release.yml` - Publish to PyPI on tags
+
+**Triggering a Release**:
+1. Update version in `bindings/python/pyproject.toml`
+2. Create and push a version tag:
+   - **Stable release**: `git tag v0.3.0 && git push origin v0.3.0` → Publishes to PyPI
+   - **Pre-release**: `git tag v0.3.0-rc1 && git push origin v0.3.0-rc1` → Publishes to TestPyPI
+
+**Tag Format**:
+| Pattern | Example | Destination |
+|---------|---------|-------------|
+| `v*` (no suffix) | `v0.3.0`, `v1.0.0` | PyPI (production) |
+| `v*-rc*` | `v0.3.0-rc1` | TestPyPI |
+| `v*-alpha*` | `v0.3.0-alpha1` | TestPyPI |
+| `v*-beta*` | `v0.3.0-beta1` | TestPyPI |
+
+**Authentication**: Uses PyPI Trusted Publishing (OIDC) - no API tokens stored in secrets.
+
+**Platform Matrix** (5 wheels built):
+- Linux x86_64 (manylinux_2_28)
+- Linux ARM64 (manylinux_2_28)
+- macOS x86_64
+- macOS ARM64 (Apple Silicon)
+- Windows x64
+
+**PyPI Setup** (one-time, by repo owner):
+1. Create PyPI project at https://pypi.org/manage/projects/
+2. Add trusted publisher at Settings → Publishing:
+   - Owner: `pmcfadin`
+   - Repository: `cqlite`
+   - Workflow: `python-release.yml`
+3. Repeat for TestPyPI at https://test.pypi.org/
 
 ---
 
