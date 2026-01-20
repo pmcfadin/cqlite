@@ -435,13 +435,16 @@ impl StreamingIterator {
     ///
     /// Raises StopIteration when no more rows are available.
     fn __next__(&self, py: Python<'_>) -> PyResult<Py<Row>> {
-        // Lock the iterator (should never contend since Python holds GIL)
+        // Lock must be held across the async operation because next_async()
+        // mutates the iterator's internal state (rows_received counter and
+        // channel receiver). This is safe because Python's GIL ensures only
+        // one Python thread accesses this iterator at a time. The block_on
+        // call waits on a bounded channel receive, so lock contention is minimal.
         let mut iter = self
             .inner
             .lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Iterator lock poisoned"))?;
 
-        // Fetch next row - GIL held but iteration is fast per-row
         let next_result = block_on(iter.next_async());
 
         match next_result {

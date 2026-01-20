@@ -6,7 +6,7 @@ Guidance for Claude Code when working with CQLite.
 
 CQLite is a Rust library for local Apache Cassandra SSTable access. It reads Cassandra 5.0 data files without cluster dependencies.
 
-**Status**: M3 Complete (Jan 2026) - Core reading (M1), CLI (M2), and Output Writers (M3) are production-ready. Next: M4 (Language Bindings).
+**Status**: M4 Complete (Jan 2026) - Core reading (M1), CLI (M2), Output Writers (M3), and Python Bindings (M4) are production-ready. Next: M5 (Write Support).
 
 ## Documentation
 
@@ -73,6 +73,21 @@ cargo run --package cqlite-cli -- \
   --data-dir test-data/datasets/sstables \
   --query "SELECT * FROM test_basic.simple_table LIMIT 5" \
   --out json
+
+# Python bindings build and test
+cd bindings/python && maturin develop  # Development build
+cd bindings/python && maturin build --release  # Release wheel
+
+# Run Python tests (requires test data)
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests -v
+
+# Python usage example
+python3 -c "
+import cqlite
+with cqlite.open('test-data/datasets/sstables', schema='test-data/schemas/basic-types.cql') as db:
+    for row in db.execute('SELECT * FROM test_basic.simple_table LIMIT 5'):
+        print(row.to_dict())
+"
 ```
 
 ### CLI Output Format Precedence
@@ -110,7 +125,29 @@ test-data/       # Real Cassandra 5.0 SSTables for testing
 tools/           # sstabledump-validator, format-validator
 ```
 
-**Planned (M4+)**: `bindings/node/` (Node.js bindings), `bindings/wasm/` (WebAssembly - M6)
+**Planned (M5+)**: `bindings/node/` (Node.js bindings - M4), `bindings/wasm/` (WebAssembly - M6)
+
+### Python Bindings Structure
+
+```
+bindings/python/
+├── src/                    # PyO3 binding implementation
+│   ├── lib.rs             # Module initialization
+│   ├── database.rs        # Database class (open/close/execute)
+│   ├── result.rs          # QueryResult, Row, StreamingIterator
+│   ├── value.rs           # CQL to Python type conversions
+│   ├── error.rs           # Exception mapping
+│   ├── config.rs          # StreamingConfig, presets
+│   ├── runtime.rs         # Tokio runtime management
+│   ├── prepared.rs        # PreparedStatement bindings
+│   └── stats.rs           # DatabaseStats bindings
+├── python/cqlite/
+│   ├── __init__.py        # Python package wrapper
+│   └── __init__.pyi       # Type stubs for IDE support
+├── tests/                 # 16 test files, 355 tests
+├── pyproject.toml         # Maturin build configuration
+└── Cargo.toml             # Rust dependencies
+```
 
 ### Key Source Paths
 
@@ -211,6 +248,24 @@ cargo build --package cqlite-core --features cli-helpers
 **Clippy failures**: Run with `RUSTFLAGS="-D warnings"` to match CI
 
 **Parsing issues**: Check `docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md`
+
+**Python bindings won't build**: Ensure Rust 1.85+ and maturin are installed:
+```bash
+pip install maturin
+rustup update
+```
+
+**Python import errors**: Verify Python 3.9+ and rebuild bindings:
+```bash
+python3 --version  # Must be 3.9+
+cd bindings/python && maturin develop
+```
+
+**Python tests skip or fail**: Ensure test data is available:
+```bash
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+bash test-data/scripts/fetch-datasets.sh
+```
 
 ## Resources
 

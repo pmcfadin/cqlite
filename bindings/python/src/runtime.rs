@@ -18,13 +18,26 @@ static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 /// # Panics
 ///
 /// Panics if the runtime cannot be created (e.g., system resource exhaustion).
+/// This use of `expect()` is acceptable because:
+///
+/// 1. **Module initialization context**: Failure occurs once at module load time,
+///    not during normal operations
+/// 2. **Fatal condition**: Runtime creation only fails under extreme resource
+///    exhaustion (no memory, file descriptors, or thread capacity)
+/// 3. **No recovery path**: All CQLite Python operations require an async runtime;
+///    there is no meaningful fallback
+/// 4. **Clear error message**: Users see the panic message rather than silent
+///    failure or downstream errors
+///
+/// In Python, this manifests as an `ImportError` during `import cqlite`, which
+/// is the appropriate failure mode for an unrecoverable initialization error.
 pub fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .thread_name("cqlite-py-worker")
             .enable_all()
             .build()
-            .expect("Failed to create tokio runtime")
+            .expect("Failed to create tokio runtime - system may be out of resources")
     })
 }
 

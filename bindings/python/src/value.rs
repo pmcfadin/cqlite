@@ -277,7 +277,9 @@ fn duration_to_timedelta(py: Python<'_>, months: i32, days: i32, nanos: i64) -> 
     // Convert nanoseconds to microseconds (truncate sub-microsecond precision)
     // nanos = total nanoseconds in the duration
     // 1 microsecond = 1000 nanoseconds
-    let total_micros = nanos / 1000;
+    let total_micros = nanos.checked_div(1000).ok_or_else(|| {
+        pyo3::exceptions::PyOverflowError::new_err("Duration nanoseconds value invalid")
+    })?;
 
     // timedelta(days=X, microseconds=Y)
     // Note: timedelta normalizes large microseconds to seconds/days automatically

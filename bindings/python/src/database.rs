@@ -79,14 +79,16 @@ impl Database {
     /// db.close()
     /// db.close()  # Safe to call again
     /// ```
-    pub fn close(&self) -> PyResult<()> {
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
         // Atomically set closed flag, return early if already closed
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
 
         // Shutdown the storage engine to release resources
-        block_on(self.inner.shutdown()).map_err(to_py_err)?;
+        // Release GIL during async shutdown to allow other Python threads to run
+        py.allow_threads(|| block_on(self.inner.shutdown()))
+            .map_err(to_py_err)?;
         Ok(())
     }
 
@@ -124,11 +126,12 @@ impl Database {
     #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
     fn __exit__(
         &self,
+        py: Python<'_>,
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc_val: Option<&Bound<'_, PyAny>>,
         _exc_tb: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        self.close()?;
+        self.close(py)?;
         Ok(false) // Don't suppress exceptions
     }
 
@@ -377,14 +380,19 @@ pub fn open(
             table_directory_filter: None,
         };
 
-        block_on(async {
-            let result = cqlite_core::ingestion::ingest(ingestion_config).await?;
-            Ok::<_, cqlite_core::Error>(result.database)
+        // Release GIL during async ingestion to allow other Python threads to run
+        py.allow_threads(|| {
+            block_on(async {
+                let result = cqlite_core::ingestion::ingest(ingestion_config).await?;
+                Ok::<_, cqlite_core::Error>(result.database)
+            })
         })
         .map_err(to_py_err)?
     } else {
         // Simple open without schema
-        block_on(cqlite_core::Database::open(&path, core_config)).map_err(to_py_err)?
+        // Release GIL during async open to allow other Python threads to run
+        py.allow_threads(|| block_on(cqlite_core::Database::open(&path, core_config)))
+            .map_err(to_py_err)?
     };
 
     Ok(Database {
