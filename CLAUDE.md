@@ -145,6 +145,13 @@ cqlite-core/src/
 - Validate against sstabledump output
 - JSONL reference files for parity checking
 
+### Python Bindings Thread Safety (Issue #311)
+- **Database handle**: Thread-safe via `Arc<Database>` + `AtomicBool`
+- **Close**: Idempotent, safe to call from multiple threads
+- **GIL release**: All async operations release Python GIL (`py.allow_threads()`)
+- **Streaming**: Each thread can use its own `StreamingIterator`
+- **Known issue**: Concurrent queries on same database may have race condition in schema metadata access (requires warm-up query before parallel access)
+
 ## Test Data
 
 Location: `test-data/datasets/sstables/`
