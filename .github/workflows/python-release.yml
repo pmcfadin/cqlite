@@ -122,7 +122,7 @@ jobs:
           ls -lh dist/
           echo "::endgroup::"
 
-          # Count artifacts: 1 sdist + 5 wheels = 6 files
+          # Count artifacts: 1 sdist + 5+ wheels (may include PyPy wheels)
           SDIST_COUNT=$(ls dist/*.tar.gz 2>/dev/null | wc -l)
           WHEEL_COUNT=$(ls dist/*.whl 2>/dev/null | wc -l)
           echo "Source distributions: $SDIST_COUNT"
@@ -132,8 +132,8 @@ jobs:
             echo "::error::Expected 1 sdist, found $SDIST_COUNT"
             exit 1
           fi
-          if [ "$WHEEL_COUNT" -ne 5 ]; then
-            echo "::error::Expected 5 wheels, found $WHEEL_COUNT"
+          if [ "$WHEEL_COUNT" -lt 5 ]; then
+            echo "::error::Expected at least 5 wheels, found $WHEEL_COUNT"
             exit 1
           fi
 
@@ -197,7 +197,7 @@ jobs:
           ls -lh dist/
           echo "::endgroup::"
 
-          # Count artifacts: 1 sdist + 5 wheels = 6 files
+          # Count artifacts: 1 sdist + 5+ wheels (may include PyPy wheels)
           SDIST_COUNT=$(ls dist/*.tar.gz 2>/dev/null | wc -l)
           WHEEL_COUNT=$(ls dist/*.whl 2>/dev/null | wc -l)
           echo "Source distributions: $SDIST_COUNT"
@@ -207,8 +207,8 @@ jobs:
             echo "::error::Expected 1 sdist, found $SDIST_COUNT"
             exit 1
           fi
-          if [ "$WHEEL_COUNT" -ne 5 ]; then
-            echo "::error::Expected 5 wheels, found $WHEEL_COUNT"
+          if [ "$WHEEL_COUNT" -lt 5 ]; then
+            echo "::error::Expected at least 5 wheels, found $WHEEL_COUNT"
             exit 1
           fi
 
@@ -288,8 +288,8 @@ jobs:
           TOTAL_COUNT=$(ls dist/* 2>/dev/null | wc -l)
           echo "Total artifacts: $TOTAL_COUNT"
 
-          if [ "$TOTAL_COUNT" -ne 6 ]; then
-            echo "::warning::Expected 6 artifacts (1 sdist + 5 wheels), found $TOTAL_COUNT"
+          if [ "$TOTAL_COUNT" -lt 6 ]; then
+            echo "::warning::Expected at least 6 artifacts (1 sdist + 5+ wheels), found $TOTAL_COUNT"
           fi
 
       - name: Generate checksums
