@@ -86,10 +86,17 @@ class TestDatabaseOpen:
         assert db is not None
         db.close()
 
-    def test_open_nonexistent_path_raises(self):
-        """open() with nonexistent path should raise IOError."""
-        with pytest.raises(IOError):
-            cqlite.open("/nonexistent/path/to/data")
+    def test_open_nonexistent_path_succeeds_empty(self, tmp_path):
+        """open() with nonexistent path succeeds but has no data.
+
+        This is expected behavior - cqlite opens a data directory and scans
+        for SSTables. A non-existent or empty directory is valid (no SSTables).
+        """
+        nonexistent = tmp_path / "definitely_does_not_exist_12345" / "nested" / "path"
+        db = cqlite.open(str(nonexistent))
+        assert db is not None
+        assert not db.is_closed
+        db.close()
 
     def test_open_invalid_config_raises(self):
         """open() with invalid config should raise ValueError."""

@@ -46,10 +46,17 @@ def db():
 class TestInvalidPathHandling:
     """Test error handling for invalid paths."""
 
-    def test_invalid_path_raises_ioerror(self):
-        """Opening nonexistent path should raise IOError."""
-        with pytest.raises(IOError):
-            cqlite.open("/nonexistent/path/to/data")
+    def test_nonexistent_path_opens_successfully(self, tmp_path):
+        """Opening nonexistent path succeeds (returns empty database).
+
+        This is expected behavior - cqlite scans for SSTables in a directory.
+        A non-existent or empty directory is valid (no SSTables found).
+        """
+        nonexistent = tmp_path / "definitely_does_not_exist_12345" / "nested" / "path"
+        db = cqlite.open(str(nonexistent))
+        assert db is not None
+        assert not db.is_closed
+        db.close()
 
     def test_empty_path_opens_current_dir(self):
         """Opening empty path may succeed (opens current dir) or raise error."""

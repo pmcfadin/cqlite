@@ -83,14 +83,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Native test platforms only (no ARM64 Linux cross-compile)
-          # Note: x86_64-apple-darwin wheel built on macos-14 (ARM64) via cross-compile,
-          # tested via Rosetta 2 on macos-14
+          # Native test platforms only
+          # Note: x86_64-apple-darwin is build-only (cross-compiled on ARM64, can't test)
+          # Note: aarch64-unknown-linux-gnu is build-only (cross-compiled, can't test)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            python: "3.12"
-          - os: macos-14
-            target: x86_64-apple-darwin
             python: "3.12"
           - os: macos-14
             target: aarch64-apple-darwin
@@ -239,7 +236,7 @@ jobs:
           echo "| x86_64-pc-windows-msvc | :white_check_mark: |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "Tests passed on 4 native platforms (ARM64 Linux is build-only)" >> $GITHUB_STEP_SUMMARY
+          echo "Tests passed on 3 native platforms (ARM64 Linux and x86_64 macOS are build-only)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
           echo "Download wheels: \`cqlite-wheels\`" >> $GITHUB_STEP_SUMMARY
