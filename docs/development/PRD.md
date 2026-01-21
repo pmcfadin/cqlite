@@ -48,7 +48,7 @@ tests/              # shared fixtures (Cassandra 5 SSTables)
 | **M1** | **Core Reading Library**   | Reads any Cassandra 5 SSTable; all CQL/UDT types; compression OK; tiered coverage (see Section 5.1) |
 | **M2** | **CLI (REPL + one‑shot)**  | Human can query & verify data from disk; basic `SELECT … WHERE …`                         |
 | **M3** | **Output Writers**         | JSON, CSV, Parquet export work end‑to‑end via CLI                                         |
-| **M4** | **Python & Node.js Bindings** | `pip install cqlite`, `npm i @cqlite/node`; CI wheels & native modules                 |
+| **M4** | **Python & Node.js Bindings** | `pip install cqlite-py`, `npm i @cqlite/node`; CI wheels & native modules                 |
 | **M5** | **Write Support**          | Generate valid Cassandra 5 SSTables; write API in core and bindings                       |
 | **M6** | **WASM Bindings**          | `npm i @cqlite/wasm`; IndexedDB support; browser compatibility                            |
 | **M7** | **Perf & Size Validation** | Benchmarks > native bulk tools; WASM < 2 MB; publish v1.0 release                         |
@@ -142,13 +142,13 @@ The Python bindings provide a synchronous API for reading Cassandra 5.0 SSTables
 ### Installation
 
 ```bash
-pip install cqlite
+pip install cqlite-py
 ```
 
 ### Quick Start
 
 ```python
-import cqlite
+import cqlite  # Note: package name is cqlite-py, but import is cqlite
 
 # Open database with schema
 with cqlite.open("path/to/sstables", schema="schema.cql") as db:

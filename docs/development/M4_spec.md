@@ -11,7 +11,7 @@
 M4 delivers language bindings for Python and Node.js, enabling developers to read Cassandra 5.0 SSTables from their preferred language. WASM bindings are deferred to M6 to reduce complexity and ship production bindings sooner.
 
 **Deliverables**:
-- `bindings/python/` - Python bindings via PyO3 (`pip install cqlite`)
+- `bindings/python/` - Python bindings via PyO3 (`pip install cqlite-py`)
 - `bindings/node/` - Node.js bindings via napi-rs (`npm i @cqlite/node`)
 
 **Deferred to M6**:

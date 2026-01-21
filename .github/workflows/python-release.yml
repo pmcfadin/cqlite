@@ -101,7 +101,7 @@ jobs:
 
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/cqlite
+      url: https://test.pypi.org/p/cqlite-py
 
     permissions:
       id-token: write
@@ -158,7 +158,7 @@ jobs:
           echo "## TestPyPI Publish Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Tag**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Package**: [cqlite on TestPyPI](https://test.pypi.org/p/cqlite)" >> $GITHUB_STEP_SUMMARY
+          echo "**Package**: [cqlite-py on TestPyPI](https://test.pypi.org/p/cqlite-py)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Artifacts Published" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
@@ -176,7 +176,7 @@ jobs:
 
     environment:
       name: pypi
-      url: https://pypi.org/p/cqlite
+      url: https://pypi.org/p/cqlite-py
 
     permissions:
       id-token: write
@@ -251,7 +251,7 @@ jobs:
           echo "## PyPI Publish Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Tag**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Package**: [cqlite on PyPI](https://pypi.org/p/cqlite)" >> $GITHUB_STEP_SUMMARY
+          echo "**Package**: [cqlite-py on PyPI](https://pypi.org/p/cqlite-py)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Artifacts Published" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
