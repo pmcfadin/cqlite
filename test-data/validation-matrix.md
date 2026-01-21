@@ -434,6 +434,52 @@ The following priorities have all been completed:
 
 ---
 
+## Cross-Language E2E Testing Framework (Issue #323)
+
+**Last Updated**: 2026-01-21
+**Status**: ✅ COMPLETE
+
+### Acceptance Criteria
+
+| Criteria | Status | Evidence |
+|----------|--------|----------|
+| Python E2E tests validate all 33 tables | ✅ | `test_parity.py::TestE2ESummary` validates all tables |
+| Tests run in CI on every PR | ✅ | `python-ci.yml` runs pytest on 3 platforms |
+| No simulation code | ✅ | All tests use real `cqlite` bindings |
+| Documentation explains test architecture | ✅ | Added to CLAUDE.md |
+
+### E2E Test Files
+
+| File | Tables Covered | Purpose |
+|------|----------------|---------|
+| `test_parity.py` | 33 (31 pass, 2 xfail) | JSONL golden file validation |
+| `test_cli_parity.py` | 33 (30 pass, 3 xfail) | Python vs CLI output parity |
+
+### Known Issues (XFail)
+
+These are **core library issues** not Python binding issues:
+
+| Table | Issue | Root Cause |
+|-------|-------|------------|
+| `static_columns_table` | Row count 200 vs 100 | Static column duplication |
+| `typed_collections_table` | Row count 1 vs 50 | V5CompressedLegacy cell extraction |
+| `frozen_collections_table` | Parsing differs | Frozen collection handling |
+
+### Test Commands
+
+```bash
+# Run all Python E2E tests
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests/ -v
+
+# Run E2E summary test only
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests/test_parity.py::TestE2ESummary -v
+
+# Run CLI parity tests only
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests/test_cli_parity.py -v
+```
+
+---
+
 **Milestone Status**: ✅ COMPLETE
 All 33 test tables now pass validation! CQLite has achieved 100% parsing coverage for all Cassandra 5.0 test datasets.
 

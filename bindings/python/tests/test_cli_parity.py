@@ -138,7 +138,9 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
         # Check if this is a UDT (has _type key)
         if "_type" in value:
             # UDT: CLI outputs as {"_type": name, field1: v1, ...}
-            return {k: normalize_python_value(v, is_row_level=False) for k, v in value.items()}
+            # Filter out _keyspace as CLI doesn't include it
+            filtered = {k: v for k, v in value.items() if k != "_keyspace"}
+            return {k: normalize_python_value(v, is_row_level=False) for k, v in filtered.items()}
 
         if is_row_level:
             # This is a row dict - keep as dict, recurse into cell values
@@ -442,6 +444,13 @@ class TestCLIParityBasic:
             ("uncompressed_table", 10),
             ("compression_test_table", 10),
             ("ttl_test_table", 10),
+            pytest.param(
+                "static_columns_table",
+                10,
+                marks=pytest.mark.xfail(
+                    reason="Static column parsing differs between Python/CLI (known core issue)"
+                ),
+            ),
         ],
     )
     def test_basic_table_parity(self, db_basic, table: str, limit: int):
@@ -483,6 +492,8 @@ class TestCLIParityCollections:
         "table",
         [
             "collection_table",
+            "collection_clustering_table",
+            "collections_with_udts",
             pytest.param(
                 "frozen_collections_table",
                 marks=pytest.mark.xfail(
@@ -490,7 +501,14 @@ class TestCLIParityCollections:
                 ),
             ),
             "empty_collections_table",
+            "large_collections_table",
             "nested_collections_table",
+            pytest.param(
+                "typed_collections_table",
+                marks=pytest.mark.xfail(
+                    reason="Typed collection parsing differs between Python/CLI (known core issue)"
+                ),
+            ),
         ],
     )
     def test_collection_table_parity(self, db_collections, table: str):
@@ -519,6 +537,10 @@ class TestCLIParityTimeseries:
             ("user_sessions", 10),
             ("app_metrics", 10),
             ("log_entries", 10),
+            ("stock_prices", 10),
+            ("tick_data", 10),
+            ("time_bucketed_counters", 10),
+            ("user_activity", 10),
         ],
     )
     def test_timeseries_table_parity(self, db_timeseries, table: str, limit: int):
@@ -545,7 +567,11 @@ class TestCLIParityWideRows:
             ("wide_partition_table", 10),
             ("chat_messages", 10),
             ("document_versions", 10),
+            ("large_blob_table", 10),
             ("many_columns_table", 10),
+            ("multi_metric_timeseries", 10),
+            ("product_catalog", 10),
+            ("sparse_data_table", 10),
         ],
     )
     def test_wide_rows_table_parity(self, db_wide_rows, table: str, limit: int):
