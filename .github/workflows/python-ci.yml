@@ -209,9 +209,9 @@ jobs:
           WHEEL_COUNT=$(ls wheels/*.whl 2>/dev/null | wc -l)
           echo "Wheel count: $WHEEL_COUNT"
 
-          # Verify 5 wheels (one per target)
-          if [ "$WHEEL_COUNT" -ne 5 ]; then
-            echo "::error::Expected 5 wheels, found $WHEEL_COUNT"
+          # Verify at least 5 wheels (one per target, plus optional PyPy wheels)
+          if [ "$WHEEL_COUNT" -lt 5 ]; then
+            echo "::error::Expected at least 5 wheels, found $WHEEL_COUNT"
             exit 1
           fi
 
