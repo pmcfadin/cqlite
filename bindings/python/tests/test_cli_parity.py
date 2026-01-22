@@ -138,10 +138,12 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
             return {str(k): normalize_python_value(v, is_row_level=False) for k, v in value.items()}
         else:
             # This is a CQL map inside a cell - CLI outputs ALL maps as array of {"key": k, "value": v}
-            return [
-                {"key": normalize_python_value(k, is_row_level=False), "value": normalize_python_value(v, is_row_level=False)}
-                for k, v in value.items()
-            ]
+            # Sort by key for determinism (like sets) - Issue #336
+            return sorted(
+                [{"key": normalize_python_value(k, is_row_level=False), "value": normalize_python_value(v, is_row_level=False)}
+                 for k, v in value.items()],
+                key=lambda x: _sort_key(x["key"])
+            )
 
     if isinstance(value, str):
         return value
@@ -190,11 +192,12 @@ def normalize_cli_value(value: Any) -> Any:
             isinstance(item, dict) and set(item.keys()) == {"key", "value"}
             for item in value
         ):
-            # This is a map with non-string keys - keep as array format for comparison
-            return [
-                {"key": normalize_cli_value(item["key"]), "value": normalize_cli_value(item["value"])}
-                for item in value
-            ]
+            # This is a map with non-string keys - sort by key for determinism (like sets) - Issue #336
+            return sorted(
+                [{"key": normalize_cli_value(item["key"]), "value": normalize_cli_value(item["value"])}
+                 for item in value],
+                key=lambda x: _sort_key(x["key"])
+            )
         # Regular list
         return [normalize_cli_value(v) for v in value]
 
