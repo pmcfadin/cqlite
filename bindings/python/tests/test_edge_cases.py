@@ -23,7 +23,9 @@ from conftest import DATASETS, SCHEMAS
 
 # Increase string digit limit to handle very large integers from test data
 # This is needed because some test data has extremely large decimal values
-sys.set_int_max_str_digits(50000)
+# Note: set_int_max_str_digits() is only available in Python 3.11+
+if sys.version_info >= (3, 11):
+    sys.set_int_max_str_digits(50000)
 
 
 class TestInvalidPathHandling:
