@@ -11,16 +11,10 @@ Tests verify:
 """
 
 import pytest
-from pathlib import Path
 
 import cqlite
 
-
-# Test data paths relative to the test file
-# Adjusted for actual test data location
-TEST_DATA = Path(__file__).parent.parent.parent.parent / "test-data"
-DATASETS = TEST_DATA / "datasets" / "sstables"
-SCHEMAS = TEST_DATA / "schemas"
+from conftest import DATASETS, SCHEMAS
 
 
 class TestDatabaseImports:

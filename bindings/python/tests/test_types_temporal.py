@@ -21,26 +21,10 @@ Tests use real SSTable data from test_basic keyspace.
 
 import datetime
 import pytest
-from pathlib import Path
 
 import cqlite
 
-# Test data paths
-TEST_DATA = Path(__file__).parent.parent.parent.parent / "test-data"
-DATASETS = TEST_DATA / "datasets" / "sstables"
-SCHEMAS = TEST_DATA / "schemas"
-
-
-@pytest.fixture
-def db():
-    """Database fixture with schema loaded."""
-    schema_file = SCHEMAS / "basic-types.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
+# db and db_timeseries fixtures are provided by conftest.py
 
 
 class TestTimestampConversion:
@@ -454,16 +438,7 @@ class TestTimestampEdgeCases:
 class TestTimeSeriesData:
     """Test temporal types using time series keyspace data."""
 
-    @pytest.fixture
-    def db_timeseries(self):
-        """Database fixture with time series schema."""
-        schema_file = SCHEMAS / "time-series.cql"
-        if not schema_file.exists():
-            pytest.skip(f"Schema file not found: {schema_file}")
-        if not DATASETS.exists():
-            pytest.skip(f"Test data not found: {DATASETS}")
-        with cqlite.open(DATASETS, schema=schema_file) as database:
-            yield database
+    # db_timeseries fixture is provided by conftest.py
 
     def test_timeseries_timestamp_clustering_key(self, db_timeseries):
         """TIMESTAMP as clustering key should work correctly."""

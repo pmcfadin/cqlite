@@ -37,13 +37,7 @@ import pytest
 import cqlite
 
 
-# =============================================================================
-# Test Data Paths
-# =============================================================================
-
-TEST_DATA = Path(__file__).parent.parent.parent.parent / "test-data"
-DATASETS = TEST_DATA / "datasets" / "sstables"
-SCHEMAS = TEST_DATA / "schemas"
+from conftest import DATASETS, SCHEMAS
 
 
 # =============================================================================
@@ -326,16 +320,11 @@ def values_equal(actual: Any, expected: Any) -> bool:
 
 
 # =============================================================================
-# Pytest Fixtures
+# Pytest Fixtures (Use module-scoped variants from conftest.py)
 # =============================================================================
 
 
-@pytest.fixture(scope="module")
-def datasets_root() -> Path:
-    """Return the path to the datasets root directory."""
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    return DATASETS
+# datasets_root fixture is provided by conftest.py
 
 
 def get_schema_for_keyspace(keyspace: str) -> Path | None:
@@ -348,52 +337,34 @@ def get_schema_for_keyspace(keyspace: str) -> Path | None:
     return None
 
 
-@pytest.fixture(scope="module")
-def db_basic():
-    """Database fixture with basic-types schema loaded."""
-    schema_file = SCHEMAS / "basic-types.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
+# Database fixtures (db_basic, db_collections, db_timeseries, db_wide_rows)
+# are aliased from conftest module-scoped variants.
+# Note: test_parity.py uses single database objects (not tuples), while
+# test_cli_parity.py uses (database, schema_file) tuples.
 
 
 @pytest.fixture(scope="module")
-def db_collections():
-    """Database fixture with collections schema loaded."""
-    schema_file = SCHEMAS / "collections.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
+def db_basic(db_basic_module):
+    """Alias for db_basic_module from conftest."""
+    return db_basic_module
 
 
 @pytest.fixture(scope="module")
-def db_timeseries():
-    """Database fixture with time-series schema loaded."""
-    schema_file = SCHEMAS / "time-series.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
+def db_collections(db_collections_module):
+    """Alias for db_collections_module from conftest."""
+    return db_collections_module
 
 
 @pytest.fixture(scope="module")
-def db_wide_rows():
-    """Database fixture with wide-rows schema loaded."""
-    schema_file = SCHEMAS / "wide-rows.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
+def db_timeseries(db_timeseries_module):
+    """Alias for db_timeseries_module from conftest."""
+    return db_timeseries_module
+
+
+@pytest.fixture(scope="module")
+def db_wide_rows(db_wide_rows_module):
+    """Alias for db_wide_rows_module from conftest."""
+    return db_wide_rows_module
 
 
 # =============================================================================

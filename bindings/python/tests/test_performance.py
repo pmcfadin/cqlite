@@ -14,17 +14,11 @@ Performance Targets:
 import gc
 import time
 import tracemalloc
-from pathlib import Path
 
 import pytest
 
 import cqlite
 
-
-# Test data paths (matches existing pattern from test_streaming.py)
-TEST_DATA = Path(__file__).parent.parent.parent.parent / "test-data"
-DATASETS = TEST_DATA / "datasets" / "sstables"
-SCHEMAS = TEST_DATA / "schemas"
 
 # Table constants for performance testing
 LARGE_TABLE = "test_basic.simple_table"  # 999 rows, 632 KB (most columns)
@@ -39,28 +33,7 @@ MAX_FIRST_ROW_LATENCY_SEC = 0.1  # 100ms
 MAX_LEAK_GROWTH_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
-@pytest.fixture
-def db():
-    """Database fixture with basic-types schema (simple_table - 999 rows)."""
-    schema_file = SCHEMAS / "basic-types.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
-
-
-@pytest.fixture
-def db_timeseries():
-    """Database fixture with time-series schema (sensor_data - 2000 rows)."""
-    schema_file = SCHEMAS / "time-series.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
+# db and db_timeseries fixtures are provided by conftest.py
 
 
 class TestStreamingMemoryBudget:

@@ -1,23 +1,11 @@
 """Tests for database statistics functionality."""
 import pytest
-from pathlib import Path
 
 import cqlite
 from cqlite import DatabaseStats
 
-# Test data paths
-BINDINGS_DIR = Path(__file__).parent.parent
-PROJECT_ROOT = BINDINGS_DIR.parent.parent
-DATASETS = PROJECT_ROOT / "test-data" / "datasets" / "sstables"
-SCHEMAS = PROJECT_ROOT / "test-data" / "schemas"
 
-
-@pytest.fixture
-def db():
-    """Database fixture with schema loaded."""
-    schema_file = SCHEMAS / "basic-types.cql"
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
+# db fixture is provided by conftest.py
 
 
 class TestDatabaseStats:

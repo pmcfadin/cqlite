@@ -144,7 +144,8 @@ bindings/python/
 ├── python/cqlite/
 │   ├── __init__.py        # Python package wrapper
 │   └── __init__.pyi       # Type stubs for IDE support
-├── tests/                 # 16 test files, 355 tests
+├── tests/                 # 17 test files, 360+ tests
+│   └── conftest.py        # Shared fixtures and path constants (Issue #330)
 ├── pyproject.toml         # Maturin build configuration
 └── Cargo.toml             # Rust dependencies
 ```

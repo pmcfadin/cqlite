@@ -35,14 +35,7 @@ import pytest
 
 import cqlite
 
-# =============================================================================
-# Test Data Paths
-# =============================================================================
-
-TEST_DATA = Path(__file__).parent.parent.parent.parent / "test-data"
-DATASETS = TEST_DATA / "datasets" / "sstables"
-SCHEMAS = TEST_DATA / "schemas"
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+from conftest import DATASETS, SCHEMAS, PROJECT_ROOT
 
 
 # =============================================================================
@@ -365,66 +358,50 @@ def run_cli_query(
 # =============================================================================
 
 
-@pytest.fixture(scope="module")
-def check_prerequisites():
-    """Check that test prerequisites are met."""
-    if not DATASETS.exists():
-        pytest.skip(
-            f"Test data not found: {DATASETS}\n"
-            f"Run: bash test-data/scripts/fetch-datasets.sh"
-        )
-    if not SCHEMAS.exists():
-        pytest.skip(f"Schemas not found: {SCHEMAS}")
+# check_prerequisites fixture is provided by conftest.py
 
-    # Check if cargo is available
-    try:
-        subprocess.run(
-            ["cargo", "--version"],
-            capture_output=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pytest.skip("Cargo not available - cannot run CLI tests")
+
+# CLI parity tests need (database, schema_file) tuples so they can invoke CLI
+# with the same schema. We define local aliases that add the schema_file.
+from conftest import (
+    SCHEMA_BASIC_TYPES,
+    SCHEMA_COLLECTIONS,
+    SCHEMA_TIME_SERIES,
+    SCHEMA_WIDE_ROWS,
+    require_test_data,
+)
 
 
 @pytest.fixture(scope="module")
 def db_basic(check_prerequisites):
-    """Database fixture with basic-types schema loaded."""
-    schema_file = SCHEMAS / "basic-types.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database, schema_file
+    """Database fixture with basic-types schema - returns (db, schema_file) tuple."""
+    require_test_data(SCHEMA_BASIC_TYPES)
+    with cqlite.open(DATASETS, schema=SCHEMA_BASIC_TYPES) as database:
+        yield database, SCHEMA_BASIC_TYPES
 
 
 @pytest.fixture(scope="module")
 def db_collections(check_prerequisites):
-    """Database fixture with collections schema loaded."""
-    schema_file = SCHEMAS / "collections.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database, schema_file
+    """Database fixture with collections schema - returns (db, schema_file) tuple."""
+    require_test_data(SCHEMA_COLLECTIONS)
+    with cqlite.open(DATASETS, schema=SCHEMA_COLLECTIONS) as database:
+        yield database, SCHEMA_COLLECTIONS
 
 
 @pytest.fixture(scope="module")
 def db_timeseries(check_prerequisites):
-    """Database fixture with time-series schema loaded."""
-    schema_file = SCHEMAS / "time-series.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database, schema_file
+    """Database fixture with time-series schema - returns (db, schema_file) tuple."""
+    require_test_data(SCHEMA_TIME_SERIES)
+    with cqlite.open(DATASETS, schema=SCHEMA_TIME_SERIES) as database:
+        yield database, SCHEMA_TIME_SERIES
 
 
 @pytest.fixture(scope="module")
 def db_wide_rows(check_prerequisites):
-    """Database fixture with wide-rows schema loaded."""
-    schema_file = SCHEMAS / "wide-rows.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database, schema_file
+    """Database fixture with wide-rows schema - returns (db, schema_file) tuple."""
+    require_test_data(SCHEMA_WIDE_ROWS)
+    with cqlite.open(DATASETS, schema=SCHEMA_WIDE_ROWS) as database:
+        yield database, SCHEMA_WIDE_ROWS
 
 
 # =============================================================================

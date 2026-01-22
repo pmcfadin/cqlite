@@ -19,27 +19,8 @@ import uuid
 import ipaddress
 from decimal import Decimal
 import pytest
-from pathlib import Path
 
 import cqlite
-
-
-# Test data paths
-TEST_DATA = Path(__file__).parent.parent.parent.parent / "test-data"
-DATASETS = TEST_DATA / "datasets" / "sstables"
-SCHEMAS = TEST_DATA / "schemas"
-
-
-@pytest.fixture
-def db():
-    """Database fixture with schema loaded."""
-    schema_file = SCHEMAS / "basic-types.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
 
 
 class TestUuidConversion:

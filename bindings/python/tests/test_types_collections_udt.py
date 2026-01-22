@@ -23,27 +23,15 @@ Tests use real SSTable data from test_collections keyspace.
 
 import datetime
 import pytest
-from pathlib import Path
 
 import cqlite
 
 
-# Test data paths
-TEST_DATA = Path(__file__).parent.parent.parent.parent / "test-data"
-DATASETS = TEST_DATA / "datasets" / "sstables"
-SCHEMAS = TEST_DATA / "schemas"
-
-
+# Use db_collections from conftest, aliased as db for backward compatibility
 @pytest.fixture
-def db():
-    """Database fixture with collections schema loaded."""
-    schema_file = SCHEMAS / "collections.cql"
-    if not schema_file.exists():
-        pytest.skip(f"Schema file not found: {schema_file}")
-    if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
-    with cqlite.open(DATASETS, schema=schema_file) as database:
-        yield database
+def db(db_collections):
+    """Alias db_collections as db for this module's tests."""
+    return db_collections
 
 
 class TestListConversion:
