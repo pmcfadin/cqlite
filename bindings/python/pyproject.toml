@@ -27,6 +27,7 @@ Homepage = "https://github.com/pmcfadin/cqlite"
 Repository = "https://github.com/pmcfadin/cqlite"
 Documentation = "https://github.com/pmcfadin/cqlite/tree/main/bindings/python"
 Issues = "https://github.com/pmcfadin/cqlite/issues"
+Changelog = "https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "mypy>=1.0"]
