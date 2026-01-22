@@ -8,6 +8,8 @@ Tests verify:
 3. Exception hierarchy is correct
 """
 
+import pytest
+
 import cqlite
 
 
@@ -121,12 +123,8 @@ class TestCatchAllBehavior:
         ]
 
         for exc in exceptions:
-            try:
+            with pytest.raises(cqlite.CqliteError):
                 raise exc
-            except cqlite.CqliteError:
-                pass  # Expected
-            except Exception:
-                assert False, f"Failed to catch {type(exc).__name__} as CqliteError"
 
 
 class TestExceptionInAllExports:

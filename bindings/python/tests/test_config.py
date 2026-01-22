@@ -10,6 +10,8 @@ Tests verify:
 
 import json
 
+import pytest
+
 import cqlite
 
 
@@ -52,19 +54,13 @@ class TestStreamingConfigDefaults:
 
     def test_streaming_config_zero_buffer_size_raises(self):
         """StreamingConfig should reject buffer_size=0."""
-        try:
+        with pytest.raises(ValueError, match="buffer_size"):
             cqlite.StreamingConfig(buffer_size=0)
-            assert False, "Should have raised ValueError"
-        except ValueError as e:
-            assert "buffer_size" in str(e)
 
     def test_streaming_config_zero_chunk_size_raises(self):
         """StreamingConfig should reject chunk_size=0."""
-        try:
+        with pytest.raises(ValueError, match="chunk_size"):
             cqlite.StreamingConfig(chunk_size=0)
-            assert False, "Should have raised ValueError"
-        except ValueError as e:
-            assert "chunk_size" in str(e)
 
 
 class TestMemoryOptimizedPreset:
@@ -120,11 +116,8 @@ class TestValidateConfig:
         # Start with a valid preset and modify to make invalid
         invalid_config = cqlite.memory_optimized()
         invalid_config["memory"]["max_memory"] = 0
-        try:
+        with pytest.raises(ValueError, match=r"(?i)max_memory|greater than 0"):
             cqlite.validate_config(invalid_config)
-            assert False, "Should have raised ValueError"
-        except ValueError as e:
-            assert "max_memory" in str(e).lower() or "greater than 0" in str(e)
 
     def test_incomplete_config_raises_valueerror(self):
         """validate_config() should raise ValueError for incomplete configs.
@@ -133,11 +126,8 @@ class TestValidateConfig:
         """
         # Partial config missing required fields
         partial_config = {"memory": {"max_memory": 128 * 1024 * 1024}}
-        try:
+        with pytest.raises(ValueError, match=r"(?i)missing field|invalid"):
             cqlite.validate_config(partial_config)
-            assert False, "Should have raised ValueError"
-        except ValueError as e:
-            assert "missing field" in str(e).lower() or "invalid" in str(e).lower()
 
     def test_validate_json_string_from_preset(self):
         """validate_config() should accept full JSON config string."""
