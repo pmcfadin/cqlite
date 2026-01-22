@@ -106,8 +106,20 @@ class Database:
         ...         print(row["column_name"])
 
     Thread Safety:
-        Database handle is thread-safe. Multiple threads can execute queries
-        concurrently. Each thread should use its own StreamingIterator.
+        The database handle is thread-safe. Multiple threads can execute queries
+        concurrently on the same Database instance.
+
+        **GIL Release**: All blocking operations (open, execute, execute_streaming,
+        prepare, stats, close) release the Python GIL, allowing other Python
+        threads to run during I/O.
+
+        **Iterator Usage**: Each thread should create its own StreamingIterator
+        via execute_streaming(). Do not share iterators between threads.
+
+        **Known Limitation**: Concurrent queries may experience a race condition
+        in schema metadata access on first use. Workaround: Execute a warm-up
+        query (e.g., ``SELECT * FROM table LIMIT 1``) before spawning parallel
+        query threads.
     """
 
     @property
@@ -151,6 +163,11 @@ class Database:
             QueryError: If query execution fails
             ParseError: If query syntax is invalid
             RuntimeError: If database is closed
+
+        Thread Safety:
+            Each thread should use its own StreamingIterator. Do not share
+            a single iterator between threads - create separate iterators
+            per thread instead.
         """
         ...
 
@@ -232,6 +249,9 @@ def open(
         >>> db = cqlite.open("data/sstables", schema="schema.cql")
         >>> result = db.execute("SELECT * FROM test.users")
         >>> db.close()
+
+    Thread Safety:
+        This function releases the Python GIL during file I/O operations.
     """
     ...
 
@@ -409,6 +429,11 @@ class StreamingIterator:
         ...     process(row)
         ...     if should_stop:
         ...         break  # Safe early termination
+
+    Thread Safety:
+        StreamingIterator is designed for single-thread use. Each Python thread
+        should create its own iterator via Database.execute_streaming().
+        Sharing an iterator between threads is not supported.
     """
 
     @property
