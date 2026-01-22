@@ -199,3 +199,86 @@ def check_prerequisites():
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pytest.skip("Cargo not available - cannot run CLI tests")
+
+
+# =============================================================================
+# CLI Binary Fixture (Issue #331)
+# =============================================================================
+
+
+@pytest.fixture(scope="session")
+def cli_binary() -> Path:
+    """Build CLI binary once per session and return path.
+
+    If release binary already exists, skip build for faster test startup.
+    This fixture is used by CLI parity tests.
+
+    Returns:
+        Path to the cqlite binary.
+
+    Raises:
+        pytest.skip: If build fails or cargo is unavailable.
+    """
+    # Note: Binary is named "cqlite" (from [[bin]] name in Cargo.toml), not "cqlite-cli"
+    binary_name = "cqlite.exe" if os.name == "nt" else "cqlite"
+    release_binary = PROJECT_ROOT / "target" / "release" / binary_name
+
+    # Skip build if release binary already exists (CI pre-build optimization)
+    if release_binary.exists():
+        return release_binary
+
+    # Build release binary
+    try:
+        result = subprocess.run(
+            ["cargo", "build", "--package", "cqlite-cli", "--release"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout for build
+        )
+        if result.returncode != 0:
+            pytest.skip(f"Failed to build CLI: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        pytest.skip("CLI build timed out after 5 minutes")
+    except FileNotFoundError:
+        pytest.skip("Cargo not available - cannot build CLI")
+
+    if not release_binary.exists():
+        pytest.skip(f"CLI binary not found after build: {release_binary}")
+
+    return release_binary
+
+
+# =============================================================================
+# Pytest Hooks (Issue #331)
+# =============================================================================
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip slow tests unless RUN_SLOW_TESTS=1 is set.
+
+    Slow tests include:
+    - CLI parity tests (spawn external process)
+    - Performance/memory tests (timing-sensitive)
+
+    To run slow tests:
+        RUN_SLOW_TESTS=1 pytest tests/
+    Or explicitly:
+        pytest tests/ -m slow
+    """
+    run_slow = os.environ.get("RUN_SLOW_TESTS", "0") == "1"
+
+    if run_slow:
+        # User wants slow tests, don't skip anything
+        return
+
+    # Check if user explicitly requested slow tests via -m
+    markexpr = config.getoption("-m", default="")
+    if markexpr and "slow" in markexpr:
+        # User explicitly wants slow tests via marker expression
+        return
+
+    skip_slow = pytest.mark.skip(reason="Slow test (set RUN_SLOW_TESTS=1 to run)")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)

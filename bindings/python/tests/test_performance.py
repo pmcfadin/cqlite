@@ -36,6 +36,7 @@ MAX_LEAK_GROWTH_BYTES = 10 * 1024 * 1024  # 10 MB
 # db and db_timeseries fixtures are provided by conftest.py
 
 
+@pytest.mark.slow
 class TestStreamingMemoryBudget:
     """Test that streaming stays under 128MB memory budget."""
 
@@ -93,6 +94,7 @@ class TestStreamingMemoryBudget:
         )
 
 
+@pytest.mark.slow
 class TestExecutePerformance:
     """Test execute() throughput performance."""
 
@@ -166,6 +168,7 @@ class TestExecutePerformance:
         )
 
 
+@pytest.mark.slow
 class TestMemoryLeakDetection:
     """Detect memory leaks using tracemalloc snapshots."""
 
@@ -282,6 +285,7 @@ class TestMemoryLeakDetection:
         )
 
 
+@pytest.mark.slow
 class TestPerformanceSummary:
     """Generate a performance summary report (informational)."""
 

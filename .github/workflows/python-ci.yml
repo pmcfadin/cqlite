@@ -154,9 +154,16 @@ jobs:
           test -f test-data/datasets/metadata.yml
           ls test-data/datasets/sstables/test_basic/ | head -n 1
 
+      # Issue #331: Pre-build CLI binary for faster CLI parity tests
+      - name: Build CLI binary for tests
+        shell: bash
+        run: |
+          cargo build --package cqlite-cli --release
+
       - name: Run pytest
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUN_SLOW_TESTS: "1"  # Issue #331: Run all tests including CLI parity
         shell: bash
         run: |
           pytest bindings/python/tests/ -v --tb=short

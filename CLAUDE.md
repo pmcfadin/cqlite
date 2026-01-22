@@ -78,8 +78,17 @@ cargo run --package cqlite-cli -- \
 cd bindings/python && maturin develop  # Development build
 cd bindings/python && maturin build --release  # Release wheel
 
-# Run Python tests (requires test data)
+# Run Python tests - fast tests only (default, Issue #331)
 env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests -v
+
+# Run all Python tests including slow (CLI parity, performance)
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets RUN_SLOW_TESTS=1 pytest bindings/python/tests -v
+
+# Run only slow tests (CLI parity and performance)
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests -m slow -v
+
+# Exclude slow tests explicitly
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests -m "not slow" -v
 
 # Python usage example
 python3 -c "

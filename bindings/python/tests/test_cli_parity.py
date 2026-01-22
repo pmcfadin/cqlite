@@ -300,19 +300,24 @@ def _float_equal(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-
 
 
 def run_cli_query(
-    data_dir: Path, schema: Path, query: str, timeout: int = 60
+    data_dir: Path, schema: Path, query: str, cli_binary: Path, timeout: int = 60
 ) -> list[dict]:
     """Run a query via the CLI and return parsed JSON rows.
 
-    Uses `cargo run` to invoke the CLI with the given parameters.
+    Uses pre-built binary instead of `cargo run` for performance (Issue #331).
+
+    Args:
+        data_dir: Path to the SSTable data directory.
+        schema: Path to the CQL schema file.
+        query: CQL query string.
+        cli_binary: Path to the pre-built cqlite-cli binary.
+        timeout: Timeout in seconds for CLI execution.
+
+    Returns:
+        List of row dictionaries parsed from JSON output.
     """
     cmd = [
-        "cargo",
-        "run",
-        "--quiet",
-        "--package",
-        "cqlite-cli",
-        "--",
+        str(cli_binary),
         "--data-dir",
         str(data_dir),
         "--schema",
@@ -409,6 +414,7 @@ def db_wide_rows(check_prerequisites):
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestCLIParityBasic:
     """CLI parity tests for test_basic keyspace."""
 
@@ -430,7 +436,7 @@ class TestCLIParityBasic:
             ),
         ],
     )
-    def test_basic_table_parity(self, db_basic, table: str, limit: int):
+    def test_basic_table_parity(self, db_basic, cli_binary, table: str, limit: int):
         """Verify Python and CLI produce identical output for basic tables."""
         db, schema_file = db_basic
         query = f"SELECT * FROM test_basic.{table} LIMIT {limit}"
@@ -440,14 +446,14 @@ class TestCLIParityBasic:
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
         # Get CLI result
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         # Compare
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
         assert is_equal, error_msg
 
-    def test_counters_parity(self, db_basic):
+    def test_counters_parity(self, db_basic, cli_binary):
         """Verify counter table parity."""
         db, schema_file = db_basic
         query = "SELECT * FROM test_basic.counters"
@@ -455,13 +461,14 @@ class TestCLIParityBasic:
         py_result = db.execute(query)
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
         assert is_equal, error_msg
 
 
+@pytest.mark.slow
 class TestCLIParityCollections:
     """CLI parity tests for test_collections keyspace."""
 
@@ -488,7 +495,7 @@ class TestCLIParityCollections:
             ),
         ],
     )
-    def test_collection_table_parity(self, db_collections, table: str):
+    def test_collection_table_parity(self, db_collections, cli_binary, table: str):
         """Verify Python and CLI produce identical output for collection tables."""
         db, schema_file = db_collections
         query = f"SELECT * FROM test_collections.{table}"
@@ -496,13 +503,14 @@ class TestCLIParityCollections:
         py_result = db.execute(query)
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
         assert is_equal, error_msg
 
 
+@pytest.mark.slow
 class TestCLIParityTimeseries:
     """CLI parity tests for test_timeseries keyspace."""
 
@@ -520,7 +528,7 @@ class TestCLIParityTimeseries:
             ("user_activity", 10),
         ],
     )
-    def test_timeseries_table_parity(self, db_timeseries, table: str, limit: int):
+    def test_timeseries_table_parity(self, db_timeseries, cli_binary, table: str, limit: int):
         """Verify Python and CLI produce identical output for timeseries tables."""
         db, schema_file = db_timeseries
         query = f"SELECT * FROM test_timeseries.{table} LIMIT {limit}"
@@ -528,13 +536,14 @@ class TestCLIParityTimeseries:
         py_result = db.execute(query)
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
         assert is_equal, error_msg
 
 
+@pytest.mark.slow
 class TestCLIParityWideRows:
     """CLI parity tests for test_wide_rows keyspace."""
 
@@ -551,7 +560,7 @@ class TestCLIParityWideRows:
             ("sparse_data_table", 10),
         ],
     )
-    def test_wide_rows_table_parity(self, db_wide_rows, table: str, limit: int):
+    def test_wide_rows_table_parity(self, db_wide_rows, cli_binary, table: str, limit: int):
         """Verify Python and CLI produce identical output for wide row tables."""
         db, schema_file = db_wide_rows
         query = f"SELECT * FROM test_wide_rows.{table} LIMIT {limit}"
@@ -559,7 +568,7 @@ class TestCLIParityWideRows:
         py_result = db.execute(query)
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
@@ -571,10 +580,11 @@ class TestCLIParityWideRows:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestIssue319Spec:
     """Tests specified in Issue #319 acceptance criteria."""
 
-    def test_basic_select(self, db_basic):
+    def test_basic_select(self, db_basic, cli_binary):
         """Test: SELECT * FROM test_basic.simple_table LIMIT 10"""
         db, schema_file = db_basic
         query = "SELECT * FROM test_basic.simple_table LIMIT 10"
@@ -582,13 +592,13 @@ class TestIssue319Spec:
         py_result = db.execute(query)
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
         assert is_equal, f"Basic select parity failed: {error_msg}"
 
-    def test_with_collections(self, db_collections):
+    def test_with_collections(self, db_collections, cli_binary):
         """Test: SELECT * FROM test_collections.collection_table"""
         db, schema_file = db_collections
         query = "SELECT * FROM test_collections.collection_table"
@@ -596,13 +606,13 @@ class TestIssue319Spec:
         py_result = db.execute(query)
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
         assert is_equal, f"Collection table parity failed: {error_msg}"
 
-    def test_timeseries_data(self, db_timeseries):
+    def test_timeseries_data(self, db_timeseries, cli_binary):
         """Test: SELECT * FROM test_timeseries.sensor_data LIMIT 10"""
         db, schema_file = db_timeseries
         query = "SELECT * FROM test_timeseries.sensor_data LIMIT 10"
@@ -610,13 +620,13 @@ class TestIssue319Spec:
         py_result = db.execute(query)
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
         assert is_equal, f"Timeseries data parity failed: {error_msg}"
 
-    def test_wide_partition(self, db_wide_rows):
+    def test_wide_partition(self, db_wide_rows, cli_binary):
         """Test: SELECT * FROM test_wide_rows.wide_partition_table LIMIT 10"""
         db, schema_file = db_wide_rows
         query = "SELECT * FROM test_wide_rows.wide_partition_table LIMIT 10"
@@ -624,17 +634,18 @@ class TestIssue319Spec:
         py_result = db.execute(query)
         py_rows = [normalize_python_value(row.to_dict()) for row in py_result]
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_rows = [normalize_cli_value(row) for row in cli_rows]
 
         is_equal, error_msg = rows_equal(py_rows, cli_rows)
         assert is_equal, f"Wide partition parity failed: {error_msg}"
 
 
+@pytest.mark.slow
 class TestColumnOrdering:
     """Tests for column ordering consistency."""
 
-    def test_column_count_matches(self, db_basic):
+    def test_column_count_matches(self, db_basic, cli_binary):
         """Verify Python and CLI return same number of columns."""
         db, schema_file = db_basic
         query = "SELECT * FROM test_basic.simple_table LIMIT 1"
@@ -646,7 +657,7 @@ class TestColumnOrdering:
         py_row = py_result.rows[0].to_dict()
         py_cols = set(py_row.keys())
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         if not cli_rows:
             pytest.skip("No CLI rows returned")
 
@@ -654,7 +665,7 @@ class TestColumnOrdering:
 
         assert py_cols == cli_cols, f"Column mismatch: Python={py_cols}, CLI={cli_cols}"
 
-    def test_columns_metadata_available(self, db_basic):
+    def test_columns_metadata_available(self, db_basic, cli_binary):
         """Verify column metadata is available in Python result."""
         db, schema_file = db_basic
         query = "SELECT * FROM test_basic.simple_table LIMIT 1"
@@ -674,6 +685,7 @@ class TestColumnOrdering:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestRowCountParity:
     """Verify row counts match between Python and CLI."""
 
@@ -699,7 +711,7 @@ class TestRowCountParity:
             ("test_wide_rows", "wide_partition_table", "db_wide_rows"),
         ],
     )
-    def test_row_count_matches(self, keyspace: str, table: str, fixture: str, request):
+    def test_row_count_matches(self, keyspace: str, table: str, fixture: str, cli_binary, request):
         """Verify Python and CLI return same row count."""
         db_fixture = request.getfixturevalue(fixture)
         db, schema_file = db_fixture
@@ -708,7 +720,7 @@ class TestRowCountParity:
         py_result = db.execute(query)
         py_count = len(py_result.rows)
 
-        cli_rows = run_cli_query(DATASETS, schema_file, query)
+        cli_rows = run_cli_query(DATASETS, schema_file, query, cli_binary)
         cli_count = len(cli_rows)
 
         assert py_count == cli_count, (
