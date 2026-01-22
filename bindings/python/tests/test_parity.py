@@ -23,13 +23,14 @@ Tables Tested (33 total):
                         multi_metric_timeseries, product_catalog, sparse_data_table
 """
 
+import functools
 import json
 import re
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from ipaddress import IPv4Address, IPv6Address
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -118,8 +119,8 @@ def find_jsonl_file(keyspace: str, table: str) -> Path | None:
     return None
 
 
-def count_rows_in_jsonl(jsonl_path: Path) -> int:
-    """Count total rows in a JSONL reference file.
+def _count_rows_in_jsonl_impl(jsonl_path: Path) -> int:
+    """Implementation: Count total rows in a JSONL reference file.
 
     JSONL format: One partition per line, each partition has a "rows" array.
     Returns the sum of len(partition["rows"]) across all partitions.
@@ -137,6 +138,16 @@ def count_rows_in_jsonl(jsonl_path: Path) -> int:
     return total_rows
 
 
+@functools.lru_cache(maxsize=64)
+def count_rows_in_jsonl(jsonl_path: str | Path) -> int:
+    """Count total rows in a JSONL reference file. Cached for performance (Issue #337).
+
+    Accepts both str and Path for cache key hashability.
+    """
+    path = Path(jsonl_path) if isinstance(jsonl_path, str) else jsonl_path
+    return _count_rows_in_jsonl_impl(path)
+
+
 def load_jsonl_partitions(jsonl_path: Path) -> list[dict]:
     """Load partitions from a JSONL reference file.
 
@@ -148,6 +159,16 @@ def load_jsonl_partitions(jsonl_path: Path) -> list[dict]:
             if line.strip():
                 partitions.append(json.loads(line))
     return partitions
+
+
+@functools.lru_cache(maxsize=32)
+def load_jsonl_partitions_cached(jsonl_path: str | Path) -> tuple[dict, ...]:
+    """Load and cache partitions from JSONL file. Returns tuple for hashability (Issue #337).
+
+    Accepts both str and Path for cache key hashability.
+    """
+    path = Path(jsonl_path) if isinstance(jsonl_path, str) else jsonl_path
+    return tuple(load_jsonl_partitions(path))
 
 
 # =============================================================================
@@ -537,8 +558,8 @@ class TestValueParity:
         if jsonl_file is None:
             pytest.skip("JSONL reference not found for test_basic.simple_table")
 
-        # Load first few partitions from JSONL
-        partitions = list(load_jsonl_partitions(jsonl_file))
+        # Load partitions from JSONL (cached for performance - Issue #337)
+        partitions = load_jsonl_partitions_cached(str(jsonl_file))
         if not partitions:
             pytest.skip("No partitions in JSONL file")
 
@@ -603,7 +624,8 @@ class TestValueParity:
         if jsonl_file is None:
             pytest.skip("JSONL reference not found for test_basic.counters")
 
-        partitions = list(load_jsonl_partitions(jsonl_file))
+        # Load partitions (cached for performance - Issue #337)
+        partitions = load_jsonl_partitions_cached(str(jsonl_file))
         if not partitions:
             pytest.skip("No partitions in JSONL file")
 
@@ -662,7 +684,7 @@ class TestValueParity:
         if jsonl_file is None:
             pytest.skip("JSONL reference not found for test_timeseries.sensor_data")
 
-        partitions = list(load_jsonl_partitions(jsonl_file))
+        partitions = load_jsonl_partitions_cached(str(jsonl_file))
         if not partitions:
             pytest.skip("No partitions in JSONL file")
 
@@ -671,7 +693,12 @@ class TestValueParity:
             pytest.skip("No rows returned from query")
 
         # Verify we got the expected number of rows
-        expected_count = count_rows_in_jsonl(jsonl_file)
+        # Compute count from partitions instead of re-reading file (Issue #337)
+        expected_count = sum(
+            1 for p in partitions
+            for row in p.get("rows", [])
+            if row.get("type") == "row"
+        )
         assert len(result.rows) == expected_count
 
         # Spot check that rows contain expected column types
