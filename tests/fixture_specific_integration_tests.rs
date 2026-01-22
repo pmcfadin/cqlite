@@ -26,7 +26,7 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
 
     // Skip if fixture doesn't exist
     if fs::metadata(&fixture_path).await.is_err() {
-        println!("ℹ️  Minimal fixture not found, skipping test. Run create_fixtures.py to enable.");
+        println!("ℹ️  Minimal fixture not found, skipping test. Fixture files not available.");
         return Ok(());
     }
 

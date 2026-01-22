@@ -68,7 +68,7 @@ impl ComponentIntegrationTestFixture {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
-                    "Minimal fixture not found: {:?}. Run create_fixtures.py first.",
+                    "Minimal fixture not found: {:?}. Fixture files missing.",
                     data_file
                 ),
             )));
@@ -119,7 +119,7 @@ impl ComponentIntegrationTestFixture {
         if existing_components.is_empty() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "No fixture components found. Please run create_fixtures.py first.",
+                "No fixture components found. Fixture files missing.",
             )));
         }
 
