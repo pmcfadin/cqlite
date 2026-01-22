@@ -6,7 +6,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org)
 [![Cassandra](https://img.shields.io/badge/cassandra-5.0+-green.svg)](https://cassandra.apache.org)
 
-> **Status**: M3 Complete - Core reading, CLI, and Output Writers are production-ready
+> **Status**: M4 Complete - Core reading, CLI, Output Writers, and Python Bindings are production-ready
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
@@ -34,6 +34,20 @@ cargo run --package cqlite-cli -- \
   --data-dir test-data/datasets/sstables \
   --query "SELECT * FROM test_basic.simple_table LIMIT 5" \
   --out json
+```
+
+### Python
+
+```bash
+pip install cqlite-py
+```
+
+```python
+import cqlite
+
+with cqlite.open('path/to/sstables', schema='schema.cql') as db:
+    for row in db.execute('SELECT * FROM keyspace.table LIMIT 5'):
+        print(row.to_dict())
 ```
 
 ## Feature Flags
@@ -78,8 +92,15 @@ cargo build --no-default-features
 - [x] Streaming export for large datasets
 - [x] Output formats: CSV, JSON, Parquet, CQL
 
-### 📋 Roadmap (M4+)
-- [ ] Python and NodeJS bindings
+### ✅ M4 Complete (Jan 2026)
+- [x] Python bindings with full CQL type support
+- [x] Streaming API for memory-efficient queries
+- [x] pip installable package (5 platform wheels)
+- [x] Type stubs for IDE/mypy support
+
+### 📋 Roadmap (M5+)
+- [ ] Write support (SSTable creation)
+- [ ] Node.js bindings
 - [ ] WASM support for browser deployment
 - [ ] Advanced query capabilities
 
@@ -157,6 +178,13 @@ cargo run --bin cqlite parse test-data/users-*.db
 - Streaming export for memory-efficient large dataset handling
 - Progress bar and statistics for exports
 
+### ✅ M4 Complete (Jan 2026)
+- Python bindings via PyO3 with sync-first API
+- Full CQL type system (20+ types including collections, UDTs)
+- Thread-safe database handles with GIL management
+- Streaming iterator for memory-bounded queries
+- 308+ tests with 98%+ pass rate
+
 See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
 ## Technical Details
@@ -171,11 +199,10 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 - **Memory Usage**: <128MB for large SSTables
 - **Query Latency**: Sub-millisecond partition lookups
 
-### Language Bindings (Planned)
-- **Python**: Pythonic API with asyncio support
-- **NodeJS**: Modern JavaScript with TypeScript definitions
-- **WASM**: Browser-compatible library
-- **C API**: Foundation for additional languages
+### Language Bindings
+- **Python**: Production-ready sync API (see [Python README](bindings/python/README.md))
+- **Node.js**: Planned (M5+)
+- **WASM**: Planned (M6+)
 
 ## Resources
 
@@ -200,4 +227,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: M1, M2, and M3 milestones are complete. The read-only SSTable access and output writers are production-ready. Next: M4 (Language Bindings).
+**Note**: M1 through M4 milestones are complete. Core SSTable reading, CLI, output writers, and Python bindings are production-ready. Next: M5 (Write Support).
