@@ -3,6 +3,7 @@ members = [
     "cqlite-core",
     "cqlite-cli",
     "bindings/python",
+    "bindings/node",
     "tests",
     "examples",
     "tools/*",
@@ -108,6 +109,11 @@ chrono = { version = "0.4", features = ["serde"] }
 libc = "0.2"
 cbindgen = "0.26"
 pyo3 = { version = "0.23" }
+
+# napi-rs for Node.js bindings
+napi = { version = "2.16", default-features = false }
+napi-derive = "2.16"
+napi-build = "2.1"
 
 # Arrow and Parquet support (M3 output writers)
 arrow = { version = "53", default-features = false }

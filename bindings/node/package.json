@@ -1,0 +1,43 @@
+{
+  "name": "@cqlite/node",
+  "version": "0.3.0",
+  "description": "Node.js bindings for CQLite - read Apache Cassandra 5.0 SSTables without cluster dependencies",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "cqlite-node",
+    "triples": {
+      "defaults": true,
+      "additional": ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu"]
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node __test__/smoke.test.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pmcfadin/cqlite.git",
+    "directory": "bindings/node"
+  },
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "cassandra",
+    "sstable",
+    "database",
+    "cql",
+    "cqlite"
+  ],
+  "author": "CQLite Team",
+  "homepage": "https://github.com/pmcfadin/cqlite#readme",
+  "bugs": {
+    "url": "https://github.com/pmcfadin/cqlite/issues"
+  }
+}

@@ -97,6 +97,14 @@ with cqlite.open('test-data/datasets/sstables', schema='test-data/schemas/basic-
     for row in db.execute('SELECT * FROM test_basic.simple_table LIMIT 5'):
         print(row.to_dict())
 "
+
+# Node.js bindings build and test (Issue #290)
+cd bindings/node && npm install && npm run build  # Build native module
+cd bindings/node && npm test                       # Run smoke tests
+
+# Node.js usage example (Phase 2 - not yet implemented)
+# const cqlite = require('@cqlite/node');
+# const db = await cqlite.Database.open('/path/to/data');
 ```
 
 ### CLI Output Format Precedence
@@ -129,12 +137,13 @@ Status metrics refresh every 5 seconds. Status line disabled for piped output.
 ```
 cqlite-core/     # Core library (SSTable parsing, query engine)
 cqlite-cli/      # Command-line interface
-bindings/python/ # Python bindings (PyO3) - M4
+bindings/python/ # Python bindings (PyO3) - M4 complete
+bindings/node/   # Node.js bindings (napi-rs) - M4 in progress
 test-data/       # Real Cassandra 5.0 SSTables for testing
 tools/           # sstabledump-validator, format-validator
 ```
 
-**Planned (M5+)**: `bindings/node/` (Node.js bindings - M4), `bindings/wasm/` (WebAssembly - M6)
+**Planned (M6)**: `bindings/wasm/` (WebAssembly bindings)
 
 ### Python Bindings Structure
 
@@ -158,6 +167,24 @@ bindings/python/
 ├── pyproject.toml         # Maturin build configuration
 └── Cargo.toml             # Rust dependencies
 ```
+
+### Node.js Bindings Structure (Issue #290)
+
+```
+bindings/node/
+├── src/
+│   └── lib.rs             # napi-rs entry point (Phase 1: version, Database stub)
+├── __test__/
+│   └── smoke.test.js      # Basic import tests
+├── Cargo.toml             # napi-rs dependencies
+├── build.rs               # napi build script
+├── package.json           # npm package config (@cqlite/node)
+├── index.js               # Generated platform loader
+└── index.d.ts             # Generated TypeScript definitions
+```
+
+**Status**: Phase 1 (Foundation) complete - workspace setup and smoke tests passing.
+**Phase 2** (pending): Full Database API (open, execute, streaming, etc.)
 
 ### Key Source Paths
 

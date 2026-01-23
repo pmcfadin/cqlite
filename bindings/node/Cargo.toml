@@ -1,0 +1,25 @@
+[package]
+name = "cqlite-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Node.js bindings for CQLite SSTable reader"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression"] }
+napi = { workspace = true, features = ["async", "napi9", "tokio_rt", "serde-json"] }
+napi-derive = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+thiserror = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }
+
+[lints]
+workspace = true
