@@ -428,13 +428,7 @@ class TestCLIParityBasic:
             ("uncompressed_table", 10),
             ("compression_test_table", 10),
             ("ttl_test_table", 10),
-            pytest.param(
-                "static_columns_table",
-                10,
-                marks=pytest.mark.xfail(
-                    reason="Static column parsing differs between Python/CLI (known core issue)"
-                ),
-            ),
+            ("static_columns_table", 10),  # Issue resolved
         ],
     )
     def test_basic_table_parity(self, db_basic, cli_binary, table: str, limit: int):
@@ -479,21 +473,11 @@ class TestCLIParityCollections:
             "collection_table",
             "collection_clustering_table",
             "collections_with_udts",
-            pytest.param(
-                "frozen_collections_table",
-                marks=pytest.mark.xfail(
-                    reason="Frozen collection parsing differs between Python/CLI (known core issue)"
-                ),
-            ),
+            "frozen_collections_table",  # Issue resolved
             "empty_collections_table",
             "large_collections_table",
             "nested_collections_table",
-            pytest.param(
-                "typed_collections_table",
-                marks=pytest.mark.xfail(
-                    reason="Typed collection parsing differs between Python/CLI (known core issue)"
-                ),
-            ),
+            "typed_collections_table",  # Issue resolved
         ],
     )
     def test_collection_table_parity(self, db_collections, cli_binary, table: str):
@@ -691,10 +675,9 @@ class TestRowCountParity:
     """Verify row counts match between Python and CLI."""
 
     # Known row count discrepancies (core library issues)
+    # Note: As issues are resolved, tests are updated to remove xfail markers
     KNOWN_ROW_COUNT_ISSUES = {
-        # sensor_data: Python returns 2000 rows vs CLI 1000
-        # Likely related to static columns or row duplication in core
-        ("test_timeseries", "sensor_data"): "Python returns duplicate rows (known core issue)",
+        # All previously known issues have been resolved
     }
 
     @pytest.mark.parametrize(
@@ -703,12 +686,7 @@ class TestRowCountParity:
             ("test_basic", "simple_table", "db_basic"),
             ("test_basic", "composite_key_table", "db_basic"),
             ("test_collections", "collection_table", "db_collections"),
-            pytest.param(
-                "test_timeseries",
-                "sensor_data",
-                "db_timeseries",
-                marks=pytest.mark.xfail(reason="Python returns duplicate rows (known core issue)"),
-            ),
+            ("test_timeseries", "sensor_data", "db_timeseries"),  # Issue resolved
             ("test_wide_rows", "wide_partition_table", "db_wide_rows"),
         ],
     )
