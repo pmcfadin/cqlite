@@ -206,11 +206,64 @@ def check_prerequisites():
 # =============================================================================
 
 
+def _get_source_files_for_staleness_check() -> list[Path]:
+    """Get all source files that could affect the CLI binary.
+
+    Includes:
+    - cqlite-cli/src/**/*.rs (CLI source)
+    - cqlite-core/src/**/*.rs (core library source)
+    - Cargo.toml, Cargo.lock (workspace dependencies)
+    - cqlite-cli/Cargo.toml, cqlite-core/Cargo.toml (per-crate dependencies)
+    - build.rs in workspace crates (excludes target/ to avoid noise)
+    """
+    files = []
+
+    # Rust source files in cqlite-cli and cqlite-core
+    for crate_dir in ["cqlite-cli", "cqlite-core"]:
+        src_dir = PROJECT_ROOT / crate_dir / "src"
+        if src_dir.exists():
+            files.extend(src_dir.glob("**/*.rs"))
+
+    # Workspace Cargo manifest and lock files
+    for cargo_file in ["Cargo.toml", "Cargo.lock"]:
+        cargo_path = PROJECT_ROOT / cargo_file
+        if cargo_path.exists():
+            files.append(cargo_path)
+
+    # Per-crate Cargo manifests (dependency or feature changes affect binary)
+    for crate_dir in ["cqlite-cli", "cqlite-core"]:
+        cargo_toml = PROJECT_ROOT / crate_dir / "Cargo.toml"
+        if cargo_toml.exists():
+            files.append(cargo_toml)
+
+    # Build scripts in workspace crates (exclude target/ to avoid noise)
+    for crate_dir in ["cqlite-cli", "cqlite-core", "bindings/python"]:
+        build_rs = PROJECT_ROOT / crate_dir / "build.rs"
+        if build_rs.exists():
+            files.append(build_rs)
+    # Also check workspace root
+    root_build_rs = PROJECT_ROOT / "build.rs"
+    if root_build_rs.exists():
+        files.append(root_build_rs)
+
+    return files
+
+
 @pytest.fixture(scope="session")
 def cli_binary() -> Path:
     """Build CLI binary once per session and return path.
 
-    If release binary already exists, skip build for faster test startup.
+    Performs stale binary detection:
+    - If binary doesn't exist, builds it
+    - If binary exists but sources are newer, rebuilds
+
+    Sources checked for staleness:
+    - cqlite-cli/src/**/*.rs
+    - cqlite-core/src/**/*.rs
+    - Cargo.toml, Cargo.lock (workspace)
+    - cqlite-cli/Cargo.toml, cqlite-core/Cargo.toml (per-crate)
+    - build.rs in workspace crates
+
     This fixture is used by CLI parity tests.
 
     Returns:
@@ -223,8 +276,20 @@ def cli_binary() -> Path:
     binary_name = "cqlite.exe" if os.name == "nt" else "cqlite"
     release_binary = PROJECT_ROOT / "target" / "release" / binary_name
 
-    # Skip build if release binary already exists (CI pre-build optimization)
-    if release_binary.exists():
+    # Check if rebuild is needed
+    needs_rebuild = False
+    if not release_binary.exists():
+        needs_rebuild = True
+    else:
+        # Check if any source file is newer than the binary
+        binary_mtime = release_binary.stat().st_mtime
+        source_files = _get_source_files_for_staleness_check()
+        if source_files:
+            newest_source_mtime = max(path.stat().st_mtime for path in source_files)
+            if newest_source_mtime > binary_mtime:
+                needs_rebuild = True
+
+    if not needs_rebuild:
         return release_binary
 
     # Build release binary
@@ -255,30 +320,65 @@ def cli_binary() -> Path:
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip slow tests unless RUN_SLOW_TESTS=1 is set.
+    """Skip slow tests unless explicitly requested.
 
     Slow tests include:
     - CLI parity tests (spawn external process)
     - Performance/memory tests (timing-sensitive)
 
-    To run slow tests:
+    To run slow tests, use either:
         RUN_SLOW_TESTS=1 pytest tests/
-    Or explicitly:
         pytest tests/ -m slow
+
+    To exclude slow tests:
+        pytest tests/ -m "not slow"
     """
+    # Check if user wants slow tests via environment variable
     run_slow = os.environ.get("RUN_SLOW_TESTS", "0") == "1"
-
     if run_slow:
-        # User wants slow tests, don't skip anything
         return
 
-    # Check if user explicitly requested slow tests via -m
-    markexpr = config.getoption("-m", default="")
-    if markexpr and "slow" in markexpr:
-        # User explicitly wants slow tests via marker expression
-        return
+    # Check if user explicitly requested slow tests via -m marker expression
+    # Use satisfiability check: can expression be True with slow=True?
+    markexpr = config.getoption("markexpr", default="")
+    if markexpr:
+        import itertools
+        import re
+        from _pytest.mark.expression import Expression
 
-    skip_slow = pytest.mark.skip(reason="Slow test (set RUN_SLOW_TESTS=1 to run)")
+        try:
+            expr = Expression.compile(markexpr)
+
+            # Extract marker names from expression (identifiers only)
+            names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", markexpr))
+            names -= {"and", "or", "not"}
+
+            # If expression doesn't mention "slow", skip slow tests by default
+            if "slow" not in names:
+                pass  # Fall through to add skip markers
+            else:
+                names.discard("slow")
+                # Enumerate all combinations of other markers (SAT check with slow=True)
+                # Search space is tiny in practice (expressions rarely have >8 markers)
+                could_select_slow = False
+                if len(names) <= 12:  # Safety cap for huge expressions
+                    for combo in itertools.product([False, True], repeat=len(names)):
+                        env = dict(zip(names, combo))
+                        env["slow"] = True
+                        if expr.evaluate(lambda n: env.get(n, False)):
+                            could_select_slow = True
+                            break
+                else:
+                    # Fallback for huge expressions: if slow is mentioned, assume wanted
+                    could_select_slow = True
+
+                if could_select_slow:
+                    return  # Don't skip slow tests
+        except Exception:
+            # If expression parsing fails, fall back to conservative behavior
+            pass
+
+    skip_slow = pytest.mark.skip(reason="Slow test (set RUN_SLOW_TESTS=1 or use -m slow)")
     for item in items:
         if "slow" in item.keywords:
             item.add_marker(skip_slow)
