@@ -11,6 +11,43 @@ use napi_derive::napi;
 
 use crate::error::{simple_error, to_napi_error};
 
+/// Column metadata information.
+///
+/// Provides information about a column in the query result set,
+/// including name, data type, and nullability.
+#[napi(object)]
+pub struct ColumnInfo {
+    /// Column name.
+    pub name: String,
+
+    /// CQL data type as a string (e.g., "Text", "Integer", "List").
+    #[napi(js_name = "dataType")]
+    pub data_type: String,
+
+    /// Whether the column can contain null values.
+    pub nullable: bool,
+
+    /// Column position in the result set (0-indexed).
+    pub position: u32,
+
+    /// Original table name (for joined queries).
+    #[napi(js_name = "tableName")]
+    pub table_name: Option<String>,
+}
+
+impl ColumnInfo {
+    /// Create ColumnInfo from core library's ColumnInfo.
+    fn from_core(col: &cqlite_core::query::result::ColumnInfo) -> Self {
+        Self {
+            name: col.name.clone(),
+            data_type: format!("{:?}", col.data_type),
+            nullable: col.nullable,
+            position: col.position as u32,
+            table_name: col.table_name.clone(),
+        }
+    }
+}
+
 /// Query execution result.
 ///
 /// Contains the query results serialized as JSON values for JavaScript
@@ -26,6 +63,10 @@ pub struct QueryResult {
 
     /// Query execution time in milliseconds.
     pub execution_time_ms: u32,
+
+    /// Column metadata for the result set.
+    /// Contains information about each column's name, type, and nullability.
+    pub columns: Vec<ColumnInfo>,
 }
 
 /// Database statistics.
@@ -185,10 +226,19 @@ impl Database {
             })
             .collect();
 
+        // Convert column metadata
+        let columns: Vec<ColumnInfo> = core_result
+            .metadata
+            .columns
+            .iter()
+            .map(ColumnInfo::from_core)
+            .collect();
+
         Ok(QueryResult {
             row_count: rows.len() as u32,
             rows,
             execution_time_ms: core_result.execution_time_ms as u32,
+            columns,
         })
     }
 
@@ -278,7 +328,7 @@ impl Database {
     /// ```
     #[napi(
         js_name = "executeNative",
-        ts_return_type = "Promise<{rows: object[], rowCount: number, executionTimeMs: number}>"
+        ts_return_type = "Promise<{rows: object[], rowCount: number, executionTimeMs: number, columns: ColumnInfo[]}>"
     )]
     pub fn execute_native(
         &self,
@@ -302,6 +352,7 @@ pub struct ExecuteNativeTask {
 pub struct QueryResultData {
     rows: Vec<std::collections::HashMap<String, cqlite_core::types::Value>>,
     execution_time_ms: u32,
+    columns: Vec<cqlite_core::query::result::ColumnInfo>,
 }
 
 impl napi::Task for ExecuteNativeTask {
@@ -322,6 +373,7 @@ impl napi::Task for ExecuteNativeTask {
         Ok(QueryResultData {
             rows: result.rows.iter().map(|r| r.values.clone()).collect(),
             execution_time_ms: result.execution_time_ms as u32,
+            columns: result.metadata.columns.clone(),
         })
     }
 
@@ -341,6 +393,25 @@ impl napi::Task for ExecuteNativeTask {
             "executionTimeMs",
             env.create_uint32(output.execution_time_ms)?,
         )?;
+
+        // Create columns array with metadata
+        let mut columns_arr = env.create_array_with_length(output.columns.len())?;
+        for (i, col) in output.columns.iter().enumerate() {
+            let mut col_obj = env.create_object()?;
+            col_obj.set_named_property("name", env.create_string(&col.name)?)?;
+            col_obj.set_named_property(
+                "dataType",
+                env.create_string(&format!("{:?}", col.data_type))?,
+            )?;
+            col_obj.set_named_property("nullable", env.get_boolean(col.nullable)?)?;
+            col_obj.set_named_property("position", env.create_uint32(col.position as u32)?)?;
+            match &col.table_name {
+                Some(name) => col_obj.set_named_property("tableName", env.create_string(name)?)?,
+                None => col_obj.set_named_property("tableName", env.get_null()?)?,
+            }
+            columns_arr.set_element(i as u32, col_obj)?;
+        }
+        result_obj.set_named_property("columns", columns_arr)?;
 
         Ok(result_obj)
     }

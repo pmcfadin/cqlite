@@ -24,6 +24,7 @@ mod database;
 mod error;
 mod value;
 
+pub use database::ColumnInfo;
 pub use database::Database;
 pub use database::DatabaseOptions;
 pub use database::DatabaseStats;

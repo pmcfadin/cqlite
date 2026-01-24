@@ -181,13 +181,14 @@ bindings/python/
 └── Cargo.toml             # Rust dependencies
 ```
 
-### Node.js Bindings Structure (Issue #290, #296, #297)
+### Node.js Bindings Structure (Issue #290, #296, #297, #303)
 
 ```
 bindings/node/
 ├── src/
 │   ├── lib.rs             # napi-rs entry point, module exports
-│   ├── database.rs        # Database class (open, execute, close, getStats)
+│   ├── database.rs        # Database class, QueryResult, ColumnInfo
+│   ├── value.rs           # CQL to JavaScript type conversions
 │   └── error.rs           # Error mapping (cqlite_core::Error → napi::Error)
 ├── lib/
 │   ├── index.js           # Enhanced entry point with error wrapper
@@ -196,7 +197,9 @@ bindings/node/
 ├── __test__/
 │   ├── smoke.test.js      # Basic import tests
 │   ├── database.test.js   # Database API tests (8 tests)
-│   └── error.test.js      # Error mapping tests (8 tests)
+│   ├── error.test.js      # Error mapping tests (8 tests)
+│   ├── value.test.js      # Value type conversion tests (16 tests)
+│   └── result.test.js     # QueryResult and ColumnInfo tests (10 tests)
 ├── Cargo.toml             # napi-rs dependencies
 ├── build.rs               # napi build script
 ├── package.json           # npm package config (@cqlite/node)
@@ -204,12 +207,26 @@ bindings/node/
 └── index.d.ts             # Generated TypeScript definitions
 ```
 
-**Status**: Error Mapping (Issue #297) complete.
+**Status**: QueryResult Types (Issue #303) complete.
 - `Database.open(dataDir, options?)` - Open database with optional schema
-- `Database.execute(query)` - Execute CQL query, returns QueryResult
+- `Database.execute(query)` - Execute CQL query, returns QueryResult with columns metadata
+- `Database.executeNative(query)` - Execute with native JS types (BigInt, Date, Buffer, Set, Map)
 - `Database.getStats()` - Get database statistics
 - `Database.close()` - Idempotent close
 - Error properties: `code`, `category`, `isRecoverable` on all thrown errors
+
+**QueryResult Fields**:
+- `rows: object[]` - Result rows as JavaScript objects
+- `rowCount: number` - Number of rows returned
+- `executionTimeMs: number` - Query execution time in milliseconds
+- `columns: ColumnInfo[]` - Column metadata array
+
+**ColumnInfo Fields** (Issue #303):
+- `name: string` - Column name
+- `dataType: string` - CQL data type (e.g., "Text", "Integer", "List")
+- `nullable: boolean` - Whether column can be null
+- `position: number` - Column position (0-indexed)
+- `tableName: string | null` - Original table name (for joined queries)
 
 **Error Codes** (Issue #297):
 | Code | Category | Description |
