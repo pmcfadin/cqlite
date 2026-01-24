@@ -252,7 +252,7 @@ bindings/node/
 **Next**: Phase 3 (Streaming) - Issue #305 for AsyncIterator support
 
 **Test Infrastructure** (Issue #306): Jest-based testing with centralized setup.
-- 205 tests across 9 test files, all passing
+- 236 tests across 10 test files, all passing
 - Coverage thresholds: 80% lines, 65% branches, 80% functions
 - Centralized path handling in `__test__/setup.js` (matches Python conftest.py)
 - Test helpers in `__test__/helpers.js`: `openDatabase()`, `skipIfNoDatasets()`
@@ -272,6 +272,11 @@ bindings/node/
 **TypeScript Definitions** (Issue #312): Complete type-safe definitions.
 - 68 tests validating type definitions in `typescript-definitions.test.js`
 - No `any` types - uses `Value` union type for all CQL-to-JS mappings
+
+**Publishing Validation** (Issue #314): npm publishing readiness tests.
+- 31 tests in `publish.test.js` validating package.json, napi config, files array
+- Tarball creation test (with `RUN_SLOW_TESTS=1`)
+- Dry-run verification step in release workflow
 - Includes `Duration`, `UdtValue`, `Row`, `NativeQueryResult` interfaces
 - Comprehensive JSDoc on all exports with `@example`, `@param`, `@throws` tags
 - Types configured in package.json: `"types": "lib/index.d.ts"`

@@ -212,6 +212,14 @@ jobs:
           fi
           npm whoami --registry https://registry.npmjs.org/
 
+      - name: Dry-run publish verification
+        working-directory: bindings/node
+        run: |
+          echo "::group::npm pack dry-run output"
+          npm pack --dry-run 2>&1
+          echo "::endgroup::"
+          echo "Dry-run publish verification passed"
+
       - name: Publish to npm (stable)
         if: ${{ !contains(github.ref_name, '-') }}
         working-directory: bindings/node
