@@ -12,11 +12,16 @@ description = "Node.js bindings for CQLite SSTable reader"
 crate-type = ["cdylib"]
 
 [dependencies]
-cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression"] }
+cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression", "cli-helpers"] }
 napi = { workspace = true, features = ["async", "napi9", "tokio_rt", "serde-json"] }
 napi-derive = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { version = "1.6", features = ["v4"] }
+base64 = "0.22"
+hex = "0.4"
 
 [build-dependencies]
 napi-build = { workspace = true }

@@ -2,41 +2,44 @@
 //!
 //! This crate provides Node.js bindings using napi-rs for reading
 //! Apache Cassandra 5.0 SSTables without cluster dependencies.
+//!
+//! ## Example
+//!
+//! ```javascript
+//! const { Database } = require('@cqlite/node');
+//!
+//! const db = await Database.open('/path/to/data', {
+//!   schema: '/path/to/schema.cql'
+//! });
+//!
+//! const result = await db.execute('SELECT * FROM users LIMIT 10');
+//! console.log(`Got ${result.rowCount} rows`);
+//!
+//! await db.close();
+//! ```
 
 #![deny(clippy::all)]
+
+mod database;
+mod error;
+
+pub use database::Database;
+pub use database::DatabaseOptions;
+pub use database::DatabaseStats;
+pub use database::QueryResult;
 
 use napi_derive::napi;
 
 /// Returns the version of the cqlite-node binding.
+///
+/// @returns The semantic version string (e.g., "0.3.0")
+///
+/// @example
+/// ```javascript
+/// const { version } = require('@cqlite/node');
+/// console.log(`CQLite version: ${version()}`);
+/// ```
 #[napi]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
-}
-
-/// Database handle for CQLite SSTable access.
-///
-/// Placeholder implementation - full API will be implemented in Phase 2.
-///
-/// ## Thread Safety (Phase 2)
-///
-/// - Database handles will be thread-safe for use across worker threads
-/// - Close operations will be idempotent
-/// - Async operations integrate with Node.js event loop via napi's tokio_rt
-#[napi]
-pub struct Database {
-    // TODO(Phase 2): Wrap Arc<cqlite_core::Database> + AtomicBool for thread-safe close
-    _private: (),
-}
-
-#[napi]
-impl Database {
-    /// Opens a database at the specified data directory.
-    ///
-    /// `data_dir` - Path to the SSTable data directory
-    ///
-    /// Currently throws "Not yet implemented - Phase 2" error.
-    #[napi(factory)]
-    pub fn open(_data_dir: String) -> napi::Result<Database> {
-        Err(napi::Error::from_reason("Not yet implemented - Phase 2"))
-    }
 }

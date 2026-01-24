@@ -98,13 +98,26 @@ with cqlite.open('test-data/datasets/sstables', schema='test-data/schemas/basic-
         print(row.to_dict())
 "
 
-# Node.js bindings build and test (Issue #290)
+# Node.js bindings build and test (Issue #290, #296)
 cd bindings/node && npm install && npm run build  # Build native module
 cd bindings/node && npm test                       # Run smoke tests
+cd bindings/node && npm run test:database          # Run database tests (requires test data)
 
-# Node.js usage example (Phase 2 - not yet implemented)
-# const cqlite = require('@cqlite/node');
-# const db = await cqlite.Database.open('/path/to/data');
+# Node.js usage example (Issue #296 - Phase 2 complete)
+node -e "
+const { Database } = require('@cqlite/node');
+(async () => {
+  const db = await Database.open('test-data/datasets/sstables', {
+    schema: 'test-data/schemas/basic-types.cql'
+  });
+  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 5');
+  console.log('Rows:', result.rowCount);
+  for (const row of result.rows) {
+    console.log(row.name);
+  }
+  await db.close();
+})();
+"
 ```
 
 ### CLI Output Format Precedence
@@ -138,7 +151,7 @@ Status metrics refresh every 5 seconds. Status line disabled for piped output.
 cqlite-core/     # Core library (SSTable parsing, query engine)
 cqlite-cli/      # Command-line interface
 bindings/python/ # Python bindings (PyO3) - M4 complete
-bindings/node/   # Node.js bindings (napi-rs) - M4 in progress
+bindings/node/   # Node.js bindings (napi-rs) - Phase 2 complete (Issue #296)
 test-data/       # Real Cassandra 5.0 SSTables for testing
 tools/           # sstabledump-validator, format-validator
 ```
@@ -168,14 +181,17 @@ bindings/python/
 └── Cargo.toml             # Rust dependencies
 ```
 
-### Node.js Bindings Structure (Issue #290)
+### Node.js Bindings Structure (Issue #290, #296)
 
 ```
 bindings/node/
 ├── src/
-│   └── lib.rs             # napi-rs entry point (Phase 1: version, Database stub)
+│   ├── lib.rs             # napi-rs entry point, module exports
+│   ├── database.rs        # Database class (open, execute, close, getStats)
+│   └── error.rs           # Error mapping (cqlite_core::Error → napi::Error)
 ├── __test__/
-│   └── smoke.test.js      # Basic import tests
+│   ├── smoke.test.js      # Basic import tests
+│   └── database.test.js   # Database API tests (8 tests)
 ├── Cargo.toml             # napi-rs dependencies
 ├── build.rs               # napi build script
 ├── package.json           # npm package config (@cqlite/node)
@@ -183,8 +199,14 @@ bindings/node/
 └── index.d.ts             # Generated TypeScript definitions
 ```
 
-**Status**: Phase 1 (Foundation) complete - workspace setup and smoke tests passing.
-**Phase 2** (pending): Full Database API (open, execute, streaming, etc.)
+**Status**: Phase 2 (Core Database Wrapper) complete - Issue #296 implemented.
+- `Database.open(dataDir, options?)` - Open database with optional schema
+- `Database.execute(query)` - Execute CQL query, returns QueryResult
+- `Database.getStats()` - Get database statistics
+- `Database.close()` - Idempotent close
+- Error categories: IoError, ParseError, SchemaError, QueryError
+
+**Next**: Phase 3 (Streaming) - Issue #305 for AsyncIterator support
 
 **CI Integration** (Issue #291): Tests run automatically via `node-ci.yml` on every PR.
 - Build matrix: 5 platforms (Linux x64/ARM64, macOS x64/ARM64, Windows x64)
