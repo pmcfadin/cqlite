@@ -6,7 +6,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org)
 [![Cassandra](https://img.shields.io/badge/cassandra-5.0+-green.svg)](https://cassandra.apache.org)
 
-> **Status**: M4 Complete - Core reading, CLI, Output Writers, and Python Bindings are production-ready
+> **Status**: M4 Complete - Core reading, CLI, Output Writers, Python and Node.js Bindings are production-ready
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
@@ -48,6 +48,23 @@ import cqlite
 with cqlite.open('path/to/sstables', schema='schema.cql') as db:
     for row in db.execute('SELECT * FROM keyspace.table LIMIT 5'):
         print(row.to_dict())
+```
+
+### Node.js
+
+```bash
+npm install @cqlite/node
+```
+
+```typescript
+import { Database } from '@cqlite/node';
+
+const db = await Database.open('path/to/sstables', { schema: 'schema.cql' });
+const result = await db.execute('SELECT * FROM keyspace.table LIMIT 5');
+for (const row of result.rows) {
+  console.log(row.name);
+}
+await db.close();
 ```
 
 ## Feature Flags
@@ -94,13 +111,13 @@ cargo build --no-default-features
 
 ### ✅ M4 Complete (Jan 2026)
 - [x] Python bindings with full CQL type support
+- [x] Node.js bindings with TypeScript definitions
 - [x] Streaming API for memory-efficient queries
-- [x] pip installable package (5 platform wheels)
-- [x] Type stubs for IDE/mypy support
+- [x] pip/npm installable packages (5 platform builds each)
+- [x] Type stubs for IDE support (Python mypy, TypeScript)
 
 ### 📋 Roadmap (M5+)
 - [ ] Write support (SSTable creation)
-- [ ] Node.js bindings
 - [ ] WASM support for browser deployment
 - [ ] Advanced query capabilities
 
@@ -180,10 +197,10 @@ cargo run --bin cqlite parse test-data/users-*.db
 
 ### ✅ M4 Complete (Jan 2026)
 - Python bindings via PyO3 with sync-first API
+- Node.js bindings via napi-rs with Promise-based API
 - Full CQL type system (20+ types including collections, UDTs)
-- Thread-safe database handles with GIL management
-- Streaming iterator for memory-bounded queries
-- 308+ tests with 98%+ pass rate
+- Thread-safe database handles
+- 500+ tests with 98%+ pass rate across both bindings
 
 See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
@@ -201,7 +218,7 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
 ### Language Bindings
 - **Python**: Production-ready sync API (see [Python README](bindings/python/README.md))
-- **Node.js**: Planned (M5+)
+- **Node.js**: Production-ready Promise API (see [Node.js README](bindings/node/README.md))
 - **WASM**: Planned (M6+)
 
 ## Resources
@@ -227,4 +244,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: M1 through M4 milestones are complete. Core SSTable reading, CLI, output writers, and Python bindings are production-ready. Next: M5 (Write Support).
+**Note**: M1 through M4 milestones are complete. Core SSTable reading, CLI, output writers, Python bindings, and Node.js bindings are production-ready. Next: M5 (Write Support).

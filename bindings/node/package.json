@@ -30,11 +30,16 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:parity": "jest parity.test.js --testTimeout=60000",
+    "typecheck": "tsc --noEmit -p examples/tsconfig.json",
+    "examples": "ts-node examples/basic-query.ts",
     "prepublishOnly": "napi prepublish -t npm"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
-    "jest": "^29.7.0"
+    "@types/node": "^20.0.0",
+    "jest": "^29.7.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
   },
   "engines": {
     "node": ">= 18"
