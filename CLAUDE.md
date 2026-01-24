@@ -186,6 +186,11 @@ bindings/node/
 **Status**: Phase 1 (Foundation) complete - workspace setup and smoke tests passing.
 **Phase 2** (pending): Full Database API (open, execute, streaming, etc.)
 
+**CI Integration** (Issue #291): Tests run automatically via `node-ci.yml` on every PR.
+- Build matrix: 5 platforms (Linux x64/ARM64, macOS x64/ARM64, Windows x64)
+- Tests run on 3 native platforms (ARM64 Linux and x64 macOS are build-only)
+- Release workflow: `node-release.yml` publishes to npm on version tags
+
 ### Key Source Paths
 
 ```

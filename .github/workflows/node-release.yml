@@ -1,0 +1,290 @@
+name: Node.js Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: cqlite-node
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "bindings/node -> target"
+          key: release-${{ matrix.os }}-${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install dependencies
+        working-directory: bindings/node
+        run: npm ci
+
+      - name: Build native module
+        working-directory: bindings/node
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            npm run build -- --target aarch64-unknown-linux-gnu
+          elif [ "${{ matrix.target }}" = "x86_64-apple-darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+            npm run build -- --target x86_64-apple-darwin
+          else
+            npm run build
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: bindings/node/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      id-token: write  # Required for npm provenance
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bindings-*
+          path: bindings/node/artifacts
+          merge-multiple: false
+
+      - name: Move artifacts to npm directory structure
+        working-directory: bindings/node
+        shell: bash
+        run: |
+          # napi-rs expects artifacts in npm/{platform}-{arch}/ subdirectories
+          mkdir -p npm
+
+          # Move each platform's .node file to appropriate npm subdirectory
+          for dir in artifacts/bindings-*/; do
+            if [ -d "$dir" ]; then
+              target=$(basename "$dir" | sed 's/bindings-//')
+              echo "Processing target: $target"
+
+              # Find the .node file
+              node_file=$(find "$dir" -name "*.node" -type f | head -n 1)
+              if [ -n "$node_file" ]; then
+                # Map Rust target to npm platform-arch format
+                case "$target" in
+                  x86_64-unknown-linux-gnu)
+                    dest="npm/linux-x64-gnu"
+                    ;;
+                  aarch64-unknown-linux-gnu)
+                    dest="npm/linux-arm64-gnu"
+                    ;;
+                  x86_64-apple-darwin)
+                    dest="npm/darwin-x64"
+                    ;;
+                  aarch64-apple-darwin)
+                    dest="npm/darwin-arm64"
+                    ;;
+                  x86_64-pc-windows-msvc)
+                    dest="npm/win32-x64-msvc"
+                    ;;
+                  *)
+                    echo "::error::Unknown target: $target"
+                    exit 1
+                    ;;
+                esac
+
+                mkdir -p "$dest"
+                cp "$node_file" "$dest/"
+                echo "Moved $node_file to $dest/"
+              fi
+            fi
+          done
+
+          # Clean up artifact directories
+          rm -rf artifacts
+
+          echo "::group::npm directory structure"
+          find npm -type f
+          echo "::endgroup::"
+
+      - name: Install dependencies
+        working-directory: bindings/node
+        run: npm ci
+
+      - name: Validate artifacts
+        working-directory: bindings/node
+        run: |
+          MODULE_COUNT=$(find npm -name "*.node" -type f | wc -l)
+          echo "Native module count: $MODULE_COUNT"
+
+          if [ "$MODULE_COUNT" -lt 5 ]; then
+            echo "::error::Expected 5 native modules, found $MODULE_COUNT"
+            exit 1
+          fi
+
+      - name: Validate version consistency
+        working-directory: bindings/node
+        run: |
+          TAG_VERSION="${{ github.ref_name }}"
+          TAG_VERSION="${TAG_VERSION#v}"
+
+          PKG_VERSION=$(node -p "require('./package.json').version")
+
+          echo "Tag version: $TAG_VERSION"
+          echo "package.json version: $PKG_VERSION"
+
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Version mismatch! Tag is $TAG_VERSION but package.json has $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Prepare npm packages
+        working-directory: bindings/node
+        run: npm run prepublishOnly
+
+      - name: Verify npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret not configured"
+            exit 1
+          fi
+          npm whoami --registry https://registry.npmjs.org/
+
+      - name: Publish to npm (stable)
+        if: ${{ !contains(github.ref_name, '-') }}
+        working-directory: bindings/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
+        run: npm publish --access public
+
+      - name: Publish to npm (pre-release)
+        if: contains(github.ref_name, '-')
+        working-directory: bindings/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
+        run: npm publish --access public --tag next
+
+      - name: Summary
+        run: |
+          TAG="${{ github.ref_name }}"
+          PKG_VERSION="${TAG#v}"
+
+          echo "## npm Publish Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag**: $TAG" >> $GITHUB_STEP_SUMMARY
+          echo "**Package**: [@cqlite/node](https://www.npmjs.com/package/@cqlite/node/v/$PKG_VERSION)" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "$TAG" == *"-"* ]]; then
+            echo "**Dist Tag**: \`next\` (pre-release)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Dist Tag**: \`latest\` (stable)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Published Platforms" >> $GITHUB_STEP_SUMMARY
+          echo "- Linux x86_64 (GNU)" >> $GITHUB_STEP_SUMMARY
+          echo "- Linux ARM64 (GNU)" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS x86_64" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS ARM64" >> $GITHUB_STEP_SUMMARY
+          echo "- Windows x86_64" >> $GITHUB_STEP_SUMMARY
+
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bindings-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.node > SHA256SUMS.txt
+          echo "::group::SHA256 Checksums"
+          cat SHA256SUMS.txt
+          echo "::endgroup::"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
