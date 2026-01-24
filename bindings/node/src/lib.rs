@@ -22,6 +22,7 @@
 
 mod database;
 mod error;
+mod streaming;
 mod value;
 
 pub use database::ColumnInfo;
@@ -30,6 +31,7 @@ pub use database::DatabaseOptions;
 pub use database::DatabaseStats;
 pub use database::QueryResult;
 pub use database::StreamingConfig;
+pub use streaming::StreamingResult;
 
 use napi_derive::napi;
 

@@ -220,6 +220,43 @@ export declare class Database {
    */
   get isClosed(): boolean
   /**
+   * Execute a CQL query with streaming results.
+   *
+   * Returns a `StreamingResult` that yields rows one at a time for memory-efficient
+   * processing of large result sets. Use with JavaScript's `for await...of` loop.
+   *
+   * Memory stays bounded by `StreamingConfig` settings (default ~11MB peak):
+   * - `bufferSize`: 1024 rows in flight
+   * - `chunkSize`: 10,000 rows per fetch chunk
+   *
+   * @param query - CQL SELECT statement to execute
+   * @param config - Optional StreamingConfig for buffer/chunk sizes
+   * @returns Promise resolving to StreamingResult async iterator
+   *
+   * @example
+   * ```javascript
+   * const stream = await db.executeStreaming('SELECT * FROM large_table');
+   * for await (const row of stream) {
+   *   console.log(row.name);
+   * }
+   *
+   * // With custom config for memory constraints
+   * const config = { bufferSize: 256, chunkSize: 2500 };
+   * for await (const row of await db.executeStreaming(query, config)) {
+   *   process(row);
+   * }
+   *
+   * // Early termination is safe - resources cleaned up automatically
+   * const stream = await db.executeStreaming('SELECT * FROM huge_table');
+   * for await (const row of stream) {
+   *   if (row.id === targetId) {
+   *     break;
+   *   }
+   * }
+   * ```
+   */
+  executeStreaming(query: string, config?: StreamingConfig | undefined | null): Promise<StreamingResult>
+  /**
    * Execute a CQL query and return results with native JavaScript types.
    *
    * This method returns native JavaScript types instead of JSON:
@@ -245,4 +282,72 @@ export declare class Database {
    * ```
    */
   executeNative(query: string): Promise<{rows: object[], rowCount: number, executionTimeMs: number, columns: ColumnInfo[]}>
+}
+/**
+ * Streaming query result iterator.
+ *
+ * Yields rows one at a time via `next()` method which returns an AsyncTask.
+ * JavaScript wrapper implements `Symbol.asyncIterator` for `for await...of` support.
+ *
+ * ## Resource Cleanup
+ *
+ * Resources are cleaned up when:
+ * 1. All rows consumed (`next()` returns `done: true`)
+ * 2. Iterator dropped (early break from loop triggers `return()`)
+ * 3. `close()` called explicitly
+ * 4. Error occurs
+ *
+ * ## Example (JavaScript)
+ *
+ * ```javascript
+ * const stream = await db.executeStreaming('SELECT * FROM large_table');
+ * for await (const row of stream) {
+ *   console.log(row);
+ * }
+ * ```
+ */
+export declare class StreamingResult {
+  /**
+   * Get the next row from the stream.
+   *
+   * Returns an object matching JavaScript's iterator protocol:
+   * - `{ value: Row, done: false }` - More rows available
+   * - `{ value: undefined, done: true }` - Stream exhausted
+   *
+   * Errors are thrown as exceptions with structured error properties
+   * (code, category, isRecoverable).
+   *
+   * @returns Promise resolving to iterator result object
+   */
+  next(): Promise<unknown>
+  /**
+   * Number of rows received so far.
+   *
+   * This counter increases as rows are yielded from the stream.
+   * Useful for progress tracking.
+   *
+   * @returns Number of rows received
+   */
+  get rowsReceived(): number
+  /**
+   * Column metadata for the result set.
+   *
+   * Contains information about each column's name, type, and nullability.
+   * Available immediately after creating the streaming result.
+   *
+   * @returns Array of ColumnInfo objects
+   */
+  get columns(): Array<ColumnInfo>
+  /**
+   * Release resources early (synchronous).
+   *
+   * Called automatically when:
+   * - All rows are consumed
+   * - JavaScript iterator's `return()` is called (e.g., `break` from loop)
+   * - Error occurs during iteration
+   *
+   * Safe to call multiple times - subsequent calls are no-ops.
+   * This method is synchronous and does not need to be awaited.
+   */
+  close(): void
 }

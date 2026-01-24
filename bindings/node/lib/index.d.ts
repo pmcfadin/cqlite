@@ -328,7 +328,9 @@ export interface DatabaseOptions {
  * @example
  * ```typescript
  * const config: StreamingConfig = { bufferSize: 512, chunkSize: 5000 };
- * // Future: for await (const row of db.executeStreaming(query, config)) { ... }
+ * for await (const row of await db.executeStreaming(query, config)) {
+ *   console.log(row);
+ * }
  * ```
  */
 export interface StreamingConfig {
@@ -344,6 +346,75 @@ export interface StreamingConfig {
    * Default: 10000.
    */
   chunkSize?: number;
+}
+
+/**
+ * Streaming query result for memory-efficient processing.
+ *
+ * Implements `AsyncIterable<Row>` for use with `for await...of` loops.
+ * Memory stays bounded by StreamingConfig settings (default ~11MB peak).
+ *
+ * ## Resource Cleanup
+ *
+ * Resources are automatically cleaned up when:
+ * 1. All rows are consumed (iteration completes)
+ * 2. `break` exits the loop early (calls `return()` automatically)
+ * 3. `close()` is called explicitly
+ * 4. An error occurs during iteration
+ *
+ * @example
+ * ```typescript
+ * // Basic streaming
+ * const stream = await db.executeStreaming('SELECT * FROM large_table');
+ * for await (const row of stream) {
+ *   console.log(row.name);
+ *   // Memory stays bounded - only bufferSize rows in flight
+ * }
+ *
+ * // Early termination is safe
+ * for await (const row of stream) {
+ *   if (row.id === targetId) {
+ *     break; // Resources cleaned up automatically
+ *   }
+ * }
+ *
+ * // Access metadata during streaming
+ * console.log(`Received ${stream.rowsReceived} rows so far`);
+ * console.log(`Columns: ${stream.columns.map(c => c.name).join(', ')}`);
+ * ```
+ */
+export interface StreamingResult extends AsyncIterable<Row> {
+  /**
+   * Number of rows received so far.
+   *
+   * This counter increases as rows are yielded from the stream.
+   * Useful for progress tracking and debugging.
+   */
+  readonly rowsReceived: number;
+
+  /**
+   * Column metadata for the result set.
+   *
+   * Contains information about each column's name, type, and nullability.
+   * Available immediately after creating the streaming result.
+   */
+  readonly columns: ColumnInfo[];
+
+  /**
+   * Release resources early.
+   *
+   * Called automatically when the iterator is exhausted or the loop exits.
+   * Call explicitly to release resources before consuming all rows.
+   * Safe to call multiple times - subsequent calls are no-ops.
+   */
+  close(): void;
+
+  /**
+   * Async iterator protocol implementation.
+   *
+   * Prefer using `for await...of` over calling this directly.
+   */
+  [Symbol.asyncIterator](): AsyncIterator<Row>;
 }
 
 // ============================================================================
@@ -618,6 +689,46 @@ export declare class Database {
    * @returns True if the database has been closed, false otherwise
    */
   get isClosed(): boolean;
+
+  /**
+   * Execute a CQL query with streaming results.
+   *
+   * Returns an async iterable that yields rows one at a time, keeping memory
+   * usage bounded by the `StreamingConfig` settings. Use with `for await...of`.
+   *
+   * Memory stays bounded by configuration (default ~11MB peak):
+   * - `bufferSize`: 1024 rows in flight (~1MB)
+   * - `chunkSize`: 10,000 rows per fetch chunk (~10MB)
+   *
+   * @param query - CQL SELECT statement to execute
+   * @param config - Optional StreamingConfig for buffer/chunk sizes
+   * @returns Promise resolving to StreamingResult async iterator
+   * @throws {CqliteError} If the query fails
+   *
+   * @example
+   * ```typescript
+   * // Basic streaming
+   * const stream = await db.executeStreaming('SELECT * FROM large_table');
+   * for await (const row of stream) {
+   *   console.log(row.name);
+   * }
+   *
+   * // With custom config for memory constraints
+   * const config: StreamingConfig = { bufferSize: 256, chunkSize: 2500 };
+   * for await (const row of await db.executeStreaming(query, config)) {
+   *   process(row);
+   * }
+   *
+   * // Early termination is safe
+   * const stream = await db.executeStreaming('SELECT * FROM huge_table');
+   * for await (const row of stream) {
+   *   if (row.id === targetId) {
+   *     break; // Resources cleaned up automatically
+   *   }
+   * }
+   * ```
+   */
+  executeStreaming(query: string, config?: StreamingConfig): Promise<StreamingResult>;
 }
 
 // ============================================================================

@@ -15,6 +15,7 @@ use crate::error::{simple_error, to_napi_error};
 ///
 /// Provides information about a column in the query result set,
 /// including name, data type, and nullability.
+#[derive(Clone)]
 #[napi(object)]
 pub struct ColumnInfo {
     /// Column name.
@@ -370,6 +371,65 @@ impl Database {
     #[napi(getter)]
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Execute a CQL query with streaming results.
+    ///
+    /// Returns a `StreamingResult` that yields rows one at a time for memory-efficient
+    /// processing of large result sets. Use with JavaScript's `for await...of` loop.
+    ///
+    /// Memory stays bounded by `StreamingConfig` settings (default ~11MB peak):
+    /// - `bufferSize`: 1024 rows in flight
+    /// - `chunkSize`: 10,000 rows per fetch chunk
+    ///
+    /// @param query - CQL SELECT statement to execute
+    /// @param config - Optional StreamingConfig for buffer/chunk sizes
+    /// @returns Promise resolving to StreamingResult async iterator
+    ///
+    /// @example
+    /// ```javascript
+    /// const stream = await db.executeStreaming('SELECT * FROM large_table');
+    /// for await (const row of stream) {
+    ///   console.log(row.name);
+    /// }
+    ///
+    /// // With custom config for memory constraints
+    /// const config = { bufferSize: 256, chunkSize: 2500 };
+    /// for await (const row of await db.executeStreaming(query, config)) {
+    ///   process(row);
+    /// }
+    ///
+    /// // Early termination is safe - resources cleaned up automatically
+    /// const stream = await db.executeStreaming('SELECT * FROM huge_table');
+    /// for await (const row of stream) {
+    ///   if (row.id === targetId) {
+    ///     break;
+    ///   }
+    /// }
+    /// ```
+    #[napi(js_name = "executeStreaming")]
+    pub async fn execute_streaming(
+        &self,
+        query: String,
+        config: Option<StreamingConfig>,
+    ) -> napi::Result<crate::streaming::StreamingResult> {
+        self.ensure_open()?;
+
+        // Convert config or use defaults
+        let core_config = match config {
+            Some(c) => c.to_core()?,
+            None => cqlite_core::query::result::StreamingConfig::default(),
+        };
+
+        // Execute streaming query via core library
+        let iter = self
+            .inner
+            .execute_streaming(&query, core_config)
+            .await
+            .map_err(to_napi_error)?;
+
+        // Create StreamingResult with shared runtime
+        crate::streaming::StreamingResult::new(iter)
     }
 
     /// Execute a CQL query and return results with native JavaScript types.
