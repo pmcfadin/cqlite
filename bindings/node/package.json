@@ -26,17 +26,14 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node __test__/smoke.test.js",
-    "test:database": "node __test__/database.test.js",
-    "test:error": "node __test__/error.test.js",
-    "test:config": "node __test__/config.test.js",
-    "test:value": "node __test__/value.test.js",
-    "test:result": "node __test__/result.test.js",
-    "test:all": "npm run test && npm run test:database && npm run test:error && npm run test:config && npm run test:value && npm run test:result",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "prepublishOnly": "napi prepublish -t npm"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0"
+    "@napi-rs/cli": "^2.18.0",
+    "jest": "^29.7.0"
   },
   "engines": {
     "node": ">= 18"

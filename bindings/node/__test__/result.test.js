@@ -1,6 +1,8 @@
 /**
  * QueryResult and ColumnInfo tests for Issue #303.
  *
+ * Issue #306: Migrated to Jest format.
+ *
  * TDD Requirements from the issue:
  * - [x] Test: QueryResult has columns array
  * - [x] Test: ColumnInfo has name property
@@ -11,272 +13,194 @@
  * - [x] Test: Empty result still has column metadata
  */
 
-const assert = require('assert');
-const path = require('path');
 const { Database } = require('../lib/index.js');
+const { skipIfNoDatasets } = require('./helpers.js');
 
-// Test data paths
-const TEST_DATA_ROOT = process.env.CQLITE_DATASETS_ROOT ||
-  path.join(__dirname, '..', '..', '..', 'test-data', 'datasets');
-const SSTABLES_DIR = path.join(TEST_DATA_ROOT, 'sstables');
-const SCHEMA_FILE = path.join(__dirname, '..', '..', '..', 'test-data', 'schemas', 'basic-types.cql');
+describe('QueryResult and ColumnInfo Tests (Issue #303)', () => {
+  let db = null;
 
-// Helper to run async test
-async function runTest(name, fn) {
-  try {
-    await fn();
-    console.log(`\u2713 ${name}`);
-    return true;
-  } catch (e) {
-    console.error(`\u2717 ${name}`);
-    console.error(`  Error: ${e.message}`);
-    if (e.stack) {
-      console.error(`  Stack: ${e.stack.split('\n').slice(1, 3).join('\n')}`);
+  beforeAll(async () => {
+    skipIfNoDatasets();
+    console.log(`Test data root: ${global.testPaths.TEST_DATA_ROOT}`);
+    console.log(`SSTables dir: ${global.testPaths.SSTABLES_DIR}`);
+    console.log(`Schema file: ${global.testPaths.SCHEMA_BASIC_TYPES}`);
+    db = await Database.open(global.testPaths.SSTABLES_DIR, {
+      schema: global.testPaths.SCHEMA_BASIC_TYPES,
+    });
+  });
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+      db = null;
     }
-    return false;
-  }
-}
+  });
 
-// Shared database instance for tests
-let db = null;
-
-// Setup: Open database before tests
-async function setup() {
-  db = await Database.open(SSTABLES_DIR, { schema: SCHEMA_FILE });
-}
-
-// Teardown: Close database after tests
-async function teardown() {
-  if (db) {
-    await db.close();
-    db = null;
-  }
-}
-
-// Test: QueryResult has columns array
-async function testQueryResultHasColumnsArray() {
-  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 1');
-
-  assert(result !== null && result !== undefined, 'Result should not be null');
-  assert('columns' in result, 'Result should have columns property');
-  assert(Array.isArray(result.columns), 'columns should be an array');
-  console.log(`    Found ${result.columns.length} columns`);
-}
-
-// Test: ColumnInfo has name property
-async function testColumnInfoHasNameProperty() {
-  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 1');
-
-  assert(result.columns.length > 0, 'Should have at least one column');
-
-  for (const col of result.columns) {
-    assert('name' in col, 'Column should have name property');
-    assert(typeof col.name === 'string', `name should be string, got ${typeof col.name}`);
-    assert(col.name.length > 0, 'name should not be empty');
-  }
-
-  console.log(`    Column names: ${result.columns.map(c => c.name).join(', ')}`);
-}
-
-// Test: ColumnInfo has dataType property
-async function testColumnInfoHasDataTypeProperty() {
-  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 1');
-
-  assert(result.columns.length > 0, 'Should have at least one column');
-
-  for (const col of result.columns) {
-    assert('dataType' in col, 'Column should have dataType property');
-    assert(typeof col.dataType === 'string', `dataType should be string, got ${typeof col.dataType}`);
-    assert(col.dataType.length > 0, 'dataType should not be empty');
-  }
-
-  console.log(`    Data types: ${result.columns.map(c => `${c.name}:${c.dataType}`).join(', ')}`);
-}
-
-// Test: ColumnInfo has nullable property
-async function testColumnInfoHasNullableProperty() {
-  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 1');
-
-  assert(result.columns.length > 0, 'Should have at least one column');
-
-  for (const col of result.columns) {
-    assert('nullable' in col, 'Column should have nullable property');
-    assert(typeof col.nullable === 'boolean', `nullable should be boolean, got ${typeof col.nullable}`);
-  }
-
-  const nullableCount = result.columns.filter(c => c.nullable).length;
-  console.log(`    ${nullableCount}/${result.columns.length} columns are nullable`);
-}
-
-// Test: ColumnInfo has position property
-async function testColumnInfoHasPositionProperty() {
-  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 1');
-
-  assert(result.columns.length > 0, 'Should have at least one column');
-
-  for (const col of result.columns) {
-    assert('position' in col, 'Column should have position property');
-    assert(typeof col.position === 'number', `position should be number, got ${typeof col.position}`);
-    assert(col.position >= 0, 'position should be non-negative');
-  }
-
-  // Verify positions are sequential from 0
-  const positions = result.columns.map(c => c.position).sort((a, b) => a - b);
-  for (let i = 0; i < positions.length; i++) {
-    assert(positions[i] === i, `Position ${i} should be ${i}, got ${positions[i]}`);
-  }
-
-  console.log(`    Positions: 0-${result.columns.length - 1}`);
-}
-
-// Test: ColumnInfo has optional tableName property
-async function testColumnInfoHasTableNameProperty() {
-  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 1');
-
-  assert(result.columns.length > 0, 'Should have at least one column');
-
-  for (const col of result.columns) {
-    assert('tableName' in col, 'Column should have tableName property');
-    // tableName can be string or null
-    assert(
-      col.tableName === null || typeof col.tableName === 'string',
-      `tableName should be string or null, got ${typeof col.tableName}`
+  test('QueryResult has columns array', async () => {
+    const result = await db.execute(
+      'SELECT * FROM test_basic.simple_table LIMIT 1'
     );
-  }
-}
 
-// Test: Column order matches query SELECT order (for SELECT *)
-async function testColumnOrderMatchesSelectOrder() {
-  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 1');
+    expect(result).not.toBeNull();
+    expect(result).not.toBeUndefined();
+    expect(result).toHaveProperty('columns');
+    expect(Array.isArray(result.columns)).toBe(true);
+    console.log(`    Found ${result.columns.length} columns`);
+  });
 
-  assert(result.columns.length > 0, 'Should have at least one column');
-
-  // For SELECT *, verify position matches array index
-  for (let i = 0; i < result.columns.length; i++) {
-    assert(
-      result.columns[i].position === i,
-      `Column at index ${i} should have position ${i}, got ${result.columns[i].position}`
+  test('ColumnInfo has name property', async () => {
+    const result = await db.execute(
+      'SELECT * FROM test_basic.simple_table LIMIT 1'
     );
-  }
 
-  console.log(`    Verified ${result.columns.length} columns in order`);
-}
+    expect(result.columns.length).toBeGreaterThan(0);
 
-// Test: Empty result still has column metadata
-async function testEmptyResultHasColumnMetadata() {
-  // Query with impossible WHERE clause to get empty result
-  const result = await db.execute(
-    "SELECT * FROM test_basic.simple_table WHERE id = 'nonexistent-id-that-does-not-exist-12345' LIMIT 1"
-  );
-
-  assert(result.rowCount === 0, 'Should have zero rows');
-  assert(result.rows.length === 0, 'Rows array should be empty');
-
-  // Even with no rows, columns should still have metadata
-  assert('columns' in result, 'Empty result should have columns property');
-  assert(Array.isArray(result.columns), 'columns should be an array');
-
-  // Note: Column metadata may or may not be populated for empty results
-  // depending on query planning. This is acceptable behavior.
-  console.log(`    Empty result has ${result.columns.length} column definitions`);
-}
-
-// Test: executeNative also returns columns
-async function testExecuteNativeHasColumns() {
-  const result = await db.executeNative('SELECT * FROM test_basic.simple_table LIMIT 1');
-
-  assert('columns' in result, 'executeNative result should have columns property');
-  assert(Array.isArray(result.columns), 'columns should be an array');
-
-  if (result.columns.length > 0) {
-    const col = result.columns[0];
-    assert('name' in col, 'Column should have name');
-    assert('dataType' in col, 'Column should have dataType');
-    assert('nullable' in col, 'Column should have nullable');
-    assert('position' in col, 'Column should have position');
-  }
-
-  console.log(`    executeNative: ${result.columns.length} columns`);
-}
-
-// Test: Columns match between execute and executeNative
-async function testColumnsMatchBetweenExecuteMethods() {
-  const query = 'SELECT * FROM test_basic.simple_table LIMIT 1';
-  const jsonResult = await db.execute(query);
-  const nativeResult = await db.executeNative(query);
-
-  assert.strictEqual(
-    jsonResult.columns.length,
-    nativeResult.columns.length,
-    'Column counts should match'
-  );
-
-  for (let i = 0; i < jsonResult.columns.length; i++) {
-    assert.strictEqual(
-      jsonResult.columns[i].name,
-      nativeResult.columns[i].name,
-      `Column ${i} name should match`
-    );
-    assert.strictEqual(
-      jsonResult.columns[i].dataType,
-      nativeResult.columns[i].dataType,
-      `Column ${i} dataType should match`
-    );
-  }
-
-  console.log(`    Both methods return identical column metadata`);
-}
-
-// Run all tests
-async function main() {
-  console.log('QueryResult and ColumnInfo Tests (Issue #303)\n');
-  console.log(`Test data root: ${TEST_DATA_ROOT}`);
-  console.log(`SSTables dir: ${SSTABLES_DIR}`);
-  console.log(`Schema file: ${SCHEMA_FILE}\n`);
-
-  try {
-    await setup();
-
-    const tests = [
-      ['QueryResult has columns array', testQueryResultHasColumnsArray],
-      ['ColumnInfo has name property', testColumnInfoHasNameProperty],
-      ['ColumnInfo has dataType property', testColumnInfoHasDataTypeProperty],
-      ['ColumnInfo has nullable property', testColumnInfoHasNullableProperty],
-      ['ColumnInfo has position property', testColumnInfoHasPositionProperty],
-      ['ColumnInfo has tableName property', testColumnInfoHasTableNameProperty],
-      ['Column order matches SELECT order', testColumnOrderMatchesSelectOrder],
-      ['Empty result has column metadata', testEmptyResultHasColumnMetadata],
-      ['executeNative also returns columns', testExecuteNativeHasColumns],
-      ['Columns match between execute methods', testColumnsMatchBetweenExecuteMethods],
-    ];
-
-    let passed = 0;
-    let failed = 0;
-
-    for (const [name, fn] of tests) {
-      const success = await runTest(name, fn);
-      if (success) {
-        passed++;
-      } else {
-        failed++;
-      }
+    for (const col of result.columns) {
+      expect(col).toHaveProperty('name');
+      expect(typeof col.name).toBe('string');
+      expect(col.name.length).toBeGreaterThan(0);
     }
 
-    console.log(`\n${passed} passed, ${failed} failed`);
+    console.log(`    Column names: ${result.columns.map((c) => c.name).join(', ')}`);
+  });
 
-    await teardown();
+  test('ColumnInfo has dataType property', async () => {
+    const result = await db.execute(
+      'SELECT * FROM test_basic.simple_table LIMIT 1'
+    );
 
-    if (failed > 0) {
-      process.exit(1);
+    expect(result.columns.length).toBeGreaterThan(0);
+
+    for (const col of result.columns) {
+      expect(col).toHaveProperty('dataType');
+      expect(typeof col.dataType).toBe('string');
+      expect(col.dataType.length).toBeGreaterThan(0);
     }
-  } catch (e) {
-    console.error('Test setup error:', e);
-    await teardown();
-    process.exit(1);
-  }
-}
 
-main().catch(e => {
-  console.error('Test runner error:', e);
-  process.exit(1);
+    console.log(
+      `    Data types: ${result.columns.map((c) => `${c.name}:${c.dataType}`).join(', ')}`
+    );
+  });
+
+  test('ColumnInfo has nullable property', async () => {
+    const result = await db.execute(
+      'SELECT * FROM test_basic.simple_table LIMIT 1'
+    );
+
+    expect(result.columns.length).toBeGreaterThan(0);
+
+    for (const col of result.columns) {
+      expect(col).toHaveProperty('nullable');
+      expect(typeof col.nullable).toBe('boolean');
+    }
+
+    const nullableCount = result.columns.filter((c) => c.nullable).length;
+    console.log(`    ${nullableCount}/${result.columns.length} columns are nullable`);
+  });
+
+  test('ColumnInfo has position property', async () => {
+    const result = await db.execute(
+      'SELECT * FROM test_basic.simple_table LIMIT 1'
+    );
+
+    expect(result.columns.length).toBeGreaterThan(0);
+
+    for (const col of result.columns) {
+      expect(col).toHaveProperty('position');
+      expect(typeof col.position).toBe('number');
+      expect(col.position).toBeGreaterThanOrEqual(0);
+    }
+
+    // Verify positions are sequential from 0
+    const positions = result.columns.map((c) => c.position).sort((a, b) => a - b);
+    for (let i = 0; i < positions.length; i++) {
+      expect(positions[i]).toBe(i);
+    }
+
+    console.log(`    Positions: 0-${result.columns.length - 1}`);
+  });
+
+  test('ColumnInfo has tableName property', async () => {
+    const result = await db.execute(
+      'SELECT * FROM test_basic.simple_table LIMIT 1'
+    );
+
+    expect(result.columns.length).toBeGreaterThan(0);
+
+    for (const col of result.columns) {
+      expect(col).toHaveProperty('tableName');
+      // tableName can be string or null
+      expect(col.tableName === null || typeof col.tableName === 'string').toBe(
+        true
+      );
+    }
+  });
+
+  test('Column order matches SELECT order', async () => {
+    const result = await db.execute(
+      'SELECT * FROM test_basic.simple_table LIMIT 1'
+    );
+
+    expect(result.columns.length).toBeGreaterThan(0);
+
+    // For SELECT *, verify position matches array index
+    for (let i = 0; i < result.columns.length; i++) {
+      expect(result.columns[i].position).toBe(i);
+    }
+
+    console.log(`    Verified ${result.columns.length} columns in order`);
+  });
+
+  test('Empty result has column metadata', async () => {
+    // Query with impossible WHERE clause to get empty result
+    const result = await db.execute(
+      "SELECT * FROM test_basic.simple_table WHERE id = 'nonexistent-id-that-does-not-exist-12345' LIMIT 1"
+    );
+
+    expect(result.rowCount).toBe(0);
+    expect(result.rows.length).toBe(0);
+
+    // Even with no rows, columns property should exist and be an array
+    expect(result).toHaveProperty('columns');
+    expect(Array.isArray(result.columns)).toBe(true);
+
+    // Column metadata should be populated even for empty results
+    // This allows schema discovery without requiring data
+    expect(result.columns.length).toBeGreaterThan(0);
+    console.log(`    Empty result has ${result.columns.length} column definitions`);
+  });
+
+  test('executeNative also returns columns', async () => {
+    const result = await db.executeNative(
+      'SELECT * FROM test_basic.simple_table LIMIT 1'
+    );
+
+    expect(result).toHaveProperty('columns');
+    expect(Array.isArray(result.columns)).toBe(true);
+
+    if (result.columns.length > 0) {
+      const col = result.columns[0];
+      expect(col).toHaveProperty('name');
+      expect(col).toHaveProperty('dataType');
+      expect(col).toHaveProperty('nullable');
+      expect(col).toHaveProperty('position');
+    }
+
+    console.log(`    executeNative: ${result.columns.length} columns`);
+  });
+
+  test('Columns match between execute methods', async () => {
+    const query = 'SELECT * FROM test_basic.simple_table LIMIT 1';
+    const jsonResult = await db.execute(query);
+    const nativeResult = await db.executeNative(query);
+
+    expect(jsonResult.columns.length).toBe(nativeResult.columns.length);
+
+    for (let i = 0; i < jsonResult.columns.length; i++) {
+      expect(jsonResult.columns[i].name).toBe(nativeResult.columns[i].name);
+      expect(jsonResult.columns[i].dataType).toBe(nativeResult.columns[i].dataType);
+    }
+
+    console.log(`    Both methods return identical column metadata`);
+  });
 });

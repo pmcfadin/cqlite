@@ -98,10 +98,11 @@ with cqlite.open('test-data/datasets/sstables', schema='test-data/schemas/basic-
         print(row.to_dict())
 "
 
-# Node.js bindings build and test (Issue #290, #296)
+# Node.js bindings build and test (Issue #290, #296, #306)
 cd bindings/node && npm install && npm run build  # Build native module
-cd bindings/node && npm test                       # Run smoke tests
-cd bindings/node && npm run test:database          # Run database tests (requires test data)
+cd bindings/node && npm test                       # Run all tests (Jest)
+cd bindings/node && npm run test:watch             # Watch mode for development
+cd bindings/node && npm run test:coverage          # Run with coverage report
 
 # Node.js usage example (Issue #296 - Phase 2 complete)
 node -e "
@@ -195,11 +196,15 @@ bindings/node/
 │   ├── index.d.ts         # TypeScript definitions with CqliteError
 │   └── error-wrapper.js   # JavaScript error enhancement layer
 ├── __test__/
-│   ├── smoke.test.js      # Basic import tests
+│   ├── setup.js           # Jest setup with centralized paths (Issue #306)
+│   ├── helpers.js         # Test utilities (openDatabase, skipIfNoDatasets)
+│   ├── smoke.test.js      # Basic import tests (4 tests)
+│   ├── config.test.js     # StreamingConfig tests (8 tests)
 │   ├── database.test.js   # Database API tests (8 tests)
 │   ├── error.test.js      # Error mapping tests (8 tests)
 │   ├── value.test.js      # Value type conversion tests (16 tests)
 │   └── result.test.js     # QueryResult and ColumnInfo tests (10 tests)
+├── jest.config.js         # Jest configuration (Issue #306)
 ├── Cargo.toml             # napi-rs dependencies
 ├── build.rs               # napi build script
 ├── package.json           # npm package config (@cqlite/node)
@@ -241,6 +246,12 @@ bindings/node/
 | `INVALID_INPUT` | Logic | Invalid operation/state |
 
 **Next**: Phase 3 (Streaming) - Issue #305 for AsyncIterator support
+
+**Test Infrastructure** (Issue #306): Jest-based testing with centralized setup.
+- 54 tests across 6 test files, all passing
+- Coverage thresholds: 80% lines, 65% branches, 80% functions
+- Centralized path handling in `__test__/setup.js` (matches Python conftest.py)
+- Test helpers in `__test__/helpers.js`: `openDatabase()`, `skipIfNoDatasets()`
 
 **CI Integration** (Issue #291): Tests run automatically via `node-ci.yml` on every PR.
 - Build matrix: 5 platforms (Linux x64/ARM64, macOS x64/ARM64, Windows x64)

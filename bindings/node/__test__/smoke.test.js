@@ -1,31 +1,31 @@
-// Smoke test: verify native module loads without error
-const assert = require('assert');
+/**
+ * Smoke tests: verify native module loads without error.
+ *
+ * Issue #306: Migrated to Jest format.
+ */
 
-try {
-  const cqlite = require('../index.js');
+const cqlite = require('../index.js');
 
-  // Test 1: Module loads
-  assert(cqlite, 'Module should load');
+describe('Smoke Tests', () => {
+  test('Module loads', () => {
+    expect(cqlite).toBeDefined();
+  });
 
-  // Test 2: Version function exists and returns string
-  assert(typeof cqlite.version === 'function', 'version() should be a function');
-  const ver = cqlite.version();
-  assert(typeof ver === 'string', 'version() should return a string');
-  assert(ver.match(/^\d+\.\d+\.\d+/), 'version() should return semver');
+  test('version() returns semver string', () => {
+    expect(typeof cqlite.version).toBe('function');
+    const ver = cqlite.version();
+    expect(typeof ver).toBe('string');
+    expect(ver).toMatch(/^\d+\.\d+\.\d+/);
+  });
 
-  // Test 3: Database class exists with expected methods
-  assert(typeof cqlite.Database === 'function', 'Database should be a class');
-  assert(typeof cqlite.Database.open === 'function', 'Database.open should be a function');
+  test('Database class exists with expected methods', () => {
+    expect(typeof cqlite.Database).toBe('function');
+    expect(typeof cqlite.Database.open).toBe('function');
+  });
 
-  // Test 4: QueryResult and DatabaseStats types are exported
-  // (These are object types, exported via napi as part of the module)
-  // Note: napi-rs exports object types implicitly, no explicit check needed
-
-  console.log('All smoke tests passed');
-  console.log(`  cqlite-node version: ${ver}`);
-  process.exit(0);
-} catch (err) {
-  console.error('Smoke test failed:', err.message);
-  console.error(err.stack);
-  process.exit(1);
-}
+  test('Module version is accessible', () => {
+    const ver = cqlite.version();
+    console.log(`    cqlite-node version: ${ver}`);
+    expect(ver.length).toBeGreaterThan(0);
+  });
+});
