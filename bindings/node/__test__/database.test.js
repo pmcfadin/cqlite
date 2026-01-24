@@ -12,7 +12,7 @@
 
 const assert = require('assert');
 const path = require('path');
-const { Database, version } = require('../index.js');
+const { Database, version } = require('../lib/index.js');
 
 // Test data paths
 const TEST_DATA_ROOT = process.env.CQLITE_DATASETS_ROOT ||

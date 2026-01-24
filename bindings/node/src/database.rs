@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use napi_derive::napi;
 
-use crate::error::to_napi_error;
+use crate::error::{simple_error, to_napi_error};
 
 /// Query execution result.
 ///
@@ -87,7 +87,7 @@ impl Database {
     /// Check if database is open, returning error if closed.
     fn ensure_open(&self) -> napi::Result<()> {
         if self.closed.load(Ordering::SeqCst) {
-            Err(napi::Error::from_reason("Database is closed"))
+            Err(simple_error("Database is closed"))
         } else {
             Ok(())
         }

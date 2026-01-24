@@ -181,7 +181,7 @@ bindings/python/
 └── Cargo.toml             # Rust dependencies
 ```
 
-### Node.js Bindings Structure (Issue #290, #296)
+### Node.js Bindings Structure (Issue #290, #296, #297)
 
 ```
 bindings/node/
@@ -189,9 +189,14 @@ bindings/node/
 │   ├── lib.rs             # napi-rs entry point, module exports
 │   ├── database.rs        # Database class (open, execute, close, getStats)
 │   └── error.rs           # Error mapping (cqlite_core::Error → napi::Error)
+├── lib/
+│   ├── index.js           # Enhanced entry point with error wrapper
+│   ├── index.d.ts         # TypeScript definitions with CqliteError
+│   └── error-wrapper.js   # JavaScript error enhancement layer
 ├── __test__/
 │   ├── smoke.test.js      # Basic import tests
-│   └── database.test.js   # Database API tests (8 tests)
+│   ├── database.test.js   # Database API tests (8 tests)
+│   └── error.test.js      # Error mapping tests (8 tests)
 ├── Cargo.toml             # napi-rs dependencies
 ├── build.rs               # napi build script
 ├── package.json           # npm package config (@cqlite/node)
@@ -199,12 +204,24 @@ bindings/node/
 └── index.d.ts             # Generated TypeScript definitions
 ```
 
-**Status**: Phase 2 (Core Database Wrapper) complete - Issue #296 implemented.
+**Status**: Error Mapping (Issue #297) complete.
 - `Database.open(dataDir, options?)` - Open database with optional schema
 - `Database.execute(query)` - Execute CQL query, returns QueryResult
 - `Database.getStats()` - Get database statistics
 - `Database.close()` - Idempotent close
-- Error categories: IoError, ParseError, SchemaError, QueryError
+- Error properties: `code`, `category`, `isRecoverable` on all thrown errors
+
+**Error Codes** (Issue #297):
+| Code | Category | Description |
+|------|----------|-------------|
+| `IO` | System | I/O errors (file access, memory, timeout) |
+| `SCHEMA` | Schema | Schema/table errors |
+| `QUERY` | Query | Query execution, CQL syntax errors |
+| `PARSE` | Data | Binary format parsing, type conversion |
+| `CONFIG` | Configuration | Configuration errors |
+| `STORAGE` | Storage | Storage engine errors |
+| `NOT_FOUND` | NotFound | Resource not found |
+| `INVALID_INPUT` | Logic | Invalid operation/state |
 
 **Next**: Phase 3 (Streaming) - Issue #305 for AsyncIterator support
 

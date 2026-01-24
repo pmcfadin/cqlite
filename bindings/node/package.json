@@ -2,7 +2,7 @@
   "name": "@cqlite/node",
   "version": "0.3.0",
   "description": "Node.js bindings for CQLite - read Apache Cassandra 5.0 SSTables without cluster dependencies",
-  "main": "index.js",
+  "main": "lib/index.js",
   "types": "index.d.ts",
   "napi": {
     "name": "cqlite-node",
@@ -14,6 +14,7 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "lib",
     "npm",
     "README.md",
     "LICENSE"
@@ -27,7 +28,8 @@
     "build:debug": "napi build --platform",
     "test": "node __test__/smoke.test.js",
     "test:database": "node __test__/database.test.js",
-    "test:all": "npm run test && npm run test:database",
+    "test:error": "node __test__/error.test.js",
+    "test:all": "npm run test && npm run test:database && npm run test:error",
     "prepublishOnly": "napi prepublish -t npm"
   },
   "devDependencies": {
