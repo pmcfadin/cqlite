@@ -159,4 +159,30 @@ export declare class Database {
    * @returns True if the database has been closed, false otherwise
    */
   get isClosed(): boolean
+  /**
+   * Execute a CQL query and return results with native JavaScript types.
+   *
+   * This method returns native JavaScript types instead of JSON:
+   * - BigInt for bigint/counter columns (preserves 64-bit precision)
+   * - Buffer for blob columns
+   * - Date for timestamp/date columns
+   * - Set for set columns
+   * - Map for map columns
+   *
+   * @param query - CQL SELECT statement to execute
+   * @returns Promise resolving to NativeQueryResult with native typed rows
+   *
+   * @example
+   * ```javascript
+   * const result = await db.executeNative('SELECT * FROM users LIMIT 10');
+   * console.log(`Got ${result.rowCount} rows`);
+   * for (const row of result.rows) {
+   *   // row.id is a BigInt if the column is bigint type
+   *   // row.created_at is a Date if the column is timestamp
+   *   // row.data is a Buffer if the column is blob
+   *   console.log(row.name, typeof row.id);
+   * }
+   * ```
+   */
+  executeNative(query: string): Promise<{rows: object[], rowCount: number, executionTimeMs: number}>
 }

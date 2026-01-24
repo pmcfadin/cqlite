@@ -124,6 +124,14 @@ function createWrappedDatabase(NativeDatabase) {
       }
     }
 
+    async executeNative(query) {
+      try {
+        return await this._native.executeNative(query);
+      } catch (error) {
+        throw enhanceError(error);
+      }
+    }
+
     async getStats() {
       try {
         return await this._native.getStats();

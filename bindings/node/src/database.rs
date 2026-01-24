@@ -175,6 +175,7 @@ impl Database {
             .rows
             .iter()
             .map(|row| {
+                #[allow(deprecated)]
                 let obj: serde_json::Map<String, serde_json::Value> = row
                     .values
                     .iter()
@@ -251,12 +252,109 @@ impl Database {
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
+
+    /// Execute a CQL query and return results with native JavaScript types.
+    ///
+    /// This method returns native JavaScript types instead of JSON:
+    /// - BigInt for bigint/counter columns (preserves 64-bit precision)
+    /// - Buffer for blob columns
+    /// - Date for timestamp/date columns
+    /// - Set for set columns
+    /// - Map for map columns
+    ///
+    /// @param query - CQL SELECT statement to execute
+    /// @returns Promise resolving to NativeQueryResult with native typed rows
+    ///
+    /// @example
+    /// ```javascript
+    /// const result = await db.executeNative('SELECT * FROM users LIMIT 10');
+    /// console.log(`Got ${result.rowCount} rows`);
+    /// for (const row of result.rows) {
+    ///   // row.id is a BigInt if the column is bigint type
+    ///   // row.created_at is a Date if the column is timestamp
+    ///   // row.data is a Buffer if the column is blob
+    ///   console.log(row.name, typeof row.id);
+    /// }
+    /// ```
+    #[napi(
+        js_name = "executeNative",
+        ts_return_type = "Promise<{rows: object[], rowCount: number, executionTimeMs: number}>"
+    )]
+    pub fn execute_native(
+        &self,
+        query: String,
+    ) -> napi::Result<napi::bindgen_prelude::AsyncTask<ExecuteNativeTask>> {
+        self.ensure_open()?;
+        Ok(napi::bindgen_prelude::AsyncTask::new(ExecuteNativeTask {
+            inner: self.inner.clone(),
+            query,
+        }))
+    }
+}
+
+/// Async task for executing queries with native type conversion.
+pub struct ExecuteNativeTask {
+    inner: Arc<cqlite_core::Database>,
+    query: String,
+}
+
+/// Intermediate result from async query execution.
+pub struct QueryResultData {
+    rows: Vec<std::collections::HashMap<String, cqlite_core::types::Value>>,
+    execution_time_ms: u32,
+}
+
+impl napi::Task for ExecuteNativeTask {
+    type Output = QueryResultData;
+    type JsValue = napi::JsObject;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        // Create a new runtime for this blocking task
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| napi::Error::from_reason(format!("Failed to create runtime: {}", e)))?;
+
+        let result = rt
+            .block_on(self.inner.execute(&self.query))
+            .map_err(to_napi_error)?;
+
+        Ok(QueryResultData {
+            rows: result.rows.iter().map(|r| r.values.clone()).collect(),
+            execution_time_ms: result.execution_time_ms as u32,
+        })
+    }
+
+    fn resolve(&mut self, env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        let mut result_obj = env.create_object()?;
+
+        // Create rows array with native types
+        let mut rows_arr = env.create_array_with_length(output.rows.len())?;
+        for (i, row_values) in output.rows.iter().enumerate() {
+            let row_obj = crate::value::row_to_object(&env, row_values)?;
+            rows_arr.set_element(i as u32, row_obj)?;
+        }
+
+        result_obj.set_named_property("rows", rows_arr)?;
+        result_obj.set_named_property("rowCount", env.create_uint32(output.rows.len() as u32)?)?;
+        result_obj.set_named_property(
+            "executionTimeMs",
+            env.create_uint32(output.execution_time_ms)?,
+        )?;
+
+        Ok(result_obj)
+    }
 }
 
 /// Convert a CQL Value to a JSON value.
 ///
-/// This provides basic type conversion for Phase 2. Full type conversion
-/// with native JavaScript types will be implemented in Issue #302.
+/// This provides basic type conversion for Phase 2.
+/// For native JavaScript types, use `executeNative()` instead.
+#[deprecated(
+    since = "0.4.0",
+    note = "Use executeNative() for native JavaScript types"
+)]
+#[allow(deprecated)]
 fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
     use cqlite_core::types::Value;
 
@@ -419,6 +517,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_value_to_json_primitives() {
         use cqlite_core::types::Value;
 
@@ -435,6 +534,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_value_to_json_uuid() {
         use cqlite_core::types::Value;
 
@@ -452,6 +552,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_value_to_json_collections() {
         use cqlite_core::types::Value;
 

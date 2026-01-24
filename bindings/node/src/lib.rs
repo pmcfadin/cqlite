@@ -22,6 +22,7 @@
 
 mod database;
 mod error;
+mod value;
 
 pub use database::Database;
 pub use database::DatabaseOptions;
