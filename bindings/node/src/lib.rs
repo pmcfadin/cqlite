@@ -29,6 +29,7 @@ pub use database::Database;
 pub use database::DatabaseOptions;
 pub use database::DatabaseStats;
 pub use database::QueryResult;
+pub use database::StreamingConfig;
 
 use napi_derive::napi;
 

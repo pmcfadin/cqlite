@@ -29,7 +29,10 @@
     "test": "node __test__/smoke.test.js",
     "test:database": "node __test__/database.test.js",
     "test:error": "node __test__/error.test.js",
-    "test:all": "npm run test && npm run test:database && npm run test:error",
+    "test:config": "node __test__/config.test.js",
+    "test:value": "node __test__/value.test.js",
+    "test:result": "node __test__/result.test.js",
+    "test:all": "npm run test && npm run test:database && npm run test:error && npm run test:config && npm run test:value && npm run test:result",
     "prepublishOnly": "napi prepublish -t npm"
   },
   "devDependencies": {

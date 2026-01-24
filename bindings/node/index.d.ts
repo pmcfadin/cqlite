@@ -70,6 +70,43 @@ export interface DatabaseOptions {
   schema?: string
 }
 /**
+ * Configuration for streaming query execution.
+ *
+ * Controls memory usage during large result set iteration.
+ * Used with `executeStreaming()` for memory-efficient processing
+ * of large result sets.
+ *
+ * ## Example
+ *
+ * ```javascript
+ * const config = { bufferSize: 512, chunkSize: 5000 };
+ * for await (const row of db.executeStreaming(query, config)) {
+ *   console.log(row);
+ * }
+ * ```
+ *
+ * ## Memory Budget
+ *
+ * Default values (~11MB peak usage):
+ * - bufferSize: 1024 rows × ~1KB = ~1MB in flight
+ * - chunkSize: 10000 rows × ~1KB = ~10MB per chunk
+ *
+ * For rows with large blobs, reduce buffer sizes proportionally.
+ */
+export interface StreamingConfig {
+  /**
+   * Number of rows to buffer in memory during streaming.
+   * Controls backpressure. Default: 1024.
+   */
+  bufferSize?: number
+  /**
+   * Number of rows per fetch chunk from storage.
+   * Larger chunks improve throughput, smaller chunks reduce memory.
+   * Default: 10000.
+   */
+  chunkSize?: number
+}
+/**
  * Returns the version of the cqlite-node binding.
  *
  * @returns The semantic version string (e.g., "0.3.0")

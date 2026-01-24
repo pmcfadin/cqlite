@@ -97,6 +97,75 @@ pub struct DatabaseOptions {
     pub schema: Option<String>,
 }
 
+/// Configuration for streaming query execution.
+///
+/// Controls memory usage during large result set iteration.
+/// Used with `executeStreaming()` for memory-efficient processing
+/// of large result sets.
+///
+/// ## Example
+///
+/// ```javascript
+/// const config = { bufferSize: 512, chunkSize: 5000 };
+/// for await (const row of db.executeStreaming(query, config)) {
+///   console.log(row);
+/// }
+/// ```
+///
+/// ## Memory Budget
+///
+/// Default values (~11MB peak usage):
+/// - bufferSize: 1024 rows × ~1KB = ~1MB in flight
+/// - chunkSize: 10000 rows × ~1KB = ~10MB per chunk
+///
+/// For rows with large blobs, reduce buffer sizes proportionally.
+#[napi(object)]
+pub struct StreamingConfig {
+    /// Number of rows to buffer in memory during streaming.
+    /// Controls backpressure. Default: 1024.
+    #[napi(js_name = "bufferSize")]
+    pub buffer_size: Option<u32>,
+
+    /// Number of rows per fetch chunk from storage.
+    /// Larger chunks improve throughput, smaller chunks reduce memory.
+    /// Default: 10000.
+    #[napi(js_name = "chunkSize")]
+    pub chunk_size: Option<u32>,
+}
+
+impl StreamingConfig {
+    /// Convert to core StreamingConfig with validation.
+    ///
+    /// Applies default values and validates that both buffer_size
+    /// and chunk_size are greater than 0.
+    pub fn to_core(&self) -> napi::Result<cqlite_core::query::result::StreamingConfig> {
+        let buffer_size = self.buffer_size.unwrap_or(1024);
+        let chunk_size = self.chunk_size.unwrap_or(10_000);
+
+        if buffer_size == 0 {
+            return Err(napi::Error::from_reason(
+                "bufferSize must be greater than 0",
+            ));
+        }
+        if chunk_size == 0 {
+            return Err(napi::Error::from_reason("chunkSize must be greater than 0"));
+        }
+
+        Ok(cqlite_core::query::result::StreamingConfig {
+            buffer_size: buffer_size as usize,
+            chunk_size: chunk_size as usize,
+        })
+    }
+
+    /// Create a StreamingConfig with default values.
+    pub fn with_defaults() -> Self {
+        StreamingConfig {
+            buffer_size: Some(1024),
+            chunk_size: Some(10_000),
+        }
+    }
+}
+
 /// A CQLite database handle.
 ///
 /// Use `Database.open()` to create a Database instance.
@@ -638,5 +707,65 @@ mod tests {
         ]);
         let result = value_to_json(&map);
         assert!(result.is_object());
+    }
+
+    // StreamingConfig tests (Issue #304)
+
+    #[test]
+    fn test_streaming_config_to_core_default_values() {
+        let config = StreamingConfig {
+            buffer_size: None,
+            chunk_size: None,
+        };
+        let core = config.to_core().unwrap();
+        assert_eq!(core.buffer_size, 1024);
+        assert_eq!(core.chunk_size, 10_000);
+    }
+
+    #[test]
+    fn test_streaming_config_to_core_custom_values() {
+        let config = StreamingConfig {
+            buffer_size: Some(512),
+            chunk_size: Some(5000),
+        };
+        let core = config.to_core().unwrap();
+        assert_eq!(core.buffer_size, 512);
+        assert_eq!(core.chunk_size, 5000);
+    }
+
+    #[test]
+    fn test_streaming_config_to_core_zero_buffer_size_fails() {
+        let config = StreamingConfig {
+            buffer_size: Some(0),
+            chunk_size: Some(10000),
+        };
+        let result = config.to_core();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.reason.contains("bufferSize must be greater than 0"));
+    }
+
+    #[test]
+    fn test_streaming_config_to_core_zero_chunk_size_fails() {
+        let config = StreamingConfig {
+            buffer_size: Some(1024),
+            chunk_size: Some(0),
+        };
+        let result = config.to_core();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.reason.contains("chunkSize must be greater than 0"));
+    }
+
+    #[test]
+    fn test_streaming_config_with_defaults() {
+        let config = StreamingConfig::with_defaults();
+        assert_eq!(config.buffer_size, Some(1024));
+        assert_eq!(config.chunk_size, Some(10_000));
+
+        // Should also convert to core correctly
+        let core = config.to_core().unwrap();
+        assert_eq!(core.buffer_size, 1024);
+        assert_eq!(core.chunk_size, 10_000);
     }
 }

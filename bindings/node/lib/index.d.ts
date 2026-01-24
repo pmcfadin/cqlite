@@ -6,7 +6,45 @@
  */
 
 // Re-export types from auto-generated definitions
-export { QueryResult, DatabaseStats, DatabaseOptions } from '../index';
+export { QueryResult, DatabaseStats, DatabaseOptions, StreamingConfig } from '../index';
+
+/**
+ * Configuration for streaming query execution.
+ *
+ * Controls memory usage during large result set iteration.
+ * Used with `executeStreaming()` for memory-efficient processing
+ * of large result sets.
+ *
+ * ## Memory Budget
+ *
+ * Default values (~11MB peak usage):
+ * - bufferSize: 1024 rows × ~1KB = ~1MB in flight
+ * - chunkSize: 10000 rows × ~1KB = ~10MB per chunk
+ *
+ * For rows with large blobs, reduce buffer sizes proportionally.
+ *
+ * @example
+ * ```typescript
+ * const config: StreamingConfig = { bufferSize: 512, chunkSize: 5000 };
+ * for await (const row of db.executeStreaming(query, config)) {
+ *   console.log(row);
+ * }
+ * ```
+ */
+export interface StreamingConfig {
+  /**
+   * Number of rows to buffer in memory during streaming.
+   * Controls backpressure. Default: 1024.
+   */
+  bufferSize?: number;
+
+  /**
+   * Number of rows per fetch chunk from storage.
+   * Larger chunks improve throughput, smaller chunks reduce memory.
+   * Default: 10000.
+   */
+  chunkSize?: number;
+}
 
 /**
  * Error codes for CQLite errors.
