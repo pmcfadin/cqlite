@@ -1,0 +1,552 @@
+/**
+ * Parity test utilities for validating Node.js bindings against sstabledump JSONL files.
+ *
+ * Issue #307: sstabledump Parity Tests
+ *
+ * Adapted from Python bindings (bindings/python/tests/test_parity.py) patterns:
+ * - JSONL file discovery and parsing
+ * - Type normalization for comparison
+ * - Value equality with tolerance for floats and dates
+ */
+
+const fs = require('fs');
+const path = require('path');
+
+// =============================================================================
+// Caches for Performance (matching Python's @lru_cache pattern)
+// =============================================================================
+
+const MAX_CACHE_ENTRIES = 64; // Match Python's lru_cache maxsize
+const rowCountCache = new Map();
+const partitionsCache = new Map();
+
+/**
+ * Evict oldest entry from a Map if it exceeds the max size.
+ *
+ * @param {Map} cache - The cache Map to check
+ */
+function evictIfNeeded(cache) {
+  if (cache.size >= MAX_CACHE_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    cache.delete(firstKey);
+  }
+}
+
+// =============================================================================
+// JSONL File Discovery
+// =============================================================================
+
+/**
+ * Find the JSONL reference file for a given keyspace and table.
+ * Tables have hash-suffixed directories: {table}-{hash}/nb-1-big-Data.db.jsonl
+ *
+ * @param {string} keyspace - Keyspace name (e.g., "test_basic")
+ * @param {string} table - Table name (e.g., "simple_table")
+ * @returns {string|null} - Path to JSONL file or null if not found
+ */
+function findJsonlFile(keyspace, table) {
+  const keyspaceDir = path.join(global.testPaths.SSTABLES_DIR, keyspace);
+
+  if (!fs.existsSync(keyspaceDir)) {
+    return null;
+  }
+
+  const entries = fs.readdirSync(keyspaceDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name.startsWith(`${table}-`)) {
+      const jsonlFile = path.join(keyspaceDir, entry.name, 'nb-1-big-Data.db.jsonl');
+      if (fs.existsSync(jsonlFile)) {
+        return jsonlFile;
+      }
+    }
+  }
+
+  return null;
+}
+
+// =============================================================================
+// JSONL Parsing
+// =============================================================================
+
+/**
+ * Count total non-tombstone rows in a JSONL file.
+ * Results are cached for performance.
+ *
+ * @param {string} jsonlPath - Path to JSONL file
+ * @returns {number} - Total row count (excluding tombstones)
+ */
+function countRowsInJsonl(jsonlPath) {
+  if (rowCountCache.has(jsonlPath)) {
+    return rowCountCache.get(jsonlPath);
+  }
+
+  const content = fs.readFileSync(jsonlPath, 'utf8');
+  const lines = content.split('\n');
+  let totalRows = 0;
+
+  for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+    const line = lines[lineNum];
+    if (!line.trim()) continue;
+
+    try {
+      const partition = JSON.parse(line);
+      const rows = partition.rows || [];
+
+      for (const row of rows) {
+        if (row.type === 'row') {
+          totalRows++;
+        }
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to parse JSONL at ${jsonlPath}:${lineNum + 1}: ${error.message}`
+      );
+    }
+  }
+
+  evictIfNeeded(rowCountCache);
+  rowCountCache.set(jsonlPath, totalRows);
+  return totalRows;
+}
+
+/**
+ * Load all partitions from a JSONL file.
+ * Results are cached for performance.
+ *
+ * @param {string} jsonlPath - Path to JSONL file
+ * @returns {Array<Object>} - Array of partition objects
+ */
+function loadJsonlPartitions(jsonlPath) {
+  if (partitionsCache.has(jsonlPath)) {
+    return partitionsCache.get(jsonlPath);
+  }
+
+  const content = fs.readFileSync(jsonlPath, 'utf8');
+  const lines = content.split('\n');
+  const partitions = [];
+
+  for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+    const line = lines[lineNum];
+    if (!line.trim()) continue;
+
+    try {
+      partitions.push(JSON.parse(line));
+    } catch (error) {
+      throw new Error(
+        `Failed to parse JSONL at ${jsonlPath}:${lineNum + 1}: ${error.message}`
+      );
+    }
+  }
+
+  evictIfNeeded(partitionsCache);
+  partitionsCache.set(jsonlPath, partitions);
+  return partitions;
+}
+
+/**
+ * Extract all rows from JSONL partitions as a flat array with cells mapped to columns.
+ *
+ * @param {Array<Object>} partitions - Array of partition objects from loadJsonlPartitions
+ * @returns {Array<Object>} - Array of row objects with column names as keys
+ */
+function extractRowsFromPartitions(partitions) {
+  const rows = [];
+
+  for (const partition of partitions) {
+    const partitionKey = partition.partition?.key || [];
+
+    for (const row of partition.rows || []) {
+      if (row.type !== 'row') continue;
+
+      const rowObj = {};
+
+      // Add partition key values (assuming single partition key column for now)
+      // The actual column name would need schema info, but for comparison we use 'id'
+      if (partitionKey.length === 1) {
+        rowObj._partition_key = partitionKey[0];
+      } else if (partitionKey.length > 1) {
+        rowObj._partition_key = partitionKey;
+      }
+
+      // Add clustering columns if present
+      if (row.clustering) {
+        rowObj._clustering = row.clustering;
+      }
+
+      // Add cell values
+      for (const cell of row.cells || []) {
+        if (cell.name && !('deletion_info' in cell) && !('path' in cell)) {
+          rowObj[cell.name] = cell.value;
+        }
+      }
+
+      rows.push(rowObj);
+    }
+  }
+
+  return rows;
+}
+
+// =============================================================================
+// Type Normalization (matching Python's normalize_jsonl_value)
+// =============================================================================
+
+// UUID pattern: 8-4-4-4-12 hex chars
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Timestamp patterns
+const TIMESTAMP_PATTERN1 = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+Z?$/;
+const TIMESTAMP_PATTERN2 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z?$/;
+
+// Date-only pattern
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+// Time pattern
+const TIME_PATTERN = /^\d{2}:\d{2}:\d{2}\.\d+$/;
+
+// Duration pattern (e.g., "1mo2d3h4m5s6ns")
+const DURATION_PATTERN = /^(\d+mo)?(\d+d)?(\d+h)?(\d+m)?(\d+s)?(\d+ns)?$/;
+
+/**
+ * Normalize a JSONL value to a comparable JavaScript type.
+ * Handles UUIDs, timestamps, dates, hex blobs, and nested structures.
+ *
+ * @param {any} value - Value from JSONL file
+ * @param {string} [columnName] - Optional column name for context
+ * @returns {any} - Normalized value
+ */
+function normalizeJsonlValue(value, columnName) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === 'boolean' || typeof value === 'number') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    // Hex blob (0x...)
+    if (value.startsWith('0x')) {
+      return Buffer.from(value.slice(2), 'hex');
+    }
+
+    // UUID - keep as string for comparison
+    if (UUID_PATTERN.test(value)) {
+      return value.toLowerCase();
+    }
+
+    // Timestamp
+    if (TIMESTAMP_PATTERN1.test(value) || TIMESTAMP_PATTERN2.test(value)) {
+      // Normalize to ISO format and parse
+      let normalized = value.replace(' ', 'T');
+      if (!normalized.endsWith('Z')) {
+        normalized += 'Z';
+      }
+      return new Date(normalized);
+    }
+
+    // Date only (keep as string for comparison)
+    if (DATE_PATTERN.test(value)) {
+      return value;
+    }
+
+    // Time (keep as string for comparison)
+    if (TIME_PATTERN.test(value)) {
+      return value;
+    }
+
+    // Duration (keep as string for comparison)
+    if (DURATION_PATTERN.test(value)) {
+      return value;
+    }
+
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((v) => normalizeJsonlValue(v, columnName));
+  }
+
+  if (typeof value === 'object') {
+    const result = {};
+    for (const [k, v] of Object.entries(value)) {
+      result[k] = normalizeJsonlValue(v, k);
+    }
+    return result;
+  }
+
+  return value;
+}
+
+// =============================================================================
+// Value Comparison (matching Python's values_equal)
+// =============================================================================
+
+/**
+ * Compare two values with type-aware equality.
+ * Handles:
+ * - Null values
+ * - Float comparison with tolerance
+ * - Date comparison with 1ms tolerance
+ * - Buffer/byte array comparison
+ * - Set comparison (order-independent)
+ * - Map comparison
+ * - Recursive structure comparison
+ *
+ * @param {any} actual - Actual value from Node.js bindings
+ * @param {any} expected - Expected value from JSONL (normalized)
+ * @returns {boolean} - True if values are equal
+ */
+function valuesEqual(actual, expected) {
+  // Null handling
+  if (actual === null && expected === null) return true;
+  if (actual === undefined && expected === null) return true;
+  if (actual === null && expected === undefined) return true;
+  if (actual === null || actual === undefined) return expected === null || expected === undefined;
+  if (expected === null || expected === undefined) return false;
+
+  // Buffer/Uint8Array comparison
+  if (Buffer.isBuffer(actual) && Buffer.isBuffer(expected)) {
+    return actual.equals(expected);
+  }
+  if (Buffer.isBuffer(actual) && typeof expected === 'string' && expected.startsWith('0x')) {
+    return actual.equals(Buffer.from(expected.slice(2), 'hex'));
+  }
+
+  // BigInt comparison
+  if (typeof actual === 'bigint' && typeof expected === 'bigint') {
+    return actual === expected;
+  }
+  if (typeof actual === 'bigint' && typeof expected === 'number') {
+    return actual === BigInt(expected);
+  }
+  if (typeof actual === 'number' && typeof expected === 'bigint') {
+    return BigInt(actual) === expected;
+  }
+
+  // Float comparison with tolerance
+  if (typeof actual === 'number' && typeof expected === 'number') {
+    if (actual === expected) return true;
+    if (Number.isNaN(actual) && Number.isNaN(expected)) return true;
+
+    const relTol = 1e-6;
+    const absTol = 1e-9;
+    return Math.abs(actual - expected) <= Math.max(
+      relTol * Math.max(Math.abs(actual), Math.abs(expected)),
+      absTol
+    );
+  }
+
+  // Date comparison with 1ms tolerance (inclusive)
+  if (actual instanceof Date && expected instanceof Date) {
+    const diff = Math.abs(actual.getTime() - expected.getTime());
+    return diff <= 1;
+  }
+  if (actual instanceof Date && typeof expected === 'string') {
+    // Compare Date to timestamp string
+    const expectedDate = new Date(expected.replace(' ', 'T'));
+    if (!isNaN(expectedDate.getTime())) {
+      const diff = Math.abs(actual.getTime() - expectedDate.getTime());
+      return diff < 1;
+    }
+  }
+
+  // Set comparison (order-independent)
+  if (actual instanceof Set && (expected instanceof Set || Array.isArray(expected))) {
+    const expectedSet = expected instanceof Set ? expected : new Set(expected);
+    if (actual.size !== expectedSet.size) return false;
+    for (const item of actual) {
+      let found = false;
+      for (const expItem of expectedSet) {
+        if (valuesEqual(item, expItem)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+    return true;
+  }
+
+  // Map comparison
+  if (actual instanceof Map && (expected instanceof Map || typeof expected === 'object')) {
+    const expectedMap = expected instanceof Map ? expected : new Map(Object.entries(expected));
+    if (actual.size !== expectedMap.size) return false;
+    for (const [key, val] of actual) {
+      if (!expectedMap.has(key)) return false;
+      if (!valuesEqual(val, expectedMap.get(key))) return false;
+    }
+    return true;
+  }
+
+  // Array comparison
+  if (Array.isArray(actual) && Array.isArray(expected)) {
+    if (actual.length !== expected.length) return false;
+    return actual.every((a, i) => valuesEqual(a, expected[i]));
+  }
+
+  // Object comparison
+  if (typeof actual === 'object' && typeof expected === 'object' &&
+      !Array.isArray(actual) && !Array.isArray(expected) &&
+      !(actual instanceof Date) && !(expected instanceof Date) &&
+      !(actual instanceof Set) && !(expected instanceof Set) &&
+      !(actual instanceof Map) && !(expected instanceof Map)) {
+    const actualKeys = Object.keys(actual).sort();
+    const expectedKeys = Object.keys(expected).sort();
+    if (actualKeys.length !== expectedKeys.length) return false;
+    if (!actualKeys.every((k, i) => k === expectedKeys[i])) return false;
+    return actualKeys.every((k) => valuesEqual(actual[k], expected[k]));
+  }
+
+  // String comparison (case-sensitive)
+  if (typeof actual === 'string' && typeof expected === 'string') {
+    // UUID comparison (case-insensitive)
+    if (UUID_PATTERN.test(actual) && UUID_PATTERN.test(expected)) {
+      return actual.toLowerCase() === expected.toLowerCase();
+    }
+    return actual === expected;
+  }
+
+  // Default strict equality
+  return actual === expected;
+}
+
+/**
+ * Format a value difference for error messages.
+ *
+ * @param {string} field - Field name
+ * @param {any} actual - Actual value
+ * @param {any} expected - Expected value
+ * @returns {string} - Formatted difference message
+ */
+function formatDifference(field, actual, expected) {
+  const actualStr = formatValue(actual);
+  const expectedStr = formatValue(expected);
+  return `${field}: got ${actualStr}, expected ${expectedStr}`;
+}
+
+/**
+ * Format a value for display in error messages.
+ *
+ * @param {any} value - Value to format
+ * @returns {string} - Formatted string
+ */
+function formatValue(value) {
+  if (value === null || value === undefined) {
+    return 'null';
+  }
+  if (Buffer.isBuffer(value)) {
+    return `Buffer(${value.length} bytes)`;
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (value instanceof Set) {
+    return `Set(${value.size})`;
+  }
+  if (value instanceof Map) {
+    return `Map(${value.size})`;
+  }
+  if (typeof value === 'object') {
+    return JSON.stringify(value).slice(0, 100);
+  }
+  return String(value);
+}
+
+// =============================================================================
+// Test Table Definitions
+// =============================================================================
+
+/**
+ * All 33 test tables organized by keyspace.
+ */
+const ALL_TABLES = {
+  test_basic: [
+    'simple_table',
+    'composite_key_table',
+    'compression_test_table',
+    'multi_partition_table',
+    'ttl_test_table',
+    'counters',
+    'static_columns_table',
+    'uncompressed_table',
+  ],
+  test_collections: [
+    'collection_table',
+    'collection_clustering_table',
+    'collections_with_udts',
+    'empty_collections_table',
+    'frozen_collections_table',
+    'large_collections_table',
+    'nested_collections_table',
+    'typed_collections_table',
+  ],
+  test_timeseries: [
+    'event_store',
+    'user_sessions',
+    'sensor_data',
+    'app_metrics',
+    'log_entries',
+    'stock_prices',
+    'tick_data',
+    'time_bucketed_counters',
+    'user_activity',
+  ],
+  test_wide_rows: [
+    'wide_partition_table',
+    'chat_messages',
+    'document_versions',
+    'large_blob_table',
+    'many_columns_table',
+    'multi_metric_timeseries',
+    'product_catalog',
+    'sparse_data_table',
+  ],
+};
+
+/**
+ * Known issues from Python parity tests that may also affect Node.js.
+ * These tables have core library issues (not binding issues).
+ */
+const KNOWN_ISSUES = {
+  'test_basic.static_columns_table': 'Static column duplication (200 vs 100 rows)',
+  'test_collections.typed_collections_table': 'V5CompressedLegacy cell extraction failure',
+  'test_collections.frozen_collections_table': 'Null byte parsing error in frozen collection data',
+};
+
+/**
+ * Check if a table has a known issue.
+ *
+ * @param {string} keyspace - Keyspace name
+ * @param {string} table - Table name
+ * @returns {string|null} - Issue description or null
+ */
+function getKnownIssue(keyspace, table) {
+  return KNOWN_ISSUES[`${keyspace}.${table}`] || null;
+}
+
+// =============================================================================
+// Exports
+// =============================================================================
+
+module.exports = {
+  // JSONL utilities
+  findJsonlFile,
+  countRowsInJsonl,
+  loadJsonlPartitions,
+  extractRowsFromPartitions,
+
+  // Type normalization
+  normalizeJsonlValue,
+
+  // Value comparison
+  valuesEqual,
+  formatDifference,
+  formatValue,
+
+  // Test tables
+  ALL_TABLES,
+  KNOWN_ISSUES,
+  getKnownIssue,
+};

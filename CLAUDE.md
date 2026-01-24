@@ -198,6 +198,8 @@ bindings/node/
 ├── __test__/
 │   ├── setup.js           # Jest setup with centralized paths (Issue #306)
 │   ├── helpers.js         # Test utilities (openDatabase, skipIfNoDatasets)
+│   ├── parity-utils.js    # JSONL parsing, type normalization utilities (Issue #307)
+│   ├── parity.test.js     # sstabledump parity tests - 39 tests (Issue #307)
 │   ├── smoke.test.js      # Basic import tests (4 tests)
 │   ├── config.test.js     # StreamingConfig tests (8 tests)
 │   ├── database.test.js   # Database API tests (8 tests)
@@ -248,10 +250,16 @@ bindings/node/
 **Next**: Phase 3 (Streaming) - Issue #305 for AsyncIterator support
 
 **Test Infrastructure** (Issue #306): Jest-based testing with centralized setup.
-- 54 tests across 6 test files, all passing
+- 93 tests across 7 test files, all passing
 - Coverage thresholds: 80% lines, 65% branches, 80% functions
 - Centralized path handling in `__test__/setup.js` (matches Python conftest.py)
 - Test helpers in `__test__/helpers.js`: `openDatabase()`, `skipIfNoDatasets()`
+
+**Parity Tests** (Issue #307): sstabledump validation for all 33 tables.
+- Tier 1: Row count parity validation (33/33 tables, 3 with known issues)
+- Tier 2: Column and type validation for representative tables
+- JSONL utilities in `__test__/parity-utils.js` for parsing and comparison
+- Run with: `npm run test:parity` (requires CQLITE_DATASETS_ROOT)
 
 **CI Integration** (Issue #291): Tests run automatically via `node-ci.yml` on every PR.
 - Build matrix: 5 platforms (Linux x64/ARM64, macOS x64/ARM64, Windows x64)

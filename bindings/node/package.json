@@ -29,6 +29,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
+    "test:parity": "jest parity.test.js --testTimeout=60000",
     "prepublishOnly": "napi prepublish -t npm"
   },
   "devDependencies": {
