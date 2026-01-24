@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "description": "Node.js bindings for CQLite - read Apache Cassandra 5.0 SSTables without cluster dependencies",
   "main": "lib/index.js",
-  "types": "index.d.ts",
+  "types": "lib/index.d.ts",
   "napi": {
     "name": "cqlite-node",
     "triples": {
