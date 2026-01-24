@@ -200,6 +200,7 @@ bindings/node/
 │   ├── helpers.js         # Test utilities (openDatabase, skipIfNoDatasets)
 │   ├── parity-utils.js    # JSONL parsing, type normalization utilities (Issue #307)
 │   ├── parity.test.js     # sstabledump parity tests - 39 tests (Issue #307)
+│   ├── types.test.js      # Comprehensive type conversion tests - 44 tests (Issue #308)
 │   ├── smoke.test.js      # Basic import tests (4 tests)
 │   ├── config.test.js     # StreamingConfig tests (8 tests)
 │   ├── database.test.js   # Database API tests (8 tests)
@@ -250,10 +251,16 @@ bindings/node/
 **Next**: Phase 3 (Streaming) - Issue #305 for AsyncIterator support
 
 **Test Infrastructure** (Issue #306): Jest-based testing with centralized setup.
-- 93 tests across 7 test files, all passing
+- 137 tests across 8 test files, all passing
 - Coverage thresholds: 80% lines, 65% branches, 80% functions
 - Centralized path handling in `__test__/setup.js` (matches Python conftest.py)
 - Test helpers in `__test__/helpers.js`: `openDatabase()`, `skipIfNoDatasets()`
+
+**Type Conversion Tests** (Issue #308): Comprehensive CQL type testing.
+- 44 tests covering all primitive, text, binary, temporal, and collection types
+- Precision tests for BigInt, decimal, and nanosecond time values
+- Cross-realm safe type checking with `isDate()`, `isMap()`, `isSet()` helpers
+- Coverage of UDTs, nested collections, and frozen types
 
 **Parity Tests** (Issue #307): sstabledump validation for all 33 tables.
 - Tier 1: Row count parity validation (33/33 tables, 3 with known issues)
