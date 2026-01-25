@@ -185,7 +185,7 @@ CQL types are automatically converted to JavaScript types:
 | `blob` | `Buffer` | via `executeNative()` |
 | `timestamp` | `Date` | via `executeNative()` |
 | `date` | `Date` | via `executeNative()` |
-| `time` | `string` | HH:MM:SS.nnnnnnnnn format |
+| `time` | `bigint` | Nanoseconds since midnight, via `executeNative()` |
 | `duration` | `object` | `{ months, days, nanos }` |
 | `uuid`, `timeuuid` | `string` | Lowercase formatted |
 | `inet` | `string` | IP address string |

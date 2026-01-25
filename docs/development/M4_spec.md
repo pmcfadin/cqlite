@@ -522,7 +522,7 @@ napi-build = "2.1"
 | `blob` | `Vec<u8>` | `bytes` | `Buffer` |
 | `timestamp` | `i64` | `datetime.datetime` | `Date` |
 | `date` | `i32` | `datetime.date` | `Date` |
-| `time` | `i64` | `datetime.time` | `number` (ns) |
+| `time` | `i64` | `datetime.time` | `bigint` (ns) |
 | `uuid` | `[u8; 16]` | `uuid.UUID` | `string` |
 | `timeuuid` | `[u8; 16]` | `uuid.UUID` | `string` |
 | `inet` | `Vec<u8>` | `ipaddress` | `string` |
