@@ -219,6 +219,14 @@ export interface QueryResult {
   /** Number of rows returned. */
   rowCount: number;
 
+  /**
+   * Number of rows returned (M4 spec alias for rowCount).
+   *
+   * Note: CQLite is read-only. For SELECT queries, this represents
+   * the number of rows read, not modified.
+   */
+  rowsAffected: number;
+
   /** Query execution time in milliseconds. */
   executionTimeMs: number;
 
@@ -252,6 +260,14 @@ export interface NativeQueryResult {
 
   /** Number of rows returned. */
   rowCount: number;
+
+  /**
+   * Number of rows returned (M4 spec alias for rowCount).
+   *
+   * Note: CQLite is read-only. For SELECT queries, this represents
+   * the number of rows read, not modified.
+   */
+  rowsAffected: number;
 
   /** Query execution time in milliseconds. */
   executionTimeMs: number;

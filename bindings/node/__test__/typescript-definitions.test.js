@@ -98,6 +98,14 @@ describe('TypeScript Definitions (Issue #312)', () => {
     test('should export version function', () => {
       expect(dtsContent).toMatch(/export\s+declare\s+function\s+version\b/);
     });
+
+    test('should export PreparedStatement class', () => {
+      expect(dtsContent).toMatch(/export\s+declare\s+class\s+PreparedStatement\b/);
+    });
+
+    test('should export PreparedStatementStats interface', () => {
+      expect(dtsContent).toMatch(/export\s+interface\s+PreparedStatementStats\b/);
+    });
   });
 
   describe('Database class methods', () => {
@@ -305,6 +313,10 @@ describe('TypeScript Definitions (Issue #312)', () => {
       expect(dtsContent).toMatch(/interface\s+QueryResult[\s\S]*?rowCount\s*:\s*number/);
     });
 
+    test('QueryResult should have rowsAffected alias (Issue #348)', () => {
+      expect(dtsContent).toMatch(/interface\s+QueryResult[\s\S]*?rowsAffected\s*:\s*number/);
+    });
+
     test('QueryResult should have executionTimeMs property', () => {
       expect(dtsContent).toMatch(/interface\s+QueryResult[\s\S]*?executionTimeMs\s*:\s*number/);
     });
@@ -315,6 +327,10 @@ describe('TypeScript Definitions (Issue #312)', () => {
 
     test('NativeQueryResult should have rows of type Row[]', () => {
       expect(dtsContent).toMatch(/interface\s+NativeQueryResult[\s\S]*?rows\s*:\s*Row\s*\[\s*\]/);
+    });
+
+    test('NativeQueryResult should have rowsAffected alias (Issue #348)', () => {
+      expect(dtsContent).toMatch(/interface\s+NativeQueryResult[\s\S]*?rowsAffected\s*:\s*number/);
     });
   });
 

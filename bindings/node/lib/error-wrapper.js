@@ -186,7 +186,9 @@ function createWrappedDatabase(NativeDatabase) {
 
     async execute(query) {
       try {
-        return await this._native.execute(query);
+        const result = await this._native.execute(query);
+        result.rowsAffected = result.rowCount; // M4 spec alias (Issue #348)
+        return result;
       } catch (error) {
         throw enhanceError(error);
       }
@@ -194,7 +196,9 @@ function createWrappedDatabase(NativeDatabase) {
 
     async executeNative(query) {
       try {
-        return await this._native.executeNative(query);
+        const result = await this._native.executeNative(query);
+        result.rowsAffected = result.rowCount; // M4 spec alias (Issue #348)
+        return result;
       } catch (error) {
         throw enhanceError(error);
       }

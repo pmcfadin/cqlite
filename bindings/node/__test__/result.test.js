@@ -203,4 +203,41 @@ describe('QueryResult and ColumnInfo Tests (Issue #303)', () => {
 
     console.log(`    Both methods return identical column metadata`);
   });
+
+  describe('rowsAffected alias (Issue #348)', () => {
+    test('execute() result has rowsAffected equal to rowCount', async () => {
+      const result = await db.execute(
+        'SELECT * FROM test_basic.simple_table LIMIT 5'
+      );
+
+      expect(result).toHaveProperty('rowsAffected');
+      expect(typeof result.rowsAffected).toBe('number');
+      expect(result.rowsAffected).toBe(result.rowCount);
+
+      console.log(`    rowCount=${result.rowCount}, rowsAffected=${result.rowsAffected}`);
+    });
+
+    test('executeNative() result has rowsAffected equal to rowCount', async () => {
+      const result = await db.executeNative(
+        'SELECT * FROM test_basic.simple_table LIMIT 5'
+      );
+
+      expect(result).toHaveProperty('rowsAffected');
+      expect(typeof result.rowsAffected).toBe('number');
+      expect(result.rowsAffected).toBe(result.rowCount);
+
+      console.log(`    rowCount=${result.rowCount}, rowsAffected=${result.rowsAffected}`);
+    });
+
+    test('rowsAffected is 0 for empty results', async () => {
+      const result = await db.execute(
+        "SELECT * FROM test_basic.simple_table WHERE id = 'nonexistent-id-that-does-not-exist-12345'"
+      );
+
+      expect(result.rowCount).toBe(0);
+      expect(result.rowsAffected).toBe(0);
+
+      console.log(`    Empty result: rowsAffected=${result.rowsAffected}`);
+    });
+  });
 });
