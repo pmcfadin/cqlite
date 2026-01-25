@@ -130,11 +130,9 @@ impl ValueFormatter {
 
     /// Format timestamp (milliseconds since epoch) as YYYY-MM-DD HH:MM:SS.fff+0000
     fn format_timestamp(millis: i64) -> String {
-        // Convert milliseconds to seconds and nanoseconds
-        let secs = millis / 1_000;
-        let subsec_nanos = ((millis % 1_000).abs() as u32) * 1_000_000;
-
-        if let Some(datetime) = DateTime::from_timestamp(secs, subsec_nanos) {
+        // Use from_timestamp_millis to correctly handle pre-epoch timestamps
+        // (truncating division was incorrect for negative values)
+        if let Some(datetime) = DateTime::from_timestamp_millis(millis) {
             // Format with milliseconds: YYYY-MM-DD HH:MM:SS.fff+0000
             datetime.format("%Y-%m-%d %H:%M:%S%.3f+0000").to_string()
         } else {

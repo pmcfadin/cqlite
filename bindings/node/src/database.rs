@@ -631,10 +631,9 @@ fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
             serde_json::Value::String(encoded)
         }
         Value::Timestamp(ts) => {
-            // ISO 8601 timestamp string
-            let secs = ts / 1000;
-            let nanos = ((ts % 1000).unsigned_abs() * 1_000_000) as u32;
-            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nanos) {
+            // Use from_timestamp_millis to correctly handle pre-epoch timestamps
+            // (Issue #341: truncating division was incorrect for negative values)
+            if let Some(dt) = chrono::DateTime::from_timestamp_millis(*ts) {
                 serde_json::Value::String(dt.to_rfc3339())
             } else {
                 serde_json::Value::Number((*ts).into())

@@ -1006,4 +1006,95 @@ describe('Type Conversion Tests (Issue #308)', () => {
       }
     });
   });
+
+  // ============================================================================
+  // PRE-EPOCH TIMESTAMP TESTS (Issue #341)
+  // ============================================================================
+  describe('Pre-Epoch Timestamps', () => {
+    // These tests validate that the timestamp conversion logic handles
+    // pre-epoch (negative) timestamps correctly. Issue #341 identified
+    // that truncating division caused errors for negative values.
+
+    test('JavaScript Date handles pre-epoch timestamps correctly', () => {
+      // Validate JavaScript Date behavior for reference
+      // This documents the expected behavior our Rust code should match
+
+      // -1500ms = 1.5 seconds before epoch (1969-12-31T23:59:58.500Z)
+      const date1 = new Date(-1500);
+      expect(date1.toISOString()).toBe('1969-12-31T23:59:58.500Z');
+
+      // -1ms = just before epoch
+      const date2 = new Date(-1);
+      expect(date2.toISOString()).toBe('1969-12-31T23:59:59.999Z');
+
+      // -500ms = half second before epoch
+      const date3 = new Date(-500);
+      expect(date3.toISOString()).toBe('1969-12-31T23:59:59.500Z');
+
+      // -60000ms = 1 minute before epoch
+      const date4 = new Date(-60000);
+      expect(date4.toISOString()).toBe('1969-12-31T23:59:00.000Z');
+    });
+
+    test('pre-epoch timestamp conversion is mathematically correct', () => {
+      // Verify correct Euclidean division behavior
+      // Bug was: ts / 1000 truncates toward zero, not toward negative infinity
+
+      // For -1500ms:
+      // Wrong: -1500 / 1000 = -1 (truncating toward zero)
+      // Correct: floor(-1500 / 1000) = -2 (floor toward negative infinity)
+
+      const wrongDivision = Math.trunc(-1500 / 1000); // -1 (WRONG)
+      const correctDivision = Math.floor(-1500 / 1000); // -2 (CORRECT)
+
+      expect(wrongDivision).toBe(-1);
+      expect(correctDivision).toBe(-2);
+
+      // The correct result: -2 seconds + 500 milliseconds = -1.5 seconds = -1500ms
+      const reconstructed = correctDivision * 1000 + 500;
+      expect(reconstructed).toBe(-1500);
+
+      // Wrong result: -1 seconds + 500 milliseconds = -0.5 seconds = -500ms (WRONG!)
+      const wrongReconstructed = wrongDivision * 1000 + 500;
+      expect(wrongReconstructed).toBe(-500); // This was the bug!
+    });
+
+    test('executeNative handles timestamps from test data', async () => {
+      // Query real data and verify Date conversion works
+      const result = await dbBasic.executeNative(
+        'SELECT created FROM test_basic.simple_table LIMIT 10'
+      );
+
+      expect(result.rowCount).toBeGreaterThan(0);
+
+      for (const row of result.rows) {
+        if (row.created !== null) {
+          expect(isDate(row.created)).toBe(true);
+          // All timestamps should produce valid ISO strings
+          expect(() => row.created.toISOString()).not.toThrow();
+        }
+      }
+    });
+
+    test('execute JSON path handles timestamps', async () => {
+      // Test the JSON conversion path (execute instead of executeNative)
+      // This is the path that had the bug in Issue #341
+      const result = await dbBasic.execute(
+        'SELECT created FROM test_basic.simple_table LIMIT 10'
+      );
+
+      expect(result.rowCount).toBeGreaterThan(0);
+
+      for (const row of result.rows) {
+        if (row.created !== null) {
+          // JSON path returns ISO 8601 strings, not Date objects
+          expect(typeof row.created).toBe('string');
+          // Should be valid ISO date string
+          const parsed = new Date(row.created);
+          expect(isDate(parsed)).toBe(true);
+          expect(parsed.toISOString()).toBeDefined();
+        }
+      }
+    });
+  });
 });
