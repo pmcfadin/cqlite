@@ -333,6 +333,7 @@ export interface DatabaseOptions {
 
   /**
    * Maximum memory usage in bytes.
+   * Minimum: 1 byte. Values less than 1 will be rejected.
    * Default: 1GB (1073741824 bytes).
    * Controls the overall memory budget for caches and internal buffers.
    *

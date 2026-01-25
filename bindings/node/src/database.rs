@@ -253,9 +253,9 @@ impl Database {
                         "memoryLimit must be a finite number",
                     ));
                 }
-                if limit <= 0.0 {
+                if limit < 1.0 {
                     return Err(napi::Error::from_reason(
-                        "memoryLimit must be greater than 0",
+                        "memoryLimit must be at least 1 byte",
                     ));
                 }
                 config.memory.max_memory = limit as u64;

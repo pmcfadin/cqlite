@@ -255,6 +255,17 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
     await db.close();
   });
 
+  test('Database.open() accepts memoryLimit of 1 byte (minimum valid value)', async () => {
+    skipIfNoDatasets();
+    // Test boundary condition: 1 is the minimum valid memoryLimit
+    const db = await Database.open(global.testPaths.SSTABLES_DIR, {
+      schema: global.testPaths.SCHEMA_BASIC_TYPES,
+      memoryLimit: 1,
+    });
+    expect(db).not.toBeNull();
+    await db.close();
+  });
+
   test('DatabaseOptions fields are optional', async () => {
     skipIfNoDatasets();
     // All fields should be optional - open with just schema
@@ -278,7 +289,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,
           memoryLimit: 0,
         })
-      ).rejects.toThrow(/memoryLimit must be greater than 0/);
+      ).rejects.toThrow(/memoryLimit must be at least 1 byte/);
     });
 
     test('Database.open() with negative memoryLimit should fail', async () => {
@@ -288,7 +299,37 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,
           memoryLimit: -1024,
         })
-      ).rejects.toThrow(/memoryLimit must be greater than 0/);
+      ).rejects.toThrow(/memoryLimit must be at least 1 byte/);
+    });
+
+    test('Database.open() with fractional memoryLimit (0.5) should fail', async () => {
+      skipIfNoDatasets();
+      await expect(
+        Database.open(global.testPaths.SSTABLES_DIR, {
+          schema: global.testPaths.SCHEMA_BASIC_TYPES,
+          memoryLimit: 0.5,
+        })
+      ).rejects.toThrow(/memoryLimit must be at least 1 byte/);
+    });
+
+    test('Database.open() with fractional memoryLimit (0.1) should fail', async () => {
+      skipIfNoDatasets();
+      await expect(
+        Database.open(global.testPaths.SSTABLES_DIR, {
+          schema: global.testPaths.SCHEMA_BASIC_TYPES,
+          memoryLimit: 0.1,
+        })
+      ).rejects.toThrow(/memoryLimit must be at least 1 byte/);
+    });
+
+    test('Database.open() with fractional memoryLimit (0.99) should fail', async () => {
+      skipIfNoDatasets();
+      await expect(
+        Database.open(global.testPaths.SSTABLES_DIR, {
+          schema: global.testPaths.SCHEMA_BASIC_TYPES,
+          memoryLimit: 0.99,
+        })
+      ).rejects.toThrow(/memoryLimit must be at least 1 byte/);
     });
 
     test('Database.open() with NaN memoryLimit should fail', async () => {
