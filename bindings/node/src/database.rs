@@ -541,15 +541,9 @@ impl napi::Task for ExecuteNativeTask {
     type JsValue = napi::JsObject;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        // Create a new runtime for this blocking task
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| napi::Error::from_reason(format!("Failed to create runtime: {}", e)))?;
-
-        let result = rt
-            .block_on(self.inner.execute(&self.query))
-            .map_err(to_napi_error)?;
+        // Use global runtime for async execution
+        let result =
+            crate::runtime::block_on(self.inner.execute(&self.query)).map_err(to_napi_error)?;
 
         Ok(QueryResultData {
             rows: result.rows.iter().map(|r| r.values.clone()).collect(),

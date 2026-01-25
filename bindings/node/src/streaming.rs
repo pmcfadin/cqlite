@@ -71,9 +71,6 @@ pub struct StreamingResult {
     inner: Arc<Mutex<Option<cqlite_core::query::result::QueryResultIterator>>>,
     /// Cached column metadata for the result set.
     columns: Vec<ColumnInfo>,
-    /// Shared tokio runtime for async operations.
-    /// Reused across all `next()` calls for efficiency.
-    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl StreamingResult {
@@ -94,17 +91,9 @@ impl StreamingResult {
             })
             .collect();
 
-        // Create a single runtime for the entire streaming session
-        // This is much more efficient than creating one per next() call
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| napi::Error::from_reason(format!("Failed to create runtime: {}", e)))?;
-
         Ok(Self {
             inner: Arc::new(Mutex::new(Some(iter))),
             columns,
-            runtime: Arc::new(runtime),
         })
     }
 }
@@ -120,7 +109,6 @@ pub enum NextResult {
 /// Async task for fetching the next row.
 pub struct NextTask {
     inner: Arc<Mutex<Option<cqlite_core::query::result::QueryResultIterator>>>,
-    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl napi::Task for NextTask {
@@ -143,8 +131,8 @@ impl napi::Task for NextTask {
             None => return Ok(NextResult::Done),
         };
 
-        // Get next row from core iterator using the shared runtime
-        match self.runtime.block_on(iter.next_async()) {
+        // Get next row from core iterator using the global runtime
+        match crate::runtime::block_on(iter.next_async()) {
             Some(Ok(row)) => {
                 // Take ownership of values - no clone needed
                 Ok(NextResult::Value(row.values))
@@ -195,10 +183,9 @@ impl StreamingResult {
     /// @returns Promise resolving to iterator result object
     #[napi]
     pub fn next(&self) -> AsyncTask<NextTask> {
-        // Clone the Arc references to share with the task
+        // Clone the Arc reference to share with the task
         AsyncTask::new(NextTask {
             inner: self.inner.clone(),
-            runtime: self.runtime.clone(),
         })
     }
 

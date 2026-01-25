@@ -23,6 +23,7 @@
 mod database;
 mod error;
 mod prepared;
+mod runtime;
 mod streaming;
 mod value;
 
