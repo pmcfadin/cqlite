@@ -353,7 +353,7 @@ export interface DatabaseOptions {
  * @example
  * ```typescript
  * const config: StreamingConfig = { bufferSize: 512, chunkSize: 5000 };
- * for await (const row of await db.executeStreaming(query, config)) {
+ * for await (const row of db.executeStreaming(query, config)) {
  *   console.log(row);
  * }
  * ```
@@ -389,21 +389,21 @@ export interface StreamingConfig {
  *
  * @example
  * ```typescript
- * // Basic streaming
- * const stream = await db.executeStreaming('SELECT * FROM large_table');
+ * // Basic streaming - no await on executeStreaming
+ * const stream = db.executeStreaming('SELECT * FROM large_table');
  * for await (const row of stream) {
  *   console.log(row.name);
  *   // Memory stays bounded - only bufferSize rows in flight
  * }
  *
- * // Early termination is safe
- * for await (const row of stream) {
+ * // Or use directly in for-await loop
+ * for await (const row of db.executeStreaming('SELECT * FROM large_table')) {
  *   if (row.id === targetId) {
  *     break; // Resources cleaned up automatically
  *   }
  * }
  *
- * // Access metadata during streaming
+ * // Access metadata during streaming (available after first iteration)
  * console.log(`Received ${stream.rowsReceived} rows so far`);
  * console.log(`Columns: ${stream.columns.map(c => c.name).join(', ')}`);
  * ```
@@ -788,33 +788,31 @@ export declare class Database {
    *
    * @param query - CQL SELECT statement to execute
    * @param config - Optional StreamingConfig for buffer/chunk sizes
-   * @returns Promise resolving to StreamingResult async iterator
-   * @throws {CqliteError} If the query fails
+   * @returns StreamingResult async iterable (iteration triggers query execution)
+   * @throws {CqliteError} If the query fails (on first iteration)
    *
    * @example
    * ```typescript
-   * // Basic streaming
-   * const stream = await db.executeStreaming('SELECT * FROM large_table');
-   * for await (const row of stream) {
+   * // Basic streaming - no await needed on executeStreaming itself
+   * for await (const row of db.executeStreaming('SELECT * FROM large_table')) {
    *   console.log(row.name);
    * }
    *
    * // With custom config for memory constraints
    * const config: StreamingConfig = { bufferSize: 256, chunkSize: 2500 };
-   * for await (const row of await db.executeStreaming(query, config)) {
+   * for await (const row of db.executeStreaming(query, config)) {
    *   process(row);
    * }
    *
    * // Early termination is safe
-   * const stream = await db.executeStreaming('SELECT * FROM huge_table');
-   * for await (const row of stream) {
+   * for await (const row of db.executeStreaming('SELECT * FROM huge_table')) {
    *   if (row.id === targetId) {
    *     break; // Resources cleaned up automatically
    *   }
    * }
    * ```
    */
-  executeStreaming(query: string, config?: StreamingConfig): Promise<StreamingResult>;
+  executeStreaming(query: string, config?: StreamingConfig): StreamingResult;
 
   /**
    * Prepare a CQL query for analysis.

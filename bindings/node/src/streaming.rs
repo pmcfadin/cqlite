@@ -59,8 +59,8 @@ use crate::value::row_to_object;
 /// ## Example (JavaScript)
 ///
 /// ```javascript
-/// const stream = await db.executeStreaming('SELECT * FROM large_table');
-/// for await (const row of stream) {
+/// // No await on executeStreaming - it returns an AsyncIterable directly
+/// for await (const row of db.executeStreaming('SELECT * FROM large_table')) {
 ///   console.log(row);
 /// }
 /// ```

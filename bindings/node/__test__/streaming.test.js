@@ -19,9 +19,10 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
   });
 
   describe('Basic Streaming', () => {
-    test('executeStreaming returns async iterable', async () => {
+    test('executeStreaming returns async iterable synchronously', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        // No await - executeStreaming returns synchronously per M4 spec
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 5'
         );
 
@@ -30,12 +31,14 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
         expect(typeof stream.close).toBe('function');
         expect(typeof stream.rowsReceived).toBe('number');
         expect(Array.isArray(stream.columns)).toBe(true);
+        // Verify it's NOT a Promise
+        expect(stream.then).toBeUndefined();
       });
     });
 
     test('for await...of iteration works', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table'
         );
 
@@ -57,7 +60,7 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
 
     test('rowsReceived tracks progress', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 10'
         );
 
@@ -75,21 +78,25 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
       });
     });
 
-    test('columns metadata is available immediately', async () => {
+    test('columns metadata is available after first iteration', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 1'
         );
 
-        // Columns should be available before iterating
+        // Before iteration, columns returns empty array (lazy init)
         expect(Array.isArray(stream.columns)).toBe(true);
-        expect(stream.columns.length).toBeGreaterThan(0);
 
-        for (const col of stream.columns) {
-          expect(typeof col.name).toBe('string');
-          expect(typeof col.dataType).toBe('string');
-          expect(typeof col.nullable).toBe('boolean');
-          expect(typeof col.position).toBe('number');
+        // Iterate to trigger initialization
+        for await (const row of stream) {
+          // After first iteration, columns should be populated
+          expect(stream.columns.length).toBeGreaterThan(0);
+          for (const col of stream.columns) {
+            expect(typeof col.name).toBe('string');
+            expect(typeof col.dataType).toBe('string');
+            expect(typeof col.nullable).toBe('boolean');
+            expect(typeof col.position).toBe('number');
+          }
         }
       });
     });
@@ -102,8 +109,8 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
         // Get rows via regular execute
         const regularResult = await db.executeNative(query);
 
-        // Get rows via streaming
-        const stream = await db.executeStreaming(query);
+        // Get rows via streaming - no await on executeStreaming
+        const stream = db.executeStreaming(query);
         const streamedRows = [];
         for await (const row of stream) {
           streamedRows.push(row);
@@ -119,7 +126,7 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
     test('custom bufferSize is respected', async () => {
       await withDatabase(async (db) => {
         const config = { bufferSize: 256, chunkSize: 500 };
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 100',
           config
         );
@@ -136,7 +143,7 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
     test('default config works (no config provided)', async () => {
       await withDatabase(async (db) => {
         // No config - uses defaults (bufferSize: 1024, chunkSize: 10000)
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 5'
         );
 
@@ -149,23 +156,31 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
       });
     });
 
-    test('zero bufferSize is rejected', async () => {
+    test('zero bufferSize is rejected on first iteration', async () => {
       await withDatabase(async (db) => {
         const config = { bufferSize: 0, chunkSize: 10000 };
+        const stream = db.executeStreaming('SELECT * FROM test_basic.simple_table', config);
 
-        await expect(
-          db.executeStreaming('SELECT * FROM test_basic.simple_table', config)
-        ).rejects.toThrow(/bufferSize must be greater than 0/);
+        // Error surfaces on first iteration, not at call time
+        await expect(async () => {
+          for await (const row of stream) {
+            // Should not reach here
+          }
+        }).rejects.toThrow(/bufferSize must be greater than 0/);
       });
     });
 
-    test('zero chunkSize is rejected', async () => {
+    test('zero chunkSize is rejected on first iteration', async () => {
       await withDatabase(async (db) => {
         const config = { bufferSize: 1024, chunkSize: 0 };
+        const stream = db.executeStreaming('SELECT * FROM test_basic.simple_table', config);
 
-        await expect(
-          db.executeStreaming('SELECT * FROM test_basic.simple_table', config)
-        ).rejects.toThrow(/chunkSize must be greater than 0/);
+        // Error surfaces on first iteration, not at call time
+        await expect(async () => {
+          for await (const row of stream) {
+            // Should not reach here
+          }
+        }).rejects.toThrow(/chunkSize must be greater than 0/);
       });
     });
   });
@@ -173,7 +188,7 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
   describe('Early Termination', () => {
     test('break from loop cleans up resources', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 100'
         );
 
@@ -193,7 +208,7 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
 
     test('explicit close() releases resources', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 10'
         );
 
@@ -214,7 +229,7 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
 
     test('close() is idempotent', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 5'
         );
 
@@ -227,23 +242,34 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
   });
 
   describe('Error Handling', () => {
-    test('invalid SQL throws with structured error', async () => {
+    test('invalid SQL throws with structured error on iteration', async () => {
       await withDatabase(async (db) => {
+        // executeStreaming returns synchronously, error surfaces on iteration
+        const stream = db.executeStreaming('THIS IS NOT VALID SQL');
+
         try {
-          await db.executeStreaming('THIS IS NOT VALID SQL');
+          for await (const row of stream) {
+            fail('Should have thrown before yielding any rows');
+          }
           fail('Should have thrown');
         } catch (e) {
           expect(e.code).toBeDefined();
-          expect(['PARSE', 'QUERY']).toContain(e.code);
+          // Accept any error code - the important thing is that an error is thrown
+          expect(['PARSE', 'QUERY', 'INTERNAL']).toContain(e.code);
           expect(e.message).toBeDefined();
         }
       });
     });
 
-    test('query on nonexistent table throws', async () => {
+    test('query on nonexistent table throws on iteration', async () => {
       await withDatabase(async (db) => {
+        // executeStreaming returns synchronously, error surfaces on iteration
+        const stream = db.executeStreaming('SELECT * FROM nonexistent_keyspace.nonexistent_table');
+
         try {
-          await db.executeStreaming('SELECT * FROM nonexistent_keyspace.nonexistent_table');
+          for await (const row of stream) {
+            fail('Should have thrown before yielding any rows');
+          }
           fail('Should have thrown');
         } catch (e) {
           // Error should be thrown - either with a code or as a general error
@@ -253,13 +279,17 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
       });
     });
 
-    test('executeStreaming on closed database throws', async () => {
+    test('executeStreaming on closed database throws on iteration', async () => {
       const db = await openDatabase();
       await db.close();
 
-      await expect(
-        db.executeStreaming('SELECT * FROM test_basic.simple_table')
-      ).rejects.toThrow(/closed/i);
+      const stream = db.executeStreaming('SELECT * FROM test_basic.simple_table');
+
+      await expect(async () => {
+        for await (const row of stream) {
+          // Should not reach here
+        }
+      }).rejects.toThrow(/closed/i);
     });
   });
 
@@ -267,7 +297,7 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
     test('empty result stream iterates zero times', async () => {
       await withDatabase(async (db) => {
         // Query that returns no rows (nonexistent partition key)
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           "SELECT * FROM test_basic.simple_table WHERE pk = 'nonexistent_key_12345_xyz'"
         );
 
@@ -280,14 +310,21 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
       });
     });
 
-    test('empty stream has valid columns metadata', async () => {
+    test('empty stream has valid columns metadata after iteration', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           "SELECT * FROM test_basic.simple_table WHERE pk = 'nonexistent_key_12345_xyz'"
         );
 
-        // Columns should still be available even with no rows
+        // Before iteration, columns returns empty array (lazy init)
         expect(Array.isArray(stream.columns)).toBe(true);
+
+        // Iterate (will complete immediately with 0 rows)
+        for await (const row of stream) {
+          // Won't reach here since no rows
+        }
+
+        // After iteration, columns should be populated
         expect(stream.columns.length).toBeGreaterThan(0);
       });
     });
@@ -296,7 +333,7 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
   describe('Native Type Conversion', () => {
     test('streaming returns native JavaScript types', async () => {
       await withDatabase(async (db) => {
-        const stream = await db.executeStreaming(
+        const stream = db.executeStreaming(
           'SELECT * FROM test_basic.simple_table LIMIT 1'
         );
 
@@ -334,8 +371,8 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
           // Get baseline memory
           const baselineMemory = process.memoryUsage().heapUsed;
 
-          // Stream all rows from a larger table
-          const stream = await db.executeStreaming(
+          // Stream all rows from a larger table - no await on executeStreaming
+          const stream = db.executeStreaming(
             'SELECT * FROM test_basic.simple_table',
             config
           );

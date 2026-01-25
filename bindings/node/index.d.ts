@@ -262,24 +262,27 @@ export declare class Database {
    *
    * @param query - CQL SELECT statement to execute
    * @param config - Optional StreamingConfig for buffer/chunk sizes
-   * @returns Promise resolving to StreamingResult async iterator
+   * @returns StreamingResult async iterable (JS wrapper makes this sync)
+   *
+   * Note: The native Rust layer returns a Promise, but the JavaScript wrapper
+   * in error-wrapper.js converts this to a synchronous return of AsyncIterable,
+   * per M4 spec requirement (Issue #347).
    *
    * @example
    * ```javascript
-   * const stream = await db.executeStreaming('SELECT * FROM large_table');
-   * for await (const row of stream) {
+   * // No await on executeStreaming - returns AsyncIterable directly
+   * for await (const row of db.executeStreaming('SELECT * FROM large_table')) {
    *   console.log(row.name);
    * }
    *
    * // With custom config for memory constraints
    * const config = { bufferSize: 256, chunkSize: 2500 };
-   * for await (const row of await db.executeStreaming(query, config)) {
+   * for await (const row of db.executeStreaming(query, config)) {
    *   process(row);
    * }
    *
    * // Early termination is safe - resources cleaned up automatically
-   * const stream = await db.executeStreaming('SELECT * FROM huge_table');
-   * for await (const row of stream) {
+   * for await (const row of db.executeStreaming('SELECT * FROM huge_table')) {
    *   if (row.id === targetId) {
    *     break;
    *   }
@@ -357,8 +360,8 @@ export declare class PreparedStatement {
  * ## Example (JavaScript)
  *
  * ```javascript
- * const stream = await db.executeStreaming('SELECT * FROM large_table');
- * for await (const row of stream) {
+ * // No await on executeStreaming - it returns an AsyncIterable directly
+ * for await (const row of db.executeStreaming('SELECT * FROM large_table')) {
  *   console.log(row);
  * }
  * ```

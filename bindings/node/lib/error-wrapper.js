@@ -230,22 +230,104 @@ function createWrappedDatabase(NativeDatabase) {
      * @param {Object} [config] - Optional streaming configuration
      * @param {number} [config.bufferSize=1024] - Rows to buffer in memory
      * @param {number} [config.chunkSize=10000] - Rows per fetch chunk
-     * @returns {Promise<AsyncIterable<Object>>} Async iterable of rows
-     * @throws {CqliteError} If the query fails
+     * @returns {AsyncIterable<Object>} Async iterable of rows
+     * @throws {CqliteError} If the query fails (on first iteration)
      *
      * @example
-     * const stream = await db.executeStreaming('SELECT * FROM large_table');
-     * for await (const row of stream) {
+     * for await (const row of db.executeStreaming('SELECT * FROM large_table')) {
      *   console.log(row.name);
      * }
      */
-    async executeStreaming(query, config) {
-      try {
-        const nativeStream = await this._native.executeStreaming(query, config);
-        return createAsyncIterator(nativeStream);
-      } catch (error) {
-        throw enhanceError(error);
-      }
+    executeStreaming(query, config) {
+      const self = this;
+      let nativeStreamPromise = null;
+      let nativeStream = null;
+      let initError = null;
+      let closed = false;
+
+      // Lazy initialization - called on first iteration
+      const ensureInitialized = async () => {
+        // Check if stream was closed before initialization
+        if (closed) {
+          return { next: async () => ({ value: undefined, done: true }) };
+        }
+        if (initError) throw initError;
+        if (nativeStream) return nativeStream;
+        if (!nativeStreamPromise) {
+          nativeStreamPromise = self._native.executeStreaming(query, config)
+            .then(stream => {
+              // Check if close() was called while we were initializing
+              if (closed) {
+                stream.close();
+                return { next: async () => ({ value: undefined, done: true }) };
+              }
+              nativeStream = stream;
+              return stream;
+            })
+            .catch(err => {
+              initError = enhanceError(err);
+              throw initError;
+            });
+        }
+        return nativeStreamPromise;
+      };
+
+      return {
+        /**
+         * Number of rows received so far.
+         * Returns 0 before iteration begins.
+         * @returns {number}
+         */
+        get rowsReceived() {
+          return nativeStream?.rowsReceived ?? 0;
+        },
+
+        /**
+         * Column metadata for the result set.
+         * Returns empty array before iteration begins.
+         * @returns {Array<Object>}
+         */
+        get columns() {
+          return nativeStream?.columns ?? [];
+        },
+
+        /**
+         * Release resources early.
+         * Safe to call multiple times.
+         * If called before initialization completes, prevents initialization
+         * from creating a zombie stream.
+         */
+        close() {
+          closed = true;
+          // Clear the promise to prevent initialization from completing
+          // after close() is called (prevents zombie streams)
+          nativeStreamPromise = null;
+          nativeStream?.close();
+        },
+
+        /**
+         * Implement Symbol.asyncIterator for `for await...of` support.
+         * @returns {AsyncIterator}
+         */
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              try {
+                const stream = await ensureInitialized();
+                return await stream.next();
+              } catch (error) {
+                throw enhanceError(error);
+              }
+            },
+            async return() {
+              closed = true;
+              nativeStreamPromise = null;
+              nativeStream?.close();
+              return { value: undefined, done: true };
+            },
+          };
+        },
+      };
     }
 
     /**
