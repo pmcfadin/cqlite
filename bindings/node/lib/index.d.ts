@@ -528,6 +528,53 @@ export interface CqliteError extends Error {
 }
 
 // ============================================================================
+// Prepared Statements
+// ============================================================================
+
+/**
+ * Statistics about a prepared statement.
+ *
+ * Contains query plan information useful for optimization
+ * and debugging query performance.
+ */
+export interface PreparedStatementStats {
+  /** Number of parameters in the query. */
+  parameterCount: number;
+
+  /** Type of execution plan (TableScan, IndexScan, PointLookup). */
+  planType: string;
+
+  /** Estimated execution cost (relative metric for comparing plans). */
+  estimatedCost: number;
+
+  /** Estimated number of rows to be returned. */
+  estimatedRows: bigint;
+
+  /** Whether the query is cache-friendly. */
+  cacheFriendly: boolean;
+}
+
+/**
+ * A prepared CQL statement.
+ *
+ * PreparedStatement holds a pre-parsed and planned query that can be
+ * inspected for metadata and statistics. Created via Database.prepare().
+ */
+export declare class PreparedStatement {
+  /** The original CQL query text. */
+  readonly query: string;
+
+  /** Number of parameters in the query. */
+  readonly parameterCount: number;
+
+  /** Get statistics about this prepared statement. */
+  stats(): PreparedStatementStats;
+
+  /** String representation of the prepared statement. */
+  toString(): string;
+}
+
+// ============================================================================
 // Database Class
 // ============================================================================
 
@@ -729,6 +776,18 @@ export declare class Database {
    * ```
    */
   executeStreaming(query: string, config?: StreamingConfig): Promise<StreamingResult>;
+
+  /**
+   * Prepare a CQL query for analysis.
+   *
+   * Returns a PreparedStatement that can be inspected for query plan
+   * information and statistics.
+   *
+   * @param query - CQL SELECT statement to prepare
+   * @returns Promise resolving to PreparedStatement with query plan info
+   * @throws {CqliteError} If the query cannot be prepared
+   */
+  prepare(query: string): Promise<PreparedStatement>;
 }
 
 // ============================================================================

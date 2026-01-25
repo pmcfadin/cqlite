@@ -247,6 +247,24 @@ function createWrappedDatabase(NativeDatabase) {
         throw enhanceError(error);
       }
     }
+
+    /**
+     * Prepare a CQL query for analysis.
+     *
+     * Returns a PreparedStatement that can be inspected for query plan
+     * information and statistics.
+     *
+     * @param {string} query - CQL SELECT statement to prepare
+     * @returns {Promise<PreparedStatement>} PreparedStatement with query plan info
+     * @throws {CqliteError} If the query cannot be prepared
+     */
+    async prepare(query) {
+      try {
+        return await this._native.prepare(query);
+      } catch (error) {
+        throw enhanceError(error);
+      }
+    }
   }
 
   return Database;

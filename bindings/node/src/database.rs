@@ -469,6 +469,17 @@ impl Database {
             query,
         }))
     }
+
+    /// Prepare a CQL query for analysis.
+    ///
+    /// Returns a PreparedStatement that can be inspected for query plan
+    /// information and statistics.
+    #[napi]
+    pub async fn prepare(&self, query: String) -> napi::Result<crate::prepared::PreparedStatement> {
+        self.ensure_open()?;
+        let prepared = self.inner.prepare(&query).await.map_err(to_napi_error)?;
+        Ok(crate::prepared::PreparedStatement::new(prepared))
+    }
 }
 
 /// Async task for executing queries with native type conversion.

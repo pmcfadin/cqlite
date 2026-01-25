@@ -107,6 +107,24 @@ export interface StreamingConfig {
   chunkSize?: number
 }
 /**
+ * Statistics about a prepared statement.
+ *
+ * Contains query plan information useful for optimization
+ * and debugging query performance.
+ */
+export interface PreparedStatementStats {
+  /** Number of parameters in the query. */
+  parameterCount: number
+  /** Type of execution plan (TableScan, IndexScan, PointLookup). */
+  planType: string
+  /** Estimated execution cost (relative metric for comparing plans). */
+  estimatedCost: number
+  /** Estimated number of rows to be returned. */
+  estimatedRows: bigint
+  /** Whether the query is cache-friendly. */
+  cacheFriendly: boolean
+}
+/**
  * Returns the version of the cqlite-node binding.
  *
  * @returns The semantic version string (e.g., "0.3.0")
@@ -282,6 +300,32 @@ export declare class Database {
    * ```
    */
   executeNative(query: string): Promise<{rows: object[], rowCount: number, executionTimeMs: number, columns: ColumnInfo[]}>
+  /**
+   * Prepare a CQL query for analysis.
+   *
+   * Returns a PreparedStatement that can be inspected for query plan
+   * information and statistics.
+   */
+  prepare(query: string): Promise<PreparedStatement>
+}
+/**
+ * A prepared CQL statement.
+ *
+ * PreparedStatement holds a pre-parsed and planned query that can be
+ * inspected for metadata and statistics. Created via Database.prepare().
+ */
+export declare class PreparedStatement {
+  /** The original CQL query text. */
+  get query(): string
+  /**
+   * Number of parameters in the query.
+   * Returns count of placeholder parameters (?), clamped to u32::MAX.
+   */
+  get parameterCount(): number
+  /** Get statistics about this prepared statement. */
+  stats(): PreparedStatementStats
+  /** String representation of the prepared statement. */
+  toString(): string
 }
 /**
  * Streaming query result iterator.

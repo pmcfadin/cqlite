@@ -22,6 +22,7 @@
 
 mod database;
 mod error;
+mod prepared;
 mod streaming;
 mod value;
 
@@ -31,6 +32,8 @@ pub use database::DatabaseOptions;
 pub use database::DatabaseStats;
 pub use database::QueryResult;
 pub use database::StreamingConfig;
+pub use prepared::PreparedStatement;
+pub use prepared::PreparedStatementStats;
 pub use streaming::StreamingResult;
 
 use napi_derive::napi;

@@ -310,8 +310,9 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { Database, StreamingResult, version } = nativeBinding
+const { Database, PreparedStatement, StreamingResult, version } = nativeBinding
 
 module.exports.Database = Database
+module.exports.PreparedStatement = PreparedStatement
 module.exports.StreamingResult = StreamingResult
 module.exports.version = version
