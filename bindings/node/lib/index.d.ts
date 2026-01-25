@@ -297,7 +297,9 @@ export interface DatabaseStats {
  * @example
  * ```typescript
  * const options: DatabaseOptions = {
- *   schema: '/path/to/schema.cql'
+ *   schema: '/path/to/schema.cql',
+ *   memoryLimit: 256 * 1024 * 1024, // 256MB
+ *   cacheEnabled: true
  * };
  * const db = await Database.open('/path/to/data', options);
  * ```
@@ -308,6 +310,25 @@ export interface DatabaseOptions {
    * If provided, the schema will be loaded and used for query execution.
    */
   schema?: string;
+
+  /**
+   * Maximum memory usage in bytes.
+   * Default: 1GB (1073741824 bytes).
+   * Controls the overall memory budget for caches and internal buffers.
+   *
+   * @example
+   * ```typescript
+   * { memoryLimit: 256 * 1024 * 1024 } // 256MB
+   * ```
+   */
+  memoryLimit?: number;
+
+  /**
+   * Enable or disable all caches (block, row, query).
+   * Default: true (caches enabled).
+   * Set to false to minimize memory usage at the cost of performance.
+   */
+  cacheEnabled?: boolean;
 }
 
 /**

@@ -324,6 +324,30 @@ describe('TypeScript Definitions (Issue #312)', () => {
     });
   });
 
+  describe('DatabaseOptions interface (Issue #339)', () => {
+    test('should have schema property of optional string', () => {
+      expect(dtsContent).toMatch(/interface\s+DatabaseOptions[\s\S]*?schema\s*\?\s*:\s*string/);
+    });
+
+    test('should have memoryLimit property of optional number', () => {
+      expect(dtsContent).toMatch(/interface\s+DatabaseOptions[\s\S]*?memoryLimit\s*\?\s*:\s*number/);
+    });
+
+    test('should have cacheEnabled property of optional boolean', () => {
+      expect(dtsContent).toMatch(/interface\s+DatabaseOptions[\s\S]*?cacheEnabled\s*\?\s*:\s*boolean/);
+    });
+
+    test('memoryLimit should have JSDoc with default value', () => {
+      // Verify documentation mentions the default (1GB)
+      expect(dtsContent).toMatch(/memoryLimit[\s\S]*?Default:\s*1GB/);
+    });
+
+    test('cacheEnabled should have JSDoc with default value', () => {
+      // Verify documentation mentions the default (true)
+      expect(dtsContent).toMatch(/cacheEnabled[\s\S]*?Default:\s*true/);
+    });
+  });
+
   describe('Package configuration', () => {
     test('package.json should point types to lib/index.d.ts', () => {
       const packageJson = JSON.parse(

@@ -96,6 +96,19 @@ pub struct DatabaseOptions {
     /// Path to a CQL schema file (.cql).
     /// If provided, the schema will be loaded and used for query execution.
     pub schema: Option<String>,
+
+    /// Maximum memory usage in bytes.
+    /// Default: 1GB (1073741824 bytes).
+    /// Controls the overall memory budget for caches and internal buffers.
+    /// JavaScript numbers can safely represent up to 2^53 bytes (~9 petabytes).
+    #[napi(js_name = "memoryLimit")]
+    pub memory_limit: Option<f64>,
+
+    /// Enable or disable all caches (block, row, query).
+    /// Default: true (caches enabled).
+    /// Set to false to minimize memory usage at the cost of performance.
+    #[napi(js_name = "cacheEnabled")]
+    pub cache_enabled: Option<bool>,
 }
 
 /// Configuration for streaming query execution.
@@ -229,7 +242,35 @@ impl Database {
         options: Option<DatabaseOptions>,
     ) -> napi::Result<Database> {
         let path = PathBuf::from(&data_dir);
-        let schema_path = options.and_then(|o| o.schema).map(PathBuf::from);
+
+        // Extract all options and build config
+        let (schema_path, core_config) = if let Some(opts) = options {
+            let mut config = cqlite_core::Config::default();
+
+            if let Some(limit) = opts.memory_limit {
+                if !limit.is_finite() {
+                    return Err(napi::Error::from_reason(
+                        "memoryLimit must be a finite number",
+                    ));
+                }
+                if limit <= 0.0 {
+                    return Err(napi::Error::from_reason(
+                        "memoryLimit must be greater than 0",
+                    ));
+                }
+                config.memory.max_memory = limit as u64;
+            }
+
+            if let Some(enabled) = opts.cache_enabled {
+                config.memory.block_cache.enabled = enabled;
+                config.memory.row_cache.enabled = enabled;
+                config.memory.query_cache.enabled = enabled;
+            }
+
+            (opts.schema.map(PathBuf::from), config)
+        } else {
+            (None, cqlite_core::Config::default())
+        };
 
         let db = if let Some(schema) = schema_path {
             // Use ingestion module for schema + SSTable discovery
@@ -237,7 +278,7 @@ impl Database {
                 schema_paths: vec![schema],
                 data_dir: path,
                 version_hint: None,
-                core_config: cqlite_core::Config::default(),
+                core_config,
                 table_directory_filter: None,
             };
 
@@ -248,7 +289,7 @@ impl Database {
             result.database
         } else {
             // Simple open without schema
-            cqlite_core::Database::open(&path, cqlite_core::Config::default())
+            cqlite_core::Database::open(&path, core_config)
                 .await
                 .map_err(to_napi_error)?
         };
