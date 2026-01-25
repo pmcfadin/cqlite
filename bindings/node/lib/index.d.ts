@@ -207,8 +207,12 @@ export interface QueryResult {
    * - Blob: base64 string
    * - Timestamp: ISO 8601 string
    * - Set/Map: Array representations
+   * - Varint: Hex string `"0x{hex}"` (e.g., `"0x7f"` for 127)
+   * - Decimal: String `"decimal:{scale}:0x{hex}"` (e.g., `"decimal:2:0x7b"` for 1.23)
    *
    * For native types with full precision, use `executeNative()`.
+   *
+   * @deprecated The execute() method uses legacy JSON encoding. Use executeNative() for proper type fidelity.
    */
   rows: Record<string, unknown>[];
 
@@ -667,17 +671,31 @@ export declare class Database {
    * native JavaScript types. For native types with full precision,
    * use `executeNative()` instead.
    *
+   * ## Varint and Decimal Encoding
+   *
+   * This method uses hex-based encoding for arbitrary precision numbers:
+   * - **Varint**: `"0x{hex}"` - Two's complement big-endian hex encoding
+   *   - Example: 127 -> `"0x7f"`, -1 -> `"0xff"`, 256 -> `"0x0100"`
+   * - **Decimal**: `"decimal:{scale}:0x{hex}"` - Scale + hex-encoded unscaled value
+   *   - Example: 1.23 (scale=2, unscaled=123) -> `"decimal:2:0x7b"`
+   *
    * @param query - CQL SELECT statement to execute
    * @returns Promise resolving to QueryResult with rows and metadata
    * @throws {CqliteError} If the query fails
+   * @deprecated Since 0.4.0. Use `executeNative()` for proper type fidelity.
    *
    * @example
    * ```typescript
+   * // JSON path - hex encoding for varint/decimal
    * const result = await db.execute('SELECT * FROM users LIMIT 10');
    * console.log(`Got ${result.rowCount} rows in ${result.executionTimeMs}ms`);
-   * for (const row of result.rows) {
-   *   console.log(row.name);
-   * }
+   * // Varint column: "0x7f" for 127
+   * // Decimal column: "decimal:2:0x7b" for 1.23
+   *
+   * // Native path (recommended) - proper types
+   * const native = await db.executeNative('SELECT * FROM users');
+   * // Varint: BigInt(127)
+   * // Decimal: "1.23"
    * ```
    */
   execute(query: string): Promise<QueryResult>;

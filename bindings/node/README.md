@@ -109,6 +109,32 @@ for (const row of result.rows) {
 }
 ```
 
+### JSON Encoding (execute method)
+
+The `execute()` method returns JSON-serializable values. For most types this works intuitively,
+but `varint` and `decimal` types use a hex-based encoding to preserve arbitrary precision:
+
+```typescript
+// Using execute() - hex encoding (deprecated)
+const result = await db.execute('SELECT amount FROM transactions');
+console.log(result.rows[0].amount);
+// Varint: "0x7f" (127), "0xff" (-1), "0x0100" (256)
+// Decimal: "decimal:2:0x7b" (1.23), "decimal:2:0xee29" (-45.67)
+
+// Using executeNative() - proper types (recommended)
+const native = await db.executeNative('SELECT amount FROM transactions');
+console.log(native.rows[0].amount);
+// Varint: 127n (BigInt)
+// Decimal: "1.23" (human-readable string)
+```
+
+**Hex Format Details:**
+- `varint`: `"0x{hex}"` - Two's complement big-endian hex encoding
+- `decimal`: `"decimal:{scale}:0x{hex}"` - Scale (decimal places) + hex-encoded unscaled value
+
+**Recommendation:** Use `executeNative()` for most applications. The `execute()` method is
+primarily for JSON serialization scenarios where you need raw, reversible encoding.
+
 ### Column Metadata
 
 Each query result includes column information:
@@ -178,9 +204,9 @@ CQL types are automatically converted to JavaScript types:
 |----------|-----------------|-------|
 | `text`, `varchar`, `ascii` | `string` | |
 | `int`, `smallint`, `tinyint` | `number` | |
-| `bigint`, `varint`, `counter` | `bigint` | via `executeNative()` |
+| `bigint`, `varint`*, `counter` | `bigint` | via `executeNative()` |
 | `float`, `double` | `number` | |
-| `decimal` | `string` | Preserves precision |
+| `decimal`* | `string` | Preserves precision |
 | `boolean` | `boolean` | |
 | `blob` | `Buffer` | via `executeNative()` |
 | `timestamp` | `Date` | via `executeNative()` |
@@ -195,6 +221,9 @@ CQL types are automatically converted to JavaScript types:
 | `tuple<...>` | `[...]` | Array |
 | `frozen<T>` | Inner type | Unwrapped |
 | UDT | `object` | With `_type` and `_keyspace` fields |
+
+\* **Note:** With `execute()`, `varint` returns `"0x{hex}"` and `decimal` returns `"decimal:{scale}:0x{hex}"`.
+Use `executeNative()` for human-readable formats.
 
 ## Examples
 

@@ -199,10 +199,11 @@ bindings/node/
 ├── __test__/
 │   ├── setup.js           # Jest setup with centralized paths (Issue #306)
 │   ├── helpers.js         # Test utilities (openDatabase, skipIfNoDatasets)
-│   ├── parity-utils.js    # JSONL parsing, type normalization utilities (Issue #307)
+│   ├── parity-utils.js    # JSONL parsing, type normalization, hex parsing utilities (Issue #307, #343)
 │   ├── parity.test.js     # sstabledump parity tests - 39 tests (Issue #307)
 │   ├── types.test.js      # Comprehensive type conversion tests - 44 tests (Issue #308)
 │   ├── typescript-definitions.test.js  # TypeScript definitions validation - 68 tests (Issue #312)
+│   ├── json-encoding.test.js  # Hex encoding format documentation tests - 14 tests (Issue #343)
 │   ├── smoke.test.js      # Basic import tests (4 tests)
 │   ├── config.test.js     # StreamingConfig tests (8 tests)
 │   ├── database.test.js   # Database API tests (8 tests)
@@ -220,12 +221,14 @@ bindings/node/
 
 **Status**: Phase 3 (Streaming) complete (Issue #305).
 - `Database.open(dataDir, options?)` - Open database with optional schema
-- `Database.execute(query)` - Execute CQL query, returns QueryResult with columns metadata
-- `Database.executeNative(query)` - Execute with native JS types (BigInt, Date, Buffer, Set, Map)
+- `Database.execute(query)` - Execute CQL query, returns QueryResult (deprecated, uses hex encoding for varint/decimal)
+- `Database.executeNative(query)` - Execute with native JS types (BigInt, Date, Buffer, Set, Map) - **recommended**
 - `Database.executeStreaming(query, config?)` - Execute with async iteration (Issue #305)
 - `Database.getStats()` - Get database statistics
 - `Database.close()` - Idempotent close
 - Error properties: `code`, `category`, `isRecoverable` on all thrown errors
+
+**JSON Encoding (Issue #343)**: The deprecated `execute()` method uses hex encoding for varint (`"0x{hex}"`) and decimal (`"decimal:{scale}:0x{hex}"`) types. Use `executeNative()` for human-readable formats.
 
 **QueryResult Fields**:
 - `rows: object[]` - Result rows as JavaScript objects

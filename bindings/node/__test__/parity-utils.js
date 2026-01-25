@@ -189,6 +189,128 @@ function extractRowsFromPartitions(partitions) {
 }
 
 // =============================================================================
+// Hex Encoding Utilities (Issue #343)
+// =============================================================================
+
+// Varint hex pattern: "0x{hex}" (without decimal: prefix)
+const VARINT_HEX_PATTERN = /^0x[0-9a-f]+$/i;
+
+// Decimal hex pattern: "decimal:{scale}:0x{hex}"
+const DECIMAL_HEX_PATTERN = /^decimal:(\d+):0x([0-9a-f]+)$/i;
+
+/**
+ * Parse a varint hex string to BigInt.
+ * Format: "0x{hex}" where hex is two's complement big-endian.
+ *
+ * @param {string} hexStr - Hex string like "0x7f" or "0xff"
+ * @returns {bigint} - The parsed BigInt value
+ */
+function parseVarintHex(hexStr) {
+  if (!VARINT_HEX_PATTERN.test(hexStr)) {
+    throw new Error(`Invalid varint hex format: ${hexStr}`);
+  }
+
+  const hex = hexStr.slice(2); // Remove '0x'
+  if (hex.length === 0) {
+    return 0n;
+  }
+
+  const bytes = Buffer.from(hex, 'hex');
+
+  // Check sign from high bit
+  const isNegative = (bytes[0] & 0x80) !== 0;
+
+  let value = 0n;
+  for (const byte of bytes) {
+    value = (value << 8n) | BigInt(byte);
+  }
+
+  // Sign extend if negative
+  if (isNegative) {
+    const signBits = ~((1n << BigInt(bytes.length * 8)) - 1n);
+    value |= signBits;
+  }
+
+  return value;
+}
+
+/**
+ * Parse a decimal hex string to a human-readable decimal string.
+ * Format: "decimal:{scale}:0x{hex}"
+ *
+ * @param {string} decimalHex - Decimal hex string like "decimal:2:0x7b"
+ * @returns {string} - Human-readable decimal like "1.23"
+ */
+function parseDecimalHex(decimalHex) {
+  const match = DECIMAL_HEX_PATTERN.exec(decimalHex);
+  if (!match) {
+    throw new Error(`Invalid decimal hex format: ${decimalHex}`);
+  }
+
+  const scale = parseInt(match[1], 10);
+  const hex = match[2];
+
+  if (hex.length === 0) {
+    return '0';
+  }
+
+  const bytes = Buffer.from(hex, 'hex');
+
+  // Parse two's complement
+  const isNegative = (bytes[0] & 0x80) !== 0;
+  let value = 0n;
+  for (const byte of bytes) {
+    value = (value << 8n) | BigInt(byte);
+  }
+  if (isNegative) {
+    const signBits = ~((1n << BigInt(bytes.length * 8)) - 1n);
+    value |= signBits;
+  }
+
+  // Apply scale
+  const absValue = value < 0n ? -value : value;
+  const sign = value < 0n ? '-' : '';
+  const digits = absValue.toString();
+
+  if (scale === 0) {
+    return sign + digits;
+  } else if (scale > 0) {
+    if (digits.length <= scale) {
+      return sign + '0.' + '0'.repeat(scale - digits.length) + digits;
+    } else {
+      const splitPoint = digits.length - scale;
+      return sign + digits.slice(0, splitPoint) + '.' + digits.slice(splitPoint);
+    }
+  } else {
+    // Negative scale means multiply by 10^|scale|
+    return sign + digits + 'e' + (-scale);
+  }
+}
+
+/**
+ * Check if a string is a varint hex encoding from execute().
+ * Note: This only matches varint format, not general hex blobs.
+ *
+ * @param {string} value - String to check
+ * @returns {boolean} - True if it's a varint hex string
+ */
+function isVarintHex(value) {
+  return typeof value === 'string' &&
+    VARINT_HEX_PATTERN.test(value) &&
+    !value.includes(':');
+}
+
+/**
+ * Check if a string is a decimal hex encoding from execute().
+ *
+ * @param {string} value - String to check
+ * @returns {boolean} - True if it's a decimal hex string
+ */
+function isDecimalHex(value) {
+  return typeof value === 'string' && DECIMAL_HEX_PATTERN.test(value);
+}
+
+// =============================================================================
 // Type Normalization (matching Python's normalize_jsonl_value)
 // =============================================================================
 
@@ -544,6 +666,14 @@ module.exports = {
   valuesEqual,
   formatDifference,
   formatValue,
+
+  // Hex encoding utilities (Issue #343)
+  parseVarintHex,
+  parseDecimalHex,
+  isVarintHex,
+  isDecimalHex,
+  VARINT_HEX_PATTERN,
+  DECIMAL_HEX_PATTERN,
 
   // Test tables
   ALL_TABLES,
