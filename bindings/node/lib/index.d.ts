@@ -438,7 +438,19 @@ export interface StreamingResult extends AsyncIterable<Row> {
    * Column metadata for the result set.
    *
    * Contains information about each column's name, type, and nullability.
-   * Available immediately after creating the streaming result.
+   * Returns an empty array before iteration begins. Columns are populated
+   * after the first row is fetched.
+   *
+   * @example
+   * ```typescript
+   * const stream = db.executeStreaming('SELECT * FROM table');
+   * console.log(stream.columns); // [] - empty before iteration
+   *
+   * for await (const row of stream) {
+   *   console.log(stream.columns); // ColumnInfo[] - populated during iteration
+   *   break;
+   * }
+   * ```
    */
   readonly columns: ColumnInfo[];
 

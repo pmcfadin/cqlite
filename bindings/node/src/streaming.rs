@@ -212,7 +212,10 @@ impl StreamingResult {
     /// Column metadata for the result set.
     ///
     /// Contains information about each column's name, type, and nullability.
-    /// Available immediately after creating the streaming result.
+    ///
+    /// Note: In the JavaScript wrapper, columns return an empty array before
+    /// the first iteration. The native struct has columns immediately, but
+    /// the wrapper defers stream creation until first `next()` call.
     ///
     /// @returns Array of ColumnInfo objects
     #[napi(getter)]
