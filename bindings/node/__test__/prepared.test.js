@@ -31,6 +31,22 @@ describe('PreparedStatement', () => {
     });
   });
 
+  describe('Internal functions not exported (Issue #353)', () => {
+    test('wrapPreparedStatement is NOT exported (internal only)', () => {
+      // wrapPreparedStatement is an internal function used to wrap native
+      // PreparedStatement objects. It should NOT be exported to consumers.
+      // Issue #353: This was previously exported, but should remain internal.
+      const mod = require('../lib/index.js');
+      expect(mod.wrapPreparedStatement).toBeUndefined();
+    });
+
+    test('only Database, PreparedStatement, and version are exported', () => {
+      const mod = require('../lib/index.js');
+      const exportedKeys = Object.keys(mod).sort();
+      expect(exportedKeys).toEqual(['Database', 'PreparedStatement', 'version']);
+    });
+  });
+
   describe('Database.prepare()', () => {
     test('prepare() returns a PreparedStatement instance', async () => {
       await withDatabase(async (db) => {
