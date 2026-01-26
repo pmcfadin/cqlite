@@ -167,18 +167,20 @@ function createAsyncIterator(nativeStream) {
  * Create a wrapped Database class with enhanced error handling.
  *
  * @param {Function} NativeDatabase - The native Database class
+ * @param {Function} wrapPreparedStatement - Function to wrap PreparedStatement for type consistency
  * @returns {Function} A wrapped Database class
  */
-function createWrappedDatabase(NativeDatabase) {
+function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
   class Database {
-    constructor(native) {
+    constructor(native, preparedStatementWrapper) {
       this._native = native;
+      this._wrapPreparedStatement = preparedStatementWrapper;
     }
 
     static async open(dataDir, options) {
       try {
         const native = await NativeDatabase.open(dataDir, options);
-        return new Database(native);
+        return new Database(native, wrapPreparedStatement);
       } catch (error) {
         throw enhanceError(error);
       }
@@ -206,7 +208,14 @@ function createWrappedDatabase(NativeDatabase) {
 
     async getStats() {
       try {
-        return await this._native.getStats();
+        const stats = await this._native.getStats();
+        // Coerce to BigInt to ensure TypeScript type guarantees hold (Issue #351)
+        // napi-rs returns i64 as number for small values, but TS declares bigint
+        return {
+          totalSstables: stats.totalSstables,
+          totalRows: BigInt(stats.totalRows),
+          memoryUsedBytes: BigInt(stats.memoryUsedBytes),
+        };
       } catch (error) {
         throw enhanceError(error);
       }
@@ -346,7 +355,9 @@ function createWrappedDatabase(NativeDatabase) {
      */
     async prepare(query) {
       try {
-        return await this._native.prepare(query);
+        const nativeStmt = await this._native.prepare(query);
+        // Wrap to ensure type consistency (Issue #351)
+        return this._wrapPreparedStatement(nativeStmt);
       } catch (error) {
         throw enhanceError(error);
       }

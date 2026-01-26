@@ -132,18 +132,35 @@ describe('Database Wrapper Tests (Issue #296)', () => {
       // Verify DatabaseStats structure
       expect(typeof stats).toBe('object');
       expect(typeof stats.totalSstables).toBe('number');
-      expect(
-        typeof stats.totalRows === 'number' || typeof stats.totalRows === 'bigint'
-      ).toBe(true);
-      expect(
-        typeof stats.memoryUsedBytes === 'number' ||
-          typeof stats.memoryUsedBytes === 'bigint'
-      ).toBe(true);
+      // Issue #351: Stats fields must be bigint, not number
+      expect(typeof stats.totalRows).toBe('bigint');
+      expect(typeof stats.memoryUsedBytes).toBe('bigint');
 
       // Log for debugging
       console.log(`    SSTables: ${stats.totalSstables}`);
       console.log(`    Total rows: ${stats.totalRows}`);
       console.log(`    Memory: ${stats.memoryUsedBytes} bytes`);
+    } finally {
+      await db.close();
+    }
+  });
+
+  test('DatabaseStats bigint fields support BigInt operations (Issue #351)', async () => {
+    skipIfNoDatasets();
+    const db = await Database.open(global.testPaths.SSTABLES_DIR, {
+      schema: global.testPaths.SCHEMA_BASIC_TYPES,
+    });
+    try {
+      const stats = await db.getStats();
+
+      // These operations would throw TypeError if values were numbers
+      // (can't mix number and bigint in bitwise operations)
+      expect(stats.totalRows & 0xFFFFFFFFn).toBeDefined();
+      expect(BigInt.asIntN(64, stats.memoryUsedBytes)).toBeDefined();
+
+      // Arithmetic with bigint literals should work
+      expect(stats.totalRows + 1n).toBeGreaterThan(0n);
+      expect(stats.memoryUsedBytes * 2n).toBeGreaterThanOrEqual(0n);
     } finally {
       await db.close();
     }

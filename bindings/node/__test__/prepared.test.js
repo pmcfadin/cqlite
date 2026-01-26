@@ -70,11 +70,8 @@ describe('PreparedStatement', () => {
 
         expect(typeof stats.estimatedCost).toBe('number');
 
-        // estimatedRows can be number or bigint (napi-rs returns i64 as number)
-        expect(
-          typeof stats.estimatedRows === 'number' ||
-          typeof stats.estimatedRows === 'bigint'
-        ).toBe(true);
+        // Issue #351: estimatedRows must be bigint, not number
+        expect(typeof stats.estimatedRows).toBe('bigint');
 
         expect(typeof stats.cacheFriendly).toBe('boolean');
       });
@@ -84,7 +81,21 @@ describe('PreparedStatement', () => {
       await withDatabase(async (db) => {
         const stmt = await db.prepare('SELECT * FROM test_basic.simple_table');
         const stats = stmt.stats();
-        expect(Number(stats.estimatedRows)).toBeGreaterThanOrEqual(0);
+        expect(stats.estimatedRows).toBeGreaterThanOrEqual(0n);
+      });
+    });
+
+    test('stats() estimatedRows supports BigInt operations (Issue #351)', async () => {
+      await withDatabase(async (db) => {
+        const stmt = await db.prepare('SELECT * FROM test_basic.simple_table');
+        const stats = stmt.stats();
+
+        // These operations would throw TypeError if value was a number
+        expect(stats.estimatedRows & 0xFFFFFFFFn).toBeDefined();
+        expect(BigInt.asIntN(64, stats.estimatedRows)).toBeDefined();
+
+        // Arithmetic with bigint literals should work
+        expect(stats.estimatedRows + 1n).toBeGreaterThan(0n);
       });
     });
   });

@@ -26,13 +26,64 @@
 const nativeBinding = require('../index.js');
 const { createWrappedDatabase } = require('./error-wrapper.js');
 
-// Create wrapped Database class with enhanced error handling
-const Database = createWrappedDatabase(nativeBinding.Database);
+/**
+ * Wrap a native PreparedStatement to ensure type consistency.
+ *
+ * Coerces estimatedRows from number to BigInt to match TypeScript declarations.
+ * napi-rs returns i64 as number for small values, but TS declares bigint.
+ *
+ * Issue #351: Stats fields typed as bigint but runtime returns number
+ *
+ * @param {Object} nativeStmt - The native PreparedStatement from Rust
+ * @returns {Object} Wrapped PreparedStatement with consistent types
+ */
+function wrapPreparedStatement(nativeStmt) {
+  return {
+    /** The original CQL query text. */
+    get query() {
+      return nativeStmt.query;
+    },
 
-// Re-export version function (doesn't throw errors)
+    /** Number of parameters in the query. */
+    get parameterCount() {
+      return nativeStmt.parameterCount;
+    },
+
+    /**
+     * Get statistics about the prepared query.
+     * @returns {Object} PreparedStatementStats with estimatedRows as bigint
+     */
+    stats() {
+      const nativeStats = nativeStmt.stats();
+      return {
+        parameterCount: nativeStats.parameterCount,
+        planType: nativeStats.planType,
+        estimatedCost: nativeStats.estimatedCost,
+        estimatedRows: BigInt(nativeStats.estimatedRows),
+        cacheFriendly: nativeStats.cacheFriendly,
+      };
+    },
+
+    /**
+     * Return a string representation of this prepared statement.
+     * @returns {string} String representation
+     */
+    toString() {
+      return nativeStmt.toString();
+    },
+  };
+}
+
+// Create wrapped Database class with enhanced error handling
+const Database = createWrappedDatabase(nativeBinding.Database, wrapPreparedStatement);
+
+// Re-export version function
+// Note: PreparedStatement class is not exported directly - it's wrapped via wrapPreparedStatement
 const { version } = nativeBinding;
 
 module.exports = {
   Database,
   version,
+  // Export wrapper function for internal use and testing
+  wrapPreparedStatement,
 };
