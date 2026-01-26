@@ -107,48 +107,23 @@ jobs:
           path: bindings/node/artifacts
           merge-multiple: false
 
-      - name: Move artifacts to npm directory structure
+      - name: Move artifacts to package root
         working-directory: bindings/node
         shell: bash
         run: |
-          # napi-rs expects artifacts in npm/{platform}-{arch}/ subdirectories
-          mkdir -p npm
+          # napi-rs v3 loader expects .node files in package root
+          # Files are named: cqlite-node.{platform}.node
 
-          # Move each platform's .node file to appropriate npm subdirectory
           for dir in artifacts/bindings-*/; do
             if [ -d "$dir" ]; then
               target=$(basename "$dir" | sed 's/bindings-//')
               echo "Processing target: $target"
 
-              # Find the .node file
+              # Find and copy the .node file to package root
               node_file=$(find "$dir" -name "*.node" -type f | head -n 1)
               if [ -n "$node_file" ]; then
-                # Map Rust target to npm platform-arch format
-                case "$target" in
-                  x86_64-unknown-linux-gnu)
-                    dest="npm/linux-x64-gnu"
-                    ;;
-                  aarch64-unknown-linux-gnu)
-                    dest="npm/linux-arm64-gnu"
-                    ;;
-                  x86_64-apple-darwin)
-                    dest="npm/darwin-x64"
-                    ;;
-                  aarch64-apple-darwin)
-                    dest="npm/darwin-arm64"
-                    ;;
-                  x86_64-pc-windows-msvc)
-                    dest="npm/win32-x64-msvc"
-                    ;;
-                  *)
-                    echo "::error::Unknown target: $target"
-                    exit 1
-                    ;;
-                esac
-
-                mkdir -p "$dest"
-                cp "$node_file" "$dest/"
-                echo "Moved $node_file to $dest/"
+                cp "$node_file" ./
+                echo "Copied $node_file to package root"
               fi
             fi
           done
@@ -156,8 +131,8 @@ jobs:
           # Clean up artifact directories
           rm -rf artifacts
 
-          echo "::group::npm directory structure"
-          find npm -type f
+          echo "::group::Native modules in package root"
+          ls -la *.node
           echo "::endgroup::"
 
       - name: Install dependencies
@@ -167,7 +142,7 @@ jobs:
       - name: Validate artifacts
         working-directory: bindings/node
         run: |
-          MODULE_COUNT=$(find npm -name "*.node" -type f | wc -l)
+          MODULE_COUNT=$(ls -1 *.node 2>/dev/null | wc -l)
           echo "Native module count: $MODULE_COUNT"
 
           if [ "$MODULE_COUNT" -lt 5 ]; then
@@ -190,10 +165,6 @@ jobs:
             echo "::error::Version mismatch! Tag is $TAG_VERSION but package.json has $PKG_VERSION"
             exit 1
           fi
-
-      - name: Prepare npm packages
-        working-directory: bindings/node
-        run: npm run prepublishOnly
 
       - name: Verify npm token
         env:

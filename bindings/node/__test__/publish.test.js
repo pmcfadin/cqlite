@@ -81,41 +81,39 @@ describe('npm Publishing Validation (Issue #314)', () => {
       expect(typeof pkg.napi).toBe('object');
     });
 
-    test('napi.name matches expected binary name', () => {
+    test('napi.binaryName matches expected binary name', () => {
       // Critical: must be "cqlite-node" for scoped package resolution
-      expect(pkg.napi.name).toBe('cqlite-node');
+      // napi-rs v3 uses binaryName instead of name
+      expect(pkg.napi.binaryName).toBe('cqlite-node');
     });
 
-    test('enables default triples', () => {
-      expect(pkg.napi.triples).toBeDefined();
-      expect(pkg.napi.triples.defaults).toBe(true);
+    test('has explicit targets array (napi-rs v3 format)', () => {
+      // napi-rs v3 uses explicit targets array instead of triples.defaults/additional
+      expect(pkg.napi.targets).toBeDefined();
+      expect(Array.isArray(pkg.napi.targets)).toBe(true);
     });
 
-    test('includes ARM64 targets in additional triples', () => {
-      const additional = pkg.napi.triples.additional || [];
-      expect(additional).toContain('aarch64-apple-darwin');
-      expect(additional).toContain('aarch64-unknown-linux-gnu');
+    test('includes ARM64 targets', () => {
+      const targets = pkg.napi.targets || [];
+      expect(targets).toContain('aarch64-apple-darwin');
+      expect(targets).toContain('aarch64-unknown-linux-gnu');
     });
 
     test('covers all 5 required platforms', () => {
-      // Default triples from napi-rs (when defaults: true):
-      // - x86_64-unknown-linux-gnu
-      // - x86_64-apple-darwin
-      // - x86_64-pc-windows-msvc
-      // Additional:
-      // - aarch64-apple-darwin
-      // - aarch64-unknown-linux-gnu
-      const additional = pkg.napi.triples.additional || [];
-      const defaultTargets = [
+      // napi-rs v3 uses explicit targets array
+      const targets = pkg.napi.targets || [];
+      const requiredPlatforms = [
         'x86_64-unknown-linux-gnu',
         'x86_64-apple-darwin',
         'x86_64-pc-windows-msvc',
+        'aarch64-apple-darwin',
+        'aarch64-unknown-linux-gnu',
       ];
-      const allTargets = [...defaultTargets, ...additional];
 
-      expect(allTargets.length).toBeGreaterThanOrEqual(5);
-      expect(additional).toContain('aarch64-apple-darwin');
-      expect(additional).toContain('aarch64-unknown-linux-gnu');
+      expect(targets.length).toBeGreaterThanOrEqual(5);
+      for (const platform of requiredPlatforms) {
+        expect(targets).toContain(platform);
+      }
     });
   });
 
@@ -133,9 +131,9 @@ describe('npm Publishing Validation (Issue #314)', () => {
       expect(fs.existsSync(path.join(BINDINGS_DIR, 'lib'))).toBe(true);
     });
 
-    test('includes npm directory for platform binaries', () => {
-      // npm/ directory is created at publish time by napi-rs
-      expect(pkg.files).toContain('npm');
+    test('includes native module glob pattern', () => {
+      // *.node pattern includes all platform-specific native modules
+      expect(pkg.files).toContain('*.node');
     });
 
     test('includes README.md', () => {
