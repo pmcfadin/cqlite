@@ -35,7 +35,7 @@
     "test:parity": "jest parity.test.js --testTimeout=60000",
     "typecheck": "tsc --noEmit -p examples/tsconfig.json",
     "examples": "ts-node examples/basic-query.ts",
-    "prepublishOnly": "napi prepublish -t npm"
+    "prepublishOnly": "echo 'Skipping napi prepublish - artifacts handled by CI workflow'"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.1",
