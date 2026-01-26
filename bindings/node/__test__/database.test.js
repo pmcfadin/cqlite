@@ -13,7 +13,7 @@
  */
 
 const { Database, version } = require('../lib/index.js');
-const { skipIfNoDatasets } = require('./helpers.js');
+const { skipIfNoDatasets, getNonexistentPath } = require('./helpers.js');
 
 describe('Database Wrapper Tests (Issue #296)', () => {
   beforeAll(() => {
@@ -44,11 +44,11 @@ describe('Database Wrapper Tests (Issue #296)', () => {
   test('Database.open() with invalid path rejects with IoError', async () => {
     expect.assertions(2);
     try {
-      await Database.open('/nonexistent/path/that/does/not/exist');
+      await Database.open(getNonexistentPath());
     } catch (e) {
       expect(e).toBeDefined();
       expect(
-        e.message.includes('IoError') || e.message.includes('No such file')
+        e.message.includes('IoError') || e.message.includes('No such file') || e.message.includes('cannot find')
       ).toBe(true);
     }
   });

@@ -3,7 +3,23 @@
  *
  * Issue #306: Centralized test utilities matching Python conftest.py patterns.
  */
+const path = require('path');
 const { Database } = require('../lib/index.js');
+
+/**
+ * Get a path that is guaranteed to not exist on any platform.
+ * On Windows, uses a nonexistent drive letter path.
+ * On Unix, uses a path under /nonexistent.
+ *
+ * @returns {string} A path that definitely does not exist
+ */
+function getNonexistentPath() {
+  if (process.platform === 'win32') {
+    // Use a drive letter that almost certainly doesn't exist
+    return 'Z:\\nonexistent\\path\\that\\does\\not\\exist';
+  }
+  return '/nonexistent/path/that/does/not/exist';
+}
 
 /**
  * Require test datasets to be available.
@@ -63,4 +79,5 @@ module.exports = {
   skipIfNoDatasets,
   openDatabase,
   withDatabase,
+  getNonexistentPath,
 };

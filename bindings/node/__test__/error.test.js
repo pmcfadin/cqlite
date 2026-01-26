@@ -13,7 +13,7 @@
  */
 
 const { Database } = require('../lib/index.js');
-const { skipIfNoDatasets } = require('./helpers.js');
+const { skipIfNoDatasets, getNonexistentPath } = require('./helpers.js');
 
 describe('Error Mapping Tests (Issue #297)', () => {
   beforeAll(() => {
@@ -23,11 +23,11 @@ describe('Error Mapping Tests (Issue #297)', () => {
   test('IO error maps to code "IO"', async () => {
     expect.assertions(2);
     try {
-      await Database.open('/nonexistent/path/that/does/not/exist');
+      await Database.open(getNonexistentPath());
     } catch (e) {
       expect(e.code).toBe('IO');
       expect(
-        e.message.includes('IoError:') || e.message.includes('No such file')
+        e.message.includes('IoError:') || e.message.includes('No such file') || e.message.includes('cannot find')
       ).toBe(true);
     }
   });
@@ -39,9 +39,12 @@ describe('Error Mapping Tests (Issue #297)', () => {
     // The specific error depends on error propagation order in cqlite-core.
     // Both are correct behavior for this invalid input scenario.
     expect.assertions(1);
+    const nonexistentSchema = process.platform === 'win32'
+      ? 'Z:\\nonexistent\\schema.cql'
+      : '/nonexistent/schema.cql';
     try {
       await Database.open(global.testPaths.SSTABLES_DIR, {
-        schema: '/nonexistent/schema.cql',
+        schema: nonexistentSchema,
       });
     } catch (e) {
       expect(['SCHEMA', 'IO']).toContain(e.code);
@@ -67,7 +70,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
   test('Error.isRecoverable reflects Rust is_recoverable()', async () => {
     expect.assertions(2);
     try {
-      await Database.open('/nonexistent/path/that/does/not/exist');
+      await Database.open(getNonexistentPath());
     } catch (e) {
       // IO errors are recoverable in Rust
       expect(typeof e.isRecoverable).toBe('boolean');
@@ -78,7 +81,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
   test('Error.category matches Rust category()', async () => {
     expect.assertions(2);
     try {
-      await Database.open('/nonexistent/path/that/does/not/exist');
+      await Database.open(getNonexistentPath());
     } catch (e) {
       expect(typeof e.category).toBe('string');
       // IO errors have 'System' category in Rust
@@ -89,7 +92,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
   test('Error message contains original error text', async () => {
     expect.assertions(3);
     try {
-      await Database.open('/nonexistent/path/that/does/not/exist');
+      await Database.open(getNonexistentPath());
     } catch (e) {
       expect(typeof e.message).toBe('string');
       expect(e.message.length).toBeGreaterThan(0);
@@ -98,7 +101,8 @@ describe('Error Mapping Tests (Issue #297)', () => {
         e.message.includes('nonexistent') ||
           e.message.includes('No such file') ||
           e.message.includes('IoError') ||
-          e.message.includes('I/O error')
+          e.message.includes('I/O error') ||
+          e.message.includes('cannot find')
       ).toBe(true);
     }
   });
