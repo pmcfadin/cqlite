@@ -181,12 +181,18 @@ jobs:
       - name: Publish to npm (stable)
         if: ${{ !contains(github.ref_name, '-') }}
         working-directory: bindings/node
-        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ""
+          NPM_TOKEN: ""
+        run: npm publish --access public --provenance
 
       - name: Publish to npm (pre-release)
         if: contains(github.ref_name, '-')
         working-directory: bindings/node
-        run: npm publish --access public --tag next
+        env:
+          NODE_AUTH_TOKEN: ""
+          NPM_TOKEN: ""
+        run: npm publish --access public --tag next --provenance
 
       - name: Summary
         run: |
