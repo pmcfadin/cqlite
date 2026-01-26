@@ -27,63 +27,76 @@ const nativeBinding = require('../index.js');
 const { createWrappedDatabase } = require('./error-wrapper.js');
 
 /**
- * Wrap a native PreparedStatement to ensure type consistency.
+ * PreparedStatement wraps a native PreparedStatement with type consistency.
  *
- * Coerces estimatedRows from number to BigInt to match TypeScript declarations.
- * napi-rs returns i64 as number for small values, but TS declares bigint.
+ * Ensures estimatedRows in stats() is always BigInt (Issue #351).
+ * Users get this via Database.prepare() - direct construction not supported.
  *
  * Issue #351: Stats fields typed as bigint but runtime returns number
+ * Issue #352: PreparedStatement not exported at runtime but TypeScript declares it
+ */
+class PreparedStatement {
+  /**
+   * @private
+   * @param {Object} nativeStmt - The native PreparedStatement from Rust
+   */
+  constructor(nativeStmt) {
+    this._native = nativeStmt;
+  }
+
+  /** The original CQL query text. */
+  get query() {
+    return this._native.query;
+  }
+
+  /** Number of parameters in the query. */
+  get parameterCount() {
+    return this._native.parameterCount;
+  }
+
+  /**
+   * Get statistics about the prepared query.
+   * @returns {Object} PreparedStatementStats with estimatedRows as bigint
+   */
+  stats() {
+    const nativeStats = this._native.stats();
+    return {
+      parameterCount: nativeStats.parameterCount,
+      planType: nativeStats.planType,
+      estimatedCost: nativeStats.estimatedCost,
+      estimatedRows: BigInt(nativeStats.estimatedRows),
+      cacheFriendly: nativeStats.cacheFriendly,
+    };
+  }
+
+  /**
+   * Return a string representation of this prepared statement.
+   * @returns {string} String representation
+   */
+  toString() {
+    return this._native.toString();
+  }
+}
+
+/**
+ * Wrap a native PreparedStatement to ensure type consistency.
  *
+ * @private
  * @param {Object} nativeStmt - The native PreparedStatement from Rust
- * @returns {Object} Wrapped PreparedStatement with consistent types
+ * @returns {PreparedStatement} Wrapped PreparedStatement instance
  */
 function wrapPreparedStatement(nativeStmt) {
-  return {
-    /** The original CQL query text. */
-    get query() {
-      return nativeStmt.query;
-    },
-
-    /** Number of parameters in the query. */
-    get parameterCount() {
-      return nativeStmt.parameterCount;
-    },
-
-    /**
-     * Get statistics about the prepared query.
-     * @returns {Object} PreparedStatementStats with estimatedRows as bigint
-     */
-    stats() {
-      const nativeStats = nativeStmt.stats();
-      return {
-        parameterCount: nativeStats.parameterCount,
-        planType: nativeStats.planType,
-        estimatedCost: nativeStats.estimatedCost,
-        estimatedRows: BigInt(nativeStats.estimatedRows),
-        cacheFriendly: nativeStats.cacheFriendly,
-      };
-    },
-
-    /**
-     * Return a string representation of this prepared statement.
-     * @returns {string} String representation
-     */
-    toString() {
-      return nativeStmt.toString();
-    },
-  };
+  return new PreparedStatement(nativeStmt);
 }
 
 // Create wrapped Database class with enhanced error handling
 const Database = createWrappedDatabase(nativeBinding.Database, wrapPreparedStatement);
 
 // Re-export version function
-// Note: PreparedStatement class is not exported directly - it's wrapped via wrapPreparedStatement
 const { version } = nativeBinding;
 
 module.exports = {
   Database,
+  PreparedStatement,
   version,
-  // Export wrapper function for internal use and testing
-  wrapPreparedStatement,
 };

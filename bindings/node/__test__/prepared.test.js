@@ -11,6 +11,26 @@ describe('PreparedStatement', () => {
     skipIfNoDatasets();
   });
 
+  describe('PreparedStatement export (Issue #352)', () => {
+    test('PreparedStatement is exported and defined', () => {
+      expect(PreparedStatement).toBeDefined();
+      expect(typeof PreparedStatement).toBe('function');
+    });
+
+    test('PreparedStatement is a class constructor', () => {
+      // Verify it's a class (function with prototype)
+      expect(PreparedStatement.prototype).toBeDefined();
+      expect(PreparedStatement.prototype.constructor).toBe(PreparedStatement);
+    });
+
+    test('db.prepare() returns instance of PreparedStatement', async () => {
+      await withDatabase(async (db) => {
+        const stmt = await db.prepare('SELECT * FROM test_basic.simple_table');
+        expect(stmt instanceof PreparedStatement).toBe(true);
+      });
+    });
+  });
+
   describe('Database.prepare()', () => {
     test('prepare() returns a PreparedStatement instance', async () => {
       await withDatabase(async (db) => {
