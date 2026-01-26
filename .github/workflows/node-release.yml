@@ -168,16 +168,6 @@ jobs:
             exit 1
           fi
 
-      - name: Verify npm token
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::NPM_TOKEN secret not configured"
-            exit 1
-          fi
-          npm whoami --registry https://registry.npmjs.org/
-
       - name: Dry-run publish verification
         working-directory: bindings/node
         run: |
@@ -186,20 +176,16 @@ jobs:
           echo "::endgroup::"
           echo "Dry-run publish verification passed"
 
+      # Trusted Publishing: OIDC authentication, no token needed
+      # Provenance attestations are automatic with trusted publishing
       - name: Publish to npm (stable)
         if: ${{ !contains(github.ref_name, '-') }}
         working-directory: bindings/node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: true
         run: npm publish --access public
 
       - name: Publish to npm (pre-release)
         if: contains(github.ref_name, '-')
         working-directory: bindings/node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: true
         run: npm publish --access public --tag next
 
       - name: Summary
