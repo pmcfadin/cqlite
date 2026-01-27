@@ -100,7 +100,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+      - name: Prepare npm config for OIDC publish
+        run: |
+          echo "registry=https://registry.npmjs.org/" > "$RUNNER_TEMP/.npmrc-oidc"
+          echo "always-auth=false" >> "$RUNNER_TEMP/.npmrc-oidc"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -184,6 +187,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ""
           NPM_TOKEN: ""
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/.npmrc-oidc
         run: npm publish --access public --provenance
 
       - name: Publish to npm (pre-release)
@@ -192,6 +196,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ""
           NPM_TOKEN: ""
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/.npmrc-oidc
         run: npm publish --access public --tag next --provenance
 
       - name: Summary
