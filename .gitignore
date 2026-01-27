@@ -81,6 +81,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.ipynb_checkpoints/
+bindings/python/pytest_output.txt
 
 # Java bindings
 *.class
