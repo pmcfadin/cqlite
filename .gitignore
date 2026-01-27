@@ -73,6 +73,7 @@ tarpaulin-report.html
 # Node.js (for WASM testing)
 node_modules/
 package-lock.json
+!bindings/node/package-lock.json
 
 # Python bindings
 *.pyc
@@ -80,6 +81,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.ipynb_checkpoints/
+bindings/python/pytest_output.txt
 
 # Java bindings
 *.class

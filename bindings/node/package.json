@@ -1,0 +1,68 @@
+{
+  "name": "@cqlite/node",
+  "version": "0.3.1-rc5",
+  "description": "Node.js bindings for CQLite - read Apache Cassandra 5.0 SSTables without cluster dependencies",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "napi": {
+    "binaryName": "cqlite-node",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "lib",
+    "*.node",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:parity": "jest parity.test.js --testTimeout=60000",
+    "typecheck": "tsc --noEmit -p examples/tsconfig.json",
+    "examples": "ts-node examples/basic-query.ts",
+    "prepublishOnly": "echo 'Skipping napi prepublish - artifacts handled by CI workflow'"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.5.1",
+    "@types/node": "^20.0.0",
+    "jest": "^29.7.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pmcfadin/cqlite.git",
+    "directory": "bindings/node"
+  },
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "cassandra",
+    "sstable",
+    "database",
+    "cql",
+    "cqlite"
+  ],
+  "author": "CQLite Team",
+  "homepage": "https://github.com/pmcfadin/cqlite#readme",
+  "bugs": {
+    "url": "https://github.com/pmcfadin/cqlite/issues"
+  }
+}

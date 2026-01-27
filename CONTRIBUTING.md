@@ -129,10 +129,85 @@ For security vulnerabilities, please contact the maintainers directly rather tha
 ```
 cqlite-core/     # Core library (SSTable parsing, query engine)
 cqlite-cli/      # Command-line interface
-cqlite-ffi/      # C/C++ bindings
-cqlite-wasm/     # WebAssembly bindings
+bindings/python/ # Python bindings (PyO3)
+bindings/node/   # Node.js bindings (napi-rs)
 test-data/       # Real Cassandra 5.0 SSTables for testing
 ```
+
+## Node.js Bindings
+
+### Development Setup
+
+```bash
+cd bindings/node
+npm install
+npm run build          # Build native module (release)
+npm run build:debug    # Build with debug symbols
+npm test               # Run Jest tests
+npm run test:coverage  # Run with coverage report
+```
+
+### Publishing to npm
+
+The `@cqlite/node` package is published automatically via GitHub Actions when a version tag is pushed.
+
+#### Release Process
+
+1. **Update version** in `bindings/node/package.json`
+2. **Commit the change**:
+   ```bash
+   git add bindings/node/package.json
+   git commit -m "chore(node): bump version to X.Y.Z"
+   ```
+3. **Create and push a version tag**:
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+4. The `node-release.yml` workflow automatically:
+   - Builds native modules for 5 platforms
+   - Validates version consistency
+   - Publishes to npm with provenance
+   - Creates GitHub Release with checksums
+
+#### Pre-release Publishing
+
+For pre-release versions (alpha, beta, RC):
+```bash
+# Tag with hyphen suffix
+git tag v1.0.0-beta.1
+git push origin v1.0.0-beta.1
+```
+Pre-releases are published with the `next` dist-tag and won't become the default install.
+
+#### npm Token Setup (Maintainers)
+
+For initial setup or token rotation:
+
+1. **Create npm organization** (one-time):
+   - Go to https://www.npmjs.com/org/create
+   - Create organization named "cqlite"
+
+2. **Generate access token**:
+   - Go to https://www.npmjs.com/settings/~/tokens
+   - Click "Generate New Token" → "Granular Access Token"
+   - Permissions: Packages → Read and write
+   - Scope: @cqlite organization only
+
+3. **Add to GitHub Secrets**:
+   ```bash
+   gh secret set NPM_TOKEN
+   # Paste token when prompted
+   ```
+
+### Platform Support
+
+Published platforms (via napi-rs):
+- Linux x86_64 (GNU)
+- Linux ARM64 (GNU)
+- macOS x86_64 (Intel)
+- macOS ARM64 (Apple Silicon)
+- Windows x64 (MSVC)
 
 ## Getting Help
 
@@ -142,4 +217,4 @@ test-data/       # Real Cassandra 5.0 SSTables for testing
 
 ## License
 
-By contributing to CQLite, you agree that your contributions will be licensed under the Apache License 2.0.
+By contributing to CQLite, you agree that your contributions will be dual-licensed under the MIT License and Apache License 2.0, at the user's option.

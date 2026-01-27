@@ -1,0 +1,261 @@
+name: Node.js Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: cqlite-node
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Ensure Rust target is installed
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "bindings/node -> target"
+          key: release-${{ matrix.os }}-${{ matrix.target }}
+
+      - name: Install dependencies
+        working-directory: bindings/node
+        run: npm ci
+
+      - name: Build native module
+        working-directory: bindings/node
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            # Use --use-napi-cross for ARM64 Linux cross-compilation (napi-rs v3)
+            npm run build -- --target aarch64-unknown-linux-gnu --use-napi-cross
+          else
+            # Native builds (including x86_64-apple-darwin on Intel Mac)
+            npm run build
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: bindings/node/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      id-token: write  # Required for npm provenance
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Show Node and npm versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bindings-*
+          path: bindings/node/artifacts
+          merge-multiple: false
+
+      - name: Move artifacts to package root
+        working-directory: bindings/node
+        shell: bash
+        run: |
+          # napi-rs v3 loader expects .node files in package root
+          # Files are named: cqlite-node.{platform}.node
+
+          for dir in artifacts/bindings-*/; do
+            if [ -d "$dir" ]; then
+              target=$(basename "$dir" | sed 's/bindings-//')
+              echo "Processing target: $target"
+
+              # Find and copy the .node file to package root
+              node_file=$(find "$dir" -name "*.node" -type f | head -n 1)
+              if [ -n "$node_file" ]; then
+                cp "$node_file" ./
+                echo "Copied $node_file to package root"
+              fi
+            fi
+          done
+
+          # Clean up artifact directories
+          rm -rf artifacts
+
+          echo "::group::Native modules in package root"
+          ls -la *.node
+          echo "::endgroup::"
+
+      - name: Install dependencies
+        working-directory: bindings/node
+        run: npm ci
+
+      - name: Validate artifacts
+        working-directory: bindings/node
+        run: |
+          MODULE_COUNT=$(ls -1 *.node 2>/dev/null | wc -l)
+          echo "Native module count: $MODULE_COUNT"
+
+          if [ "$MODULE_COUNT" -lt 5 ]; then
+            echo "::error::Expected 5 native modules, found $MODULE_COUNT"
+            exit 1
+          fi
+
+      - name: Validate version consistency
+        working-directory: bindings/node
+        run: |
+          TAG_VERSION="${{ github.ref_name }}"
+          TAG_VERSION="${TAG_VERSION#v}"
+
+          PKG_VERSION=$(node -p "require('./package.json').version")
+
+          echo "Tag version: $TAG_VERSION"
+          echo "package.json version: $PKG_VERSION"
+
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Version mismatch! Tag is $TAG_VERSION but package.json has $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Dry-run publish verification
+        working-directory: bindings/node
+        run: |
+          echo "::group::npm pack dry-run output"
+          npm pack --dry-run 2>&1
+          echo "::endgroup::"
+          echo "Dry-run publish verification passed"
+
+      # Trusted Publishing: OIDC authentication, no token needed
+      # Provenance attestations are automatic with trusted publishing
+      - name: Publish to npm (stable)
+        if: ${{ !contains(github.ref_name, '-') }}
+        working-directory: bindings/node
+        env:
+          NODE_AUTH_TOKEN: ""
+          NPM_TOKEN: ""
+        run: npm publish --access public --provenance
+
+      - name: Publish to npm (pre-release)
+        if: contains(github.ref_name, '-')
+        working-directory: bindings/node
+        env:
+          NODE_AUTH_TOKEN: ""
+          NPM_TOKEN: ""
+        run: npm publish --access public --tag next --provenance
+
+      - name: Summary
+        run: |
+          TAG="${{ github.ref_name }}"
+          PKG_VERSION="${TAG#v}"
+
+          echo "## npm Publish Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag**: $TAG" >> $GITHUB_STEP_SUMMARY
+          echo "**Package**: [@cqlite/node](https://www.npmjs.com/package/@cqlite/node/v/$PKG_VERSION)" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "$TAG" == *"-"* ]]; then
+            echo "**Dist Tag**: \`next\` (pre-release)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Dist Tag**: \`latest\` (stable)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Published Platforms" >> $GITHUB_STEP_SUMMARY
+          echo "- Linux x86_64 (GNU)" >> $GITHUB_STEP_SUMMARY
+          echo "- Linux ARM64 (GNU)" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS x86_64" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS ARM64" >> $GITHUB_STEP_SUMMARY
+          echo "- Windows x86_64" >> $GITHUB_STEP_SUMMARY
+
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bindings-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.node > SHA256SUMS.txt
+          echo "::group::SHA256 Checksums"
+          cat SHA256SUMS.txt
+          echo "::endgroup::"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
