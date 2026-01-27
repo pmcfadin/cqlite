@@ -97,13 +97,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
-      - name: Prepare npm config for OIDC publish
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Show Node and npm versions
         run: |
-          echo "registry=https://registry.npmjs.org/" > "$RUNNER_TEMP/.npmrc-oidc"
-          echo "always-auth=false" >> "$RUNNER_TEMP/.npmrc-oidc"
+          node --version
+          npm --version
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -187,7 +189,6 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ""
           NPM_TOKEN: ""
-          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/.npmrc-oidc
         run: npm publish --access public --provenance
 
       - name: Publish to npm (pre-release)
@@ -196,7 +197,6 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ""
           NPM_TOKEN: ""
-          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/.npmrc-oidc
         run: npm publish --access public --tag next --provenance
 
       - name: Summary
