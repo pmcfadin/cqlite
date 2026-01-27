@@ -11,6 +11,58 @@ BTI is the modern SSTable index format introduced to improve lookup efficiency, 
 ## Motivation and Structure
 BTI (B-Tree/Trie Indexed) replaces the classic `big` index structure with trie-based indexes that favor prefix navigation and reduce binary-search hops across large sampled summaries. In Cassandra 5.0, BTI artifacts live alongside the data file and statistics:
 
+### Connection to In-Memory Tries: The Efficiency Foundation
+
+> **Cross-reference**: This section connects to [Chapter 4: From CQL to Disk](./04-from-cql-to-disk.md), which covers the flush pipeline from memtable to SSTable.
+
+BTI's efficiency is not just an on-disk optimization—it is architecturally aligned with Cassandra 5.0's in-memory `TrieMemtable`. The on-disk BTI structure is essentially a **direct persistence of the efficient in-memory trie concepts**, which dramatically reduces flush complexity and overhead.
+
+**Key alignment points:**
+
+1. **Identical byte-comparable representation**: Both `TrieMemtable` and BTI use `ByteComparable.Version.OSS50` for partition key encoding. This means keys in memory are already in the exact format needed for the on-disk trie—no transformation required during flush.
+
+2. **No sorting pass required**: Traditional memtables (like the older `SkipListMemtable`) stored data in a structure that required iteration to produce sorted output. The `TrieMemtable` stores partition keys in a trie that is inherently sorted by byte-comparable order. The `entryIterator()` method walks the trie and emits partitions in exactly the order BTI expects.
+
+3. **Prefix sharing preserved**: The in-memory trie shares prefixes between partition keys (e.g., keys `user:alice` and `user:bob` share the `user:` prefix). During flush, the `IncrementalTrieWriter` constructs the on-disk trie incrementally and naturally preserves this prefix structure.
+
+4. **Single-pass incremental construction**: The BTI writer receives pre-sorted keys from the memtable trie iterator and builds the `Partitions.db` index in a single pass using `PartitionIndexBuilder`. No buffering, no intermediate structures, no second pass.
+
+**Pseudocode illustrating the alignment:**
+
+```text
+// Flush path (simplified)
+for entry in memtableTrie.entryIterator():    // Already sorted!
+  key = entry.getKey()                         // ByteComparable (OSS50)
+  partition = entry.getValue()
+
+  position = dataWriter.write(partition)       // Write to Data.db
+  partitionIndexBuilder.addEntry(key, position) // Key already in BTI format
+
+// PartitionIndexBuilder internally:
+//   - Computes diff point with previous key
+//   - Writes only the unique prefix to trie
+//   - Uses IncrementalTrieWriter for page-aware output
+```
+
+**Why this matters for performance:**
+
+| Aspect | Big Format (classic) | BTI with TrieMemtable |
+|--------|---------------------|----------------------|
+| Key format during flush | May need transformation | Already byte-comparable |
+| Sort guarantee | Iterator provides order | Trie iteration is inherently ordered |
+| Prefix sharing | None (full keys in Index.db) | Preserved memory→disk |
+| Construction passes | Multiple (data, index, summary) | Single incremental pass |
+
+This alignment was intentionally designed as described in the [VLDB 2022 paper](https://www.vldb.org/pvldb/vol15/p3359-lambov.pdf) that introduced `TrieMemtable` to Cassandra.
+
+**Where to look in source:**
+- `TrieMemtable`: `org.apache.cassandra.db.memtable.TrieMemtable` — see `getFlushSet()` method (lines 360-493)
+  - [https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/memtable/TrieMemtable.java](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/memtable/TrieMemtable.java)
+- `PartitionIndexBuilder`: `org.apache.cassandra.io.sstable.format.bti.PartitionIndexBuilder` — builds `Partitions.db` from sorted byte-comparable keys
+  - [https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/PartitionIndexBuilder.java](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/PartitionIndexBuilder.java)
+- `IncrementalTrieWriter`: `org.apache.cassandra.io.tries.IncrementalTrieWriter` — incremental trie construction from sorted input
+  - [https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/tries/IncrementalTrieWriter.java](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/tries/IncrementalTrieWriter.java)
+
 - BTI-specific components: `Partitions.db` (partition trie), `Rows.db` (per-partition clustering trie)
 - Common components retained: `Data.db`, `Statistics.db`, `TOC.txt`, `Digest.crc32`, `CompressionInfo.db` (when compressed)
 

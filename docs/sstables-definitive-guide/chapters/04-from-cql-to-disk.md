@@ -1,12 +1,13 @@
 ## From CQL to Disk
 
-This chapter traces a CQL mutation from client to durable storage: how it becomes a partition with clustering rows and cells, how memtables and the commit log (WAL) capture it, and how a flush turns memory state into SSTable components: `Data.db`, `Index.db`, `Summary.db`, `Filter.db`, `Statistics.db`, and `CompressionInfo.db`.
+This chapter traces a CQL mutation from client to durable storage: how it becomes a partition with clustering rows and cells, how memtables and the commit log (WAL) capture it, and how a flush turns memory state into SSTable components. The classic (BIG) format produces `Data.db`, `Index.db`, `Summary.db`, `Filter.db`, `Statistics.db`, and `CompressionInfo.db`. The BTI format (Cassandra 5.0+) replaces `Index.db`/`Summary.db` with trie-based `Partitions.db`/`Rows.db`.
 
 ### In this chapter you will learn
 - How mutations map to partitions, clustering keys, and cells
 - How memtables and the WAL capture writes before flush
-- How flush builds Data/Index/Summary/Stats/Filter/CompressionInfo
-- The core steps of the flush pipeline via short pseudocode
+- How flush builds Data/Index/Summary/Stats/Filter/CompressionInfo (classic BIG format)
+- How flush builds Data/Partitions/Rows/Stats/Filter/CompressionInfo (BTI format)
+- The core steps of the flush pipeline via short pseudocode for both formats
 
 ## Mutation to Partition Structures
 
@@ -16,6 +17,20 @@ A single CQL mutation is normalized into a partition key, zero or more clusterin
 
 On write, Cassandra appends to a commit log segment and updates an in-memory memtable for the affected table. The memtable is an ordered map keyed by partition and clustering. When the memtable is full or a trigger fires, a flush converts the in-memory view into immutable SSTable components and discards the memtable.
 
+### TrieMemtable: Cassandra 5.0's Default
+
+Cassandra 5.0 introduces `TrieMemtable` as the default memtable implementation, replacing the older `SkipListMemtable`. This isn't just a performance optimization—it's an architectural alignment with the BTI (B-Tree/Trie Indexed) SSTable format.
+
+**Key characteristics of TrieMemtable:**
+
+- **Trie-based storage**: Partition keys are stored in an `InMemoryTrie` using byte-comparable representations (`ByteComparable.Version.OSS50`).
+- **Sharded for concurrency**: The trie is sharded across CPU cores, with each shard handling a token range.
+- **Inherently sorted**: Trie iteration produces partitions in lexicographic (byte-comparable) order, eliminating any sorting pass during flush.
+- **Prefix sharing**: Common prefixes between partition keys are stored only once, reducing memory overhead.
+- **Memory efficiency**: Stores trie structure in buffers (optionally off-heap), reducing GC pressure compared to object-heavy skip lists.
+
+> **Cross-reference**: See [Chapter 17: BTI Formats](./17-bti-formats.md#connection-to-in-memory-tries-the-efficiency-foundation) for how this in-memory trie structure directly persists to the on-disk BTI index, reducing flush complexity through structural alignment.
+
 ## Flush Pipeline
 
 Diagram: the flush pipeline from memtable to per-component outputs.
@@ -24,10 +39,10 @@ Diagram: the flush pipeline from memtable to per-component outputs.
 - Alt text: Flush pipeline from Memtable/WAL to per-component files with TOC.
 - Caption: Flush steps create `Data.db` then derive `Index/Summary/Filter/Statistics/CompressionInfo` and `TOC.txt`.
 
-Minimal pseudocode for the pipeline:
+Minimal pseudocode for the classic (BIG format) pipeline:
 
 ```text
-// Memtable → SSTable (simplified)
+// Memtable → SSTable (BIG format, simplified)
 for each partition in memtable in key order:
   write_partition_to(Data.db)
   record_index_entry(Index.db)
@@ -38,15 +53,59 @@ write_compression_metadata(CompressionInfo.db)
 emit_component_listing(TOC.txt)
 ```
 
+### BTI Format Flush Pipeline
+
+When the BTI (B-Tree/Trie Indexed) format is active, the flush pipeline differs significantly. Instead of `Index.db` and `Summary.db`, the BTI format writes trie-structured index files:
+
+- **`Partitions.db`**: Partition index trie mapping partition keys to data positions or row index positions
+- **`Rows.db`**: Per-partition row index tries for wide partitions (>16KB of row data by default)
+
+The flush iterates the in-memory trie (Cassandra 5.0's default memtable structure) and constructs on-disk tries incrementally:
+
+```text
+// Memtable → SSTable (BTI format, simplified)
+for each partition in memtable trie in byte-comparable order:
+  position = write_partition_to(Data.db)
+
+  if partition has row index (wide partition):
+    row_index_root = complete_row_trie(Rows.db)
+    add_to_partition_trie(key, row_index_position)  // positive offset
+  else:
+    add_to_partition_trie(key, ~data_position)      // negative offset (direct)
+
+complete_partition_trie(Partitions.db)  // writes footer with first/last keys, count, root
+build_bloom_over_partition_keys(Filter.db)
+collect_stats_and_write(Statistics.db)
+write_compression_metadata(CompressionInfo.db)
+emit_component_listing(TOC.txt)
+```
+
+**Key BTI flush characteristics:**
+
+- **Incremental trie construction**: The `PartitionIndexBuilder` writes trie nodes to disk as they become complete, keeping only the active path in memory. This enables flushing millions of partitions with minimal memory overhead.
+
+- **Shortest unique prefix optimization**: Partition keys are written with a one-key delay to compute the shortest prefix that distinguishes consecutive keys, minimizing index size.
+
+- **Row index threshold**: Partitions with only one index block (≤`column_index_size`, default 16KB) skip the row index entirely. The partition trie points directly to `Data.db` using a negative position encoding (`~dataPosition`).
+
+- **No summary file**: The trie structure is self-indexing—binary search through a sampled summary is unnecessary because trie traversal provides O(log n) lookup directly.
+
 ### Cassandra 5.0 writer touchpoints
 
-- Writer orchestrator builds `Data/Index/Summary/Statistics` and emits `TOC.txt`: see `SSTableWriter` and format-specific `BigTableWriter` (pinned below).
+**Classic (BIG) format:**
+- `BigTableWriter` builds `Data/Index/Summary/Statistics` and emits `TOC.txt`
+
+**BTI format:**
+- `BtiTableWriter` builds `Data/Partitions/Rows/Statistics` and emits `TOC.txt`
+- `PartitionIndexBuilder` incrementally constructs the partition trie, computing shortest unique prefixes
+- `RowIndexWriter` constructs per-partition row tries with separator-based block indexing
+- `BtiFormatPartitionWriter` tracks row index block boundaries (every 16KB by default)
 
 For a concrete implementation walkthrough of a writer, see Appendix C.
 
 ### Tiny flush artifact (trimmed, from `test_basic`)
 
-`TOC.txt` shows the emitted components for one table in `test_basic/simple_table`:
+**Classic (BIG) format `TOC.txt`** shows the emitted components for one table:
 
 ```text
 Data.db
@@ -59,19 +118,56 @@ Index.db
 Summary.db
 ```
 
-### Sidebar: Version Differences (3.x/4.x)
+**BTI format `TOC.txt`** shows trie-based index components instead:
 
-- 3.x/4.x embedded more assumptions in component headers and older compression metadata; 5.0’s BTI family refines component boundaries. Side effects for this chapter are minor; see detailed differences in Chapters 5, 6, and 9 where formats matter most.
+```text
+Data.db
+Statistics.db
+Digest.crc32
+TOC.txt
+CompressionInfo.db
+Filter.db
+Partitions.db
+Rows.db
+```
+
+Note that BTI replaces `Index.db` + `Summary.db` with `Partitions.db` + `Rows.db`. The `Rows.db` file may be absent or minimal if the table contains only narrow partitions (single index block each).
+
+### Sidebar: Version Differences and Format Selection
+
+**3.x/4.x vs 5.0:**
+- 3.x/4.x use the classic BIG format exclusively (`Index.db` + `Summary.db`)
+- 5.0 supports both BIG and BTI formats; BTI is selected via `sstable_format` in `cassandra.yaml`
+- Memtables in 5.0 default to trie-based storage (`TrieMemtable`), which aligns naturally with BTI's trie-based indexes
+
+**Mixed format deployments:**
+- During upgrades or format transitions, a directory may contain both BIG and BTI SSTables
+- Readers detect format from component presence (`Index.db` vs `Partitions.db`)
+- Compaction can rewrite SSTables to the configured format
+
+See detailed format differences in Chapters 5, 6, and 17 where component structures diverge.
 
 ### Key Takeaways
 - Flush writes immutable components alongside a `TOC.txt` enumerating what was produced.
-- `Data.db` is primary; `Index/Summary/Filter` accelerate lookups; `Statistics` and `CompressionInfo` guide reads and maintenance.
-- Writers operate in a stable order: write data, derive indexes/summaries, then metadata.
+- `Data.db` is primary; index components accelerate lookups; `Statistics` and `CompressionInfo` guide reads and maintenance.
+- **Classic (BIG) format**: Uses `Index.db` + `Summary.db` for partition lookup via binary search over sampled entries.
+- **BTI format**: Uses `Partitions.db` + `Rows.db` (trie-based indexes) for O(log n) lookup without a summary file.
+- BTI flush iterates the in-memory trie and incrementally constructs on-disk tries with shortest-prefix optimization.
+- Writers operate in a stable order: write data, derive indexes, then metadata.
 
 ### References
 - Cassandra 5.0.0:
   - `SSTableWriter`: [org.apache.cassandra.io.sstable.SSTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/SSTableWriter.java)
-  - `BigTableWriter`: [org.apache.cassandra.io.sstable.format.big.BigTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java)
-  - Memtables: [org.apache.cassandra.db.memtable](https://github.com/apache/cassandra/tree/cassandra-5.0.0/src/java/org/apache/cassandra/db/memtable)
-  
+  - **Classic (BIG) format:**
+    - `BigTableWriter`: [org.apache.cassandra.io.sstable.format.big.BigTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java)
+  - **BTI format:**
+    - `BtiTableWriter`: [org.apache.cassandra.io.sstable.format.bti.BtiTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/BtiTableWriter.java)
+    - `PartitionIndexBuilder`: [org.apache.cassandra.io.sstable.format.bti.PartitionIndexBuilder](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/PartitionIndexBuilder.java)
+    - `RowIndexWriter`: [org.apache.cassandra.io.sstable.format.bti.RowIndexWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/RowIndexWriter.java)
+    - `BtiFormatPartitionWriter`: [org.apache.cassandra.io.sstable.format.bti.BtiFormatPartitionWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormatPartitionWriter.java)
+    - BTI package: [org.apache.cassandra.io.sstable.format.bti](https://github.com/apache/cassandra/tree/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti)
+  - **Memtables:**
+    - `TrieMemtable`: [org.apache.cassandra.db.memtable.TrieMemtable](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/memtable/TrieMemtable.java)
+    - Memtable package: [org.apache.cassandra.db.memtable](https://github.com/apache/cassandra/tree/cassandra-5.0.0/src/java/org/apache/cassandra/db/memtable)
+
 For implementation details, see Appendix C.
