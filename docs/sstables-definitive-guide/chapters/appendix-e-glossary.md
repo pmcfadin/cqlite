@@ -18,6 +18,11 @@ Concise definitions; cross-link to first use in the chapters.
 - BTI: B-Tree/Trie indexed SSTable format family in Cassandra 5.x.
   See `17-bti-formats.md`.
 
+- TrieMemtable: Cassandra 5.0's default memtable implementation using a byte-ordered prefix trie
+  (`InMemoryTrie`) for efficient memory usage and reduced GC pressure. Stores partitions using
+  `ByteComparable` keys with prefix sharing. Sharded across CPU cores for write concurrency.
+  See `04-from-cql-to-disk.md` and [TrieMemtable.java](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/memtable/TrieMemtable.java).
+
 - big format: Legacy SSTable format family (pre-BTI) with classic `BigTableReader`/`Writer`.
   See `02-anatomy-of-an-sstable.md` and `17-bti-formats.md` for contrasts.
 

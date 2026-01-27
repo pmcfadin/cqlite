@@ -15,7 +15,7 @@ A single CQL mutation is normalized into a partition key, zero or more clusterin
 
 ## Memtables and WAL
 
-On write, Cassandra appends to a commit log segment and updates an in-memory memtable for the affected table. The memtable is an ordered map keyed by partition and clustering. When the memtable is full or a trigger fires, a flush converts the in-memory view into immutable SSTable components and discards the memtable.
+On write, Cassandra appends to a commit log segment and updates an in-memory memtable for the affected table. The memtable maintains partitions in sorted order, ready for efficient flush to disk. When the memtable reaches its size threshold or a flush trigger fires, Cassandra converts the in-memory structure into immutable SSTable components and discards the memtable.
 
 ### TrieMemtable: Cassandra 5.0's Default
 

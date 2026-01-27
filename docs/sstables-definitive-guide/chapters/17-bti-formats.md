@@ -32,17 +32,23 @@ BTI's efficiency is not just an on-disk optimization—it is architecturally ali
 ```text
 // Flush path (simplified)
 for entry in memtableTrie.entryIterator():    // Already sorted!
-  key = entry.getKey()                         // ByteComparable (OSS50)
+  key = entry.getKey()                         // DecoratedKey implements ByteComparable
   partition = entry.getValue()
 
   position = dataWriter.write(partition)       // Write to Data.db
-  partitionIndexBuilder.addEntry(key, position) // Key already in BTI format
+  partitionIndexBuilder.addEntry(key, position) // Key treated as ByteComparable (OSS50)
 
 // PartitionIndexBuilder internally:
-//   - Computes diff point with previous key
-//   - Writes only the unique prefix to trie
+//   - Computes diff point with previous key (ByteComparable.diffPoint)
+//   - Writes only the shortest unique prefix to trie
 //   - Uses IncrementalTrieWriter for page-aware output
 ```
+
+**Position encoding trick:** The partition index uses position sign to distinguish pointer types:
+- **Positive position** → points to row index file (`Rows.db`) for wide partitions
+- **Negative position (`~dataPosition`)** → bitwise NOT of direct `Data.db` offset (e.g., position 0 → -1, position 1 → -2)
+
+This encoding eliminates the need for a separate flag field and allows the reader to immediately know whether to consult the row index.
 
 **Why this matters for performance:**
 

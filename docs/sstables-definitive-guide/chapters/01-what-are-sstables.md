@@ -15,7 +15,7 @@ At a high level, Cassandra batches updates in a memtable and appends them to a W
 ## Role in Cassandra Read/Write Path
 
 - Write path (implementation view):
-  - Client mutation → append to WAL → update memtable (in-memory B+-tree like structure)
+  - Client mutation → append to WAL → update memtable (TrieMemtable: byte-ordered prefix trie with shared prefixes)
   - Flush triggers `SSTableWriter` to build components:
     - Serialize rows into `Data.db` (optionally compressed in fixed-size chunks)
     - Emit partition digests and offsets to `Index.db`; build `Summary.db` samples
