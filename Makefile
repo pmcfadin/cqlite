@@ -162,15 +162,6 @@ verify:
 	cargo tree
 	@echo "✅ Project structure verified"
 
-# Run real data compatibility tests (if available)
-test-real-data:
-	@echo "📊 Running real data compatibility tests..."
-	@if [ -d "real_cassandra5_data" ]; then \
-		cargo test --package cqlite-core real_ -- --nocapture; \
-	else \
-		echo "⚠️  Real data directory not found - skipping"; \
-	fi
-
 # Show help
 help:
 	@echo "CQLite Development Commands:"
@@ -186,7 +177,6 @@ help:
 	@echo "  test-stress        Run stress tests"
 	@echo "  test-determinism   Verify test determinism"
 	@echo "  test-edge-cases    Run edge case tests"
-	@echo "  test-real-data     Run real data tests"
 	@echo "  test-specific      Run specific test (use TEST=name)"
 	@echo ""
 	@echo "Coverage (≥90% enforcement):"

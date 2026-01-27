@@ -306,7 +306,34 @@ This tool is part of the CQLite project and follows the same licensing terms.
 ## Related Issues
 
 - **Issue #25**: SSTable Reading Validation
-- **Issue #26**: Info Command Implementation  
+- **Issue #26**: Info Command Implementation
 - **Issue #28**: Docker Test Data Generation
+- **Issue #37**: Read-Time Reconciliation (tombstones, TTL, range tombstones)
 
 The validation harness ensures that all these components work together seamlessly with perfect Cassandra compatibility.
+
+## Issue #37: Read-Time Reconciliation
+
+The validator includes comprehensive reconciliation support:
+
+### Features
+- **Timestamp-based ordering**: Newest timestamp wins for conflict resolution
+- **TTL expiration logic**: Exact Cassandra semantics with microsecond precision
+- **Tombstone precedence**: Range > Row > Cell tombstone hierarchy
+- **Range tombstone handling**: Inclusive/exclusive boundary support
+
+### Test Datasets
+- `overlapping_writes`: Multiple writes with different timestamps
+- `expired_ttl`: Various TTL expiration states
+- `row_vs_cell_tombstones`: Deletion precedence scenarios
+- `range_tombstones`: Boundary handling tests
+- `complex_mixed`: Real-world combination scenarios
+
+### Usage
+```bash
+# Run reconciliation tests
+cargo test --package sstabledump-validator reconciliation_tests
+
+# Run with strict mode
+./target/debug/sstabledump-validator reconciliation --strict-mode
+```

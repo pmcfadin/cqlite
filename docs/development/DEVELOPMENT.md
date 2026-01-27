@@ -3,17 +3,18 @@
 ## Quick Start
 
 ```bash
-# Install development tools
-just setup
-
-# Build all targets
-just build
+# Build the project
+cargo build
 
 # Run tests
-just test
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core
 
-# Start development CLI
-just dev-cli --help
+# Run CLI
+cargo run --package cqlite-cli -- --help
+
+# Check code quality
+cargo fmt --check
+env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 ```
 
 ## Project Structure
@@ -22,48 +23,52 @@ just dev-cli --help
 cqlite/
 ├── cqlite-core/           # Core database engine
 ├── cqlite-cli/            # Command-line interface
-├── cqlite-ffi/            # C FFI bindings
-├── cqlite-wasm/           # WebAssembly bindings
-├── tests/                 # Integration tests and benchmarks
+├── bindings/
+│   ├── python/            # Python bindings (PyO3)
+│   └── node/              # Node.js bindings (napi-rs)
+├── tools/                 # Development utilities
+├── test-data/             # Test datasets and scripts
+├── tests/                 # Integration tests
 ├── .github/workflows/     # CI/CD configuration
-└── guides/               # Documentation and guides
+└── docs/                  # Documentation
 ```
 
 ## Development Workflow
 
 ### Prerequisites
 
-- Rust 1.70+
-- Just (task runner): `cargo install just`
-- Node.js (for WASM testing)
+- Rust 1.85+
+- Python 3.9+ (for Python bindings)
+- Node.js 18+ (for Node.js bindings)
+- maturin (`pip install maturin`) for Python builds
 
 ### Common Tasks
 
 ```bash
-# Development setup
-just setup                    # Install tools and dependencies
-
 # Building
-just build                    # Build all targets
-just build-release            # Build optimized release
+cargo build                     # Debug build
+cargo build --release           # Release build
 
 # Testing
-just test                     # Run all tests
-just test-core               # Test only core library
-just test-cli                # Test only CLI
-just test-coverage           # Generate coverage report
+cargo test                      # All tests
+cargo test --package cqlite-core  # Core library tests
+cargo test --package cqlite-cli   # CLI tests
 
 # Code quality
-just check                   # Run formatting and linting
-just fix                     # Auto-fix formatting issues
+cargo fmt                       # Format code
+cargo fmt --check               # Check formatting
+cargo clippy                    # Lint check
 
-# Development server
-just watch                   # Auto-rebuild on changes
-just dev-cli repl           # Start development CLI
+# Python bindings
+cd bindings/python
+maturin develop                 # Development build
+maturin build --release         # Release wheel
+pytest tests -v                 # Run Python tests
 
-# Specialized builds
-just wasm                    # Build WASM package
-just ffi                     # Build FFI library
+# Node.js bindings
+cd bindings/node
+npm install && npm run build    # Build native module
+npm test                        # Run tests
 ```
 
 ## Workspace Configuration
@@ -73,23 +78,19 @@ The project uses a Cargo workspace with shared dependencies:
 ### Core Dependencies
 - **tokio**: Async runtime
 - **serde**: Serialization framework
-- **anyhow/thiserror**: Error handling
+- **thiserror**: Error handling
 - **tracing**: Structured logging
 
 ### CLI Dependencies
 - **clap**: Command-line parsing
 - **colored/indicatif**: Terminal UI
-- **ratatui/crossterm**: Advanced TUI (optional)
+- **ratatui/crossterm**: TUI interface
 
 ### Storage Dependencies
-- **lz4_flex**: Compression
-- **memmap2**: Memory mapping
-- **crc32fast**: Checksums
-
-### Development Dependencies
-- **criterion**: Benchmarking
-- **proptest**: Property testing
-- **tempfile**: Test utilities
+- **lz4_flex**: LZ4 compression
+- **snap**: Snappy compression
+- **flate2**: Deflate compression
+- **zstd**: Zstd compression
 
 ## Testing Strategy
 
@@ -102,19 +103,13 @@ cargo test --package cqlite-core
 ### Integration Tests
 Located in `tests/` directory:
 ```bash
-cargo test --package cqlite-integration-tests
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test
 ```
 
-### Benchmarks
+### Smoke Tests
+Validate all 33 test tables:
 ```bash
-just bench                   # All benchmarks
-cargo bench --package cqlite-core  # Core benchmarks
-```
-
-### Property Tests
-Using PropTest for fuzz testing:
-```bash
-cargo test --features proptest
+bash test-data/scripts/smoke-test-all-tables.sh
 ```
 
 ## Continuous Integration
@@ -123,22 +118,14 @@ cargo test --features proptest
 
 1. **CI Pipeline** (`.github/workflows/ci.yml`)
    - Multi-platform testing (Linux, macOS, Windows)
-   - Multiple Rust versions (stable, beta, nightly)
    - Code formatting and linting
-   - Security audit
    - Coverage reporting
 
-2. **Release Pipeline** (`.github/workflows/release.yml`)
-   - Cross-platform binary builds
-   - FFI library packaging
-   - WASM package generation
-   - Automated publishing to crates.io
+2. **Python CI** (`.github/workflows/python-ci.yml`)
+   - Python binding tests across platforms
 
-### Local CI
-Run the full CI pipeline locally:
-```bash
-just ci-local
-```
+3. **Node.js CI** (`.github/workflows/node-ci.yml`)
+   - Node.js binding tests across platforms
 
 ## Code Quality Standards
 
@@ -150,58 +137,12 @@ cargo fmt --all -- --check   # Check formatting
 
 ### Linting
 ```bash
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-### Security
-```bash
-cargo audit                  # Security audit
+env RUSTFLAGS="-D warnings" cargo clippy --all-targets --all-features
 ```
 
 ### Documentation
 ```bash
 cargo doc --all-features --workspace --open
-```
-
-## Performance Monitoring
-
-### Benchmarks
-Core performance benchmarks track:
-- Storage operations (read/write/compaction)
-- Query execution performance
-- Memory usage patterns
-- Concurrent operation throughput
-
-### Profiling
-```bash
-just profile                 # CPU profiling with perf
-just valgrind               # Memory profiling
-```
-
-## Cross-Platform Development
-
-### Supported Targets
-- `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu`
-- `x86_64-pc-windows-msvc`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
-- `wasm32-unknown-unknown`
-
-### FFI Development
-```bash
-just ffi                     # Build C library
-# Generated files:
-# - target/release/libcqlite.{so,dylib,dll}
-# - cqlite-ffi/include/cqlite.h
-```
-
-### WASM Development
-```bash
-just wasm                    # Build WASM package
-# Generated files:
-# - cqlite-wasm/pkg/cqlite_wasm.js
-# - cqlite-wasm/pkg/cqlite_wasm_bg.wasm
 ```
 
 ## IDE Configuration
@@ -220,9 +161,6 @@ Workspace settings in `.vscode/settings.json`:
 }
 ```
 
-### Neovim/Vim
-Using nvim-lspconfig with rust-analyzer.
-
 ## Debugging
 
 ### Debug Builds
@@ -237,27 +175,6 @@ Set log level:
 RUST_LOG=debug cargo run --package cqlite-cli
 RUST_LOG=cqlite_core=trace cargo test
 ```
-
-### GDB/LLDB
-```bash
-cargo build
-gdb target/debug/cqlite-cli
-(gdb) run --database test.db repl
-```
-
-## Release Process
-
-### Version Management
-Update version in all Cargo.toml files:
-```bash
-just release-prep 0.2.0
-```
-
-### Creating Releases
-1. Update version numbers
-2. Run full test suite: `just ci-local`
-3. Create and push git tag: `git tag v0.2.0`
-4. GitHub Actions will handle the rest
 
 ## Contributing
 
@@ -279,7 +196,7 @@ test: add integration tests for CLI
 ### Pull Request Process
 1. Create feature branch
 2. Implement changes with tests
-3. Run `just ci-local`
+3. Run `cargo fmt && cargo clippy && cargo test`
 4. Submit PR with description
 5. Address review feedback
 
@@ -294,38 +211,16 @@ cargo clean && cargo build   # Clean and rebuild
 
 **Test Failures:**
 ```bash
-just test-coverage           # Check test coverage
 RUST_BACKTRACE=1 cargo test  # Full stack traces
 ```
 
-**FFI Issues:**
+**Missing test data:**
 ```bash
-# Regenerate C headers
-cd cqlite-ffi && cargo run --bin cbindgen_gen
-```
-
-**WASM Issues:**
-```bash
-# Reinstall wasm-pack
-curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-```
-
-### Performance Issues
-```bash
-just profile                 # CPU profiling
-just bench                   # Performance benchmarks
-```
-
-### Memory Issues
-```bash
-just valgrind               # Memory leak detection
-cargo test --features debug-memory
+bash test-data/scripts/fetch-datasets.sh
 ```
 
 ## Additional Resources
 
-- [Architecture Documentation](ARCHITECTURE.md)
-- [API Specification](API_SPECIFICATION.md)
-- [Technical Analysis](TECHNICAL_ANALYSIS.md)
-- [Rust Development Guide](guides/workflows/development-workflow.md)
-- [Testing Strategy](guides/workflows/testing-strategy.md)
+- [CLAUDE.md](../../CLAUDE.md) - Development guidelines for AI assistants
+- [SSTable Guide](../sstables-definitive-guide/README.md) - Format specification
+- [Test Data Matrix](../../test-data/validation-matrix.md) - Test coverage

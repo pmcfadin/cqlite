@@ -3,7 +3,7 @@
 **A high-performance Rust library for local Apache Cassandra SSTable access**
 
 [![Apache License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85+-red.svg)](https://www.rust-lang.org)
 [![Cassandra](https://img.shields.io/badge/cassandra-5.0+-green.svg)](https://cassandra.apache.org)
 
 > **Status**: M4 Complete - Core reading, CLI, Output Writers, Python and Node.js Bindings are production-ready
@@ -138,33 +138,18 @@ CQLite is developed in the open as an Apache-licensed project. We welcome contri
 
 ```bash
 # Prerequisites
-# - Rust 1.70+
-# - Docker (for test data generation)
+# - Rust 1.85+
 
 # Clone and build
 git clone https://github.com/pmcfadin/cqlite.git
 cd cqlite
 cargo build
 
-# Run tests (requires Docker)
-docker-compose up -d cassandra-test
-cargo test
-```
+# Fetch test data (JSONL reference files are in git, SSTable binaries fetched separately)
+bash test-data/scripts/fetch-datasets.sh
 
-### Test Data Creation
-
-We use real Cassandra 5 instances to generate test data:
-
-```bash
-# Start test environment
-cd test-infrastructure
-docker-compose up -d
-
-# Generate test SSTables
-cargo run --bin generate-test-data
-
-# Validate parsing
-cargo run --bin cqlite parse test-data/users-*.db
+# Run tests
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core
 ```
 
 ### Contributing
