@@ -404,7 +404,7 @@ async fn test_data_wide_vs_narrow_partitions() {
 
 /// Test data integrity via cross-component validation
 #[tokio::test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #395)
+#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 async fn test_data_cross_component_validation() {
     use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
     use cqlite_core::storage::sstable::bloom::BloomFilter;

@@ -23,7 +23,7 @@ use tempfile::TempDir;
 
 /// Test basic Statistics.db roundtrip with minimal data
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #395)
+#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_minimal() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
@@ -62,7 +62,7 @@ fn test_statistics_roundtrip_minimal() {
 
 /// Test Statistics.db roundtrip with timestamp range
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #395)
+#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_timestamp_range() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
@@ -95,7 +95,7 @@ fn test_statistics_roundtrip_timestamp_range() {
 
 /// Test Statistics.db roundtrip with TTL
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #395)
+#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_with_ttl() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
@@ -130,7 +130,7 @@ fn test_statistics_roundtrip_with_ttl() {
 
 /// Test Statistics.db roundtrip with local deletion time
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #395)
+#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_with_deletion_time() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
@@ -167,7 +167,7 @@ fn test_statistics_roundtrip_with_deletion_time() {
 
 /// Test Statistics.db roundtrip via WriteEngine integration
 #[tokio::test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #395)
+#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 async fn test_statistics_roundtrip_via_write_engine() {
     use super::{create_simple_mutation, create_simple_schema};
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
@@ -223,7 +223,7 @@ async fn test_statistics_roundtrip_via_write_engine() {
 
 /// Test Statistics.db with extreme timestamp values
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #395)
+#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_extreme_timestamps() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");

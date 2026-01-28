@@ -376,7 +376,7 @@ async fn test_edge_long_clustering_key() {
 
 /// Test TTL roundtrip
 #[tokio::test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #395)
+#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 async fn test_edge_ttl_values() {
     use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
 
