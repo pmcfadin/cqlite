@@ -108,11 +108,11 @@ impl SSTableReader {
             log::debug!("parse_block_entries: Using state machine for true V5.0 'oa' format (VInt encoding)");
 
             // Log schema availability - NB format files may not have embedded schema
-            if self.schema.is_some() {
+            if let Some(schema) = &self.schema {
                 log::debug!(
                     "parse_block_entries: Schema available: {}.{}",
-                    self.schema.as_ref().unwrap().keyspace,
-                    self.schema.as_ref().unwrap().table
+                    schema.keyspace,
+                    schema.table
                 );
             } else {
                 log::debug!(
