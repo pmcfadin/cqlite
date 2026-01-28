@@ -28,6 +28,10 @@ pub mod streaming_reader;
 pub mod tombstone_merger;
 pub mod validation;
 
+// M5: SSTable writer components (Issue #359)
+#[cfg(feature = "write-support")]
+pub mod writer;
+
 // Test modules
 #[cfg(test)]
 mod key_digest_integration_test;
