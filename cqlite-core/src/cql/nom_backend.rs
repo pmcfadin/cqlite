@@ -439,58 +439,55 @@ impl NomParser {
         Ok(CqlStatement::Select(select))
     }
 
-    /// Parse INSERT statement (placeholder)
-    fn parse_insert_statement(&self, _input: &str) -> Result<CqlStatement> {
-        let insert = CqlInsert {
-            table: CqlTable::new("placeholder_table"),
-            columns: vec![CqlIdentifier::new("id"), CqlIdentifier::new("name")],
-            values: CqlInsertValues::Values(vec![
-                CqlExpression::Parameter(1),
-                CqlExpression::Parameter(2),
-            ]),
-            if_not_exists: false,
-            using: None,
-        };
-
+    /// Parse INSERT statement
+    #[cfg(feature = "write-support")]
+    fn parse_insert_statement(&self, input: &str) -> Result<CqlStatement> {
+        use super::mutation_parser::parse_insert_statement;
+        let insert = parse_insert_statement(input)?;
         Ok(CqlStatement::Insert(insert))
     }
 
-    /// Parse UPDATE statement (placeholder)
-    fn parse_update_statement(&self, _input: &str) -> Result<CqlStatement> {
-        let update = CqlUpdate {
-            table: CqlTable::new("placeholder_table"),
-            using: None,
-            assignments: vec![CqlAssignment {
-                column: CqlIdentifier::new("name"),
-                operator: CqlAssignmentOperator::Assign,
-                value: CqlExpression::Parameter(1),
-            }],
-            where_clause: CqlExpression::Binary {
-                left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
-                operator: CqlBinaryOperator::Eq,
-                right: Box::new(CqlExpression::Parameter(2)),
-            },
-            if_condition: None,
-        };
+    /// Parse INSERT statement (stub when write-support is disabled)
+    #[cfg(not(feature = "write-support"))]
+    fn parse_insert_statement(&self, _input: &str) -> Result<CqlStatement> {
+        Err(ParserError::unsupported_feature(
+            "nom",
+            "INSERT statement parsing requires 'write-support' feature",
+        ).into())
+    }
 
+    /// Parse UPDATE statement
+    #[cfg(feature = "write-support")]
+    fn parse_update_statement(&self, input: &str) -> Result<CqlStatement> {
+        use super::mutation_parser::parse_update_statement;
+        let update = parse_update_statement(input)?;
         Ok(CqlStatement::Update(update))
     }
 
-    /// Parse DELETE statement (placeholder)
-    fn parse_delete_statement(&self, _input: &str) -> Result<CqlStatement> {
-        let delete = CqlDelete {
-            columns: vec![], // Delete entire row
-            table: CqlTable::new("placeholder_table"),
-            using: None,
-            where_clause: CqlExpression::Binary {
-                left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
-                operator: CqlBinaryOperator::Eq,
-                right: Box::new(CqlExpression::Parameter(1)),
-            },
-            if_condition: None,
-        };
+    /// Parse UPDATE statement (stub when write-support is disabled)
+    #[cfg(not(feature = "write-support"))]
+    fn parse_update_statement(&self, _input: &str) -> Result<CqlStatement> {
+        Err(ParserError::unsupported_feature(
+            "nom",
+            "UPDATE statement parsing requires 'write-support' feature",
+        ).into())
+    }
 
+    /// Parse DELETE statement
+    #[cfg(feature = "write-support")]
+    fn parse_delete_statement(&self, input: &str) -> Result<CqlStatement> {
+        use super::mutation_parser::parse_delete_statement;
+        let delete = parse_delete_statement(input)?;
         Ok(CqlStatement::Delete(delete))
+    }
+
+    /// Parse DELETE statement (stub when write-support is disabled)
+    #[cfg(not(feature = "write-support"))]
+    fn parse_delete_statement(&self, _input: &str) -> Result<CqlStatement> {
+        Err(ParserError::unsupported_feature(
+            "nom",
+            "DELETE statement parsing requires 'write-support' feature",
+        ).into())
     }
 
     /// Parse CREATE TABLE statement using existing nom parser
@@ -751,6 +748,82 @@ mod tests {
         let config = ParserConfig::default().with_feature(ParserFeature::CodeCompletion);
 
         let result = NomParser::new(config);
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "write-support")]
+    #[tokio::test]
+    async fn test_parse_insert_through_parser() {
+        let config = ParserConfig::default();
+        let parser = NomParser::new(config).unwrap();
+
+        let cql = "INSERT INTO users (id, name) VALUES (?, ?)";
+        let result = parser.parse(cql).await;
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            CqlStatement::Insert(insert) => {
+                assert_eq!(insert.table.name.name, "users");
+                assert_eq!(insert.columns.len(), 2);
+            }
+            _ => panic!("Expected INSERT statement"),
+        }
+    }
+
+    #[cfg(feature = "write-support")]
+    #[tokio::test]
+    async fn test_parse_update_through_parser() {
+        let config = ParserConfig::default();
+        let parser = NomParser::new(config).unwrap();
+
+        let cql = "UPDATE users SET name = ? WHERE id = ?";
+        let result = parser.parse(cql).await;
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            CqlStatement::Update(update) => {
+                assert_eq!(update.table.name.name, "users");
+                assert_eq!(update.assignments.len(), 1);
+            }
+            _ => panic!("Expected UPDATE statement"),
+        }
+    }
+
+    #[cfg(feature = "write-support")]
+    #[tokio::test]
+    async fn test_parse_delete_through_parser() {
+        let config = ParserConfig::default();
+        let parser = NomParser::new(config).unwrap();
+
+        let cql = "DELETE FROM users WHERE id = ?";
+        let result = parser.parse(cql).await;
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            CqlStatement::Delete(delete) => {
+                assert_eq!(delete.table.name.name, "users");
+                assert!(delete.columns.is_empty());
+            }
+            _ => panic!("Expected DELETE statement"),
+        }
+    }
+
+    #[cfg(not(feature = "write-support"))]
+    #[tokio::test]
+    async fn test_mutation_statements_require_feature() {
+        let config = ParserConfig::default();
+        let parser = NomParser::new(config).unwrap();
+
+        // INSERT should fail without write-support
+        let result = parser.parse("INSERT INTO users (id) VALUES (?)").await;
+        assert!(result.is_err());
+
+        // UPDATE should fail without write-support
+        let result = parser.parse("UPDATE users SET name = ? WHERE id = ?").await;
+        assert!(result.is_err());
+
+        // DELETE should fail without write-support
+        let result = parser.parse("DELETE FROM users WHERE id = ?").await;
         assert!(result.is_err());
     }
 }

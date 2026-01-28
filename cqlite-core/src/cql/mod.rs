@@ -46,6 +46,10 @@ pub mod visitor;
 pub mod antlr_backend;
 pub mod nom_backend;
 
+// Mutation statement parser (M5 write support)
+#[cfg(feature = "write-support")]
+pub mod mutation_parser;
+
 // Factory and configuration
 pub mod factory;
 
