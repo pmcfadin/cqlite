@@ -22,32 +22,32 @@
 #[cfg(feature = "write-support")]
 pub mod data_writer;
 #[cfg(feature = "write-support")]
-pub mod index_writer;
+pub mod digest_writer;
 #[cfg(feature = "write-support")]
 pub mod filter_writer;
+#[cfg(feature = "write-support")]
+pub mod index_writer;
 #[cfg(feature = "write-support")]
 pub mod stats_writer;
 #[cfg(feature = "write-support")]
 pub mod summary_writer;
 #[cfg(feature = "write-support")]
 pub mod toc_writer;
-#[cfg(feature = "write-support")]
-pub mod digest_writer;
 
 #[cfg(feature = "write-support")]
 pub use data_writer::DataWriter;
 #[cfg(feature = "write-support")]
-pub use index_writer::IndexWriter;
+pub use digest_writer::DigestWriter;
 #[cfg(feature = "write-support")]
 pub use filter_writer::FilterWriter;
 #[cfg(feature = "write-support")]
-pub use stats_writer::{StatisticsWriter, StatisticsMetadata};
+pub use index_writer::{IndexEntryInfo, IndexWriter};
+#[cfg(feature = "write-support")]
+pub use stats_writer::{StatisticsMetadata, StatisticsWriter};
 #[cfg(feature = "write-support")]
 pub use summary_writer::SummaryWriter;
 #[cfg(feature = "write-support")]
-pub use toc_writer::{TocWriter, ComponentEntry};
-#[cfg(feature = "write-support")]
-pub use digest_writer::DigestWriter;
+pub use toc_writer::{ComponentEntry, TocWriter};
 
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
@@ -138,7 +138,7 @@ pub struct SSTableWriter {
     /// Output directory for SSTable files
     output_dir: PathBuf,
     /// SSTable generation number
-    generation: u32,
+    generation: u64,
     /// Table schema for column metadata
     schema: TableSchema,
     /// Statistics metadata (collected during writes)
@@ -155,10 +155,10 @@ pub struct SSTableWriter {
     last_token: Option<i64>,
     /// Number of partitions written
     partition_count: usize,
-    /// Index.db offset tracking (for Summary.db sampling)
-    index_offset: u64,
     /// Summary sampling counter (sample every N entries)
     summary_sample_counter: usize,
+    /// Sampling interval for Summary.db (default: 128)
+    summary_sample_interval: usize,
 }
 
 #[cfg(feature = "write-support")]
@@ -184,7 +184,7 @@ impl SSTableWriter {
     ///     &schema
     /// )?;
     /// ```
-    pub fn new(output_dir: PathBuf, generation: u32, schema: &TableSchema) -> Result<Self> {
+    pub fn new(output_dir: PathBuf, generation: u64, schema: &TableSchema) -> Result<Self> {
         // Initialize statistics metadata with sentinel values
         let mut stats = StatisticsMetadata::new();
         // Pre-set min values to reasonable defaults (will be updated during writes)
@@ -204,7 +204,8 @@ impl SSTableWriter {
         let filter_writer = Some(FilterWriter::new(filter_path, 1, 0.01)?);
 
         // Create Summary.db writer (sample every 128 entries per Cassandra default)
-        let summary_writer = SummaryWriter::new(128);
+        let summary_sample_interval = 128;
+        let summary_writer = SummaryWriter::new(summary_sample_interval as u32);
 
         Ok(Self {
             output_dir,
@@ -217,8 +218,8 @@ impl SSTableWriter {
             summary_writer,
             last_token: None,
             partition_count: 0,
-            index_offset: 0,
             summary_sample_counter: 0,
+            summary_sample_interval,
         })
     }
 
@@ -268,32 +269,48 @@ impl SSTableWriter {
             if let Some(ttl) = mutation.ttl_seconds {
                 self.stats.update_ttl(ttl as i32);
             }
+            // Track local deletion times for tombstones
+            // TODO(Issue #401): Get proper local_deletion_time from Mutation struct
+            for op in &mutation.operations {
+                if matches!(
+                    op,
+                    crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+                        | crate::storage::write_engine::mutation::CellOperation::DeleteRow
+                ) {
+                    // Derive local_deletion_time from timestamp (workaround)
+                    let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+                    self.stats.update_local_deletion_time(local_deletion_time);
+                }
+            }
             self.stats.increment_row_count();
-            self.stats.add_column_count(mutation.operations.len() as u64);
+            self.stats
+                .add_column_count(mutation.operations.len() as u64);
         }
+
+        // Update DataWriter's stats before writing
+        // This ensures delta encoding uses the correct baselines
+        self.data_writer.update_stats(self.stats.clone());
 
         // Write partition to Data.db and get offset
         let data_offset = self
             .data_writer
             .write_partition(&key, &mutations, &self.schema)?;
 
-        // Add partition to Index.db
-        self.index_writer.add_partition(&key, data_offset)?;
+        // Add partition to Index.db and get entry info
+        // IMPORTANT: Capture index_offset AFTER the entry is written to Index.db
+        let entry_info = self.index_writer.add_partition(&key, data_offset)?;
 
         // Add partition key to Filter.db
         if let Some(ref mut filter) = self.filter_writer {
             filter.add_key(&key);
         }
 
-        // Sample for Summary.db (every 128th entry)
-        if self.summary_sample_counter % 128 == 0 {
-            self.summary_writer.add_entry(&key, self.index_offset)?;
+        // Sample for Summary.db (every Nth entry, where N = summary_sample_interval)
+        // CRITICAL: Use the actual index_offset from entry_info, not an estimate
+        if self.summary_sample_counter % self.summary_sample_interval == 0 {
+            self.summary_writer
+                .add_entry(&key, entry_info.index_offset)?;
         }
-
-        // Track index offset for next summary sample
-        // Each Index.db entry: 2 (marker) + 16 (digest) + VInt(position) + VInt(promoted_len=0)
-        // Conservative estimate: 2 + 16 + 5 + 1 = 24 bytes per entry
-        self.index_offset += 24;
 
         self.summary_sample_counter += 1;
         self.partition_count += 1;
@@ -368,10 +385,18 @@ impl SSTableWriter {
         let components = vec![
             ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Data),
             ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Index),
-            ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Filter),
-            ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Summary),
-            ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Statistics),
-            ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Digest),
+            ComponentEntry::new(
+                crate::storage::sstable::directory::types::SSTableComponent::Filter,
+            ),
+            ComponentEntry::new(
+                crate::storage::sstable::directory::types::SSTableComponent::Summary,
+            ),
+            ComponentEntry::new(
+                crate::storage::sstable::directory::types::SSTableComponent::Statistics,
+            ),
+            ComponentEntry::new(
+                crate::storage::sstable::directory::types::SSTableComponent::Digest,
+            ),
         ];
         toc_writer.write(&components)?;
 
@@ -389,7 +414,7 @@ impl SSTableWriter {
     }
 
     /// Build component file path
-    fn component_path(output_dir: &Path, generation: u32, component: &str) -> PathBuf {
+    fn component_path(output_dir: &Path, generation: u64, component: &str) -> PathBuf {
         let filename = format!("nb-{}-big-{}", generation, component);
         output_dir.join(filename)
     }
@@ -406,8 +431,8 @@ impl SSTableWriter {
 #[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
-    use crate::storage::write_engine::mutation::{CellOperation, PartitionKey, TableId};
     use crate::schema::{Column, KeyColumn};
+    use crate::storage::write_engine::mutation::{CellOperation, PartitionKey, TableId};
     use crate::types::Value;
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -559,10 +584,7 @@ mod tests {
 
         let result = writer.write_partition(key2, vec![mutation2]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("token order"));
+        assert!(result.unwrap_err().to_string().contains("token order"));
     }
 
     #[tokio::test]
