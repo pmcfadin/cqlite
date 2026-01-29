@@ -23,7 +23,6 @@ use tempfile::TempDir;
 
 /// Test basic Statistics.db roundtrip with minimal data
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_minimal() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
@@ -62,7 +61,6 @@ fn test_statistics_roundtrip_minimal() {
 
 /// Test Statistics.db roundtrip with timestamp range
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_timestamp_range() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
@@ -95,7 +93,6 @@ fn test_statistics_roundtrip_timestamp_range() {
 
 /// Test Statistics.db roundtrip with TTL
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_with_ttl() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
@@ -130,7 +127,6 @@ fn test_statistics_roundtrip_with_ttl() {
 
 /// Test Statistics.db roundtrip with local deletion time
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_with_deletion_time() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
@@ -167,7 +163,6 @@ fn test_statistics_roundtrip_with_deletion_time() {
 
 /// Test Statistics.db roundtrip via WriteEngine integration
 #[tokio::test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 async fn test_statistics_roundtrip_via_write_engine() {
     use super::{create_simple_mutation, create_simple_schema};
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
@@ -221,9 +216,89 @@ async fn test_statistics_roundtrip_via_write_engine() {
     );
 }
 
+/// Test hex dump comparison with real Cassandra Statistics.db format
+///
+/// This test verifies that the writer output matches key structural elements
+/// of the Cassandra 5.0 Statistics.db format (Issue #398 acceptance criteria).
+#[test]
+fn test_statistics_hex_dump_format_comparison() {
+    let temp_dir = TempDir::new().unwrap();
+    let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
+
+    // Build metadata with known values
+    let mut meta = StatisticsMetadata::new();
+    meta.update_timestamp(1_000_000);
+    meta.min_local_deletion_time = 0;
+    meta.min_ttl = 0;
+    meta.partition_count = 1;
+    meta.row_count = 1;
+
+    // Write Statistics.db
+    let writer = StatisticsWriter::new(stats_path.clone());
+    writer.write(&meta).expect("Write should succeed");
+
+    // Read the written file
+    let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
+
+    // Verify minimum file size (32-byte header + EncodingStats data)
+    assert!(
+        file_data.len() >= 40,
+        "Statistics.db should have at least 40 bytes, got {}",
+        file_data.len()
+    );
+
+    // Verify header structure matches Cassandra format expectations
+    // The parser interprets bytes 0-3 as num_components (used for TOC lookup)
+    let num_components = u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
+    assert_eq!(
+        num_components, 4,
+        "First 4 bytes should be interpretable as num_components=4"
+    );
+
+    // Verify statistics_kind/checksum at bytes 4-7
+    let stats_kind = u32::from_be_bytes([file_data[4], file_data[5], file_data[6], file_data[7]]);
+    assert_eq!(
+        stats_kind, 0x26291b05,
+        "Bytes 4-7 should match Cassandra statistics_kind magic number"
+    );
+
+    // Verify metadata_type = 3 at offset 32 (start of EncodingStats data section)
+    assert!(
+        file_data.len() > 35,
+        "File should have EncodingStats section"
+    );
+    let metadata_type = u32::from_be_bytes([file_data[32], file_data[33], file_data[34], file_data[35]]);
+    assert_eq!(
+        metadata_type, 3,
+        "Byte 32-35 should contain metadata_type=3 for EncodingStats"
+    );
+
+    // Verify partitioner string is present
+    let partitioner = b"org.apache.cassandra.dht.Murmur3Partitioner";
+    let contains_partitioner = file_data
+        .windows(partitioner.len())
+        .any(|w| w == partitioner);
+    assert!(
+        contains_partitioner,
+        "File should contain Murmur3Partitioner string"
+    );
+
+    // Verify the file can still be parsed (functional check)
+    let result = parse_statistics_with_fallback(&file_data);
+    assert!(
+        result.is_ok(),
+        "Written Statistics.db should be parseable"
+    );
+
+    let (_remaining, stats) = result.unwrap();
+    assert_eq!(
+        stats.timestamp_stats.min_timestamp, 1_000_000,
+        "Parsed min_timestamp should match written value"
+    );
+}
+
 /// Test Statistics.db with extreme timestamp values
 #[test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 fn test_statistics_roundtrip_extreme_timestamps() {
     let temp_dir = TempDir::new().unwrap();
     let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");

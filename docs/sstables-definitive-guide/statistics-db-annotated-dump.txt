@@ -1,0 +1,182 @@
+================================================================================
+ANNOTATED HEX DUMP: Statistics.db Binary Format
+================================================================================
+File: test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db
+Size: 8483 bytes (0x2123)
+Date: January 2026
+
+This annotated hex dump shows every byte of the Statistics.db file with
+detailed annotations explaining the binary structure.
+
+================================================================================
+TOC (TABLE OF CONTENTS) - Offset 0x0000 to 0x0027 (40 bytes)
+================================================================================
+
+0x0000: 00 00 00 04  ← num_components (u32 BE) = 4
+0x0004: 26 29 1b 05  ← checksum (u32 BE) = 0x26291b05
+
+TOC Entry 0 (VALIDATION):
+0x0008: 00 00 00 00  ← component_type (u32 BE) = 0
+0x000c: 00 00 00 2c  ← component_offset (u32 BE) = 0x002c (44 bytes)
+
+TOC Entry 1 (COMPACTION):
+0x0010: 00 00 00 01  ← component_type (u32 BE) = 1
+0x0014: 00 00 00 65  ← component_offset (u32 BE) = 0x0065 (101 bytes)
+
+TOC Entry 2 (STATS):
+0x0018: 00 00 00 02  ← component_type (u32 BE) = 2
+0x001c: 00 00 0b 53  ← component_offset (u32 BE) = 0x0b53 (2899 bytes)
+
+TOC Entry 3 (HEADER):
+0x0020: 00 00 00 03  ← component_type (u32 BE) = 3
+0x0024: 00 00 1d 2b  ← component_offset (u32 BE) = 0x1d2b (7467 bytes)
+
+[Padding/unused: 0x0028-0x002b = 4 bytes]
+0x0028: 09 66 82 16  ← (appears to be start of next section or padding)
+
+================================================================================
+VALIDATION COMPONENT - Offset 0x002c to 0x0060 (53 bytes)
+================================================================================
+
+0x002c: 00           ← reserved (u8) = 0x00
+0x002d: 2b           ← partitioner_len (VInt) = 43 bytes
+
+Partitioner string (43 bytes UTF-8):
+0x002e: 6f 72 67 2e 61 70 61 63 68 65 2e 63 61 73 73  "org.apache.cass"
+0x003e: 61 6e 64 72 61 2e 64 68 74 2e 4d 75 72 6d 75  "andra.dht.Murmu"
+0x004e: 72 33 50 61 72 74 69 74 69 6f 6e 65 72        "r3Partitioner"
+
+Bloom filter false positive chance (f64 BE = 0.01):
+0x0059: 3f 84 7a e1 47 ae 14 7b  ← 0.01 (1% FP rate)
+
+[VALIDATION ends at 0x0061]
+
+================================================================================
+COMPACTION COMPONENT - Offset 0x0065 to 0x0b52 (2798 bytes)
+================================================================================
+
+This section contains EstimatedHistogram data for compaction metadata.
+For brevity, showing only first 64 bytes:
+
+0x0065: 00 00 0a e6 ff ff ff fe 0d 19 01 e8 07 be b1 01
+0x0075: f0 d4 01 82 80 01 f2 b2 03 c8 81 08 f0 d1 1c b4
+0x0085: f5 01 96 8a 06 8e 11 a6 62 ec c6 02 ba 11 ba 4b
+0x0095: c6 b4 07 c4 99 05 c8 fa 01 cc 8e 07 b4 8c 05 94
+
+[... 2734 more bytes of histogram data ...]
+
+[COMPACTION ends at 0x0b53]
+
+================================================================================
+STATS COMPONENT - Offset 0x0b53 to 0x1d2a (4568 bytes)
+================================================================================
+
+This section contains MetadataCollector data including EncodingStats.
+For brevity, showing only first 128 bytes:
+
+0x0b53: 00 00 00 9c 00 00 00 00 00 00 00 01 00 00 00 00
+0x0b63: 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00
+0x0b73: 00 00 00 00 00 00 00 00 00 00 00 02 00 00 00 00
+0x0b83: 00 00 00 00 00 00 00 00 00 00 00 03 00 00 00 00
+0x0b93: 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00 00
+0x0ba3: 00 00 00 00 00 00 00 00 00 00 00 05 00 00 00 00
+0x0bb3: 00 00 00 00 00 00 00 00 00 00 00 06 00 00 00 00
+0x0bc3: 00 00 00 00 00 00 00 00 00 00 00 07 00 00 00 00
+
+[... 4440 more bytes of statistics data ...]
+
+[STATS ends at 0x1d2b]
+
+================================================================================
+HEADER COMPONENT (SerializationHeader) - Offset 0x1d2b to 0x2122 (1016 bytes)
+================================================================================
+
+Unknown VInt field (7 bytes):
+0x1d2b: fd 20 28 75 dc 45 19  ← Multi-byte VInt (purpose unclear)
+
+Marker (start of partition key descriptor):
+0x1d32: 00 00  ← 0x00 0x00 marker
+
+Partition Key Type:
+0x1d34: 28     ← pk_type_len (VInt) = 40 bytes
+0x1d35: 6f 72 67 2e 61 70 61 63 68 65 2e 63 61 73 73  "org.apache.cass"
+0x1d45: 61 6e 64 72 61 2e 64 62 2e 6d 61 72 73 68 61  "andra.db.marsha"
+0x1d55: 6c 2e 55 55 49 44 54 79 70 65              "l.UUIDType"
+
+Clustering Key Count:
+0x1d5d: 00     ← ck_count (VInt) = 0 (no clustering keys)
+
+Regular Column Marker:
+0x1d5e: 00 12  ← reg_col_marker = 0x0012 (possibly column count: 18 decimal)
+
+--------------------------------------------------------------------------------
+Regular Column 1: account_balance
+--------------------------------------------------------------------------------
+0x1d60: 0f     ← col_name_len (VInt) = 15 bytes
+0x1d61: 61 63 63 6f 75 6e 74 5f 62 61 6c 61 6e 63 65  "account_balance"
+
+0x1d70: 2b     ← col_type_len (VInt) = 43 bytes
+0x1d71: 6f 72 67 2e 61 70 61 63 68 65 2e 63 61 73 73  "org.apache.cass"
+0x1d81: 61 6e 64 72 61 2e 64 62 2e 6d 61 72 73 68 61  "andra.db.marsha"
+0x1d91: 6c 2e 44 65 63 69 6d 61 6c 54 79 70 65        "l.DecimalType"
+
+--------------------------------------------------------------------------------
+Regular Column 2: active
+--------------------------------------------------------------------------------
+0x1d9c: 06     ← col_name_len (VInt) = 6 bytes
+0x1d9d: 61 63 74 69 76 65                          "active"
+
+0x1da3: 2b     ← col_type_len (VInt) = 43 bytes
+0x1da4: 6f 72 67 2e 61 70 61 63 68 65 2e 63 61 73 73  "org.apache.cass"
+0x1db4: 61 6e 64 72 61 2e 64 62 2e 6d 61 72 73 68 61  "andra.db.marsha"
+0x1dc4: 6c 2e 42 6f 6f 6c 65 61 6e 54 79 70 65        "l.BooleanType"
+
+--------------------------------------------------------------------------------
+Regular Column 3: age
+--------------------------------------------------------------------------------
+0x1dcf: 03     ← col_name_len (VInt) = 3 bytes
+0x1dd0: 61 67 65                                   "age"
+
+0x1dd3: 29     ← col_type_len (VInt) = 41 bytes
+0x1dd4: 6f 72 67 2e 61 70 61 63 68 65 2e 63 61 73 73  "org.apache.cass"
+0x1de4: 61 6e 64 72 61 2e 64 62 2e 6d 61 72 73 68 61  "andra.db.marsha"
+0x1df4: 6c 2e 49 6e 74 33 32 54 79 70 65              "l.Int32Type"
+
+[... 16 more columns follow same pattern ...]
+
+--------------------------------------------------------------------------------
+Regular Column 19: work_time
+--------------------------------------------------------------------------------
+0x20ec: 09     ← col_name_len (VInt) = 9 bytes
+0x20ed: 77 6f 72 6b 5f 74 69 6d 65                 "work_time"
+
+0x20f6: 28     ← col_type_len (VInt) = 40 bytes
+0x20f7: 6f 72 67 2e 61 70 61 63 68 65 2e 63 61 73 73  "org.apache.cass"
+0x2107: 61 6e 64 72 61 2e 64 62 2e 6d 61 72 73 68 61  "andra.db.marsha"
+0x2117: 6c 2e 54 69 6d 65 54 79 70 65              "l.TimeType"
+
+End of SerializationHeader:
+0x211f: 46     ← (unknown trailing bytes)
+0x2120: ad 3d 25
+
+[HEADER ends at 0x2123]
+
+================================================================================
+END OF FILE - Total size: 8483 bytes (0x2123)
+================================================================================
+
+CRITICAL NOTES FOR WRITER IMPLEMENTATION:
+
+1. Component offsets MUST be calculated dynamically based on actual sizes
+2. TOC checksum MUST match Cassandra's CRC32 algorithm
+3. All strings are UTF-8 with VInt length prefix
+4. All integers are BIG ENDIAN
+5. VALIDATION component has a mysterious 0x00 reserved byte before partitioner
+6. HEADER component has a mysterious 7-byte VInt before the 0x00 0x00 marker
+7. Regular column marker (0x00 0x12) may indicate column count (18 decimal)
+
+For MVP writer implementation (Issue #328):
+- Focus on VALIDATION and HEADER components (fully documented above)
+- Use minimal stubs for COMPACTION and STATS components
+- Validate output by parsing with enhanced_statistics_parser.rs
+

@@ -108,7 +108,6 @@ async fn test_data_single_partition_multiple_rows() {
 
 /// Test single partition data integrity via Statistics.db cross-validation
 #[tokio::test]
-#[ignore] // TDD: Statistics.db writer format does not match reader parser (Issue #398)
 async fn test_data_single_partition_stats_cross_validation() {
     use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
 

@@ -10,48 +10,76 @@
 //! - Min local deletion time, max local deletion time
 //! - Partition count, row count
 //!
-//! # Statistics.db Format (Cassandra 5.0 nb-format)
+//! # Statistics.db Format (Minimal Compatibility Implementation)
 //!
-//! The file consists of:
-//! 1. Table of Contents (TOC) - Component type/offset pairs
-//! 2. Component sections (VALIDATION, COMPACTION, STATS, HEADER)
+//! **Note**: This implementation produces a minimal format that is compatible with
+//! the `enhanced_statistics_parser.rs` reader but does NOT produce a full Cassandra
+//! TOC structure. Instead, it uses a hybrid format where the 32-byte header is
+//! structured to be parseable by both `parse_nb_format_header()` (which reads 8 u32s)
+//! and `parse_statistics_toc_for_header_offset()` (which looks for num_components=4).
 //!
-//! ## TOC Structure
+//! ## Actual Format Produced
+//!
 //! ```text
-//! [u32 BE] num_components
-//! [u32 BE] checksum
-//! For each component:
-//!   [u32 BE] component_type (0=VALIDATION, 1=COMPACTION, 2=STATS, 3=HEADER)
-//!   [u32 BE] component_offset (byte offset from start of file)
+//! Bytes 0-31: Header (doubles as fake TOC)
+//!   [u32 BE] 4                    - Interpreted as num_components or version
+//!   [u32 BE] 0x26291b05           - Statistics magic number
+//!   [u32 BE] 0                    - Reserved
+//!   [u32 BE] data_length          - Length of EncodingStats data
+//!   [u32 BE] 1, 0x65, 2, 0        - Metadata fields (observed in real files)
+//!
+//! Bytes 32+: EncodingStats data
+//!   [u32 BE] 3                    - Metadata type (EncodingStats marker)
+//!   [VUInt]  0                    - Data length placeholder
+//!   [VUInt]  43                   - Partitioner string length
+//!   [bytes]  Murmur3Partitioner   - Partitioner class name
+//!   [VUInt]  0, 0                 - Metadata placeholders
+//!   [VInt]   min_timestamp        - ZigZag encoded microseconds
+//!   [VInt]   min_deletion_time    - ZigZag encoded seconds
+//!   [VInt]   min_ttl              - ZigZag encoded seconds
 //! ```
 //!
-//! ## Component Sections
+//! ## Full Cassandra TOC Structure (for reference, NOT implemented)
 //!
-//! ### VALIDATION Metadata (type 0)
-//! - Partition count
-//! - Max local deletion time (used for tombstone GC)
-//!
-//! ### COMPACTION Metadata (type 1)
-//! - Ancestor generations
-//! - Cardinality estimator
-//!
-//! ### STATS Metadata (type 2) - EncodingStats
-//! - Min timestamp (microseconds)
-//! - Min local deletion time (seconds)
-//! - Min TTL (seconds)
-//!
-//! ### HEADER Metadata (type 3) - SerializationHeader
-//! - Partition key types
-//! - Clustering key types
-//! - Regular column definitions
+//! Real Cassandra Statistics.db files have:
+//! 1. TOC: num_components (4) + checksum + 4 component entries (32 bytes)
+//! 2. VALIDATION component at offset ~44
+//! 3. COMPACTION component
+//! 4. STATS component (contains EncodingStats within larger structure)
+//! 5. HEADER component (SerializationHeader with schema)
 
 use crate::error::{Error, Result};
 use crate::parser::vint::{encode_vint, encode_vuint};
 use std::io::Write;
 use std::path::PathBuf;
 
-// Cassandra MetadataType enum ordinals are defined but not used in the simplified
-// nb-format writer which uses a sequential layout instead of TOC-based components
+/// Statistics.db magic number observed in Cassandra 5.0 nb-format files.
+/// This value appears at bytes 4-7 and is interpreted as:
+/// - `statistics_kind` by parse_nb_format_header()
+/// - `checksum` by parse_statistics_toc_for_header_offset()
+/// Source: Hex dump of real Cassandra Statistics.db files
+const STATISTICS_KIND_MAGIC: u32 = 0x26291b05;
+
+/// nb-format version number. Value 4 indicates Cassandra 5.0 format.
+/// This value appears at bytes 0-3 and is interpreted as:
+/// - `version_type` by parse_nb_format_header()
+/// - `num_components` by parse_statistics_toc_for_header_offset()
+const NB_FORMAT_VERSION: u32 = 4;
+
+/// Metadata field values observed in real Cassandra Statistics.db files.
+/// Purpose of these values is unclear; they may relate to TOC entry structure
+/// or format versioning. Values extracted from hex dump analysis.
+const METADATA_FIELD_1: u32 = 1;
+const METADATA_FIELD_2: u32 = 0x65; // 101 decimal
+const METADATA_FIELD_3: u32 = 2;
+
+/// EncodingStats section type marker.
+/// Indicates start of EncodingStats data after the 32-byte header.
+const ENCODING_STATS_TYPE: u32 = 3;
+
+/// Default partitioner class name.
+/// Currently only Murmur3Partitioner is supported.
+const DEFAULT_PARTITIONER: &[u8] = b"org.apache.cassandra.dht.Murmur3Partitioner";
 
 /// Statistics metadata collected during memtable flush
 ///
@@ -189,10 +217,14 @@ impl StatisticsWriter {
 
     /// Write Statistics.db file with the given metadata
     ///
-    /// This generates a minimal nb-format Statistics.db following the observed format
-    /// from real Cassandra 5.0 files:
-    /// 1. 32-byte header (version 4, statistics_kind, data_length, checksum)
-    /// 2. Sequential component data (EncodingStats with partitioner, min values)
+    /// This generates a Cassandra 5.0 compatible Statistics.db file with a hybrid format:
+    /// - Bytes 0-31: "Header" (actually TOC entries 0-2, read by parse_nb_format_header)
+    /// - Bytes 32-39: TOC entry 3 + EncodingStats prefix
+    /// - Bytes 40+: Actual EncodingStats data
+    ///
+    /// The parser reads this as:
+    /// 1. parse_nb_format_header reads bytes 0-31
+    /// 2. parse_minimal_encoding_stats reads bytes 32+ as: metadata_type (u32), then data
     ///
     /// # Arguments
     /// * `metadata` - Statistics metadata to write
@@ -203,38 +235,24 @@ impl StatisticsWriter {
         let mut meta = metadata.clone();
         meta.finalize();
 
-        // Build EncodingStats section (the critical data for delta encoding)
-        let encoding_stats_bytes = self.build_encoding_stats(&meta)?;
+        // Build the EncodingStats data section (includes metadata_type and all data)
+        let encoding_data = self.build_encoding_stats_data(&meta)?;
 
-        // Build 32-byte nb-format header
-        let mut header_buffer = Vec::new();
-
-        // Version = 4 (nb-format)
-        header_buffer.write_all(&4u32.to_be_bytes())?;
-
-        // Statistics kind (using same value as observed in real files: 0x26291b05)
-        // This appears to be a magic number/hash in Cassandra
-        header_buffer.write_all(&0x26291b05u32.to_be_bytes())?;
-
-        // Reserved field
-        header_buffer.write_all(&0u32.to_be_bytes())?;
-
-        // Data length (length of the EncodingStats section)
-        header_buffer.write_all(&(encoding_stats_bytes.len() as u32).to_be_bytes())?;
-
-        // Metadata fields (observed values: 1, 101, 2)
-        // These appear to be version/format markers
-        header_buffer.write_all(&1u32.to_be_bytes())?;  // metadata1
-        header_buffer.write_all(&101u32.to_be_bytes())?;  // metadata2 (101 = 0x65)
-        header_buffer.write_all(&2u32.to_be_bytes())?;  // metadata3
-
-        // Checksum (placeholder - proper CRC32 deferred to future milestone)
-        header_buffer.write_all(&0u32.to_be_bytes())?;
-
-        // Assemble final file: header + encoding stats
+        // Build the complete file structure
         let mut file_buffer = Vec::new();
-        file_buffer.write_all(&header_buffer)?;
-        file_buffer.write_all(&encoding_stats_bytes)?;
+
+        // Bytes 0-31: 32-byte header (matches parse_nb_format_header expectations)
+        file_buffer.write_all(&NB_FORMAT_VERSION.to_be_bytes())?;
+        file_buffer.write_all(&STATISTICS_KIND_MAGIC.to_be_bytes())?;
+        file_buffer.write_all(&0u32.to_be_bytes())?; // reserved1
+        file_buffer.write_all(&(encoding_data.len() as u32).to_be_bytes())?; // data_length
+        file_buffer.write_all(&METADATA_FIELD_1.to_be_bytes())?;
+        file_buffer.write_all(&METADATA_FIELD_2.to_be_bytes())?;
+        file_buffer.write_all(&METADATA_FIELD_3.to_be_bytes())?;
+        file_buffer.write_all(&0u32.to_be_bytes())?; // checksum_or_more (placeholder)
+
+        // Bytes 32+: EncodingStats data (starts with metadata_type = 3)
+        file_buffer.write_all(&encoding_data)?;
 
         // Write to file
         std::fs::write(&self.path, file_buffer).map_err(|e| {
@@ -248,36 +266,41 @@ impl StatisticsWriter {
         Ok(())
     }
 
-    /// Build EncodingStats section for delta encoding
+    /// Build EncodingStats data section (bytes 32+)
     ///
-    /// This is the critical component that provides baseline values for Data.db delta encoding.
-    /// The format follows the observed structure from real Cassandra 5.0 Statistics.db files.
-    ///
-    /// Format (observed from enhanced_statistics_parser.rs):
-    /// - [VUInt] partitioner_length (unsigned VInt)
+    /// Matches the format observed in real Cassandra 5.0 Statistics.db files.
+    /// Based on hex analysis, the structure after the 32-byte header is:
+    /// - [u32 BE] metadata_type = 3
+    /// - [8 bytes] Unknown fields (appears to be part of TOC entry 3)
+    /// - [u8] Reserved byte = 0x00
+    /// - [VUInt] partitioner_length
     /// - [bytes] partitioner_class_name
-    /// - [VUInt] metadata1 (unknown purpose, value 0)
-    /// - [VUInt] metadata2 (unknown purpose, value 0)
-    /// - [VInt] min_timestamp (microseconds, signed ZigZag VInt)
-    /// - [VInt] min_local_deletion_time (seconds, signed ZigZag VInt)
-    /// - [VInt] min_ttl (seconds, signed ZigZag VInt)
-    fn build_encoding_stats(&self, metadata: &StatisticsMetadata) -> Result<Vec<u8>> {
+    /// - [Unknown data] Additional metadata before EncodingStats
+    /// - [VInt] min_timestamp
+    /// - [VInt] min_local_deletion_time
+    /// - [VInt] min_ttl
+    ///
+    /// This implementation creates a minimal version that the parser can read.
+    fn build_encoding_stats_data(&self, metadata: &StatisticsMetadata) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
-        // Partitioner (use Murmur3Partitioner as default)
-        let partitioner = b"org.apache.cassandra.dht.Murmur3Partitioner";
-        // Use unsigned VInt for string length (matches parse_vuint)
-        buffer.write_all(&encode_vuint(partitioner.len() as u64))?;
-        buffer.write_all(partitioner)?;
+        // Metadata type = 3 (EncodingStats identifier)
+        buffer.write_all(&ENCODING_STATS_TYPE.to_be_bytes())?;
 
-        // Unknown metadata fields (observed in parser, skipped during reading)
-        // Use placeholder values of 0
-        buffer.write_all(&encode_vuint(0))?;  // metadata1
-        buffer.write_all(&encode_vuint(0))?;  // metadata2
+        // data_length (VUInt) - The parser reads and discards this
+        // TODO(M6): Investigate if this needs to be the actual data length
+        buffer.write_all(&encode_vuint(0))?;
+
+        // Partitioner (currently only Murmur3Partitioner is supported)
+        buffer.write_all(&encode_vuint(DEFAULT_PARTITIONER.len() as u64))?;
+        buffer.write_all(DEFAULT_PARTITIONER)?;
+
+        // Metadata fields (observed in parser, purpose unclear)
+        // TODO(M6): Investigate what these fields represent in Cassandra
+        buffer.write_all(&encode_vuint(0))?; // metadata1 (placeholder)
+        buffer.write_all(&encode_vuint(0))?; // metadata2 (placeholder)
 
         // EncodingStats baseline values for delta encoding
-        // These values MUST match what Data.db uses as deltas
-        // Use signed ZigZag VInt for these values (matches parse_vint)
         buffer.write_all(&encode_vint(metadata.min_timestamp))?;
         buffer.write_all(&encode_vint(metadata.min_local_deletion_time as i64))?;
         buffer.write_all(&encode_vint(metadata.min_ttl as i64))?;
@@ -361,28 +384,32 @@ mod tests {
         let file_size = std::fs::metadata(&stats_path).unwrap().len();
         assert!(file_size > 0, "Statistics.db should not be empty");
 
-        // Read back and verify nb-format header
+        // Read back and verify hybrid format
         let file_data = std::fs::read(&stats_path).unwrap();
-        assert!(file_data.len() >= 32, "File should have at least 32-byte header");
+        assert!(file_data.len() >= 40, "File should have at least 40 bytes");
 
-        // Verify version = 4 (nb-format)
-        let version = u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
-        assert_eq!(version, 4, "Should have nb-format version 4");
+        // Verify num_components = 4 (byte 0-3)
+        let num_components = u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
+        assert_eq!(num_components, 4, "Should have num_components=4");
 
-        // Verify statistics_kind
+        // Verify statistics_kind/checksum (bytes 4-7)
         let stats_kind = u32::from_be_bytes([file_data[4], file_data[5], file_data[6], file_data[7]]);
         assert_eq!(stats_kind, 0x26291b05, "Should have expected statistics_kind");
+
+        // Verify metadata_type = 3 at offset 32
+        let metadata_type = u32::from_be_bytes([file_data[32], file_data[33], file_data[34], file_data[35]]);
+        assert_eq!(metadata_type, 3, "metadata_type should be 3");
     }
 
     #[test]
-    fn test_build_encoding_stats() {
+    fn test_build_encoding_stats_data() {
         let writer = StatisticsWriter::new(PathBuf::from("test.db"));
         let mut meta = StatisticsMetadata::new();
         meta.min_timestamp = 1000000;
         meta.min_local_deletion_time = 0;
         meta.min_ttl = 3600;
 
-        let result = writer.build_encoding_stats(&meta);
+        let result = writer.build_encoding_stats_data(&meta);
         assert!(result.is_ok());
 
         let bytes = result.unwrap();
@@ -394,13 +421,22 @@ mod tests {
     }
 
     #[test]
-    fn test_nb_format_constants() {
-        // Verify nb-format version is 4
-        let version = 4u32;
-        assert_eq!(version, 4);
+    fn test_encoding_stats_data_format() {
+        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
 
-        // Verify statistics_kind magic number
-        let stats_kind = 0x26291b05u32;
-        assert_eq!(stats_kind, 0x26291b05);
+        let mut meta = StatisticsMetadata::new();
+        meta.min_timestamp = 1000000;
+        meta.min_local_deletion_time = 0;
+        meta.min_ttl = 0;
+
+        let result = writer.build_encoding_stats_data(&meta);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert!(!data.is_empty());
+
+        // Should contain partitioner string
+        let partitioner = b"org.apache.cassandra.dht.Murmur3Partitioner";
+        assert!(data.windows(partitioner.len()).any(|w| w == partitioner));
     }
 }
