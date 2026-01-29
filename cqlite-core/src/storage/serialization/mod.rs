@@ -13,19 +13,19 @@
 //! TODO: Implementation in M5.0-14 through M5.0-16
 
 #[cfg(feature = "write-support")]
-pub mod vint;
-#[cfg(feature = "write-support")]
-pub mod types;
-#[cfg(feature = "write-support")]
 pub mod cell;
 #[cfg(feature = "write-support")]
 pub mod row;
+#[cfg(feature = "write-support")]
+pub mod types;
+#[cfg(feature = "write-support")]
+pub mod vint;
 
-#[cfg(feature = "write-support")]
-pub use vint::{encode_signed, encode_unsigned, signed_len, unsigned_len};
-#[cfg(feature = "write-support")]
-pub use types::TypeSerializer;
 #[cfg(feature = "write-support")]
 pub use cell::CellEncoder;
 #[cfg(feature = "write-support")]
 pub use row::RowSerializer;
+#[cfg(feature = "write-support")]
+pub use types::TypeSerializer;
+#[cfg(feature = "write-support")]
+pub use vint::{encode_signed, encode_unsigned, signed_len, unsigned_len};

@@ -57,6 +57,7 @@ use std::path::PathBuf;
 /// This value appears at bytes 4-7 and is interpreted as:
 /// - `statistics_kind` by parse_nb_format_header()
 /// - `checksum` by parse_statistics_toc_for_header_offset()
+///
 /// Source: Hex dump of real Cassandra Statistics.db files
 const STATISTICS_KIND_MAGIC: u32 = 0x26291b05;
 
@@ -389,15 +390,21 @@ mod tests {
         assert!(file_data.len() >= 40, "File should have at least 40 bytes");
 
         // Verify num_components = 4 (byte 0-3)
-        let num_components = u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
+        let num_components =
+            u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
         assert_eq!(num_components, 4, "Should have num_components=4");
 
         // Verify statistics_kind/checksum (bytes 4-7)
-        let stats_kind = u32::from_be_bytes([file_data[4], file_data[5], file_data[6], file_data[7]]);
-        assert_eq!(stats_kind, 0x26291b05, "Should have expected statistics_kind");
+        let stats_kind =
+            u32::from_be_bytes([file_data[4], file_data[5], file_data[6], file_data[7]]);
+        assert_eq!(
+            stats_kind, 0x26291b05,
+            "Should have expected statistics_kind"
+        );
 
         // Verify metadata_type = 3 at offset 32
-        let metadata_type = u32::from_be_bytes([file_data[32], file_data[33], file_data[34], file_data[35]]);
+        let metadata_type =
+            u32::from_be_bytes([file_data[32], file_data[33], file_data[34], file_data[35]]);
         assert_eq!(metadata_type, 3, "metadata_type should be 3");
     }
 

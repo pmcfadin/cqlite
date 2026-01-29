@@ -282,12 +282,10 @@ mod tests {
         let _is_present = bloom.contains(missing_key);
         // We can't assert !is_present due to false positives, but we can check
         // that the filter isn't completely broken (returning true for everything)
-        let all_true = (0..10)
-            .map(|i| {
-                let test_key = format!("nonexistent_key_{}", i);
-                bloom.contains(test_key.as_bytes())
-            })
-            .all(|x| x);
+        let all_true = (0..10).all(|i| {
+            let test_key = format!("nonexistent_key_{}", i);
+            bloom.contains(test_key.as_bytes())
+        });
 
         assert!(
             !all_true,
@@ -328,8 +326,8 @@ mod tests {
 
         let expected_keys = 1000;
         let target_fp_rate = 0.01; // 1%
-        let mut writer = FilterWriter::new(filter_path.clone(), expected_keys, target_fp_rate)
-            .unwrap();
+        let mut writer =
+            FilterWriter::new(filter_path.clone(), expected_keys, target_fp_rate).unwrap();
 
         // Add expected number of keys
         for i in 0..expected_keys {

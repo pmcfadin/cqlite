@@ -116,17 +116,16 @@ impl DigestWriter {
         })?;
 
         // Flush buffer and sync to disk
-        writer.flush().map_err(|e| {
-            Error::storage(format!("Failed to flush Digest.crc32: {}", e))
-        })?;
+        writer
+            .flush()
+            .map_err(|e| Error::storage(format!("Failed to flush Digest.crc32: {}", e)))?;
 
-        let file = writer.into_inner().map_err(|e| {
-            Error::storage(format!("Failed to extract file from buffer: {}", e))
-        })?;
+        let file = writer
+            .into_inner()
+            .map_err(|e| Error::storage(format!("Failed to extract file from buffer: {}", e)))?;
 
-        file.sync_all().map_err(|e| {
-            Error::storage(format!("Failed to sync Digest.crc32 to disk: {}", e))
-        })?;
+        file.sync_all()
+            .map_err(|e| Error::storage(format!("Failed to sync Digest.crc32 to disk: {}", e)))?;
 
         Ok(())
     }
@@ -153,7 +152,10 @@ impl DigestWriter {
         use std::io::Read;
 
         let mut file = File::open(file_path).map_err(|e| {
-            Error::storage(format!("Failed to open file {:?} for CRC32: {}", file_path, e))
+            Error::storage(format!(
+                "Failed to open file {:?} for CRC32: {}",
+                file_path, e
+            ))
         })?;
 
         let mut hasher = crc32fast::Hasher::new();
@@ -161,7 +163,10 @@ impl DigestWriter {
 
         loop {
             let bytes_read = file.read(&mut buffer).map_err(|e| {
-                Error::storage(format!("Failed to read file {:?} for CRC32: {}", file_path, e))
+                Error::storage(format!(
+                    "Failed to read file {:?} for CRC32: {}",
+                    file_path, e
+                ))
             })?;
 
             if bytes_read == 0 {

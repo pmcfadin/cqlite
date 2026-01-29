@@ -244,9 +244,9 @@ mod tests {
     fn test_encode_unsigned_boundaries() {
         let test_cases = vec![
             (0u64, vec![0x00]),
-            (127u64, vec![0x7F]),             // Max single byte
-            (128u64, vec![0x80, 0x80]),       // Min two bytes
-            (16383u64, vec![0xBF, 0xFF]),     // Max two bytes (14 bits: 6+8)
+            (127u64, vec![0x7F]),               // Max single byte
+            (128u64, vec![0x80, 0x80]),         // Min two bytes
+            (16383u64, vec![0xBF, 0xFF]),       // Max two bytes (14 bits: 6+8)
             (16384u64, vec![0xC0, 0x40, 0x00]), // Min three bytes
         ];
 
@@ -304,10 +304,23 @@ mod tests {
         use crate::parser::vint::parse_vint;
 
         let test_values = vec![
-            0, 1, -1, 63, -64, 64, -65,
-            127, -128, 255, -255,
-            1000, -1000, 32767, -32768,
-            1048576, -1048576,
+            0,
+            1,
+            -1,
+            63,
+            -64,
+            64,
+            -65,
+            127,
+            -128,
+            255,
+            -255,
+            1000,
+            -1000,
+            32767,
+            -32768,
+            1048576,
+            -1048576,
             i32::MAX as i64,
             i32::MIN as i64,
         ];
@@ -336,14 +349,14 @@ mod tests {
     fn test_large_values() {
         // Test values requiring different byte sizes
         let test_cases = vec![
-            (1u64 << 7, 2),   // 128 - 2 bytes
-            (1u64 << 14, 3),  // 16384 - 3 bytes
-            (1u64 << 21, 4),  // 2097152 - 4 bytes
-            (1u64 << 28, 5),  // 268435456 - 5 bytes
-            (1u64 << 35, 6),  // 6 bytes
-            (1u64 << 42, 7),  // 7 bytes
-            (1u64 << 49, 8),  // 8 bytes
-            (1u64 << 56, 9),  // 9 bytes
+            (1u64 << 7, 2),  // 128 - 2 bytes
+            (1u64 << 14, 3), // 16384 - 3 bytes
+            (1u64 << 21, 4), // 2097152 - 4 bytes
+            (1u64 << 28, 5), // 268435456 - 5 bytes
+            (1u64 << 35, 6), // 6 bytes
+            (1u64 << 42, 7), // 7 bytes
+            (1u64 << 49, 8), // 8 bytes
+            (1u64 << 56, 9), // 9 bytes
         ];
 
         for (value, expected_size) in test_cases {
@@ -400,14 +413,14 @@ mod tests {
         // Test specific patterns from standard Cassandra VInt encoding
         // These use ZigZag encoding: signed → unsigned → VInt bytes
         let test_cases = vec![
-            (0i64, vec![0x00], "Zero value"),                  // zigzag(0)=0, vint(0)=[0x00]
-            (1i64, vec![0x02], "Single byte positive"),        // zigzag(1)=2, vint(2)=[0x02]
+            (0i64, vec![0x00], "Zero value"), // zigzag(0)=0, vint(0)=[0x00]
+            (1i64, vec![0x02], "Single byte positive"), // zigzag(1)=2, vint(2)=[0x02]
             (63i64, vec![0x7E], "Maximum single byte positive"), // zigzag(63)=126, vint(126)=[0x7E]
             (64i64, vec![0x80, 0x80], "Two byte encoding start"), // zigzag(64)=128, vint(128)=[0x80,0x80]
-            (127i64, vec![0x80, 0xFE], "Two byte positive"),   // zigzag(127)=254, vint(254)=[0x80,0xFE]
-            (-1i64, vec![0x01], "Single byte negative"),        // zigzag(-1)=1, vint(1)=[0x01]
+            (127i64, vec![0x80, 0xFE], "Two byte positive"), // zigzag(127)=254, vint(254)=[0x80,0xFE]
+            (-1i64, vec![0x01], "Single byte negative"),     // zigzag(-1)=1, vint(1)=[0x01]
             (-64i64, vec![0x7F], "Single byte negative boundary"), // zigzag(-64)=127, vint(127)=[0x7F]
-            (-65i64, vec![0x80, 0x81], "Two byte negative"),    // zigzag(-65)=129, vint(129)=[0x80,0x81]
+            (-65i64, vec![0x80, 0x81], "Two byte negative"), // zigzag(-65)=129, vint(129)=[0x80,0x81]
         ];
 
         for (value, expected_bytes, description) in test_cases {

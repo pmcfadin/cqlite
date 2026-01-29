@@ -116,25 +116,26 @@ impl TocWriter {
         // Ensure TOC itself is in the list (add if missing)
         let mut final_components: Vec<ComponentEntry> = components.to_vec();
 
-        if !final_components.iter().any(|e| e.component == SSTableComponent::TOC) {
+        if !final_components
+            .iter()
+            .any(|e| e.component == SSTableComponent::TOC)
+        {
             final_components.push(ComponentEntry::new(SSTableComponent::TOC));
         }
 
         // Sort components for deterministic output (matches Cassandra behavior)
         // Order: Data, Statistics, Digest, TOC, CompressionInfo, Filter, Index, Summary
-        final_components.sort_by_key(|entry| {
-            match entry.component {
-                SSTableComponent::Data => 0,
-                SSTableComponent::Statistics => 1,
-                SSTableComponent::Digest => 2,
-                SSTableComponent::TOC => 3,
-                SSTableComponent::CompressionInfo => 4,
-                SSTableComponent::Filter => 5,
-                SSTableComponent::Index => 6,
-                SSTableComponent::Summary => 7,
-                SSTableComponent::Partitions => 8,
-                SSTableComponent::Rows => 9,
-            }
+        final_components.sort_by_key(|entry| match entry.component {
+            SSTableComponent::Data => 0,
+            SSTableComponent::Statistics => 1,
+            SSTableComponent::Digest => 2,
+            SSTableComponent::TOC => 3,
+            SSTableComponent::CompressionInfo => 4,
+            SSTableComponent::Filter => 5,
+            SSTableComponent::Index => 6,
+            SSTableComponent::Summary => 7,
+            SSTableComponent::Partitions => 8,
+            SSTableComponent::Rows => 9,
         });
 
         // Create file with buffered writing
@@ -159,17 +160,16 @@ impl TocWriter {
         }
 
         // Flush buffer and sync to disk (durability requirement)
-        writer.flush().map_err(|e| {
-            Error::storage(format!("Failed to flush TOC.txt: {}", e))
-        })?;
+        writer
+            .flush()
+            .map_err(|e| Error::storage(format!("Failed to flush TOC.txt: {}", e)))?;
 
-        let file = writer.into_inner().map_err(|e| {
-            Error::storage(format!("Failed to extract file from buffer: {}", e))
-        })?;
+        let file = writer
+            .into_inner()
+            .map_err(|e| Error::storage(format!("Failed to extract file from buffer: {}", e)))?;
 
-        file.sync_all().map_err(|e| {
-            Error::storage(format!("Failed to sync TOC.txt to disk: {}", e))
-        })?;
+        file.sync_all()
+            .map_err(|e| Error::storage(format!("Failed to sync TOC.txt to disk: {}", e)))?;
 
         Ok(())
     }
