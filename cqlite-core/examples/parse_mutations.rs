@@ -10,7 +10,7 @@
 
 #[cfg(feature = "write-support")]
 fn main() {
-    use cqlite_core::cql::{ParserBackend, ParserConfig, ParserFactory, CqlStatement};
+    use cqlite_core::cql::{CqlStatement, ParserBackend, ParserConfig, ParserFactory};
 
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         // Create Nom parser (ANTLR doesn't support mutations yet)
@@ -24,9 +24,15 @@ fn main() {
             Ok(CqlStatement::Insert(insert)) => {
                 println!("✓ Parsed INSERT statement:");
                 println!("  Table: {}", insert.table.name.name);
-                println!("  Columns: {:?}", insert.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+                println!(
+                    "  Columns: {:?}",
+                    insert.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+                );
                 println!("  IF NOT EXISTS: {}", insert.if_not_exists);
-                println!("  Has TTL: {}", insert.using.as_ref().and_then(|u| u.ttl.as_ref()).is_some());
+                println!(
+                    "  Has TTL: {}",
+                    insert.using.as_ref().and_then(|u| u.ttl.as_ref()).is_some()
+                );
                 println!();
             }
             Ok(_) => println!("✗ Expected INSERT statement"),
@@ -42,9 +48,21 @@ fn main() {
                 println!("  Table: {}", update.table.name.name);
                 println!("  Assignments: {}", update.assignments.len());
                 for (i, assignment) in update.assignments.iter().enumerate() {
-                    println!("    {}. {} {:?} <value>", i + 1, assignment.column.name, assignment.operator);
+                    println!(
+                        "    {}. {} {:?} <value>",
+                        i + 1,
+                        assignment.column.name,
+                        assignment.operator
+                    );
                 }
-                println!("  Has TIMESTAMP: {}", update.using.as_ref().and_then(|u| u.timestamp.as_ref()).is_some());
+                println!(
+                    "  Has TIMESTAMP: {}",
+                    update
+                        .using
+                        .as_ref()
+                        .and_then(|u| u.timestamp.as_ref())
+                        .is_some()
+                );
                 println!();
             }
             Ok(_) => println!("✗ Expected UPDATE statement"),
@@ -58,11 +76,17 @@ fn main() {
             Ok(CqlStatement::Delete(delete)) => {
                 println!("✓ Parsed DELETE statement:");
                 println!("  Table: {}", delete.table.name.name);
-                println!("  Columns: {}", if delete.columns.is_empty() {
-                    "entire row".to_string()
-                } else {
-                    format!("{:?}", delete.columns.iter().map(|c| &c.name).collect::<Vec<_>>())
-                });
+                println!(
+                    "  Columns: {}",
+                    if delete.columns.is_empty() {
+                        "entire row".to_string()
+                    } else {
+                        format!(
+                            "{:?}",
+                            delete.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+                        )
+                    }
+                );
                 println!();
             }
             Ok(_) => println!("✗ Expected DELETE statement"),
@@ -76,7 +100,10 @@ fn main() {
             Ok(CqlStatement::Delete(delete)) => {
                 println!("✓ Parsed DELETE statement:");
                 println!("  Table: {}", delete.table.name.name);
-                println!("  Columns: {:?}", delete.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+                println!(
+                    "  Columns: {:?}",
+                    delete.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+                );
                 println!();
             }
             Ok(_) => println!("✗ Expected DELETE statement"),
@@ -85,12 +112,16 @@ fn main() {
 
         // Parse INSERT with literals
         println!("=== INSERT with Literal Values ===");
-        let insert_literals = "INSERT INTO users (id, name, age, active) VALUES (123, 'Alice', 30, true)";
+        let insert_literals =
+            "INSERT INTO users (id, name, age, active) VALUES (123, 'Alice', 30, true)";
         match parser.parse(insert_literals).await {
             Ok(CqlStatement::Insert(insert)) => {
                 println!("✓ Parsed INSERT with literals:");
                 println!("  Table: {}", insert.table.name.name);
-                println!("  Columns: {:?}", insert.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+                println!(
+                    "  Columns: {:?}",
+                    insert.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+                );
                 println!();
             }
             Ok(_) => println!("✗ Expected INSERT statement"),
