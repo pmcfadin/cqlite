@@ -158,7 +158,8 @@ impl PartitionKey {
 
         // Single-component key: no length prefix
         if self.columns.len() == 1 {
-            let value_bytes = self.serialize_value(&self.columns[0].1, &schema.partition_keys[0])?;
+            let value_bytes =
+                self.serialize_value(&self.columns[0].1, &schema.partition_keys[0])?;
             result.extend_from_slice(&value_bytes);
             return Ok(result);
         }
@@ -266,7 +267,12 @@ impl Ord for ClusteringKey {
         // This is used for BTreeMap ordering in memtable.
         // Schema-aware comparison should use `compare()` method.
         for ((_, a_val), (_, b_val)) in self.columns.iter().zip(other.columns.iter()) {
-            let ordering = compare_values(a_val, b_val).unwrap_or(Ordering::Equal);
+            // Type mismatch indicates a schema validation bug - panic rather than
+            // silently corrupting ordering. All ClusteringKeys in a table should
+            // have been validated against the same schema before reaching this point.
+            let ordering = compare_values(a_val, b_val).expect(
+                "ClusteringKey comparison failed: type mismatch indicates schema validation bug",
+            );
             if ordering != Ordering::Equal {
                 return ordering;
             }
@@ -287,6 +293,16 @@ impl Eq for ClusteringKey {}
 ///
 /// This is the fundamental ordering key in Cassandra SSTables. Partitions are
 /// ordered first by token (i64), then by raw key bytes for collision resolution.
+///
+/// # Hash Collision Handling
+///
+/// While Murmur3 hash collisions are extremely rare in practice, the ordering
+/// implementation handles them correctly:
+/// 1. Primary ordering: by token (Murmur3 hash value)
+/// 2. Secondary ordering: by raw partition key bytes (for hash collisions)
+///
+/// This ensures deterministic, stable ordering even when two different partition
+/// keys produce the same token value.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DecoratedKey {
     /// Murmur3 hash token (i64)
@@ -407,7 +423,14 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
             Ok(result)
         }
 
-        (Value::Duration { months, days, nanos }, ComparatorType::Duration) => {
+        (
+            Value::Duration {
+                months,
+                days,
+                nanos,
+            },
+            ComparatorType::Duration,
+        ) => {
             // Duration: [months (4B)][days (4B)][nanos (8B)]
             let mut result = Vec::new();
             result.extend_from_slice(&months.to_be_bytes());
@@ -678,11 +701,8 @@ mod tests {
         assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x2A]);
 
         // Text
-        let bytes = serialize_value_bytes(
-            &Value::Text("hello".to_string()),
-            &ComparatorType::Text,
-        )
-        .unwrap();
+        let bytes = serialize_value_bytes(&Value::Text("hello".to_string()), &ComparatorType::Text)
+            .unwrap();
         assert_eq!(bytes, b"hello");
 
         // UUID
@@ -748,7 +768,10 @@ mod tests {
         // Test case 2: int value 100
         let key2 = vec![0x00, 0x00, 0x00, 0x64];
         let token2 = calculate_murmur3_token(&key2).unwrap();
-        assert_ne!(token2, token1, "Different keys should produce different tokens");
+        assert_ne!(
+            token2, token1,
+            "Different keys should produce different tokens"
+        );
 
         // Test case 3: text value "test"
         let key3 = b"test";
@@ -782,5 +805,102 @@ mod tests {
         assert_eq!(keys[0].token, 100);
         assert_eq!(keys[1].token, 200);
         assert_eq!(keys[2].token, 300);
+    }
+
+    #[test]
+    fn test_decorated_key_hash_collision_handling() {
+        // Test Issue #406: Explicit hash collision scenario
+        // When two different keys produce the same token (extremely rare but possible),
+        // they should be ordered by raw key bytes to ensure deterministic ordering.
+
+        let token = 12345_i64; // Shared token value (simulated collision)
+
+        let dk1 = DecoratedKey::new(token, vec![0x00, 0x01, 0x02]); // Key A
+        let dk2 = DecoratedKey::new(token, vec![0x00, 0x01, 0x03]); // Key B (differs in last byte)
+        let dk3 = DecoratedKey::new(token, vec![0x00, 0x01, 0x02]); // Key C (identical to A)
+
+        // Equal tokens: order by key bytes
+        assert!(dk1 < dk2, "Keys with same token should order by bytes");
+        assert!(dk2 > dk1, "Key comparison should be consistent");
+        assert_eq!(
+            dk1.cmp(&dk3),
+            Ordering::Equal,
+            "Identical keys should be equal"
+        );
+
+        // Verify ordering is stable in BTreeMap
+        use std::collections::BTreeMap;
+        let mut map = BTreeMap::new();
+
+        map.insert(dk2.clone(), "value2");
+        map.insert(dk1.clone(), "value1");
+        map.insert(dk3.clone(), "value3"); // Overwrites dk1 (same key)
+
+        // Should have 2 entries (dk1/dk3 are same key)
+        assert_eq!(map.len(), 2);
+
+        // Verify ordering by raw bytes
+        let keys: Vec<_> = map.keys().collect();
+        assert_eq!(keys[0].key, vec![0x00, 0x01, 0x02]); // dk1/dk3
+        assert_eq!(keys[1].key, vec![0x00, 0x01, 0x03]); // dk2
+    }
+
+    #[test]
+    fn test_clustering_key_ord_valid_comparison() {
+        // Test Issue #409: Valid comparisons work correctly
+        let ck1 = ClusteringKey::single("ts", Value::Timestamp(1000));
+        let ck2 = ClusteringKey::single("ts", Value::Timestamp(2000));
+        let ck3 = ClusteringKey::single("ts", Value::Timestamp(1000));
+
+        // Basic ordering
+        assert_eq!(ck1.cmp(&ck2), Ordering::Less);
+        assert_eq!(ck2.cmp(&ck1), Ordering::Greater);
+        assert_eq!(ck1.cmp(&ck3), Ordering::Equal);
+
+        // Multi-column clustering key
+        let ck_multi1 = ClusteringKey::new(vec![
+            ("year".to_string(), Value::Integer(2024)),
+            ("month".to_string(), Value::SmallInt(1)),
+        ]);
+        let ck_multi2 = ClusteringKey::new(vec![
+            ("year".to_string(), Value::Integer(2024)),
+            ("month".to_string(), Value::SmallInt(2)),
+        ]);
+
+        assert_eq!(ck_multi1.cmp(&ck_multi2), Ordering::Less);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "ClusteringKey comparison failed: type mismatch indicates schema validation bug"
+    )]
+    fn test_clustering_key_ord_type_mismatch_panics() {
+        // Test Issue #409: Type mismatch should panic with clear message
+        let ck1 = ClusteringKey::single("ts", Value::Timestamp(1000));
+        let ck2 = ClusteringKey::single("ts", Value::Integer(2000)); // Wrong type!
+
+        // This should panic due to type mismatch
+        let _ = ck1.cmp(&ck2);
+    }
+
+    #[test]
+    fn test_clustering_key_ord_btree_ordering() {
+        // Test Issue #409: Verify ClusteringKey works correctly in BTreeMap
+        use std::collections::BTreeMap;
+
+        let mut map = BTreeMap::new();
+
+        let ck3 = ClusteringKey::single("ts", Value::Timestamp(3000));
+        let ck1 = ClusteringKey::single("ts", Value::Timestamp(1000));
+        let ck2 = ClusteringKey::single("ts", Value::Timestamp(2000));
+
+        // Insert in non-sorted order
+        map.insert(ck3.clone(), "value3");
+        map.insert(ck1.clone(), "value1");
+        map.insert(ck2.clone(), "value2");
+
+        // Verify BTreeMap orders correctly
+        let values: Vec<_> = map.values().copied().collect();
+        assert_eq!(values, vec!["value1", "value2", "value3"]);
     }
 }
