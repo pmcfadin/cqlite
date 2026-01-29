@@ -4,9 +4,9 @@ pub mod sstable;
 
 // M5: Write engine and serialization (Issue #359)
 #[cfg(feature = "write-support")]
-pub mod write_engine;
-#[cfg(feature = "write-support")]
 pub mod serialization;
+#[cfg(feature = "write-support")]
+pub mod write_engine;
 
 // REPL data access components (Issue #249: CLI-specific)
 #[cfg(feature = "cli-helpers")]

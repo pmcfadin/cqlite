@@ -24,9 +24,9 @@ pub mod storage;
 // M5: Write engine and serialization modules (Issue #359)
 // Re-exported at crate level for convenience when write-support is enabled
 #[cfg(feature = "write-support")]
-pub use storage::write_engine;
-#[cfg(feature = "write-support")]
 pub use storage::serialization;
+#[cfg(feature = "write-support")]
+pub use storage::write_engine;
 
 // Ingestion module for one-shot schema & SSTable discovery (Issue #249: CLI-specific)
 #[cfg(feature = "cli-helpers")]
