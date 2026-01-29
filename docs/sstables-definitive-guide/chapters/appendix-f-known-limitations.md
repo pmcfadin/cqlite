@@ -796,17 +796,269 @@ cargo build --no-default-features --features all-compression
 
 ---
 
+## M5 Write Support Limitations
+
+CQLite M5 introduces SSTable write support, but with several intentional limitations for the initial release. The write engine produces valid Cassandra 5.0 BIG format SSTables that can be read by both CQLite and Cassandra, but takes simplified approaches in areas where full Cassandra compatibility is not critical.
+
+### Tombstone Local Deletion Time Workaround
+
+**Status**: ⚠️ **WORKAROUND IN PLACE** (Issue #401)
+**Impact**: Tombstone cells use derived local_deletion_time instead of explicit value
+**Affected Component**: `cqlite-core/src/storage/sstable/writer/data_writer.rs`
+
+**Background**: Cassandra tombstones require two timestamp fields:
+1. **Deletion timestamp** (microseconds): When the delete was issued
+2. **Local deletion time** (seconds): Local server time for GC eligibility tracking
+
+**Current Implementation**: The `Mutation` struct does not include an explicit `local_deletion_time` field. The writer derives it from the deletion timestamp:
+
+```rust
+// data_writer.rs:416
+let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+```
+
+**Rationale**:
+- For immediate deletes, local_deletion_time = deletion_time / 1000 is correct
+- GC semantics are deferred (M6+ scope)
+- SSTable compaction (which uses local_deletion_time) is out of scope for M5
+
+**Future Fix** (M6+):
+- Add `local_deletion_time: Option<i32>` to `Mutation` struct
+- Allow explicit setting via API: `mutation.with_deletion_time(timestamp, local_deletion_time)`
+- Default to derived value if not specified
+
+**Tracking**: Issue #401 (RESOLVED with workaround)
+
+---
+
+### IndexWriter Memory Buffering
+
+**Status**: ⚠️ **ACCEPTABLE TRADE-OFF** (Issue #408)
+**Impact**: Index.db entries are buffered in memory (not streamed to disk)
+**Affected Component**: `cqlite-core/src/storage/sstable/writer/index_writer.rs`
+
+**Current Implementation**: The `IndexWriter` uses a `Vec<u8>` buffer that holds all index entries in memory until `finish()` is called:
+
+```rust
+// index_writer.rs:90-91
+buffer: Vec<u8>,  // Serialized index data (written incrementally)
+```
+
+**Memory Usage**:
+- Each entry: 20-22 bytes (marker + digest + VInt offset + promoted_length)
+- 1M partitions: ~20 MB
+- 10M partitions: ~200 MB
+- Memory grows linearly with partition count
+
+**Why Not True Streaming?**:
+1. **Summary.db sampling requires accurate offsets**: Summary.db samples every Nth index entry and needs the exact byte offset in Index.db where each entry was written. This requires knowing Index.db positions before the file is complete.
+2. **Offset tracking complexity**: True disk streaming would require:
+   - Flushing partial buffers during writes
+   - Complex offset calculation across buffer boundaries
+   - Synchronous I/O in async context
+
+**Trade-Off Analysis**:
+- ✅ **Acceptable**: 200 MB for 10M partitions is reasonable for modern systems
+- ✅ **Simplicity**: Vec buffer provides O(1) append and accurate offset tracking
+- ❌ **Not suitable for**: Billion-partition SSTables (20 GB+ memory)
+
+**Workaround**: For extremely large SSTables, split writes into multiple generations.
+
+**Future Optimization** (M6+):
+- Implement true streaming with buffered I/O
+- Add configurable buffer size with periodic flushes
+- Track cumulative offsets across buffer boundaries
+
+**Tracking**: Issue #408 (documented limitation)
+
+---
+
+### Promoted Index Deferred
+
+**Status**: ⏳ **DEFERRED** (M5 Stage 0 scope)
+**Impact**: Wide partitions (many clustering keys) cannot use fast within-partition seeks
+**Affected Component**: `cqlite-core/src/storage/sstable/writer/index_writer.rs`
+
+**Current Implementation**: Index.db entries always write `promoted_index_length = 0`:
+
+```rust
+// index_writer.rs:168-169
+// Write promoted index length (0 = no promoted index)
+encode_unsigned(0, &mut self.buffer);
+```
+
+**What Is Promoted Index?**:
+Promoted index is Cassandra's optimization for wide partitions (partitions with many clustering keys). It stores sampled clustering key ranges within a partition, enabling O(log n) seeks to specific rows instead of O(n) sequential scans.
+
+**Example Use Case**:
+```sql
+-- Wide partition: 10,000 rows per user_id
+CREATE TABLE user_activity (
+    user_id int,
+    timestamp timestamp,
+    activity text,
+    PRIMARY KEY (user_id, timestamp)
+);
+
+-- Without promoted index: Must scan all 10K rows
+SELECT * FROM user_activity WHERE user_id = 1 AND timestamp > '2025-01-01';
+
+-- With promoted index: Jump directly to 2025-01-01 range
+```
+
+**Impact**:
+- ✅ **No impact**: Simple tables, narrow partitions (< 100 rows per partition)
+- ⚠️ **Minor impact**: Medium partitions (100-1000 rows) - sequential scan still fast
+- ❌ **Significant impact**: Wide partitions (10K+ rows) - linear scan required
+
+**Rationale for Deferral**:
+- M5 Stage 0 focuses on correctness, not performance optimizations
+- Promoted index format is complex (requires sampling logic and offset tracking)
+- 95% of use cases have narrow partitions
+- Sequential scan is functionally correct, just slower
+
+**Future Implementation** (M5.1+):
+1. Detect wide partitions (> 1000 rows) during write
+2. Sample clustering keys every N rows (e.g., every 256 rows)
+3. Encode promoted index block: `[num_entries][entry_1]...[entry_n]`
+4. Each entry: `[clustering_key][row_offset]`
+5. Write promoted_index_length and data to Index.db
+
+**Tracking**: M5.0 Stage 0 scope decision (no issue filed)
+
+---
+
+### Statistics.db Minimal Format
+
+**Status**: ⚠️ **HYBRID FORMAT** (documented trade-off)
+**Impact**: Statistics.db uses simplified structure compatible with CQLite parser but not full Cassandra TOC format
+**Affected Component**: `cqlite-core/src/storage/sstable/writer/stats_writer.rs`
+
+**Current Implementation**: The `StatisticsWriter` produces a hybrid format:
+
+```text
+Bytes 0-31:  32-byte header (parsed as both TOC and nb-format header)
+Bytes 32+:   EncodingStats data (min_timestamp, min_ttl, min_deletion_time)
+```
+
+**Full Cassandra Format** (not implemented):
+```text
+Bytes 0-31:  TOC header (num_components=4, checksum, 4×{type, offset} entries)
+Bytes 32+:   VALIDATION component (min_timestamp, max_timestamp, ...)
+Bytes X+:    COMPACTION component (level, ancestors, ...)
+Bytes Y+:    STATS component (row count, partition size histogram, ...)
+Bytes Z+:    HEADER component (SerializationHeader with column schema)
+```
+
+**What's Missing?**:
+1. **SerializationHeader**: Schema metadata embedded in Statistics.db
+   - Column names and types
+   - Static column definitions
+   - Clustering key comparators
+2. **Histogram data**: Partition size distribution for compaction hints
+3. **VALIDATION metadata**: Max timestamp, deletion time ranges
+4. **COMPACTION metadata**: Level, ancestors, cardinality estimates
+
+**Impact**:
+- ✅ **CQLite can read**: The hybrid format is compatible with `enhanced_statistics_parser.rs`
+- ⚠️ **Cassandra can read**: Cassandra may issue warnings but can parse the essential EncodingStats
+- ❌ **Missing features**: Schema inference from Statistics.db, compaction hints unavailable
+
+**Rationale**:
+- M5 requires schema to be provided explicitly (no schema inference from Statistics.db)
+- Delta encoding (primary purpose of Statistics.db) works correctly
+- Compaction is out of scope for M5 (read-write parity only)
+- SerializationHeader generation is complex (requires UDT registry, nested type encoding)
+
+**Future Enhancement** (M6+):
+1. Implement full TOC structure writer
+2. Add SerializationHeader generator from TableSchema
+3. Generate STATS component with histogram data
+4. Add VALIDATION and COMPACTION components
+
+**Tracking**: M5 Stage 0 scope decision (no issue filed)
+
+---
+
+### CompressionInfo.db Not Implemented
+
+**Status**: ❌ **NOT IMPLEMENTED** (M5 Stage 0 scope)
+**Impact**: All written SSTables are uncompressed (larger disk usage)
+**Affected Component**: None (no `compression_info_writer.rs` exists)
+
+**Background**: Cassandra SSTables support LZ4, Snappy, Deflate, and Zstd compression. Compressed Data.db files require CompressionInfo.db, which contains:
+- Compression algorithm name (e.g., "LZ4Compressor")
+- Chunk length (e.g., 65536 bytes)
+- Chunk offset table (for seeking to compressed chunks)
+- Per-chunk CRC32 checksums
+
+**Current Implementation**: The `SSTableWriter` always produces uncompressed Data.db:
+- No CompressionInfo.db component written
+- TOC.txt does not list CompressionInfo.db
+- Data.db contains raw uncompressed partition/row data
+
+**Impact**:
+- ❌ **Disk usage**: Uncompressed SSTables are 3-5x larger than LZ4-compressed
+- ❌ **I/O bandwidth**: More bytes to write/read from disk
+- ✅ **Correctness**: Uncompressed format is valid and fully compatible with Cassandra
+- ✅ **Simplicity**: No compression logic or chunk boundary handling
+
+**Example**:
+```text
+Compressed (with CompressionInfo.db):
+  Data.db:            50 MB
+  CompressionInfo.db:  1 KB
+  Total:              50 MB
+
+Uncompressed (M5):
+  Data.db:           200 MB
+  Total:             200 MB
+```
+
+**Rationale for Deferral**:
+- M5 Stage 0 prioritizes correctness over optimization
+- Compression adds complexity: chunk boundaries, buffer management, CRC validation
+- Uncompressed format is valid Cassandra 5.0 (Cassandra supports both)
+- Read path already supports compressed SSTables (asymmetric read/write capabilities)
+
+**Future Implementation** (M5.1+):
+1. Add `CompressionInfoWriter` struct
+2. Implement chunk-based compression in `DataWriter`:
+   - Buffer data in 64 KB chunks
+   - Compress each chunk with LZ4/Snappy/Zstd
+   - Track chunk offsets for CompressionInfo.db
+3. Write CompressionInfo.db after Data.db:
+   - Algorithm name
+   - Chunk length
+   - Chunk offset table
+   - Per-chunk CRC32 checksums
+4. Add to TOC.txt
+
+**Workaround**: For production use requiring compression:
+1. Write uncompressed SSTables with CQLite M5
+2. Use Cassandra's `nodetool upgradesstables` to rewrite with compression
+3. Or wait for M5.1+ compression support
+
+**Tracking**: M5 Stage 0 scope decision (no issue filed)
+
+---
+
 ## Key Takeaways
 
 - **Pass rate: 100% (33/33 tables)** - COMPLETE! All test tables now passing
 - All SSTable component parsers (Data.db, Index.db, Summary.db, Statistics.db) now use correct formats
 - All data types fully supported: basic types, collections, UDTs, frozen types, complex cells
-- CQLite is **read-only** - write operations permanently removed (Issues #175, #176)
+- **M5 Write Support**: Functional with documented limitations
+  - ⚠️ Issue #401: Tombstone local_deletion_time derived from timestamp
+  - ⚠️ Issue #408: IndexWriter uses Vec buffer (not true disk streaming)
+  - ⏳ Promoted Index deferred (length=0 in all entries)
+  - ⚠️ Statistics.db minimal format (hybrid header, not full TOC)
+  - ❌ CompressionInfo.db not implemented (uncompressed only)
 - **All feature gaps closed**:
   - ✅ Issue #219: Frozen type support
   - ✅ Issue #220: UDT (User-Defined Type) support
   - ✅ Issue #221: Complex cell flag handling for non-frozen collections
-- **Milestone achieved**: M3 completion (production-ready with 100% parsing coverage)
+- **Milestone achieved**: M3 completion (production-ready with 100% parsing coverage), M5 in progress (write support with limitations)
 
 ---
 

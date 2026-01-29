@@ -279,4 +279,390 @@ This format specification is confirmed through:
 - SerializationHeader: Delta encoding semantics for Statistics.db integration
 - Implementation research: See `docs/sstables-definitive-guide/ISSUE_162_LEARNINGS.md` for detailed findings
 
+## Writing Data.db Files
+
+This section documents how to construct valid V5CompressedLegacy Data.db files for write operations. All write operations must maintain the format described above while adhering to strict ordering and encoding rules.
+
+### Partition Ordering
+
+Partitions MUST be written in order of their Murmur3 token values (ascending). Within each token, partitions with the same token (rare but possible) are ordered by partition key bytes lexicographically.
+
+**Enforcement**: The caller (write engine) is responsible for partition ordering. The DataWriter accepts partitions in the order provided.
+
+### Partition Header Format
+
+Each partition begins with a fixed header structure:
+
+```
+[partition_flags: u8]       ← 0x00 for live partitions
+[key_length: u8]           ← Partition key length (max 255 bytes)
+[key_bytes]                ← Raw partition key bytes
+[deletion_time: i32 BE]    ← 0 for live partitions
+[unknown_field: u64 BE]    ← Always 0 in observed data
+```
+
+**Partition Flags**: Currently only 0x00 (no deletion) is supported. Partition-level tombstones would use different flags.
+
+**Key Length Limit**: V5CompressedLegacy uses a u8 length prefix, limiting partition keys to 255 bytes maximum.
+
+**End-of-Partition Marker**: Each partition ends with a single byte 0x01 (END_OF_PARTITION) after all rows.
+
+### Row Ordering
+
+Within a partition, rows MUST be ordered by their clustering keys according to the table's clustering order (ASC or DESC per column). For tables without clustering keys, there is at most one row per partition.
+
+**Enforcement**: The caller must provide rows in the correct clustering order. The DataWriter writes rows in the order provided.
+
+### Writing Partitions
+
+Complete partition structure:
+
+```
+[partition_header]          ← As described above
+[row_1]                    ← Multiple rows in clustering order
+[row_2]
+...
+[END_OF_PARTITION: 0x01]   ← Single byte marker
+```
+
+### Row Flag Construction
+
+Row flags are constructed by OR-ing flag bits based on the row's properties:
+
+| Condition | Flag | Hex | Result |
+|-----------|------|-----|--------|
+| Timestamp present (always for writes) | ROW_HAS_TIMESTAMP | 0x04 | Include timestamp delta |
+| TTL specified | ROW_HAS_TTL | 0x08 | Include TTL delta |
+| Row deletion | ROW_HAS_DELETION | 0x10 | Include deletion fields |
+| All columns present (no NULLs) | ROW_HAS_ALL_COLUMNS | 0x20 | Skip column bitmap |
+| Complex column deletion | ROW_HAS_COMPLEX_DELETION | 0x40 | Complex deletion present |
+| Extended flags follow | ROW_HAS_EXTENDED_FLAGS | 0x80 | Extended flags byte follows |
+
+**ROW_HAS_ALL_COLUMNS Truth Table**:
+
+This flag is set when ALL of these conditions are true:
+1. All operations are writes (no deletes)
+2. No NULL values present
+3. Number of columns matches schema column count
+
+| All Writes? | No NULLs? | Column Count Matches? | HAS_ALL_COLUMNS |
+|-------------|-----------|----------------------|-----------------|
+| Yes | Yes | Yes | SET (0x20) |
+| Yes | Yes | No | NOT SET |
+| Yes | No | Yes | NOT SET |
+| No | Yes | Yes | NOT SET |
+
+**Example**:
+- Row with timestamp, no TTL, all columns present: `0x04 | 0x20 = 0x24`
+- Row with timestamp and TTL, some columns NULL: `0x04 | 0x08 = 0x0c`
+- Row with timestamp, TTL, and deletion: `0x04 | 0x08 | 0x10 = 0x1c`
+
+### Cell Flag Construction
+
+Cell flags are constructed based on cell properties:
+
+| Condition | Flag | Hex | Result |
+|-----------|------|-----|--------|
+| Cell is tombstone | CELL_IS_DELETED | 0x01 | Include deletion fields |
+| Cell has TTL | CELL_IS_EXPIRING | 0x02 | Include TTL fields |
+| Value is empty string | CELL_HAS_EMPTY_VALUE | 0x04 | Zero-length value |
+| Use row timestamp | CELL_USE_ROW_TIMESTAMP | 0x08 | Skip cell timestamp |
+| Use row TTL | CELL_USE_ROW_TTL | 0x10 | Skip cell TTL |
+
+**CELL_USE_ROW_TIMESTAMP Truth Table**:
+
+Most cells use the row-level timestamp for efficiency. Cells need their own timestamp when the cell timestamp differs from the row timestamp (e.g., different write operations).
+
+| Cell Type | Timestamp Differs? | USE_ROW_TIMESTAMP |
+|-----------|-------------------|-------------------|
+| Regular write | No | SET (0x08) |
+| Regular write | Yes | NOT SET |
+| Tombstone | N/A | NOT SET (always own timestamp) |
+
+**CELL_IS_DELETED Truth Table**:
+
+Tombstone cells have special flag requirements:
+
+| Cell Operation | Flag Bits | Timestamp | Deletion Time | Value |
+|---------------|-----------|-----------|---------------|-------|
+| Regular write | 0x08 (USE_ROW_TIMESTAMP) | Skip | Skip | Present |
+| Regular write (own TS) | 0x00 | Include delta | Skip | Present |
+| Empty string write | 0x08 \| 0x04 (0x0c) | Skip | Skip | Zero-length |
+| Tombstone | 0x01 | Include delta | Include delta | None |
+
+**Example**:
+- Normal cell using row timestamp: `0x08`
+- Empty string using row timestamp: `0x08 | 0x04 = 0x0c`
+- Cell with own timestamp: `0x00` (no flags)
+- Tombstone: `0x01` (no USE_ROW_TIMESTAMP)
+- Expiring cell with row timestamp: `0x08 | 0x02 = 0x0a`
+
+**Critical**: Tombstones MUST NOT use ROW_USE_ROW_TIMESTAMP (0x08). Tombstones always include their own timestamp delta.
+
+### NULL vs Empty Values
+
+The format distinguishes between NULL and empty values:
+
+**NULL Values**:
+- NOT written as cells in the cell data section
+- Represented by absence in the column bitmap (bit = 0)
+- Presence of NULL prevents ROW_HAS_ALL_COLUMNS flag
+
+**Empty Values** (e.g., empty string ''):
+- Written as cells with CELL_HAS_EMPTY_VALUE flag (0x04)
+- Zero-length value (value_length VInt = 0)
+- Counted as "present" in column bitmap (bit = 1)
+
+**Example Column Bitmap**:
+
+For a table with columns [name, age, city]:
+- Row with `name='Alice', age=NULL, city=''`:
+  - Bitmap: `0b101` (name present, age absent, city present)
+  - Cells: Two cells (name, city), city has HAS_EMPTY_VALUE flag
+
+### Delta Encoding
+
+All temporal metadata uses delta encoding against Statistics.db baseline values:
+
+**Timestamp Delta** (signed VInt):
+```
+timestamp_delta = mutation_timestamp - min_timestamp
+```
+
+**TTL Delta** (signed VInt):
+```
+ttl_delta = mutation_ttl - min_ttl
+```
+
+**Local Deletion Time Delta** (unsigned VInt):
+```
+deletion_time_delta = local_deletion_time - min_local_deletion_time
+```
+
+**Constraints**:
+- Timestamp deltas can be negative (if mutation timestamp < min_timestamp)
+- TTL deltas can be negative
+- Deletion time deltas MUST be >= 0 (error if local_deletion_time < min_local_deletion_time)
+
+### Delta Encoding Examples
+
+**Example 1: Simple Row with Timestamp Delta**
+
+Given Statistics.db values:
+```
+min_timestamp = 1000000 (microseconds)
+min_ttl = 0
+min_local_deletion_time = 0
+```
+
+Row with timestamp = 1005000:
+```
+[0x04]                    Row flags: HAS_TIMESTAMP
+[VInt(5000)]              Timestamp delta: 1005000 - 1000000 = 5000
+                          ZigZag(5000) = 10000, encoded as VInt
+```
+
+Byte-level encoding of VInt(5000):
+- ZigZag encoding: `(5000 << 1) = 10000`
+- VInt encoding of 10000: `0x9C 0x78` (2 bytes)
+
+**Example 2: Row with TTL**
+
+Row with timestamp = 1005000, ttl = 7200:
+```
+[0x0c]                    Row flags: HAS_TIMESTAMP | HAS_TTL (0x04 | 0x08)
+[VInt(5000)]              Timestamp delta
+[VInt(7200)]              TTL delta: 7200 - 0 = 7200
+```
+
+**Example 3: Cell Timestamp Delta**
+
+Cell with own timestamp (not using row timestamp):
+```
+[0x00]                    Cell flags: no USE_ROW_TIMESTAMP
+[VInt(2000)]              Timestamp delta from min_timestamp
+[VInt(value_length)]      Value length
+[value_bytes]             Value data
+```
+
+**Example 4: Tombstone Cell**
+
+Tombstone with timestamp = 1003000, local_deletion_time = 1700000100:
+```
+[0x01]                    Cell flags: IS_DELETED (no USE_ROW_TIMESTAMP)
+[VInt(3000)]              Timestamp delta: 1003000 - 1000000
+[VUInt(1700000100)]       Deletion time delta: 1700000100 - 0 (unsigned)
+```
+
+**Example 5: Negative Delta**
+
+If min_timestamp = 2000000 and row timestamp = 1500000:
+```
+[0x04]                    Row flags: HAS_TIMESTAMP
+[VInt(-500000)]           Negative delta
+                          ZigZag(-500000) = 999999, encoded as VInt
+```
+
+### Clustering Prefix Encoding
+
+For tables with clustering keys, values are encoded immediately after row flags:
+
+**Header VInt Construction**:
+- 2 bits per clustering column, packed into a VInt
+- Bits are packed starting from LSB (column 0 uses bits 0-1)
+
+**State Values**:
+- `00` (0): PRESENT - value bytes follow
+- `01` (1): EMPTY - zero-length value (no bytes)
+- `10` (2): NULL - no value (no bytes)
+- `11` (3): Reserved
+
+**Type-Specific Encoding**:
+
+Fixed-width types (no length prefix):
+- `int`: 4 bytes (BE)
+- `bigint`: 8 bytes (BE)
+- `timestamp`: 8 bytes (BE)
+- `uuid`: 16 bytes (raw)
+
+Variable-width types (VInt length + bytes):
+- `text`/`varchar`: VInt(byte_length) + UTF-8 bytes
+- `blob`: VInt(byte_length) + raw bytes
+
+**Example**: Table with clustering keys (timestamp, text):
+
+Row with clustering = (1234567890, "sensor1"):
+```
+[0x00]                              Header VInt: both PRESENT (0b0000)
+[0x00, 0x00, 0x00, 0x00, 0x49, 0x96, 0x02, 0xD2]  timestamp (8 bytes)
+[0x07]                              VInt length (7 bytes)
+[0x73, 0x65, 0x6E, 0x73, 0x6F, 0x72, 0x31]  "sensor1" UTF-8
+```
+
+Row with clustering = (1234567890, NULL):
+```
+[0x02]                              Header VInt: timestamp PRESENT (00), text NULL (10)
+[0x00, 0x00, 0x00, 0x00, 0x49, 0x96, 0x02, 0xD2]  timestamp (8 bytes)
+                                    No text bytes (NULL)
+```
+
+### Column Bitmap Encoding
+
+When ROW_HAS_ALL_COLUMNS is NOT set, a column bitmap is required:
+
+```
+[column_count: VInt]               ← Total columns in schema
+[bitmap_bytes: (count + 7) / 8]    ← Bit = 1 means column present
+```
+
+**Bit Mapping**:
+- Column index determines bit position
+- Bit position = column_index (0-based)
+- Byte index = column_index / 8
+- Bit index within byte = column_index % 8
+
+**Example**: 10 columns, columns [0, 2, 5, 9] have values:
+
+```
+[0x0a]                              VInt(10) - column count
+[0b00100101, 0b00000010]           2 bytes for 10 columns
+                                    Byte 0: bits for columns 0-7
+                                    Byte 1: bits for columns 8-9
+```
+
+Bit positions:
+- Column 0: byte 0, bit 0 = SET
+- Column 2: byte 0, bit 2 = SET
+- Column 5: byte 0, bit 5 = SET
+- Column 9: byte 1, bit 1 = SET
+
+### Cell Data Format
+
+**Regular Cell** (live value):
+```
+[flags: u8]                                        ← Cell flags
+[timestamp_delta: VInt if NOT USE_ROW_TIMESTAMP]  ← Delta from min_timestamp
+[value_length: VInt]                              ← Byte length of value
+[value_bytes]                                     ← Type-specific serialization
+```
+
+**Tombstone Cell** (deleted):
+```
+[flags: u8]                        ← CELL_IS_DELETED (0x01)
+[timestamp_delta: VInt]            ← Delta from min_timestamp (required)
+[deletion_time_delta: VUInt]       ← Delta from min_local_deletion_time
+```
+
+**Note**: Tombstones do NOT have value_length or value_bytes fields. The parser returns immediately after reading the deletion time delta.
+
+### Cell Value Serialization
+
+Type-specific serialization rules for cell values:
+
+| Type | Format | Example |
+|------|--------|---------|
+| boolean | 1 byte | true = 0x01, false = 0x00 |
+| tinyint | 1 byte (signed) | -5 = 0xFB |
+| smallint | 2 bytes BE | 300 = 0x01 0x2C |
+| int | 4 bytes BE | 42 = 0x00 0x00 0x00 0x2A |
+| bigint | 8 bytes BE | 1000 = 0x00 0x00 0x00 0x00 0x00 0x00 0x03 0xE8 |
+| float | 4 bytes BE (IEEE 754) | 3.14f = 0x40 0x48 0xF5 0xC3 |
+| double | 8 bytes BE (IEEE 754) | 3.14 = 0x40 0x09 0x1E 0xB8 0x51 0xEB 0x85 0x1F |
+| text/varchar | UTF-8 bytes (no prefix) | "test" = 0x74 0x65 0x73 0x74 |
+| blob | Raw bytes (no prefix) | Binary data as-is |
+| timestamp | 8 bytes BE (milliseconds) | Epoch milliseconds |
+| date | 4 bytes BE (days + offset) | days - Integer.MIN_VALUE |
+| time | 8 bytes BE (nanoseconds) | Nanoseconds since midnight |
+| uuid/timeuuid | 16 bytes (raw) | UUID bytes |
+| inet | 4 or 16 bytes | IPv4 (4) or IPv6 (16) |
+| varint | Variable-length BE signed | Big integer, no length prefix |
+| decimal | 4 bytes scale + varint | Scale (BE i32) + unscaled value |
+| duration | 3x i32 BE | months, days, nanos |
+
+**Special Cases**:
+- **Empty string**: Zero-length value with CELL_HAS_EMPTY_VALUE flag
+- **NULL**: Not written as a cell (represented by bitmap absence)
+- **Date encoding**: Add Integer.MIN_VALUE to days value for storage
+- **Decimal**: Scale is 4-byte BE i32, followed by varint unscaled value
+
+### Write Operation Flow
+
+Complete write sequence for a partition:
+
+1. **Compute Statistics**: Calculate min_timestamp, min_ttl, min_local_deletion_time from all mutations
+2. **Initialize DataWriter**: Create with computed statistics for delta encoding
+3. **Order Partitions**: Sort by Murmur3 token, then partition key bytes
+4. **For Each Partition**:
+   a. Write partition header
+   b. Order rows by clustering key
+   c. For each row:
+      - Compute row flags
+      - Write clustering prefix (if present)
+      - Compute row_size (body bytes only)
+      - Write row_size VInt
+      - Write prev_size VInt (0 for now)
+      - Write timestamp delta (if HAS_TIMESTAMP)
+      - Write TTL delta (if HAS_TTL)
+      - Write column bitmap (if NOT HAS_ALL_COLUMNS)
+      - Write cells (skip NULLs)
+   d. Write END_OF_PARTITION marker (0x01)
+5. **Finish**: Return complete Data.db bytes
+
+**Critical**: row_size is measured from AFTER the row_size VInt, not from where it starts (Issue #237).
+
+### Validation
+
+This write specification is validated through:
+- **Implementation**: `cqlite-core/src/storage/sstable/writer/data_writer.rs`
+- **Unit Tests**: 20+ tests covering all encoding paths
+- **Round-trip Tests**: Written SSTables are readable by both CQLite and Cassandra's sstabledump
+- **Cassandra Source**: Cross-referenced with `org.apache.cassandra.db.rows.UnfilteredSerializer.java`
+
+### References
+
+- **Implementation**: `cqlite-core/src/storage/sstable/writer/data_writer.rs`
+- **Parser**: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+- **Cassandra Source**: `org.apache.cassandra.db.rows.UnfilteredSerializer` (lines 151-475)
+- **Issue Tracking**: Issue #237 (row_size measurement), Issue #401 (tombstone encoding)
+
 
