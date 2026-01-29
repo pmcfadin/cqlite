@@ -1,0 +1,241 @@
+name: "CI: Cassandra sstableloader Validation"
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'cqlite-core/src/storage/write_engine/**'
+      - 'cqlite-core/src/storage/sstable/writer/**'
+      - 'cqlite-core/tests/sstableloader_integration.rs'
+      - '.github/workflows/cassandra-validation.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_stress_tests:
+        description: 'Run stress tests (10K partitions, wide partitions)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# This workflow validates that SSTables written by CQLite can be loaded
+# into a real Cassandra 5.0 cluster using sstableloader (Issue #396)
+
+jobs:
+  sstableloader-validation:
+    name: sstableloader Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      cassandra:
+        image: cassandra:5.0
+        env:
+          MAX_HEAP_SIZE: 1G
+          HEAP_NEWSIZE: 256m
+        ports:
+          - 9042:9042
+        options: >-
+          --health-cmd "cqlsh -e 'DESCRIBE KEYSPACES'"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cassandra-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cassandra-
+            ${{ runner.os }}-cargo-
+
+      - name: Wait for Cassandra to be ready
+        run: |
+          echo "⏳ Waiting for Cassandra service container..."
+          for i in {1..60}; do
+            if docker exec ${{ job.services.cassandra.id }} cqlsh -e "DESCRIBE KEYSPACES" 2>/dev/null; then
+              echo "✅ Cassandra is ready!"
+              break
+            fi
+            echo "Attempt $i/60: Cassandra not ready yet..."
+            sleep 5
+          done
+
+      - name: Verify Cassandra container
+        run: |
+          echo "::group::Cassandra container info"
+          docker exec ${{ job.services.cassandra.id }} nodetool status
+          docker exec ${{ job.services.cassandra.id }} cqlsh -e "DESCRIBE KEYSPACES"
+          echo "::endgroup::"
+
+      - name: Build CQLite with write support
+        run: |
+          cargo build --release --package cqlite-core --features write-support,docker-integration
+
+      - name: Create test keyspace in Cassandra
+        run: |
+          docker exec ${{ job.services.cassandra.id }} cqlsh -e "
+            CREATE KEYSPACE IF NOT EXISTS sstableloader_test
+            WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};
+          "
+
+      - name: Run Tier 1 - sstableloader Acceptance Tests
+        id: tier1
+        env:
+          CQLITE_CASSANDRA_CONTAINER: ${{ job.services.cassandra.id }}
+        run: |
+          echo "::group::Tier 1: sstableloader Acceptance Tests"
+          cargo test --release --package cqlite-core \
+            --test sstableloader_integration \
+            --features write-support,docker-integration \
+            -- --test-threads=1 \
+            test_sstableloader_single_partition \
+            test_sstableloader_multiple_partitions \
+            test_sstableloader_wide_partition \
+            test_sstableloader_all_types \
+            --nocapture 2>&1 | tee tier1_results.txt
+          echo "::endgroup::"
+
+      - name: Run Tier 2 - CQL Query Verification Tests
+        id: tier2
+        if: success()
+        env:
+          CQLITE_CASSANDRA_CONTAINER: ${{ job.services.cassandra.id }}
+        run: |
+          echo "::group::Tier 2: CQL Query Verification Tests"
+          cargo test --release --package cqlite-core \
+            --test sstableloader_integration \
+            --features write-support,docker-integration \
+            -- --test-threads=1 \
+            test_sstableloader_select_verification \
+            test_sstableloader_ttl_verification \
+            test_sstableloader_timestamp_ordering \
+            test_sstableloader_tombstone_verification \
+            --nocapture 2>&1 | tee tier2_results.txt
+          echo "::endgroup::"
+
+      - name: Run Tier 3 - Stress Tests
+        id: tier3
+        if: |
+          success() &&
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.run_stress_tests == 'true' ||
+           github.event_name == 'push')
+        env:
+          CQLITE_CASSANDRA_CONTAINER: ${{ job.services.cassandra.id }}
+        run: |
+          echo "::group::Tier 3: Stress Tests"
+          cargo test --release --package cqlite-core \
+            --test sstableloader_integration \
+            --features write-support,docker-integration \
+            -- --test-threads=1 \
+            test_sstableloader_10k_partitions \
+            test_sstableloader_wide_partition_1000_rows \
+            test_sstableloader_mixed_operations \
+            --nocapture 2>&1 | tee tier3_results.txt
+          echo "::endgroup::"
+
+      - name: Generate Test Summary
+        if: always()
+        run: |
+          echo "# sstableloader Integration Test Results" > test_summary.md
+          echo "" >> test_summary.md
+          echo "## Tier 1: Acceptance Tests" >> test_summary.md
+          echo "Status: ${{ steps.tier1.outcome }}" >> test_summary.md
+          echo "" >> test_summary.md
+          echo "## Tier 2: Query Verification" >> test_summary.md
+          echo "Status: ${{ steps.tier2.outcome }}" >> test_summary.md
+          echo "" >> test_summary.md
+          echo "## Tier 3: Stress Tests" >> test_summary.md
+          echo "Status: ${{ steps.tier3.outcome }}" >> test_summary.md
+
+      - name: Upload Test Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sstableloader-test-results
+          path: |
+            tier1_results.txt
+            tier2_results.txt
+            tier3_results.txt
+            test_summary.md
+          retention-days: 14
+
+      - name: Comment on PR (Success)
+        if: success() && github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const summary = `## ✅ sstableloader Integration Tests PASSED
+
+            All SSTable format validation tests passed:
+            - ✅ Tier 1: Acceptance Tests - SSTable files created correctly
+            - ✅ Tier 2: Query Verification - Data integrity verified
+            - ${{ steps.tier3.outcome == 'success' && '✅' || '⏭️' }} Tier 3: Stress Tests
+
+            CQLite-written SSTables are compatible with Cassandra 5.0 sstableloader.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Comment on PR (Failure)
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const summary = `## ❌ sstableloader Integration Tests FAILED
+
+            One or more SSTable validation tests failed:
+            - Tier 1 (Acceptance): ${{ steps.tier1.outcome }}
+            - Tier 2 (Query Verification): ${{ steps.tier2.outcome }}
+            - Tier 3 (Stress): ${{ steps.tier3.outcome }}
+
+            ### Debugging Steps:
+            \`\`\`bash
+            # Start Cassandra container
+            docker-compose -f test-data/docker/docker-compose-cassandra5.yml up -d
+
+            # Run tests locally
+            cargo test --package cqlite-core \\
+              --test sstableloader_integration \\
+              --features write-support,docker-integration \\
+              -- --nocapture
+            \`\`\`
+
+            See workflow artifacts for detailed logs.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Fail on test errors
+        if: |
+          steps.tier1.outcome != 'success' ||
+          steps.tier2.outcome != 'success'
+        run: |
+          echo "❌ sstableloader integration tests failed"
+          echo "Tier 1: ${{ steps.tier1.outcome }}"
+          echo "Tier 2: ${{ steps.tier2.outcome }}"
+          exit 1

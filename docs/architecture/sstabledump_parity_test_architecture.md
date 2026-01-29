@@ -1,8 +1,8 @@
 # SSTable Companion File Parity Test Architecture
 
-## Issue #31 Implementation Design
+## Issue #31 / #394 / #396 Implementation Design
 
-This document outlines the comprehensive test architecture for validating zero-diff parity between CQLite's SSTable companion file parsing and Cassandra's sstabledump utility using real Cassandra 5 data.
+This document outlines the comprehensive test architecture for validating zero-diff parity between CQLite's SSTable companion file parsing/writing and Cassandra's sstabledump utility using real Cassandra 5 data.
 
 ## Architecture Overview
 
@@ -12,10 +12,21 @@ The test system is designed with a component-first architecture that provides de
 
 ```
 cqlite-core/tests/
-├── sstabledump_parity_index.rs      # Index.db parity validation
-├── sstabledump_parity_summary.rs    # Summary.db parity validation  
-├── sstabledump_parity_statistics.rs # Statistics.db parity validation
-└── sstabledump_parity_orchestrator.rs # Test coordination and execution
+├── sstabledump_parity_index.rs       # Index.db parity validation (read path)
+├── sstabledump_parity_summary.rs     # Summary.db parity validation (read + write)
+├── sstabledump_parity_statistics.rs  # Statistics.db parity validation (read + write)
+├── sstabledump_parity_data.rs        # Data.db parity validation (write path)
+├── sstableloader_integration.rs      # Cassandra 5.0 sstableloader integration tests
+└── helpers/
+    └── docker.rs                     # Docker/Cassandra container helpers
+```
+
+### CI Workflows
+
+```
+.github/workflows/
+├── sstabledump-parity-gate.yml       # sstabledump parity validation
+└── cassandra-validation.yml          # sstableloader integration tests (Issue #396)
 ```
 
 ## Design Principles
@@ -106,12 +117,50 @@ match resolve_table_to_sstable_path(keyspace, table) {
 - Verify metadata invariants (timestamps > 0, live_rows ≤ total_rows)
 - Compare row counts against metadata.yml with tolerance
 - Test compression ratio and histogram data
+- Validate write-path Statistics.db output
 
 **Key Features**:
 - Invariant validation for data consistency
 - Metadata cross-reference with 5% tolerance
 - Checksum format and integrity verification
 - Timestamp range validation
+- Write parity tests for TTL, deletion times, and format compliance
+
+### Data.db Parity Tests (`sstabledump_parity_data.rs`)
+
+**Responsibilities**:
+- Validate Data.db write-read roundtrip
+- Verify timestamp encoding and delta compression
+- Test TTL and tombstone encoding
+- Compare against JSONL reference files
+
+**Key Features**:
+- Write-read parity validation
+- Timestamp delta encoding tests (100 rows with incrementing timestamps)
+- TTL preservation tests
+- Tombstone (cell and row deletion) encoding
+- JSONL reference file comparison
+
+### sstableloader Integration Tests (`sstableloader_integration.rs`)
+
+**Responsibilities** (Issue #396):
+- Validate CQLite-written SSTables can be loaded into Cassandra 5.0
+- Verify data integrity after loading via CQL queries
+- Test various data patterns (single/multi partition, wide rows, all types)
+
+**Test Tiers**:
+
+| Tier | Description | Tests |
+|------|-------------|-------|
+| **Tier 1** | sstableloader Acceptance | 4 tests - Basic SSTable creation verification |
+| **Tier 2** | CQL Query Verification | 4 tests - SELECT, TTL, timestamp, tombstone queries |
+| **Tier 3** | Stress Tests | 3 tests - 10K partitions, 1K rows, mixed operations |
+
+**Key Features**:
+- Docker-based Cassandra container detection
+- Support for CI environment variable (`CQLITE_CASSANDRA_CONTAINER`)
+- Graceful skip when no Cassandra container available
+- Comprehensive schema coverage (simple types, clustering keys, all CQL types)
 
 ### Orchestrator (`sstabledump_parity_orchestrator.rs`)
 
@@ -159,9 +208,12 @@ validation_artifacts/sstabledump/<keyspace.table>/
 
 ### CI Integration
 - Tests placed in `cqlite-core/tests/` for automatic pickup
-- No workflow changes required
+- Two CI workflows:
+  - `sstabledump-parity-gate.yml` - Runs parity tests on PR/push
+  - `cassandra-validation.yml` - Runs sstableloader tests with Cassandra 5.0 container
 - Relies on unified `datasets-v2` full dataset cache
 - Fast-fail behavior prevents hanging builds
+- sstableloader tests use GitHub Actions services for Cassandra container
 
 ## Error Handling Strategy
 
