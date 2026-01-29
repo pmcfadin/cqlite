@@ -38,6 +38,97 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+/// Sync directory metadata to ensure file entries are persisted
+///
+/// This is critical for crash safety - without syncing the directory,
+/// newly created or renamed files may not appear after a crash.
+fn sync_directory(dir: &Path) -> Result<()> {
+    let dir_file = File::open(dir)
+        .map_err(|e| Error::Storage(format!("Failed to open directory for sync: {}", e)))?;
+
+    dir_file
+        .sync_all()
+        .map_err(|e| Error::Storage(format!("Failed to sync directory: {}", e)))?;
+
+    Ok(())
+}
+
+/// Validate WAL directory path for security
+///
+/// This prevents path traversal attacks and ensures the directory is safe to use.
+///
+/// # Security Checks
+///
+/// - Directory must exist
+/// - Path is canonicalized to resolve symlinks and `..' sequences
+/// - Path must not contain control characters
+///
+/// # Arguments
+///
+/// * `dir` - Directory path to validate
+///
+/// # Errors
+///
+/// Returns an error if validation fails
+fn validate_wal_directory(dir: &Path) -> Result<PathBuf> {
+    // Check directory exists
+    if !dir.exists() {
+        return Err(Error::InvalidPath(format!(
+            "WAL directory does not exist: {:?}",
+            dir
+        )));
+    }
+
+    if !dir.is_dir() {
+        return Err(Error::InvalidPath(format!(
+            "WAL path is not a directory: {:?}",
+            dir
+        )));
+    }
+
+    // Canonicalize to resolve symlinks and '..' sequences
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| Error::InvalidPath(format!("Failed to canonicalize WAL directory: {}", e)))?;
+
+    // Check for control characters in the path
+    let path_str = canonical.to_string_lossy();
+    if path_str.chars().any(|c| c.is_control()) {
+        return Err(Error::InvalidPath(
+            "WAL directory path contains control characters".to_string(),
+        ));
+    }
+
+    Ok(canonical)
+}
+
+/// Set secure file permissions on Unix platforms
+///
+/// This restricts WAL file access to the owner only (0o600)
+#[cfg(unix)]
+fn set_secure_permissions(file: &File) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut perms = file
+        .metadata()
+        .map_err(|e| Error::Storage(format!("Failed to read file metadata: {}", e)))?
+        .permissions();
+
+    perms.set_mode(0o600);
+
+    file.set_permissions(perms)
+        .map_err(|e| Error::Storage(format!("Failed to set file permissions: {}", e)))?;
+
+    Ok(())
+}
+
+/// Set secure file permissions (no-op on non-Unix platforms)
+#[cfg(not(unix))]
+fn set_secure_permissions(_file: &File) -> Result<()> {
+    // No-op on Windows - NTFS permissions are handled differently
+    Ok(())
+}
+
 /// Write-ahead log for crash recovery
 ///
 /// Provides durable storage for mutations before they reach the memtable.
@@ -112,7 +203,9 @@ impl WriteAheadLog {
     /// * `dir` - Directory where the WAL file will be created
     /// * `buffer_size` - Size of the append buffer in bytes
     pub fn create_with_buffer_size(dir: &Path, buffer_size: usize) -> Result<Self> {
-        let path = dir.join(Self::WAL_FILENAME);
+        // Validate directory path for security
+        let validated_dir = validate_wal_directory(dir)?;
+        let path = validated_dir.join(Self::WAL_FILENAME);
 
         let file = OpenOptions::new()
             .create(true)
@@ -120,6 +213,12 @@ impl WriteAheadLog {
             .truncate(true)
             .open(&path)
             .map_err(|e| Error::Storage(format!("Failed to create WAL at {:?}: {}", path, e)))?;
+
+        // Set secure file permissions (Unix: 0o600)
+        set_secure_permissions(&file)?;
+
+        // Sync directory to ensure file entry is persisted
+        sync_directory(&validated_dir)?;
 
         Ok(Self {
             file: BufWriter::with_capacity(buffer_size, file),
@@ -273,7 +372,10 @@ impl WriteAheadLog {
                     break;
                 }
                 Err(e) => {
-                    return Err(Error::Storage(format!("Failed to read WAL header at offset {}: {}", offset, e)));
+                    return Err(Error::Storage(format!(
+                        "Failed to read WAL header at offset {}: {}",
+                        offset, e
+                    )));
                 }
             }
 
@@ -367,6 +469,12 @@ impl WriteAheadLog {
             .set_len(0)
             .map_err(|e| Error::Storage(format!("Failed to truncate WAL: {}", e)))?;
 
+        // Fsync after truncate to ensure operation is persisted
+        self.file
+            .get_ref()
+            .sync_all()
+            .map_err(|e| Error::Storage(format!("Failed to sync after truncate: {}", e)))?;
+
         // Seek to beginning
         self.file
             .get_mut()
@@ -426,6 +534,9 @@ impl WriteAheadLog {
         // Rename the old WAL
         std::fs::rename(&old_path, &archived_path)
             .map_err(|e| Error::Storage(format!("Failed to rename WAL during rotation: {}", e)))?;
+
+        // Sync directory to ensure rename is persisted
+        sync_directory(dir)?;
 
         // Create a new WAL
         Self::create(dir)
@@ -577,10 +688,7 @@ mod tests {
         let wal_path = wal.path().to_path_buf();
         drop(wal);
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(&wal_path)
-            .unwrap();
+        let mut file = OpenOptions::new().write(true).open(&wal_path).unwrap();
         file.seek(SeekFrom::Start(4)).unwrap();
         file.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap();
         file.sync_all().unwrap();
@@ -606,10 +714,7 @@ mod tests {
         drop(wal);
 
         // Truncate the file to simulate incomplete write
-        let file = OpenOptions::new()
-            .write(true)
-            .open(&wal_path)
-            .unwrap();
+        let file = OpenOptions::new().write(true).open(&wal_path).unwrap();
         file.set_len(original_size - 10).unwrap();
         drop(file);
 
@@ -780,5 +885,157 @@ mod tests {
         let wal = WriteAheadLog::create_with_buffer_size(temp_dir.path(), 8192).unwrap();
 
         assert_eq!(wal.buffer_size, 8192);
+    }
+
+    #[test]
+    fn test_wal_directory_sync_on_create() {
+        // Test that directory is synced after WAL creation
+        let temp_dir = TempDir::new().unwrap();
+        let wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        // Verify WAL file exists
+        assert!(wal.path().exists());
+
+        // The sync operation should have completed without error
+        // (we can't directly test that fsync was called, but we verify no error)
+    }
+
+    #[test]
+    fn test_wal_directory_sync_on_rotate() {
+        // Test that directory is synced after WAL rotation
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        let mutation = create_test_mutation(1, "Alice");
+        wal.append(&mutation).unwrap();
+        wal.sync().unwrap();
+
+        // Rotate WAL
+        let new_wal = wal.rotate(temp_dir.path()).unwrap();
+
+        // Verify new WAL exists
+        assert!(new_wal.path().exists());
+
+        // Verify archived WAL exists
+        let archived_files: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("commitlog.wal.")
+            })
+            .collect();
+
+        assert_eq!(archived_files.len(), 1);
+    }
+
+    #[test]
+    fn test_wal_fsync_after_truncate() {
+        // Test that fsync is called after truncate
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        let mutation = create_test_mutation(1, "Alice");
+        wal.append(&mutation).unwrap();
+        wal.sync().unwrap();
+
+        let size_before = wal.size();
+        assert!(size_before > 0);
+
+        // Truncate should sync to disk
+        wal.truncate().unwrap();
+
+        assert_eq!(wal.size(), 0);
+
+        // Verify file is actually empty
+        let metadata = std::fs::metadata(wal.path()).unwrap();
+        assert_eq!(metadata.len(), 0);
+    }
+
+    #[test]
+    fn test_validate_wal_directory_nonexistent() {
+        // Test that validation fails for non-existent directory
+        let nonexistent = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        let result = validate_wal_directory(&nonexistent);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidPath(_)) => {}
+            _ => panic!("Expected InvalidPath error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_wal_directory_is_file() {
+        // Test that validation fails when path is a file, not a directory
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("not_a_dir");
+        File::create(&file_path).unwrap();
+
+        let result = validate_wal_directory(&file_path);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidPath(_)) => {}
+            _ => panic!("Expected InvalidPath error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_wal_directory_valid() {
+        // Test that validation succeeds for valid directory
+        let temp_dir = TempDir::new().unwrap();
+        let result = validate_wal_directory(temp_dir.path());
+
+        assert!(result.is_ok());
+        let canonical = result.unwrap();
+        assert!(canonical.is_absolute());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_wal_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Test that WAL files have secure permissions (0o600) on Unix
+        let temp_dir = TempDir::new().unwrap();
+        let wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        let metadata = std::fs::metadata(wal.path()).unwrap();
+        let permissions = metadata.permissions();
+        let mode = permissions.mode();
+
+        // Check that permissions are 0o600 (owner read/write only)
+        // Mask with 0o777 to get only permission bits
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_wal_create_validates_directory() {
+        // Test that WAL creation validates the directory path
+        let temp_dir = TempDir::new().unwrap();
+
+        // This should succeed because temp_dir exists
+        let result = WriteAheadLog::create(temp_dir.path());
+        assert!(result.is_ok());
+
+        // This should fail because the directory doesn't exist
+        let nonexistent = temp_dir.path().join("nonexistent");
+        let result = WriteAheadLog::create(&nonexistent);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sync_directory_invalid_path() {
+        // Test that sync_directory fails for invalid paths
+        let invalid_path = PathBuf::from("/nonexistent/path");
+        let result = sync_directory(&invalid_path);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(_)) => {}
+            _ => panic!("Expected Storage error"),
+        }
     }
 }
