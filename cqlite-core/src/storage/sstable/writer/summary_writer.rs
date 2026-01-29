@@ -242,11 +242,7 @@ impl SummaryWriter {
         let summary_entries_size = (offset_table_size + entry_data.len()) as u64;
 
         // Write header (24 bytes, big-endian)
-        self.write_header(
-            &mut buffer,
-            self.entries.len() as u32,
-            summary_entries_size,
-        );
+        self.write_header(&mut buffer, self.entries.len() as u32, summary_entries_size);
 
         // Write offset table (LITTLE-ENDIAN!)
         for offset in entry_offsets {
@@ -375,7 +371,10 @@ mod tests {
         // entries_count = 1
         assert_eq!(&bytes[4..8], &[0x00, 0x00, 0x00, 0x01]);
         // summary_entries_size = 16 (4 bytes offset table + 12 bytes entry data)
-        assert_eq!(&bytes[8..16], &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+        assert_eq!(
+            &bytes[8..16],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]
+        );
         // sampling_level = 128
         assert_eq!(&bytes[16..20], &[0x00, 0x00, 0x00, 0x80]);
         // size_at_full_sampling = 1
@@ -439,7 +438,7 @@ mod tests {
 
         // Verify entry 2 data
         assert_eq!(&bytes[42..45], &[0xCC, 0xDD, 0xEE]); // key
-                                                          // position = 1024 (0x0000000000000400)
+                                                         // position = 1024 (0x0000000000000400)
         assert_eq!(
             &bytes[45..53],
             &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00]
@@ -616,7 +615,11 @@ mod tests {
         }
 
         // Verify key sections are correct
-        assert_eq!(&bytes[0..2], &[0x00, 0x00], "Header should start with 0x0000");
+        assert_eq!(
+            &bytes[0..2],
+            &[0x00, 0x00],
+            "Header should start with 0x0000"
+        );
     }
 
     #[test]
@@ -736,7 +739,10 @@ mod tests {
         // Total: 28 bytes = 0x000000000000001C
 
         // Verify summary_entries_size in header (bytes 8-16)
-        assert_eq!(&bytes[8..16], &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1C]);
+        assert_eq!(
+            &bytes[8..16],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1C]
+        );
     }
 
     #[test]
