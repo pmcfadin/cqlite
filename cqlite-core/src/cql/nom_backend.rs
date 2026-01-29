@@ -453,7 +453,8 @@ impl NomParser {
         Err(ParserError::unsupported_feature(
             "nom",
             "INSERT statement parsing requires 'write-support' feature",
-        ).into())
+        )
+        .into())
     }
 
     /// Parse UPDATE statement
@@ -470,7 +471,8 @@ impl NomParser {
         Err(ParserError::unsupported_feature(
             "nom",
             "UPDATE statement parsing requires 'write-support' feature",
-        ).into())
+        )
+        .into())
     }
 
     /// Parse DELETE statement
@@ -487,7 +489,8 @@ impl NomParser {
         Err(ParserError::unsupported_feature(
             "nom",
             "DELETE statement parsing requires 'write-support' feature",
-        ).into())
+        )
+        .into())
     }
 
     /// Parse CREATE TABLE statement using existing nom parser
@@ -681,6 +684,7 @@ mod tests {
         assert_eq!(info.name, "nom");
     }
 
+    #[cfg(feature = "write-support")]
     #[tokio::test]
     async fn test_basic_parsing() {
         let config = ParserConfig::default();

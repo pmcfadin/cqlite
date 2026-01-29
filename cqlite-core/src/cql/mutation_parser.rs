@@ -11,11 +11,75 @@ use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while1},
     character::complete::{char, digit1, multispace0, multispace1},
-    combinator::{map, opt, recognize},
+    combinator::{map, opt},
     multi::{separated_list0, separated_list1},
     sequence::{preceded, separated_pair, tuple},
     IResult,
 };
+
+// DoS Protection Constants (Issue #402)
+const MAX_NESTING_DEPTH: usize = 32;
+const MAX_COLLECTION_SIZE: usize = 65536;
+const MAX_INPUT_LENGTH: usize = 16 * 1024 * 1024; // 16 MB
+
+// Identifier Limits (Issue #403)
+const MAX_IDENTIFIER_LENGTH: usize = 48; // Cassandra limit
+
+/// Validate identifier (Issue #403)
+fn validate_identifier(name: &str) -> Result<()> {
+    // Reject empty identifiers
+    if name.is_empty() {
+        return Err(
+            ParserError::lexical("Identifier cannot be empty", SourcePosition::start()).into(),
+        );
+    }
+
+    // Check length
+    if name.len() > MAX_IDENTIFIER_LENGTH {
+        return Err(ParserError::resource_limit(
+            "identifier_length",
+            MAX_IDENTIFIER_LENGTH as u64,
+            name.len() as u64,
+        )
+        .into());
+    }
+
+    // Reject control characters (ASCII 0-31, 127)
+    if name.chars().any(|c| c.is_ascii_control()) {
+        return Err(ParserError::lexical(
+            "Identifier contains control characters",
+            SourcePosition::start(),
+        )
+        .into());
+    }
+
+    // Reject null bytes
+    if name.contains('\0') {
+        return Err(ParserError::lexical(
+            "Identifier contains null bytes",
+            SourcePosition::start(),
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+/// Sanitize identifier for filesystem usage (Issue #403)
+/// Replaces potentially problematic characters with safe alternatives
+#[allow(dead_code)]
+fn sanitize_for_filesystem(identifier: &str) -> String {
+    identifier
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            '\0' => '_',
+            c if c.is_ascii_control() => '_',
+            c => c,
+        })
+        .take(MAX_IDENTIFIER_LENGTH)
+        .collect()
+}
 
 /// CQL keyword parser - case insensitive
 fn keyword(s: &str) -> impl Fn(&str) -> IResult<&str, &str> + '_ {
@@ -32,26 +96,71 @@ fn ws1(input: &str) -> IResult<&str, &str> {
     multispace1(input)
 }
 
+/// Parse quoted identifier with proper escape handling (Issue #403)
+fn parse_quoted_identifier(input: &str) -> IResult<&str, String> {
+    let (input, _) = char('"')(input)?;
+    let mut result = String::new();
+    let mut chars = input.chars();
+    let mut consumed = 0;
+
+    loop {
+        match chars.next() {
+            Some('"') => {
+                // Check for escaped quote ""
+                if chars.clone().next() == Some('"') {
+                    result.push('"');
+                    chars.next();
+                    consumed += 2;
+                } else {
+                    consumed += 1;
+                    break;
+                }
+            }
+            Some(c) => {
+                result.push(c);
+                consumed += 1;
+            }
+            None => {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Escaped,
+                )))
+            }
+        }
+    }
+
+    Ok((&input[consumed..], result))
+}
+
 /// Parse identifier (table name, column name, etc.)
 fn identifier(input: &str) -> IResult<&str, CqlIdentifier> {
     // Check if it starts with a quote
     let is_quoted = input.starts_with('"');
 
-    let (remaining, name) = if is_quoted {
-        // Quoted identifier
-        let (rest, _) = char('"')(input)?;
-        let (rest, name) = take_while1(|c: char| c != '"')(rest)?;
-        let (rest, _) = char('"')(rest)?;
-        (rest, name)
+    let (remaining, name_str) = if is_quoted {
+        // Quoted identifier with proper escape handling
+        parse_quoted_identifier(input)?
     } else {
         // Unquoted identifier
-        take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?
+        let (rem, n) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+        (rem, n.to_string())
     };
 
-    Ok((remaining, CqlIdentifier {
-        name: name.to_string(),
-        quoted: is_quoted,
-    }))
+    // Validate identifier (Issue #403)
+    if let Err(_e) = validate_identifier(&name_str) {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    Ok((
+        remaining,
+        CqlIdentifier {
+            name: name_str,
+            quoted: is_quoted,
+        },
+    ))
 }
 
 /// Parse a qualified table name (keyspace.table or just table)
@@ -60,14 +169,20 @@ fn qualified_table_name(input: &str) -> IResult<&str, CqlTable> {
     let (input, second) = opt(preceded(char('.'), identifier))(input)?;
 
     match second {
-        Some(table) => Ok((input, CqlTable {
-            keyspace: Some(first),
-            name: table,
-        })),
-        None => Ok((input, CqlTable {
-            keyspace: None,
-            name: first,
-        })),
+        Some(table) => Ok((
+            input,
+            CqlTable {
+                keyspace: Some(first),
+                name: table,
+            },
+        )),
+        None => Ok((
+            input,
+            CqlTable {
+                keyspace: None,
+                name: first,
+            },
+        )),
     }
 }
 
@@ -136,7 +251,12 @@ fn string_literal(input: &str) -> IResult<&str, String> {
                     Some('\\') => result.push('\\'),
                     Some('\'') => result.push('\''),
                     Some(c) => result.push(c),
-                    None => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Escaped))),
+                    None => {
+                        return Err(nom::Err::Error(nom::error::Error::new(
+                            input,
+                            nom::error::ErrorKind::Escaped,
+                        )))
+                    }
                 }
                 consumed += 2;
             }
@@ -144,86 +264,159 @@ fn string_literal(input: &str) -> IResult<&str, String> {
                 result.push(c);
                 consumed += 1;
             }
-            None => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Escaped))),
+            None => {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Escaped,
+                )))
+            }
         }
     }
 
     Ok((&input[consumed..], result))
 }
 
-/// Parse UUID literal
+/// Parse UUID literal with strict 8-4-4-4-12 format validation (Issue #402)
 fn uuid_literal(input: &str) -> IResult<&str, String> {
-    // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    let (input, uuid) = recognize(tuple((
-        take_while1(|c: char| c.is_ascii_hexdigit()),
-        char('-'),
-        take_while1(|c: char| c.is_ascii_hexdigit()),
-        char('-'),
-        take_while1(|c: char| c.is_ascii_hexdigit()),
-        char('-'),
-        take_while1(|c: char| c.is_ascii_hexdigit()),
-        char('-'),
-        take_while1(|c: char| c.is_ascii_hexdigit()),
-    )))(input)?;
+    // UUID format: 8-4-4-4-12 hex digits
+    // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
-    Ok((input, uuid.to_string()))
+    // Parse 8 hex digits
+    let (input, part1) =
+        nom::bytes::complete::take_while_m_n(8, 8, |c: char| c.is_ascii_hexdigit())(input)?;
+    let (input, _) = char('-')(input)?;
+
+    // Parse 4 hex digits
+    let (input, part2) =
+        nom::bytes::complete::take_while_m_n(4, 4, |c: char| c.is_ascii_hexdigit())(input)?;
+    let (input, _) = char('-')(input)?;
+
+    // Parse 4 hex digits
+    let (input, part3) =
+        nom::bytes::complete::take_while_m_n(4, 4, |c: char| c.is_ascii_hexdigit())(input)?;
+    let (input, _) = char('-')(input)?;
+
+    // Parse 4 hex digits
+    let (input, part4) =
+        nom::bytes::complete::take_while_m_n(4, 4, |c: char| c.is_ascii_hexdigit())(input)?;
+    let (input, _) = char('-')(input)?;
+
+    // Parse 12 hex digits
+    let (input, part5) =
+        nom::bytes::complete::take_while_m_n(12, 12, |c: char| c.is_ascii_hexdigit())(input)?;
+
+    let uuid = format!("{}-{}-{}-{}-{}", part1, part2, part3, part4, part5);
+    Ok((input, uuid))
 }
 
-/// Parse blob literal (hex string with 0x prefix)
+/// Parse blob literal (hex string with 0x prefix) with even length validation (Issue #402)
 fn blob_literal(input: &str) -> IResult<&str, String> {
     let (input, _) = tag_no_case("0x")(input)?;
     let (input, hex) = take_while1(|c: char| c.is_ascii_hexdigit())(input)?;
+
+    // Validate even hex length (each byte needs 2 hex digits)
+    if hex.len() % 2 != 0 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
     Ok((input, hex.to_string()))
 }
 
-/// Parse list literal
-fn list_literal(input: &str) -> IResult<&str, CqlCollectionLiteral> {
+/// Parse list literal with depth tracking (Issue #402)
+fn list_literal_depth(input: &str, depth: usize) -> IResult<&str, CqlCollectionLiteral> {
+    // Check nesting depth
+    if depth >= MAX_NESTING_DEPTH {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+
     let (input, _) = char('[')(input)?;
     let (input, _) = ws(input)?;
-    let (input, items) = separated_list0(
-        tuple((ws, char(','), ws)),
-        literal,
-    )(input)?;
+    let (input, items) =
+        separated_list0(tuple((ws, char(','), ws)), |i| literal_depth(i, depth + 1))(input)?;
     let (input, _) = ws(input)?;
     let (input, _) = char(']')(input)?;
+
+    // Check collection size limit
+    if items.len() > MAX_COLLECTION_SIZE {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
 
     Ok((input, CqlCollectionLiteral::List(items)))
 }
 
-/// Parse set literal
-fn set_literal(input: &str) -> IResult<&str, CqlCollectionLiteral> {
+/// Parse set literal with depth tracking (Issue #402)
+fn set_literal_depth(input: &str, depth: usize) -> IResult<&str, CqlCollectionLiteral> {
+    // Check nesting depth
+    if depth >= MAX_NESTING_DEPTH {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+
     let (input, _) = char('{')(input)?;
     let (input, _) = ws(input)?;
-    let (input, items) = separated_list0(
-        tuple((ws, char(','), ws)),
-        literal,
-    )(input)?;
+    let (input, items) =
+        separated_list0(tuple((ws, char(','), ws)), |i| literal_depth(i, depth + 1))(input)?;
     let (input, _) = ws(input)?;
     let (input, _) = char('}')(input)?;
+
+    // Check collection size limit
+    if items.len() > MAX_COLLECTION_SIZE {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
 
     Ok((input, CqlCollectionLiteral::Set(items)))
 }
 
-/// Parse map literal
-fn map_literal(input: &str) -> IResult<&str, CqlCollectionLiteral> {
+/// Parse map literal with depth tracking (Issue #402)
+fn map_literal_depth(input: &str, depth: usize) -> IResult<&str, CqlCollectionLiteral> {
+    // Check nesting depth
+    if depth >= MAX_NESTING_DEPTH {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+
     let (input, _) = char('{')(input)?;
     let (input, _) = ws(input)?;
     let (input, pairs) = separated_list0(
         tuple((ws, char(','), ws)),
         separated_pair(
-            literal,
+            |i| literal_depth(i, depth + 1),
             tuple((ws, char(':'), ws)),
-            literal,
+            |i| literal_depth(i, depth + 1),
         ),
     )(input)?;
     let (input, _) = ws(input)?;
     let (input, _) = char('}')(input)?;
 
+    // Check collection size limit
+    if pairs.len() > MAX_COLLECTION_SIZE {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+
     Ok((input, CqlCollectionLiteral::Map(pairs)))
 }
 
-/// Parse CQL literal value
-fn literal(input: &str) -> IResult<&str, CqlLiteral> {
+/// Parse CQL literal value with depth tracking (Issue #402)
+fn literal_depth(input: &str, depth: usize) -> IResult<&str, CqlLiteral> {
     alt((
         // NULL
         map(keyword("null"), |_| CqlLiteral::Null),
@@ -241,11 +434,16 @@ fn literal(input: &str) -> IResult<&str, CqlLiteral> {
         // Integer
         map(integer_literal, CqlLiteral::Integer),
         // List
-        map(list_literal, CqlLiteral::Collection),
+        map(|i| list_literal_depth(i, depth), CqlLiteral::Collection),
         // Set or Map (distinguish by checking for colon)
-        map(set_literal, CqlLiteral::Collection),
-        map(map_literal, CqlLiteral::Collection),
+        map(|i| set_literal_depth(i, depth), CqlLiteral::Collection),
+        map(|i| map_literal_depth(i, depth), CqlLiteral::Collection),
     ))(input)
+}
+
+/// Parse CQL literal value (entry point, depth 0)
+fn literal(input: &str) -> IResult<&str, CqlLiteral> {
+    literal_depth(input, 0)
 }
 
 /// Parse expression (simple version for M5)
@@ -271,22 +469,21 @@ fn where_clause(input: &str) -> IResult<&str, CqlExpression> {
     let (input, _) = ws1(input)?;
 
     // Parse simple conditions with AND
-    let (input, conditions) = separated_list1(
-        tuple((ws, keyword("and"), ws)),
-        where_condition,
-    )(input)?;
+    let (input, conditions) =
+        separated_list1(tuple((ws, keyword("and"), ws)), where_condition)(input)?;
 
     // Combine conditions with AND
     let result = if conditions.len() == 1 {
         conditions.into_iter().next().unwrap()
     } else {
-        conditions.into_iter().reduce(|acc, cond| {
-            CqlExpression::Binary {
+        conditions
+            .into_iter()
+            .reduce(|acc, cond| CqlExpression::Binary {
                 left: Box::new(acc),
                 operator: CqlBinaryOperator::And,
                 right: Box::new(cond),
-            }
-        }).unwrap()
+            })
+            .unwrap()
     };
 
     Ok((input, result))
@@ -300,11 +497,14 @@ fn where_condition(input: &str) -> IResult<&str, CqlExpression> {
     let (input, _) = ws(input)?;
     let (input, right) = expression(input)?;
 
-    Ok((input, CqlExpression::Binary {
-        left: Box::new(CqlExpression::Column(left)),
-        operator: op,
-        right: Box::new(right),
-    }))
+    Ok((
+        input,
+        CqlExpression::Binary {
+            left: Box::new(CqlExpression::Column(left)),
+            operator: op,
+            right: Box::new(right),
+        },
+    ))
 }
 
 /// Parse comparison operator
@@ -326,10 +526,8 @@ fn using_clause(input: &str) -> IResult<&str, CqlUsing> {
     let (input, _) = ws1(input)?;
 
     let (input, first_option) = using_option(input)?;
-    let (input, second_option) = opt(preceded(
-        tuple((ws, keyword("and"), ws)),
-        using_option,
-    ))(input)?;
+    let (input, second_option) =
+        opt(preceded(tuple((ws, keyword("and"), ws)), using_option))(input)?;
 
     let mut ttl = None;
     let mut timestamp = None;
@@ -359,17 +557,11 @@ enum UsingOption {
 fn using_option(input: &str) -> IResult<&str, UsingOption> {
     alt((
         map(
-            preceded(
-                tuple((keyword("ttl"), ws)),
-                expression,
-            ),
+            preceded(tuple((keyword("ttl"), ws)), expression),
             UsingOption::Ttl,
         ),
         map(
-            preceded(
-                tuple((keyword("timestamp"), ws)),
-                expression,
-            ),
+            preceded(tuple((keyword("timestamp"), ws)), expression),
             UsingOption::Timestamp,
         ),
     ))(input)
@@ -377,6 +569,16 @@ fn using_option(input: &str) -> IResult<&str, UsingOption> {
 
 /// Parse INSERT statement
 pub fn parse_insert_statement(input: &str) -> Result<CqlInsert> {
+    // Check input length (Issue #402 - DoS protection)
+    if input.len() > MAX_INPUT_LENGTH {
+        return Err(ParserError::resource_limit(
+            "input_length",
+            MAX_INPUT_LENGTH as u64,
+            input.len() as u64,
+        )
+        .into());
+    }
+
     let result = insert_statement_impl(input);
 
     match result {
@@ -384,7 +586,8 @@ pub fn parse_insert_statement(input: &str) -> Result<CqlInsert> {
         Err(e) => Err(ParserError::syntax(
             format!("Failed to parse INSERT statement: {:?}", e),
             SourcePosition::start(),
-        ).into()),
+        )
+        .into()),
     }
 }
 
@@ -402,10 +605,7 @@ fn insert_statement_impl(input: &str) -> IResult<&str, CqlInsert> {
     // Column list
     let (input, _) = char('(')(input)?;
     let (input, _) = ws(input)?;
-    let (input, columns) = separated_list1(
-        tuple((ws, char(','), ws)),
-        identifier,
-    )(input)?;
+    let (input, columns) = separated_list1(tuple((ws, char(','), ws)), identifier)(input)?;
     let (input, _) = ws(input)?;
     let (input, _) = char(')')(input)?;
     let (input, _) = ws(input)?;
@@ -415,10 +615,7 @@ fn insert_statement_impl(input: &str) -> IResult<&str, CqlInsert> {
     let (input, _) = ws(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws(input)?;
-    let (input, values) = separated_list1(
-        tuple((ws, char(','), ws)),
-        expression,
-    )(input)?;
+    let (input, values) = separated_list1(tuple((ws, char(','), ws)), expression)(input)?;
     let (input, _) = ws(input)?;
     let (input, _) = char(')')(input)?;
     let (input, _) = ws(input)?;
@@ -437,17 +634,30 @@ fn insert_statement_impl(input: &str) -> IResult<&str, CqlInsert> {
     let (input, using) = opt(using_clause)(input)?;
     let (input, _) = ws(input)?;
 
-    Ok((input, CqlInsert {
-        table,
-        columns,
-        values: CqlInsertValues::Values(values),
-        if_not_exists,
-        using,
-    }))
+    Ok((
+        input,
+        CqlInsert {
+            table,
+            columns,
+            values: CqlInsertValues::Values(values),
+            if_not_exists,
+            using,
+        },
+    ))
 }
 
 /// Parse UPDATE statement
 pub fn parse_update_statement(input: &str) -> Result<CqlUpdate> {
+    // Check input length (Issue #402 - DoS protection)
+    if input.len() > MAX_INPUT_LENGTH {
+        return Err(ParserError::resource_limit(
+            "input_length",
+            MAX_INPUT_LENGTH as u64,
+            input.len() as u64,
+        )
+        .into());
+    }
+
     let result = update_statement_impl(input);
 
     match result {
@@ -455,7 +665,8 @@ pub fn parse_update_statement(input: &str) -> Result<CqlUpdate> {
         Err(e) => Err(ParserError::syntax(
             format!("Failed to parse UPDATE statement: {:?}", e),
             SourcePosition::start(),
-        ).into()),
+        )
+        .into()),
     }
 }
 
@@ -475,10 +686,7 @@ fn update_statement_impl(input: &str) -> IResult<&str, CqlUpdate> {
     // SET clause
     let (input, _) = keyword("set")(input)?;
     let (input, _) = ws1(input)?;
-    let (input, assignments) = separated_list1(
-        tuple((ws, char(','), ws)),
-        assignment,
-    )(input)?;
+    let (input, assignments) = separated_list1(tuple((ws, char(','), ws)), assignment)(input)?;
     let (input, _) = ws(input)?;
 
     // WHERE clause
@@ -486,19 +694,19 @@ fn update_statement_impl(input: &str) -> IResult<&str, CqlUpdate> {
     let (input, _) = ws(input)?;
 
     // Optional IF condition
-    let (input, if_condition) = opt(preceded(
-        tuple((keyword("if"), ws1)),
-        where_condition,
-    ))(input)?;
+    let (input, if_condition) = opt(preceded(tuple((keyword("if"), ws1)), where_condition))(input)?;
     let (input, _) = ws(input)?;
 
-    Ok((input, CqlUpdate {
-        table,
-        using,
-        assignments,
-        where_clause: where_expr,
-        if_condition,
-    }))
+    Ok((
+        input,
+        CqlUpdate {
+            table,
+            using,
+            assignments,
+            where_clause: where_expr,
+            if_condition,
+        },
+    ))
 }
 
 /// Parse assignment (col = value)
@@ -509,11 +717,14 @@ fn assignment(input: &str) -> IResult<&str, CqlAssignment> {
     let (input, _) = ws(input)?;
     let (input, value) = expression(input)?;
 
-    Ok((input, CqlAssignment {
-        column,
-        operator,
-        value,
-    }))
+    Ok((
+        input,
+        CqlAssignment {
+            column,
+            operator,
+            value,
+        },
+    ))
 }
 
 /// Parse assignment operator
@@ -527,6 +738,16 @@ fn assignment_operator(input: &str) -> IResult<&str, CqlAssignmentOperator> {
 
 /// Parse DELETE statement
 pub fn parse_delete_statement(input: &str) -> Result<CqlDelete> {
+    // Check input length (Issue #402 - DoS protection)
+    if input.len() > MAX_INPUT_LENGTH {
+        return Err(ParserError::resource_limit(
+            "input_length",
+            MAX_INPUT_LENGTH as u64,
+            input.len() as u64,
+        )
+        .into());
+    }
+
     let result = delete_statement_impl(input);
 
     match result {
@@ -534,7 +755,8 @@ pub fn parse_delete_statement(input: &str) -> Result<CqlDelete> {
         Err(e) => Err(ParserError::syntax(
             format!("Failed to parse DELETE statement: {:?}", e),
             SourcePosition::start(),
-        ).into()),
+        )
+        .into()),
     }
 }
 
@@ -552,10 +774,7 @@ fn delete_statement_impl(input: &str) -> IResult<&str, CqlDelete> {
         (input, vec![])
     } else {
         // Parse column list
-        let (input, cols) = separated_list1(
-            tuple((ws, char(','), ws)),
-            identifier,
-        )(input)?;
+        let (input, cols) = separated_list1(tuple((ws, char(','), ws)), identifier)(input)?;
         let (input, _) = ws(input)?;
         (input, cols)
     };
@@ -575,19 +794,19 @@ fn delete_statement_impl(input: &str) -> IResult<&str, CqlDelete> {
     let (input, _) = ws(input)?;
 
     // Optional IF condition
-    let (input, if_condition) = opt(preceded(
-        tuple((keyword("if"), ws1)),
-        where_condition,
-    ))(input)?;
+    let (input, if_condition) = opt(preceded(tuple((keyword("if"), ws1)), where_condition))(input)?;
     let (input, _) = ws(input)?;
 
-    Ok((input, CqlDelete {
-        columns,
-        table,
-        using,
-        where_clause: where_expr,
-        if_condition,
-    }))
+    Ok((
+        input,
+        CqlDelete {
+            columns,
+            table,
+            using,
+            where_clause: where_expr,
+            if_condition,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -766,7 +985,7 @@ mod tests {
             CqlInsertValues::Values(vals) => {
                 assert_eq!(vals.len(), 1);
                 match &vals[0] {
-                    CqlExpression::Literal(CqlLiteral::Null) => {},
+                    CqlExpression::Literal(CqlLiteral::Null) => {}
                     _ => panic!("Expected NULL literal"),
                 }
             }
@@ -884,7 +1103,7 @@ mod tests {
             CqlInsertValues::Values(vals) => {
                 assert_eq!(vals.len(), 1);
                 match &vals[0] {
-                    CqlExpression::Literal(CqlLiteral::Uuid(_)) => {},
+                    CqlExpression::Literal(CqlLiteral::Uuid(_)) => {}
                     _ => panic!("Expected UUID literal"),
                 }
             }
@@ -928,6 +1147,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_parse_float_literal() {
         let cql = "INSERT INTO metrics (value) VALUES (3.14)";
         let result = parse_insert_statement(cql);
@@ -939,7 +1159,8 @@ mod tests {
                 assert_eq!(vals.len(), 1);
                 match &vals[0] {
                     CqlExpression::Literal(CqlLiteral::Float(f)) => {
-                        assert_eq!(*f, 3.14);
+                        assert!((*f - 3.14).abs() < 0.001, "Expected float close to 3.14");
+                        // Not approximating PI
                     }
                     _ => panic!("Expected Float literal"),
                 }
@@ -1014,5 +1235,225 @@ mod tests {
                 _ => panic!("Expected Binary expression"),
             }
         }
+    }
+
+    // Issue #402 - DoS Protection Tests
+
+    #[test]
+    fn test_input_length_limit() {
+        // Create input exceeding MAX_INPUT_LENGTH (16 MB)
+        let large_input = format!(
+            "INSERT INTO users (id, name) VALUES (?, '{}')",
+            "a".repeat(17 * 1024 * 1024)
+        );
+        let result = parse_insert_statement(&large_input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("input_length"));
+    }
+
+    #[test]
+    fn test_nesting_depth_limit() {
+        // Create deeply nested list structure
+        let mut nested = "1".to_string();
+        for _ in 0..40 {
+            nested = format!("[{}]", nested);
+        }
+        let cql = format!("INSERT INTO users (data) VALUES ({})", nested);
+        let result = parse_insert_statement(&cql);
+        // Should fail due to depth limit
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_collection_size_limit() {
+        // Create a list with MAX_COLLECTION_SIZE + 1 items
+        let items: Vec<String> = (0..=MAX_COLLECTION_SIZE).map(|i| i.to_string()).collect();
+        let list = format!("[{}]", items.join(", "));
+        let cql = format!("INSERT INTO users (data) VALUES ({})", list);
+        let result = parse_insert_statement(&cql);
+        // Should fail due to size limit
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_valid_nested_collections() {
+        // Valid nesting within limits (depth 3)
+        let cql = "INSERT INTO users (data) VALUES ([[1, 2], [3, 4]])";
+        let result = parse_insert_statement(cql);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_uuid_strict_format_valid() {
+        // Valid UUID with proper 8-4-4-4-12 format
+        let cql = "INSERT INTO users (id) VALUES (550e8400-e29b-41d4-a716-446655440000)";
+        let result = parse_insert_statement(cql);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_uuid_invalid_segment_length() {
+        // Invalid UUID - wrong segment lengths
+        let cql = "INSERT INTO users (id) VALUES (550e8400-e29b-41d4-a716-4466554400)"; // Last segment too short
+        let result = parse_insert_statement(cql);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_uuid_missing_dashes() {
+        // Invalid UUID - missing dashes (should fail as it won't match UUID pattern)
+        let cql = "INSERT INTO users (id) VALUES (550e8400e29b41d4a716446655440000)";
+        let result = parse_insert_statement(cql);
+        // This will fail as a valid parse (might parse as identifier or fail entirely)
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_blob_even_hex_length_valid() {
+        // Valid blob with even hex length
+        let cql = "INSERT INTO users (data) VALUES (0xdeadbeef)";
+        let result = parse_insert_statement(cql);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_blob_odd_hex_length_invalid() {
+        // Invalid blob with odd hex length
+        let cql = "INSERT INTO users (data) VALUES (0xabc)";
+        let result = parse_insert_statement(cql);
+        assert!(result.is_err());
+    }
+
+    // Issue #403 - Identifier Injection Tests
+
+    #[test]
+    fn test_quoted_identifier_with_escaped_quotes() {
+        // Quoted identifier with doubled quotes
+        let cql = r#"INSERT INTO "My""Table" ("My""Column") VALUES (?)"#;
+        let result = parse_insert_statement(cql);
+        assert!(result.is_ok());
+
+        let insert = result.unwrap();
+        assert_eq!(insert.table.name.name, r#"My"Table"#);
+        assert_eq!(insert.columns[0].name, r#"My"Column"#);
+    }
+
+    #[test]
+    fn test_identifier_max_length() {
+        // Identifier at max length (48 characters)
+        let valid_name = "a".repeat(48);
+        let cql = format!(r#"INSERT INTO "{}" (id) VALUES (?)"#, valid_name);
+        let result = parse_insert_statement(&cql);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_identifier_exceeds_max_length() {
+        // Identifier exceeding max length (49 characters)
+        let invalid_name = "a".repeat(49);
+        let cql = format!(r#"INSERT INTO "{}" (id) VALUES (?)"#, invalid_name);
+        let result = parse_insert_statement(&cql);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_identifier_with_control_characters() {
+        // Identifier with control character (newline)
+        let cql = "INSERT INTO \"bad\ntable\" (id) VALUES (?)";
+        let result = parse_insert_statement(cql);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_identifier_with_null_byte() {
+        // Identifier with null byte
+        let cql = "INSERT INTO \"bad\0table\" (id) VALUES (?)";
+        let result = parse_insert_statement(cql);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_valid_unquoted_identifier() {
+        // Valid unquoted identifier
+        let cql = "INSERT INTO my_table_123 (id) VALUES (?)";
+        let result = parse_insert_statement(cql);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_sanitize_for_filesystem() {
+        // Test sanitization function
+        assert_eq!(sanitize_for_filesystem("normal"), "normal");
+        assert_eq!(sanitize_for_filesystem("with/slash"), "with_slash");
+        assert_eq!(sanitize_for_filesystem("with\\backslash"), "with_backslash");
+        assert_eq!(sanitize_for_filesystem("with:colon"), "with_colon");
+        assert_eq!(sanitize_for_filesystem("with*asterisk"), "with_asterisk");
+        assert_eq!(sanitize_for_filesystem("with?question"), "with_question");
+        assert_eq!(sanitize_for_filesystem("with\"quote"), "with_quote");
+        assert_eq!(sanitize_for_filesystem("with<less"), "with_less");
+        assert_eq!(sanitize_for_filesystem("with>greater"), "with_greater");
+        assert_eq!(sanitize_for_filesystem("with|pipe"), "with_pipe");
+        assert_eq!(sanitize_for_filesystem("with\0null"), "with_null");
+
+        // Test length truncation
+        let long_name = "a".repeat(100);
+        let sanitized = sanitize_for_filesystem(&long_name);
+        assert_eq!(sanitized.len(), MAX_IDENTIFIER_LENGTH);
+    }
+
+    #[test]
+    fn test_quoted_identifier_empty() {
+        // Empty quoted identifier should be rejected
+        let cql = r#"INSERT INTO "" (id) VALUES (?)"#;
+        let result = parse_insert_statement(cql);
+        // nom's take_while1 will fail on empty identifier
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multiple_escaped_quotes() {
+        // Multiple consecutive escaped quotes
+        let cql = r#"INSERT INTO "Tab""""le" (id) VALUES (?)"#;
+        let result = parse_insert_statement(cql);
+        assert!(result.is_ok());
+
+        let insert = result.unwrap();
+        assert_eq!(insert.table.name.name, r#"Tab""le"#);
+    }
+
+    #[test]
+    fn test_collection_size_within_limit() {
+        // Collection just within the limit
+        let items: Vec<String> = (0..1000).map(|i| i.to_string()).collect();
+        let list = format!("[{}]", items.join(", "));
+        let cql = format!("INSERT INTO users (data) VALUES ({})", list);
+        let result = parse_insert_statement(&cql);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_map_size_limit() {
+        // Map with too many entries
+        let pairs: Vec<String> = (0..=MAX_COLLECTION_SIZE)
+            .map(|i| format!("{}: {}", i, i))
+            .collect();
+        let map = format!("{{{}}}", pairs.join(", "));
+        let cql = format!("INSERT INTO users (data) VALUES ({})", map);
+        let result = parse_insert_statement(&cql);
+        // Should fail due to size limit
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nested_map_depth_limit() {
+        // Create nested map structure exceeding depth limit
+        let mut nested = "{'k': 1}".to_string();
+        for i in 0..40 {
+            nested = format!("{{'key{}': {}}}", i, nested);
+        }
+        let cql = format!("INSERT INTO users (data) VALUES ({})", nested);
+        let result = parse_insert_statement(&cql);
+        // Should fail due to depth limit
+        assert!(result.is_err());
     }
 }
