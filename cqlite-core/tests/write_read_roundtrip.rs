@@ -31,22 +31,22 @@
 
 #![cfg(feature = "write-support")]
 
-#[path = "write_read_roundtrip/statistics.rs"]
-mod statistics;
-#[path = "write_read_roundtrip/index.rs"]
-mod index;
-#[path = "write_read_roundtrip/filter.rs"]
-mod filter;
-#[path = "write_read_roundtrip/summary.rs"]
-mod summary;
-#[path = "write_read_roundtrip/data_single.rs"]
-mod data_single;
 #[path = "write_read_roundtrip/data_multi.rs"]
 mod data_multi;
-#[path = "write_read_roundtrip/type_coverage.rs"]
-mod type_coverage;
+#[path = "write_read_roundtrip/data_single.rs"]
+mod data_single;
 #[path = "write_read_roundtrip/edge_cases.rs"]
 mod edge_cases;
+#[path = "write_read_roundtrip/filter.rs"]
+mod filter;
+#[path = "write_read_roundtrip/index.rs"]
+mod index;
+#[path = "write_read_roundtrip/statistics.rs"]
+mod statistics;
+#[path = "write_read_roundtrip/summary.rs"]
+mod summary;
+#[path = "write_read_roundtrip/type_coverage.rs"]
+mod type_coverage;
 
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::write_engine::{
@@ -244,7 +244,14 @@ pub fn create_clustered_mutation(pk: i32, ck: &str, data: &str, timestamp: i64) 
         value: Value::Text(data.to_string()),
     }];
 
-    Mutation::new(table_id, partition_key, clustering_key, ops, timestamp, None)
+    Mutation::new(
+        table_id,
+        partition_key,
+        clustering_key,
+        ops,
+        timestamp,
+        None,
+    )
 }
 
 /// Create a comprehensive mutation with all supported types

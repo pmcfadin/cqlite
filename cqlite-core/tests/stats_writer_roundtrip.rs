@@ -1,7 +1,9 @@
 //! Integration test: Write Statistics.db and verify it can be parsed
 
-use cqlite_core::storage::sstable::writer::{StatisticsWriter, StatisticsMetadata};
+#![cfg(feature = "write-support")]
+
 use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
+use cqlite_core::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
 
 #[test]
 fn test_statistics_roundtrip() {
@@ -35,12 +37,16 @@ fn test_statistics_roundtrip() {
     let file_data = std::fs::read(&stats_path).expect("Should read file");
     let result = parse_statistics_with_fallback(&file_data);
 
-    assert!(result.is_ok(), "Should parse written Statistics.db: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Should parse written Statistics.db: {:?}",
+        result
+    );
 
     let (_remaining, stats) = result.unwrap();
-    
+
     // Verify timestamp stats were preserved
     assert_eq!(stats.timestamp_stats.min_timestamp, 1000000);
-    
+
     println!("✓ Statistics.db roundtrip test passed");
 }

@@ -116,7 +116,14 @@ async fn test_edge_large_partition() {
             column: "data".to_string(),
             value: Value::Text(format!("Data for row {}", i)),
         }];
-        let mutation = Mutation::new(table_id.clone(), pk, Some(ck), ops, 1000000 + i as i64, None);
+        let mutation = Mutation::new(
+            table_id.clone(),
+            pk,
+            Some(ck),
+            ops,
+            1000000 + i as i64,
+            None,
+        );
         engine
             .write_async(mutation)
             .await
@@ -177,7 +184,14 @@ async fn test_edge_unicode() {
             column: "data".to_string(),
             value: Value::Text(format!("Unicode data: {}", unicode_str)),
         }];
-        let mutation = Mutation::new(table_id.clone(), pk, Some(ck), ops, 1000000 + i as i64, None);
+        let mutation = Mutation::new(
+            table_id.clone(),
+            pk,
+            Some(ck),
+            ops,
+            1000000 + i as i64,
+            None,
+        );
         engine
             .write_async(mutation)
             .await
@@ -209,14 +223,14 @@ async fn test_edge_special_characters() {
 
     // Test various special characters
     let special_strings = [
-        "\t\n\r",                               // Control characters
-        "\"quotes\" and 'apostrophes'",        // Quotes
-        "back\\slash",                          // Backslash
-        "null\0byte",                           // Null byte
-        "<html>&amp;</html>",                   // HTML-like
-        "path/to/file.txt",                     // Path-like
-        "a b  c   d",                           // Multiple spaces
-        "",                                     // Empty string
+        "\t\n\r",                       // Control characters
+        "\"quotes\" and 'apostrophes'", // Quotes
+        "back\\slash",                  // Backslash
+        "null\0byte",                   // Null byte
+        "<html>&amp;</html>",           // HTML-like
+        "path/to/file.txt",             // Path-like
+        "a b  c   d",                   // Multiple spaces
+        "",                             // Empty string
     ];
 
     let table_id = TableId::new("test_edge", "edge_cases");
@@ -227,7 +241,14 @@ async fn test_edge_special_characters() {
             column: "data".to_string(),
             value: Value::Text(special_str.to_string()),
         }];
-        let mutation = Mutation::new(table_id.clone(), pk, Some(ck), ops, 1000000 + i as i64, None);
+        let mutation = Mutation::new(
+            table_id.clone(),
+            pk,
+            Some(ck),
+            ops,
+            1000000 + i as i64,
+            None,
+        );
         engine
             .write_async(mutation)
             .await
@@ -264,18 +285,15 @@ async fn test_edge_extreme_pk_values() {
     let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
 
     // Test extreme integer partition keys
-    let extreme_pks = [
-        i32::MIN,
-        i32::MIN + 1,
-        -1,
-        0,
-        1,
-        i32::MAX - 1,
-        i32::MAX,
-    ];
+    let extreme_pks = [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX];
 
     for (i, &pk_val) in extreme_pks.iter().enumerate() {
-        let mutation = create_simple_mutation(pk_val, &format!("user_{}", pk_val), i as i32, 1000000 + i as i64);
+        let mutation = create_simple_mutation(
+            pk_val,
+            &format!("user_{}", pk_val),
+            i as i32,
+            1000000 + i as i64,
+        );
         engine
             .write_async(mutation)
             .await
@@ -349,7 +367,7 @@ async fn test_edge_long_clustering_key() {
     let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
 
     // Create a very long clustering key (just under typical limits)
-    let long_ck = "A".repeat(200);  // 200 bytes
+    let long_ck = "A".repeat(200); // 200 bytes
 
     let table_id = TableId::new("test_edge", "edge_cases");
     let pk = PartitionKey::single("pk", Value::Integer(1));
@@ -401,7 +419,14 @@ async fn test_edge_ttl_values() {
             column: "data".to_string(),
             value: Value::Text(format!("TTL={}", ttl)),
         }];
-        let mutation = Mutation::new(table_id.clone(), pk, Some(ck), ops, 1000000 + i as i64, Some(ttl));
+        let mutation = Mutation::new(
+            table_id.clone(),
+            pk,
+            Some(ck),
+            ops,
+            1000000 + i as i64,
+            Some(ttl),
+        );
         engine
             .write_async(mutation)
             .await
@@ -449,7 +474,14 @@ async fn test_edge_delete_operations() {
         column: "data".to_string(),
         value: Value::Text("Original data".to_string()),
     }];
-    let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck.clone()), ops, 1000000, None);
+    let mutation = Mutation::new(
+        table_id.clone(),
+        pk.clone(),
+        Some(ck.clone()),
+        ops,
+        1000000,
+        None,
+    );
     engine
         .write_async(mutation)
         .await
@@ -459,7 +491,14 @@ async fn test_edge_delete_operations() {
     let delete_ops = vec![CellOperation::Delete {
         column: "data".to_string(),
     }];
-    let delete_mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), delete_ops, 1000001, None);
+    let delete_mutation = Mutation::new(
+        table_id.clone(),
+        pk.clone(),
+        Some(ck),
+        delete_ops,
+        1000001,
+        None,
+    );
     engine
         .write_async(delete_mutation)
         .await
@@ -469,7 +508,8 @@ async fn test_edge_delete_operations() {
     let pk2 = PartitionKey::single("pk", Value::Integer(2));
     let ck2 = ClusteringKey::single("ck", Value::Text("row2".to_string()));
     let delete_row_ops = vec![CellOperation::DeleteRow];
-    let delete_row_mutation = Mutation::new(table_id, pk2, Some(ck2), delete_row_ops, 1000002, None);
+    let delete_row_mutation =
+        Mutation::new(table_id, pk2, Some(ck2), delete_row_ops, 1000002, None);
     engine
         .write_async(delete_row_mutation)
         .await

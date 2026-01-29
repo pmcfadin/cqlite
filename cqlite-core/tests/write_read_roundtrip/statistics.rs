@@ -80,7 +80,10 @@ fn test_statistics_roundtrip_timestamp_range() {
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
     let result = parse_statistics_with_fallback(&file_data);
 
-    assert!(result.is_ok(), "Should parse Statistics.db with timestamp range");
+    assert!(
+        result.is_ok(),
+        "Should parse Statistics.db with timestamp range"
+    );
 
     let (_remaining, stats) = result.unwrap();
 
@@ -249,7 +252,8 @@ fn test_statistics_hex_dump_format_comparison() {
 
     // Verify header structure matches Cassandra format expectations
     // The parser interprets bytes 0-3 as num_components (used for TOC lookup)
-    let num_components = u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
+    let num_components =
+        u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
     assert_eq!(
         num_components, 4,
         "First 4 bytes should be interpretable as num_components=4"
@@ -267,7 +271,8 @@ fn test_statistics_hex_dump_format_comparison() {
         file_data.len() > 35,
         "File should have EncodingStats section"
     );
-    let metadata_type = u32::from_be_bytes([file_data[32], file_data[33], file_data[34], file_data[35]]);
+    let metadata_type =
+        u32::from_be_bytes([file_data[32], file_data[33], file_data[34], file_data[35]]);
     assert_eq!(
         metadata_type, 3,
         "Byte 32-35 should contain metadata_type=3 for EncodingStats"
@@ -285,10 +290,7 @@ fn test_statistics_hex_dump_format_comparison() {
 
     // Verify the file can still be parsed (functional check)
     let result = parse_statistics_with_fallback(&file_data);
-    assert!(
-        result.is_ok(),
-        "Written Statistics.db should be parseable"
-    );
+    assert!(result.is_ok(), "Written Statistics.db should be parseable");
 
     let (_remaining, stats) = result.unwrap();
     assert_eq!(

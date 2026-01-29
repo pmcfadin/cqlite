@@ -107,7 +107,10 @@ async fn test_type_text_roundtrip() {
     )
     .await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for text type");
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for text type"
+    );
     assert_eq!(info.partition_count, 1, "Should have 1 partition");
 }
 
@@ -119,7 +122,10 @@ async fn test_type_text_empty() {
 
     let info = write_single_value(&temp_dir, &schema, "text_col", Value::Text(String::new())).await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for empty text");
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for empty text"
+    );
 }
 
 /// Test Text type with long string
@@ -133,7 +139,10 @@ async fn test_type_text_long() {
 
     let info = write_single_value(&temp_dir, &schema, "text_col", Value::Text(long_text)).await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for long text");
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for long text"
+    );
     let data_size = std::fs::metadata(&info.data_path).unwrap().len();
     assert!(
         data_size > 10000,
@@ -159,8 +168,7 @@ async fn test_type_int_min() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("int_col", "int");
 
-    let info =
-        write_single_value(&temp_dir, &schema, "int_col", Value::Integer(i32::MIN)).await;
+    let info = write_single_value(&temp_dir, &schema, "int_col", Value::Integer(i32::MIN)).await;
 
     assert!(info.data_path.exists(), "Data.db should exist for int min");
 }
@@ -171,8 +179,7 @@ async fn test_type_int_max() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("int_col", "int");
 
-    let info =
-        write_single_value(&temp_dir, &schema, "int_col", Value::Integer(i32::MAX)).await;
+    let info = write_single_value(&temp_dir, &schema, "int_col", Value::Integer(i32::MAX)).await;
 
     assert!(info.data_path.exists(), "Data.db should exist for int max");
 }
@@ -194,9 +201,13 @@ async fn test_type_bigint_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("bigint_col", "bigint");
 
-    let info =
-        write_single_value(&temp_dir, &schema, "bigint_col", Value::BigInt(9223372036854775807i64))
-            .await;
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "bigint_col",
+        Value::BigInt(9223372036854775807i64),
+    )
+    .await;
 
     assert!(
         info.data_path.exists(),
@@ -210,8 +221,7 @@ async fn test_type_bigint_min() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("bigint_col", "bigint");
 
-    let info =
-        write_single_value(&temp_dir, &schema, "bigint_col", Value::BigInt(i64::MIN)).await;
+    let info = write_single_value(&temp_dir, &schema, "bigint_col", Value::BigInt(i64::MIN)).await;
 
     assert!(
         info.data_path.exists(),
@@ -225,8 +235,7 @@ async fn test_type_bigint_max() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("bigint_col", "bigint");
 
-    let info =
-        write_single_value(&temp_dir, &schema, "bigint_col", Value::BigInt(i64::MAX)).await;
+    let info = write_single_value(&temp_dir, &schema, "bigint_col", Value::BigInt(i64::MAX)).await;
 
     assert!(
         info.data_path.exists(),
@@ -318,10 +327,18 @@ async fn test_type_uuid_roundtrip() {
     let schema = create_type_test_schema("uuid_col", "uuid");
 
     let uuid = uuid::Uuid::new_v4();
-    let info =
-        write_single_value(&temp_dir, &schema, "uuid_col", Value::Uuid(*uuid.as_bytes())).await;
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "uuid_col",
+        Value::Uuid(*uuid.as_bytes()),
+    )
+    .await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for uuid type");
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for uuid type"
+    );
 }
 
 /// Test UUID type with known value

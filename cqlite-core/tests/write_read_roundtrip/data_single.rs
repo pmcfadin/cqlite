@@ -18,7 +18,8 @@
 #![cfg(feature = "write-support")]
 
 use super::{
-    create_clustered_mutation, create_clustering_schema, create_simple_mutation, create_simple_schema,
+    create_clustered_mutation, create_clustering_schema, create_simple_mutation,
+    create_simple_schema,
 };
 use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use tempfile::TempDir;
@@ -79,7 +80,12 @@ async fn test_data_single_partition_multiple_rows() {
     // Write multiple rows to same partition (different clustering keys)
     let pk = 1;
     for i in 0..10 {
-        let mutation = create_clustered_mutation(pk, &format!("row_{:03}", i), &format!("data_{}", i), 1000000 + i as i64);
+        let mutation = create_clustered_mutation(
+            pk,
+            &format!("row_{:03}", i),
+            &format!("data_{}", i),
+            1000000 + i as i64,
+        );
         engine
             .write_async(mutation)
             .await
@@ -97,13 +103,19 @@ async fn test_data_single_partition_multiple_rows() {
     assert!(info.data_path.exists(), "Data.db should exist");
 
     // Should still be 1 partition (all rows have same pk)
-    assert_eq!(info.partition_count, 1, "Should have exactly 1 partition with multiple rows");
+    assert_eq!(
+        info.partition_count, 1,
+        "Should have exactly 1 partition with multiple rows"
+    );
 
     // Data should be larger than single row
     let data_size = std::fs::metadata(&info.data_path)
         .expect("Should get metadata")
         .len();
-    assert!(data_size > 100, "Data.db with 10 rows should have substantial size");
+    assert!(
+        data_size > 100,
+        "Data.db with 10 rows should have substantial size"
+    );
 }
 
 /// Test single partition data integrity via Statistics.db cross-validation
@@ -139,7 +151,8 @@ async fn test_data_single_partition_stats_cross_validation() {
 
     // Read Statistics.db to verify min_timestamp matches our written data
     let stats_data = std::fs::read(&info.stats_path).expect("Should read Statistics.db");
-    let (_, stats) = parse_statistics_with_fallback(&stats_data).expect("Should parse Statistics.db");
+    let (_, stats) =
+        parse_statistics_with_fallback(&stats_data).expect("Should parse Statistics.db");
 
     // The min_timestamp in Statistics.db should match what we wrote
     assert_eq!(
@@ -341,7 +354,10 @@ async fn test_data_file_format_header() {
     let data_bytes = std::fs::read(&info.data_path).expect("Should read Data.db");
 
     // Data.db should have content (partition header + row data)
-    assert!(data_bytes.len() > 10, "Data.db should have substantial content");
+    assert!(
+        data_bytes.len() > 10,
+        "Data.db should have substantial content"
+    );
 
     // The first byte should be partition header flags
     // V5CompressedLegacy format starts with partition key length prefix

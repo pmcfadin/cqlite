@@ -35,7 +35,9 @@ async fn test_index_roundtrip_single_partition() {
     // Create index writer and add a single partition
     let mut writer = IndexWriter::new();
     let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x01]); // token=12345, pk bytes
-    writer.add_partition(&key, 0).expect("add_partition should succeed"); // offset 0 in Data.db
+    writer
+        .add_partition(&key, 0)
+        .expect("add_partition should succeed"); // offset 0 in Data.db
 
     // Finalize to bytes
     let index_bytes = writer.finish().expect("IndexWriter finish should succeed");
@@ -52,7 +54,11 @@ async fn test_index_roundtrip_single_partition() {
 
     // Read back using IndexReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = IndexReader::open(&index_path, platform)
         .await
         .expect("IndexReader should open Index.db");
@@ -62,10 +68,7 @@ async fn test_index_roundtrip_single_partition() {
     assert_eq!(entries.len(), 1, "Should have 1 partition entry");
 
     // Verify offset
-    assert_eq!(
-        entries[0].data_offset, 0,
-        "Partition offset should be 0"
-    );
+    assert_eq!(entries[0].data_offset, 0, "Partition offset should be 0");
 }
 
 /// Test Index.db roundtrip with multiple partitions
@@ -88,7 +91,9 @@ async fn test_index_roundtrip_multiple_partitions() {
 
     for (token, key_bytes, offset) in &partitions {
         let key = DecoratedKey::new(*token, key_bytes.clone());
-        writer.add_partition(&key, *offset).expect("add_partition should succeed");
+        writer
+            .add_partition(&key, *offset)
+            .expect("add_partition should succeed");
     }
 
     // Finalize to bytes
@@ -106,7 +111,11 @@ async fn test_index_roundtrip_multiple_partitions() {
 
     // Read back using IndexReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = IndexReader::open(&index_path, platform)
         .await
         .expect("IndexReader should open Index.db");
@@ -163,7 +172,11 @@ async fn test_index_roundtrip_via_write_engine() {
 
     // Read using IndexReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = IndexReader::open(&info.index_path, platform)
         .await
         .expect("IndexReader should open Index.db created by WriteEngine");
@@ -207,7 +220,9 @@ async fn test_index_roundtrip_large_offsets() {
 
     for (token, key_bytes, offset) in &partitions {
         let key = DecoratedKey::new(*token, key_bytes.clone());
-        writer.add_partition(&key, *offset).expect("add_partition should succeed");
+        writer
+            .add_partition(&key, *offset)
+            .expect("add_partition should succeed");
     }
 
     // Finalize to bytes
@@ -225,7 +240,11 @@ async fn test_index_roundtrip_large_offsets() {
 
     // Read back using IndexReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = IndexReader::open(&index_path, platform)
         .await
         .expect("IndexReader should open Index.db with large offsets");
@@ -258,7 +277,9 @@ async fn test_index_partition_key_digest() {
     // Known partition key
     let pk_bytes = vec![0x00, 0x00, 0x00, 0x2A]; // int 42 in big-endian
     let key = DecoratedKey::new(12345, pk_bytes.clone());
-    writer.add_partition(&key, 0).expect("add_partition should succeed");
+    writer
+        .add_partition(&key, 0)
+        .expect("add_partition should succeed");
 
     // Calculate expected MD5 digest
     let expected_digest = md5::compute(&pk_bytes);
@@ -278,7 +299,11 @@ async fn test_index_partition_key_digest() {
 
     // Read back using IndexReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = IndexReader::open(&index_path, platform)
         .await
         .expect("IndexReader should open Index.db");

@@ -231,7 +231,10 @@ async fn test_write_engine_close_flushes_data() -> Result<()> {
         .filter_map(|e| e.ok())
         .collect();
 
-    assert!(!entries.is_empty(), "SSTable files should exist after close");
+    assert!(
+        !entries.is_empty(),
+        "SSTable files should exist after close"
+    );
 
     // Verify TOC.txt exists (publication barrier)
     let toc_exists = entries
@@ -498,11 +501,7 @@ fn create_comprehensive_schema() -> TableSchema {
 }
 
 /// Create a mutation with comprehensive type coverage
-fn create_comprehensive_mutation(
-    pk: i32,
-    ck: &str,
-    timestamp: i64,
-) -> Mutation {
+fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutation {
     let table_id = TableId::new("test_roundtrip", "comprehensive_types");
     let partition_key = PartitionKey::single("pk", Value::Integer(pk));
     let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
@@ -534,7 +533,14 @@ fn create_comprehensive_mutation(
         },
     ];
 
-    Mutation::new(table_id, partition_key, clustering_key, ops, timestamp, None)
+    Mutation::new(
+        table_id,
+        partition_key,
+        clustering_key,
+        ops,
+        timestamp,
+        None,
+    )
 }
 
 #[tokio::test]
@@ -547,11 +553,7 @@ async fn test_stage0_write_read_roundtrip_simple_types() -> Result<()> {
     let schema = create_comprehensive_schema();
 
     // === WRITE PHASE ===
-    let config = WriteEngineConfig::new(
-        data_dir.clone(),
-        wal_dir.clone(),
-        schema.clone(),
-    );
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
 
     let mut engine = WriteEngine::new(config)?;
 
@@ -589,13 +591,26 @@ async fn test_stage0_write_read_roundtrip_simple_types() -> Result<()> {
     assert!(toc_contents.contains("Index.db"), "TOC lists Index.db");
     assert!(toc_contents.contains("Filter.db"), "TOC lists Filter.db");
     assert!(toc_contents.contains("Summary.db"), "TOC lists Summary.db");
-    assert!(toc_contents.contains("Statistics.db"), "TOC lists Statistics.db");
-    assert!(toc_contents.contains("Digest.crc32"), "TOC lists Digest.crc32");
+    assert!(
+        toc_contents.contains("Statistics.db"),
+        "TOC lists Statistics.db"
+    );
+    assert!(
+        toc_contents.contains("Digest.crc32"),
+        "TOC lists Digest.crc32"
+    );
     assert!(toc_contents.contains("TOC.txt"), "TOC lists itself");
 
     // Verify file naming convention
-    assert!(info.data_path.file_name().unwrap().to_str().unwrap().starts_with("nb-1-big-"),
-        "File follows nb-{{gen}}-big- convention");
+    assert!(
+        info.data_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("nb-1-big-"),
+        "File follows nb-{{gen}}-big- convention"
+    );
 
     Ok(())
 }
@@ -679,7 +694,10 @@ async fn test_stage0_write_read_roundtrip_multiple_partitions() -> Result<()> {
 
     // === VALIDATION PHASE ===
     assert!(info.data_path.exists());
-    assert!(info.index_path.exists(), "Index.db required for partition lookup");
+    assert!(
+        info.index_path.exists(),
+        "Index.db required for partition lookup"
+    );
 
     Ok(())
 }
@@ -699,14 +717,18 @@ async fn test_stage0_write_read_roundtrip_large_partition() -> Result<()> {
 
     // Write 100+ rows to single partition (wide row)
     for i in 0..150 {
-        let mutation = create_comprehensive_mutation(1, &format!("row{:04}", i), 1000000 + i as i64);
+        let mutation =
+            create_comprehensive_mutation(1, &format!("row{:04}", i), 1000000 + i as i64);
         engine.write_async(mutation).await?;
     }
 
     // Flush and verify
     let info = engine.flush().await?.unwrap();
     assert_eq!(info.partition_count, 1, "Single wide partition");
-    assert!(info.data_size > 10000, "Large partition should have substantial data");
+    assert!(
+        info.data_size > 10000,
+        "Large partition should have substantial data"
+    );
 
     drop(engine);
 
@@ -756,10 +778,20 @@ async fn test_stage0_sstable_format_validation() -> Result<()> {
     }
 
     // 2. File naming convention (nb-{gen}-big-{Component}.db)
-    assert!(info.data_path.to_str().unwrap().contains("nb-1-big-Data.db"),
-        "Data.db follows naming convention");
-    assert!(info.index_path.to_str().unwrap().contains("nb-1-big-Index.db"),
-        "Index.db follows naming convention");
+    assert!(
+        info.data_path
+            .to_str()
+            .unwrap()
+            .contains("nb-1-big-Data.db"),
+        "Data.db follows naming convention"
+    );
+    assert!(
+        info.index_path
+            .to_str()
+            .unwrap()
+            .contains("nb-1-big-Index.db"),
+        "Index.db follows naming convention"
+    );
 
     // 3. TOC.txt content validation
     let toc_contents = std::fs::read_to_string(&info.toc_path)?;
@@ -769,14 +801,29 @@ async fn test_stage0_sstable_format_validation() -> Result<()> {
     assert!(toc_lines.contains(&"Index.db"), "TOC contains Index.db");
     assert!(toc_lines.contains(&"Filter.db"), "TOC contains Filter.db");
     assert!(toc_lines.contains(&"Summary.db"), "TOC contains Summary.db");
-    assert!(toc_lines.contains(&"Statistics.db"), "TOC contains Statistics.db");
-    assert!(toc_lines.contains(&"Digest.crc32"), "TOC contains Digest.crc32");
+    assert!(
+        toc_lines.contains(&"Statistics.db"),
+        "TOC contains Statistics.db"
+    );
+    assert!(
+        toc_lines.contains(&"Digest.crc32"),
+        "TOC contains Digest.crc32"
+    );
     assert!(toc_lines.contains(&"TOC.txt"), "TOC contains itself");
 
     // 4. Non-empty data files
-    assert!(std::fs::metadata(&info.data_path)?.len() > 0, "Data.db is non-empty");
-    assert!(std::fs::metadata(&info.index_path)?.len() > 0, "Index.db is non-empty");
-    assert!(std::fs::metadata(&info.stats_path)?.len() > 0, "Statistics.db is non-empty");
+    assert!(
+        std::fs::metadata(&info.data_path)?.len() > 0,
+        "Data.db is non-empty"
+    );
+    assert!(
+        std::fs::metadata(&info.index_path)?.len() > 0,
+        "Index.db is non-empty"
+    );
+    assert!(
+        std::fs::metadata(&info.stats_path)?.len() > 0,
+        "Statistics.db is non-empty"
+    );
 
     Ok(())
 }
@@ -811,7 +858,10 @@ async fn test_stage0_delta_encoding_validation() -> Result<()> {
 
     // === VALIDATION PHASE ===
     // Statistics.db should exist and contain delta encoding baseline
-    assert!(info.stats_path.exists(), "Statistics.db exists for delta encoding");
+    assert!(
+        info.stats_path.exists(),
+        "Statistics.db exists for delta encoding"
+    );
 
     // Data.db should use delta-encoded timestamps
     // (verification happens at read time through existing SSTable reader)
@@ -955,64 +1005,99 @@ async fn test_stage0_various_data_types() -> Result<()> {
 
     // Row 1: Text
     let pk1 = PartitionKey::single("id", Value::Integer(1));
-    let ops1 = vec![
-        CellOperation::Write {
-            column: "text_val".to_string(),
-            value: Value::Text("Hello, CQLite!".to_string()),
-        },
-    ];
-    engine.write_async(Mutation::new(table_id.clone(), pk1, None, ops1, 1000000, None)).await?;
+    let ops1 = vec![CellOperation::Write {
+        column: "text_val".to_string(),
+        value: Value::Text("Hello, CQLite!".to_string()),
+    }];
+    engine
+        .write_async(Mutation::new(
+            table_id.clone(),
+            pk1,
+            None,
+            ops1,
+            1000000,
+            None,
+        ))
+        .await?;
 
     // Row 2: Integer
     let pk2 = PartitionKey::single("id", Value::Integer(2));
-    let ops2 = vec![
-        CellOperation::Write {
-            column: "int_val".to_string(),
-            value: Value::Integer(42),
-        },
-    ];
-    engine.write_async(Mutation::new(table_id.clone(), pk2, None, ops2, 1000001, None)).await?;
+    let ops2 = vec![CellOperation::Write {
+        column: "int_val".to_string(),
+        value: Value::Integer(42),
+    }];
+    engine
+        .write_async(Mutation::new(
+            table_id.clone(),
+            pk2,
+            None,
+            ops2,
+            1000001,
+            None,
+        ))
+        .await?;
 
     // Row 3: BigInt
     let pk3 = PartitionKey::single("id", Value::Integer(3));
-    let ops3 = vec![
-        CellOperation::Write {
-            column: "bigint_val".to_string(),
-            value: Value::BigInt(9223372036854775807),
-        },
-    ];
-    engine.write_async(Mutation::new(table_id.clone(), pk3, None, ops3, 1000002, None)).await?;
+    let ops3 = vec![CellOperation::Write {
+        column: "bigint_val".to_string(),
+        value: Value::BigInt(9223372036854775807),
+    }];
+    engine
+        .write_async(Mutation::new(
+            table_id.clone(),
+            pk3,
+            None,
+            ops3,
+            1000002,
+            None,
+        ))
+        .await?;
 
     // Row 4: Boolean
     let pk4 = PartitionKey::single("id", Value::Integer(4));
-    let ops4 = vec![
-        CellOperation::Write {
-            column: "bool_val".to_string(),
-            value: Value::Boolean(true),
-        },
-    ];
-    engine.write_async(Mutation::new(table_id.clone(), pk4, None, ops4, 1000003, None)).await?;
+    let ops4 = vec![CellOperation::Write {
+        column: "bool_val".to_string(),
+        value: Value::Boolean(true),
+    }];
+    engine
+        .write_async(Mutation::new(
+            table_id.clone(),
+            pk4,
+            None,
+            ops4,
+            1000003,
+            None,
+        ))
+        .await?;
 
     // Row 5: Timestamp
     let pk5 = PartitionKey::single("id", Value::Integer(5));
-    let ops5 = vec![
-        CellOperation::Write {
-            column: "timestamp_val".to_string(),
-            value: Value::Timestamp(1704067200000), // 2024-01-01 00:00:00 UTC
-        },
-    ];
-    engine.write_async(Mutation::new(table_id.clone(), pk5, None, ops5, 1000004, None)).await?;
+    let ops5 = vec![CellOperation::Write {
+        column: "timestamp_val".to_string(),
+        value: Value::Timestamp(1704067200000), // 2024-01-01 00:00:00 UTC
+    }];
+    engine
+        .write_async(Mutation::new(
+            table_id.clone(),
+            pk5,
+            None,
+            ops5,
+            1000004,
+            None,
+        ))
+        .await?;
 
     // Row 6: UUID
     let pk6 = PartitionKey::single("id", Value::Integer(6));
     let test_uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-    let ops6 = vec![
-        CellOperation::Write {
-            column: "uuid_val".to_string(),
-            value: Value::Uuid(*test_uuid.as_bytes()),
-        },
-    ];
-    engine.write_async(Mutation::new(table_id, pk6, None, ops6, 1000005, None)).await?;
+    let ops6 = vec![CellOperation::Write {
+        column: "uuid_val".to_string(),
+        value: Value::Uuid(*test_uuid.as_bytes()),
+    }];
+    engine
+        .write_async(Mutation::new(table_id, pk6, None, ops6, 1000005, None))
+        .await?;
 
     // Flush
     let info = engine.flush().await?.unwrap();
@@ -1056,12 +1141,24 @@ async fn test_stage0_sstable_component_order() -> Result<()> {
 
     // TOC should be written last or at same time as other components
     // (we can't guarantee ordering within same test, but files should exist)
-    assert!(toc_modified >= data_modified ||
-            toc_modified.duration_since(data_modified).unwrap_or_default().as_millis() < 1000,
-        "TOC.txt written as publication barrier");
-    assert!(toc_modified >= stats_modified ||
-            toc_modified.duration_since(stats_modified).unwrap_or_default().as_millis() < 1000,
-        "TOC.txt written after Statistics.db");
+    assert!(
+        toc_modified >= data_modified
+            || toc_modified
+                .duration_since(data_modified)
+                .unwrap_or_default()
+                .as_millis()
+                < 1000,
+        "TOC.txt written as publication barrier"
+    );
+    assert!(
+        toc_modified >= stats_modified
+            || toc_modified
+                .duration_since(stats_modified)
+                .unwrap_or_default()
+                .as_millis()
+                < 1000,
+        "TOC.txt written after Statistics.db"
+    );
 
     Ok(())
 }
@@ -1084,14 +1181,14 @@ async fn test_stage0_null_values() -> Result<()> {
     let pk = PartitionKey::single("id", Value::Integer(1));
 
     // Only write 'name', leave 'age' as null
-    let ops = vec![
-        CellOperation::Write {
-            column: "name".to_string(),
-            value: Value::Text("Alice".to_string()),
-        },
-    ];
+    let ops = vec![CellOperation::Write {
+        column: "name".to_string(),
+        value: Value::Text("Alice".to_string()),
+    }];
 
-    engine.write_async(Mutation::new(table_id, pk, None, ops, 1000000, None)).await?;
+    engine
+        .write_async(Mutation::new(table_id, pk, None, ops, 1000000, None))
+        .await?;
 
     let info = engine.flush().await?.unwrap();
     drop(engine);
@@ -1134,7 +1231,10 @@ async fn test_stage0_deterministic_writes() -> Result<()> {
     let size1 = std::fs::metadata(&info1.data_path)?.len();
     let size2 = std::fs::metadata(&info2.data_path)?.len();
 
-    assert_eq!(size1, size2, "Deterministic writes should produce identical Data.db sizes");
+    assert_eq!(
+        size1, size2,
+        "Deterministic writes should produce identical Data.db sizes"
+    );
 
     Ok(())
 }

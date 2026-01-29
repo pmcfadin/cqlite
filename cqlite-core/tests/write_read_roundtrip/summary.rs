@@ -40,7 +40,9 @@ async fn test_summary_roundtrip_single_entry() {
     writer.add_entry(&key, 0).expect("add_entry should succeed");
 
     // Finalize to bytes
-    let summary_bytes = writer.finish().expect("SummaryWriter finish should succeed");
+    let summary_bytes = writer
+        .finish()
+        .expect("SummaryWriter finish should succeed");
 
     // Write to file
     let mut file = File::create(&summary_path)
@@ -54,7 +56,11 @@ async fn test_summary_roundtrip_single_entry() {
 
     // Read back using SummaryReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = SummaryReader::open(&summary_path, platform)
         .await
         .expect("SummaryReader should open Summary.db");
@@ -66,14 +72,8 @@ async fn test_summary_roundtrip_single_entry() {
     // Verify first and last keys
     let first_key = reader.get_first_key();
     let last_key = reader.get_last_key();
-    assert!(
-        !first_key.is_empty(),
-        "First key should not be empty"
-    );
-    assert!(
-        !last_key.is_empty(),
-        "Last key should not be empty"
-    );
+    assert!(!first_key.is_empty(), "First key should not be empty");
+    assert!(!last_key.is_empty(), "Last key should not be empty");
 }
 
 /// Test Summary.db roundtrip with multiple entries
@@ -96,11 +96,15 @@ async fn test_summary_roundtrip_multiple_entries() {
 
     for (token, key_bytes, position) in &entries_data {
         let key = DecoratedKey::new(*token, key_bytes.clone());
-        writer.add_entry(&key, *position).expect("add_entry should succeed");
+        writer
+            .add_entry(&key, *position)
+            .expect("add_entry should succeed");
     }
 
     // Finalize to bytes
-    let summary_bytes = writer.finish().expect("SummaryWriter finish should succeed");
+    let summary_bytes = writer
+        .finish()
+        .expect("SummaryWriter finish should succeed");
 
     // Write to file
     let mut file = File::create(&summary_path)
@@ -114,7 +118,11 @@ async fn test_summary_roundtrip_multiple_entries() {
 
     // Read back using SummaryReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = SummaryReader::open(&summary_path, platform)
         .await
         .expect("SummaryReader should open Summary.db");
@@ -176,7 +184,11 @@ async fn test_summary_roundtrip_via_write_engine() {
 
     // Read using SummaryReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = SummaryReader::open(&info.summary_path, platform)
         .await
         .expect("SummaryReader should open Summary.db created by WriteEngine");
@@ -216,11 +228,15 @@ async fn test_summary_header_parameters() {
     // Add entries
     for i in 0..10 {
         let key = DecoratedKey::new(i as i64 * 100, vec![0x00, 0x00, 0x00, i as u8]);
-        writer.add_entry(&key, i as u64 * 256).expect("add_entry should succeed");
+        writer
+            .add_entry(&key, i as u64 * 256)
+            .expect("add_entry should succeed");
     }
 
     // Finalize to bytes
-    let summary_bytes = writer.finish().expect("SummaryWriter finish should succeed");
+    let summary_bytes = writer
+        .finish()
+        .expect("SummaryWriter finish should succeed");
 
     // Write to file
     let mut file = File::create(&summary_path)
@@ -234,7 +250,11 @@ async fn test_summary_header_parameters() {
 
     // Read back using SummaryReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = SummaryReader::open(&summary_path, platform)
         .await
         .expect("SummaryReader should open Summary.db");
@@ -263,18 +283,22 @@ async fn test_summary_large_positions() {
     // Add entries with large positions (testing 8-byte encoding)
     let entries_data = vec![
         (100i64, vec![0x01], 0u64),
-        (200i64, vec![0x02], 1_000_000_000u64),        // 1 GB
-        (300i64, vec![0x03], 10_000_000_000u64),       // 10 GB
-        (400i64, vec![0x04], 100_000_000_000u64),      // 100 GB
+        (200i64, vec![0x02], 1_000_000_000u64),   // 1 GB
+        (300i64, vec![0x03], 10_000_000_000u64),  // 10 GB
+        (400i64, vec![0x04], 100_000_000_000u64), // 100 GB
     ];
 
     for (token, key_bytes, position) in &entries_data {
         let key = DecoratedKey::new(*token, key_bytes.clone());
-        writer.add_entry(&key, *position).expect("add_entry should succeed");
+        writer
+            .add_entry(&key, *position)
+            .expect("add_entry should succeed");
     }
 
     // Finalize to bytes
-    let summary_bytes = writer.finish().expect("SummaryWriter finish should succeed");
+    let summary_bytes = writer
+        .finish()
+        .expect("SummaryWriter finish should succeed");
 
     // Write to file
     let mut file = File::create(&summary_path)
@@ -288,7 +312,11 @@ async fn test_summary_large_positions() {
 
     // Read back using SummaryReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = SummaryReader::open(&summary_path, platform)
         .await
         .expect("SummaryReader should open Summary.db with large positions");
@@ -331,11 +359,15 @@ async fn test_summary_entry_lookup() {
 
     for (token, key_bytes, position) in &entries_data {
         let key = DecoratedKey::new(*token, key_bytes.clone());
-        writer.add_entry(&key, *position).expect("add_entry should succeed");
+        writer
+            .add_entry(&key, *position)
+            .expect("add_entry should succeed");
     }
 
     // Finalize to bytes
-    let summary_bytes = writer.finish().expect("SummaryWriter finish should succeed");
+    let summary_bytes = writer
+        .finish()
+        .expect("SummaryWriter finish should succeed");
 
     // Write to file
     let mut file = File::create(&summary_path)
@@ -349,7 +381,11 @@ async fn test_summary_entry_lookup() {
 
     // Read back using SummaryReader
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let reader = SummaryReader::open(&summary_path, platform)
         .await
         .expect("SummaryReader should open Summary.db");
@@ -361,7 +397,8 @@ async fn test_summary_entry_lookup() {
     let entry = reader.find_entry_for_position(500);
     assert!(entry.is_some(), "Should find entry for position 500");
     assert_eq!(
-        entry.unwrap().position, 0,
+        entry.unwrap().position,
+        0,
         "Entry for position 500 should be at position 0"
     );
 
@@ -369,7 +406,192 @@ async fn test_summary_entry_lookup() {
     let entry = reader.find_entry_for_position(1500);
     assert!(entry.is_some(), "Should find entry for position 1500");
     assert_eq!(
-        entry.unwrap().position, 1000,
+        entry.unwrap().position,
+        1000,
         "Entry for position 1500 should be at position 1000"
+    );
+}
+
+/// Test Summary.db offset tracking with Index.db integration (Issue #407)
+///
+/// Verifies that Summary.db offsets point to the correct byte positions in Index.db.
+/// This test addresses the critical requirement that Summary.db entries must point to
+/// the exact locations where Index.db entries start.
+#[tokio::test]
+async fn test_summary_offset_tracking_with_index() {
+    use cqlite_core::storage::sstable::index_reader::IndexReader;
+    use cqlite_core::storage::sstable::writer::IndexWriter;
+
+    let temp_dir = TempDir::new().unwrap();
+    let index_path = temp_dir.path().join("nb-1-big-Index.db");
+    let summary_path = temp_dir.path().join("nb-1-big-Summary.db");
+
+    // Create Index.db and Summary.db simultaneously (simulating SSTableWriter flow)
+    let mut index_writer = IndexWriter::new();
+    let mut summary_writer = SummaryWriter::new(128);
+
+    // Write 384 partitions (3 summary samples at 0, 128, 256)
+    let mut summary_sample_offsets = Vec::new();
+    for i in 0..384 {
+        let token = (i * 1000) as i64;
+        let key_bytes = vec![0x00, 0x00, 0x00, (i % 256) as u8];
+        let data_offset = (i * 100) as u64;
+
+        let key = DecoratedKey::new(token, key_bytes);
+
+        // Write to Index.db and capture entry info
+        let entry_info = index_writer
+            .add_partition(&key, data_offset)
+            .expect("add_partition should succeed");
+
+        // Sample every 128th entry for Summary.db
+        if i % 128 == 0 {
+            summary_writer
+                .add_entry(&key, entry_info.index_offset)
+                .expect("add_entry should succeed");
+            summary_sample_offsets.push((i, entry_info.index_offset));
+        }
+    }
+
+    // Finalize both files
+    let index_bytes = index_writer
+        .finish()
+        .expect("IndexWriter finish should succeed");
+    let summary_bytes = summary_writer
+        .finish()
+        .expect("SummaryWriter finish should succeed");
+
+    // Write files
+    let mut index_file = File::create(&index_path)
+        .await
+        .expect("Should create Index.db");
+    index_file
+        .write_all(&index_bytes)
+        .await
+        .expect("Should write Index.db");
+    index_file.flush().await.expect("Should flush Index.db");
+    drop(index_file);
+
+    let mut summary_file = File::create(&summary_path)
+        .await
+        .expect("Should create Summary.db");
+    summary_file
+        .write_all(&summary_bytes)
+        .await
+        .expect("Should write Summary.db");
+    summary_file.flush().await.expect("Should flush Summary.db");
+    drop(summary_file);
+
+    // Read back both files
+    let config = cqlite_core::Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
+
+    let index_reader = IndexReader::open(&index_path, platform.clone())
+        .await
+        .expect("IndexReader should open Index.db");
+    let summary_reader = SummaryReader::open(&summary_path, platform)
+        .await
+        .expect("SummaryReader should open Summary.db");
+
+    // Get entries from both readers
+    let index_entries = index_reader.get_partition_entries();
+    let summary_entries = summary_reader.get_entries();
+
+    // Verify we have the expected number of entries
+    assert_eq!(
+        index_entries.len(),
+        384,
+        "Index.db should have 384 partition entries"
+    );
+    assert_eq!(
+        summary_entries.len(),
+        3,
+        "Summary.db should have 3 sampled entries (0, 128, 256)"
+    );
+
+    // Critical verification: Summary.db offsets must match actual Index.db entry positions
+    // Read raw Index.db to verify marker positions
+    let index_bytes_vec = tokio::fs::read(&index_path)
+        .await
+        .expect("Should read Index.db");
+
+    // Each Summary.db entry should point to the start of the corresponding Index.db entry
+    for (sample_idx, summary_entry) in summary_entries.iter().enumerate() {
+        let expected_partition_idx = sample_idx * 128;
+
+        // Verify the offset points to a valid Index.db entry marker (0x0010)
+        let offset = summary_entry.position as usize;
+        assert!(
+            offset + 2 <= index_bytes_vec.len(),
+            "Summary offset {} should be within Index.db bounds",
+            offset
+        );
+
+        // Check that the offset points to the Index.db entry marker
+        let marker_bytes = &index_bytes_vec[offset..offset + 2];
+        assert_eq!(
+            marker_bytes,
+            &[0x00, 0x10],
+            "Summary entry {} should point to Index.db entry marker at offset {}",
+            sample_idx,
+            offset
+        );
+
+        // Verify this matches our tracked offsets
+        let (_tracked_idx, tracked_offset) = summary_sample_offsets[sample_idx];
+        assert_eq!(
+            summary_entry.position, tracked_offset,
+            "Summary entry {} offset should match tracked offset from IndexWriter",
+            sample_idx
+        );
+
+        println!(
+            "✓ Summary entry {} points to Index.db partition {} at offset {} (verified marker 0x0010)",
+            sample_idx, expected_partition_idx, offset
+        );
+    }
+
+    // Additional verification: compute expected offsets based on entry sizes
+    // Each Index.db entry: 2 (marker) + 16 (digest) + VInt(data_offset) + VInt(0)
+    // For data_offset values 0, 100, 200, ..., most will be 1-byte VInts (< 128)
+    // Entry size = 2 + 16 + 1 + 1 = 20 bytes for data_offset < 128
+    // Entry size = 2 + 16 + 2 + 1 = 21 bytes for data_offset >= 128
+
+    let mut cumulative_offset = 0u64;
+    for i in 0..384 {
+        let data_offset = (i * 100) as u64;
+
+        // Calculate expected entry size based on VInt encoding
+        let vint_size = if data_offset < 128 {
+            1
+        } else if data_offset < 16384 {
+            2
+        } else if data_offset < 2097152 {
+            3
+        } else {
+            4 // Sufficient for this test
+        };
+        let entry_size = 2 + 16 + vint_size + 1; // marker + digest + data_offset_vint + promoted_len_vint(0)
+
+        // If this is a sampled partition, verify the offset matches
+        if i % 128 == 0 {
+            let sample_idx = i / 128;
+            assert_eq!(
+                summary_entries[sample_idx].position, cumulative_offset,
+                "Summary entry {} should point to cumulative offset {}",
+                sample_idx, cumulative_offset
+            );
+        }
+
+        cumulative_offset += entry_size;
+    }
+
+    println!(
+        "✓ Summary.db offset tracking verified for all {} sampled entries",
+        summary_entries.len()
     );
 }

@@ -103,7 +103,6 @@ mod toc_digest_tests {
 
         // Simulate corruption: modify the file
         let mut file = fs::OpenOptions::new()
-            .write(true)
             .append(true)
             .open(&data_path)
             .unwrap();

@@ -69,8 +69,8 @@ async fn test_filter_roundtrip_via_writer() {
     let filter_path = temp_dir.path().join("nb-1-big-Filter.db");
 
     // Create filter writer
-    let mut writer =
-        FilterWriter::new(filter_path.clone(), 100, 0.01).expect("FilterWriter creation should succeed");
+    let mut writer = FilterWriter::new(filter_path.clone(), 100, 0.01)
+        .expect("FilterWriter creation should succeed");
 
     // Add some partition keys
     let keys: Vec<DecoratedKey> = (0..20)
@@ -82,7 +82,10 @@ async fn test_filter_roundtrip_via_writer() {
     }
 
     // Finalize and write to disk
-    writer.finish().await.expect("FilterWriter finish should succeed");
+    writer
+        .finish()
+        .await
+        .expect("FilterWriter finish should succeed");
 
     // Read back the file
     let filter_bytes = std::fs::read(&filter_path).expect("Should read Filter.db");
@@ -164,7 +167,8 @@ fn test_bloom_filter_false_positive_rate() {
     let fp_rate = 0.01; // 1% target
 
     // Create a bloom filter
-    let mut filter = BloomFilter::new(expected_keys, fp_rate).expect("BloomFilter creation should succeed");
+    let mut filter =
+        BloomFilter::new(expected_keys, fp_rate).expect("BloomFilter creation should succeed");
 
     // Insert expected number of keys
     for i in 0..expected_keys {
@@ -206,7 +210,8 @@ fn test_bloom_filter_large_keys() {
     let fp_rate = 0.01;
 
     // Create a bloom filter
-    let mut filter = BloomFilter::new(expected_keys, fp_rate).expect("BloomFilter creation should succeed");
+    let mut filter =
+        BloomFilter::new(expected_keys, fp_rate).expect("BloomFilter creation should succeed");
 
     // Insert many keys
     let keys: Vec<Vec<u8>> = (0..expected_keys)
@@ -238,7 +243,10 @@ fn test_bloom_filter_large_keys() {
 
     // Spot check: verify some keys are found
     for key in keys.iter().take(100) {
-        assert!(restored.contains(key), "Key should be found in restored filter");
+        assert!(
+            restored.contains(key),
+            "Key should be found in restored filter"
+        );
     }
 }
 
@@ -266,7 +274,8 @@ fn test_bloom_filter_no_keys() {
 #[test]
 fn test_bloom_filter_minimum_elements() {
     // Minimum valid configuration: 1 expected element
-    let mut filter = BloomFilter::new(1, 0.01).expect("BloomFilter creation with 1 element should succeed");
+    let mut filter =
+        BloomFilter::new(1, 0.01).expect("BloomFilter creation with 1 element should succeed");
 
     filter.insert(&[0x42]);
 

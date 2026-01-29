@@ -40,7 +40,8 @@ async fn test_data_multiple_partitions_basic() {
 
     // Write multiple partitions (different partition keys)
     for i in 0..10 {
-        let mutation = create_simple_mutation(i, &format!("user_{}", i), i * 100, 1000000 + i as i64);
+        let mutation =
+            create_simple_mutation(i, &format!("user_{}", i), i * 100, 1000000 + i as i64);
         engine
             .write_async(mutation)
             .await
@@ -84,7 +85,8 @@ async fn test_data_partitions_token_order() {
 
     // Write partitions (WriteEngine handles token ordering internally)
     for i in 0..20 {
-        let mutation = create_simple_mutation(i, &format!("user_{}", i), i * 10, 1000000 + i as i64);
+        let mutation =
+            create_simple_mutation(i, &format!("user_{}", i), i * 10, 1000000 + i as i64);
         engine
             .write_async(mutation)
             .await
@@ -100,7 +102,11 @@ async fn test_data_partitions_token_order() {
 
     // Read Index.db to verify token ordering
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let index_reader = IndexReader::open(&info.index_path, platform)
         .await
         .expect("IndexReader should open");
@@ -138,7 +144,8 @@ async fn test_data_index_offset_correctness() {
 
     // Write several partitions
     for i in 0..5 {
-        let mutation = create_simple_mutation(i, &format!("user_{}", i), i * 10, 1000000 + i as i64);
+        let mutation =
+            create_simple_mutation(i, &format!("user_{}", i), i * 10, 1000000 + i as i64);
         engine
             .write_async(mutation)
             .await
@@ -156,7 +163,11 @@ async fn test_data_index_offset_correctness() {
     let data_bytes = std::fs::read(&info.data_path).expect("Should read Data.db");
 
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let index_reader = IndexReader::open(&info.index_path, platform)
         .await
         .expect("IndexReader should open");
@@ -225,7 +236,11 @@ async fn test_data_many_partitions() {
 
     // Verify Index.db has correct entry count
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let index_reader = IndexReader::open(&info.index_path, platform)
         .await
         .expect("IndexReader should open");
@@ -300,7 +315,11 @@ async fn test_data_mixed_partition_sizes() {
 
     // Verify Index.db captures different offsets reflecting different sizes
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let index_reader = IndexReader::open(&info.index_path, platform)
         .await
         .expect("IndexReader should open");
@@ -349,7 +368,12 @@ async fn test_data_wide_vs_narrow_partitions() {
 
     // Write 50 rows to single partition
     for i in 0..50 {
-        let mutation = create_clustered_mutation(1, &format!("ck_{:03}", i), &format!("data_{}", i), 1000000 + i as i64);
+        let mutation = create_clustered_mutation(
+            1,
+            &format!("ck_{:03}", i),
+            &format!("data_{}", i),
+            1000000 + i as i64,
+        );
         engine1
             .write_async(mutation)
             .await
@@ -376,7 +400,8 @@ async fn test_data_wide_vs_narrow_partitions() {
 
     // Write 50 partitions with 1 row each
     for i in 0..50 {
-        let mutation = create_simple_mutation(i, &format!("user_{}", i), i * 10, 1000000 + i as i64);
+        let mutation =
+            create_simple_mutation(i, &format!("user_{}", i), i * 10, 1000000 + i as i64);
         engine2
             .write_async(mutation)
             .await
@@ -390,8 +415,14 @@ async fn test_data_wide_vs_narrow_partitions() {
         .expect("Should return SSTableInfo");
 
     // Compare: Wide partition should have 1 partition, narrow should have 50
-    assert_eq!(info1.partition_count, 1, "Wide partition SSTable should have 1 partition");
-    assert_eq!(info2.partition_count, 50, "Narrow partition SSTable should have 50 partitions");
+    assert_eq!(
+        info1.partition_count, 1,
+        "Wide partition SSTable should have 1 partition"
+    );
+    assert_eq!(
+        info2.partition_count, 50,
+        "Narrow partition SSTable should have 50 partitions"
+    );
 
     // Both should have similar total data (approximately)
     let size1 = std::fs::metadata(&info1.data_path).unwrap().len();
@@ -422,7 +453,8 @@ async fn test_data_cross_component_validation() {
 
     // Write several partitions
     for i in 0..10 {
-        let mutation = create_simple_mutation(i, &format!("user_{}", i), i * 10, 1000000 + i as i64);
+        let mutation =
+            create_simple_mutation(i, &format!("user_{}", i), i * 10, 1000000 + i as i64);
         engine
             .write_async(mutation)
             .await
@@ -438,7 +470,11 @@ async fn test_data_cross_component_validation() {
 
     // Cross-validation 1: Index.db entry count matches partition count
     let config = cqlite_core::Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("Platform creation should succeed"));
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform creation should succeed"),
+    );
     let index_reader = IndexReader::open(&info.index_path, platform.clone())
         .await
         .expect("IndexReader should open");
@@ -450,7 +486,8 @@ async fn test_data_cross_component_validation() {
 
     // Cross-validation 2: Statistics.db min_timestamp matches first mutation
     let stats_data = std::fs::read(&info.stats_path).expect("Should read Statistics.db");
-    let (_, stats) = parse_statistics_with_fallback(&stats_data).expect("Should parse Statistics.db");
+    let (_, stats) =
+        parse_statistics_with_fallback(&stats_data).expect("Should parse Statistics.db");
     assert_eq!(
         stats.timestamp_stats.min_timestamp, 1000000,
         "Statistics.db min_timestamp should match first mutation"
