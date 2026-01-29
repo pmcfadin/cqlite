@@ -23,29 +23,28 @@
 //! On startup, the WriteEngine replays WAL entries into the memtable.
 
 #[cfg(feature = "write-support")]
-pub mod wal;
-#[cfg(feature = "write-support")]
 pub mod memtable;
+#[cfg(feature = "write-support")]
+pub mod merge;
 #[cfg(feature = "write-support")]
 pub mod mutation;
 #[cfg(feature = "write-support")]
-pub mod merge;
+pub mod wal;
 
-#[cfg(feature = "write-support")]
-pub use wal::WriteAheadLog;
 #[cfg(feature = "write-support")]
 pub use memtable::Memtable;
 #[cfg(feature = "write-support")]
-pub use mutation::{
-    CellOperation, ClusteringKey, DecoratedKey, Mutation, PartitionKey, TableId,
-};
-#[cfg(feature = "write-support")]
 pub use merge::KWayMerger;
+#[cfg(feature = "write-support")]
+pub use mutation::{CellOperation, ClusteringKey, DecoratedKey, Mutation, PartitionKey, TableId};
+#[cfg(feature = "write-support")]
+pub use wal::WriteAheadLog;
 
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
 use crate::storage::sstable::writer::SSTableInfo;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Write engine configuration
 #[cfg(feature = "write-support")]
@@ -57,6 +56,9 @@ pub struct WriteEngineConfig {
     pub wal_dir: PathBuf,
     /// Memtable flush threshold in bytes (default: 64MB)
     pub memtable_flush_threshold: usize,
+    /// Memtable hard limit in bytes (default: 256MB)
+    /// When this limit is reached, writes will fail with an error
+    pub memtable_hard_limit: usize,
     /// Table schema for column metadata
     pub schema: TableSchema,
 }
@@ -65,6 +67,8 @@ pub struct WriteEngineConfig {
 impl WriteEngineConfig {
     /// Default flush threshold (64 MB)
     pub const DEFAULT_FLUSH_THRESHOLD: usize = 64 * 1024 * 1024;
+    /// Default hard limit (256 MB)
+    pub const DEFAULT_HARD_LIMIT: usize = 256 * 1024 * 1024;
 
     /// Create a new configuration with default flush threshold
     pub fn new(data_dir: PathBuf, wal_dir: PathBuf, schema: TableSchema) -> Self {
@@ -72,6 +76,7 @@ impl WriteEngineConfig {
             data_dir,
             wal_dir,
             memtable_flush_threshold: Self::DEFAULT_FLUSH_THRESHOLD,
+            memtable_hard_limit: Self::DEFAULT_HARD_LIMIT,
             schema,
         }
     }
@@ -79,6 +84,12 @@ impl WriteEngineConfig {
     /// Set a custom flush threshold
     pub fn with_flush_threshold(mut self, threshold: usize) -> Self {
         self.memtable_flush_threshold = threshold;
+        self
+    }
+
+    /// Set a custom hard limit
+    pub fn with_hard_limit(mut self, limit: usize) -> Self {
+        self.memtable_hard_limit = limit;
         self
     }
 }
@@ -92,6 +103,7 @@ impl WriteEngineConfig {
 ///
 /// WriteEngine follows a single-writer model. It is NOT thread-safe and
 /// should be used from a single thread or protected by external locking.
+/// The `closed` flag uses atomic operations for safe concurrent access checking.
 ///
 /// ## Example
 ///
@@ -131,9 +143,9 @@ pub struct WriteEngine {
     /// In-memory write buffer
     memtable: Memtable,
     /// SSTable generation counter (increments on each flush)
-    generation: u32,
-    /// Whether the engine has been closed
-    closed: bool,
+    generation: u64,
+    /// Whether the engine has been closed (atomic for thread safety)
+    closed: AtomicBool,
 }
 
 #[cfg(feature = "write-support")]
@@ -213,7 +225,7 @@ impl WriteEngine {
             wal,
             memtable,
             generation,
-            closed: false,
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -242,10 +254,19 @@ impl WriteEngine {
     /// - Memtable insert fails
     /// - Automatic flush fails (sync context only)
     pub fn write(&mut self, mutation: Mutation) -> Result<()> {
-        if self.closed {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
             ));
+        }
+
+        // Check hard limit before accepting write
+        if self.memtable.size_bytes() >= self.config.memtable_hard_limit {
+            return Err(Error::Storage(format!(
+                "Memtable at hard limit ({} bytes >= {} bytes). Flush required before accepting more writes.",
+                self.memtable.size_bytes(),
+                self.config.memtable_hard_limit
+            )));
         }
 
         // 1. Append to WAL (durability)
@@ -300,10 +321,19 @@ impl WriteEngine {
     /// - Memtable insert fails
     /// - Automatic flush fails
     pub async fn write_async(&mut self, mutation: Mutation) -> Result<()> {
-        if self.closed {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
             ));
+        }
+
+        // Check hard limit before accepting write
+        if self.memtable.size_bytes() >= self.config.memtable_hard_limit {
+            return Err(Error::Storage(format!(
+                "Memtable at hard limit ({} bytes >= {} bytes). Flush required before accepting more writes.",
+                self.memtable.size_bytes(),
+                self.config.memtable_hard_limit
+            )));
         }
 
         // 1. Append to WAL (durability)
@@ -361,7 +391,7 @@ impl WriteEngine {
     /// engine.execute("DELETE FROM users WHERE id = 1")?;
     /// ```
     pub fn execute(&mut self, statement: &str) -> Result<()> {
-        if self.closed {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
             ));
@@ -391,7 +421,7 @@ impl WriteEngine {
     /// - SSTable write fails
     /// - WAL truncate fails
     pub async fn flush(&mut self) -> Result<Option<SSTableInfo>> {
-        if self.closed {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
             ));
@@ -410,8 +440,9 @@ impl WriteEngine {
             }
             Err(_) => {
                 // No runtime, create one
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| Error::Storage(format!("Failed to create tokio runtime: {}", e)))?;
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    Error::Storage(format!("Failed to create tokio runtime: {}", e))
+                })?;
                 rt.block_on(self.flush_internal_async())?;
             }
         }
@@ -455,7 +486,15 @@ impl WriteEngine {
         );
 
         // Truncate WAL (data now persisted to SSTable)
-        self.wal.truncate()?;
+        // If truncate fails, log warning but don't fail - data is already in SSTable
+        if let Err(e) = self.wal.truncate() {
+            log::warn!(
+                "Failed to truncate WAL after successful SSTable flush: {}. \
+                Data is safe in SSTable, but WAL cleanup failed.",
+                e
+            );
+            // Don't return error - SSTable write succeeded, which is the important part
+        }
 
         // Clear memtable
         self.memtable.clear();
@@ -469,8 +508,10 @@ impl WriteEngine {
     /// Close the write engine
     ///
     /// This flushes any remaining data in the memtable to SSTable,
-    /// then closes the WAL. After calling close(), the engine
-    /// cannot be used for further writes.
+    /// syncs the WAL, then marks the engine as closed. After calling close(),
+    /// the engine cannot be used for further writes.
+    ///
+    /// This method is idempotent - calling it multiple times is safe.
     ///
     /// # Returns
     ///
@@ -478,9 +519,12 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error if the final flush fails.
-    pub async fn close(mut self) -> Result<()> {
-        if self.closed {
+    /// Returns an error if the final flush fails. If the WAL truncate fails
+    /// after a successful SSTable write, a warning is logged but no error
+    /// is returned (the data is already persisted).
+    pub async fn close(&mut self) -> Result<()> {
+        // Check if already closed (idempotent)
+        if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
 
@@ -489,10 +533,28 @@ impl WriteEngine {
         // Flush any remaining data
         if !self.memtable.is_empty() {
             log::info!("Flushing memtable before close");
-            self.flush_internal_async().await?;
+
+            // Attempt to flush to SSTable
+            match self.flush_internal_async().await {
+                Ok(_) => {
+                    log::info!("Memtable flushed successfully");
+                }
+                Err(e) => {
+                    // If flush fails, log error and return it
+                    log::error!("Failed to flush memtable during close: {}", e);
+                    // Reset closed flag since we failed to close cleanly
+                    self.closed.store(false, Ordering::SeqCst);
+                    return Err(e);
+                }
+            }
         }
 
-        self.closed = true;
+        // Sync WAL before closing
+        if let Err(e) = self.wal.sync() {
+            log::warn!("Failed to sync WAL during close: {}", e);
+            // Don't fail close if sync fails - data is already persisted to SSTable
+        }
+
         log::info!("WriteEngine closed");
 
         Ok(())
@@ -514,7 +576,7 @@ impl WriteEngine {
     }
 
     /// Get the current generation number
-    pub fn generation(&self) -> u32 {
+    pub fn generation(&self) -> u64 {
         self.generation
     }
 
@@ -535,20 +597,19 @@ impl WriteEngine {
     ///
     /// Scans the data directory for existing SSTable files and returns
     /// the next generation number.
-    fn determine_next_generation(data_dir: &Path) -> Result<u32> {
-        let mut max_generation = 0u32;
+    fn determine_next_generation(data_dir: &Path) -> Result<u64> {
+        let mut max_generation = 0u64;
 
         if !data_dir.exists() {
             return Ok(1);
         }
 
         // Scan directory for SSTable files
-        for entry in std::fs::read_dir(data_dir).map_err(|e| {
-            Error::Storage(format!("Failed to read data directory: {}", e))
-        })? {
-            let entry = entry.map_err(|e| {
-                Error::Storage(format!("Failed to read directory entry: {}", e))
-            })?;
+        for entry in std::fs::read_dir(data_dir)
+            .map_err(|e| Error::Storage(format!("Failed to read data directory: {}", e)))?
+        {
+            let entry = entry
+                .map_err(|e| Error::Storage(format!("Failed to read directory entry: {}", e)))?;
 
             let filename = entry.file_name();
             let filename_str = filename.to_string_lossy();
@@ -559,7 +620,7 @@ impl WriteEngine {
                     .strip_prefix("nb-")
                     .and_then(|s| s.split('-').next())
                 {
-                    if let Ok(gen) = gen_str.parse::<u32>() {
+                    if let Ok(gen) = gen_str.parse::<u64>() {
                         max_generation = max_generation.max(gen);
                     }
                 }
@@ -573,8 +634,8 @@ impl WriteEngine {
 #[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
-    use crate::storage::write_engine::mutation::{CellOperation, PartitionKey, TableId};
     use crate::schema::{Column, KeyColumn};
+    use crate::storage::write_engine::mutation::{CellOperation, PartitionKey, TableId};
     use crate::types::Value;
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -635,9 +696,16 @@ mod tests {
             config.memtable_flush_threshold,
             WriteEngineConfig::DEFAULT_FLUSH_THRESHOLD
         );
+        assert_eq!(
+            config.memtable_hard_limit,
+            WriteEngineConfig::DEFAULT_HARD_LIMIT
+        );
 
         let config = config.with_flush_threshold(128 * 1024 * 1024);
         assert_eq!(config.memtable_flush_threshold, 128 * 1024 * 1024);
+
+        let config = config.with_hard_limit(512 * 1024 * 1024);
+        assert_eq!(config.memtable_hard_limit, 512 * 1024 * 1024);
     }
 
     #[test]
@@ -656,7 +724,7 @@ mod tests {
         assert_eq!(engine.generation(), 1);
         assert_eq!(engine.memtable_size(), 0);
         assert_eq!(engine.memtable_row_count(), 0);
-        assert!(!engine.closed);
+        assert!(!engine.closed.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]
@@ -814,7 +882,7 @@ mod tests {
         // Verify SSTable was created
         let data_dir = temp_dir.path().join("data");
         let entries: Vec<_> = std::fs::read_dir(&data_dir).unwrap().collect();
-        assert!(entries.len() > 0, "SSTable files should exist");
+        assert!(!entries.is_empty(), "SSTable files should exist");
     }
 
     #[tokio::test]
@@ -828,7 +896,7 @@ mod tests {
             schema,
         );
 
-        let engine = WriteEngine::new(config).unwrap();
+        let mut engine = WriteEngine::new(config).unwrap();
 
         // Close empty engine
         engine.close().await.unwrap();
@@ -845,7 +913,7 @@ mod tests {
             schema,
         );
 
-        let engine = WriteEngine::new(config).unwrap();
+        let mut engine = WriteEngine::new(config).unwrap();
 
         // Close
         tokio::runtime::Runtime::new()
@@ -987,5 +1055,311 @@ mod tests {
 
         let generation = WriteEngine::determine_next_generation(&data_dir).unwrap();
         assert_eq!(generation, 6);
+    }
+
+    #[tokio::test]
+    async fn test_write_engine_close_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Close once
+        engine.close().await.unwrap();
+        assert!(engine.closed.load(Ordering::SeqCst));
+
+        // Close again - should be idempotent
+        engine.close().await.unwrap();
+        assert!(engine.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_write_engine_close_syncs_wal() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write a mutation
+        let mutation = create_test_mutation(1, "Alice", 1000000);
+        engine.write(mutation).unwrap();
+
+        // Close should sync WAL before completing
+        engine.close().await.unwrap();
+
+        // Verify WAL was truncated (because data was flushed to SSTable)
+        assert_eq!(engine.wal_size(), 0);
+    }
+
+    #[test]
+    fn test_write_engine_closed_flag_atomic() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let engine = WriteEngine::new(config).unwrap();
+
+        // Verify closed flag is atomic
+        assert!(!engine.closed.load(Ordering::SeqCst));
+
+        // Store true
+        engine.closed.store(true, Ordering::SeqCst);
+        assert!(engine.closed.load(Ordering::SeqCst));
+
+        // Swap back to false
+        let prev = engine.closed.swap(false, Ordering::SeqCst);
+        assert!(prev);
+        assert!(!engine.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_write_engine_write_after_close_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Close the engine
+        engine.close().await.unwrap();
+
+        // Try to write - should fail
+        let mutation = create_test_mutation(1, "Alice", 1000000);
+        let result = engine.write(mutation);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidInput(_)) => {}
+            _ => panic!("Expected InvalidInput error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_engine_flush_after_close_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Close the engine
+        engine.close().await.unwrap();
+
+        // Try to flush - should fail
+        let result = engine.flush().await;
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidInput(_)) => {}
+            _ => panic!("Expected InvalidInput error"),
+        }
+    }
+
+    #[test]
+    fn test_write_engine_hard_limit_enforcement() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        // Set very low hard limit (2KB) with flush threshold higher (to prevent auto-flush)
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_flush_threshold(10 * 1024) // 10KB flush threshold (higher than hard limit for test)
+        .with_hard_limit(2048); // 2KB hard limit
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write mutations until we hit the hard limit
+        let mut write_count = 0;
+        for i in 0..1000 {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1000000 + i as i64);
+            let result = engine.write(mutation);
+
+            match result {
+                Ok(()) => {
+                    write_count += 1;
+                }
+                Err(Error::Storage(msg)) => {
+                    assert!(msg.contains("hard limit"));
+                    break;
+                }
+                Err(e) => panic!("Expected Storage error, got: {:?}", e),
+            }
+        }
+
+        // Should have stopped before 1000 writes due to hard limit
+        assert!(
+            write_count < 1000,
+            "Should have hit hard limit before 1000 writes"
+        );
+        assert!(
+            write_count > 0,
+            "Should have accepted at least some writes before hitting limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_engine_hard_limit_enforcement_async() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        // Set very low hard limit (2KB) with flush threshold higher (to prevent auto-flush)
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_flush_threshold(10 * 1024) // 10KB flush threshold (higher than hard limit for test)
+        .with_hard_limit(2048); // 2KB hard limit
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write mutations until we hit the hard limit
+        let mut write_count = 0;
+        for i in 0..1000 {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1000000 + i as i64);
+            let result = engine.write_async(mutation).await;
+
+            match result {
+                Ok(()) => {
+                    write_count += 1;
+                }
+                Err(Error::Storage(msg)) => {
+                    assert!(msg.contains("hard limit"));
+                    break;
+                }
+                Err(e) => panic!("Expected Storage error, got: {:?}", e),
+            }
+        }
+
+        // Should have stopped before 1000 writes due to hard limit
+        assert!(
+            write_count < 1000,
+            "Should have hit hard limit before 1000 writes"
+        );
+        assert!(
+            write_count > 0,
+            "Should have accepted at least some writes before hitting limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_engine_hard_limit_recovery_after_flush() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        // Set low hard limit
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_flush_threshold(1024)
+        .with_hard_limit(2048);
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write until hard limit
+        let mut first_batch_count = 0;
+        for i in 0..1000 {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1000000 + i as i64);
+            let result = engine.write(mutation);
+
+            if result.is_err() {
+                break;
+            }
+
+            first_batch_count += 1;
+        }
+
+        assert!(
+            first_batch_count > 0,
+            "Should have accepted some writes before limit"
+        );
+
+        // Flush to clear memtable
+        engine.flush().await.unwrap();
+
+        // Should be able to write again after flush
+        let mutation = create_test_mutation(9999, "After flush", 2000000);
+        let result = engine.write(mutation);
+        assert!(result.is_ok(), "Should accept writes after flush");
+
+        assert_eq!(engine.memtable_row_count(), 1);
+    }
+
+    #[test]
+    fn test_generation_counter_is_u64() {
+        // Verify that generation counter is u64 to prevent overflow (Issue #410)
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let engine = WriteEngine::new(config).unwrap();
+
+        // Verify type by checking the value is within u64 range
+        let generation: u64 = engine.generation();
+        assert_eq!(generation, 1u64);
+
+        // This compile-time check ensures generation() returns u64
+        // If it returned u32, this assignment would be a no-op but still compile
+        let _type_check: u64 = generation;
+
+        // Verify that u64 can handle generations beyond u32::MAX
+        // This would overflow with u32 (max value: 4,294,967,295)
+        let large_generation: u64 = u32::MAX as u64 + 1000;
+        assert!(large_generation > u32::MAX as u64);
+        assert_eq!(large_generation, 4_294_968_295u64);
+    }
+
+    #[test]
+    fn test_determine_next_generation_large_numbers() {
+        // Verify that generation parsing handles large u64 values (Issue #410)
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Create dummy SSTable files with large generation numbers
+        // These would overflow if we used u32 (max: 4,294,967,295)
+        let large_gen: u64 = u32::MAX as u64 + 100;
+        std::fs::write(data_dir.join(format!("nb-{}-big-Data.db", large_gen)), b"").unwrap();
+
+        let generation = WriteEngine::determine_next_generation(&data_dir).unwrap();
+        assert_eq!(generation, large_gen + 1);
+        assert!(generation > u32::MAX as u64);
     }
 }

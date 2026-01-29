@@ -128,6 +128,9 @@ impl Memtable {
         // Keep created_at unchanged - represents original creation time
     }
 
+    /// Maximum nesting depth for collection size estimation (prevents stack overflow)
+    const MAX_NESTING_DEPTH: usize = 32;
+
     /// Estimate the size of a mutation in bytes
     ///
     /// Conservative estimate includes:
@@ -141,14 +144,14 @@ impl Memtable {
         // Partition key size
         for (col_name, value) in &mutation.partition_key.columns {
             size += col_name.len();
-            size += Self::estimate_value_size(value);
+            size += Self::estimate_value_size_with_depth(value, 0);
         }
 
         // Clustering key size
         if let Some(ref clustering_key) = mutation.clustering_key {
             for (col_name, value) in &clustering_key.columns {
                 size += col_name.len();
-                size += Self::estimate_value_size(value);
+                size += Self::estimate_value_size_with_depth(value, 0);
             }
         }
 
@@ -162,7 +165,21 @@ impl Memtable {
 
     /// Estimate the size of a CQL value in bytes
     fn estimate_value_size(value: &crate::types::Value) -> usize {
+        Self::estimate_value_size_with_depth(value, 0)
+    }
+
+    /// Estimate the size of a CQL value in bytes with depth tracking
+    ///
+    /// Limits recursion depth to prevent stack overflow from deeply nested collections.
+    /// When max depth is reached, returns a conservative fixed estimate.
+    fn estimate_value_size_with_depth(value: &crate::types::Value, depth: usize) -> usize {
         use crate::types::Value;
+
+        // Prevent excessive recursion for deeply nested structures
+        if depth >= Self::MAX_NESTING_DEPTH {
+            // Return conservative estimate: assume 1KB for deeply nested value
+            return 1024;
+        }
 
         match value {
             Value::Null => 0,
@@ -179,31 +196,60 @@ impl Memtable {
             Value::Date(_) => 4,
             Value::Decimal { scale: _, unscaled } => 4 + unscaled.len(),
             Value::Duration { .. } => 16,
-            Value::List(items) => items.iter().map(Self::estimate_value_size).sum::<usize>() + 16,
-            Value::Set(items) => items.iter().map(Self::estimate_value_size).sum::<usize>() + 16,
+            Value::List(items) => {
+                items
+                    .iter()
+                    .map(|item| Self::estimate_value_size_with_depth(item, depth + 1))
+                    .sum::<usize>()
+                    + 16
+            }
+            Value::Set(items) => {
+                items
+                    .iter()
+                    .map(|item| Self::estimate_value_size_with_depth(item, depth + 1))
+                    .sum::<usize>()
+                    + 16
+            }
             Value::Map(entries) => {
                 entries
                     .iter()
-                    .map(|(k, v)| Self::estimate_value_size(k) + Self::estimate_value_size(v))
+                    .map(|(k, v)| {
+                        Self::estimate_value_size_with_depth(k, depth + 1)
+                            + Self::estimate_value_size_with_depth(v, depth + 1)
+                    })
                     .sum::<usize>()
                     + 16
             }
             Value::Udt(udt) => {
                 udt.fields
                     .iter()
-                    .map(|field| field.name.len() + field.value.as_ref().map_or(0, Self::estimate_value_size))
+                    .map(|field| {
+                        field.name.len()
+                            + field
+                                .value
+                                .as_ref()
+                                .map_or(0, |v| Self::estimate_value_size_with_depth(v, depth + 1))
+                    })
                     .sum::<usize>()
                     + 16
             }
-            Value::Tuple(items) => items.iter().map(Self::estimate_value_size).sum::<usize>() + 16,
+            Value::Tuple(items) => {
+                items
+                    .iter()
+                    .map(|item| Self::estimate_value_size_with_depth(item, depth + 1))
+                    .sum::<usize>()
+                    + 16
+            }
             Value::Json(json) => json.to_string().len(),
-            Value::Frozen(inner) => Self::estimate_value_size(inner) + 8,
+            Value::Frozen(inner) => Self::estimate_value_size_with_depth(inner, depth + 1) + 8,
             Value::Tombstone(_) => 24, // timestamp + type + ttl overhead
         }
     }
 
     /// Estimate the size of a cell operation
-    fn estimate_operation_size(op: &crate::storage::write_engine::mutation::CellOperation) -> usize {
+    fn estimate_operation_size(
+        op: &crate::storage::write_engine::mutation::CellOperation,
+    ) -> usize {
         use crate::storage::write_engine::mutation::CellOperation;
 
         match op {
@@ -250,7 +296,8 @@ mod tests {
         let key_bytes = id.to_be_bytes().to_vec();
         let decorated_key = DecoratedKey::from_key_bytes(key_bytes).unwrap();
 
-        let clustering_key = clustering_val.map(|val| ClusteringKey::single("ts", Value::BigInt(val)));
+        let clustering_key =
+            clustering_val.map(|val| ClusteringKey::single("ts", Value::BigInt(val)));
 
         let operations = vec![CellOperation::Write {
             column: "name".to_string(),
@@ -466,12 +513,19 @@ mod tests {
     #[test]
     fn test_memtable_collection_size_estimates() {
         // List
-        let list = Value::List(vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        let list = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
         let size = Memtable::estimate_value_size(&list);
         assert!(size >= 12); // 3 * 4 bytes + overhead
 
         // Set
-        let set = Value::Set(vec![Value::Text("a".to_string()), Value::Text("b".to_string())]);
+        let set = Value::Set(vec![
+            Value::Text("a".to_string()),
+            Value::Text("b".to_string()),
+        ]);
         let size = Memtable::estimate_value_size(&set);
         assert!(size >= 2); // 2 * 1 byte + overhead
 
@@ -503,7 +557,11 @@ mod tests {
         }
 
         let final_size = memtable.size_bytes();
-        println!("10K mutations size: {} bytes ({} KB)", final_size, final_size / 1024);
+        println!(
+            "10K mutations size: {} bytes ({} KB)",
+            final_size,
+            final_size / 1024
+        );
 
         // Should be well under 64MB for 10K mutations
         assert!(final_size < flush_threshold);
@@ -539,5 +597,154 @@ mod tests {
         // Deprecated insert() should return error
         let result = memtable.insert(mutation);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_memtable_nested_collection_depth_limit() {
+        // Create a deeply nested list structure (40 levels deep)
+        let mut nested_value = Value::Integer(42);
+        for _ in 0..40 {
+            nested_value = Value::List(vec![nested_value]);
+        }
+
+        // Should not panic and should return conservative estimate
+        let size = Memtable::estimate_value_size(&nested_value);
+
+        // At depth 32, should return 1024 for each remaining level
+        // First 32 levels recurse normally, remaining 8 levels return 1024 each
+        assert!(size > 0);
+        assert!(
+            size >= 1024,
+            "Should use conservative estimate at max depth"
+        );
+    }
+
+    #[test]
+    fn test_memtable_nested_map_depth_limit() {
+        // Create deeply nested map structure
+        let mut nested_value = Value::Text("bottom".to_string());
+        for _ in 0..35 {
+            nested_value = Value::Map(vec![(Value::Integer(1), nested_value)]);
+        }
+
+        // Should not panic
+        let size = Memtable::estimate_value_size(&nested_value);
+        assert!(size > 0);
+        assert!(
+            size >= 1024,
+            "Should use conservative estimate for deep nesting"
+        );
+    }
+
+    #[test]
+    fn test_memtable_nested_udt_depth_limit() {
+        use crate::types::{UdtField, UdtValue};
+
+        // Create deeply nested UDT structure
+        let mut nested_value = Value::Integer(1);
+        for i in 0..35 {
+            let udt = UdtValue {
+                type_name: format!("type_{}", i),
+                keyspace: "test_ks".to_string(),
+                fields: vec![UdtField {
+                    name: "field".to_string(),
+                    value: Some(nested_value),
+                }],
+            };
+            nested_value = Value::Udt(udt);
+        }
+
+        // Should not panic
+        let size = Memtable::estimate_value_size(&nested_value);
+        assert!(size > 0);
+        assert!(size >= 1024);
+    }
+
+    #[test]
+    fn test_memtable_frozen_nested_depth_limit() {
+        // Create deeply nested frozen values
+        let mut nested_value = Value::Integer(99);
+        for _ in 0..40 {
+            nested_value = Value::Frozen(Box::new(nested_value));
+        }
+
+        // Should not panic or cause stack overflow
+        let size = Memtable::estimate_value_size(&nested_value);
+        assert!(size > 0);
+        assert!(size >= 1024);
+    }
+
+    #[test]
+    fn test_memtable_mixed_nested_collections() {
+        use crate::types::{UdtField, UdtValue};
+
+        // Create a complex nested structure mixing different types
+        let mut nested_value = Value::Text("base".to_string());
+
+        // Alternate between different collection types
+        for i in 0..50 {
+            nested_value = match i % 5 {
+                0 => Value::List(vec![nested_value]),
+                1 => Value::Set(vec![nested_value]),
+                2 => Value::Map(vec![(Value::Integer(i), nested_value)]),
+                3 => Value::Tuple(vec![nested_value]),
+                4 => Value::Udt(UdtValue {
+                    type_name: format!("type_{}", i),
+                    keyspace: "test_ks".to_string(),
+                    fields: vec![UdtField {
+                        name: "f".to_string(),
+                        value: Some(nested_value),
+                    }],
+                }),
+                _ => unreachable!(),
+            };
+        }
+
+        // Should handle mixed nesting without panic
+        let size = Memtable::estimate_value_size(&nested_value);
+        assert!(size > 0);
+    }
+
+    #[test]
+    fn test_memtable_depth_limit_exact_boundary() {
+        // Test at exactly the max depth (32 levels)
+        let mut nested_value = Value::Integer(1);
+        for _ in 0..32 {
+            nested_value = Value::List(vec![nested_value]);
+        }
+
+        // Should handle max depth normally
+        let size = Memtable::estimate_value_size(&nested_value);
+        assert!(size > 0);
+
+        // Add one more level - should hit depth limit on deepest value
+        nested_value = Value::List(vec![nested_value]);
+        let size_over = Memtable::estimate_value_size(&nested_value);
+
+        // Size with depth limit should be >= 1024 due to conservative estimate
+        assert!(size_over >= 1024);
+    }
+
+    #[test]
+    fn test_memtable_shallow_collections_unaffected() {
+        // Verify shallow collections are not affected by depth limit
+
+        // Simple list
+        let simple_list = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
+        let size = Memtable::estimate_value_size(&simple_list);
+        assert_eq!(size, 12 + 16); // 3 * 4 bytes + overhead
+
+        // Nested but shallow (3 levels)
+        let shallow_nested =
+            Value::List(vec![Value::List(vec![Value::List(vec![Value::Integer(
+                1,
+            )])])]);
+        let size = Memtable::estimate_value_size(&shallow_nested);
+        assert!(size > 0);
+        assert!(size < 1024); // Should not use conservative estimate
     }
 }
