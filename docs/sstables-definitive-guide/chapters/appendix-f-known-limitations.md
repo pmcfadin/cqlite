@@ -1,13 +1,196 @@
 # Appendix F — Known Limitations
 
-This appendix documents current parsing limitations, validation status, and workarounds in CQLite's SSTable reading implementation. It serves as a reference to prevent repeated investigation of known issues and provides clear guidance for contributors.
+This appendix documents current capabilities, parsing limitations, validation status, and workarounds in CQLite's SSTable implementation. It serves as a reference to prevent repeated investigation of known issues and provides clear guidance for contributors.
 
 **In this appendix you will learn:**
+- M5.1 write support capabilities (NEW)
 - Which SSTable formats and table types have parsing issues
 - Current validation pass rates across test datasets
-- Feature gaps and M2+ deferred functionality
+- Feature gaps and remaining limitations
 - Practical workarounds for common limitations
 - Issue tracking references for ongoing fixes
+
+---
+
+## M5.1 Write Support Capabilities
+
+CQLite M5.1 introduces comprehensive SSTable write support with the following capabilities:
+
+### Data.db Writing (V5CompressedLegacy Format)
+
+**Status**: IMPLEMENTED
+
+The `DataWriter` produces valid Cassandra 5.0 BIG format Data.db files with:
+
+- **Partition ordering**: Murmur3 token ordering with collision handling (token, then key bytes)
+- **Row format**: V5CompressedLegacy with proper flag handling
+- **Delta encoding**: Timestamps, TTL, and local deletion times delta-encoded against Statistics.db baseline
+- **Clustering prefixes**: Multi-column clustering keys with state bits (PRESENT/NULL/EMPTY)
+- **Cell types**: All primitive CQL types supported (int, bigint, text, timestamp, uuid, etc.)
+
+### CompressionInfo.db Writing
+
+**Status**: IMPLEMENTED
+
+Full compression support via `CompressedDataWriter` and `CompressionInfoWriter`:
+
+- **LZ4**: Fast compression (default, requires `lz4` feature)
+- **Snappy**: Very fast compression (requires `snappy` feature)
+- **Deflate**: Better compression ratio (requires `deflate` feature)
+- **Zstd**: Balanced speed/ratio (requires `zstd` feature)
+
+CompressionInfo.db format includes:
+- Algorithm name with BE u16 length prefix
+- Chunk length (default 64KB)
+- Chunk offset table (u64 BE per chunk)
+- Per-chunk CRC32 checksums
+- Trailing metadata CRC32
+
+### Frozen Collection Serialization
+
+**Status**: IMPLEMENTED (Issue #377)
+
+Frozen collections are serialized as single cells:
+
+- **frozen\<list\<T\>\>**: `[i32 count][i32 len][bytes]...`
+- **frozen\<set\<T\>\>**: Same format as frozen list
+- **frozen\<map\<K,V\>\>**: `[i32 count][i32 key_len][key][i32 val_len][val]...`
+
+### Non-Frozen Collection Serialization
+
+**Status**: IMPLEMENTED (Issue #378)
+
+Non-frozen collections are serialized as multiple cells (complex columns):
+
+- **list\<T\>**: Elements stored with UUID timeuuid paths
+- **set\<T\>**: Elements stored with serialized element as path
+- **map\<K,V\>**: Entries stored with serialized key as path
+
+Complex columns set the `ROW_HAS_COMPLEX_DELETION` flag (0x40).
+
+### Static Row Support
+
+**Status**: IMPLEMENTED (Issue #379)
+
+Static rows use extended flags format:
+
+- `ROW_HAS_EXTENDED_FLAGS` (0x80) set in row flags
+- `EXTENDED_IS_STATIC` (0x01) as extended flags byte
+- No clustering prefix (static rows apply to entire partition)
+- Written after partition header, before regular rows
+
+### Composite Partition Key Support
+
+**Status**: IMPLEMENTED (Issue #380)
+
+Multi-column partition keys use composite encoding:
+
+- Single component: raw bytes (no length prefix)
+- Multi-component: `[u16 BE len][bytes][0x00]...[u16 BE len][bytes]` (no trailing 0x00)
+
+### Delta Encoding with Statistics.db Baseline
+
+**Status**: IMPLEMENTED
+
+All timestamps, TTL values, and local deletion times are delta-encoded:
+
+- `StatisticsWriter` produces baseline values (min_timestamp, min_ttl, min_local_deletion_time)
+- `DataWriter` uses baseline for delta encoding in row and cell data
+- Reduces SSTable size for tables with similar timestamps
+
+---
+
+## Resolved M5.0 Limitations
+
+The following limitations from M5.0 have been resolved in M5.1:
+
+### CompressionInfo.db Writing
+
+**Status**: RESOLVED (was "NOT IMPLEMENTED" in M5.0)
+
+M5.0 produced only uncompressed SSTables. M5.1 implements full compression support with:
+- All four compression algorithms (LZ4, Snappy, Deflate, Zstd)
+- Chunk-based compression with configurable chunk size
+- Trailing CRC32 checksums per chunk
+- CompressionInfo.db metadata file generation
+
+### Collection Serialization
+
+**Status**: RESOLVED (Issues #377, #378)
+
+M5.0 had limited collection support. M5.1 implements:
+- Frozen collection serialization (single-cell format)
+- Non-frozen collection serialization (multi-cell complex columns)
+- Proper flag handling (`ROW_HAS_COMPLEX_DELETION`)
+
+### Static Column Support
+
+**Status**: RESOLVED (Issue #379)
+
+M5.0 did not support static columns. M5.1 implements:
+- Static row writing with extended flags
+- Proper ordering (static rows before regular rows)
+- Correct column bitmap handling for static columns
+
+---
+
+## Remaining M5.1 Limitations
+
+### Promoted Index (Deferred)
+
+**Status**: DEFERRED (M5.2+ scope)
+
+Index.db entries always write `promoted_index_length = 0`. Wide partitions (10K+ rows) cannot use fast within-partition seeks.
+
+**Impact**:
+- Simple/narrow partitions: No impact
+- Wide partitions (10K+ rows): Linear scan required for within-partition queries
+
+**Rationale**: M5.1 prioritizes correctness over performance. Promoted index requires complex sampling logic.
+
+### Compaction
+
+**Status**: NOT IMPLEMENTED (Out of scope)
+
+CQLite does not implement SSTable compaction. Use Cassandra's `nodetool compact` for production compaction needs.
+
+### BTI Format Writing
+
+**Status**: NOT IMPLEMENTED
+
+M5.1 produces BIG format SSTables only. BTI (trie-based) index writing is not supported.
+
+**Rationale**: BTI is opt-in/experimental in Cassandra 5.0. BIG format covers >95% of production use cases.
+
+### Index.db/Summary.db Full Format
+
+**Status**: PARTIAL
+
+Current implementation:
+- Index.db: MD5 digest format with VInt offsets (no promoted index)
+- Summary.db: Sampled entries with correct offset tracking
+
+Not implemented:
+- Full promoted index data in Index.db entries
+- BTI trie format
+
+### Statistics.db Full TOC Format
+
+**Status**: MINIMAL
+
+The `StatisticsWriter` produces a hybrid format compatible with CQLite parser but not full Cassandra TOC:
+
+**Implemented**:
+- EncodingStats (min_timestamp, min_ttl, min_local_deletion_time)
+- 32-byte header for compatibility
+
+**Not Implemented**:
+- SerializationHeader (embedded schema)
+- VALIDATION component (max timestamp, deletion ranges)
+- COMPACTION component (level, ancestors)
+- STATS component (histograms)
+
+**Impact**: Schema must be provided explicitly. Cassandra may issue warnings but can read the essential EncodingStats.
 
 ---
 
@@ -980,66 +1163,22 @@ Bytes Z+:    HEADER component (SerializationHeader with column schema)
 
 ---
 
-### CompressionInfo.db Not Implemented
+### ~~CompressionInfo.db Not Implemented~~ - RESOLVED
 
-**Status**: ❌ **NOT IMPLEMENTED** (M5 Stage 0 scope)
-**Impact**: All written SSTables are uncompressed (larger disk usage)
-**Affected Component**: None (no `compression_info_writer.rs` exists)
+**Status**: ✅ **RESOLVED** (M5.1)
+**Resolution**: Full compression support implemented in M5.1
 
-**Background**: Cassandra SSTables support LZ4, Snappy, Deflate, and Zstd compression. Compressed Data.db files require CompressionInfo.db, which contains:
-- Compression algorithm name (e.g., "LZ4Compressor")
-- Chunk length (e.g., 65536 bytes)
-- Chunk offset table (for seeking to compressed chunks)
-- Per-chunk CRC32 checksums
+M5.0 produced only uncompressed SSTables. M5.1 implements full compression support via:
+- `CompressedDataWriter`: Chunk-based compression with LZ4/Snappy/Deflate/Zstd
+- `CompressionInfoWriter`: Compression metadata file generation
+- Trailing CRC32 checksums per chunk
+- Feature-gated compression algorithms
 
-**Current Implementation**: The `SSTableWriter` always produces uncompressed Data.db:
-- No CompressionInfo.db component written
-- TOC.txt does not list CompressionInfo.db
-- Data.db contains raw uncompressed partition/row data
+See "M5.1 Write Support Capabilities" section at the top of this document for details.
 
-**Impact**:
-- ❌ **Disk usage**: Uncompressed SSTables are 3-5x larger than LZ4-compressed
-- ❌ **I/O bandwidth**: More bytes to write/read from disk
-- ✅ **Correctness**: Uncompressed format is valid and fully compatible with Cassandra
-- ✅ **Simplicity**: No compression logic or chunk boundary handling
-
-**Example**:
-```text
-Compressed (with CompressionInfo.db):
-  Data.db:            50 MB
-  CompressionInfo.db:  1 KB
-  Total:              50 MB
-
-Uncompressed (M5):
-  Data.db:           200 MB
-  Total:             200 MB
-```
-
-**Rationale for Deferral**:
-- M5 Stage 0 prioritizes correctness over optimization
-- Compression adds complexity: chunk boundaries, buffer management, CRC validation
-- Uncompressed format is valid Cassandra 5.0 (Cassandra supports both)
-- Read path already supports compressed SSTables (asymmetric read/write capabilities)
-
-**Future Implementation** (M5.1+):
-1. Add `CompressionInfoWriter` struct
-2. Implement chunk-based compression in `DataWriter`:
-   - Buffer data in 64 KB chunks
-   - Compress each chunk with LZ4/Snappy/Zstd
-   - Track chunk offsets for CompressionInfo.db
-3. Write CompressionInfo.db after Data.db:
-   - Algorithm name
-   - Chunk length
-   - Chunk offset table
-   - Per-chunk CRC32 checksums
-4. Add to TOC.txt
-
-**Workaround**: For production use requiring compression:
-1. Write uncompressed SSTables with CQLite M5
-2. Use Cassandra's `nodetool upgradesstables` to rewrite with compression
-3. Or wait for M5.1+ compression support
-
-**Tracking**: M5 Stage 0 scope decision (no issue filed)
+**Files Added**:
+- `cqlite-core/src/storage/sstable/writer/compressed_data_writer.rs`
+- `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs`
 
 ---
 
@@ -1048,17 +1187,21 @@ Uncompressed (M5):
 - **Pass rate: 100% (33/33 tables)** - COMPLETE! All test tables now passing
 - All SSTable component parsers (Data.db, Index.db, Summary.db, Statistics.db) now use correct formats
 - All data types fully supported: basic types, collections, UDTs, frozen types, complex cells
-- **M5 Write Support**: Functional with documented limitations
+- **M5.1 Write Support**: Feature-complete with documented trade-offs
+  - ✅ CompressionInfo.db: Full compression support (LZ4, Snappy, Deflate, Zstd)
+  - ✅ Collection serialization: Frozen and non-frozen collections
+  - ✅ Static columns: Extended flags format with EXTENDED_IS_STATIC
+  - ✅ Composite partition keys: Multi-component encoding
+  - ✅ Delta encoding: Statistics.db baseline for timestamps/TTL
   - ⚠️ Issue #401: Tombstone local_deletion_time derived from timestamp
   - ⚠️ Issue #408: IndexWriter uses Vec buffer (not true disk streaming)
   - ⏳ Promoted Index deferred (length=0 in all entries)
   - ⚠️ Statistics.db minimal format (hybrid header, not full TOC)
-  - ❌ CompressionInfo.db not implemented (uncompressed only)
-- **All feature gaps closed**:
+- **All read-side feature gaps closed**:
   - ✅ Issue #219: Frozen type support
   - ✅ Issue #220: UDT (User-Defined Type) support
   - ✅ Issue #221: Complex cell flag handling for non-frozen collections
-- **Milestone achieved**: M3 completion (production-ready with 100% parsing coverage), M5 in progress (write support with limitations)
+- **Milestone achieved**: M5.1 completion (write support with compression, collections, static columns)
 
 ---
 
