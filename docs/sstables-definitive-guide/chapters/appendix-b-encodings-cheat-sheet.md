@@ -110,7 +110,7 @@ Row flags appear at the start of each row and control row-level metadata.
 | 3 | `HAS_TTL` | `0x08` | Row-level TTL present (delta encoded) |
 | 4 | `HAS_DELETION` | `0x10` | Row deletion present (local_deletion_time + timestamp) |
 | 5 | `HAS_ALL_COLUMNS` | `0x20` | All columns present (no bitmap needed) |
-| 6 | `HAS_COMPLEX_DELETION` | `0x40` | Row contains complex column with deletion |
+| 6 | `HAS_COMPLEX_DELETION` | `0x40` | Row contains non-frozen collection column |
 | 7 | `HAS_EXTENDED_FLAGS` | `0x80` | Extended flags byte follows |
 
 **Common flag combinations**:
@@ -249,25 +249,41 @@ Single-component keys are serialized as raw bytes with no length prefix:
 - `text("hello")`: `0x68 0x65 0x6C 0x6C 0x6F` (5 bytes, UTF-8)
 - `uuid(...)`: 16 bytes (raw UUID bytes)
 
-### Multi-Component (Composite) Keys
+### Multi-Component (Composite) Keys (Issue #380, #422)
 
-Multi-component keys use 2-byte big-endian length prefixes for each component:
+Multi-component keys use 2-byte big-endian length prefixes with 0x00 separators between components:
 
 ```
-[len1: 2B BE][value1_bytes][len2: 2B BE][value2_bytes]...
+[u16 BE: len1][component1_bytes][0x00]
+[u16 BE: len2][component2_bytes][0x00]
+...
+[u16 BE: lenN][componentN_bytes]  ← NO trailing 0x00
 ```
 
-**Example**: `(int(42), text("hello"))` partition key
+**CRITICAL**: The 0x00 separator appears after each component EXCEPT the last.
+
+**Example 1**: `(int(42), text("hello"))` partition key
 ```
-0x00 0x04              ← length of int component (4 bytes)
-0x00 0x00 0x00 0x2A    ← int value 42
-0x00 0x05              ← length of text component (5 bytes)
+0x00 0x04                 ← length of int component (4 bytes)
+0x00 0x00 0x00 0x2A       ← int value 42
+0x00                      ← separator after first component
+0x00 0x05                 ← length of text component (5 bytes)
 0x68 0x65 0x6C 0x6C 0x6F  ← text value "hello"
+                          ← NO trailing 0x00 after last component
 ```
+Total: 13 bytes (2 + 4 + 1 + 2 + 5)
+
+**Example 2**: `(year int, month int, day int)` with values `(2024, 6, 15)`:
+```
+00 04 00 00 07 E8 00    ← year=2024: len(4) + value + separator
+00 04 00 00 00 06 00    ← month=6: len(4) + value + separator
+00 04 00 00 00 0F       ← day=15: len(4) + value (NO trailing 0x00)
+```
+Total: 20 bytes (7 + 7 + 6)
 
 **Size limits**:
 - Single-component: No inherent limit (but V5CompressedLegacy partition header uses u8 length, limiting total to 255 bytes)
-- Multi-component: Each component limited to 65535 bytes (u16 length prefix)
+- Multi-component: Each component limited to 65,535 bytes (u16 length prefix)
 
 ### Token Computation
 
@@ -308,7 +324,7 @@ DecoratedKey {
 - **Row size measurement**: VInt values like `row_size` are measured from AFTER the VInt is consumed (Issue #237).
 - **Safety limit**: Length VInts are capped at 1GB to prevent overflow and allocation attacks (Issue #264).
 - **Write guidance**: Use delta encoding for timestamps/TTL/deletion times; compute Statistics.db baselines first.
-- **Partition keys**: Single-component keys have no length prefix; multi-component keys use 2-byte BE lengths.
+- **Partition keys**: Single-component keys have no length prefix; multi-component keys use 2-byte BE lengths with 0x00 separators EXCEPT after the last component (Issue #380, #422).
 - **Token ordering**: Partitions must be written in ascending token order (Murmur3 hash of partition key bytes).
 
 ## References

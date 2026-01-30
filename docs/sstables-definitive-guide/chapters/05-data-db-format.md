@@ -68,15 +68,115 @@ Endianness:
 - **Frozen** (`frozen<list<...>>`): Single-cell storage, entire collection serialized as one blob
 - **Non-frozen** (`list<...>`): Multi-cell storage, each element stored as separate cell
 
+#### Frozen Collection Serialization
+
+Frozen collections are stored as a single cell with the entire collection serialized as a binary blob. The format uses 4-byte big-endian i32 length prefixes (matching Java's serialization format).
+
+**Frozen List/Set Format** (identical for both types):
+```
+[i32 BE: element_count]
+[for each element:
+  [i32 BE: element_length]
+  [element_bytes]
+]
+```
+
+**Example** (frozen list with 2 integers):
+```
+Hex: 00 00 00 02  00 00 00 04 00 00 00 2A  00 00 00 04 00 00 00 64
+     |___________|  |_____________________| |_____________________|
+     count=2        elem1: len=4, val=42   elem2: len=4, val=100
+```
+
+**Frozen Map Format**:
+```
+[i32 BE: entry_count]
+[for each entry:
+  [i32 BE: key_length]
+  [key_bytes]
+  [i32 BE: value_length]
+  [value_bytes]
+]
+```
+
+**Example** (frozen map with 1 entry: "a" -> 42):
+```
+Hex: 00 00 00 01  00 00 00 01 61  00 00 00 04 00 00 00 2A
+     |___________|  |____________| |_______________________|
+     count=1        key: len=1, "a" val: len=4, int(42)
+```
+
+#### Non-Frozen Collection Serialization
+
+Non-frozen collections are stored as multiple cells, one per element or entry. Each cell has a `cell_path` that identifies the element and a `cell_value` that contains the data.
+
 **Non-frozen collection cell format** (complex columns):
 ```
 [flags: u8]
 [timestamp: VInt if not USE_ROW_TIMESTAMP_MASK]
 [local_deletion_time: VInt if deleted/expiring]
 [ttl: VInt if expiring]
-[cell_path: VInt length + bytes]  ← List: UUID, Set: element value, Map: key
-[value: VInt length + bytes]      ← Element/value data
+[cell_path: VInt length + bytes]  ← See table below
+[value: VInt length + bytes]      ← See table below
 ```
+
+**Cell Path and Value by Collection Type**:
+
+| Collection Type | cell_path | cell_value |
+|-----------------|-----------|------------|
+| `list<T>` | TimeUUID (16 bytes) | Serialized element |
+| `set<T>` | Serialized element | Empty (0 bytes) |
+| `map<K,V>` | Serialized key | Serialized value |
+
+**List Element Ordering**:
+
+Lists use TimeUUID (UUID version 1) for the `cell_path` to maintain insertion order. TimeUUIDs are time-sortable, ensuring elements remain in the order they were written. Each element gets a unique TimeUUID generated at write time.
+
+**Example** (list with 2 integers):
+```
+Cell 1:
+  path: f35cf98a-220c-11ef-8b04-f4ff7ffcf681 (16 bytes, TimeUUID)
+  value: 00 00 00 2A (4 bytes, int 42)
+
+Cell 2:
+  path: f35cf98b-220c-11ef-8b04-f4ff7ffcf681 (16 bytes, TimeUUID)
+  value: 00 00 00 64 (4 bytes, int 100)
+```
+
+**Set Element Storage**:
+
+Sets use the element value itself as the `cell_path` for efficient membership testing. The `cell_value` is always empty (0 bytes). This allows Cassandra to check set membership by looking for a cell with a matching path.
+
+**Example** (set with 2 text values):
+```
+Cell 1:
+  path: 61 6C 70 68 61 (5 bytes, "alpha")
+  value: (empty, 0 bytes)
+
+Cell 2:
+  path: 62 65 74 61 (4 bytes, "beta")
+  value: (empty, 0 bytes)
+```
+
+**Map Entry Storage**:
+
+Maps use the serialized key as the `cell_path` and the serialized value as the `cell_value`. This allows efficient key lookups.
+
+**Example** (map with 2 entries: 1->"one", 2->"two"):
+```
+Cell 1:
+  path: 00 00 00 01 (4 bytes, int key 1)
+  value: 6F 6E 65 (3 bytes, "one")
+
+Cell 2:
+  path: 00 00 00 02 (4 bytes, int key 2)
+  value: 74 77 6F (3 bytes, "two")
+```
+
+**Implementation References**:
+- Frozen collections: `cqlite-core/src/storage/sstable/writer/data_writer.rs::serialize_frozen_list()`, `serialize_frozen_set()`, `serialize_frozen_map()`
+- Non-frozen collections: `serialize_nonfrozen_list()`, `serialize_nonfrozen_set()`, `serialize_nonfrozen_map()`
+- Tests: `cqlite-core/tests/collection_roundtrip_test.rs`
 
 **UDTs** (User-Defined Types) serialize fields in schema order with 4-byte BE length prefixes:
 ```
