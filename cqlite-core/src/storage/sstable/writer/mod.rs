@@ -6,6 +6,7 @@
 //! - Filter.db: Bloom filter for existence checks
 //! - Statistics.db: Metadata for delta encoding
 //! - Summary.db: Sampled index entries
+//! - CompressionInfo.db: Compression metadata (required even when uncompressed)
 //! - TOC.txt: Component manifest (publication barrier)
 //!
 //! Component generation order is critical (see M5 Council Recommendation):
@@ -13,12 +14,16 @@
 //! 2. Data.db + Index.db (single pass, track offsets)
 //! 3. Summary.db (sample Index.db entries)
 //! 4. Filter.db (finalize Bloom filter)
-//! 5. CompressionInfo.db (if compressed)
+//! 5. CompressionInfo.db (required for NB format, even when uncompressed)
 //! 6. Digest.crc32
 //! 7. TOC.txt (makes SSTable visible)
 //!
 //! TODO: Implementation in M5.0-7 through M5.0-13
 
+#[cfg(feature = "write-support")]
+pub mod compressed_data_writer;
+#[cfg(feature = "write-support")]
+pub mod compression_info_writer;
 #[cfg(feature = "write-support")]
 pub mod data_writer;
 #[cfg(feature = "write-support")]
@@ -34,6 +39,22 @@ pub mod summary_writer;
 #[cfg(feature = "write-support")]
 pub mod toc_writer;
 
+#[cfg(all(feature = "write-support", feature = "deflate"))]
+pub use compressed_data_writer::DeflateCompressor;
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+pub use compressed_data_writer::Lz4Compressor;
+#[cfg(all(feature = "write-support", feature = "snappy"))]
+pub use compressed_data_writer::SnappyCompressor;
+#[cfg(all(feature = "write-support", feature = "zstd"))]
+pub use compressed_data_writer::ZstdCompressor;
+#[cfg(feature = "write-support")]
+pub use compressed_data_writer::{
+    create_compressor, CompressedDataWriter, Compressor, NoopCompressor,
+};
+#[cfg(feature = "write-support")]
+pub use compression_info_writer::{
+    CompressionAlgorithm, CompressionInfoWriter, CompressionMetadata,
+};
 #[cfg(feature = "write-support")]
 pub use data_writer::DataWriter;
 #[cfg(feature = "write-support")]
@@ -70,6 +91,8 @@ pub struct SSTableInfo {
     pub summary_path: PathBuf,
     /// Path to the Statistics.db file
     pub stats_path: PathBuf,
+    /// Path to the CompressionInfo.db file
+    pub compression_info_path: PathBuf,
     /// Path to the TOC.txt file
     pub toc_path: PathBuf,
     /// Path to the Digest.crc32 file
@@ -93,8 +116,9 @@ pub struct SSTableInfo {
 /// 3. Index.db - Partition index (uses Data.db offsets)
 /// 4. Filter.db - Bloom filter
 /// 5. Summary.db - Sampled index entries
-/// 6. Digest.crc32 - Data.db checksum
-/// 7. TOC.txt - Table of contents (LAST, publication barrier)
+/// 6. CompressionInfo.db - Compression metadata (required even when uncompressed)
+/// 7. Digest.crc32 - Data.db checksum
+/// 8. TOC.txt - Table of contents (LAST, publication barrier)
 ///
 /// # File Naming
 ///
@@ -269,17 +293,32 @@ impl SSTableWriter {
             if let Some(ttl) = mutation.ttl_seconds {
                 self.stats.update_ttl(ttl as i32);
             }
-            // Track local deletion times for tombstones
+            // Track local deletion times for tombstones and TTL cells
             // TODO(Issue #401): Get proper local_deletion_time from Mutation struct
             for op in &mutation.operations {
-                if matches!(
-                    op,
+                match op {
+                    crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                        ttl_seconds,
+                        ..
+                    } => {
+                        // Track TTL
+                        self.stats.update_ttl(*ttl_seconds as i32);
+                        // CRITICAL: TTL cells need local_deletion_time tracked
+                        // local_deletion_time = now + ttl
+                        let now_seconds = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i32)
+                            .unwrap_or(0);
+                        let local_deletion_time = now_seconds.saturating_add(*ttl_seconds as i32);
+                        self.stats.update_local_deletion_time(local_deletion_time);
+                    }
                     crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                        | crate::storage::write_engine::mutation::CellOperation::DeleteRow
-                ) {
-                    // Derive local_deletion_time from timestamp (workaround)
-                    let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
-                    self.stats.update_local_deletion_time(local_deletion_time);
+                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
+                        // Derive local_deletion_time from timestamp (workaround)
+                        let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+                        self.stats.update_local_deletion_time(local_deletion_time);
+                    }
+                    _ => {}
                 }
             }
             self.stats.increment_row_count();
@@ -291,10 +330,28 @@ impl SSTableWriter {
         // This ensures delta encoding uses the correct baselines
         self.data_writer.update_stats(self.stats.clone());
 
+        // Extract partition tombstone and range tombstones from mutations
+        // For now, we assume no partition or range tombstones (M5.2 basic support)
+        // TODO(Issue #387): Extract from mutations if present
+        let partition_tombstone = mutations
+            .first()
+            .and_then(|m| m.partition_tombstone.as_ref());
+
+        // Collect all range tombstones from mutations
+        let range_tombstones: Vec<_> = mutations
+            .iter()
+            .flat_map(|m| m.range_tombstones.iter())
+            .cloned()
+            .collect();
+
         // Write partition to Data.db and get offset
-        let data_offset = self
-            .data_writer
-            .write_partition(&key, &mutations, &self.schema)?;
+        let data_offset = self.data_writer.write_partition(
+            &key,
+            &mutations,
+            &self.schema,
+            partition_tombstone,
+            &range_tombstones,
+        )?;
 
         // Add partition to Index.db and get entry info
         // IMPORTANT: Capture index_offset AFTER the entry is written to Index.db
@@ -373,6 +430,15 @@ impl SSTableWriter {
         let summary_bytes = self.summary_writer.finish()?;
         tokio::fs::write(&summary_path, summary_bytes).await?;
 
+        // 5.5. Write CompressionInfo.db (required for NB format, even when uncompressed)
+        let compression_info_path =
+            Self::component_path(&self.output_dir, self.generation, "CompressionInfo.db");
+        let compression_writer = CompressionInfoWriter::new(compression_info_path.clone());
+        let mut compression_metadata = CompressionMetadata::new(CompressionAlgorithm::None, 65536);
+        // For uncompressed data: no chunks, compressed_length = data_size
+        compression_metadata.set_compressed_length(data_size);
+        compression_writer.write(&compression_metadata)?;
+
         // 6. Write Digest.crc32 (compute CRC32 of Data.db)
         let digest_path = Self::component_path(&self.output_dir, self.generation, "Digest.crc32");
         let digest_writer = DigestWriter::new(digest_path.clone());
@@ -395,6 +461,9 @@ impl SSTableWriter {
                 crate::storage::sstable::directory::types::SSTableComponent::Statistics,
             ),
             ComponentEntry::new(
+                crate::storage::sstable::directory::types::SSTableComponent::CompressionInfo,
+            ),
+            ComponentEntry::new(
                 crate::storage::sstable::directory::types::SSTableComponent::Digest,
             ),
         ];
@@ -406,6 +475,7 @@ impl SSTableWriter {
             filter_path,
             summary_path,
             stats_path,
+            compression_info_path,
             toc_path,
             digest_path,
             partition_count: self.partition_count,
@@ -511,6 +581,7 @@ mod tests {
         assert!(info.filter_path.exists());
         assert!(info.summary_path.exists());
         assert!(info.stats_path.exists());
+        assert!(info.compression_info_path.exists());
         assert!(info.toc_path.exists());
         assert!(info.digest_path.exists());
 
@@ -624,6 +695,7 @@ mod tests {
         assert!(toc_contents.contains("Filter.db"));
         assert!(toc_contents.contains("Summary.db"));
         assert!(toc_contents.contains("Statistics.db"));
+        assert!(toc_contents.contains("CompressionInfo.db"));
         assert!(toc_contents.contains("Digest.crc32"));
         assert!(toc_contents.contains("TOC.txt"));
     }
