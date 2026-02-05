@@ -123,6 +123,7 @@ impl ExportReport {
             "Statistics.db",
             "Filter.db",
             "Summary.db",
+            "CompressionInfo.db",
             "Digest.crc32",
             "TOC.txt",
         ];
@@ -259,6 +260,7 @@ impl crate::storage::write_engine::WriteEngine {
             ("Statistics.db", SSTableComponent::Statistics),
             ("Filter.db", SSTableComponent::Filter),
             ("Summary.db", SSTableComponent::Summary),
+            ("CompressionInfo.db", SSTableComponent::CompressionInfo),
             ("Digest.crc32", SSTableComponent::Digest),
             ("TOC.txt", SSTableComponent::TOC),
         ];
@@ -578,6 +580,17 @@ mod tests {
             .join("test_table")
             .join("nb-1-big-Index.db");
         assert!(index_file.exists());
+
+        // Verify CompressionInfo.db is included in export (Issue #426)
+        let compression_info_file = export_dir
+            .path()
+            .join("test_ks")
+            .join("test_table")
+            .join("nb-1-big-CompressionInfo.db");
+        assert!(
+            compression_info_file.exists(),
+            "CompressionInfo.db must be included in export for Cassandra 5 compatibility"
+        );
     }
 
     #[tokio::test]
