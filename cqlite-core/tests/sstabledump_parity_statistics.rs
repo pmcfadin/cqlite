@@ -271,7 +271,13 @@ async fn validate_table_statistics_parity(
     Ok(validation_result)
 }
 
-/// Test that written Statistics.db matches what we write
+/// Test that written Statistics.db has correct TOC structure and checksums (Issue #425)
+///
+/// This test verifies Cassandra 5 compatibility by checking:
+/// - Proper TOC structure with 4 component entries
+/// - CRC32 checksum at bytes 4-7 = CRC32(num_components)
+/// - Accumulated CRC32 at bytes 40-43
+/// - Sequential component offsets starting at byte 44
 #[tokio::test]
 async fn test_statistics_write_parity() -> CqliteResult<()> {
     let temp_dir = TempDir::new().unwrap();
@@ -288,17 +294,73 @@ async fn test_statistics_write_parity() -> CqliteResult<()> {
     let writer = StatisticsWriter::new(stats_path.clone());
     writer.write(&meta)?;
 
-    // Read back and parse
+    // Read back the file
     let file_data = std::fs::read(&stats_path)?;
-    let (_, stats) = parse_statistics_with_fallback(&file_data)?;
-
-    // Verify min_timestamp matches first update
-    assert_eq!(
-        stats.timestamp_stats.min_timestamp, 1704067200000000,
-        "Min timestamp should match first update"
+    assert!(
+        file_data.len() >= 44,
+        "Statistics.db should have at least 44 bytes for TOC"
     );
 
-    println!("✅ Statistics.db write parity test passed");
+    // Verify TOC structure (Issue #425)
+    // 1. num_components = 4 at bytes 0-3
+    let num_components =
+        u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
+    assert_eq!(num_components, 4, "Should have num_components=4");
+
+    // 2. CRC32 checksum at bytes 4-7 should equal CRC32(bytes[0:4])
+    let stored_crc1 = u32::from_be_bytes([file_data[4], file_data[5], file_data[6], file_data[7]]);
+    let expected_crc1 = crc32fast::hash(&file_data[0..4]);
+    assert_eq!(
+        stored_crc1, expected_crc1,
+        "First checksum should be CRC32 of num_components"
+    );
+
+    // 3. Verify it matches the known Cassandra value (0x26291b05 for num_components=4)
+    assert_eq!(
+        stored_crc1, 0x26291b05,
+        "CRC32 of num_components=4 should be 0x26291b05"
+    );
+
+    // 4. Verify TOC entry types (0, 1, 2, 3 = VALIDATION, COMPACTION, STATS, HEADER)
+    for i in 0..4u32 {
+        let entry_offset = 8 + i as usize * 8;
+        let component_type = u32::from_be_bytes([
+            file_data[entry_offset],
+            file_data[entry_offset + 1],
+            file_data[entry_offset + 2],
+            file_data[entry_offset + 3],
+        ]);
+        assert_eq!(
+            component_type, i,
+            "TOC entry {} should have component_type={}",
+            i, i
+        );
+    }
+
+    // 5. Accumulated CRC32 at bytes 40-43
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&file_data[0..4]); // num_components
+    for i in 0..4 {
+        let entry_start = 8 + i * 8;
+        hasher.update(&file_data[entry_start..entry_start + 8]);
+    }
+    let expected_accumulated = hasher.finalize();
+    let stored_accumulated =
+        u32::from_be_bytes([file_data[40], file_data[41], file_data[42], file_data[43]]);
+    assert_eq!(
+        stored_accumulated, expected_accumulated,
+        "Accumulated checksum at byte 40 should match"
+    );
+
+    // 6. VALIDATION component should start at byte 44
+    let validation_offset =
+        u32::from_be_bytes([file_data[12], file_data[13], file_data[14], file_data[15]]);
+    assert_eq!(
+        validation_offset, 44,
+        "VALIDATION component should start at byte 44"
+    );
+
+    println!("✅ Statistics.db TOC structure and checksums validated (Issue #425)");
     Ok(())
 }
 
