@@ -42,9 +42,18 @@
 //! - 3: SERIALIZATION_HEADER (table schema)
 
 use crate::error::{Error, Result};
-use crate::parser::vint::encode_vint;
+use crate::parser::vint::encode_vuint;
 use std::io::Write;
 use std::path::PathBuf;
+
+/// Epoch constants for EncodingStats (from Cassandra's EncodingStats.java)
+/// These are used to compute deltas from a baseline for more compact encoding
+#[allow(dead_code)]
+const TIMESTAMP_EPOCH: i64 = 1442880000000000; // Sept 22, 2015 00:00:00 UTC in microseconds
+#[allow(dead_code)]
+const DELETION_TIME_EPOCH: i32 = 1442880000; // Sept 22, 2015 00:00:00 UTC in seconds
+#[allow(dead_code)]
+const TTL_EPOCH: i32 = 0; // TTL epoch is 0 (no offset)
 
 /// Number of metadata components in Statistics.db
 /// Cassandra 5.0 nb-format has 4 components: VALIDATION, COMPACTION, STATS, HEADER
@@ -343,109 +352,234 @@ impl StatisticsWriter {
 
     /// Build VALIDATION component (MetadataType ordinal 0)
     ///
-    /// Contains the validator class name. For CQLite, we use a minimal stub.
-    /// Real Cassandra files contain the full validator class path.
+    /// Format (ValidationMetadata.java):
+    /// - partitioner class name (Java writeUTF: u16 BE length + UTF-8 bytes)
+    /// - bloom filter FP chance (f64 BE)
     fn build_validation_component(&self) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
-        // Validator class name (VInt length + string)
-        let validator = b"org.apache.cassandra.db.marshal.UTF8Type";
-        buffer.write_all(&encode_vint(validator.len() as i64))?;
-        buffer.write_all(validator)?;
+        // Partitioner class name (Java writeUTF format)
+        let partitioner = b"org.apache.cassandra.dht.Murmur3Partitioner";
+
+        // Java writeUTF: u16 BE length prefix + modified UTF-8 bytes
+        let len = partitioner.len() as u16;
+        buffer.write_all(&len.to_be_bytes())?;
+        buffer.write_all(partitioner)?;
+
+        // Bloom filter false positive chance (f64 BE)
+        let fp_chance = 0.01f64;
+        buffer.write_all(&fp_chance.to_be_bytes())?;
 
         Ok(buffer)
     }
 
     /// Build COMPACTION component (MetadataType ordinal 1)
     ///
-    /// Contains compaction metadata. We write a minimal version.
+    /// Format (CompactionMetadata.java):
+    /// - cardinality estimator (i32 BE length + HyperLogLogPlus bytes)
+    ///
+    /// We write a minimal valid empty HyperLogLogPlus sketch.
     fn build_compaction_component(&self) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
-        // Minimal compaction metadata structure observed in real files
-        // This is a simplified version - real files have cardinality estimates, histograms, etc.
+        // Cardinality estimator: ByteArrayUtil.writeWithLength(bytes, out)
+        // Format: i32 BE length + data bytes
+        //
+        // Minimal valid HyperLogLogPlus(p=11, sp=25) in SPARSE format:
+        // - 4 bytes: version (-2 as i32 = 0xFFFFFFFE)
+        // - 1 byte: p = 11 (0x0B)
+        // - 1 byte: sp = 25 (0x19)
+        // - 1 byte: format type = SPARSE (0x01)
+        // - 4 bytes: tempSetSize = 0
+        // - 4 bytes: sparseSetSize = 0
+        // Total: 15 bytes
 
-        // Estimated cardinality (VInt)
-        buffer.write_all(&encode_vint(0))?;
+        const HLL_DATA: [u8; 15] = [
+            0xFF, 0xFF, 0xFF, 0xFE, // version = -2 (HyperLogLogPlus marker)
+            0x0B, // p = 11 (precision)
+            0x19, // sp = 25 (sparse precision)
+            0x01, // format = SPARSE
+            0x00, 0x00, 0x00, 0x00, // tempSetSize = 0
+            0x00, 0x00, 0x00, 0x00, // sparseSetSize = 0
+        ];
 
-        // Unknown metadata fields - minimal placeholders
-        // Real format has partition size histograms, column count histograms, etc.
-        // For now, we write minimal data that Cassandra can skip
-        buffer.write_all(&encode_vint(-1))?; // Sentinel for "no histogram data"
-        buffer.write_all(&encode_vint(-1))?;
+        // Write length prefix (i32 BE)
+        buffer.write_all(&(HLL_DATA.len() as i32).to_be_bytes())?;
+
+        // Write HLL data
+        buffer.write_all(&HLL_DATA)?;
 
         Ok(buffer)
     }
 
     /// Build STATS component (MetadataType ordinal 2)
     ///
-    /// Contains EncodingStats and other statistics metadata.
-    /// This matches the format expected by `parse_minimal_encoding_stats()`.
+    /// Format for nb version (StatsMetadata.java lines 401-512):
+    /// This is a complete serialization of all required fields for Cassandra 5.0 nb format.
     fn build_stats_component(&self, metadata: &StatisticsMetadata) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
-        // The STATS component format expected by parse_minimal_encoding_stats:
-        // 1. metadata_type (u32 BE) - NOT included in component data (it's in the TOC)
-        //    Actually, looking at the parser, it DOES expect a u32 at the start!
-        // 2. data_length (VUInt)
-        // 3. partitioner_len (VUInt) + partitioner string
-        // 4. metadata1 (VUInt)
-        // 5. metadata2 (VUInt)
-        // 6. min_timestamp (VInt)
-        // 7. min_local_deletion_time (VInt)
-        // 8. min_ttl (VInt)
+        // 1-2. EstimatedHistogram estimatedPartitionSize and estimatedCellPerPartitionCount
+        // Minimal valid histogram: size=2, one offset/count pair
+        self.write_estimated_histogram(&mut buffer)?;
+        self.write_estimated_histogram(&mut buffer)?;
 
-        // Legacy field: appears in Cassandra 5.0 format but purpose unclear
-        // Setting to 0 as observed in real Statistics.db files
-        buffer.write_all(&0u32.to_be_bytes())?;
+        // 3. CommitLogPosition commitLogUpperBound (NONE = segmentId=-1, position=0)
+        buffer.write_all(&(-1i64).to_be_bytes())?; // segmentId
+        buffer.write_all(&0i32.to_be_bytes())?; // position
 
-        // Data length (VUInt) - placeholder, parser reads and discards
-        buffer.write_all(&encode_vint(0))?;
+        // 4. long minTimestamp
+        buffer.write_all(&metadata.min_timestamp.to_be_bytes())?;
 
-        // Partitioner class name
-        let partitioner = b"org.apache.cassandra.dht.Murmur3Partitioner";
-        buffer.write_all(&encode_vint(partitioner.len() as i64))?;
-        buffer.write_all(partitioner)?;
+        // 5. long maxTimestamp
+        buffer.write_all(&metadata.max_timestamp.to_be_bytes())?;
 
-        // Two metadata placeholders (parser skips these)
-        buffer.write_all(&encode_vint(0))?;
-        buffer.write_all(&encode_vint(0))?;
+        // 6. int minLocalDeletionTime (use Integer.MAX_VALUE if no deletions)
+        let min_del_time = if metadata.min_local_deletion_time == 0 {
+            i32::MAX
+        } else {
+            metadata.min_local_deletion_time
+        };
+        buffer.write_all(&min_del_time.to_be_bytes())?;
 
-        // EncodingStats baseline values for delta encoding
-        buffer.write_all(&encode_vint(metadata.min_timestamp))?;
-        buffer.write_all(&encode_vint(metadata.min_local_deletion_time as i64))?;
-        buffer.write_all(&encode_vint(metadata.min_ttl as i64))?;
+        // 7. int maxLocalDeletionTime
+        let max_del_time = if metadata.max_local_deletion_time == 0 {
+            i32::MAX
+        } else {
+            metadata.max_local_deletion_time
+        };
+        buffer.write_all(&max_del_time.to_be_bytes())?;
+
+        // 8. int minTTL
+        buffer.write_all(&metadata.min_ttl.to_be_bytes())?;
+
+        // 9. int maxTTL
+        buffer.write_all(&metadata.max_ttl.to_be_bytes())?;
+
+        // 10. double compressionRatio (use -1.0 for unknown)
+        buffer.write_all(&(-1.0f64).to_be_bytes())?;
+
+        // 11. TombstoneHistogram estimatedTombstoneDropTime (empty for nb: size=0)
+        self.write_tombstone_histogram(&mut buffer)?;
+
+        // 12. int sstableLevel
+        buffer.write_all(&0i32.to_be_bytes())?;
+
+        // 13. long repairedAt
+        buffer.write_all(&0i64.to_be_bytes())?;
+
+        // 14. int minClusteringCount (no clustering = 0)
+        buffer.write_all(&0i32.to_be_bytes())?;
+
+        // 15. [clustering values] - count=0 means no values to write
+
+        // 16. int maxClusteringCount
+        buffer.write_all(&0i32.to_be_bytes())?;
+
+        // 17. [clustering values] - count=0 means no values to write
+
+        // 18. boolean hasLegacyCounterShards
+        buffer.write_all(&[0x00])?; // false
+
+        // 19. long totalColumnsSet
+        buffer.write_all(&metadata.column_count.to_be_bytes())?;
+
+        // 20. long totalRows
+        buffer.write_all(&metadata.row_count.to_be_bytes())?;
+
+        // 21. CommitLogPosition commitLogLowerBound (NONE)
+        buffer.write_all(&(-1i64).to_be_bytes())?; // segmentId
+        buffer.write_all(&0i32.to_be_bytes())?; // position
+
+        // 22. IntervalSet<CommitLogPosition> commitLogIntervals (empty set: size=0)
+        buffer.write_all(&0i32.to_be_bytes())?;
+
+        // 23. byte pendingRepair (0 = null, no pending repair)
+        buffer.write_all(&[0x00])?;
+
+        // 24. boolean isTransient
+        buffer.write_all(&[0x00])?; // false
+
+        // 25. byte originatingHostId (0 = null)
+        buffer.write_all(&[0x00])?;
 
         Ok(buffer)
     }
 
+    /// Write an EstimatedHistogram (EstimatedHistogram.java lines 414-429)
+    ///
+    /// Format:
+    /// - int: bucket count (we use 2 for minimal valid histogram)
+    /// - for each bucket: long offset + long count
+    ///
+    /// Minimal valid: 2 buckets (size-1=1 offset, size=2 counts)
+    fn write_estimated_histogram(&self, buffer: &mut Vec<u8>) -> Result<()> {
+        // Bucket count
+        buffer.write_all(&2i32.to_be_bytes())?;
+
+        // Bucket 0: offset=1, count=0
+        buffer.write_all(&1i64.to_be_bytes())?; // offset
+        buffer.write_all(&0i64.to_be_bytes())?; // count
+
+        // Bucket 1: offset=1 (gets overwritten per spec), count=0
+        buffer.write_all(&1i64.to_be_bytes())?; // offset (overwrite of offsets[0])
+        buffer.write_all(&0i64.to_be_bytes())?; // count
+
+        Ok(())
+    }
+
+    /// Write a TombstoneHistogram for nb format (LegacyHistogramSerializer)
+    ///
+    /// Format:
+    /// - int: maxBinSize (= size)
+    /// - int: size
+    /// - for each entry: double point + long value
+    ///
+    /// Empty histogram: maxBinSize=0, size=0
+    fn write_tombstone_histogram(&self, buffer: &mut Vec<u8>) -> Result<()> {
+        buffer.write_all(&0i32.to_be_bytes())?; // maxBinSize
+        buffer.write_all(&0i32.to_be_bytes())?; // size
+        Ok(())
+    }
+
     /// Build SERIALIZATION_HEADER component (MetadataType ordinal 3)
     ///
-    /// Contains the table schema used for Data.db serialization.
-    /// We write a minimal stub - full schema would require TableMetadata.
+    /// Format (SerializationHeader.java Serializer, lines 594-603):
+    /// - EncodingStats: 3 unsigned VInts (minTimestamp, minLocalDeletionTime, minTTL deltas from epochs)
+    /// - keyType: VInt length + UTF-8 type string
+    /// - clusteringTypes: unsigned VInt count + list of types
+    /// - staticColumns: unsigned VInt count + map of (column name, type)
+    /// - regularColumns: unsigned VInt count + map of (column name, type)
     fn build_serialization_header_component(&self) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
-        // Minimal SerializationHeader stub
-        // Real files contain full schema: partition key types, clustering key types,
-        // static columns, regular columns
+        // EncodingStats: 3 unsigned VInts representing deltas from epochs
+        // minTimestamp - TIMESTAMP_EPOCH
+        let min_ts_delta = 0u64; // Use 0 for minimal stub (timestamp at epoch)
+        buffer.write_all(&encode_vuint(min_ts_delta))?;
 
-        // For now, write a minimal structure that indicates "unknown schema"
-        // This is a placeholder - real implementation would need TableMetadata
+        // minLocalDeletionTime - DELETION_TIME_EPOCH
+        let min_del_delta = 0u64; // Use 0 for minimal stub
+        buffer.write_all(&encode_vuint(min_del_delta))?;
 
-        // Partition key type (unknown/placeholder)
-        let pk_type = b"org.apache.cassandra.db.marshal.BytesType";
-        buffer.write_all(&encode_vint(pk_type.len() as i64))?;
-        buffer.write_all(pk_type)?;
+        // minTTL - TTL_EPOCH (TTL_EPOCH=0, so just use 0)
+        let min_ttl_delta = 0u64;
+        buffer.write_all(&encode_vuint(min_ttl_delta))?;
 
-        // Clustering key count = 0 (no clustering keys in minimal stub)
-        buffer.write_all(&encode_vint(0))?;
+        // keyType: AbstractTypeSerializer.serialize
+        // Format: unsigned VInt length + UTF-8 bytes
+        let key_type = b"org.apache.cassandra.db.marshal.BytesType";
+        buffer.write_all(&encode_vuint(key_type.len() as u64))?;
+        buffer.write_all(key_type)?;
 
-        // Static column count = 0
-        buffer.write_all(&encode_vint(0))?;
+        // clusteringTypes: writeList with unsigned VInt count
+        buffer.write_all(&encode_vuint(0))?; // No clustering types
 
-        // Regular column count = 0 (minimal stub)
-        buffer.write_all(&encode_vint(0))?;
+        // staticColumns: writeColumnsWithTypes (unsigned VInt count)
+        buffer.write_all(&encode_vuint(0))?; // No static columns
+
+        // regularColumns: writeColumnsWithTypes (unsigned VInt count)
+        buffer.write_all(&encode_vuint(0))?; // No regular columns
 
         Ok(buffer)
     }
@@ -564,9 +698,13 @@ mod tests {
         let bytes = result.unwrap();
         assert!(!bytes.is_empty());
 
-        // Should contain validator class name
-        let validator = b"org.apache.cassandra.db.marshal.UTF8Type";
-        assert!(bytes.windows(validator.len()).any(|w| w == validator));
+        // Should contain partitioner class name (Java writeUTF format: u16 BE length + UTF-8)
+        let partitioner = b"org.apache.cassandra.dht.Murmur3Partitioner";
+        assert!(bytes.windows(partitioner.len()).any(|w| w == partitioner));
+
+        // Should also contain bloom filter FP chance (f64 BE) = 0.01
+        // Total length should be: 2 (length) + 43 (partitioner) + 8 (f64) = 53 bytes
+        assert_eq!(bytes.len(), 53);
     }
 
     #[test]
@@ -575,9 +713,14 @@ mod tests {
 
         let mut meta = StatisticsMetadata::new();
         meta.min_timestamp = 1000000;
+        meta.max_timestamp = 2000000;
         meta.min_local_deletion_time = 0;
+        meta.max_local_deletion_time = 0;
         meta.min_ttl = 0;
+        meta.max_ttl = 0;
         meta.partition_count = 100;
+        meta.row_count = 100;
+        meta.column_count = 200;
 
         let result = writer.build_stats_component(&meta);
         assert!(result.is_ok());
@@ -585,9 +728,34 @@ mod tests {
         let data = result.unwrap();
         assert!(!data.is_empty());
 
-        // Should contain partitioner string
-        let partitioner = b"org.apache.cassandra.dht.Murmur3Partitioner";
-        assert!(data.windows(partitioner.len()).any(|w| w == partitioner));
+        // STATS component now has a complex binary format (nb version)
+        // It should contain:
+        // - 2x EstimatedHistogram (2 buckets each = 36 bytes each)
+        // - CommitLogPosition upper bound (12 bytes)
+        // - min/max timestamps (16 bytes)
+        // - min/max deletion times (8 bytes)
+        // - min/max TTL (8 bytes)
+        // - compression ratio (8 bytes)
+        // - TombstoneHistogram (8 bytes for empty)
+        // - sstableLevel (4 bytes)
+        // - repairedAt (8 bytes)
+        // - min/max clustering count (8 bytes)
+        // - hasLegacyCounterShards (1 byte)
+        // - totalColumnsSet (8 bytes)
+        // - totalRows (8 bytes)
+        // - CommitLogPosition lower bound (12 bytes)
+        // - commitLogIntervals empty set (4 bytes)
+        // - pendingRepair (1 byte)
+        // - isTransient (1 byte)
+        // - originatingHostId (1 byte)
+        // Total: 36+36+12+16+8+8+8+8+4+8+8+1+8+8+12+4+1+1+1 = 188 bytes
+        assert_eq!(data.len(), 188);
+
+        // Verify the row count is present (at offset 36+36+12+16+8+8+8+8+4+8+8+1+8 = 161)
+        let row_count_offset = 161;
+        let row_count_bytes = &data[row_count_offset..row_count_offset + 8];
+        let row_count = u64::from_be_bytes(row_count_bytes.try_into().unwrap());
+        assert_eq!(row_count, 100);
     }
 
     #[test]
@@ -716,5 +884,105 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_component_binary_formats() {
+        let temp_dir = TempDir::new().unwrap();
+        let stats_path = temp_dir.path().join("test-Statistics.db");
+
+        let writer = StatisticsWriter::new(stats_path.clone());
+
+        let mut meta = StatisticsMetadata::new();
+        meta.min_timestamp = 1000000;
+        meta.max_timestamp = 2000000;
+        meta.min_local_deletion_time = 0;
+        meta.max_local_deletion_time = 0;
+        meta.min_ttl = 100;
+        meta.max_ttl = 200;
+        meta.partition_count = 50;
+        meta.row_count = 150;
+        meta.column_count = 300;
+
+        writer.write(&meta).unwrap();
+
+        // Read and parse the file
+        let file_data = std::fs::read(&stats_path).unwrap();
+
+        // Verify TOC structure
+        let num_components =
+            u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]);
+        assert_eq!(num_components, 4, "Should have 4 components");
+
+        // Read component offsets
+        let validation_offset =
+            u32::from_be_bytes([file_data[12], file_data[13], file_data[14], file_data[15]])
+                as usize;
+        let compaction_offset =
+            u32::from_be_bytes([file_data[20], file_data[21], file_data[22], file_data[23]])
+                as usize;
+        let stats_offset =
+            u32::from_be_bytes([file_data[28], file_data[29], file_data[30], file_data[31]])
+                as usize;
+        let header_offset =
+            u32::from_be_bytes([file_data[36], file_data[37], file_data[38], file_data[39]])
+                as usize;
+
+        // Verify VALIDATION component format
+        // First 2 bytes should be u16 BE length of partitioner string
+        let partitioner_len = u16::from_be_bytes([
+            file_data[validation_offset],
+            file_data[validation_offset + 1],
+        ]);
+        assert_eq!(
+            partitioner_len, 43,
+            "Partitioner string length should be 43"
+        );
+
+        // Verify COMPACTION component format
+        // First 4 bytes should be i32 BE length of HLL data
+        let hll_len = i32::from_be_bytes([
+            file_data[compaction_offset],
+            file_data[compaction_offset + 1],
+            file_data[compaction_offset + 2],
+            file_data[compaction_offset + 3],
+        ]);
+        assert_eq!(hll_len, 15, "HLL data length should be 15 bytes");
+
+        // Verify HLL version marker (next 4 bytes should be -2 = 0xFFFFFFFE)
+        let hll_version = i32::from_be_bytes([
+            file_data[compaction_offset + 4],
+            file_data[compaction_offset + 5],
+            file_data[compaction_offset + 6],
+            file_data[compaction_offset + 7],
+        ]);
+        assert_eq!(hll_version, -2, "HLL version should be -2");
+
+        // Verify STATS component has correct total size (188 bytes + 4 byte checksum)
+        let stats_end = header_offset;
+        let stats_size = stats_end - stats_offset - 4; // -4 for checksum
+        assert_eq!(stats_size, 188, "STATS component should be 188 bytes");
+
+        // Verify min_timestamp in STATS component (at offset: 2*36 + 12 = 84 from stats_offset)
+        let ts_offset = stats_offset + 84;
+        let min_ts = i64::from_be_bytes([
+            file_data[ts_offset],
+            file_data[ts_offset + 1],
+            file_data[ts_offset + 2],
+            file_data[ts_offset + 3],
+            file_data[ts_offset + 4],
+            file_data[ts_offset + 5],
+            file_data[ts_offset + 6],
+            file_data[ts_offset + 7],
+        ]);
+        assert_eq!(min_ts, 1000000, "Min timestamp should be preserved");
+
+        // Verify SERIALIZATION_HEADER component
+        // Should start with unsigned VInt encoding of EncodingStats
+        // First byte should be 0x00 (vuint encoding of 0)
+        assert_eq!(
+            file_data[header_offset], 0x00,
+            "First EncodingStats delta should be 0"
+        );
     }
 }
