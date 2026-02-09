@@ -708,7 +708,7 @@ impl V5CompressedLegacyParser {
     /// [timestamp: VInt if 0x04 set] ← Delta from min_timestamp
     /// [ttl: VInt if 0x08 set] ← Delta from min_ttl
     /// [deletion: 2 VInts if 0x10 set]
-    /// [column_bitmap: VInt + bytes if NOT 0x20]
+    /// [column_bitmap: VUInt bitmask of missing columns if NOT 0x20]
     /// ```
     ///
     /// Returns RowHeader with decoded metadata, calculated header_size, and row_size.
@@ -852,34 +852,22 @@ impl V5CompressedLegacyParser {
 
         // Parse and skip column bitmap if HAS_ALL_COLUMNS is NOT set
         if (row_flags & ROW_HAS_ALL_COLUMNS) == 0 {
-            // Column bitmap format: VInt column_count + (columns_in_row + 7) / 8 bytes of bitmap
-
-            // Read column count (VInt)
-            let (remaining, column_count) = parse_vuint(&data[pos..]).map_err(|e| {
+            // Cassandra Columns.Serializer.serializeSubset() format:
+            // Single unsigned VInt encoding a bitmask of MISSING columns
+            // (bit=1 means column is missing, bit=0 means present)
+            let (remaining, bitmap) = parse_vuint(&data[pos..]).map_err(|e| {
                 Error::corruption(format!(
-                    "V5CompressedLegacy: Failed to parse column count at offset {}: {:?}",
-                    pos, e
+                    "V5CompressedLegacy: Failed to parse column bitmap at offset {}: {:?}",
+                    offset + pos,
+                    e
                 ))
             })?;
             let bytes_consumed = data[pos..].len() - remaining.len();
             pos += bytes_consumed;
 
-            // Calculate bitmap size in bytes: (column_count + 7) / 8
-            let bitmap_bytes = column_count.div_ceil(8) as usize;
-
-            if pos + bitmap_bytes > data.len() {
-                return Err(Error::corruption(format!(
-                    "V5CompressedLegacy: Not enough bytes for column bitmap at offset {} (need {} bytes, have {})",
-                    pos, bitmap_bytes, data.len() - pos
-                )));
-            }
-
-            // Skip the bitmap bytes
-            pos += bitmap_bytes;
-
             debug!(
-                "V5CompressedLegacy: Skipped column bitmap: {} columns, {} bitmap bytes",
-                column_count, bitmap_bytes
+                "V5CompressedLegacy: Skipped column bitmap: missing_bitmap=0x{:X} ({} bytes)",
+                bitmap, bytes_consumed
             );
         }
 
@@ -6201,14 +6189,18 @@ mod tests {
     fn test_sparse_column_bitmap_parsing() {
         // Test column bitmap parsing when NOT HAS_ALL_COLUMNS
         // Row header WITHOUT HAS_ALL_COLUMNS flag (0x20)
-        // Should parse column bitmap after metadata fields
+        // Should parse single VUInt bitmap after metadata fields
+        //
+        // Cassandra format: single VUInt bitmask of missing columns
+        // (bit=1 → column missing, bit=0 → column present)
         //
         // Row header format: [flags: 0x04] [row_size] [prev_size] [timestamp]
-        // [column_bitmap_size: VInt] [column_bitmap_bytes]
+        // [missing_columns_bitmap: VUInt]
 
         // Construct row with HAS_TIMESTAMP but NOT HAS_ALL_COLUMNS
-        // bitmap_size=8 columns (0x08), bitmap=0b00000101 (columns 0 and 2 present)
-        let row_header_hex = "046400000805"; // flags=0x04, size=100, prev=0, ts=0 (signed), col_count=8, bitmap=0x05
+        // bitmap=0x05 means columns 0 and 2 are MISSING
+        let row_header_hex = "04640000 05"; // flags=0x04, size=100, prev=0, ts=0 (signed), bitmap=0x05
+        let row_header_hex = row_header_hex.replace(' ', "");
         let data = hex::decode(row_header_hex).unwrap();
 
         let parser = V5CompressedLegacyParser::new(
@@ -6234,12 +6226,11 @@ mod tests {
         // Verify header was parsed (has timestamp)
         assert_eq!(row_header.timestamp, Some(0));
 
-        // Verify header_size includes bitmap overhead (but NOT flags now)
-        // size(1) + prev(1) + timestamp(1) + column_count(1) + bitmap(1) = 5
-        // (flags are parsed separately now)
+        // Verify header_size includes bitmap VUInt (but NOT flags, parsed separately)
+        // size(1) + prev(1) + timestamp(1) + bitmap(1) = 4
         assert_eq!(
-            row_header.header_size, 5,
-            "Header size should include column bitmap but not flags (parsed separately)"
+            row_header.header_size, 4,
+            "Header size should include column bitmap VUInt but not flags (parsed separately)"
         );
     }
 

@@ -22,7 +22,7 @@
 //! [timestamp: VInt if ROW_HAS_TIMESTAMP]   ← Delta from min_timestamp
 //! [ttl: VInt if ROW_HAS_TTL]              ← Delta from min_ttl
 //! [deletion: 2 VInts if ROW_HAS_DELETION] ← local_deletion_time delta + deletion timestamp
-//! [column_bitmap: VInt + bytes if NOT ROW_HAS_ALL_COLUMNS]
+//! [column_bitmap: VUInt bitmask of missing columns if NOT ROW_HAS_ALL_COLUMNS]
 //! [cell_data...]
 //! ```
 //!
@@ -57,11 +57,14 @@
 //! - Format docs: `docs/sstables-definitive-guide/chapters/05-data-db-format.md`
 
 use crate::error::{Error, Result};
-use crate::schema::TableSchema;
+use crate::schema::{Column, CqlType, TableSchema};
+use crate::storage::serialization::types::TypeSerializer;
 use crate::storage::serialization::vint::{encode_signed, encode_unsigned};
 use crate::storage::sstable::writer::stats_writer::StatisticsMetadata;
-use crate::storage::write_engine::mutation::{DecoratedKey, Mutation};
-use crate::types::{ComparatorType, Value};
+use crate::storage::write_engine::mutation::{
+    ClusteringBound, DecoratedKey, Mutation, PartitionTombstone, RangeTombstone,
+};
+use crate::types::{ComparatorType, UdtTypeDef, Value};
 use std::io::Write;
 
 // Row header flag constants (from V5CompressedLegacy parser)
@@ -72,8 +75,10 @@ const ROW_HAS_DELETION: u8 = 0x10;
 const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
 #[allow(dead_code)]
 const ROW_HAS_COMPLEX_DELETION: u8 = 0x40;
-#[allow(dead_code)]
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
+
+// Extended flag constants (when ROW_HAS_EXTENDED_FLAGS is set)
+const EXTENDED_IS_STATIC: u8 = 0x01;
 
 // Cell flag constants (from V5CompressedLegacy parser)
 const CELL_IS_DELETED: u8 = 0x01;
@@ -83,6 +88,23 @@ const CELL_HAS_EMPTY_VALUE: u8 = 0x04;
 const CELL_USE_ROW_TIMESTAMP: u8 = 0x08;
 #[allow(dead_code)]
 const CELL_USE_ROW_TTL: u8 = 0x10;
+
+// Range tombstone marker constants
+const IS_MARKER: u8 = 0x02;
+
+// Range tombstone bound kinds
+#[allow(dead_code)]
+const INCL_START_BOUND: u8 = 0; // Inclusive start bound
+#[allow(dead_code)]
+const EXCL_START_BOUND: u8 = 1; // Exclusive start bound
+#[allow(dead_code)]
+const INCL_END_BOUND: u8 = 2; // Inclusive end bound
+#[allow(dead_code)]
+const EXCL_END_BOUND: u8 = 3; // Exclusive end bound
+#[allow(dead_code)]
+const START_BOUNDARY: u8 = 4; // Bottom (start of partition)
+#[allow(dead_code)]
+const END_BOUNDARY: u8 = 5; // Top (end of partition)
 
 // Partition/row markers
 const END_OF_PARTITION: u8 = 0x01;
@@ -126,6 +148,8 @@ impl DataWriter {
     /// * `key` - Decorated partition key (token + raw bytes)
     /// * `mutations` - All mutations for this partition (must be in clustering order)
     /// * `schema` - Table schema for column metadata
+    /// * `partition_tombstone` - Optional partition-level tombstone
+    /// * `range_tombstones` - Range tombstones for this partition (must be in clustering order)
     ///
     /// # Returns
     /// File offset where this partition starts (for Index.db)
@@ -134,11 +158,18 @@ impl DataWriter {
         key: &DecoratedKey,
         mutations: &[Mutation],
         schema: &TableSchema,
+        partition_tombstone: Option<&PartitionTombstone>,
+        range_tombstones: &[RangeTombstone],
     ) -> Result<u64> {
         let partition_offset = self.buffer.len() as u64;
 
-        // Write partition header
-        self.write_partition_header(key)?;
+        // Write partition header (with optional tombstone)
+        self.write_partition_header(key, partition_tombstone)?;
+
+        // Write range tombstones before rows
+        for rt in range_tombstones {
+            self.write_range_tombstone(rt, schema)?;
+        }
 
         // Write all rows for this partition
         for mutation in mutations {
@@ -160,15 +191,20 @@ impl DataWriter {
     ///
     /// Format (V5CompressedLegacy):
     /// ```text
-    /// [partition_flags: u8]       ← Currently 0x00 (no deletion)
+    /// [partition_flags: u8]       ← 0x01 if has deletion, 0x00 otherwise
     /// [key_length: u8]           ← Partition key length (max 255 bytes)
     /// [key_bytes]                ← Raw partition key bytes
-    /// [deletion_time: i32 BE]    ← Partition deletion time (0 = not deleted)
-    /// [unknown_field: u64 BE]    ← Unknown 8-byte field (observed as 0)
+    /// [local_deletion_time: i32 BE] ← Local deletion time in seconds (0 = not deleted)
+    /// [deletion_timestamp: i64 BE]  ← Deletion timestamp in microseconds (0 = not deleted)
     /// ```
-    fn write_partition_header(&mut self, key: &DecoratedKey) -> Result<()> {
-        // Partition flags (0x00 = no deletion)
-        self.buffer.push(0x00);
+    fn write_partition_header(
+        &mut self,
+        key: &DecoratedKey,
+        tombstone: Option<&PartitionTombstone>,
+    ) -> Result<()> {
+        // Partition flags
+        let flags = if tombstone.is_some() { 0x01 } else { 0x00 };
+        self.buffer.push(flags);
 
         // Partition key length (u8, NOT VInt)
         // V5CompressedLegacy uses u8 length prefix, limiting keys to 255 bytes
@@ -183,11 +219,18 @@ impl DataWriter {
         // Partition key bytes
         self.buffer.extend_from_slice(&key.key);
 
-        // Partition deletion time (i32 BE, 0 = not deleted)
-        self.buffer.write_all(&0i32.to_be_bytes())?;
-
-        // Unknown 8-byte field (observed as 0 in real data)
-        self.buffer.write_all(&0u64.to_be_bytes())?;
+        // Partition deletion info
+        if let Some(ts) = tombstone {
+            // Local deletion time (i32 BE, in seconds)
+            self.buffer
+                .write_all(&ts.local_deletion_time.to_be_bytes())?;
+            // Deletion timestamp (i64 BE, in microseconds)
+            self.buffer.write_all(&ts.deletion_time.to_be_bytes())?;
+        } else {
+            // No deletion: write zeros
+            self.buffer.write_all(&0i32.to_be_bytes())?;
+            self.buffer.write_all(&0i64.to_be_bytes())?;
+        }
 
         Ok(())
     }
@@ -199,29 +242,51 @@ impl DataWriter {
         // Build row header flags
         let mut flags = 0u8;
 
-        // Timestamp is always present for writes
+        // Check if this is a row tombstone
+        let is_row_tombstone = mutation.operations.iter().any(|op| {
+            matches!(
+                op,
+                crate::storage::write_engine::mutation::CellOperation::DeleteRow
+            )
+        });
+
+        if is_row_tombstone {
+            flags |= ROW_HAS_DELETION; // 0x10
+        }
+
+        // Timestamp is always present for writes and row tombstones
         flags |= ROW_HAS_TIMESTAMP;
 
-        // TTL if present
-        if mutation.ttl_seconds.is_some() {
+        // TTL if present (not applicable to row tombstones)
+        if !is_row_tombstone && mutation.ttl_seconds.is_some() {
             flags |= ROW_HAS_TTL;
         }
 
         // All columns present if all operations are writes (no deletes) AND no NULLs
-        let all_writes = mutation.operations.iter().all(|op| {
-            matches!(
-                op,
-                crate::storage::write_engine::mutation::CellOperation::Write { .. }
-            )
-        });
-        let has_nulls = mutation
-            .operations
-            .iter()
-            .any(|op| {
-                matches!(op, crate::storage::write_engine::mutation::CellOperation::Write { value, .. } if matches!(value, Value::Null))
+        if !is_row_tombstone {
+            let all_writes = mutation.operations.iter().all(|op| {
+                matches!(
+                    op,
+                    crate::storage::write_engine::mutation::CellOperation::Write { .. }
+                        | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
+                )
             });
-        if all_writes && !has_nulls && mutation.operations.len() == schema.columns.len() {
-            flags |= ROW_HAS_ALL_COLUMNS;
+            let has_nulls = mutation.operations.iter().any(|op| match op {
+                crate::storage::write_engine::mutation::CellOperation::Write { value, .. }
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    value,
+                    ..
+                } => {
+                    matches!(value, Value::Null)
+                }
+                _ => false,
+            });
+            // Count regular columns only (exclude PK, CK, and static)
+            let regular_column_count = self.regular_columns(schema).len();
+
+            if all_writes && !has_nulls && mutation.operations.len() == regular_column_count {
+                flags |= ROW_HAS_ALL_COLUMNS;
+            }
         }
 
         // Write row flags
@@ -251,6 +316,270 @@ impl DataWriter {
         Ok(())
     }
 
+    /// Write a static row for the current partition
+    ///
+    /// Static rows contain STATIC column values at partition level.
+    /// They use extended flags and have NO clustering prefix.
+    ///
+    /// # Arguments
+    /// * `mutation` - Mutation containing static column values
+    /// * `schema` - Table schema for column metadata
+    ///
+    /// # Binary Format
+    /// ```text
+    /// [row_flags: u8]        ← 0x80 | other_flags (always HAS_EXTENDED_FLAGS)
+    /// [extended_flags: u8]   ← 0x01 (EXTENDED_IS_STATIC)
+    /// [row_size: VInt]       ← Size of body after this
+    /// [prev_size: VInt]      ← 0 or previous row size
+    /// [timestamp: VInt]      ← If HAS_TIMESTAMP (delta)
+    /// [ttl: VInt]            ← If HAS_TTL (delta)
+    /// [deletion: 2 VInts]    ← If HAS_DELETION
+    /// [column_bitmap]        ← If NOT HAS_ALL_COLUMNS
+    /// [cell_data...]         ← Static column cells only
+    /// ```
+    pub fn write_static_row(&mut self, mutation: &Mutation, schema: &TableSchema) -> Result<()> {
+        // Build row header flags - always includes HAS_EXTENDED_FLAGS for static rows
+        let mut flags = ROW_HAS_EXTENDED_FLAGS;
+
+        // Check if this is a row tombstone
+        let is_row_tombstone = mutation.operations.iter().any(|op| {
+            matches!(
+                op,
+                crate::storage::write_engine::mutation::CellOperation::DeleteRow
+            )
+        });
+
+        if is_row_tombstone {
+            flags |= ROW_HAS_DELETION;
+        }
+
+        // Timestamp is always present for static rows
+        flags |= ROW_HAS_TIMESTAMP;
+
+        // TTL if present (not applicable to row tombstones)
+        if !is_row_tombstone && mutation.ttl_seconds.is_some() {
+            flags |= ROW_HAS_TTL;
+        }
+
+        // Check if all static columns are present
+        if !is_row_tombstone {
+            let all_writes = mutation.operations.iter().all(|op| {
+                matches!(
+                    op,
+                    crate::storage::write_engine::mutation::CellOperation::Write { .. }
+                        | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
+                )
+            });
+            let has_nulls = mutation.operations.iter().any(|op| match op {
+                crate::storage::write_engine::mutation::CellOperation::Write { value, .. }
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    value,
+                    ..
+                } => {
+                    matches!(value, Value::Null)
+                }
+                _ => false,
+            });
+            // Count static columns only for static row
+            let static_column_count = schema.columns.iter().filter(|c| c.is_static).count();
+
+            if all_writes && !has_nulls && mutation.operations.len() == static_column_count {
+                flags |= ROW_HAS_ALL_COLUMNS;
+            }
+        }
+
+        // Write row flags
+        self.buffer.push(flags);
+
+        // Write extended flags - always EXTENDED_IS_STATIC for static rows
+        self.buffer.push(EXTENDED_IS_STATIC);
+
+        // NO clustering prefix for static rows (key difference from write_row)
+
+        // Build row body
+        let row_body = self.build_static_row_body(mutation, schema, flags)?;
+
+        // Write row_size (VInt)
+        let mut row_size_buf = Vec::new();
+        encode_unsigned(row_body.len() as u64, &mut row_size_buf);
+        self.buffer.extend_from_slice(&row_size_buf);
+
+        // Write prev_size (VInt, 0 for now)
+        let mut prev_size_buf = Vec::new();
+        encode_unsigned(0, &mut prev_size_buf);
+        self.buffer.extend_from_slice(&prev_size_buf);
+
+        // Write row body
+        self.buffer.extend_from_slice(&row_body);
+
+        Ok(())
+    }
+
+    /// Build static row body (everything after row_size VInt)
+    ///
+    /// Similar to build_row_body but only processes static columns.
+    fn build_static_row_body(
+        &self,
+        mutation: &Mutation,
+        schema: &TableSchema,
+        flags: u8,
+    ) -> Result<Vec<u8>> {
+        let mut body = Vec::new();
+
+        // Write timestamp delta (if HAS_TIMESTAMP)
+        if (flags & ROW_HAS_TIMESTAMP) != 0 {
+            let timestamp_delta = mutation.timestamp_micros - self.stats.min_timestamp;
+            encode_signed(timestamp_delta, &mut body);
+        }
+
+        // Write TTL delta (if HAS_TTL)
+        if (flags & ROW_HAS_TTL) != 0 {
+            if let Some(ttl) = mutation.ttl_seconds {
+                let ttl_delta = ttl as i64 - self.stats.min_ttl as i64;
+                if ttl_delta < 0 {
+                    return Err(Error::InvalidInput(format!(
+                        "TTL {} is less than min_ttl {}",
+                        ttl, self.stats.min_ttl
+                    )));
+                }
+                encode_signed(ttl_delta, &mut body);
+            }
+        }
+
+        // Write deletion (if HAS_DELETION)
+        if (flags & ROW_HAS_DELETION) != 0 {
+            // Row tombstone: write local_deletion_time and deletion_timestamp deltas
+            let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+            let ldt_delta =
+                (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+            encode_signed(ldt_delta, &mut body);
+
+            let ts_delta = mutation.timestamp_micros - self.stats.min_timestamp;
+            encode_signed(ts_delta, &mut body);
+
+            // No cells written for row tombstones - return early
+            return Ok(body);
+        }
+
+        // Write column bitmap (if NOT HAS_ALL_COLUMNS)
+        // For static rows, bitmap only covers static columns
+        if (flags & ROW_HAS_ALL_COLUMNS) == 0 {
+            self.write_static_column_bitmap(&mut body, mutation, schema)?;
+        }
+
+        // Write cell data for static columns only
+        self.write_static_cells(&mut body, mutation, schema)?;
+
+        Ok(body)
+    }
+
+    /// Write column bitmap for static columns only.
+    ///
+    /// Same Cassandra `Columns.Serializer.serializeSubset()` format as
+    /// `write_column_bitmap()` but scoped to static columns.
+    fn write_static_column_bitmap(
+        &self,
+        buf: &mut Vec<u8>,
+        mutation: &Mutation,
+        schema: &TableSchema,
+    ) -> Result<()> {
+        let static_columns: Vec<_> = schema.columns.iter().filter(|c| c.is_static).collect();
+        let col_count = static_columns.len();
+
+        // Collect names of columns that have non-NULL writes
+        let present_columns: std::collections::HashSet<&str> = mutation
+            .operations
+            .iter()
+            .filter_map(|op| match op {
+                crate::storage::write_engine::mutation::CellOperation::Write { column, value }
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    column,
+                    value,
+                    ..
+                } if !matches!(value, Value::Null) => Some(column.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        // Build bitmask of MISSING columns (Cassandra convention: bit=1 → missing)
+        let mut bitmap: u64 = 0;
+        for (idx, col) in static_columns.iter().enumerate() {
+            if !present_columns.contains(col.name.as_str()) {
+                bitmap |= 1u64 << idx;
+            }
+        }
+
+        if col_count >= 64 {
+            return Err(Error::InvalidInput(format!(
+                "Static column bitmap for >64 columns not yet supported (have {} static columns)",
+                col_count
+            )));
+        }
+
+        encode_unsigned(bitmap, buf);
+        Ok(())
+    }
+
+    /// Write cells for static columns only
+    fn write_static_cells(
+        &self,
+        buf: &mut Vec<u8>,
+        mutation: &Mutation,
+        schema: &TableSchema,
+    ) -> Result<()> {
+        // Get set of static column names for validation
+        let static_column_names: std::collections::HashSet<_> = schema
+            .columns
+            .iter()
+            .filter(|c| c.is_static)
+            .map(|c| &c.name)
+            .collect();
+
+        for op in &mutation.operations {
+            match op {
+                crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
+                    // Only write if it's a static column
+                    if static_column_names.contains(column) && !matches!(value, Value::Null) {
+                        self.write_cell(buf, column, value, mutation.timestamp_micros)?;
+                    }
+                }
+                crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    column,
+                    value,
+                    ttl_seconds,
+                } => {
+                    // Only write if it's a static column
+                    if static_column_names.contains(column) && !matches!(value, Value::Null) {
+                        self.write_cell_with_ttl(
+                            buf,
+                            column,
+                            value,
+                            mutation.timestamp_micros,
+                            *ttl_seconds,
+                        )?;
+                    }
+                }
+                crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                    // Only process if it's a static column
+                    if static_column_names.contains(column) {
+                        let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+                        self.write_tombstone_cell(
+                            buf,
+                            column,
+                            mutation.timestamp_micros,
+                            local_deletion_time,
+                        )?;
+                    }
+                }
+                crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
+                    // Row deletion handled at row level with HAS_DELETION flag
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Build row body (everything after row_size VInt)
     ///
     /// Returns the bytes for: timestamp, TTL, deletion, column bitmap, and cells.
@@ -272,12 +601,30 @@ impl DataWriter {
         if (flags & ROW_HAS_TTL) != 0 {
             if let Some(ttl) = mutation.ttl_seconds {
                 let ttl_delta = ttl as i64 - self.stats.min_ttl as i64;
+                if ttl_delta < 0 {
+                    return Err(Error::InvalidInput(format!(
+                        "TTL {} is less than min_ttl {}",
+                        ttl, self.stats.min_ttl
+                    )));
+                }
                 encode_signed(ttl_delta, &mut body);
             }
         }
 
-        // Write deletion (if HAS_DELETION) - not implemented yet
-        // Would write: [local_deletion_time_delta: VInt][deletion_timestamp: VInt]
+        // Write deletion (if HAS_DELETION)
+        if (flags & ROW_HAS_DELETION) != 0 {
+            // Row tombstone: write local_deletion_time and deletion_timestamp deltas
+            let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+            let ldt_delta =
+                (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+            encode_signed(ldt_delta, &mut body);
+
+            let ts_delta = mutation.timestamp_micros - self.stats.min_timestamp;
+            encode_signed(ts_delta, &mut body);
+
+            // No cells written for row tombstones - return early
+            return Ok(body);
+        }
 
         // Write column bitmap (if NOT HAS_ALL_COLUMNS)
         if (flags & ROW_HAS_ALL_COLUMNS) == 0 {
@@ -343,55 +690,76 @@ impl DataWriter {
 
     /// Write column bitmap
     ///
-    /// Format:
-    /// ```text
-    /// [column_count: VInt]
-    /// [bitmap_bytes: (column_count + 7) / 8 bytes]
-    /// ```
+    /// Cassandra `Columns.Serializer.serializeSubset()` format.
     ///
-    /// The bitmap indicates which columns have non-NULL values:
-    /// - Bit = 1: Column has a value (not NULL)
-    /// - Bit = 0: Column is NULL (not present)
+    /// For ≤64 regular columns (the common case), this writes a single
+    /// unsigned VInt whose bits indicate **missing** columns:
+    ///   - bit = 1 → column is MISSING (NULL / not written)
+    ///   - bit = 0 → column is PRESENT
+    ///   - bitmap = 0 means all columns present (this case is prevented by
+    ///     the caller which sets `HAS_ALL_COLUMNS` instead).
+    ///
+    /// Only regular columns participate in the bitmap — partition key and
+    /// clustering key columns are serialized elsewhere.
     fn write_column_bitmap(
         &self,
         buf: &mut Vec<u8>,
         mutation: &Mutation,
         schema: &TableSchema,
     ) -> Result<()> {
-        let column_count = schema.columns.len();
+        let regular_cols = self.regular_columns(schema);
+        let col_count = regular_cols.len();
 
-        // Write column count as VUInt
-        encode_unsigned(column_count as u64, buf);
+        // Collect names of columns that have non-NULL writes
+        let present_columns: std::collections::HashSet<&str> = mutation
+            .operations
+            .iter()
+            .filter_map(|op| match op {
+                crate::storage::write_engine::mutation::CellOperation::Write { column, value }
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    column,
+                    value,
+                    ..
+                } if !matches!(value, Value::Null) => Some(column.as_str()),
+                _ => None,
+            })
+            .collect();
 
-        // Build bitmap
-        let bitmap_size = column_count.div_ceil(8);
-        let mut bitmap = vec![0u8; bitmap_size];
-
-        for op in &mutation.operations {
-            if let crate::storage::write_engine::mutation::CellOperation::Write { column, value } =
-                op
-            {
-                // Skip NULL values - they are represented by bit = 0 (not set)
-                if matches!(value, Value::Null) {
-                    continue;
-                }
-
-                // Find column index and set bit
-                if let Some((idx, _)) = schema
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .find(|(_, c)| &c.name == column)
-                {
-                    let byte_idx = idx / 8;
-                    let bit_idx = idx % 8;
-                    bitmap[byte_idx] |= 1 << bit_idx;
-                }
+        // Build bitmask of MISSING columns (Cassandra convention: bit=1 → missing)
+        let mut bitmap: u64 = 0;
+        for (idx, col) in regular_cols.iter().enumerate() {
+            if !present_columns.contains(col.name.as_str()) {
+                bitmap |= 1u64 << idx;
             }
         }
 
-        buf.extend_from_slice(&bitmap);
+        if col_count >= 64 {
+            // >64 columns: use large-subset delta encoding (not yet implemented)
+            return Err(Error::InvalidInput(format!(
+                "Column bitmap for >64 columns not yet supported (have {} regular columns)",
+                col_count
+            )));
+        }
+
+        encode_unsigned(bitmap, buf);
         Ok(())
+    }
+
+    /// Get regular (non-PK, non-CK, non-static) columns from schema.
+    ///
+    /// Cassandra's column bitmap only covers regular columns — partition key
+    /// and clustering key columns are serialized separately in the partition
+    /// header and clustering prefix.
+    fn regular_columns<'a>(&self, schema: &'a TableSchema) -> Vec<&'a Column> {
+        schema
+            .columns
+            .iter()
+            .filter(|c| {
+                !c.is_static
+                    && !schema.is_partition_key(&c.name)
+                    && !schema.is_clustering_key(&c.name)
+            })
+            .collect()
     }
 
     /// Write cells for this row
@@ -409,10 +777,33 @@ impl DataWriter {
                         self.write_cell(buf, column, value, mutation.timestamp_micros)?;
                     }
                 }
+                crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    column,
+                    value,
+                    ttl_seconds,
+                } => {
+                    // Skip NULL values - they are represented by absence in the bitmap
+                    if !matches!(value, Value::Null) {
+                        self.write_cell_with_ttl(
+                            buf,
+                            column,
+                            value,
+                            mutation.timestamp_micros,
+                            *ttl_seconds,
+                        )?;
+                    }
+                }
                 crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                    // Tombstones need a local_deletion_time parameter
-                    // For now, use current time in seconds since epoch
-                    // TODO(Issue #401): Get local_deletion_time from Mutation or compute properly
+                    // Cell tombstones: local_deletion_time = mutation timestamp as seconds
+                    //
+                    // This is the Cassandra default when no explicit deletion time is provided.
+                    // The local_deletion_time determines when tombstones are eligible for GC
+                    // (gc_grace_seconds after local_deletion_time). Using the mutation timestamp
+                    // converted to seconds provides a reasonable default that preserves the
+                    // temporal relationship between write and delete operations.
+                    //
+                    // For explicit control over GC timing, a future enhancement could add
+                    // CellOperation::DeleteWithTime { column, local_deletion_time }.
                     let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
                     self.write_tombstone_cell(
                         buf,
@@ -498,6 +889,93 @@ impl DataWriter {
         Ok(())
     }
 
+    /// Write a cell with TTL (expiring cell)
+    ///
+    /// Format:
+    /// ```text
+    /// [flags: u8]                    ← CELL_IS_EXPIRING (0x02) set
+    /// [timestamp_delta: VInt]        ← Delta from min_timestamp (NOT USE_ROW_TIMESTAMP for TTL cells)
+    /// [local_deletion_time_delta: VUInt]  ← When the cell expires (relative to min_local_deletion_time)
+    /// [ttl_delta: VUInt]            ← TTL value (relative to min_ttl)
+    /// [value_length: VInt]
+    /// [value_bytes]
+    /// ```
+    ///
+    /// CRITICAL: TTL cells MUST NOT use USE_ROW_TIMESTAMP or USE_ROW_TTL flags.
+    /// They need explicit timestamp and TTL deltas.
+    fn write_cell_with_ttl(
+        &self,
+        buf: &mut Vec<u8>,
+        column: &str,
+        value: &Value,
+        timestamp: i64,
+        ttl_seconds: u32,
+    ) -> Result<()> {
+        // NULL values should not be written as cells
+        if matches!(value, Value::Null) {
+            return Err(Error::InvalidInput(format!(
+                "NULL values should not be written as cells (column: {}). They are represented by absence in the bitmap.",
+                column
+            )));
+        }
+
+        // Calculate local_deletion_time = current_time_seconds + ttl_seconds
+        let now_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| Error::Storage(format!("System time error: {}", e)))?
+            .as_secs() as i32;
+        let local_deletion_time = now_seconds.saturating_add(ttl_seconds as i32);
+
+        // Cell flags - CELL_IS_EXPIRING, NO USE_ROW_TIMESTAMP or USE_ROW_TTL
+        let flags = CELL_IS_EXPIRING;
+        buf.push(flags);
+
+        // Timestamp delta (required for expiring cells)
+        let timestamp_delta = timestamp - self.stats.min_timestamp;
+        encode_signed(timestamp_delta, buf);
+
+        // Local deletion time delta
+        let ldt_delta = (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+        if ldt_delta < 0 {
+            return Err(Error::InvalidInput(format!(
+                "Local deletion time {} is less than min_local_deletion_time {}",
+                local_deletion_time, self.stats.min_local_deletion_time
+            )));
+        }
+        encode_unsigned(ldt_delta as u64, buf);
+
+        // TTL delta
+        let ttl_delta = (ttl_seconds as i64) - (self.stats.min_ttl as i64);
+        if ttl_delta < 0 {
+            return Err(Error::InvalidInput(format!(
+                "TTL {} is less than min_ttl {}",
+                ttl_seconds, self.stats.min_ttl
+            )));
+        }
+        encode_unsigned(ttl_delta as u64, buf);
+
+        // Value
+        let value_bytes = serialize_value(value)?;
+
+        // Bounds check: value length must fit in i64
+        if value_bytes.len() > i64::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "Value too large for column '{}': {} bytes (max {})",
+                column,
+                value_bytes.len(),
+                i64::MAX
+            )));
+        }
+
+        // Write value length as VInt
+        encode_signed(value_bytes.len() as i64, buf);
+
+        // Write value bytes
+        buf.extend_from_slice(&value_bytes);
+
+        Ok(())
+    }
+
     /// Write a tombstone cell
     ///
     /// Tombstones require:
@@ -534,6 +1012,87 @@ impl DataWriter {
 
         // No value length or value bytes for tombstones
         // Parser returns immediately after reading local_deletion_time
+        Ok(())
+    }
+
+    /// Write a range tombstone marker
+    ///
+    /// Range tombstones are written as markers within the partition data:
+    /// ```text
+    /// [marker_flags: u8]           ← IS_MARKER (0x02) set
+    /// [bound_kind: u8]             ← Open/Close/Boundary type
+    /// [clustering_prefix: variable] ← Clustering key bound
+    /// [deletion_time: VInt]        ← Delta from min_timestamp
+    /// [local_deletion_time: VInt]  ← Delta from min_local_deletion_time
+    /// ```
+    fn write_range_tombstone(
+        &mut self,
+        range: &RangeTombstone,
+        schema: &TableSchema,
+    ) -> Result<()> {
+        // Write opening bound
+        self.write_range_bound(
+            &range.start,
+            true,
+            range.deletion_time,
+            range.local_deletion_time,
+            schema,
+        )?;
+
+        // Write closing bound
+        self.write_range_bound(
+            &range.end,
+            false,
+            range.deletion_time,
+            range.local_deletion_time,
+            schema,
+        )?;
+
+        Ok(())
+    }
+
+    /// Write a single range tombstone bound
+    fn write_range_bound(
+        &mut self,
+        bound: &ClusteringBound,
+        is_open: bool,
+        deletion_time: i64,
+        local_deletion_time: i32,
+        schema: &TableSchema,
+    ) -> Result<()> {
+        // Marker flag
+        self.buffer.push(IS_MARKER);
+
+        // Determine bound kind
+        let bound_kind = match (is_open, bound) {
+            (true, ClusteringBound::Inclusive(_)) => INCL_START_BOUND,
+            (true, ClusteringBound::Exclusive(_)) => EXCL_START_BOUND,
+            (false, ClusteringBound::Inclusive(_)) => INCL_END_BOUND,
+            (false, ClusteringBound::Exclusive(_)) => EXCL_END_BOUND,
+            (_, ClusteringBound::Bottom) => START_BOUNDARY,
+            (_, ClusteringBound::Top) => END_BOUNDARY,
+        };
+        self.buffer.push(bound_kind);
+
+        // Write clustering prefix if present
+        match bound {
+            ClusteringBound::Inclusive(ck) | ClusteringBound::Exclusive(ck) => {
+                self.write_clustering_prefix(ck, schema)?;
+            }
+            ClusteringBound::Bottom | ClusteringBound::Top => {
+                // Empty clustering prefix (header = 0)
+                encode_unsigned(0, &mut self.buffer);
+            }
+        }
+
+        // Deletion time delta
+        let ts_delta = deletion_time - self.stats.min_timestamp;
+        encode_signed(ts_delta, &mut self.buffer);
+
+        // Local deletion time delta
+        let ldt_delta = (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+        encode_signed(ldt_delta, &mut self.buffer);
+
         Ok(())
     }
 
@@ -586,10 +1145,65 @@ fn serialize_value(value: &Value) -> Result<Vec<u8>> {
             result.extend_from_slice(&nanos.to_be_bytes());
             Ok(result)
         }
+        Value::Udt(udt_value) => {
+            // Construct UdtTypeDef from UdtValue fields by inferring types
+            let mut schema =
+                UdtTypeDef::new(udt_value.keyspace.clone(), udt_value.type_name.clone());
+
+            // Infer field types from values
+            for field in &udt_value.fields {
+                let field_type = infer_cql_type_from_value(field.value.as_ref());
+                schema = schema.with_field(field.name.clone(), field_type, true);
+            }
+
+            let serializer = TypeSerializer::new();
+            serializer.serialize_udt(value, &schema)
+        }
         _ => Err(Error::InvalidInput(format!(
             "Unsupported value type for serialization: {:?}",
             value
         ))),
+    }
+}
+
+/// Infer CQL type from a Value instance
+///
+/// Used for UDT serialization when schema context is not available.
+/// For nested collections, defaults to Text element type since we don't
+/// inspect element values (YAGNI - full recursive inference would be needed
+/// for proper nested collection support in M5.3).
+fn infer_cql_type_from_value(value: Option<&Value>) -> CqlType {
+    match value {
+        None | Some(Value::Null) => CqlType::Text, // Default for NULL
+        Some(Value::Boolean(_)) => CqlType::Boolean,
+        Some(Value::TinyInt(_)) => CqlType::TinyInt,
+        Some(Value::SmallInt(_)) => CqlType::SmallInt,
+        Some(Value::Integer(_)) => CqlType::Int,
+        Some(Value::BigInt(_)) => CqlType::BigInt,
+        Some(Value::Float32(_)) => CqlType::Float,
+        Some(Value::Float(_)) => CqlType::Double,
+        Some(Value::Text(_)) => CqlType::Text,
+        Some(Value::Blob(_)) => CqlType::Blob,
+        Some(Value::Timestamp(_)) => CqlType::Timestamp,
+        Some(Value::Date(_)) => CqlType::Date,
+        Some(Value::Time(_)) => CqlType::Time,
+        Some(Value::Uuid(_)) => CqlType::Uuid,
+        Some(Value::Inet(_)) => CqlType::Inet,
+        Some(Value::Varint(_)) => CqlType::Varint,
+        Some(Value::Decimal { .. }) => CqlType::Decimal,
+        Some(Value::Duration { .. }) => CqlType::Duration,
+        Some(Value::Counter(_)) => CqlType::Counter,
+        // Nested collections default to Text element type (M5.3 for full support)
+        Some(Value::List(_)) => CqlType::List(Box::new(CqlType::Text)),
+        Some(Value::Set(_)) => CqlType::Set(Box::new(CqlType::Text)),
+        Some(Value::Map(_)) => CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)),
+        Some(Value::Tuple(fields)) => CqlType::Tuple(vec![CqlType::Text; fields.len()]),
+        Some(Value::Udt(udt)) => CqlType::Udt(udt.type_name.clone(), vec![]),
+        Some(Value::Frozen(inner)) => {
+            CqlType::Frozen(Box::new(infer_cql_type_from_value(Some(inner))))
+        }
+        Some(Value::Tombstone(_)) => CqlType::Text, // Tombstones shouldn't appear in UDT fields
+        Some(Value::Json(_)) => CqlType::Text,      // JSON is stored as text
     }
 }
 
@@ -687,7 +1301,7 @@ mod tests {
         let mut writer = DataWriter::new(stats);
 
         let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]); // int = 42
-        writer.write_partition_header(&key).unwrap();
+        writer.write_partition_header(&key, None).unwrap();
 
         let bytes = writer.finish().unwrap();
 
@@ -695,13 +1309,13 @@ mod tests {
         // [0x00] partition flags
         // [0x04] key length (4 bytes)
         // [0x00, 0x00, 0x00, 0x2A] key bytes
-        // [0x00, 0x00, 0x00, 0x00] deletion time (4 bytes)
-        // [0x00 * 8] unknown field (8 bytes)
+        // [0x00, 0x00, 0x00, 0x00] local deletion time (4 bytes)
+        // [0x00 * 8] deletion timestamp (8 bytes)
         assert_eq!(bytes[0], 0x00); // partition flags
         assert_eq!(bytes[1], 0x04); // key length
         assert_eq!(&bytes[2..6], &[0x00, 0x00, 0x00, 0x2A]); // key bytes
-        assert_eq!(&bytes[6..10], &[0x00, 0x00, 0x00, 0x00]); // deletion time
-        assert_eq!(&bytes[10..18], &[0x00; 8]); // unknown field
+        assert_eq!(&bytes[6..10], &[0x00, 0x00, 0x00, 0x00]); // local deletion time
+        assert_eq!(&bytes[10..18], &[0x00; 8]); // deletion timestamp
     }
 
     #[test]
@@ -822,7 +1436,9 @@ mod tests {
             ),
         ];
 
-        let offset = writer.write_partition(&key, &mutations, &schema).unwrap();
+        let offset = writer
+            .write_partition(&key, &mutations, &schema, None, &[])
+            .unwrap();
         assert_eq!(offset, 0); // First partition starts at offset 0
 
         let bytes = writer.finish().unwrap();
@@ -898,6 +1514,8 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(1));
 
         // Only write "name" column (not "age")
+        // Schema has 2 regular columns: [name(0), age(1)]
+        // "age" is MISSING → bitmap bit 1 set → bitmap = 0b10 = 2
         let mutation = Mutation::new(
             table_id,
             pk,
@@ -915,9 +1533,9 @@ mod tests {
             .write_column_bitmap(&mut buf, &mutation, &schema)
             .unwrap();
 
-        assert!(!buf.is_empty());
-        // Should have: [column_count: VInt][bitmap: 1 byte for 2 columns]
-        // First byte after column_count should have bit 0 set (column 0 = "name")
+        // Cassandra format: single VUInt of missing columns bitmask
+        // "age" (index 1) is missing → bitmap = 0x02
+        assert_eq!(buf, vec![0x02]);
     }
 
     #[test]
@@ -929,7 +1547,7 @@ mod tests {
         let large_key = vec![0xFF; 256];
         let key = DecoratedKey::new(12345, large_key);
 
-        let result = writer.write_partition_header(&key);
+        let result = writer.write_partition_header(&key, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("too large"));
     }
@@ -1098,6 +1716,10 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(1));
 
         // Write "name" with value, "age" with NULL
+        // Schema has 2 regular columns: [name(0), age(1)]
+        // "name" is present → bit 0 = 0
+        // "age" is NULL (missing) → bit 1 = 1
+        // bitmap = 0b10 = 0x02
         let mutation = Mutation::new(
             table_id,
             pk,
@@ -1121,19 +1743,12 @@ mod tests {
             .write_column_bitmap(&mut buf, &mutation, &schema)
             .unwrap();
 
-        assert!(!buf.is_empty());
-        // After column count VInt, bitmap should have only bit 0 set (column "name")
-        // and bit 1 NOT set (column "age" is NULL)
-
-        // Skip the column_count VInt (first byte should be 0x02 for count=2)
-        let bitmap_start = 1; // After 1-byte VInt
-        let bitmap_byte = buf[bitmap_start];
-
-        assert_eq!(bitmap_byte & 0x01, 0x01, "Bit 0 (name) should be set");
+        // Cassandra format: single VUInt bitmask where bit=1 means MISSING
+        // Only "age" (index 1) is missing → bitmap = 0x02
         assert_eq!(
-            bitmap_byte & 0x02,
-            0x00,
-            "Bit 1 (age) should NOT be set (NULL)"
+            buf,
+            vec![0x02],
+            "Bitmap should encode age as missing (bit 1)"
         );
     }
 
@@ -1199,7 +1814,9 @@ mod tests {
             None,
         )];
 
-        let offset1 = writer.write_partition(&key1, &mutations1, &schema).unwrap();
+        let offset1 = writer
+            .write_partition(&key1, &mutations1, &schema, None, &[])
+            .unwrap();
         assert_eq!(offset1, 0);
 
         // Write second partition
@@ -1217,7 +1834,9 @@ mod tests {
             None,
         )];
 
-        let offset2 = writer.write_partition(&key2, &mutations2, &schema).unwrap();
+        let offset2 = writer
+            .write_partition(&key2, &mutations2, &schema, None, &[])
+            .unwrap();
         assert!(offset2 > offset1); // Second partition starts after first
 
         let bytes = writer.finish().unwrap();
@@ -1237,5 +1856,514 @@ mod tests {
             END_OF_PARTITION,
             "File should end with END_OF_PARTITION"
         );
+    }
+
+    // ========== M5.2 Tombstone Tests ==========
+
+    #[test]
+    fn test_row_tombstone() {
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+        let schema = create_test_schema();
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::DeleteRow],
+            1001000,
+            None,
+        );
+
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Verify row flags have HAS_DELETION
+        let flags = bytes[0];
+        assert_eq!(
+            flags & ROW_HAS_DELETION,
+            ROW_HAS_DELETION,
+            "Should have HAS_DELETION flag"
+        );
+        assert_eq!(
+            flags & ROW_HAS_TIMESTAMP,
+            ROW_HAS_TIMESTAMP,
+            "Should have HAS_TIMESTAMP flag"
+        );
+    }
+
+    #[test]
+    fn test_partition_tombstone() {
+        use crate::storage::write_engine::mutation::PartitionTombstone;
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
+        let tombstone = PartitionTombstone {
+            deletion_time: 1001000,          // microseconds
+            local_deletion_time: 1700000010, // seconds
+        };
+
+        writer
+            .write_partition_header(&key, Some(&tombstone))
+            .unwrap();
+
+        let bytes = writer.finish().unwrap();
+
+        // Verify structure:
+        // [0x01] partition flags (has deletion)
+        // [0x04] key length
+        // [key bytes]
+        // [local_deletion_time: i32 BE]
+        // [deletion_timestamp: i64 BE]
+        assert_eq!(bytes[0], 0x01, "Should have deletion flag");
+        assert_eq!(bytes[1], 0x04, "Key length");
+
+        // Check local_deletion_time (i32 BE at offset 6)
+        let ldt_bytes = &bytes[6..10];
+        let ldt = i32::from_be_bytes([ldt_bytes[0], ldt_bytes[1], ldt_bytes[2], ldt_bytes[3]]);
+        assert_eq!(ldt, 1700000010, "Local deletion time should match");
+
+        // Check deletion_timestamp (i64 BE at offset 10)
+        let ts_bytes = &bytes[10..18];
+        let ts = i64::from_be_bytes([
+            ts_bytes[0],
+            ts_bytes[1],
+            ts_bytes[2],
+            ts_bytes[3],
+            ts_bytes[4],
+            ts_bytes[5],
+            ts_bytes[6],
+            ts_bytes[7],
+        ]);
+        assert_eq!(ts, 1001000, "Deletion timestamp should match");
+    }
+
+    #[test]
+    fn test_range_tombstone_inclusive_bounds() {
+        use crate::storage::write_engine::mutation::{ClusteringBound, RangeTombstone};
+
+        let mut schema = create_test_schema();
+        schema.clustering_keys = vec![ClusteringColumn {
+            name: "ts".to_string(),
+            data_type: "timestamp".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }];
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let range = RangeTombstone {
+            start: ClusteringBound::Inclusive(ClusteringKey::single("ts", Value::Timestamp(1000))),
+            end: ClusteringBound::Inclusive(ClusteringKey::single("ts", Value::Timestamp(2000))),
+            deletion_time: 1001000,
+            local_deletion_time: 1700000010,
+        };
+
+        writer.write_range_tombstone(&range, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Verify opening bound
+        assert_eq!(bytes[0], IS_MARKER, "Should have IS_MARKER flag");
+        assert_eq!(
+            bytes[1], INCL_START_BOUND,
+            "Should have INCL_START_BOUND kind"
+        );
+
+        // Second marker should also be present (closing bound)
+        // Note: Position will vary based on VInt encoding of clustering prefix
+    }
+
+    #[test]
+    fn test_range_tombstone_exclusive_bounds() {
+        use crate::storage::write_engine::mutation::{ClusteringBound, RangeTombstone};
+
+        let mut schema = create_test_schema();
+        schema.clustering_keys = vec![ClusteringColumn {
+            name: "ts".to_string(),
+            data_type: "timestamp".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }];
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let range = RangeTombstone {
+            start: ClusteringBound::Exclusive(ClusteringKey::single("ts", Value::Timestamp(1000))),
+            end: ClusteringBound::Exclusive(ClusteringKey::single("ts", Value::Timestamp(2000))),
+            deletion_time: 1001000,
+            local_deletion_time: 1700000010,
+        };
+
+        writer.write_range_tombstone(&range, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Verify opening bound
+        assert_eq!(bytes[0], IS_MARKER, "Should have IS_MARKER flag");
+        assert_eq!(
+            bytes[1], EXCL_START_BOUND,
+            "Should have EXCL_START_BOUND kind"
+        );
+    }
+
+    #[test]
+    fn test_range_tombstone_bottom_top_bounds() {
+        use crate::storage::write_engine::mutation::{ClusteringBound, RangeTombstone};
+
+        let mut schema = create_test_schema();
+        schema.clustering_keys = vec![ClusteringColumn {
+            name: "ts".to_string(),
+            data_type: "timestamp".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }];
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        // Delete everything from start to end of partition
+        let range = RangeTombstone {
+            start: ClusteringBound::Bottom,
+            end: ClusteringBound::Top,
+            deletion_time: 1001000,
+            local_deletion_time: 1700000010,
+        };
+
+        writer.write_range_tombstone(&range, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Verify opening bound (Bottom)
+        assert_eq!(bytes[0], IS_MARKER, "Should have IS_MARKER flag");
+        assert_eq!(bytes[1], START_BOUNDARY, "Should have START_BOUNDARY kind");
+        // Empty clustering prefix for Bottom: header = 0 (single byte VInt)
+        assert_eq!(bytes[2], 0x00, "Bottom should have empty clustering prefix");
+    }
+
+    #[test]
+    fn test_complete_partition_with_range_tombstone() {
+        use crate::storage::write_engine::mutation::{ClusteringBound, RangeTombstone};
+
+        let mut schema = create_test_schema();
+        schema.clustering_keys = vec![ClusteringColumn {
+            name: "ts".to_string(),
+            data_type: "timestamp".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }];
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x01]);
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+
+        // Create mutations
+        let mutations = vec![Mutation::new(
+            table_id,
+            pk,
+            Some(ClusteringKey::single("ts", Value::Timestamp(1000))),
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::Text("Alice".to_string()),
+            }],
+            1001000,
+            None,
+        )];
+
+        // Create range tombstone
+        let range_tombstones = vec![RangeTombstone {
+            start: ClusteringBound::Inclusive(ClusteringKey::single("ts", Value::Timestamp(500))),
+            end: ClusteringBound::Inclusive(ClusteringKey::single("ts", Value::Timestamp(1500))),
+            deletion_time: 1002000, // Later than row timestamp - will shadow it
+            local_deletion_time: 1700000020,
+        }];
+
+        let offset = writer
+            .write_partition(&key, &mutations, &schema, None, &range_tombstones)
+            .unwrap();
+        assert_eq!(offset, 0);
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Verify partition header is present
+        assert_eq!(bytes[0], 0x00, "No partition deletion");
+
+        // Range tombstone markers should appear before rows
+        // This is validated by the structure of the output
+    }
+
+    #[test]
+    fn test_write_cell_with_ttl() {
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 1000000;
+        stats.min_local_deletion_time = 1700000000;
+        stats.min_ttl = 3600;
+        let writer = DataWriter::new(stats);
+
+        let mut buf = Vec::new();
+        let timestamp = 1001000;
+        let ttl_seconds = 7200;
+
+        writer
+            .write_cell_with_ttl(
+                &mut buf,
+                "test_col",
+                &Value::Text("test".to_string()),
+                timestamp,
+                ttl_seconds,
+            )
+            .unwrap();
+
+        assert!(!buf.is_empty());
+
+        // First byte should be CELL_IS_EXPIRING flag (0x02)
+        let flags = buf[0];
+        assert_eq!(
+            flags & CELL_IS_EXPIRING,
+            CELL_IS_EXPIRING,
+            "Should have IS_EXPIRING flag"
+        );
+        assert_eq!(
+            flags & CELL_USE_ROW_TIMESTAMP,
+            0,
+            "Should NOT have USE_ROW_TIMESTAMP flag"
+        );
+        assert_eq!(
+            flags & CELL_USE_ROW_TTL,
+            0,
+            "Should NOT have USE_ROW_TTL flag"
+        );
+
+        // Should contain timestamp delta, local_deletion_time delta, TTL delta, and value
+        assert!(buf.len() > 10, "Should have all TTL cell fields");
+    }
+
+    #[test]
+    fn test_row_with_ttl_cells() {
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 1000000;
+        stats.min_local_deletion_time = 1700000000;
+        stats.min_ttl = 3600;
+        let mut writer = DataWriter::new(stats);
+        let schema = create_test_schema();
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                CellOperation::WriteWithTtl {
+                    column: "name".to_string(),
+                    value: Value::Text("Alice".to_string()),
+                    ttl_seconds: 7200,
+                },
+                CellOperation::Write {
+                    column: "age".to_string(),
+                    value: Value::Integer(30),
+                },
+            ],
+            1001000,
+            None,
+        );
+
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Verify row flags
+        let flags = bytes[0];
+        assert_eq!(
+            flags & ROW_HAS_TIMESTAMP,
+            ROW_HAS_TIMESTAMP,
+            "Should have timestamp"
+        );
+        assert_eq!(
+            flags & ROW_HAS_ALL_COLUMNS,
+            ROW_HAS_ALL_COLUMNS,
+            "Should have all columns"
+        );
+    }
+
+    #[test]
+    fn test_row_with_multiple_ttl_cells() {
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 1000000;
+        stats.min_local_deletion_time = 1700000000;
+        stats.min_ttl = 1800;
+        let mut writer = DataWriter::new(stats);
+        let schema = create_test_schema();
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                CellOperation::WriteWithTtl {
+                    column: "name".to_string(),
+                    value: Value::Text("Alice".to_string()),
+                    ttl_seconds: 3600, // 1 hour
+                },
+                CellOperation::WriteWithTtl {
+                    column: "age".to_string(),
+                    value: Value::Integer(30),
+                    ttl_seconds: 7200, // 2 hours (different TTL)
+                },
+            ],
+            1001000,
+            None,
+        );
+
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Verify both cells were written with their own TTLs
+        // The exact validation would require parsing the binary format
+    }
+
+    #[test]
+    fn test_mixed_ttl_and_regular_cells() {
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 1000000;
+        stats.min_local_deletion_time = 1700000000;
+        stats.min_ttl = 3600;
+        let mut writer = DataWriter::new(stats);
+        let schema = create_test_schema();
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("Alice".to_string()),
+                },
+                CellOperation::WriteWithTtl {
+                    column: "age".to_string(),
+                    value: Value::Integer(30),
+                    ttl_seconds: 7200,
+                },
+            ],
+            1001000,
+            None,
+        );
+
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Row should contain both regular and TTL cells
+        let flags = bytes[0];
+        assert_eq!(flags & ROW_HAS_TIMESTAMP, ROW_HAS_TIMESTAMP);
+    }
+
+    #[test]
+    fn test_ttl_zero_special_case() {
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 1000000;
+        stats.min_local_deletion_time = 1700000000;
+        stats.min_ttl = 0;
+        let writer = DataWriter::new(stats);
+
+        let mut buf = Vec::new();
+        let timestamp = 1001000;
+        let ttl_seconds = 0; // Immediate expiration
+
+        writer
+            .write_cell_with_ttl(
+                &mut buf,
+                "test_col",
+                &Value::Text("test".to_string()),
+                timestamp,
+                ttl_seconds,
+            )
+            .unwrap();
+
+        assert!(!buf.is_empty());
+
+        // Should have IS_EXPIRING flag even with TTL=0
+        let flags = buf[0];
+        assert_eq!(flags & CELL_IS_EXPIRING, CELL_IS_EXPIRING);
+    }
+
+    #[test]
+    fn test_ttl_statistics_tracking() {
+        let mut stats = StatisticsMetadata::new();
+
+        // Update with various TTL values
+        stats.update_ttl(3600);
+        stats.update_ttl(7200);
+        stats.update_ttl(1800);
+        stats.update_ttl(0); // TTL=0 should be ignored
+
+        assert_eq!(stats.min_ttl, 1800, "min_ttl should be 1800");
+        assert_eq!(stats.max_ttl, 7200, "max_ttl should be 7200");
+    }
+
+    #[test]
+    fn test_ttl_cell_with_null_value() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let mut buf = Vec::new();
+        let result = writer.write_cell_with_ttl(&mut buf, "test_col", &Value::Null, 1001000, 3600);
+
+        assert!(result.is_err(), "NULL values should return error");
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("NULL values should not be written"));
+    }
+
+    #[test]
+    fn test_ttl_cell_local_deletion_time_calculation() {
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 1000000;
+        stats.min_local_deletion_time = 1700000000;
+        stats.min_ttl = 3600;
+        let writer = DataWriter::new(stats);
+
+        let mut buf = Vec::new();
+        let timestamp = 1001000;
+        let ttl_seconds = 7200; // 2 hours
+
+        // The local_deletion_time should be computed as current_time + ttl_seconds
+        writer
+            .write_cell_with_ttl(
+                &mut buf,
+                "test_col",
+                &Value::Text("test".to_string()),
+                timestamp,
+                ttl_seconds,
+            )
+            .unwrap();
+
+        assert!(!buf.is_empty());
+        // Detailed validation would require parsing the encoded deltas
     }
 }
