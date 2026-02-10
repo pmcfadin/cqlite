@@ -90,10 +90,7 @@ jobs:
 
       - name: Create test keyspace in Cassandra
         run: |
-          docker exec ${{ job.services.cassandra.id }} cqlsh -e "
-            CREATE KEYSPACE IF NOT EXISTS sstableloader_test
-            WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};
-          "
+          docker exec ${{ job.services.cassandra.id }} cqlsh -e "CREATE KEYSPACE IF NOT EXISTS sstableloader_test WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};"
 
       - name: Run Tier 1 - sstableloader Acceptance Tests
         id: tier1
