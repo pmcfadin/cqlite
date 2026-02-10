@@ -209,6 +209,18 @@ impl SSTableWriter {
     /// )?;
     /// ```
     pub fn new(output_dir: PathBuf, generation: u64, schema: &TableSchema) -> Result<Self> {
+        Self::with_expected_partitions(output_dir, generation, schema, 128)
+    }
+
+    /// Create a new SSTable writer with an expected partition count hint
+    ///
+    /// The expected count is used to size the Bloom filter optimally.
+    pub fn with_expected_partitions(
+        output_dir: PathBuf,
+        generation: u64,
+        schema: &TableSchema,
+        expected_partitions: usize,
+    ) -> Result<Self> {
         // Initialize statistics metadata with sentinel values
         let mut stats = StatisticsMetadata::new();
         // Pre-set min values to reasonable defaults (will be updated during writes)
@@ -223,9 +235,12 @@ impl SSTableWriter {
         let index_writer = IndexWriter::new();
 
         // Create Filter.db writer (1% false positive rate by default)
-        // Start with capacity for 1 partition, will grow as needed
         let filter_path = Self::component_path(&output_dir, generation, "Filter.db");
-        let filter_writer = Some(FilterWriter::new(filter_path, 1, 0.01)?);
+        let filter_writer = Some(FilterWriter::new(
+            filter_path,
+            expected_partitions.max(1),
+            0.01,
+        )?);
 
         // Create Summary.db writer (sample every 128 entries per Cassandra default)
         let summary_sample_interval = 128;

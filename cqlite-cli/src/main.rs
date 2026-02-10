@@ -259,22 +259,186 @@ async fn run_main() -> Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("--write-dir required with --writable"))?;
 
+        // Determine target table from mutations to select correct schema
+        let target_table: Option<(String, String)> = if !cli.mutation.is_empty() {
+            // Peek at first --mutation to get target table
+            let first: serde_json::Value = serde_json::from_str(&cli.mutation[0])
+                .map_err(|e| anyhow::anyhow!("Failed to parse mutation JSON: {}", e))?;
+            let table = first
+                .get("table")
+                .ok_or_else(|| anyhow::anyhow!("Mutation missing 'table' field"))?;
+            let ks = table
+                .get("keyspace")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tbl = table
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some((ks, tbl))
+        } else if let Some(ref file_path) = cli.mutations_file {
+            // Peek at first line of mutations file to get target table
+            use std::io::BufRead;
+            let file = std::fs::File::open(file_path)
+                .map_err(|e| anyhow::anyhow!("Failed to open mutations file: {}", e))?;
+            let reader = std::io::BufReader::new(file);
+            let mut target = None;
+            for line in reader.lines() {
+                let line = line.map_err(|e| anyhow::anyhow!("Failed to read mutations file: {}", e))?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let first: serde_json::Value = serde_json::from_str(trimmed)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse first mutation: {}", e))?;
+                let table = first
+                    .get("table")
+                    .ok_or_else(|| anyhow::anyhow!("First mutation missing 'table' field"))?;
+                let ks = table
+                    .get("keyspace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tbl = table
+                    .get("table")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                target = Some((ks, tbl));
+                break;
+            }
+            target
+        } else {
+            None
+        };
+
         // Get schema from startup ingestion result
         let schema = if let Some(ref registry) = startup_schema_registry {
-            // Try to get the first available schema from the registry asynchronously
-            let schemas = registry
-                .read()
-                .await
-                .list_schemas(None)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to list schemas: {}", e))?;
+            if let Some((ref ks, ref tbl)) = target_table {
+                // Look up specific table schema matching mutation target
+                registry
+                    .read()
+                    .await
+                    .get_schema(ks, tbl)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "No schema found for {}.{}. Check --schema file contains this table: {}",
+                            ks,
+                            tbl,
+                            e
+                        )
+                    })?
+            } else {
+                // No mutations specified yet, fall back to first available schema
+                let schemas = registry
+                    .read()
+                    .await
+                    .list_schemas(None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to list schemas: {}", e))?;
 
-            schemas.into_iter().next().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No schema available for write operations. \
-                     Provide --schema to load a schema."
-                )
-            })?
+                schemas.into_iter().next().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No schema available for write operations. \
+                         Provide --schema to load a schema."
+                    )
+                })?
+            }
+        } else if let Some(ref schema_path) = cli.schema {
+            // Write-only mode: parse schema directly from CQL file
+            use cqlite_core::schema::cql_parser::{
+                classify_statement, parse_create_table, split_cql_statements, StatementType,
+            };
+            let content = std::fs::read_to_string(schema_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read schema file: {}", e))?;
+            let statements = split_cql_statements(&content);
+
+            // Extract keyspace from CREATE KEYSPACE statement (simple parser)
+            let mut file_keyspace: Option<String> = None;
+            let mut table_schemas = Vec::new();
+
+            for stmt in &statements {
+                match classify_statement(stmt) {
+                    StatementType::Other(ref kind) if kind == "use" => {
+                        // Extract keyspace from USE <keyspace>;
+                        let name = stmt
+                            .trim()
+                            .strip_prefix("USE")
+                            .or_else(|| stmt.trim().strip_prefix("use"))
+                            .unwrap_or("")
+                            .trim()
+                            .trim_end_matches(';')
+                            .trim()
+                            .to_string();
+                        if !name.is_empty() {
+                            file_keyspace = Some(name);
+                        }
+                    }
+                    StatementType::Other(ref kind) if kind == "create" => {
+                        // Extract keyspace from CREATE KEYSPACE IF NOT EXISTS <name>
+                        let lower = stmt.to_lowercase();
+                        if lower.contains("create keyspace") {
+                            let after = if let Some(pos) = lower.find("exists") {
+                                &stmt[pos + 6..]
+                            } else if let Some(pos) = lower.find("keyspace") {
+                                &stmt[pos + 8..]
+                            } else {
+                                ""
+                            };
+                            let name = after
+                                .trim()
+                                .split(|c: char| c.is_whitespace() || c == '{' || c == ';')
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            if !name.is_empty() {
+                                file_keyspace = Some(name);
+                            }
+                        }
+                    }
+                    StatementType::CreateTable => {
+                        if let Ok((_, mut ts)) = parse_create_table(stmt) {
+                            // Apply file-level keyspace if table doesn't have one
+                            if ts.keyspace.is_empty()
+                                || ts.keyspace == "unknown"
+                                || ts.keyspace == "default"
+                            {
+                                if let Some(ref ks) = file_keyspace {
+                                    ts.keyspace = ks.clone();
+                                }
+                            }
+                            table_schemas.push(ts);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Find matching schema
+            if let Some((ref ks, ref tbl)) = target_table {
+                table_schemas
+                    .into_iter()
+                    .find(|ts| ts.keyspace == *ks && ts.table == *tbl)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "No schema found for {}.{} in {}",
+                            ks,
+                            tbl,
+                            schema_path.display()
+                        )
+                    })?
+            } else {
+                table_schemas.into_iter().next().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No CREATE TABLE statements found in {}",
+                        schema_path.display()
+                    )
+                })?
+            }
         } else {
             return Err(anyhow::anyhow!(
                 "Schema required for write operations. \

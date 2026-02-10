@@ -189,32 +189,31 @@ impl DataWriter {
 
     /// Write partition header
     ///
-    /// Format (V5CompressedLegacy):
+    /// Format (V5CompressedLegacy / Cassandra BigFormat):
     /// ```text
-    /// [partition_flags: u8]       ← 0x01 if has deletion, 0x00 otherwise
-    /// [key_length: u8]           ← Partition key length (max 255 bytes)
-    /// [key_bytes]                ← Raw partition key bytes
-    /// [local_deletion_time: i32 BE] ← Local deletion time in seconds (0 = not deleted)
-    /// [deletion_timestamp: i64 BE]  ← Deletion timestamp in microseconds (0 = not deleted)
+    /// [key_length: u16 BE]           ← Partition key length (2-byte unsigned short)
+    /// [key_bytes]                    ← Raw partition key bytes
+    /// [local_deletion_time: i32 BE]  ← i32::MAX for LIVE (DeletionTime.LIVE)
+    /// [deletion_timestamp: i64 BE]   ← i64::MIN for LIVE (DeletionTime.LIVE)
     /// ```
+    ///
+    /// Note: Cassandra uses `ByteBufferUtil.writeWithShortLength()` for the key,
+    /// which is a 2-byte BE unsigned short. There is NO separate flags byte.
+    /// DeletionTime.LIVE uses sentinel values (Integer.MAX_VALUE, Long.MIN_VALUE).
     fn write_partition_header(
         &mut self,
         key: &DecoratedKey,
         tombstone: Option<&PartitionTombstone>,
     ) -> Result<()> {
-        // Partition flags
-        let flags = if tombstone.is_some() { 0x01 } else { 0x00 };
-        self.buffer.push(flags);
-
-        // Partition key length (u8, NOT VInt)
-        // V5CompressedLegacy uses u8 length prefix, limiting keys to 255 bytes
-        if key.key.len() > 255 {
+        // Partition key length (u16 BE, matching Cassandra's writeWithShortLength)
+        if key.key.len() > 65535 {
             return Err(Error::InvalidInput(format!(
-                "Partition key too large for V5CompressedLegacy format: {} bytes (max 255)",
+                "Partition key too large: {} bytes (max 65535)",
                 key.key.len()
             )));
         }
-        self.buffer.push(key.key.len() as u8);
+        self.buffer
+            .write_all(&(key.key.len() as u16).to_be_bytes())?;
 
         // Partition key bytes
         self.buffer.extend_from_slice(&key.key);
@@ -227,9 +226,9 @@ impl DataWriter {
             // Deletion timestamp (i64 BE, in microseconds)
             self.buffer.write_all(&ts.deletion_time.to_be_bytes())?;
         } else {
-            // No deletion: write zeros
-            self.buffer.write_all(&0i32.to_be_bytes())?;
-            self.buffer.write_all(&0i64.to_be_bytes())?;
+            // DeletionTime.LIVE: Cassandra uses (Integer.MAX_VALUE, Long.MIN_VALUE)
+            self.buffer.write_all(&i32::MAX.to_be_bytes())?;
+            self.buffer.write_all(&i64::MIN.to_be_bytes())?;
         }
 
         Ok(())
@@ -483,7 +482,8 @@ impl DataWriter {
         mutation: &Mutation,
         schema: &TableSchema,
     ) -> Result<()> {
-        let static_columns: Vec<_> = schema.columns.iter().filter(|c| c.is_static).collect();
+        let mut static_columns: Vec<_> = schema.columns.iter().filter(|c| c.is_static).collect();
+        static_columns.sort_by(|a: &&Column, b: &&Column| a.name.cmp(&b.name));
         let col_count = static_columns.len();
 
         // Collect names of columns that have non-NULL writes
@@ -751,7 +751,7 @@ impl DataWriter {
     /// and clustering key columns are serialized separately in the partition
     /// header and clustering prefix.
     fn regular_columns<'a>(&self, schema: &'a TableSchema) -> Vec<&'a Column> {
-        schema
+        let mut cols: Vec<&'a Column> = schema
             .columns
             .iter()
             .filter(|c| {
@@ -759,17 +759,48 @@ impl DataWriter {
                     && !schema.is_partition_key(&c.name)
                     && !schema.is_clustering_key(&c.name)
             })
-            .collect()
+            .collect();
+        // Cassandra sorts regular columns alphabetically by name
+        cols.sort_by(|a, b| a.name.cmp(&b.name));
+        cols
     }
 
     /// Write cells for this row
+    ///
+    /// Cells are written in alphabetical column name order to match Cassandra's
+    /// `Columns` sorting (regular columns are sorted by name).
     fn write_cells(
         &self,
         buf: &mut Vec<u8>,
         mutation: &Mutation,
         _schema: &TableSchema,
     ) -> Result<()> {
-        for op in &mutation.operations {
+        // Sort operations alphabetically by column name to match Cassandra ordering
+        let mut sorted_ops: Vec<_> = mutation.operations.iter().collect();
+        sorted_ops.sort_by(|a, b| {
+            let name_a = match a {
+                crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    column, ..
+                }
+                | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                    column.as_str()
+                }
+                crate::storage::write_engine::mutation::CellOperation::DeleteRow => "",
+            };
+            let name_b = match b {
+                crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    column, ..
+                }
+                | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                    column.as_str()
+                }
+                crate::storage::write_engine::mutation::CellOperation::DeleteRow => "",
+            };
+            name_a.cmp(name_b)
+        });
+        for op in &sorted_ops {
             match op {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
                     // Skip NULL values - they are represented by absence in the bitmap
@@ -880,8 +911,8 @@ impl DataWriter {
             )));
         }
 
-        // Write value length as VInt
-        encode_signed(value_bytes.len() as i64, buf);
+        // Write value length as UNSIGNED VInt (Cassandra uses writeUnsignedVInt)
+        encode_unsigned(value_bytes.len() as u64, buf);
 
         // Write value bytes
         buf.extend_from_slice(&value_bytes);
@@ -967,8 +998,8 @@ impl DataWriter {
             )));
         }
 
-        // Write value length as VInt
-        encode_signed(value_bytes.len() as i64, buf);
+        // Write value length as UNSIGNED VInt (Cassandra uses writeUnsignedVInt)
+        encode_unsigned(value_bytes.len() as u64, buf);
 
         // Write value bytes
         buf.extend_from_slice(&value_bytes);
@@ -1305,17 +1336,15 @@ mod tests {
 
         let bytes = writer.finish().unwrap();
 
-        // Verify structure:
-        // [0x00] partition flags
-        // [0x04] key length (4 bytes)
+        // Verify structure (Cassandra BigFormat):
+        // [0x00, 0x04] key length (u16 BE = 4 bytes)
         // [0x00, 0x00, 0x00, 0x2A] key bytes
-        // [0x00, 0x00, 0x00, 0x00] local deletion time (4 bytes)
-        // [0x00 * 8] deletion timestamp (8 bytes)
-        assert_eq!(bytes[0], 0x00); // partition flags
-        assert_eq!(bytes[1], 0x04); // key length
+        // [0x7F, 0xFF, 0xFF, 0xFF] DeletionTime.LIVE local_deletion_time (i32::MAX)
+        // [0x80, 0x00...] DeletionTime.LIVE deletion_timestamp (i64::MIN)
+        assert_eq!(&bytes[0..2], &[0x00, 0x04]); // key length (u16 BE)
         assert_eq!(&bytes[2..6], &[0x00, 0x00, 0x00, 0x2A]); // key bytes
-        assert_eq!(&bytes[6..10], &[0x00, 0x00, 0x00, 0x00]); // local deletion time
-        assert_eq!(&bytes[10..18], &[0x00; 8]); // deletion timestamp
+        assert_eq!(&bytes[6..10], &i32::MAX.to_be_bytes()); // DeletionTime.LIVE ldt
+        assert_eq!(&bytes[10..18], &i64::MIN.to_be_bytes()); // DeletionTime.LIVE ts
     }
 
     #[test]
@@ -1514,8 +1543,8 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(1));
 
         // Only write "name" column (not "age")
-        // Schema has 2 regular columns: [name(0), age(1)]
-        // "age" is MISSING → bitmap bit 1 set → bitmap = 0b10 = 2
+        // Schema has 2 regular columns sorted alphabetically: [age(0), name(1)]
+        // "age" is MISSING → bitmap bit 0 set → bitmap = 0b01 = 1
         let mutation = Mutation::new(
             table_id,
             pk,
@@ -1534,8 +1563,8 @@ mod tests {
             .unwrap();
 
         // Cassandra format: single VUInt of missing columns bitmask
-        // "age" (index 1) is missing → bitmap = 0x02
-        assert_eq!(buf, vec![0x02]);
+        // "age" (index 0) is missing → bitmap = 0x01
+        assert_eq!(buf, vec![0x01]);
     }
 
     #[test]
@@ -1543,11 +1572,18 @@ mod tests {
         let stats = create_test_stats();
         let mut writer = DataWriter::new(stats);
 
-        // Create a partition key larger than 255 bytes
-        let large_key = vec![0xFF; 256];
+        // 256 bytes should succeed (u16 allows up to 65535)
+        let key_256 = vec![0xFF; 256];
+        let key = DecoratedKey::new(12345, key_256);
+        let result = writer.write_partition_header(&key, None);
+        assert!(result.is_ok());
+
+        // Create a partition key larger than 65535 bytes
+        let mut writer2 = DataWriter::new(create_test_stats());
+        let large_key = vec![0xFF; 65536];
         let key = DecoratedKey::new(12345, large_key);
 
-        let result = writer.write_partition_header(&key, None);
+        let result = writer2.write_partition_header(&key, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("too large"));
     }
@@ -1716,10 +1752,10 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(1));
 
         // Write "name" with value, "age" with NULL
-        // Schema has 2 regular columns: [name(0), age(1)]
-        // "name" is present → bit 0 = 0
-        // "age" is NULL (missing) → bit 1 = 1
-        // bitmap = 0b10 = 0x02
+        // Schema has 2 regular columns sorted alphabetically: [age(0), name(1)]
+        // "age" is NULL (missing) → bit 0 = 1
+        // "name" is present → bit 1 = 0
+        // bitmap = 0b01 = 0x01
         let mutation = Mutation::new(
             table_id,
             pk,
@@ -1744,11 +1780,11 @@ mod tests {
             .unwrap();
 
         // Cassandra format: single VUInt bitmask where bit=1 means MISSING
-        // Only "age" (index 1) is missing → bitmap = 0x02
+        // Only "age" (index 0) is missing → bitmap = 0x01
         assert_eq!(
             buf,
-            vec![0x02],
-            "Bitmap should encode age as missing (bit 1)"
+            vec![0x01],
+            "Bitmap should encode age as missing (bit 0)"
         );
     }
 
@@ -1915,14 +1951,12 @@ mod tests {
 
         let bytes = writer.finish().unwrap();
 
-        // Verify structure:
-        // [0x01] partition flags (has deletion)
-        // [0x04] key length
+        // Verify structure (Cassandra BigFormat):
+        // [0x00, 0x04] key length (u16 BE)
         // [key bytes]
         // [local_deletion_time: i32 BE]
         // [deletion_timestamp: i64 BE]
-        assert_eq!(bytes[0], 0x01, "Should have deletion flag");
-        assert_eq!(bytes[1], 0x04, "Key length");
+        assert_eq!(&bytes[0..2], &[0x00, 0x04], "Key length (u16 BE)");
 
         // Check local_deletion_time (i32 BE at offset 6)
         let ldt_bytes = &bytes[6..10];
@@ -2100,8 +2134,8 @@ mod tests {
         let bytes = writer.finish().unwrap();
         assert!(!bytes.is_empty());
 
-        // Verify partition header is present
-        assert_eq!(bytes[0], 0x00, "No partition deletion");
+        // Verify partition header is present (u16 BE key length)
+        assert_eq!(&bytes[0..2], &[0x00, 0x04], "Key length (u16 BE)");
 
         // Range tombstone markers should appear before rows
         // This is validated by the structure of the output

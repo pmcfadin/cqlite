@@ -532,11 +532,13 @@ impl WriteEngine {
             self.memtable.size_bytes()
         );
 
-        // Create SSTable writer
-        let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
+        // Create SSTable writer with hint for Bloom filter sizing
+        let partition_count_hint = self.memtable.iter().count();
+        let mut writer = crate::storage::sstable::writer::SSTableWriter::with_expected_partitions(
             self.config.data_dir.clone(),
             self.generation,
             &self.config.schema,
+            partition_count_hint,
         )?;
 
         // Write all partitions from memtable (already in token order)
