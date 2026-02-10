@@ -292,7 +292,7 @@ async fn test_statistics_write_parity() -> CqliteResult<()> {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta)?;
+    writer.write(&meta, None)?;
 
     // Read back the file
     let file_data = std::fs::read(&stats_path)?;
@@ -380,7 +380,7 @@ async fn test_statistics_ttl_parity() -> CqliteResult<()> {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta)?;
+    writer.write(&meta, None)?;
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path)?;
@@ -410,7 +410,7 @@ async fn test_statistics_deletion_time_parity() -> CqliteResult<()> {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta)?;
+    writer.write(&meta, None)?;
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path)?;
@@ -439,7 +439,7 @@ fn test_statistics_format_compliance() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta).expect("Write should succeed");
+    writer.write(&meta, None).expect("Write should succeed");
 
     // Read raw bytes
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");

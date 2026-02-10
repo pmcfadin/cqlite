@@ -36,7 +36,10 @@ pub struct ExportOptions {
     pub table: String,
     /// Generation number (for filename generation)
     pub generation: u64,
-    /// Whether to perform compaction before export (default: true)
+    /// Whether to perform compaction before export (default: false)
+    ///
+    /// **NOT YET IMPLEMENTED**: Setting this to `true` will return an error.
+    /// Use `maintenance_step()` to compact SSTables before calling `export_sstable()`.
     pub compact_before_export: bool,
     /// Whether to validate the exported SSTable (default: true)
     pub validate_after_export: bool,
@@ -62,7 +65,7 @@ impl ExportOptions {
             keyspace: keyspace.into(),
             table: table.into(),
             generation,
-            compact_before_export: true,
+            compact_before_export: false,
             validate_after_export: true,
         }
     }
@@ -123,7 +126,6 @@ impl ExportReport {
             "Statistics.db",
             "Filter.db",
             "Summary.db",
-            "CompressionInfo.db",
             "Digest.crc32",
             "TOC.txt",
         ];
@@ -146,6 +148,39 @@ impl ExportReport {
 
         Ok(())
     }
+}
+
+/// Validate that a name is safe for use in filesystem paths.
+///
+/// Rejects empty strings, path traversal sequences (`..`), path separators
+/// (`/`, `\`), and null bytes.
+#[cfg(feature = "write-support")]
+fn validate_export_name(name: &str, field: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::InvalidPath(format!(
+            "Export {} must not be empty",
+            field
+        )));
+    }
+    if name.contains("..") {
+        return Err(Error::InvalidPath(format!(
+            "Export {} contains path traversal sequence '..': {:?}",
+            field, name
+        )));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(Error::InvalidPath(format!(
+            "Export {} contains path separator: {:?}",
+            field, name
+        )));
+    }
+    if name.contains('\0') {
+        return Err(Error::InvalidPath(format!(
+            "Export {} contains null byte: {:?}",
+            field, name
+        )));
+    }
+    Ok(())
 }
 
 /// Build the Cassandra-style filename for a component
@@ -205,6 +240,10 @@ impl crate::storage::write_engine::WriteEngine {
             ));
         }
 
+        // Validate keyspace/table names to prevent path traversal
+        validate_export_name(&options.keyspace, "keyspace")?;
+        validate_export_name(&options.table, "table")?;
+
         log::info!(
             "Starting SSTable export to {} with keyspace={}, table={}, generation={}",
             output_dir.display(),
@@ -254,13 +293,13 @@ impl crate::storage::write_engine::WriteEngine {
         let (source_generation, source_dir) = source_sstable;
 
         // List of components to copy
+        // CompressionInfo.db is omitted for uncompressed data (Issue #429)
         let components_to_copy = [
             ("Data.db", SSTableComponent::Data),
             ("Index.db", SSTableComponent::Index),
             ("Statistics.db", SSTableComponent::Statistics),
             ("Filter.db", SSTableComponent::Filter),
             ("Summary.db", SSTableComponent::Summary),
-            ("CompressionInfo.db", SSTableComponent::CompressionInfo),
             ("Digest.crc32", SSTableComponent::Digest),
             ("TOC.txt", SSTableComponent::TOC),
         ];
@@ -392,9 +431,19 @@ impl crate::storage::write_engine::WriteEngine {
         Ok((max_generation, self.config.data_dir.clone()))
     }
 
-    /// Read partition and row counts from Statistics.db
+    /// Read partition and row counts from Statistics.db and Index.db
     ///
-    /// This is a simple extraction from the exported SSTable's Statistics.db file.
+    /// Reads the STATS component (MetadataType ordinal 2) from the exported
+    /// Statistics.db to extract totalRows. Partition count is derived from the
+    /// number of index entries in the exported Index.db.
+    ///
+    /// The STATS component layout is fixed (written by our StatisticsWriter):
+    /// - Offset 153 from component start: totalColumnsSet (u64 BE)
+    /// - Offset 161 from component start: totalRows (u64 BE)
+    ///
+    /// Index.db format (BIG format):
+    /// - Each entry: 2-byte BE key_len + key_bytes + 8-byte BE position
+    /// - Entries are sequential until EOF
     fn read_statistics_from_export(&self, components: &[PathBuf]) -> Result<(u64, u64)> {
         // Find Statistics.db in exported components
         let stats_path = components
@@ -407,13 +456,152 @@ impl crate::storage::write_engine::WriteEngine {
             })
             .ok_or_else(|| Error::Storage("Statistics.db not found in export".to_string()))?;
 
-        // Statistics.db parsing not yet implemented
-        // Return placeholder values with warning
-        log::warn!(
-            "Statistics.db parsing not implemented; partition/row counts unavailable for {}",
-            stats_path.display()
+        let file_data = std::fs::read(stats_path)
+            .map_err(|e| Error::Storage(format!("Failed to read Statistics.db: {}", e)))?;
+
+        // TOC structure: 4 (count) + 4 (checksum) + N*8 (entries) + 4 (checksum)
+        // We need the STATS component offset (type ordinal 2)
+        if file_data.len() < 8 {
+            log::warn!("Statistics.db too small to parse, returning zero counts");
+            return Ok((0, 0));
+        }
+
+        let num_components =
+            u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]) as usize;
+
+        // Find STATS component (type == 2) offset from TOC entries
+        let mut stats_offset: Option<usize> = None;
+        for i in 0..num_components {
+            let entry_base = 8 + i * 8; // past count(4) + checksum(4)
+            if entry_base + 8 > file_data.len() {
+                break;
+            }
+            let comp_type = u32::from_be_bytes([
+                file_data[entry_base],
+                file_data[entry_base + 1],
+                file_data[entry_base + 2],
+                file_data[entry_base + 3],
+            ]);
+            if comp_type == 2 {
+                stats_offset = Some(u32::from_be_bytes([
+                    file_data[entry_base + 4],
+                    file_data[entry_base + 5],
+                    file_data[entry_base + 6],
+                    file_data[entry_base + 7],
+                ]) as usize);
+                break;
+            }
+        }
+
+        let stats_offset = match stats_offset {
+            Some(o) => o,
+            None => {
+                log::warn!("STATS component not found in Statistics.db TOC");
+                return Ok((0, 0));
+            }
+        };
+
+        // totalRows is at byte offset 161 within the STATS component data.
+        // Layout: 2×histogram(36ea) + CommitLog(12) + timestamps(16) +
+        //         delTimes(8) + ttls(8) + compression(8) + tombHist(8) +
+        //         level(4) + repaired(8) + minCK(4) + maxCK(4) +
+        //         legacyCounter(1) + totalColumnsSet(8) + totalRows(8)
+        const TOTAL_ROWS_OFFSET: usize = 161;
+        let abs_offset = stats_offset + TOTAL_ROWS_OFFSET;
+
+        if abs_offset + 8 > file_data.len() {
+            log::warn!(
+                "Statistics.db STATS component too short for totalRows (need {} + 8, have {})",
+                abs_offset,
+                file_data.len()
+            );
+            return Ok((0, 0));
+        }
+
+        let row_count = u64::from_be_bytes([
+            file_data[abs_offset],
+            file_data[abs_offset + 1],
+            file_data[abs_offset + 2],
+            file_data[abs_offset + 3],
+            file_data[abs_offset + 4],
+            file_data[abs_offset + 5],
+            file_data[abs_offset + 6],
+            file_data[abs_offset + 7],
+        ]);
+
+        // Count partitions from Index.db entries
+        let partition_count = self.count_index_entries(components).unwrap_or_else(|e| {
+            log::warn!("Failed to count Index.db entries: {}, defaulting to 0", e);
+            0
+        });
+
+        log::info!(
+            "Read from export: row_count={}, partition_count={}",
+            row_count,
+            partition_count
         );
-        Ok((0, 0))
+
+        Ok((partition_count, row_count))
+    }
+
+    /// Count the number of partition entries in Index.db
+    ///
+    /// Each partition has one entry in Index.db. The format is:
+    /// - 2-byte big-endian key length
+    /// - N bytes of partition key
+    /// - 8-byte big-endian data file position
+    ///
+    /// Entries are sequential until EOF.
+    fn count_index_entries(&self, components: &[PathBuf]) -> Result<u64> {
+        // Find Index.db in exported components
+        let index_path = components
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.ends_with("Index.db"))
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| Error::Storage("Index.db not found in export".to_string()))?;
+
+        let index_data = std::fs::read(index_path)
+            .map_err(|e| Error::Storage(format!("Failed to read Index.db: {}", e)))?;
+
+        let mut count = 0u64;
+        let mut offset = 0usize;
+
+        while offset + 2 <= index_data.len() {
+            // Read 2-byte big-endian key length
+            let key_len = u16::from_be_bytes([index_data[offset], index_data[offset + 1]]) as usize;
+            offset += 2;
+
+            // Skip key bytes
+            if offset + key_len > index_data.len() {
+                log::warn!(
+                    "Index.db entry at offset {} has key_len {} exceeding file bounds (file size: {})",
+                    offset - 2,
+                    key_len,
+                    index_data.len()
+                );
+                break;
+            }
+            offset += key_len;
+
+            // Skip 8-byte position
+            if offset + 8 > index_data.len() {
+                log::warn!(
+                    "Index.db entry at offset {} missing 8-byte position field",
+                    offset
+                );
+                break;
+            }
+            offset += 8;
+
+            count += 1;
+        }
+
+        log::debug!("Counted {} partition entries in Index.db", count);
+        Ok(count)
     }
 }
 
@@ -469,13 +657,36 @@ mod tests {
     }
 
     #[test]
+    fn test_export_path_traversal_rejected() {
+        let bad_names = vec!["../etc", "foo/bar", "foo\\bar", "", "test\0ks", ".."];
+        for name in &bad_names {
+            let result = validate_export_name(name, "keyspace");
+            assert!(result.is_err(), "Should reject {:?} as export name", name);
+        }
+    }
+
+    #[test]
+    fn test_export_valid_names_accepted() {
+        let good_names = vec!["test_ks", "my-table", "T1", "keyspace123", "a.b"];
+        for name in &good_names {
+            let result = validate_export_name(name, "keyspace");
+            assert!(
+                result.is_ok(),
+                "Should accept {:?} as export name: {:?}",
+                name,
+                result
+            );
+        }
+    }
+
+    #[test]
     fn test_export_options_defaults() {
         let options = ExportOptions::new("test_ks", "users", 1);
 
         assert_eq!(options.keyspace, "test_ks");
         assert_eq!(options.table, "users");
         assert_eq!(options.generation, 1);
-        assert!(options.compact_before_export);
+        assert!(!options.compact_before_export);
         assert!(options.validate_after_export);
     }
 
@@ -491,7 +702,7 @@ mod tests {
     fn test_export_options_skip_validation() {
         let options = ExportOptions::new("test_ks", "users", 1).skip_validation();
 
-        assert!(options.compact_before_export);
+        assert!(!options.compact_before_export);
         assert!(!options.validate_after_export);
     }
 
@@ -565,6 +776,9 @@ mod tests {
         // Verify report
         assert!(report.data_file_size > 0);
         assert!(!report.components.is_empty());
+        assert_eq!(report.row_count, 5, "Expected 5 rows");
+        // Partition count should be non-zero (actual count depends on data writer implementation)
+        assert!(report.partition_count > 0, "Expected non-zero partition count, got {}", report.partition_count);
 
         // Verify files exist with correct naming and directory structure
         let data_file = export_dir
@@ -581,15 +795,15 @@ mod tests {
             .join("nb-1-big-Index.db");
         assert!(index_file.exists());
 
-        // Verify CompressionInfo.db is included in export (Issue #426)
+        // Verify CompressionInfo.db is NOT included for uncompressed data (Issue #429)
         let compression_info_file = export_dir
             .path()
             .join("test_ks")
             .join("test_table")
             .join("nb-1-big-CompressionInfo.db");
         assert!(
-            compression_info_file.exists(),
-            "CompressionInfo.db must be included in export for Cassandra 5 compatibility"
+            !compression_info_file.exists(),
+            "CompressionInfo.db must NOT be included for uncompressed data"
         );
     }
 
@@ -765,5 +979,85 @@ mod tests {
             .join("test_table")
             .join("nb-100-big-Data.db");
         assert!(data_file.exists());
+    }
+
+    #[tokio::test]
+    async fn test_export_default_options_does_not_fail() {
+        let temp_dir = TempDir::new().unwrap();
+        let export_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write some data and flush
+        for i in 0..3 {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1000000 + i as i64);
+            engine.write(mutation).unwrap();
+        }
+        engine.flush().await.unwrap();
+
+        // Export with default options (compact_before_export=false) should succeed
+        let options = ExportOptions::new("test_ks", "test_table", 1).skip_validation();
+        let result = engine.export_sstable(export_dir.path(), options).await;
+        assert!(
+            result.is_ok(),
+            "Export with default options should not fail: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_partition_count_nonzero() {
+        let temp_dir = TempDir::new().unwrap();
+        let export_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write data and flush
+        for i in 0..10 {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1000000 + i as i64);
+            engine.write(mutation).unwrap();
+        }
+        engine.flush().await.unwrap();
+
+        // Export and verify partition_count is non-zero
+        let options = ExportOptions::new("test_ks", "test_table", 1)
+            .skip_validation()
+            .skip_compaction();
+        let report = engine
+            .export_sstable(export_dir.path(), options)
+            .await
+            .unwrap();
+
+        // Main assertion: partition_count should now be non-zero (was always 0 before fix)
+        assert!(
+            report.partition_count > 0,
+            "partition_count should be non-zero, got {}",
+            report.partition_count
+        );
+
+        // Verify row count is correct
+        assert_eq!(report.row_count, 10, "Expected 10 rows");
+
+        // Partition count should be <= row count
+        assert!(
+            report.partition_count <= report.row_count,
+            "partition_count ({}) should be <= row_count ({})",
+            report.partition_count,
+            report.row_count
+        );
     }
 }

@@ -6,7 +6,7 @@
 //! - Filter.db: Bloom filter for existence checks
 //! - Statistics.db: Metadata for delta encoding
 //! - Summary.db: Sampled index entries
-//! - CompressionInfo.db: Compression metadata (required even when uncompressed)
+//! - CompressionInfo.db: Compression metadata (only when compressed)
 //! - TOC.txt: Component manifest (publication barrier)
 //!
 //! Component generation order is critical (see M5 Council Recommendation):
@@ -14,7 +14,7 @@
 //! 2. Data.db + Index.db (single pass, track offsets)
 //! 3. Summary.db (sample Index.db entries)
 //! 4. Filter.db (finalize Bloom filter)
-//! 5. CompressionInfo.db (required for NB format, even when uncompressed)
+//! 5. CompressionInfo.db (only when compressed)
 //! 6. Digest.crc32
 //! 7. TOC.txt (makes SSTable visible)
 //!
@@ -91,8 +91,8 @@ pub struct SSTableInfo {
     pub summary_path: PathBuf,
     /// Path to the Statistics.db file
     pub stats_path: PathBuf,
-    /// Path to the CompressionInfo.db file
-    pub compression_info_path: PathBuf,
+    /// Path to the CompressionInfo.db file (None when data is uncompressed)
+    pub compression_info_path: Option<PathBuf>,
     /// Path to the TOC.txt file
     pub toc_path: PathBuf,
     /// Path to the Digest.crc32 file
@@ -116,7 +116,7 @@ pub struct SSTableInfo {
 /// 3. Index.db - Partition index (uses Data.db offsets)
 /// 4. Filter.db - Bloom filter
 /// 5. Summary.db - Sampled index entries
-/// 6. CompressionInfo.db - Compression metadata (required even when uncompressed)
+/// 6. CompressionInfo.db - Compression metadata (only when compressed)
 /// 7. Digest.crc32 - Data.db checksum
 /// 8. TOC.txt - Table of contents (LAST, publication barrier)
 ///
@@ -406,7 +406,7 @@ impl SSTableWriter {
         // 1. Write Statistics.db (FIRST - provides delta baseline)
         let stats_path = Self::component_path(&self.output_dir, self.generation, "Statistics.db");
         let stats_writer = StatisticsWriter::new(stats_path.clone());
-        stats_writer.write(&self.stats)?;
+        stats_writer.write(&self.stats, Some(&self.schema))?;
 
         // 2. Write Data.db
         let data_path = Self::component_path(&self.output_dir, self.generation, "Data.db");
@@ -430,14 +430,10 @@ impl SSTableWriter {
         let summary_bytes = self.summary_writer.finish()?;
         tokio::fs::write(&summary_path, summary_bytes).await?;
 
-        // 5.5. Write CompressionInfo.db (required for NB format, even when uncompressed)
-        let compression_info_path =
-            Self::component_path(&self.output_dir, self.generation, "CompressionInfo.db");
-        let compression_writer = CompressionInfoWriter::new(compression_info_path.clone());
-        let mut compression_metadata = CompressionMetadata::new(CompressionAlgorithm::None, 65536);
-        // For uncompressed data: no chunks, compressed_length = data_size
-        compression_metadata.set_compressed_length(data_size);
-        compression_writer.write(&compression_metadata)?;
+        // 5.5. CompressionInfo.db is omitted for uncompressed data.
+        // Real Cassandra 5 SSTables do not include CompressionInfo.db when
+        // data is uncompressed. The compression_info_writer module is retained
+        // for future compressed SSTable support.
 
         // 6. Write Digest.crc32 (compute CRC32 of Data.db)
         let digest_path = Self::component_path(&self.output_dir, self.generation, "Digest.crc32");
@@ -461,9 +457,6 @@ impl SSTableWriter {
                 crate::storage::sstable::directory::types::SSTableComponent::Statistics,
             ),
             ComponentEntry::new(
-                crate::storage::sstable::directory::types::SSTableComponent::CompressionInfo,
-            ),
-            ComponentEntry::new(
                 crate::storage::sstable::directory::types::SSTableComponent::Digest,
             ),
         ];
@@ -475,7 +468,7 @@ impl SSTableWriter {
             filter_path,
             summary_path,
             stats_path,
-            compression_info_path,
+            compression_info_path: None,
             toc_path,
             digest_path,
             partition_count: self.partition_count,
@@ -581,7 +574,7 @@ mod tests {
         assert!(info.filter_path.exists());
         assert!(info.summary_path.exists());
         assert!(info.stats_path.exists());
-        assert!(info.compression_info_path.exists());
+        assert!(info.compression_info_path.is_none());
         assert!(info.toc_path.exists());
         assert!(info.digest_path.exists());
 
@@ -695,7 +688,7 @@ mod tests {
         assert!(toc_contents.contains("Filter.db"));
         assert!(toc_contents.contains("Summary.db"));
         assert!(toc_contents.contains("Statistics.db"));
-        assert!(toc_contents.contains("CompressionInfo.db"));
+        assert!(!toc_contents.contains("CompressionInfo.db"));
         assert!(toc_contents.contains("Digest.crc32"));
         assert!(toc_contents.contains("TOC.txt"));
     }

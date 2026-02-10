@@ -52,6 +52,14 @@ impl std::fmt::Display for TableId {
 /// a single CQL INSERT/UPDATE/DELETE statement. Each mutation targets a specific
 /// row (identified by partition key + optional clustering key) and contains
 /// one or more cell operations.
+///
+/// # Tombstone Support (M5.2)
+///
+/// Mutations can represent various deletion types:
+/// - Cell tombstone: `CellOperation::Delete` for single column
+/// - Row tombstone: `CellOperation::DeleteRow` for entire row
+/// - Range tombstone: `range_tombstones` field for clustering key ranges
+/// - Partition tombstone: `partition_tombstone` field for entire partition
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Mutation {
     /// Target table
@@ -66,6 +74,10 @@ pub struct Mutation {
     pub timestamp_micros: i64,
     /// Time-to-live in seconds (None = no expiration)
     pub ttl_seconds: Option<u32>,
+    /// Partition tombstone (deletes entire partition)
+    pub partition_tombstone: Option<PartitionTombstone>,
+    /// Range tombstones (delete clustering key ranges within partition)
+    pub range_tombstones: Vec<RangeTombstone>,
 }
 
 impl Mutation {
@@ -85,6 +97,8 @@ impl Mutation {
             operations,
             timestamp_micros,
             ttl_seconds,
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         }
     }
 
@@ -92,6 +106,50 @@ impl Mutation {
     pub fn decorated_key(&self, schema: &TableSchema) -> Result<DecoratedKey> {
         self.partition_key.to_decorated_key(schema)
     }
+}
+
+/// Partition tombstone for deleting entire partition
+///
+/// Stored in the partition header and shadows all rows in the partition
+/// when the partition deletion time is greater than the row timestamps.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PartitionTombstone {
+    /// Deletion timestamp in microseconds since Unix epoch
+    pub deletion_time: i64,
+    /// Local deletion time in seconds since Unix epoch
+    pub local_deletion_time: i32,
+}
+
+/// Range tombstone for deleting a range of clustering keys
+///
+/// Stored as markers within the partition data and shadows all rows
+/// in the specified clustering key range.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RangeTombstone {
+    /// Start bound (inclusive or exclusive)
+    pub start: ClusteringBound,
+    /// End bound (inclusive or exclusive)
+    pub end: ClusteringBound,
+    /// Deletion timestamp in microseconds since Unix epoch
+    pub deletion_time: i64,
+    /// Local deletion time in seconds since Unix epoch
+    pub local_deletion_time: i32,
+}
+
+/// Clustering key bound for range tombstones
+///
+/// Defines the boundary of a range deletion. Can be inclusive or exclusive,
+/// or represent the minimum/maximum possible clustering key.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ClusteringBound {
+    /// Inclusive bound (clustering key is part of the deletion range)
+    Inclusive(ClusteringKey),
+    /// Exclusive bound (clustering key is NOT part of the deletion range)
+    Exclusive(ClusteringKey),
+    /// Before all clustering keys (start of partition)
+    Bottom,
+    /// After all clustering keys (end of partition)
+    Top,
 }
 
 /// Cell-level operation within a mutation
@@ -103,6 +161,15 @@ pub enum CellOperation {
         column: String,
         /// Column value
         value: Value,
+    },
+    /// Write a value to a column with TTL (expiring cell)
+    WriteWithTtl {
+        /// Column name
+        column: String,
+        /// Column value
+        value: Value,
+        /// Time-to-live in seconds
+        ttl_seconds: u32,
     },
     /// Delete a specific column
     Delete {
@@ -164,7 +231,9 @@ impl PartitionKey {
             return Ok(result);
         }
 
-        // Multi-component key: each component has 2-byte BE length prefix
+        // Multi-component key: [len1][val1][0x00][len2][val2][0x00]...[lenN][valN]
+        // 0x00 separator after each component EXCEPT the last (Issue #380, #422)
+        let num_components = self.columns.len();
         for (i, (_, value)) in self.columns.iter().enumerate() {
             let value_bytes = self.serialize_value(value, &schema.partition_keys[i])?;
             let len = value_bytes.len();
@@ -177,6 +246,11 @@ impl PartitionKey {
             // 2-byte big-endian length prefix
             result.extend_from_slice(&(len as u16).to_be_bytes());
             result.extend_from_slice(&value_bytes);
+
+            // Add 0x00 separator after each component EXCEPT the last
+            if i < num_components - 1 {
+                result.push(0x00);
+            }
         }
 
         Ok(result)
@@ -543,10 +617,12 @@ mod tests {
         ]);
 
         let bytes = pk.to_bytes(&schema).unwrap();
-        // Multi-component: [len1(2B)][int(4B)][len2(2B)][text(5B)]
+        // Multi-component: [len1(2B)][val1][0x00][len2(2B)][val2] (no trailing 0x00)
+        // Format per Issue #380, #422 and appendix-b-encodings-cheat-sheet.md
         let expected = vec![
             0x00, 0x04, // len1 = 4
             0x00, 0x00, 0x00, 0x2A, // int = 42
+            0x00, // separator between components
             0x00, 0x05, // len2 = 5
             b'h', b'e', b'l', b'l', b'o', // text = "hello"
         ];

@@ -79,6 +79,10 @@ struct RowHeader {
     /// Length of the row_size VInt in bytes (needed for offset calculation)
     /// row_size is measured from AFTER this VInt is consumed
     row_size_vint_len: usize,
+    /// Bitmask of missing columns from Cassandra's Columns.Serializer format.
+    /// bit=1 means column missing, bit=0 means column present.
+    /// None when HAS_ALL_COLUMNS flag is set.
+    missing_columns_bitmap: Option<u64>,
 }
 
 // Row header flag constants
@@ -850,8 +854,8 @@ impl V5CompressedLegacyParser {
             None
         };
 
-        // Parse and skip column bitmap if HAS_ALL_COLUMNS is NOT set
-        if (row_flags & ROW_HAS_ALL_COLUMNS) == 0 {
+        // Parse column bitmap if HAS_ALL_COLUMNS is NOT set
+        let missing_columns_bitmap = if (row_flags & ROW_HAS_ALL_COLUMNS) == 0 {
             // Cassandra Columns.Serializer.serializeSubset() format:
             // Single unsigned VInt encoding a bitmask of MISSING columns
             // (bit=1 means column is missing, bit=0 means present)
@@ -866,10 +870,13 @@ impl V5CompressedLegacyParser {
             pos += bytes_consumed;
 
             debug!(
-                "V5CompressedLegacy: Skipped column bitmap: missing_bitmap=0x{:X} ({} bytes)",
+                "V5CompressedLegacy: Parsed column bitmap: missing_bitmap=0x{:X} ({} bytes)",
                 bitmap, bytes_consumed
             );
-        }
+            Some(bitmap)
+        } else {
+            None
+        };
 
         let header_size = pos - offset;
         debug!(
@@ -884,6 +891,7 @@ impl V5CompressedLegacyParser {
                 local_deletion_time,
                 header_size,
                 row_size_vint_len,
+                missing_columns_bitmap,
             },
             row_size,
         ))
@@ -1555,10 +1563,38 @@ impl V5CompressedLegacyParser {
                 .collect()
         };
 
-        log::debug!("V5CompressedLegacy: Parsing {} cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes)", columns_in_order.len(), offset, row_header.header_size);
+        // Filter columns by missing_columns_bitmap when present.
+        // The bitmap indicates which columns are MISSING (bit=1 → absent).
+        // We only parse cells for columns that are actually present in the data.
+        let columns_to_parse: Vec<&crate::schema::Column> = match row_header.missing_columns_bitmap
+        {
+            Some(bitmap) => {
+                let filtered: Vec<_> = columns_in_order
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| {
+                        // Bitmap only covers the first 64 columns (u64).
+                        // Columns beyond index 63 are not represented in the
+                        // bitmap and are treated as present.
+                        *idx >= 64 || (bitmap & (1u64 << idx)) == 0
+                    })
+                    .map(|(_, col)| *col)
+                    .collect();
+                log::debug!(
+                    "V5CompressedLegacy: Column bitmap 0x{:X} filters {} → {} columns",
+                    bitmap,
+                    columns_in_order.len(),
+                    filtered.len()
+                );
+                filtered
+            }
+            None => columns_in_order,
+        };
+
+        log::debug!("V5CompressedLegacy: Parsing {} cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes)", columns_to_parse.len(), offset, row_header.header_size);
         log::debug!(
             "V5CompressedLegacy: Column order: {:?}",
-            columns_in_order.iter().map(|c| &c.name).collect::<Vec<_>>()
+            columns_to_parse.iter().map(|c| &c.name).collect::<Vec<_>>()
         );
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
@@ -1571,14 +1607,14 @@ impl V5CompressedLegacyParser {
             log::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
         }
 
-        for (col_idx, &column) in columns_in_order.iter().enumerate() {
+        for (col_idx, &column) in columns_to_parse.iter().enumerate() {
             if offset >= data.len() {
                 log::debug!(
                     "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} cells",
                     col_idx,
                     column.name,
                     cells.len(),
-                    columns_in_order.len()
+                    columns_to_parse.len()
                 );
                 break;
             }
@@ -1627,7 +1663,7 @@ impl V5CompressedLegacyParser {
         log::debug!(
             "V5CompressedLegacy: Parsed {}/{} columns (missing columns are NULL)",
             cells.len(),
-            columns_in_order.len()
+            columns_to_parse.len()
         );
         log::debug!(
             "V5CompressedLegacy: Cells HashMap keys: {:?}",
@@ -6226,12 +6262,43 @@ mod tests {
         // Verify header was parsed (has timestamp)
         assert_eq!(row_header.timestamp, Some(0));
 
+        // Verify missing_columns_bitmap is captured
+        assert_eq!(
+            row_header.missing_columns_bitmap,
+            Some(0x05),
+            "Bitmap 0x05 means columns 0 and 2 are MISSING"
+        );
+
         // Verify header_size includes bitmap VUInt (but NOT flags, parsed separately)
         // size(1) + prev(1) + timestamp(1) + bitmap(1) = 4
         assert_eq!(
             row_header.header_size, 4,
             "Header size should include column bitmap VUInt but not flags (parsed separately)"
         );
+    }
+
+    #[test]
+    fn test_bitmap_filter_does_not_panic_for_wide_schemas() {
+        // Verify that bitmap filtering with idx >= 64 does not panic.
+        // Columns beyond bit 63 are not represented in the u64 bitmap
+        // and should be treated as present (not filtered out).
+        let bitmap: u64 = 0x05; // bits 0 and 2 are set (missing)
+        let total_columns = 70; // wider than 64
+
+        let kept: Vec<usize> = (0..total_columns)
+            .filter(|idx| *idx >= 64 || (bitmap & (1u64 << idx)) == 0)
+            .collect();
+
+        // Columns 0 and 2 should be filtered out, all others kept
+        assert!(!kept.contains(&0));
+        assert!(kept.contains(&1));
+        assert!(!kept.contains(&2));
+        assert!(kept.contains(&3));
+        // All columns >= 64 should be kept
+        for i in 64..total_columns {
+            assert!(kept.contains(&i), "Column {} should be kept", i);
+        }
+        assert_eq!(kept.len(), 68); // 70 - 2 missing = 68
     }
 
     #[test]

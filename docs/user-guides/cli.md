@@ -290,11 +290,31 @@ cqlite> :help troubleshooting
 
 ## Limitations
 
-1. **Read-only**: CQLite is designed for reading SSTable data, not writing
-2. **Single SSTable**: Queries operate on one SSTable directory at a time
-3. **Partition key queries**: WHERE clauses work best with partition keys
-4. **Cassandra 5+ only**: Earlier versions are not supported
-5. **Local files only**: No network connectivity to live Cassandra clusters
+1. **Single SSTable**: Queries operate on one SSTable directory at a time
+2. **Partition key queries**: WHERE clauses work best with partition keys
+3. **Cassandra 5+ only**: Earlier versions are not supported
+4. **Local files only**: No network connectivity to live Cassandra clusters
+
+## Write Support (M5)
+
+CQLite supports write operations when built with the `write-support` feature flag:
+
+```bash
+# Build with write support
+cargo build --package cqlite-cli --features write-support
+
+# Enable write mode
+cqlite --writable --write-dir /path/to/write-dir \
+  --schema schema.json \
+  --mutation '{"table":{"keyspace":"ks","table":"tbl"},...}'
+
+# Available write subcommands
+cqlite maintenance --budget-ms 100 --writable --write-dir /path  # Run compaction
+cqlite write-stats --writable --write-dir /path                   # Show statistics
+cqlite export-sstable /output --writable --write-dir /path        # Export SSTables
+```
+
+For full write support documentation, see [CLI Usage Examples](../../cqlite-cli/CLI_USAGE_EXAMPLES.md#write-support-m5).
 
 ## Next Steps
 

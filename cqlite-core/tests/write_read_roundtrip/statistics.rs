@@ -35,7 +35,7 @@ fn test_statistics_roundtrip_minimal() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta).expect("Write should succeed");
+    writer.write(&meta, None).expect("Write should succeed");
 
     // Verify file exists
     assert!(stats_path.exists(), "Statistics.db should be created");
@@ -74,7 +74,7 @@ fn test_statistics_roundtrip_timestamp_range() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta).expect("Write should succeed");
+    writer.write(&meta, None).expect("Write should succeed");
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
@@ -110,7 +110,7 @@ fn test_statistics_roundtrip_with_ttl() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta).expect("Write should succeed");
+    writer.write(&meta, None).expect("Write should succeed");
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
@@ -143,7 +143,7 @@ fn test_statistics_roundtrip_with_deletion_time() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta).expect("Write should succeed");
+    writer.write(&meta, None).expect("Write should succeed");
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
@@ -238,7 +238,7 @@ fn test_statistics_hex_dump_format_comparison() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta).expect("Write should succeed");
+    writer.write(&meta, None).expect("Write should succeed");
 
     // Read the written file
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
@@ -315,7 +315,7 @@ fn test_statistics_roundtrip_extreme_timestamps() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta).expect("Write should succeed");
+    writer.write(&meta, None).expect("Write should succeed");
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");

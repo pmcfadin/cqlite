@@ -43,6 +43,7 @@
 
 use crate::error::{Error, Result};
 use crate::parser::vint::encode_vuint;
+use crate::schema::TableSchema;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -181,6 +182,121 @@ impl StatisticsMetadata {
     }
 }
 
+/// Convert a CQL type name to Cassandra internal marshal type.
+///
+/// This is the reverse of `convert_marshal_type_to_cql` in enhanced_statistics_parser.rs.
+/// Used when writing the SERIALIZATION_HEADER component of Statistics.db.
+///
+/// Handles:
+/// - Primitive types: text, int, bigint, uuid, etc.
+/// - Collections: list<T>, set<T>, map<K,V>
+/// - Frozen wrappers: frozen<list<T>>, frozen<map<K,V>>
+/// - Tuples: tuple<T1, T2, ...>
+fn cql_type_to_marshal_type(cql_type: &str) -> String {
+    let trimmed = cql_type.trim();
+    let prefix = "org.apache.cassandra.db.marshal.";
+
+    // Handle parameterized types: list<T>, set<T>, map<K,V>, frozen<T>, tuple<T1,T2>
+    if let Some(inner) = strip_cql_wrapper(trimmed, "list") {
+        return format!("{prefix}ListType({})", cql_type_to_marshal_type(inner));
+    }
+    if let Some(inner) = strip_cql_wrapper(trimmed, "set") {
+        return format!("{prefix}SetType({})", cql_type_to_marshal_type(inner));
+    }
+    if let Some(inner) = strip_cql_wrapper(trimmed, "map") {
+        let args = split_cql_type_args(inner);
+        if args.len() == 2 {
+            return format!(
+                "{prefix}MapType({},{})",
+                cql_type_to_marshal_type(args[0]),
+                cql_type_to_marshal_type(args[1])
+            );
+        }
+        // Malformed map type — fall through to BytesType
+    }
+    if let Some(inner) = strip_cql_wrapper(trimmed, "frozen") {
+        return format!("{prefix}FrozenType({})", cql_type_to_marshal_type(inner));
+    }
+    if let Some(inner) = strip_cql_wrapper(trimmed, "tuple") {
+        let args = split_cql_type_args(inner);
+        let components: Vec<String> = args.iter().map(|a| cql_type_to_marshal_type(a)).collect();
+        return format!("{prefix}TupleType({})", components.join(","));
+    }
+
+    // Primitive types
+    match trimmed {
+        "text" | "varchar" => format!("{prefix}UTF8Type"),
+        "int" => format!("{prefix}Int32Type"),
+        "bigint" => format!("{prefix}LongType"),
+        "smallint" => format!("{prefix}ShortType"),
+        "tinyint" => format!("{prefix}ByteType"),
+        "float" => format!("{prefix}FloatType"),
+        "double" => format!("{prefix}DoubleType"),
+        "boolean" => format!("{prefix}BooleanType"),
+        "blob" => format!("{prefix}BytesType"),
+        "uuid" => format!("{prefix}UUIDType"),
+        "timeuuid" => format!("{prefix}TimeUUIDType"),
+        "timestamp" => format!("{prefix}TimestampType"),
+        "date" => format!("{prefix}SimpleDateType"),
+        "time" => format!("{prefix}TimeType"),
+        "duration" => format!("{prefix}DurationType"),
+        "inet" => format!("{prefix}InetAddressType"),
+        "ascii" => format!("{prefix}AsciiType"),
+        "decimal" => format!("{prefix}DecimalType"),
+        "varint" => format!("{prefix}IntegerType"),
+        "counter" => format!("{prefix}CounterColumnType"),
+        // Fallback: use BytesType for unknown types
+        _ => format!("{prefix}BytesType"),
+    }
+}
+
+/// Strip a CQL wrapper type like `list<inner>` and return the inner string.
+/// Returns None if `cql_type` does not start with `wrapper<`.
+fn strip_cql_wrapper<'a>(cql_type: &'a str, wrapper: &str) -> Option<&'a str> {
+    let pattern = format!("{}<", wrapper);
+    if let Some(rest) = cql_type.strip_prefix(&pattern) {
+        // Find the matching closing '>' (handling nested angle brackets)
+        let mut depth = 1;
+        for (i, ch) in rest.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(rest[..i].trim());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Split CQL type arguments at top-level commas (respecting nested angle brackets).
+/// E.g. `"int, map<text, int>"` → `["int", "map<text, int>"]`
+fn split_cql_type_args(s: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                result.push(s[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = s[start..].trim();
+    if !last.is_empty() {
+        result.push(last);
+    }
+    result
+}
+
 /// Statistics.db component writer
 ///
 /// Writes the Statistics.db file with metadata for SSTable delta encoding.
@@ -206,16 +322,17 @@ impl StatisticsWriter {
     /// 2. VALIDATION component (validator class name)
     /// 3. COMPACTION component (minimal metadata)
     /// 4. STATS component (EncodingStats with baselines)
-    /// 5. SERIALIZATION_HEADER component (minimal schema stub)
+    /// 5. SERIALIZATION_HEADER component (schema-derived or minimal stub)
     ///
     /// Each component is followed by a CRC32 checksum for validation.
     ///
     /// # Arguments
     /// * `metadata` - Statistics metadata to write
+    /// * `schema` - Optional table schema for populating serialization header
     ///
     /// # Returns
     /// `Ok(())` on success, or an error if writing fails
-    pub fn write(&self, metadata: &StatisticsMetadata) -> Result<()> {
+    pub fn write(&self, metadata: &StatisticsMetadata, schema: Option<&TableSchema>) -> Result<()> {
         let mut meta = metadata.clone();
         meta.finalize();
 
@@ -223,7 +340,7 @@ impl StatisticsWriter {
         let validation_data = self.build_validation_component()?;
         let compaction_data = self.build_compaction_component()?;
         let stats_data = self.build_stats_component(&meta)?;
-        let header_data = self.build_serialization_header_component()?;
+        let header_data = self.build_serialization_header_component(schema)?;
 
         // Calculate component offsets
         // TOC structure: 4 (count) + 4 (checksum) + (4*8) TOC entries + 4 (checksum) = 44 bytes
@@ -550,7 +667,14 @@ impl StatisticsWriter {
     /// - clusteringTypes: unsigned VInt count + list of types
     /// - staticColumns: unsigned VInt count + map of (column name, type)
     /// - regularColumns: unsigned VInt count + map of (column name, type)
-    fn build_serialization_header_component(&self) -> Result<Vec<u8>> {
+    ///
+    /// When `schema` is Some, populates keyType, clustering types, and column
+    /// names/types from the actual table schema. When None, falls back to a
+    /// minimal stub (BytesType, zero columns).
+    fn build_serialization_header_component(
+        &self,
+        schema: Option<&TableSchema>,
+    ) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
         // EncodingStats: 3 unsigned VInts representing deltas from epochs
@@ -566,20 +690,95 @@ impl StatisticsWriter {
         let min_ttl_delta = 0u64;
         buffer.write_all(&encode_vuint(min_ttl_delta))?;
 
-        // keyType: AbstractTypeSerializer.serialize
-        // Format: unsigned VInt length + UTF-8 bytes
-        let key_type = b"org.apache.cassandra.db.marshal.BytesType";
-        buffer.write_all(&encode_vuint(key_type.len() as u64))?;
-        buffer.write_all(key_type)?;
+        match schema {
+            Some(s) => {
+                // keyType: single PK → simple type, composite PK → CompositeType(...)
+                let key_marshal = if s.partition_keys.len() > 1 {
+                    let inner: Vec<String> = s
+                        .partition_keys
+                        .iter()
+                        .map(|pk| cql_type_to_marshal_type(&pk.data_type))
+                        .collect();
+                    format!(
+                        "org.apache.cassandra.db.marshal.CompositeType({})",
+                        inner.join(",")
+                    )
+                } else if !s.partition_keys.is_empty() {
+                    cql_type_to_marshal_type(&s.partition_keys[0].data_type)
+                } else {
+                    "org.apache.cassandra.db.marshal.BytesType".to_string()
+                };
+                buffer.write_all(&encode_vuint(key_marshal.len() as u64))?;
+                buffer.write_all(key_marshal.as_bytes())?;
 
-        // clusteringTypes: writeList with unsigned VInt count
-        buffer.write_all(&encode_vuint(0))?; // No clustering types
+                // clusteringTypes: VUInt count + for each CK: VUInt-length-prefixed marshal type
+                buffer.write_all(&encode_vuint(s.clustering_keys.len() as u64))?;
+                for ck in &s.clustering_keys {
+                    let ck_marshal = cql_type_to_marshal_type(&ck.data_type);
+                    buffer.write_all(&encode_vuint(ck_marshal.len() as u64))?;
+                    buffer.write_all(ck_marshal.as_bytes())?;
+                }
 
-        // staticColumns: writeColumnsWithTypes (unsigned VInt count)
-        buffer.write_all(&encode_vuint(0))?; // No static columns
+                // Collect partition key and clustering key names for filtering
+                let pk_names: std::collections::HashSet<&str> =
+                    s.partition_keys.iter().map(|k| k.name.as_str()).collect();
+                let ck_names: std::collections::HashSet<&str> =
+                    s.clustering_keys.iter().map(|k| k.name.as_str()).collect();
 
-        // regularColumns: writeColumnsWithTypes (unsigned VInt count)
-        buffer.write_all(&encode_vuint(0))?; // No regular columns
+                // staticColumns: filter for is_static && not PK/CK
+                let static_cols: Vec<_> = s
+                    .columns
+                    .iter()
+                    .filter(|c| {
+                        c.is_static
+                            && !pk_names.contains(c.name.as_str())
+                            && !ck_names.contains(c.name.as_str())
+                    })
+                    .collect();
+                buffer.write_all(&encode_vuint(static_cols.len() as u64))?;
+                for col in &static_cols {
+                    // Column name: VUInt length + UTF-8 bytes
+                    buffer.write_all(&encode_vuint(col.name.len() as u64))?;
+                    buffer.write_all(col.name.as_bytes())?;
+                    // Column type: VUInt length + marshal type bytes
+                    let col_marshal = cql_type_to_marshal_type(&col.data_type);
+                    buffer.write_all(&encode_vuint(col_marshal.len() as u64))?;
+                    buffer.write_all(col_marshal.as_bytes())?;
+                }
+
+                // regularColumns: filter for !is_static && not PK/CK
+                let regular_cols: Vec<_> = s
+                    .columns
+                    .iter()
+                    .filter(|c| {
+                        !c.is_static
+                            && !pk_names.contains(c.name.as_str())
+                            && !ck_names.contains(c.name.as_str())
+                    })
+                    .collect();
+                buffer.write_all(&encode_vuint(regular_cols.len() as u64))?;
+                for col in &regular_cols {
+                    buffer.write_all(&encode_vuint(col.name.len() as u64))?;
+                    buffer.write_all(col.name.as_bytes())?;
+                    let col_marshal = cql_type_to_marshal_type(&col.data_type);
+                    buffer.write_all(&encode_vuint(col_marshal.len() as u64))?;
+                    buffer.write_all(col_marshal.as_bytes())?;
+                }
+            }
+            None => {
+                // Minimal stub: BytesType key, no clustering, no columns
+                let key_type = b"org.apache.cassandra.db.marshal.BytesType";
+                buffer.write_all(&encode_vuint(key_type.len() as u64))?;
+                buffer.write_all(key_type)?;
+
+                // clusteringTypes: 0
+                buffer.write_all(&encode_vuint(0))?;
+                // staticColumns: 0
+                buffer.write_all(&encode_vuint(0))?;
+                // regularColumns: 0
+                buffer.write_all(&encode_vuint(0))?;
+            }
+        }
 
         Ok(buffer)
     }
@@ -650,7 +849,7 @@ mod tests {
         meta.partition_count = 10;
         meta.row_count = 100;
 
-        let result = writer.write(&meta);
+        let result = writer.write(&meta, None);
         assert!(result.is_ok(), "Write should succeed: {:?}", result);
 
         // Verify file was created
@@ -769,7 +968,7 @@ mod tests {
         meta.min_timestamp = 1000000;
         meta.partition_count = 10;
 
-        writer.write(&meta).unwrap();
+        writer.write(&meta, None).unwrap();
 
         // Read file and verify checksum structure
         let file_data = std::fs::read(&stats_path).unwrap();
@@ -830,7 +1029,7 @@ mod tests {
         meta.min_timestamp = 1000000;
         meta.partition_count = 100;
 
-        writer.write(&meta).unwrap();
+        writer.write(&meta, None).unwrap();
 
         // Read file and verify per-component checksums
         let file_data = std::fs::read(&stats_path).unwrap();
@@ -904,7 +1103,7 @@ mod tests {
         meta.row_count = 150;
         meta.column_count = 300;
 
-        writer.write(&meta).unwrap();
+        writer.write(&meta, None).unwrap();
 
         // Read and parse the file
         let file_data = std::fs::read(&stats_path).unwrap();
@@ -983,6 +1182,214 @@ mod tests {
         assert_eq!(
             file_data[header_offset], 0x00,
             "First EncodingStats delta should be 0"
+        );
+    }
+
+    #[test]
+    fn test_cql_type_to_marshal_type() {
+        assert_eq!(
+            cql_type_to_marshal_type("text"),
+            "org.apache.cassandra.db.marshal.UTF8Type"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("int"),
+            "org.apache.cassandra.db.marshal.Int32Type"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("bigint"),
+            "org.apache.cassandra.db.marshal.LongType"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("uuid"),
+            "org.apache.cassandra.db.marshal.UUIDType"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("blob"),
+            "org.apache.cassandra.db.marshal.BytesType"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("timestamp"),
+            "org.apache.cassandra.db.marshal.TimestampType"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("boolean"),
+            "org.apache.cassandra.db.marshal.BooleanType"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("varint"),
+            "org.apache.cassandra.db.marshal.IntegerType"
+        );
+        // Unknown type falls back to BytesType
+        assert_eq!(
+            cql_type_to_marshal_type("unknown_type"),
+            "org.apache.cassandra.db.marshal.BytesType"
+        );
+
+        // Collection types
+        assert_eq!(
+            cql_type_to_marshal_type("list<int>"),
+            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("set<text>"),
+            "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type)"
+        );
+        assert_eq!(
+            cql_type_to_marshal_type("map<text, int>"),
+            "org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.Int32Type)"
+        );
+
+        // Frozen and nested
+        assert_eq!(
+            cql_type_to_marshal_type("frozen<list<int>>"),
+            "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))"
+        );
+
+        // Tuple
+        assert_eq!(
+            cql_type_to_marshal_type("tuple<int, text>"),
+            "org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UTF8Type)"
+        );
+    }
+
+    #[test]
+    fn test_serialization_header_with_schema() {
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "age".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+        let result = writer.build_serialization_header_component(Some(&schema));
+        assert!(result.is_ok());
+
+        let bytes = result.unwrap();
+
+        // Verify the header contains the UUIDType key type
+        let header_str = String::from_utf8_lossy(&bytes);
+        assert!(
+            header_str.contains("UUIDType"),
+            "Header should contain UUIDType for uuid partition key"
+        );
+
+        // Verify column names are present
+        assert!(
+            header_str.contains("name"),
+            "Header should contain column 'name'"
+        );
+        assert!(
+            header_str.contains("age"),
+            "Header should contain column 'age'"
+        );
+
+        // Verify column types are present
+        assert!(
+            header_str.contains("UTF8Type"),
+            "Header should contain UTF8Type for text column"
+        );
+        assert!(
+            header_str.contains("Int32Type"),
+            "Header should contain Int32Type for int column"
+        );
+    }
+
+    #[test]
+    fn test_serialization_header_composite_partition_key() {
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "composite_table".to_string(),
+            partition_keys: vec![
+                KeyColumn {
+                    name: "tenant".to_string(),
+                    data_type: "text".to_string(),
+                    position: 0,
+                },
+                KeyColumn {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    position: 1,
+                },
+            ],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "tenant".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "value".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+        let bytes = writer
+            .build_serialization_header_component(Some(&schema))
+            .unwrap();
+
+        let header_str = String::from_utf8_lossy(&bytes);
+        assert!(
+            header_str.contains("CompositeType("),
+            "Composite PK should produce CompositeType wrapper"
+        );
+        assert!(
+            header_str.contains("UTF8Type"),
+            "CompositeType should contain UTF8Type for text PK"
+        );
+        assert!(
+            header_str.contains("UUIDType"),
+            "CompositeType should contain UUIDType for uuid PK"
         );
     }
 }

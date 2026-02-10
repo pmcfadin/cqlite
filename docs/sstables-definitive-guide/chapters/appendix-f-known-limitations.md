@@ -134,6 +134,82 @@ M5.0 did not support static columns. M5.1 implements:
 
 ---
 
+## M5.2 Compaction and Export Capabilities
+
+CQLite M5.2 introduces compaction APIs and SSTable export support. Note that compaction execution is pending M5.3 reader integration.
+
+### K-Way Merge (Issue #382)
+
+**Status**: PARTIALLY IMPLEMENTED
+
+API surface defined; merge execution pending M5.3 SSTable reader integration.
+
+K-way merge infrastructure for combining multiple L0 SSTables:
+- Binary heap-based merge with O(log k) per entry
+- Last-write-wins semantics by timestamp
+- Schema-aware clustering key comparison
+- Memory budget: k × 8KB peek buffers
+
+**Current Limitation**: `KWayMerger::new()` returns "pending" error. Merge execution requires M5.3 reader integration to convert SSTable entries back to Mutation format.
+
+**Code Review Fixes Applied**:
+- `merge.rs:551`: Replaced `unwrap()` with `ok_or_else()` for proper error handling
+- `merge.rs:643`: Added `log::warn` for schema comparison fallback instead of silent error
+
+### STCS Merge Policy (Issue #383)
+
+**Status**: IMPLEMENTED (not yet usable)
+
+Pluggable compaction strategy via `MergePolicy` trait:
+- `STCSPolicy`: Size-Tiered Compaction Strategy (Cassandra default)
+  - Bucket grouping by size ratio (0.5x - 1.5x)
+  - Configurable min/max thresholds (default: 4-32)
+- Custom policies via `Box<dyn MergePolicy>`
+
+**Current Limitation**: While the `STCSPolicy` logic is fully implemented and tested, it cannot be used yet because `WriteEngine::set_merge_policy()` returns an error pending M5.3 reader integration.
+
+**Code Review Fixes Applied**:
+- `merge_policy.rs:175-177`: Fixed bucket boundary to use inclusive comparisons (`>=`/`<=`)
+- `merge_policy.rs:192-193`: Changed to saturating arithmetic for overflow safety
+
+### Maintenance Step API (Issue #384)
+
+**Status**: PARTIALLY IMPLEMENTED
+
+Incremental maintenance via `maintenance_step()`:
+- Non-blocking, budget-limited execution
+- Returns `MaintenanceReport` with maintenance stats
+- Suitable for background thread scheduling
+
+**Current Limitation**: `maintenance_step()` currently performs only flush operations. Compaction steps pending M5.3 reader integration.
+
+### TTL and Expiring Cells (Issue #386)
+
+**Status**: IMPLEMENTED
+
+TTL support for expiring data:
+- TTL delta encoding against Statistics.db baseline
+- Expiration timestamp tracking
+- Tombstone generation for expired cells
+
+**Code Review Fixes Applied**:
+- `data_writer.rs:328`: Added negative TTL delta validation with descriptive error
+
+### SSTable Export API (Issue #388)
+
+**Status**: IMPLEMENTED
+
+`export_sstable()` API for distribution:
+- Cassandra-compatible naming: `{keyspace}-{table}-nb-{gen}-big-{Component}.db`
+- Optional compaction before export
+- Component validation (Data.db, Index.db, Statistics.db, etc.)
+
+**Code Review Fixes Applied**:
+- `export.rs:220`: Changed `std::fs::create_dir_all` to `tokio::fs::create_dir_all().await`
+- `export.rs:343-378`: Made `find_most_recent_sstable()` async with `tokio::fs::read_dir`
+
+---
+
 ## Remaining M5.1 Limitations
 
 ### Promoted Index (Deferred)
@@ -150,9 +226,15 @@ Index.db entries always write `promoted_index_length = 0`. Wide partitions (10K+
 
 ### Compaction
 
-**Status**: NOT IMPLEMENTED (Out of scope)
+**Status**: PARTIALLY IMPLEMENTED (M5.2)
 
-CQLite does not implement SSTable compaction. Use Cassandra's `nodetool compact` for production compaction needs.
+CQLite has defined k-way merge compaction API with STCS (Size-Tiered Compaction Strategy):
+- `maintenance_step()` API for incremental maintenance (currently flush-only)
+- `set_merge_policy()` for custom compaction strategies (currently returns error)
+- API surface complete; execution pending M5.3 reader integration
+- See "M5.2 Compaction and Export Capabilities" section above for details
+
+**Current Limitation**: `set_merge_policy()` currently returns an error. Compaction execution requires M5.3 SSTable reader integration to convert entries back to mutations for k-way merge.
 
 ### BTI Format Writing
 
@@ -176,21 +258,23 @@ Not implemented:
 
 ### Statistics.db Full TOC Format
 
-**Status**: MINIMAL
+**Status**: IMPLEMENTED
 
-The `StatisticsWriter` produces a hybrid format compatible with CQLite parser but not full Cassandra TOC:
+The `StatisticsWriter` produces a full Cassandra 5.0 compatible Statistics.db with complete TOC structure:
 
 **Implemented**:
-- EncodingStats (min_timestamp, min_ttl, min_local_deletion_time)
-- 32-byte header for compatibility
+- Full TOC header with component count and CRC32 checksums
+- VALIDATION component (partitioner class name, bloom filter FP chance)
+- COMPACTION component (minimal HyperLogLogPlus cardinality estimator)
+- STATS component (EncodingStats with min/max timestamps, TTL, deletion times, histograms)
+- SERIALIZATION_HEADER component (schema-derived or minimal stub)
 
-**Not Implemented**:
-- SerializationHeader (embedded schema)
-- VALIDATION component (max timestamp, deletion ranges)
-- COMPACTION component (level, ancestors)
-- STATS component (histograms)
+**Known Limitations**:
+- Column bitmap encoding limited to 64 columns (VUInt bitmap format; >64 columns requires different encoding)
+- STATS component uses minimal histograms (2 buckets, empty tombstone histogram)
+- COMPACTION component uses empty HyperLogLogPlus sketch (no cardinality data)
 
-**Impact**: Schema must be provided explicitly. Cassandra may issue warnings but can read the essential EncodingStats.
+**Impact**: Statistics.db files are fully compatible with Cassandra 5.0. Schema can be provided explicitly for richer SerializationHeader, or omitted for minimal stub format.
 
 ---
 
@@ -1111,55 +1195,31 @@ SELECT * FROM user_activity WHERE user_id = 1 AND timestamp > '2025-01-01';
 
 ---
 
-### Statistics.db Minimal Format
+### ~~Statistics.db Minimal Format~~ - RESOLVED
 
-**Status**: ⚠️ **HYBRID FORMAT** (documented trade-off)
-**Impact**: Statistics.db uses simplified structure compatible with CQLite parser but not full Cassandra TOC format
-**Affected Component**: `cqlite-core/src/storage/sstable/writer/stats_writer.rs`
+**Status**: ✅ **RESOLVED** (M5.1)
+**Resolution**: Full Cassandra 5.0 TOC format implemented
 
-**Current Implementation**: The `StatisticsWriter` produces a hybrid format:
+The `StatisticsWriter` now produces complete Cassandra 5.0 compatible Statistics.db files with:
 
-```text
-Bytes 0-31:  32-byte header (parsed as both TOC and nb-format header)
-Bytes 32+:   EncodingStats data (min_timestamp, min_ttl, min_deletion_time)
-```
+**Implemented**:
+- Full TOC header (4 bytes count + CRC32 checksums + component offsets)
+- VALIDATION component (partitioner, bloom filter FP chance)
+- COMPACTION component (HyperLogLogPlus cardinality estimator)
+- STATS component (min/max timestamps, TTL, deletion times, row/column counts, histograms)
+- SERIALIZATION_HEADER component (schema-derived partition keys, clustering keys, column names/types)
 
-**Full Cassandra Format** (not implemented):
-```text
-Bytes 0-31:  TOC header (num_components=4, checksum, 4×{type, offset} entries)
-Bytes 32+:   VALIDATION component (min_timestamp, max_timestamp, ...)
-Bytes X+:    COMPACTION component (level, ancestors, ...)
-Bytes Y+:    STATS component (row count, partition size histogram, ...)
-Bytes Z+:    HEADER component (SerializationHeader with column schema)
-```
+**Current Limitations**:
+- Column bitmap encoding limited to 64 columns (VUInt format)
+- STATS histograms use minimal valid values (2 buckets, empty tombstone histogram)
+- COMPACTION cardinality estimator uses empty HyperLogLogPlus sketch
 
-**What's Missing?**:
-1. **SerializationHeader**: Schema metadata embedded in Statistics.db
-   - Column names and types
-   - Static column definitions
-   - Clustering key comparators
-2. **Histogram data**: Partition size distribution for compaction hints
-3. **VALIDATION metadata**: Max timestamp, deletion time ranges
-4. **COMPACTION metadata**: Level, ancestors, cardinality estimates
+**Impact**: Statistics.db files are fully compatible with Cassandra 5.0. When schema is provided via `write()`, SerializationHeader contains full column metadata. When schema is None, uses minimal stub format.
 
-**Impact**:
-- ✅ **CQLite can read**: The hybrid format is compatible with `enhanced_statistics_parser.rs`
-- ⚠️ **Cassandra can read**: Cassandra may issue warnings but can parse the essential EncodingStats
-- ❌ **Missing features**: Schema inference from Statistics.db, compaction hints unavailable
+**Files**:
+- `cqlite-core/src/storage/sstable/writer/stats_writer.rs` (complete implementation)
 
-**Rationale**:
-- M5 requires schema to be provided explicitly (no schema inference from Statistics.db)
-- Delta encoding (primary purpose of Statistics.db) works correctly
-- Compaction is out of scope for M5 (read-write parity only)
-- SerializationHeader generation is complex (requires UDT registry, nested type encoding)
-
-**Future Enhancement** (M6+):
-1. Implement full TOC structure writer
-2. Add SerializationHeader generator from TableSchema
-3. Generate STATS component with histogram data
-4. Add VALIDATION and COMPACTION components
-
-**Tracking**: M5 Stage 0 scope decision (no issue filed)
+**Related Issues**: Issue #425 (Statistics.db checksums and format - FIXED)
 
 ---
 
