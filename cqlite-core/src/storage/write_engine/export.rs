@@ -778,7 +778,11 @@ mod tests {
         assert!(!report.components.is_empty());
         assert_eq!(report.row_count, 5, "Expected 5 rows");
         // Partition count should be non-zero (actual count depends on data writer implementation)
-        assert!(report.partition_count > 0, "Expected non-zero partition count, got {}", report.partition_count);
+        assert!(
+            report.partition_count > 0,
+            "Expected non-zero partition count, got {}",
+            report.partition_count
+        );
 
         // Verify files exist with correct naming and directory structure
         let data_file = export_dir

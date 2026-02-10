@@ -129,8 +129,8 @@ pub async fn handle_mutation_write(
     let start = Instant::now();
 
     // Parse the mutation from JSON
-    let mutation: Mutation = serde_json::from_str(mutation_json)
-        .with_context(|| "Failed to parse mutation JSON")?;
+    let mutation: Mutation =
+        serde_json::from_str(mutation_json).with_context(|| "Failed to parse mutation JSON")?;
 
     // Write the mutation
     write_engine

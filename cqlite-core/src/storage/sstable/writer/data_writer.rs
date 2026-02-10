@@ -781,7 +781,8 @@ impl DataWriter {
             let name_a = match a {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
                 | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                    column, ..
+                    column,
+                    ..
                 }
                 | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
                     column.as_str()
@@ -791,7 +792,8 @@ impl DataWriter {
             let name_b = match b {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
                 | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                    column, ..
+                    column,
+                    ..
                 }
                 | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
                     column.as_str()

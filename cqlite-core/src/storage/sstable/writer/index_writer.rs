@@ -34,7 +34,6 @@ use crate::storage::serialization::vint::encode_unsigned;
 use crate::storage::write_engine::mutation::DecoratedKey;
 use std::io::Write;
 
-
 /// Index.db component writer
 ///
 /// Writes partition index entries in BIG format (NB variant) for Cassandra 5.0 compatibility.
@@ -507,7 +506,7 @@ mod tests {
         assert_eq!(bytes.len(), 26);
 
         // Verify key_len prefix for all entries
-        assert_eq!(&bytes[0..2], &[0x00, 0x04]);  // key_len=4
+        assert_eq!(&bytes[0..2], &[0x00, 0x04]); // key_len=4
 
         // Second entry at offset 8
         assert_eq!(&bytes[8..10], &[0x00, 0x04]); // key_len=4
