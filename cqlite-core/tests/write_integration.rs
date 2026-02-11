@@ -264,7 +264,6 @@ async fn test_all_cql_primitive_types() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "Collections not yet implemented in serializer (M5.3)"]
 async fn test_collection_types() -> Result<()> {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_simple_schema("test_ks", "collections_test");
