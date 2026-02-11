@@ -1135,6 +1135,17 @@ impl DataWriter {
     }
 }
 
+/// Convert a usize length to i32 for Cassandra's collection wire format.
+/// Returns an error if the length exceeds i32::MAX.
+fn len_as_i32(len: usize) -> Result<i32> {
+    i32::try_from(len).map_err(|_| {
+        Error::InvalidInput(format!(
+            "Length {} exceeds maximum i32 for collection encoding",
+            len
+        ))
+    })
+}
+
 /// Serialize a Value to bytes for cell storage
 ///
 /// This follows Cassandra's type-specific serialization rules.
@@ -1192,6 +1203,44 @@ fn serialize_value(value: &Value) -> Result<Vec<u8>> {
             let serializer = TypeSerializer::new();
             serializer.serialize_udt(value, &schema)
         }
+        Value::List(elements) | Value::Set(elements) => {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&len_as_i32(elements.len())?.to_be_bytes());
+            for elem in elements {
+                let elem_bytes = serialize_value(elem)?;
+                buf.extend_from_slice(&len_as_i32(elem_bytes.len())?.to_be_bytes());
+                buf.extend_from_slice(&elem_bytes);
+            }
+            Ok(buf)
+        }
+        Value::Map(entries) => {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&len_as_i32(entries.len())?.to_be_bytes());
+            for (key, val) in entries {
+                let key_bytes = serialize_value(key)?;
+                buf.extend_from_slice(&len_as_i32(key_bytes.len())?.to_be_bytes());
+                buf.extend_from_slice(&key_bytes);
+                let val_bytes = serialize_value(val)?;
+                buf.extend_from_slice(&len_as_i32(val_bytes.len())?.to_be_bytes());
+                buf.extend_from_slice(&val_bytes);
+            }
+            Ok(buf)
+        }
+        Value::Tuple(fields) => {
+            let mut buf = Vec::new();
+            for field in fields {
+                match field {
+                    Value::Null => buf.extend_from_slice(&(-1i32).to_be_bytes()),
+                    other => {
+                        let field_bytes = serialize_value(other)?;
+                        buf.extend_from_slice(&len_as_i32(field_bytes.len())?.to_be_bytes());
+                        buf.extend_from_slice(&field_bytes);
+                    }
+                }
+            }
+            Ok(buf)
+        }
+        Value::Frozen(inner) => serialize_value(inner),
         _ => Err(Error::InvalidInput(format!(
             "Unsupported value type for serialization: {:?}",
             value
@@ -1274,6 +1323,15 @@ fn serialize_value_for_clustering(value: &Value, comparator: &ComparatorType) ->
             let mut result = Vec::new();
             encode_unsigned(bytes.len() as u64, &mut result);
             result.extend_from_slice(bytes);
+            Ok(result)
+        }
+
+        // Frozen collections as clustering keys: serialize the full collection bytes with VInt length prefix
+        (Value::Frozen(inner), _) => {
+            let bytes = serialize_value(inner)?;
+            let mut result = Vec::new();
+            encode_unsigned(bytes.len() as u64, &mut result);
+            result.extend_from_slice(&bytes);
             Ok(result)
         }
 
@@ -2671,5 +2729,116 @@ mod tests {
 
         // Verify bitmap was written (should be non-empty)
         assert!(!buf.is_empty(), "Bitmap should be written");
+    }
+
+    #[test]
+    fn test_serialize_list() {
+        let list = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
+        let bytes = serialize_value(&list).unwrap();
+        // 4 bytes count + 3 * (4 bytes len + 4 bytes i32)
+        assert_eq!(bytes.len(), 4 + 3 * 8);
+        // Count = 3
+        assert_eq!(&bytes[0..4], &3i32.to_be_bytes());
+        // First element length = 4
+        assert_eq!(&bytes[4..8], &4i32.to_be_bytes());
+        // First element value = 1
+        assert_eq!(&bytes[8..12], &1i32.to_be_bytes());
+    }
+
+    #[test]
+    fn test_serialize_empty_list() {
+        let list = Value::List(vec![]);
+        let bytes = serialize_value(&list).unwrap();
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(&bytes[0..4], &0i32.to_be_bytes());
+    }
+
+    #[test]
+    fn test_serialize_set() {
+        let set = Value::Set(vec![
+            Value::Text("alpha".to_string()),
+            Value::Text("beta".to_string()),
+        ]);
+        let bytes = serialize_value(&set).unwrap();
+        // Count = 2
+        assert_eq!(&bytes[0..4], &2i32.to_be_bytes());
+        // First element length = 5 ("alpha")
+        assert_eq!(&bytes[4..8], &5i32.to_be_bytes());
+        assert_eq!(&bytes[8..13], b"alpha");
+    }
+
+    #[test]
+    fn test_serialize_map() {
+        let map = Value::Map(vec![(Value::Text("key1".to_string()), Value::Integer(100))]);
+        let bytes = serialize_value(&map).unwrap();
+        // Count = 1
+        assert_eq!(&bytes[0..4], &1i32.to_be_bytes());
+        // Key length = 4 ("key1")
+        assert_eq!(&bytes[4..8], &4i32.to_be_bytes());
+        assert_eq!(&bytes[8..12], b"key1");
+        // Value length = 4 (i32)
+        assert_eq!(&bytes[12..16], &4i32.to_be_bytes());
+        // Value = 100
+        assert_eq!(&bytes[16..20], &100i32.to_be_bytes());
+    }
+
+    #[test]
+    fn test_serialize_empty_map() {
+        let map = Value::Map(vec![]);
+        let bytes = serialize_value(&map).unwrap();
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(&bytes[0..4], &0i32.to_be_bytes());
+    }
+
+    #[test]
+    fn test_serialize_tuple() {
+        let tuple = Value::Tuple(vec![
+            Value::Integer(42),
+            Value::Text("hello".to_string()),
+            Value::Null,
+        ]);
+        let bytes = serialize_value(&tuple).unwrap();
+        // Field 1: 4 bytes len + 4 bytes i32 = 8
+        assert_eq!(&bytes[0..4], &4i32.to_be_bytes());
+        assert_eq!(&bytes[4..8], &42i32.to_be_bytes());
+        // Field 2: 4 bytes len + 5 bytes text = 9
+        assert_eq!(&bytes[8..12], &5i32.to_be_bytes());
+        assert_eq!(&bytes[12..17], b"hello");
+        // Field 3: NULL = -1 as i32
+        assert_eq!(&bytes[17..21], &(-1i32).to_be_bytes());
+    }
+
+    #[test]
+    fn test_serialize_frozen() {
+        let frozen = Value::Frozen(Box::new(Value::List(vec![
+            Value::Integer(10),
+            Value::Integer(20),
+        ])));
+        let frozen_bytes = serialize_value(&frozen).unwrap();
+        let list_bytes =
+            serialize_value(&Value::List(vec![Value::Integer(10), Value::Integer(20)])).unwrap();
+        // Frozen should produce identical bytes to inner value
+        assert_eq!(frozen_bytes, list_bytes);
+    }
+
+    #[test]
+    fn test_serialize_nested_collection() {
+        // MAP<TEXT, FROZEN<LIST<INT>>>
+        let nested = Value::Map(vec![(
+            Value::Text("nums".to_string()),
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+            ]))),
+        )]);
+        let bytes = serialize_value(&nested).unwrap();
+        // Should not error - validates nested serialization works
+        assert!(!bytes.is_empty());
+        // Count = 1
+        assert_eq!(&bytes[0..4], &1i32.to_be_bytes());
     }
 }
