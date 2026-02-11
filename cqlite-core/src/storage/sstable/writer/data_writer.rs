@@ -1247,9 +1247,19 @@ fn infer_cql_type_from_value(value: Option<&Value>) -> CqlType {
 fn serialize_value_for_clustering(value: &Value, comparator: &ComparatorType) -> Result<Vec<u8>> {
     match (value, comparator) {
         // Fixed-width types (no length prefix)
+        (Value::Boolean(b), ComparatorType::Boolean) => Ok(vec![if *b { 1 } else { 0 }]),
+        (Value::TinyInt(n), ComparatorType::TinyInt) => Ok(n.to_be_bytes().to_vec()),
+        (Value::SmallInt(n), ComparatorType::SmallInt) => Ok(n.to_be_bytes().to_vec()),
         (Value::Integer(n), ComparatorType::Int) => Ok(n.to_be_bytes().to_vec()),
         (Value::BigInt(n), ComparatorType::BigInt) => Ok(n.to_be_bytes().to_vec()),
+        (Value::Float32(f), ComparatorType::Float32) => Ok(f.to_bits().to_be_bytes().to_vec()),
+        (Value::Float(f), ComparatorType::Float) => Ok(f.to_bits().to_be_bytes().to_vec()),
         (Value::Timestamp(millis), ComparatorType::Timestamp) => Ok(millis.to_be_bytes().to_vec()),
+        (Value::Date(days), ComparatorType::Date) => {
+            // Cassandra DATE in clustering keys: stored as unsigned int with Integer.MIN_VALUE offset
+            let stored = days.wrapping_sub(i32::MIN) as u32;
+            Ok(stored.to_be_bytes().to_vec())
+        }
         (Value::Uuid(bytes), ComparatorType::Uuid) => Ok(bytes.to_vec()),
 
         // Variable-width types (VInt length + bytes)
