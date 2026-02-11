@@ -328,7 +328,7 @@ The `--skip-compact` flag is required for export. Compaction (merging multiple S
 
 ### Collection types (Phase 2)
 
-`FROZEN` collections are fully supported as single-cell values (#433). Non-frozen collections (`LIST`, `SET`, `MAP`) require complex column (multi-cell) format which is not yet implemented (#435). Mutations with non-frozen collection values will write successfully but produce SSTables that Cassandra cannot read. See #436 for E2E validation tracking.
+`FROZEN` collections are fully supported as single-cell values (#433). Non-frozen collections (`LIST`, `SET`, `MAP`) use complex column (multi-cell) format with canonical element ordering. Set elements and map keys are sorted by serialized byte order. List elements use TimeUUID cell paths for insertion-order preservation.
 
 ## CI Integration
 

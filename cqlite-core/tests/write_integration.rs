@@ -265,8 +265,50 @@ async fn test_all_cql_primitive_types() -> Result<()> {
 
 #[tokio::test]
 async fn test_collection_types() -> Result<()> {
+    // Use a schema with actual non-frozen collection column types
+    // so writes go through the complex column encoding path.
     let temp_dir = TempDir::new().unwrap();
-    let schema = create_simple_schema("test_ks", "collections_test");
+    let schema = TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "collections_test".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![
+            Column {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "tags".to_string(),
+                data_type: "set<text>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "items".to_string(),
+                data_type: "list<text>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "props".to_string(),
+                data_type: "map<text, int>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+    };
 
     let config = WriteEngineConfig::new(
         temp_dir.path().join("data"),
@@ -276,12 +318,12 @@ async fn test_collection_types() -> Result<()> {
 
     let mut engine = WriteEngine::new(config)?;
 
-    // Test List
+    // Test List (non-frozen → complex column format)
     let list_mutation = {
         let table_id = TableId::new("test_ks", "collections_test");
         let pk = PartitionKey::single("id", Value::Integer(1));
         let ops = vec![CellOperation::Write {
-            column: "value".to_string(),
+            column: "items".to_string(),
             value: Value::List(vec![
                 Value::Text("item1".to_string()),
                 Value::Text("item2".to_string()),
@@ -292,28 +334,28 @@ async fn test_collection_types() -> Result<()> {
     };
     engine.write_async(list_mutation).await?;
 
-    // Test Set
+    // Test Set (non-frozen → complex column format)
     let set_mutation = {
         let table_id = TableId::new("test_ks", "collections_test");
         let pk = PartitionKey::single("id", Value::Integer(2));
         let ops = vec![CellOperation::Write {
-            column: "value".to_string(),
+            column: "tags".to_string(),
             value: Value::Set(vec![
-                Value::Integer(10),
-                Value::Integer(20),
-                Value::Integer(30),
+                Value::Text("zebra".to_string()),
+                Value::Text("alpha".to_string()),
+                Value::Text("mango".to_string()),
             ]),
         }];
         Mutation::new(table_id, pk, None, ops, 1000001, None)
     };
     engine.write_async(set_mutation).await?;
 
-    // Test Map
+    // Test Map (non-frozen → complex column format)
     let map_mutation = {
         let table_id = TableId::new("test_ks", "collections_test");
         let pk = PartitionKey::single("id", Value::Integer(3));
         let ops = vec![CellOperation::Write {
-            column: "value".to_string(),
+            column: "props".to_string(),
             value: Value::Map(vec![
                 (Value::Text("key1".to_string()), Value::Integer(100)),
                 (Value::Text("key2".to_string()), Value::Integer(200)),

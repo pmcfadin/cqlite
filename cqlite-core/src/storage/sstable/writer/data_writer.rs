@@ -73,7 +73,6 @@ const ROW_HAS_TTL: u8 = 0x08;
 #[allow(dead_code)]
 const ROW_HAS_DELETION: u8 = 0x10;
 const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
-#[allow(dead_code)]
 const ROW_HAS_COMPLEX_DELETION: u8 = 0x40;
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 
@@ -82,7 +81,6 @@ const EXTENDED_IS_STATIC: u8 = 0x01;
 
 // Cell flag constants (from V5CompressedLegacy parser)
 const CELL_IS_DELETED: u8 = 0x01;
-#[allow(dead_code)]
 const CELL_IS_EXPIRING: u8 = 0x02;
 const CELL_HAS_EMPTY_VALUE: u8 = 0x04;
 const CELL_USE_ROW_TIMESTAMP: u8 = 0x08;
@@ -286,6 +284,36 @@ impl DataWriter {
             if all_writes && !has_nulls && mutation.operations.len() == regular_column_count {
                 flags |= ROW_HAS_ALL_COLUMNS;
             }
+
+            // Check if any operation targets a complex column (non-frozen collection)
+            let has_complex = mutation.operations.iter().any(|op| {
+                let col_name = match op {
+                    crate::storage::write_engine::mutation::CellOperation::Write {
+                        column, ..
+                    }
+                    | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                        column,
+                        ..
+                    }
+                    | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                        Some(column.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(name) = col_name {
+                    schema
+                        .columns
+                        .iter()
+                        .find(|c| c.name == name)
+                        .map(|c| is_complex_column(&c.data_type))
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            });
+            if has_complex {
+                flags |= ROW_HAS_COMPLEX_DELETION;
+            }
         }
 
         // Write row flags
@@ -486,7 +514,7 @@ impl DataWriter {
         static_columns.sort_by(|a: &&Column, b: &&Column| a.name.cmp(&b.name));
         let col_count = static_columns.len();
 
-        // Collect names of columns that have non-NULL writes
+        // Collect names of columns that are present (non-NULL writes + deletes)
         let present_columns: std::collections::HashSet<&str> = mutation
             .operations
             .iter()
@@ -497,6 +525,9 @@ impl DataWriter {
                     value,
                     ..
                 } if !matches!(value, Value::Null) => Some(column.as_str()),
+                crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                    Some(column.as_str())
+                }
                 _ => None,
             })
             .collect();
@@ -710,7 +741,9 @@ impl DataWriter {
         let regular_cols = self.regular_columns(schema);
         let col_count = regular_cols.len();
 
-        // Collect names of columns that have non-NULL writes
+        // Collect names of columns that are present (non-NULL writes + deletes).
+        // Delete operations must be marked as present so the reader parses
+        // the tombstone/complex-deletion bytes that write_cells() emits.
         let present_columns: std::collections::HashSet<&str> = mutation
             .operations
             .iter()
@@ -721,6 +754,9 @@ impl DataWriter {
                     value,
                     ..
                 } if !matches!(value, Value::Null) => Some(column.as_str()),
+                crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                    Some(column.as_str())
+                }
                 _ => None,
             })
             .collect();
@@ -773,7 +809,7 @@ impl DataWriter {
         &self,
         buf: &mut Vec<u8>,
         mutation: &Mutation,
-        _schema: &TableSchema,
+        schema: &TableSchema,
     ) -> Result<()> {
         // Sort operations alphabetically by column name to match Cassandra ordering
         let mut sorted_ops: Vec<_> = mutation.operations.iter().collect();
@@ -807,7 +843,35 @@ impl DataWriter {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
                     // Skip NULL values - they are represented by absence in the bitmap
                     if !matches!(value, Value::Null) {
-                        self.write_cell(buf, column, value, mutation.timestamp_micros)?;
+                        // Check if this column is a complex column (non-frozen collection)
+                        let is_complex = schema
+                            .columns
+                            .iter()
+                            .find(|c| c.name == *column)
+                            .map(|c| is_complex_column(&c.data_type))
+                            .unwrap_or(false);
+
+                        if is_complex {
+                            let col = schema
+                                .columns
+                                .iter()
+                                .find(|c| c.name == *column)
+                                .ok_or_else(|| {
+                                    Error::Schema(format!(
+                                        "Complex column '{}' not found in schema",
+                                        column
+                                    ))
+                                })?;
+                            self.write_complex_column(
+                                buf,
+                                col,
+                                value,
+                                mutation.timestamp_micros,
+                                None,
+                            )?;
+                        } else {
+                            self.write_cell(buf, column, value, mutation.timestamp_micros)?;
+                        }
                     }
                 }
                 crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
@@ -817,39 +881,352 @@ impl DataWriter {
                 } => {
                     // Skip NULL values - they are represented by absence in the bitmap
                     if !matches!(value, Value::Null) {
-                        self.write_cell_with_ttl(
-                            buf,
-                            column,
-                            value,
-                            mutation.timestamp_micros,
-                            *ttl_seconds,
-                        )?;
+                        let is_complex = schema
+                            .columns
+                            .iter()
+                            .find(|c| c.name == *column)
+                            .map(|c| is_complex_column(&c.data_type))
+                            .unwrap_or(false);
+
+                        if is_complex {
+                            let col = schema
+                                .columns
+                                .iter()
+                                .find(|c| c.name == *column)
+                                .ok_or_else(|| {
+                                    Error::Schema(format!(
+                                        "Complex column '{}' not found in schema",
+                                        column
+                                    ))
+                                })?;
+                            self.write_complex_column(
+                                buf,
+                                col,
+                                value,
+                                mutation.timestamp_micros,
+                                Some(*ttl_seconds),
+                            )?;
+                        } else {
+                            self.write_cell_with_ttl(
+                                buf,
+                                column,
+                                value,
+                                mutation.timestamp_micros,
+                                *ttl_seconds,
+                            )?;
+                        }
                     }
                 }
                 crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                    // Cell tombstones: local_deletion_time = mutation timestamp as seconds
-                    //
-                    // This is the Cassandra default when no explicit deletion time is provided.
-                    // The local_deletion_time determines when tombstones are eligible for GC
-                    // (gc_grace_seconds after local_deletion_time). Using the mutation timestamp
-                    // converted to seconds provides a reasonable default that preserves the
-                    // temporal relationship between write and delete operations.
-                    //
-                    // For explicit control over GC timing, a future enhancement could add
-                    // CellOperation::DeleteWithTime { column, local_deletion_time }.
-                    let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
-                    self.write_tombstone_cell(
-                        buf,
-                        column,
-                        mutation.timestamp_micros,
-                        local_deletion_time,
-                    )?;
+                    let is_complex = schema
+                        .columns
+                        .iter()
+                        .find(|c| c.name == *column)
+                        .map(|c| is_complex_column(&c.data_type))
+                        .unwrap_or(false);
+
+                    if is_complex {
+                        // Complex column deletion: write empty complex column
+                        // with active deletion time (not LIVE)
+                        self.write_complex_column_deletion(buf, mutation.timestamp_micros)?;
+                    } else {
+                        let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+                        self.write_tombstone_cell(
+                            buf,
+                            column,
+                            mutation.timestamp_micros,
+                            local_deletion_time,
+                        )?;
+                    }
                 }
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
                     // Row deletion handled at row level with HAS_DELETION flag
-                    // Not implemented yet
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Write a complex column (non-frozen collection stored as multiple cells).
+    ///
+    /// Complex columns use the following wire format:
+    /// ```text
+    /// [complex_deletion: marked_for_delete_at (signed VInt) + local_deletion_time (signed VInt)]
+    /// [cell_count: unsigned VInt]
+    /// For each cell:
+    ///   [flags: u8]
+    ///   [cell_path_length: unsigned VInt]
+    ///   [cell_path_bytes]
+    ///   [value_length: unsigned VInt]  (if not HAS_EMPTY_VALUE)
+    ///   [value_bytes]
+    /// ```
+    ///
+    /// Per collection type:
+    /// - SET<T>: cell_path = serialized element, value = empty (HAS_EMPTY_VALUE)
+    /// - MAP<K,V>: cell_path = serialized key, value = serialized value
+    /// - LIST<T>: cell_path = 16-byte TimeUUID, value = serialized element
+    fn write_complex_column(
+        &self,
+        buf: &mut Vec<u8>,
+        column: &Column,
+        value: &Value,
+        timestamp_micros: i64,
+        ttl_seconds: Option<u32>,
+    ) -> Result<()> {
+        // Write complex deletion time: DeletionTime.LIVE
+        // markedForDeleteAt = Long.MIN_VALUE (signed VInt)
+        encode_signed(i64::MIN, buf);
+        // localDeletionTime = Integer.MAX_VALUE (signed VInt)
+        encode_signed(i32::MAX as i64, buf);
+
+        let dt = column.data_type.to_lowercase();
+
+        if dt.starts_with("set<") || dt.starts_with("org.apache.cassandra.db.marshal.settype(") {
+            self.write_set_complex_cells(buf, value, timestamp_micros, ttl_seconds)?;
+        } else if dt.starts_with("map<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
+        {
+            self.write_map_complex_cells(buf, value, timestamp_micros, ttl_seconds)?;
+        } else if dt.starts_with("list<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
+        {
+            self.write_list_complex_cells(buf, value, timestamp_micros, ttl_seconds)?;
+        } else {
+            return Err(Error::InvalidInput(format!(
+                "Column '{}' has type '{}' which is not a recognized complex column type",
+                column.name, column.data_type
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Write a complex column deletion (delete all elements of a collection).
+    ///
+    /// Wire format: active deletion time + zero cells.
+    /// ```text
+    /// [marked_for_delete_at: signed VInt]   ← mutation timestamp (delta from min)
+    /// [local_deletion_time: signed VInt]    ← seconds since epoch (delta from min)
+    /// [cell_count: unsigned VInt]           ← 0 (no cells)
+    /// ```
+    fn write_complex_column_deletion(
+        &self,
+        buf: &mut Vec<u8>,
+        timestamp_micros: i64,
+    ) -> Result<()> {
+        // Active deletion: marked_for_delete_at = mutation timestamp
+        let ts_delta = timestamp_micros - self.stats.min_timestamp;
+        encode_signed(ts_delta, buf);
+
+        // local_deletion_time = mutation timestamp as seconds
+        let local_deletion_time = (timestamp_micros / 1_000_000) as i32;
+        let ldt_delta = (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+        encode_signed(ldt_delta, buf);
+
+        // Zero cells
+        encode_unsigned(0u64, buf);
+
+        Ok(())
+    }
+
+    /// Write per-cell TTL fields for a complex cell.
+    ///
+    /// When TTL is present, writes:
+    /// - flags: CELL_IS_EXPIRING (0x02), NO USE_ROW_TIMESTAMP
+    /// - timestamp delta (signed VInt)
+    /// - local_deletion_time delta (unsigned VInt)
+    /// - TTL delta (unsigned VInt)
+    ///
+    /// When TTL is absent, writes:
+    /// - flags: base_flags | CELL_USE_ROW_TIMESTAMP (0x08)
+    ///
+    /// Returns the flags byte written (for caller to check HAS_EMPTY_VALUE etc.).
+    fn write_complex_cell_header(
+        &self,
+        buf: &mut Vec<u8>,
+        base_flags: u8,
+        timestamp_micros: i64,
+        ttl_seconds: Option<u32>,
+    ) -> Result<()> {
+        match ttl_seconds {
+            Some(ttl) => {
+                // Expiring cell: IS_EXPIRING flag, explicit timestamp + LDT + TTL
+                let flags = base_flags | CELL_IS_EXPIRING;
+                buf.push(flags);
+
+                // Timestamp delta (signed VInt, NOT USE_ROW_TIMESTAMP)
+                let timestamp_delta = timestamp_micros - self.stats.min_timestamp;
+                encode_signed(timestamp_delta, buf);
+
+                // local_deletion_time = now + ttl
+                let now_seconds = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| Error::Storage(format!("System time error: {}", e)))?
+                    .as_secs() as i32;
+                let local_deletion_time = now_seconds.saturating_add(ttl as i32);
+                let ldt_delta =
+                    (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+                if ldt_delta < 0 {
+                    return Err(Error::InvalidInput(format!(
+                        "Complex cell: local deletion time {} is less than min_local_deletion_time {}",
+                        local_deletion_time, self.stats.min_local_deletion_time
+                    )));
+                }
+                encode_unsigned(ldt_delta as u64, buf);
+
+                // TTL delta
+                let ttl_delta = (ttl as i64) - (self.stats.min_ttl as i64);
+                if ttl_delta < 0 {
+                    return Err(Error::InvalidInput(format!(
+                        "Complex cell: TTL {} is less than min_ttl {}",
+                        ttl, self.stats.min_ttl
+                    )));
+                }
+                encode_unsigned(ttl_delta as u64, buf);
+            }
+            None => {
+                // Non-expiring cell: use row timestamp
+                buf.push(base_flags | CELL_USE_ROW_TIMESTAMP);
+            }
+        }
+        Ok(())
+    }
+
+    /// Write SET complex cells.
+    ///
+    /// SET elements: cell_path = serialized element value, cell value = empty (HAS_EMPTY_VALUE).
+    /// Elements are sorted by their serialized byte representation for Cassandra compatibility.
+    fn write_set_complex_cells(
+        &self,
+        buf: &mut Vec<u8>,
+        value: &Value,
+        timestamp_micros: i64,
+        ttl_seconds: Option<u32>,
+    ) -> Result<()> {
+        let elements = match value {
+            Value::Set(elements) => elements,
+            _ => {
+                return Err(Error::InvalidInput(format!(
+                    "Expected Set value for complex SET column, got {:?}",
+                    value
+                )))
+            }
+        };
+
+        // Serialize all elements first, then sort by byte representation
+        let mut serialized: Vec<Vec<u8>> = elements
+            .iter()
+            .map(serialize_value)
+            .collect::<Result<Vec<_>>>()?;
+        serialized.sort();
+
+        // Cell count
+        encode_unsigned(serialized.len() as u64, buf);
+
+        for path_bytes in &serialized {
+            // Cell header: flags + optional TTL fields
+            self.write_complex_cell_header(
+                buf,
+                CELL_HAS_EMPTY_VALUE,
+                timestamp_micros,
+                ttl_seconds,
+            )?;
+
+            // Cell path: serialized element value
+            encode_unsigned(path_bytes.len() as u64, buf);
+            buf.extend_from_slice(path_bytes);
+
+            // No value bytes (HAS_EMPTY_VALUE flag set)
+        }
+
+        Ok(())
+    }
+
+    /// Write MAP complex cells.
+    ///
+    /// MAP entries: cell_path = serialized key, cell value = serialized value.
+    /// Entries are sorted by their serialized key byte representation for Cassandra compatibility.
+    fn write_map_complex_cells(
+        &self,
+        buf: &mut Vec<u8>,
+        value: &Value,
+        timestamp_micros: i64,
+        ttl_seconds: Option<u32>,
+    ) -> Result<()> {
+        let entries = match value {
+            Value::Map(entries) => entries,
+            _ => {
+                return Err(Error::InvalidInput(format!(
+                    "Expected Map value for complex MAP column, got {:?}",
+                    value
+                )))
+            }
+        };
+
+        // Serialize all keys and values, then sort by serialized key bytes
+        let mut serialized: Vec<(Vec<u8>, Vec<u8>)> = entries
+            .iter()
+            .map(|(key, val)| Ok((serialize_value(key)?, serialize_value(val)?)))
+            .collect::<Result<Vec<_>>>()?;
+        serialized.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Cell count
+        encode_unsigned(serialized.len() as u64, buf);
+
+        for (path_bytes, value_bytes) in &serialized {
+            // Cell header: flags + optional TTL fields
+            self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds)?;
+
+            // Cell path: serialized key
+            encode_unsigned(path_bytes.len() as u64, buf);
+            buf.extend_from_slice(path_bytes);
+
+            // Cell value: serialized value
+            encode_unsigned(value_bytes.len() as u64, buf);
+            buf.extend_from_slice(value_bytes);
+        }
+
+        Ok(())
+    }
+
+    /// Write LIST complex cells.
+    ///
+    /// LIST elements: cell_path = 16-byte TimeUUID, cell value = serialized element.
+    /// Lists preserve insertion order (no sorting) — TimeUUIDs provide ordering.
+    fn write_list_complex_cells(
+        &self,
+        buf: &mut Vec<u8>,
+        value: &Value,
+        timestamp_micros: i64,
+        ttl_seconds: Option<u32>,
+    ) -> Result<()> {
+        let elements = match value {
+            Value::List(elements) => elements,
+            _ => {
+                return Err(Error::InvalidInput(format!(
+                    "Expected List value for complex LIST column, got {:?}",
+                    value
+                )))
+            }
+        };
+
+        // Cell count
+        encode_unsigned(elements.len() as u64, buf);
+
+        for (i, elem) in elements.iter().enumerate() {
+            // Cell header: flags + optional TTL fields
+            self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds)?;
+
+            // Cell path: 16-byte TimeUUID
+            let timeuuid = generate_list_cell_path_timeuuid(timestamp_micros, i as u64);
+            encode_unsigned(16u64, buf);
+            buf.extend_from_slice(&timeuuid);
+
+            // Cell value: serialized element
+            let value_bytes = serialize_value(elem)?;
+            encode_unsigned(value_bytes.len() as u64, buf);
+            buf.extend_from_slice(&value_bytes);
         }
 
         Ok(())
@@ -1133,6 +1510,71 @@ impl DataWriter {
     pub fn position(&self) -> u64 {
         self.buffer.len() as u64
     }
+}
+
+/// Returns true if the column type is a non-frozen collection (complex column).
+///
+/// Complex columns are stored as multiple cells with cell paths, unlike
+/// frozen collections which are stored as a single cell with blob value.
+/// Matches the reader logic in `v5_compressed_legacy.rs`.
+fn is_complex_column(data_type: &str) -> bool {
+    let dt = data_type.to_lowercase();
+
+    // Frozen collections are NOT complex (they're single-cell frozen types)
+    if dt.starts_with("frozen<") || dt.starts_with("org.apache.cassandra.db.marshal.frozentype(") {
+        return false;
+    }
+
+    // CQL-style collection types
+    if dt.starts_with("list<") || dt.starts_with("set<") || dt.starts_with("map<") {
+        return true;
+    }
+
+    // Cassandra internal collection types
+    if dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
+        || dt.starts_with("org.apache.cassandra.db.marshal.settype(")
+        || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Generate a version-1 TimeUUID for use as a list cell path.
+///
+/// List elements in Cassandra use TimeUUIDs as cell paths to maintain insertion order.
+/// Each call with a different `element_index` produces a monotonically increasing UUID.
+///
+/// # Arguments
+/// * `timestamp_micros` - Mutation timestamp in microseconds since Unix epoch
+/// * `element_index` - Index of the element within the list (for monotonic ordering)
+fn generate_list_cell_path_timeuuid(timestamp_micros: i64, element_index: u64) -> [u8; 16] {
+    // UUID v1 timestamp: 100-nanosecond intervals since UUID epoch (Oct 15, 1582)
+    // Offset from Unix epoch to UUID epoch in 100-ns units
+    const UUID_EPOCH_OFFSET: u64 = 0x01B2_1DD2_1381_4000;
+
+    let ts_100ns = (timestamp_micros as u64) * 10 + element_index;
+    let uuid_ts = ts_100ns + UUID_EPOCH_OFFSET;
+
+    // Extract time fields per RFC 4122
+    let time_low = (uuid_ts & 0xFFFF_FFFF) as u32;
+    let time_mid = ((uuid_ts >> 32) & 0xFFFF) as u16;
+    let time_hi = ((uuid_ts >> 48) & 0x0FFF) as u16 | 0x1000; // version 1
+
+    // Fixed clock_seq and node for deterministic output
+    let clock_seq: u16 = 0x80; // variant bits (10xx) + seq=0
+    let node: [u8; 6] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+    let mut uuid = [0u8; 16];
+    uuid[0..4].copy_from_slice(&time_low.to_be_bytes());
+    uuid[4..6].copy_from_slice(&time_mid.to_be_bytes());
+    uuid[6..8].copy_from_slice(&time_hi.to_be_bytes());
+    uuid[8] = (clock_seq >> 8) as u8;
+    uuid[9] = (clock_seq & 0xFF) as u8;
+    uuid[10..16].copy_from_slice(&node);
+
+    uuid
 }
 
 /// Convert a usize length to i32 for Cassandra's collection wire format.
@@ -2840,5 +3282,905 @@ mod tests {
         assert!(!bytes.is_empty());
         // Count = 1
         assert_eq!(&bytes[0..4], &1i32.to_be_bytes());
+    }
+
+    // ========== Complex Column (Multi-Cell) Tests ==========
+
+    #[test]
+    fn test_is_complex_column() {
+        // Non-frozen collections ARE complex (CQL syntax)
+        assert!(is_complex_column("set<int>"));
+        assert!(is_complex_column("list<text>"));
+        assert!(is_complex_column("map<text, int>"));
+        assert!(is_complex_column("SET<INT>"));
+        assert!(is_complex_column("List<Text>"));
+        assert!(is_complex_column("Map<Text, Int>"));
+
+        // Non-frozen collections ARE complex (Cassandra internal syntax)
+        assert!(is_complex_column(
+            "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type)"
+        ));
+        assert!(is_complex_column(
+            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type)"
+        ));
+        assert!(is_complex_column(
+            "org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.Int32Type)"
+        ));
+
+        // Frozen collections are NOT complex (CQL syntax)
+        assert!(!is_complex_column("frozen<set<int>>"));
+        assert!(!is_complex_column("frozen<list<text>>"));
+        assert!(!is_complex_column("frozen<map<text, int>>"));
+        assert!(!is_complex_column("FROZEN<SET<INT>>"));
+
+        // Frozen collections are NOT complex (Cassandra internal syntax)
+        assert!(!is_complex_column(
+            "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type))"
+        ));
+
+        // Primitives are NOT complex
+        assert!(!is_complex_column("int"));
+        assert!(!is_complex_column("text"));
+        assert!(!is_complex_column("uuid"));
+        assert!(!is_complex_column("timestamp"));
+    }
+
+    #[test]
+    fn test_generate_list_cell_path_timeuuid() {
+        let ts = 1_704_067_200_000_000i64; // 2024-01-01 00:00:00 UTC
+
+        let uuid0 = generate_list_cell_path_timeuuid(ts, 0);
+        let uuid1 = generate_list_cell_path_timeuuid(ts, 1);
+        let uuid2 = generate_list_cell_path_timeuuid(ts, 2);
+
+        // All should be 16 bytes
+        assert_eq!(uuid0.len(), 16);
+        assert_eq!(uuid1.len(), 16);
+
+        // Version bits should be 1 (0x1X in byte 6)
+        assert_eq!(uuid0[6] & 0xF0, 0x10, "Should be UUID version 1");
+        assert_eq!(uuid1[6] & 0xF0, 0x10, "Should be UUID version 1");
+
+        // UUIDs should be monotonically increasing (as byte arrays)
+        assert!(uuid0 < uuid1, "UUID0 should be less than UUID1");
+        assert!(uuid1 < uuid2, "UUID1 should be less than UUID2");
+    }
+
+    #[test]
+    fn test_write_set_complex_column() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "tags".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        let value = Value::Set(vec![
+            Value::Text("alpha".to_string()),
+            Value::Text("beta".to_string()),
+        ]);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &column, &value, 1001000, None)
+            .unwrap();
+
+        assert!(!buf.is_empty());
+
+        // Parse: complex_deletion (2 signed VInts) + cell_count + cells
+        // The first bytes are DeletionTime.LIVE encoded as signed VInts
+        // Then cell_count = 2 (unsigned VInt)
+        // Then for each cell: flags(1) + path_len(VInt) + path_bytes + (no value for SET)
+
+        // Verify we can find 2 cell flag bytes with USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE = 0x0C
+        let expected_cell_flags = CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE;
+        let cell_flag_count = buf.iter().filter(|&&b| b == expected_cell_flags).count();
+        assert_eq!(
+            cell_flag_count, 2,
+            "Should have 2 SET cells with USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE flags"
+        );
+    }
+
+    #[test]
+    fn test_write_map_complex_column() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "props".to_string(),
+            data_type: "map<text, int>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        let value = Value::Map(vec![
+            (Value::Text("key1".to_string()), Value::Integer(100)),
+            (Value::Text("key2".to_string()), Value::Integer(200)),
+        ]);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &column, &value, 1001000, None)
+            .unwrap();
+
+        assert!(!buf.is_empty());
+
+        // MAP cells have USE_ROW_TIMESTAMP (0x08) but NOT HAS_EMPTY_VALUE
+        let cell_flag_count = buf.iter().filter(|&&b| b == CELL_USE_ROW_TIMESTAMP).count();
+        assert_eq!(
+            cell_flag_count, 2,
+            "Should have 2 MAP cells with USE_ROW_TIMESTAMP flags"
+        );
+    }
+
+    #[test]
+    fn test_write_list_complex_column() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "items".to_string(),
+            data_type: "list<int>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        let value = Value::List(vec![Value::Integer(10), Value::Integer(20)]);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &column, &value, 1001000, None)
+            .unwrap();
+
+        assert!(!buf.is_empty());
+
+        // LIST cells have USE_ROW_TIMESTAMP (0x08) and 16-byte TimeUUID paths
+        let cell_flag_count = buf.iter().filter(|&&b| b == CELL_USE_ROW_TIMESTAMP).count();
+        assert_eq!(
+            cell_flag_count, 2,
+            "Should have 2 LIST cells with USE_ROW_TIMESTAMP flags"
+        );
+
+        // Verify TimeUUID path length (16) appears in the output
+        // Each cell has: flags(1) + path_len_vint(1, value=16=0x10) + path(16) + val_len + val
+        // The VInt encoding of 16 is 0x10
+        let timeuuid_len_count = buf.iter().filter(|&&b| b == 0x10).count();
+        assert!(
+            timeuuid_len_count >= 2,
+            "Should have TimeUUID path length (16) for each list cell"
+        );
+    }
+
+    #[test]
+    fn test_frozen_collection_not_complex() {
+        // Frozen collections should still use simple cell (serialize_value), not complex column
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "frozen_tags".to_string(),
+                data_type: "frozen<set<text>>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "frozen_tags".to_string(),
+                value: Value::Frozen(Box::new(Value::Set(vec![
+                    Value::Text("a".to_string()),
+                    Value::Text("b".to_string()),
+                ]))),
+            }],
+            1001000,
+            None,
+        );
+
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Frozen collection should NOT have HAS_COMPLEX_DELETION flag
+        let flags = bytes[0];
+        assert_eq!(
+            flags & ROW_HAS_COMPLEX_DELETION,
+            0,
+            "Frozen collection should NOT have HAS_COMPLEX_DELETION flag"
+        );
+    }
+
+    #[test]
+    fn test_mixed_simple_and_complex_columns() {
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "tags".to_string(),
+                    data_type: "set<text>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("Alice".to_string()),
+                },
+                CellOperation::Write {
+                    column: "tags".to_string(),
+                    value: Value::Set(vec![
+                        Value::Text("admin".to_string()),
+                        Value::Text("user".to_string()),
+                    ]),
+                },
+            ],
+            1001000,
+            None,
+        );
+
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Row should have HAS_COMPLEX_DELETION flag because of the SET column
+        let flags = bytes[0];
+        assert_eq!(
+            flags & ROW_HAS_COMPLEX_DELETION,
+            ROW_HAS_COMPLEX_DELETION,
+            "Row with non-frozen SET should have HAS_COMPLEX_DELETION flag"
+        );
+        assert_eq!(
+            flags & ROW_HAS_TIMESTAMP,
+            ROW_HAS_TIMESTAMP,
+            "Should have timestamp"
+        );
+        assert_eq!(
+            flags & ROW_HAS_ALL_COLUMNS,
+            ROW_HAS_ALL_COLUMNS,
+            "Should have all columns"
+        );
+    }
+
+    #[test]
+    fn test_set_canonical_ordering() {
+        // Elements provided out of order should be sorted by serialized bytes
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "tags".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Input: zebra, alpha, mango (unsorted)
+        let value = Value::Set(vec![
+            Value::Text("zebra".to_string()),
+            Value::Text("alpha".to_string()),
+            Value::Text("mango".to_string()),
+        ]);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &column, &value, 1001000, None)
+            .unwrap();
+
+        // Extract cell paths from the binary output.
+        // After complex deletion (2 VInts) and cell count (1 VInt), each cell is:
+        //   flags(1) + path_len(VInt) + path_bytes
+        // Find the text values in order by scanning for ASCII strings.
+        let buf_str = String::from_utf8_lossy(&buf);
+        let alpha_pos = buf_str.find("alpha").expect("alpha should be in output");
+        let mango_pos = buf_str.find("mango").expect("mango should be in output");
+        let zebra_pos = buf_str.find("zebra").expect("zebra should be in output");
+
+        assert!(
+            alpha_pos < mango_pos && mango_pos < zebra_pos,
+            "SET elements should be in sorted order: alpha({}) < mango({}) < zebra({})",
+            alpha_pos,
+            mango_pos,
+            zebra_pos
+        );
+    }
+
+    #[test]
+    fn test_map_canonical_ordering() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "props".to_string(),
+            data_type: "map<text, int>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Input: keys out of order (z_key, a_key)
+        let value = Value::Map(vec![
+            (Value::Text("z_key".to_string()), Value::Integer(1)),
+            (Value::Text("a_key".to_string()), Value::Integer(2)),
+        ]);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &column, &value, 1001000, None)
+            .unwrap();
+
+        let buf_str = String::from_utf8_lossy(&buf);
+        let a_pos = buf_str.find("a_key").expect("a_key should be in output");
+        let z_pos = buf_str.find("z_key").expect("z_key should be in output");
+
+        assert!(
+            a_pos < z_pos,
+            "MAP entries should be sorted by key: a_key({}) < z_key({})",
+            a_pos,
+            z_pos
+        );
+    }
+
+    #[test]
+    fn test_set_rejects_list_value() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "tags".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Pass a List value to a SET column — should be rejected
+        let value = Value::List(vec![Value::Text("x".to_string())]);
+        let mut buf = Vec::new();
+        let result = writer.write_complex_column(&mut buf, &column, &value, 1001000, None);
+        assert!(result.is_err(), "SET column should reject Value::List");
+    }
+
+    #[test]
+    fn test_list_rejects_set_value() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "items".to_string(),
+            data_type: "list<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Pass a Set value to a LIST column — should be rejected
+        let value = Value::Set(vec![Value::Text("x".to_string())]);
+        let mut buf = Vec::new();
+        let result = writer.write_complex_column(&mut buf, &column, &value, 1001000, None);
+        assert!(result.is_err(), "LIST column should reject Value::Set");
+    }
+
+    #[test]
+    fn test_complex_column_deletion() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_deletion(&mut buf, 1001000)
+            .unwrap();
+
+        assert!(!buf.is_empty());
+
+        // Should contain: marked_for_delete_at delta + local_deletion_time delta + cell_count(0)
+        // The last byte should be 0x00 (cell_count = 0 encoded as unsigned VInt)
+        assert_eq!(
+            buf[buf.len() - 1],
+            0x00,
+            "Last byte should be cell_count = 0"
+        );
+    }
+
+    #[test]
+    fn test_write_with_ttl_complex_column() {
+        // WriteWithTtl on a complex column should use complex format, not simple cell
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "tags".to_string(),
+                data_type: "set<text>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::WriteWithTtl {
+                column: "tags".to_string(),
+                value: Value::Set(vec![
+                    Value::Text("a".to_string()),
+                    Value::Text("b".to_string()),
+                ]),
+                ttl_seconds: 3600,
+            }],
+            1001000,
+            None,
+        );
+
+        // Should succeed without error — complex format should be used
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Should have HAS_COMPLEX_DELETION flag
+        let flags = bytes[0];
+        assert_eq!(
+            flags & ROW_HAS_COMPLEX_DELETION,
+            ROW_HAS_COMPLEX_DELETION,
+            "WriteWithTtl on SET should set HAS_COMPLEX_DELETION"
+        );
+    }
+
+    #[test]
+    fn test_delete_complex_column() {
+        // Delete on a complex column should write complex deletion, not simple tombstone
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "tags".to_string(),
+                data_type: "set<text>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Delete {
+                column: "tags".to_string(),
+            }],
+            1001000,
+            None,
+        );
+
+        // Should succeed — uses complex deletion format
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Should have HAS_COMPLEX_DELETION flag
+        let flags = bytes[0];
+        assert_eq!(
+            flags & ROW_HAS_COMPLEX_DELETION,
+            ROW_HAS_COMPLEX_DELETION,
+            "Delete on SET should set HAS_COMPLEX_DELETION"
+        );
+    }
+
+    #[test]
+    fn test_internal_type_string_complex_column() {
+        // Cassandra internal type strings should be recognized as complex
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "tags".to_string(),
+                data_type: "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type)".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "tags".to_string(),
+                value: Value::Set(vec![Value::Text("test".to_string())]),
+            }],
+            1001000,
+            None,
+        );
+
+        writer.write_row(&mutation, &schema).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        let flags = bytes[0];
+        assert_eq!(
+            flags & ROW_HAS_COMPLEX_DELETION,
+            ROW_HAS_COMPLEX_DELETION,
+            "Internal type string should be recognized as complex column"
+        );
+    }
+
+    #[test]
+    fn test_set_complex_column_with_ttl() {
+        // SET with TTL should write IS_EXPIRING flag per cell, not USE_ROW_TIMESTAMP
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "tags".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        let value = Value::Set(vec![
+            Value::Text("alpha".to_string()),
+            Value::Text("beta".to_string()),
+        ]);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &column, &value, 1001000, Some(3600))
+            .unwrap();
+
+        // With TTL: cells should have IS_EXPIRING (0x02) | HAS_EMPTY_VALUE (0x04) = 0x06
+        // NOT USE_ROW_TIMESTAMP (0x08)
+        let expected_flags = CELL_IS_EXPIRING | CELL_HAS_EMPTY_VALUE; // 0x06
+        let cell_flag_count = buf.iter().filter(|&&b| b == expected_flags).count();
+        assert_eq!(
+            cell_flag_count, 2,
+            "SET with TTL should have 2 cells with IS_EXPIRING | HAS_EMPTY_VALUE (0x06), got flags: {:?}",
+            buf.iter().take(30).collect::<Vec<_>>()
+        );
+
+        // Should NOT have USE_ROW_TIMESTAMP flags
+        let row_ts_flags = CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE; // 0x0C
+        let row_ts_count = buf.iter().filter(|&&b| b == row_ts_flags).count();
+        assert_eq!(
+            row_ts_count, 0,
+            "SET with TTL should NOT have USE_ROW_TIMESTAMP cells"
+        );
+    }
+
+    #[test]
+    fn test_map_complex_column_with_ttl() {
+        // MAP with TTL should write IS_EXPIRING flag per cell
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "props".to_string(),
+            data_type: "map<text, int>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        let value = Value::Map(vec![(Value::Text("key1".to_string()), Value::Integer(100))]);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &column, &value, 1001000, Some(7200))
+            .unwrap();
+
+        // MAP cell with TTL: IS_EXPIRING (0x02), no HAS_EMPTY_VALUE
+        let cell_flag_count = buf.iter().filter(|&&b| b == CELL_IS_EXPIRING).count();
+        assert_eq!(
+            cell_flag_count, 1,
+            "MAP with TTL should have 1 cell with IS_EXPIRING flag"
+        );
+    }
+
+    #[test]
+    fn test_list_complex_column_with_ttl() {
+        // LIST with TTL should write IS_EXPIRING per cell, producing a larger
+        // output than without TTL (extra timestamp/LDT/TTL delta fields).
+        let stats = create_test_stats();
+        let writer_ttl = DataWriter::new(stats.clone());
+        let writer_no_ttl = DataWriter::new(stats);
+
+        let column = Column {
+            name: "items".to_string(),
+            data_type: "list<int>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        let value = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
+
+        let mut buf_ttl = Vec::new();
+        writer_ttl
+            .write_complex_column(&mut buf_ttl, &column, &value, 1001000, Some(1800))
+            .unwrap();
+
+        let mut buf_no_ttl = Vec::new();
+        writer_no_ttl
+            .write_complex_column(&mut buf_no_ttl, &column, &value, 1001000, None)
+            .unwrap();
+
+        // TTL version must be larger: each cell gets timestamp + LDT + TTL deltas
+        // instead of just USE_ROW_TIMESTAMP flag
+        assert!(
+            buf_ttl.len() > buf_no_ttl.len(),
+            "LIST with TTL ({} bytes) should be larger than without TTL ({} bytes)",
+            buf_ttl.len(),
+            buf_no_ttl.len()
+        );
+
+        // Without TTL, cells use USE_ROW_TIMESTAMP (0x08).
+        // With TTL, cells should NOT use USE_ROW_TIMESTAMP.
+        // Verify no 0x08 flag bytes in TTL version at cell-flag positions.
+        // The complex deletion header is 2 VInts, then cell_count VInt.
+        // After that, each cell starts with a flags byte.
+        // Since the no-TTL version has 0x08 at cell positions, we verify
+        // the TTL version doesn't have the same pattern at those offsets.
+        assert_ne!(
+            buf_ttl, buf_no_ttl,
+            "TTL and non-TTL versions should produce different output"
+        );
+    }
+
+    #[test]
+    fn test_complex_column_no_ttl_uses_row_timestamp() {
+        // Regression: without TTL, cells should still use USE_ROW_TIMESTAMP
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let column = Column {
+            name: "tags".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        let value = Value::Set(vec![Value::Text("x".to_string())]);
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &column, &value, 1001000, None)
+            .unwrap();
+
+        // Without TTL: USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE = 0x0C
+        let expected_flags = CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE;
+        let count = buf.iter().filter(|&&b| b == expected_flags).count();
+        assert_eq!(
+            count, 1,
+            "Without TTL, SET cells should use USE_ROW_TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn test_bitmap_includes_deleted_columns() {
+        // Delete operations should mark columns as present in the bitmap
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "age".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        // Write "name" and delete "age"
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                CellOperation::Delete {
+                    column: "age".to_string(),
+                },
+                CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("Alice".to_string()),
+                },
+            ],
+            1001000,
+            None,
+        );
+
+        // Write bitmap — both columns should be present (bitmap = 0)
+        let mut buf = Vec::new();
+        writer
+            .write_column_bitmap(&mut buf, &mutation, &schema)
+            .unwrap();
+
+        // bitmap = 0 means all columns present (no MISSING bits set)
+        // Since we have 2 regular columns and both are in operations,
+        // all should be marked present
+        assert_eq!(buf.len(), 1, "Bitmap should be a single byte");
+        assert_eq!(
+            buf[0], 0,
+            "Bitmap should be 0 (all columns present) when both write and delete cover all columns"
+        );
+    }
+
+    #[test]
+    fn test_bitmap_delete_only_column_is_present() {
+        // A column that ONLY has a Delete should still be marked present
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "age".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        // Only delete "age", don't write "name"
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Delete {
+                column: "age".to_string(),
+            }],
+            1001000,
+            None,
+        );
+
+        let mut buf = Vec::new();
+        writer
+            .write_column_bitmap(&mut buf, &mutation, &schema)
+            .unwrap();
+
+        // Regular columns sorted alphabetically: [age, name]
+        // age (idx 0) = present (Delete), name (idx 1) = missing
+        // bitmap bit 1 = 1, bit 0 = 0 → bitmap = 0b10 = 2
+        assert_eq!(buf.len(), 1);
+        assert_eq!(
+            buf[0], 2,
+            "Bitmap should mark 'name' as missing (bit 1) but 'age' as present (bit 0)"
+        );
     }
 }
