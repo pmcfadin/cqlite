@@ -231,9 +231,9 @@ impl PartitionKey {
             return Ok(result);
         }
 
-        // Multi-component key: [len1][val1][0x00][len2][val2][0x00]...[lenN][valN]
-        // 0x00 separator after each component EXCEPT the last (Issue #380, #422)
-        let num_components = self.columns.len();
+        // Multi-component (composite) key: [len1][val1][0x00][len2][val2][0x00]...[lenN][valN][0x00]
+        // Cassandra CompositeType format: 0x00 EOC byte after EVERY component including the last
+        // (Issue #438, Cassandra CompositeType.java lines 522-542)
         for (i, (_, value)) in self.columns.iter().enumerate() {
             let value_bytes = self.serialize_value(value, &schema.partition_keys[i])?;
             let len = value_bytes.len();
@@ -247,10 +247,8 @@ impl PartitionKey {
             result.extend_from_slice(&(len as u16).to_be_bytes());
             result.extend_from_slice(&value_bytes);
 
-            // Add 0x00 separator after each component EXCEPT the last
-            if i < num_components - 1 {
-                result.push(0x00);
-            }
+            // 0x00 end-of-component byte after every component (including last)
+            result.push(0x00);
         }
 
         Ok(result)
@@ -653,14 +651,45 @@ mod tests {
         ]);
 
         let bytes = pk.to_bytes(&schema).unwrap();
-        // Multi-component: [len1(2B)][val1][0x00][len2(2B)][val2] (no trailing 0x00)
-        // Format per Issue #380, #422 and appendix-b-encodings-cheat-sheet.md
+        // Cassandra CompositeType format (Issue #438):
+        // [len1(2B)][val1][0x00 EOC][len2(2B)][val2][0x00 EOC]
+        // EOC byte after EVERY component including the last
         let expected = vec![
             0x00, 0x04, // len1 = 4
             0x00, 0x00, 0x00, 0x2A, // int = 42
-            0x00, // separator between components
+            0x00, // EOC after component 1
             0x00, 0x05, // len2 = 5
             b'h', b'e', b'l', b'l', b'o', // text = "hello"
+            0x00, // EOC after component 2 (required by CompositeType)
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn test_partition_key_three_components() {
+        // Issue #438: Verify 3-component composite keys (e.g., tick_data table)
+        let schema = create_test_schema(
+            vec![("symbol", "text"), ("exchange", "text"), ("bucket", "int")],
+            vec![],
+        );
+        let pk = PartitionKey::new(vec![
+            ("symbol".to_string(), Value::Text("AAPL".to_string())),
+            ("exchange".to_string(), Value::Text("NYSE".to_string())),
+            ("bucket".to_string(), Value::Integer(100)),
+        ]);
+
+        let bytes = pk.to_bytes(&schema).unwrap();
+        // CompositeType: [len][val][EOC] for each component
+        let expected = vec![
+            0x00, 0x04, // len1 = 4
+            b'A', b'A', b'P', b'L', // "AAPL"
+            0x00, // EOC
+            0x00, 0x04, // len2 = 4
+            b'N', b'Y', b'S', b'E', // "NYSE"
+            0x00, // EOC
+            0x00, 0x04, // len3 = 4
+            0x00, 0x00, 0x00, 0x64, // int = 100
+            0x00, // EOC (required on last component too)
         ];
         assert_eq!(bytes, expected);
     }
