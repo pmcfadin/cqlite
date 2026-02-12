@@ -545,6 +545,42 @@ fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
         (Uuid(a), Uuid(b)) => Ok(a.cmp(b)),
         (Inet(a), Inet(b)) => Ok(a.cmp(b)),
 
+        // Collection types (element-wise lexicographic comparison)
+        (List(a), List(b)) | (Set(a), Set(b)) => {
+            for (elem_a, elem_b) in a.iter().zip(b.iter()) {
+                let ord = compare_values(elem_a, elem_b)?;
+                if ord != Ordering::Equal {
+                    return Ok(ord);
+                }
+            }
+            Ok(a.len().cmp(&b.len()))
+        }
+        (Map(a), Map(b)) => {
+            for ((ka, va), (kb, vb)) in a.iter().zip(b.iter()) {
+                let key_ord = compare_values(ka, kb)?;
+                if key_ord != Ordering::Equal {
+                    return Ok(key_ord);
+                }
+                let val_ord = compare_values(va, vb)?;
+                if val_ord != Ordering::Equal {
+                    return Ok(val_ord);
+                }
+            }
+            Ok(a.len().cmp(&b.len()))
+        }
+        (Tuple(a), Tuple(b)) => {
+            for (fa, fb) in a.iter().zip(b.iter()) {
+                let ord = compare_values(fa, fb)?;
+                if ord != Ordering::Equal {
+                    return Ok(ord);
+                }
+            }
+            Ok(a.len().cmp(&b.len()))
+        }
+
+        // Frozen wrapper: compare inner values
+        (Frozen(a), Frozen(b)) => compare_values(a, b),
+
         _ => Err(Error::InvalidInput(format!(
             "Cannot compare values of different types: {:?} vs {:?}",
             a, b
@@ -978,5 +1014,78 @@ mod tests {
         // Verify BTreeMap orders correctly
         let values: Vec<_> = map.values().copied().collect();
         assert_eq!(values, vec!["value1", "value2", "value3"]);
+    }
+
+    #[test]
+    fn test_compare_frozen_list_values() {
+        // Issue #437: Frozen collection clustering keys must be comparable
+        let list_a = Value::Frozen(Box::new(Value::List(vec![
+            Value::Text("a".to_string()),
+            Value::Text("b".to_string()),
+        ])));
+        let list_b = Value::Frozen(Box::new(Value::List(vec![
+            Value::Text("a".to_string()),
+            Value::Text("c".to_string()),
+        ])));
+        let list_c = Value::Frozen(Box::new(Value::List(vec![
+            Value::Text("a".to_string()),
+            Value::Text("b".to_string()),
+            Value::Text("c".to_string()),
+        ])));
+
+        // Same elements: equal
+        assert_eq!(compare_values(&list_a, &list_a).unwrap(), Ordering::Equal);
+        // Different second element: a < c
+        assert_eq!(compare_values(&list_a, &list_b).unwrap(), Ordering::Less);
+        assert_eq!(compare_values(&list_b, &list_a).unwrap(), Ordering::Greater);
+        // Prefix match, shorter < longer
+        assert_eq!(compare_values(&list_a, &list_c).unwrap(), Ordering::Less);
+        assert_eq!(compare_values(&list_c, &list_a).unwrap(), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_frozen_list_clustering_key_btree_ordering() {
+        // Issue #437: Frozen list clustering keys must sort correctly in BTreeMap
+        use std::collections::BTreeMap;
+
+        let mut map = BTreeMap::new();
+
+        // Create clustering keys with frozen lists of varying sizes (mimics test data generator)
+        let ck_2elem = ClusteringKey::single(
+            "tags",
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Text("ck_0_0".to_string()),
+                Value::Text("ck_0_1".to_string()),
+            ]))),
+        );
+        let ck_3elem = ClusteringKey::single(
+            "tags",
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Text("ck_1_0".to_string()),
+                Value::Text("ck_1_1".to_string()),
+                Value::Text("ck_1_2".to_string()),
+            ]))),
+        );
+        let ck_4elem = ClusteringKey::single(
+            "tags",
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Text("ck_2_0".to_string()),
+                Value::Text("ck_2_1".to_string()),
+                Value::Text("ck_2_2".to_string()),
+                Value::Text("ck_2_3".to_string()),
+            ]))),
+        );
+
+        // Insert in non-sorted order
+        map.insert(ck_4elem.clone(), "4elem");
+        map.insert(ck_2elem.clone(), "2elem");
+        map.insert(ck_3elem.clone(), "3elem");
+
+        // All three should be distinct keys (no deduplication)
+        assert_eq!(map.len(), 3, "All frozen list CKs should be distinct");
+
+        // Verify ordering: ck_0_* < ck_1_* < ck_2_* (lexicographic by first element)
+        let values: Vec<_> = map.values().copied().collect();
+        assert_eq!(values, vec!["2elem", "3elem", "4elem"]);
     }
 }

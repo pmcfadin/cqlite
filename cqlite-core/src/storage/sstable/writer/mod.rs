@@ -302,6 +302,17 @@ impl SSTableWriter {
         }
         self.last_token = Some(key.token);
 
+        // Sort mutations by clustering key (Cassandra requires sorted rows within partitions)
+        let mut mutations = mutations;
+        mutations.sort_by(|a, b| match (&a.clustering_key, &b.clustering_key) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(ck_a), Some(ck_b)) => ck_a
+                .compare(ck_b, &self.schema)
+                .unwrap_or_else(|_| ck_a.cmp(ck_b)),
+        });
+
         // Update statistics from mutations
         for mutation in &mutations {
             self.stats.update_timestamp(mutation.timestamp_micros);
