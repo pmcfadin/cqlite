@@ -59,7 +59,7 @@
 use crate::error::{Error, Result};
 use crate::schema::{Column, CqlType, TableSchema};
 use crate::storage::serialization::types::TypeSerializer;
-use crate::storage::serialization::vint::{encode_signed, encode_unsigned};
+use crate::storage::serialization::vint::{encode_signed, encode_unsigned, unsigned_len};
 use crate::storage::sstable::writer::stats_writer::StatisticsMetadata;
 use crate::storage::write_engine::mutation::{
     ClusteringBound, DecoratedKey, Mutation, PartitionTombstone, RangeTombstone,
@@ -327,17 +327,21 @@ impl DataWriter {
         // Calculate row body size (everything after row_size VInt)
         let row_body = self.build_row_body(mutation, schema, flags)?;
 
-        // Write row_size (VInt)
+        // prev_unfiltered_size = 0 (could track prev row for optimization)
+        let prev_size: u64 = 0;
+        let prev_size_vint_len = unsigned_len(prev_size);
+
+        // Write row_size (VInt) — Cassandra's serializedRowBodySize() includes
+        // the prev_unfiltered_size VInt as part of the row body
+        let row_body_size = prev_size_vint_len as u64 + row_body.len() as u64;
         let mut row_size_buf = Vec::new();
-        encode_unsigned(row_body.len() as u64, &mut row_size_buf);
+        encode_unsigned(row_body_size, &mut row_size_buf);
         self.buffer.extend_from_slice(&row_size_buf);
 
-        // Write prev_size (VInt, 0 for now - could optimize with prev row tracking)
-        let mut prev_size_buf = Vec::new();
-        encode_unsigned(0, &mut prev_size_buf);
-        self.buffer.extend_from_slice(&prev_size_buf);
+        // Write prev_unfiltered_size (VInt, inside the row body)
+        encode_unsigned(prev_size, &mut self.buffer);
 
-        // Write row body
+        // Write rest of row body
         self.buffer.extend_from_slice(&row_body);
 
         Ok(())
@@ -426,17 +430,20 @@ impl DataWriter {
         // Build row body
         let row_body = self.build_static_row_body(mutation, schema, flags)?;
 
-        // Write row_size (VInt)
+        // prev_unfiltered_size = 0
+        let prev_size: u64 = 0;
+        let prev_size_vint_len = unsigned_len(prev_size);
+
+        // Write row_size (VInt) — includes prev_unfiltered_size VInt + rest of body
+        let row_body_size = prev_size_vint_len as u64 + row_body.len() as u64;
         let mut row_size_buf = Vec::new();
-        encode_unsigned(row_body.len() as u64, &mut row_size_buf);
+        encode_unsigned(row_body_size, &mut row_size_buf);
         self.buffer.extend_from_slice(&row_size_buf);
 
-        // Write prev_size (VInt, 0 for now)
-        let mut prev_size_buf = Vec::new();
-        encode_unsigned(0, &mut prev_size_buf);
-        self.buffer.extend_from_slice(&prev_size_buf);
+        // Write prev_unfiltered_size (VInt, inside the row body)
+        encode_unsigned(prev_size, &mut self.buffer);
 
-        // Write row body
+        // Write rest of row body
         self.buffer.extend_from_slice(&row_body);
 
         Ok(())
@@ -475,14 +482,15 @@ impl DataWriter {
 
         // Write deletion (if HAS_DELETION)
         if (flags & ROW_HAS_DELETION) != 0 {
-            // Row tombstone: write local_deletion_time and deletion_timestamp deltas
-            let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
-            let ldt_delta =
-                (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
-            encode_signed(ldt_delta, &mut body);
-
+            // Row tombstone: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
+            // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
             let ts_delta = mutation.timestamp_micros - self.stats.min_timestamp;
             encode_signed(ts_delta, &mut body);
+
+            let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+            let ldt_delta =
+                local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+            encode_unsigned(ldt_delta as u64, &mut body);
 
             // No cells written for row tombstones - return early
             return Ok(body);
@@ -644,14 +652,15 @@ impl DataWriter {
 
         // Write deletion (if HAS_DELETION)
         if (flags & ROW_HAS_DELETION) != 0 {
-            // Row tombstone: write local_deletion_time and deletion_timestamp deltas
-            let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
-            let ldt_delta =
-                (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
-            encode_signed(ldt_delta, &mut body);
-
+            // Row tombstone: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
+            // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
             let ts_delta = mutation.timestamp_micros - self.stats.min_timestamp;
             encode_signed(ts_delta, &mut body);
+
+            let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+            let ldt_delta =
+                local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+            encode_unsigned(ldt_delta as u64, &mut body);
 
             // No cells written for row tombstones - return early
             return Ok(body);
@@ -952,7 +961,7 @@ impl DataWriter {
     ///
     /// Complex columns use the following wire format:
     /// ```text
-    /// [complex_deletion: marked_for_delete_at (signed VInt) + local_deletion_time (signed VInt)]
+    /// [complex_deletion: marked_for_delete_at (signed VInt) + local_deletion_time (unsigned VInt)]
     /// [cell_count: unsigned VInt]
     /// For each cell:
     ///   [flags: u8]
@@ -975,10 +984,14 @@ impl DataWriter {
         ttl_seconds: Option<u32>,
     ) -> Result<()> {
         // Write complex deletion time: DeletionTime.LIVE
-        // markedForDeleteAt = Long.MIN_VALUE (signed VInt)
-        encode_signed(i64::MIN, buf);
-        // localDeletionTime = Integer.MAX_VALUE (signed VInt)
-        encode_signed(i32::MAX as i64, buf);
+        // Cassandra canonical order: markedForDeleteAt first, then localDeletionTime
+        // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
+        // markedForDeleteAt delta = Long.MIN_VALUE - stats.min_timestamp (signed VInt)
+        let ts_delta = i64::MIN.wrapping_sub(self.stats.min_timestamp);
+        encode_signed(ts_delta, buf);
+        // localDeletionTime delta = Integer.MAX_VALUE - stats.min_local_deletion_time (unsigned VInt)
+        let ldt_delta = i32::MAX.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+        encode_unsigned(ldt_delta as u64, buf);
 
         let dt = column.data_type.to_lowercase();
 
@@ -1005,24 +1018,27 @@ impl DataWriter {
     /// Write a complex column deletion (delete all elements of a collection).
     ///
     /// Wire format: active deletion time + zero cells.
+    /// Per SerializationHeader.writeDeletionTime(): timestamp first, LDT second.
     /// ```text
     /// [marked_for_delete_at: signed VInt]   ← mutation timestamp (delta from min)
-    /// [local_deletion_time: signed VInt]    ← seconds since epoch (delta from min)
-    /// [cell_count: unsigned VInt]           ← 0 (no cells)
+    /// [local_deletion_time: unsigned VInt]   ← seconds since epoch (delta from min)
+    /// [cell_count: unsigned VInt]            ← 0 (no cells)
     /// ```
     fn write_complex_column_deletion(
         &self,
         buf: &mut Vec<u8>,
         timestamp_micros: i64,
     ) -> Result<()> {
-        // Active deletion: marked_for_delete_at = mutation timestamp
+        // Active deletion: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
+        // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
+        // marked_for_delete_at = mutation timestamp (signed VInt delta)
         let ts_delta = timestamp_micros - self.stats.min_timestamp;
         encode_signed(ts_delta, buf);
 
-        // local_deletion_time = mutation timestamp as seconds
+        // local_deletion_time = mutation timestamp as seconds (unsigned VInt delta)
         let local_deletion_time = (timestamp_micros / 1_000_000) as i32;
-        let ldt_delta = (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
-        encode_signed(ldt_delta, buf);
+        let ldt_delta = local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+        encode_unsigned(ldt_delta as u64, buf);
 
         // Zero cells
         encode_unsigned(0u64, buf);

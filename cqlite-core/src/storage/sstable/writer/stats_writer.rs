@@ -193,7 +193,11 @@ impl StatisticsMetadata {
 /// - Frozen wrappers: frozen<list<T>>, frozen<map<K,V>>
 /// - Tuples: tuple<T1, T2, ...>
 fn cql_type_to_marshal_type(cql_type: &str) -> String {
-    let trimmed = cql_type.trim();
+    // Normalize to lowercase for case-insensitive matching.
+    // CQL type names are case-insensitive, and the parser may preserve
+    // original case from CQL files (e.g., "SET<TEXT>" instead of "set<text>").
+    let trimmed = cql_type.trim().to_lowercase();
+    let trimmed = trimmed.as_str();
     let prefix = "org.apache.cassandra.db.marshal.";
 
     // Handle parameterized types: list<T>, set<T>, map<K,V>, frozen<T>, tuple<T1,T2>
@@ -340,7 +344,10 @@ impl StatisticsWriter {
         let validation_data = self.build_validation_component()?;
         let compaction_data = self.build_compaction_component()?;
         let stats_data = self.build_stats_component(&meta)?;
-        let header_data = self.build_serialization_header_component(schema)?;
+        // Use pre-finalize metadata for the SerializationHeader EncodingStats.
+        // The baselines in the header MUST match those used by the DataWriter for
+        // delta encoding. The DataWriter uses the raw (pre-finalize) metadata values.
+        let header_data = self.build_serialization_header_component(schema, metadata)?;
 
         // Calculate component offsets
         // TOC structure: 4 (count) + 4 (checksum) + (4*8) TOC entries + 4 (checksum) = 44 bytes
@@ -674,20 +681,45 @@ impl StatisticsWriter {
     fn build_serialization_header_component(
         &self,
         schema: Option<&TableSchema>,
+        metadata: &StatisticsMetadata,
     ) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
-        // EncodingStats: 3 unsigned VInts representing deltas from epochs
-        // minTimestamp - TIMESTAMP_EPOCH
-        let min_ts_delta = 0u64; // Use 0 for minimal stub (timestamp at epoch)
+        // EncodingStats: 3 unsigned VInts representing deltas from epochs.
+        // These baselines MUST match the values used by DataWriter for delta encoding.
+        // Cassandra: EncodingStats.Serializer.serialize() writes:
+        //   writeUnsignedVInt(minTimestamp - TIMESTAMP_EPOCH)
+        //   writeUnsignedVInt(minLocalDeletionTime - DELETION_TIME_EPOCH)
+        //   writeUnsignedVInt(minTTL - TTL_EPOCH)
+
+        // minTimestamp delta from epoch
+        let min_ts = if metadata.min_timestamp == i64::MAX {
+            // No data recorded: use epoch as baseline
+            TIMESTAMP_EPOCH as u64
+        } else {
+            metadata.min_timestamp as u64
+        };
+        let min_ts_delta = min_ts.wrapping_sub(TIMESTAMP_EPOCH as u64);
         buffer.write_all(&encode_vuint(min_ts_delta))?;
 
-        // minLocalDeletionTime - DELETION_TIME_EPOCH
-        let min_del_delta = 0u64; // Use 0 for minimal stub
+        // minLocalDeletionTime delta from epoch
+        let min_ldt = if metadata.min_local_deletion_time == i32::MAX {
+            // No deletions: use Integer.MAX_VALUE as baseline (DeletionTime.LIVE)
+            i32::MAX as u64
+        } else {
+            metadata.min_local_deletion_time as u64
+        };
+        let min_del_delta = min_ldt.wrapping_sub(DELETION_TIME_EPOCH as u64);
         buffer.write_all(&encode_vuint(min_del_delta))?;
 
-        // minTTL - TTL_EPOCH (TTL_EPOCH=0, so just use 0)
-        let min_ttl_delta = 0u64;
+        // minTTL delta from TTL_EPOCH (TTL_EPOCH=0)
+        let min_ttl = if metadata.min_ttl == i32::MAX {
+            // No TTL: use 0 as baseline
+            0u64
+        } else {
+            metadata.min_ttl as u64
+        };
+        let min_ttl_delta = min_ttl.wrapping_sub(TTL_EPOCH as u64);
         buffer.write_all(&encode_vuint(min_ttl_delta))?;
 
         match schema {
@@ -725,8 +757,8 @@ impl StatisticsWriter {
                 let ck_names: std::collections::HashSet<&str> =
                     s.clustering_keys.iter().map(|k| k.name.as_str()).collect();
 
-                // staticColumns: filter for is_static && not PK/CK
-                let static_cols: Vec<_> = s
+                // staticColumns: filter for is_static && not PK/CK, sorted alphabetically
+                let mut static_cols: Vec<_> = s
                     .columns
                     .iter()
                     .filter(|c| {
@@ -735,6 +767,7 @@ impl StatisticsWriter {
                             && !ck_names.contains(c.name.as_str())
                     })
                     .collect();
+                static_cols.sort_by(|a, b| a.name.cmp(&b.name));
                 buffer.write_all(&encode_vuint(static_cols.len() as u64))?;
                 for col in &static_cols {
                     // Column name: VUInt length + UTF-8 bytes
@@ -746,8 +779,9 @@ impl StatisticsWriter {
                     buffer.write_all(col_marshal.as_bytes())?;
                 }
 
-                // regularColumns: filter for !is_static && not PK/CK
-                let regular_cols: Vec<_> = s
+                // regularColumns: filter for !is_static && not PK/CK, sorted alphabetically
+                // Cassandra's SerializationHeader stores columns in natural order (alphabetical)
+                let mut regular_cols: Vec<_> = s
                     .columns
                     .iter()
                     .filter(|c| {
@@ -756,6 +790,7 @@ impl StatisticsWriter {
                             && !ck_names.contains(c.name.as_str())
                     })
                     .collect();
+                regular_cols.sort_by(|a, b| a.name.cmp(&b.name));
                 buffer.write_all(&encode_vuint(regular_cols.len() as u64))?;
                 for col in &regular_cols {
                     buffer.write_all(&encode_vuint(col.name.len() as u64))?;
@@ -1293,7 +1328,8 @@ mod tests {
         };
 
         let writer = StatisticsWriter::new(PathBuf::from("test.db"));
-        let result = writer.build_serialization_header_component(Some(&schema));
+        let meta = StatisticsMetadata::new();
+        let result = writer.build_serialization_header_component(Some(&schema), &meta);
         assert!(result.is_ok());
 
         let bytes = result.unwrap();
@@ -1374,8 +1410,9 @@ mod tests {
         };
 
         let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+        let meta = StatisticsMetadata::new();
         let bytes = writer
-            .build_serialization_header_component(Some(&schema))
+            .build_serialization_header_component(Some(&schema), &meta)
             .unwrap();
 
         let header_str = String::from_utf8_lossy(&bytes);

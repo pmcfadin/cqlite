@@ -117,10 +117,30 @@ impl TypeSerializer {
             CqlType::Map(key_type, val_type) => self.serialize_map(value, key_type, val_type),
             CqlType::Tuple(field_types) => self.serialize_tuple(value, field_types),
 
-            // UDT - requires schema
-            CqlType::Udt(_, _) => Err(Error::serialization(
-                "UDT serialization requires schema context, use serialize_udt() instead",
-            )),
+            // UDT - build schema from value and serialize
+            CqlType::Udt(_, _) => {
+                // Unwrap Frozen wrapper(s) to get the raw UDT value
+                let mut unwrapped = value;
+                while let Value::Frozen(inner) = unwrapped {
+                    unwrapped = inner.as_ref();
+                }
+                let udt_value = match unwrapped {
+                    Value::Udt(u) => u,
+                    _ => {
+                        return Err(Error::type_conversion(format!(
+                            "Expected UDT value for UDT type, got {:?}",
+                            value
+                        )))
+                    }
+                };
+                let mut schema =
+                    UdtTypeDef::new(udt_value.keyspace.clone(), udt_value.type_name.clone());
+                for field in &udt_value.fields {
+                    let field_type = Self::infer_cql_type(field.value.as_ref());
+                    schema = schema.with_field(field.name.clone(), field_type, true);
+                }
+                self.serialize_udt(unwrapped, &schema)
+            }
 
             // Frozen wrapper
             CqlType::Frozen(inner_type) => self.serialize_typed_value(value, inner_type),
@@ -384,6 +404,40 @@ impl TypeSerializer {
         }
 
         Ok(buf)
+    }
+
+    /// Infer CqlType from a Value (used for nested UDT field type inference).
+    fn infer_cql_type(value: Option<&Value>) -> CqlType {
+        match value {
+            None | Some(Value::Null) => CqlType::Text,
+            Some(Value::Boolean(_)) => CqlType::Boolean,
+            Some(Value::TinyInt(_)) => CqlType::TinyInt,
+            Some(Value::SmallInt(_)) => CqlType::SmallInt,
+            Some(Value::Integer(_)) => CqlType::Int,
+            Some(Value::BigInt(_)) => CqlType::BigInt,
+            Some(Value::Float32(_)) => CqlType::Float,
+            Some(Value::Float(_)) => CqlType::Double,
+            Some(Value::Text(_)) => CqlType::Text,
+            Some(Value::Blob(_)) => CqlType::Blob,
+            Some(Value::Timestamp(_)) => CqlType::Timestamp,
+            Some(Value::Date(_)) => CqlType::Date,
+            Some(Value::Time(_)) => CqlType::Time,
+            Some(Value::Uuid(_)) => CqlType::Uuid,
+            Some(Value::Inet(_)) => CqlType::Inet,
+            Some(Value::Varint(_)) => CqlType::Varint,
+            Some(Value::Decimal { .. }) => CqlType::Decimal,
+            Some(Value::Duration { .. }) => CqlType::Duration,
+            Some(Value::Counter(_)) => CqlType::Counter,
+            Some(Value::List(_)) => CqlType::List(Box::new(CqlType::Text)),
+            Some(Value::Set(_)) => CqlType::Set(Box::new(CqlType::Text)),
+            Some(Value::Map(_)) => CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)),
+            Some(Value::Tuple(fields)) => CqlType::Tuple(vec![CqlType::Text; fields.len()]),
+            Some(Value::Udt(udt)) => CqlType::Udt(udt.type_name.clone(), vec![]),
+            Some(Value::Frozen(inner)) => {
+                CqlType::Frozen(Box::new(Self::infer_cql_type(Some(inner))))
+            }
+            Some(Value::Tombstone(_)) | Some(Value::Json(_)) => CqlType::Text,
+        }
     }
 
     /// Serialize UDT with schema awareness (DANGEROUS)
