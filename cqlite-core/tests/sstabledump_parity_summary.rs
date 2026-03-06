@@ -126,15 +126,8 @@ async fn test_summary_db_parity_comprehensive() -> CqliteResult<()> {
                 Error::corruption(format!("Target table '{}' not found", target_table))
             })?;
 
-        match validate_table_summary_parity(table_info, &config).await {
-            Ok(result) => validation_results.push(result),
-            Err(e) => {
-                println!(
-                    "⚠️ Skipping {}.{}: {}",
-                    table_info.keyspace, table_info.table, e
-                );
-            }
-        }
+        let result = validate_table_summary_parity(table_info, &config).await?;
+        validation_results.push(result);
     }
 
     // Generate validation report
@@ -150,6 +143,18 @@ async fn test_summary_db_parity_comprehensive() -> CqliteResult<()> {
     let total = validation_results.len();
 
     println!("🎯 Summary.db parity: {}/{} tables passed", passed, total);
+
+    assert_eq!(
+        total,
+        config.target_tables.len(),
+        "Summary.db parity validated {} tables, expected {}",
+        total,
+        config.target_tables.len()
+    );
+    assert_eq!(
+        passed, total,
+        "Summary.db parity failures detected; see validation artifacts for details"
+    );
 
     Ok(())
 }

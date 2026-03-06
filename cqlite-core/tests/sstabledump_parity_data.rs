@@ -373,20 +373,30 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
         }
     };
 
+    for target_table in &config.target_tables {
+        let found = available_tables.iter().any(|t| t.table == *target_table);
+        if !found {
+            return Err(Error::corruption(format!(
+                "Data.db JSONL parity target table '{}' not found in datasets",
+                target_table
+            )));
+        }
+    }
+
     let mut results = Vec::new();
 
     for target_table in &config.target_tables {
-        if let Some(table_info) = available_tables.iter().find(|t| t.table == *target_table) {
-            match validate_jsonl_parity(table_info).await {
-                Ok(result) => results.push(result),
-                Err(e) => {
-                    println!(
-                        "⚠️ Skipping {}.{}: {}",
-                        table_info.keyspace, table_info.table, e
-                    );
-                }
-            }
-        }
+        let table_info = available_tables
+            .iter()
+            .find(|t| t.table == *target_table)
+            .ok_or_else(|| {
+                Error::corruption(format!(
+                    "Data.db JSONL parity target table '{}' disappeared after validation",
+                    target_table
+                ))
+            })?;
+        let result = validate_jsonl_parity(table_info).await?;
+        results.push(result);
     }
 
     // Save validation artifacts
@@ -397,6 +407,19 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
         "🎯 Data.db JSONL parity: {}/{} tables passed",
         passed,
         results.len()
+    );
+
+    assert_eq!(
+        results.len(),
+        config.target_tables.len(),
+        "Data.db JSONL parity validated {} tables, expected {}",
+        results.len(),
+        config.target_tables.len()
+    );
+    assert_eq!(
+        passed,
+        results.len(),
+        "Data.db JSONL parity failures detected; see validation artifacts for details"
     );
 
     Ok(())
