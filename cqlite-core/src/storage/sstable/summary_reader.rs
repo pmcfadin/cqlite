@@ -450,26 +450,19 @@ fn normalize_entry_offsets(
         return Ok(Vec::new());
     }
 
-    let relative_offsets = offsets
-        .iter()
-        .map(|offset| *offset as usize)
-        .collect::<Vec<_>>();
-    if relative_offsets
-        .iter()
-        .all(|offset| *offset < entry_data_size)
-    {
-        return Ok(relative_offsets);
+    let usize_offsets: Vec<usize> = offsets.iter().map(|offset| *offset as usize).collect();
+
+    // Check if offsets are relative (writer-local, already zero-based into entry data)
+    if usize_offsets.iter().all(|offset| *offset < entry_data_size) {
+        return Ok(usize_offsets);
     }
 
-    let absolute_offsets = offsets
-        .iter()
-        .map(|offset| *offset as usize)
-        .collect::<Vec<_>>();
-    if absolute_offsets
+    // Check if offsets are absolute (Cassandra layout, including offset table size)
+    if usize_offsets
         .iter()
         .all(|offset| *offset >= offset_table_size && *offset < summary_entries_size)
     {
-        return Ok(absolute_offsets
+        return Ok(usize_offsets
             .into_iter()
             .map(|offset| offset - offset_table_size)
             .collect());

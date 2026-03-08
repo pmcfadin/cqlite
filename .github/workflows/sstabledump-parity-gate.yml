@@ -108,8 +108,6 @@ jobs:
       - name: Run Data.db parity tests
         id: data_parity
         continue-on-error: true
-        env:
-          CQLITE_DATASETS_ROOT: ${{ env.CQLITE_DATASETS_ROOT }}
         run: |
           cargo test --package cqlite-core --features write-support \
             --test sstabledump_parity_data \
@@ -119,8 +117,6 @@ jobs:
       - name: Run Index.db parity tests
         id: index_parity
         continue-on-error: true
-        env:
-          CQLITE_DATASETS_ROOT: ${{ env.CQLITE_DATASETS_ROOT }}
         run: |
           cargo test --package cqlite-core --features write-support \
             --test sstabledump_parity_index \
@@ -129,8 +125,6 @@ jobs:
       - name: Run Summary.db parity tests
         id: summary_parity
         continue-on-error: true
-        env:
-          CQLITE_DATASETS_ROOT: ${{ env.CQLITE_DATASETS_ROOT }}
         run: |
           cargo test --package cqlite-core --features write-support \
             --test sstabledump_parity_summary \
@@ -139,8 +133,6 @@ jobs:
       - name: Run Statistics.db parity tests
         id: statistics_parity
         continue-on-error: true
-        env:
-          CQLITE_DATASETS_ROOT: ${{ env.CQLITE_DATASETS_ROOT }}
         run: |
           cargo test --package cqlite-core --features write-support \
             --test sstabledump_parity_statistics \
