@@ -182,7 +182,7 @@ jobs:
             const summary = `## ✅ sstableloader Integration Tests PASSED
 
             All SSTable format validation tests passed:
-            - ✅ Tier 1: Acceptance Tests - `sstableloader` accepted packaged flushed SSTables
+            - ✅ Tier 1: Acceptance Tests - sstableloader accepted packaged flushed SSTables
             - ✅ Tier 2: Query Verification - Cassandra returned the expected rows
             - ${{ steps.tier3.outcome == 'success' && '✅' || '⏭️' }} Tier 3: Stress Tests
 
