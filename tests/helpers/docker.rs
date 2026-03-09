@@ -98,7 +98,10 @@ impl DockerCqlshClient {
                 continue;
             }
 
-            if self.execute_cql("SELECT cluster_name FROM system.local;").is_ok() {
+            if self
+                .execute_cql("SELECT cluster_name FROM system.local;")
+                .is_ok()
+            {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_secs(2));
@@ -204,8 +207,7 @@ impl DockerCqlshClient {
     }
 
     fn container_is_running(container: &str) -> io::Result<bool> {
-        let output =
-            Self::docker_output(&["inspect", "-f", "{{.State.Running}}", container])?;
+        let output = Self::docker_output(&["inspect", "-f", "{{.State.Running}}", container])?;
         Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
     }
 }
@@ -349,7 +351,10 @@ impl CassandraContainer {
         if !local_dir.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Local SSTable directory does not exist: {}", local_dir.display()),
+                format!(
+                    "Local SSTable directory does not exist: {}",
+                    local_dir.display()
+                ),
             ));
         }
 
@@ -381,8 +386,12 @@ impl CassandraContainer {
     }
 
     fn hostname(&self) -> io::Result<String> {
-        let output =
-            DockerCqlshClient::docker_output(&["inspect", "-f", "{{.Config.Hostname}}", &self.container])?;
+        let output = DockerCqlshClient::docker_output(&[
+            "inspect",
+            "-f",
+            "{{.Config.Hostname}}",
+            &self.container,
+        ])?;
 
         if !output.status.success() {
             return Err(io::Error::other(format!(

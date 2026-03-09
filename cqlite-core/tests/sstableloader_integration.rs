@@ -50,7 +50,12 @@ impl LoaderHarness {
         };
 
         ensure_keyspace(&cassandra, &schema.keyspace)?;
-        recreate_table(&cassandra, &schema.keyspace, &schema.table, create_table_cql)?;
+        recreate_table(
+            &cassandra,
+            &schema.keyspace,
+            &schema.table,
+            create_table_cql,
+        )?;
 
         let work_dir = TempDir::new().map_err(io_to_cqlite)?;
         let package_dir = TempDir::new().map_err(io_to_cqlite)?;
@@ -198,7 +203,13 @@ async fn test_sstableloader_simple_table() -> CqliteResult<()> {
     let rows = [(1, "Alice", 100), (2, "Bob", 200), (3, "Charlie", 300)];
     for (id, name, value) in rows {
         harness
-            .write(simple_mutation("loader_simple", id, name, value, 1_704_067_200_000_000))
+            .write(simple_mutation(
+                "loader_simple",
+                id,
+                name,
+                value,
+                1_704_067_200_000_000,
+            ))
             .await?;
     }
 
@@ -261,7 +272,12 @@ async fn test_sstableloader_multiple_partitions() -> CqliteResult<()> {
         return Ok(());
     };
 
-    let rows = [(42, "Zoe", 4200), (1, "Alice", 100), (100, "Max", 1000), (7, "Drew", 700)];
+    let rows = [
+        (42, "Zoe", 4200),
+        (1, "Alice", 100),
+        (100, "Max", 1000),
+        (7, "Drew", 700),
+    ];
     for (id, name, value) in rows {
         harness
             .write(simple_mutation(
@@ -391,7 +407,10 @@ async fn test_sstableloader_where_on_partition_key() -> CqliteResult<()> {
         harness.fully_qualified_table()
     );
     let output = harness.query_until(&query, Duration::from_secs(15), |out| out.rows.len() == 1)?;
-    assert_eq!(output.rows, vec![vec!["2".to_string(), "Bob".to_string(), "200".to_string()]]);
+    assert_eq!(
+        output.rows,
+        vec![vec!["2".to_string(), "Bob".to_string(), "200".to_string()]]
+    );
 
     Ok(())
 }
@@ -646,7 +665,9 @@ fn recreate_table(
 ) -> CqliteResult<()> {
     let drop_cql = format!("DROP TABLE IF EXISTS {keyspace}.{table};");
     cassandra.execute_cql(&drop_cql).map_err(io_to_cqlite)?;
-    cassandra.execute_cql(create_table_cql).map_err(io_to_cqlite)?;
+    cassandra
+        .execute_cql(create_table_cql)
+        .map_err(io_to_cqlite)?;
     Ok(())
 }
 
@@ -844,9 +865,7 @@ fn create_types_schema(table_name: &str) -> TableSchema {
 }
 
 fn create_simple_table_cql(table_name: &str) -> String {
-    format!(
-        "CREATE TABLE {KEYSPACE}.{table_name} (id int PRIMARY KEY, name text, value int);"
-    )
+    format!("CREATE TABLE {KEYSPACE}.{table_name} (id int PRIMARY KEY, name text, value int);")
 }
 
 fn create_clustered_table_cql(table_name: &str) -> String {
@@ -861,13 +880,7 @@ fn create_types_table_cql(table_name: &str) -> String {
     )
 }
 
-fn simple_mutation(
-    table_name: &str,
-    id: i32,
-    name: &str,
-    value: i32,
-    timestamp: i64,
-) -> Mutation {
+fn simple_mutation(table_name: &str, id: i32, name: &str, value: i32, timestamp: i64) -> Mutation {
     let table_id = TableId::new(KEYSPACE, table_name);
     let partition_key = PartitionKey::single("id", Value::Integer(id));
     let operations = vec![
@@ -884,13 +897,7 @@ fn simple_mutation(
     Mutation::new(table_id, partition_key, None, operations, timestamp, None)
 }
 
-fn clustered_mutation(
-    table_name: &str,
-    pk: i32,
-    ck: &str,
-    data: &str,
-    timestamp: i64,
-) -> Mutation {
+fn clustered_mutation(table_name: &str, pk: i32, ck: &str, data: &str, timestamp: i64) -> Mutation {
     let table_id = TableId::new(KEYSPACE, table_name);
     let partition_key = PartitionKey::single("pk", Value::Integer(pk));
     let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
@@ -937,8 +944,8 @@ fn types_mutation(table_name: &str, pk: i32, ck: &str, mutation_timestamp: i64) 
         CellOperation::Write {
             column: "uuid_col".to_string(),
             value: Value::Uuid([
-                0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0x4D, 0xEF, 0x81, 0x23, 0x45, 0x67, 0x89,
-                0xAB, 0xCD, 0xEF,
+                0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0x4D, 0xEF, 0x81, 0x23, 0x45, 0x67, 0x89, 0xAB,
+                0xCD, 0xEF,
             ]),
         },
     ];
